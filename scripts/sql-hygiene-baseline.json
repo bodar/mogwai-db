@@ -139,8 +139,8 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 1854,
-    "compiler": 27,
+    "bytes": 4942,
+    "compiler": 32,
     "bound": 0
   },
   "difference": {
@@ -487,8 +487,8 @@
   },
   "select": {
     "binds": 3,
-    "bytes": 5638,
-    "compiler": 53,
+    "bytes": 5056,
+    "compiler": 51,
     "bound": 2
   },
   "skip": {

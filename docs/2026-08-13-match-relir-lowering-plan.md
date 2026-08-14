@@ -1,11 +1,23 @@
 # `match()` on the RelIR spine — build plan
 
-> **Status: P0 + P1 + P1c + P2a LANDED on trunk 2026-08-13 (L3 1480 → 1521).** Binding patterns,
-> back-edge/cyclic, no-end filter constraints, per-row + reducing-barrier scalar ends, the zero-root
-> regime, the unconditional bindings map, and inline `where(key, P.eq/neq)` legs are live — and the
-> whole GQL match-STRING front end is restored (it desugars to `match(Traversal)`). **The remaining
-> work is one well-scoped SUBSTRATE piece (P2b): the TRAVERSAL filter legs (`not`/`where(<body>)`)
-> need SEMI/ANTI-JOIN construction with multi-column correlation** — see the P2 bullet. Then P3/P4.
+> **Status: P0 + P1 + P1c + P2a + P2b LANDED, plus `and(…)`, keyed `dedup(labels)` and modulated
+> pattern bodies (2026-08-14, L3 1480 → 1527).** Binding patterns, back-edge/cyclic, no-end filter
+> constraints, per-row + reducing-barrier scalar ends, the zero-root regime, the unconditional bindings
+> map, inline `where(key, P.eq/neq)` legs, and the TRAVERSAL filter legs (`not`/`where(<body>)`) as
+> SEMI/ANTI JOINs with multi-column correlation are all live — and the whole GQL match-STRING front end
+> is restored (it desugars to `match(Traversal)`). **Three later-phase pieces landed since:**
+> - **`and(…)` connective (P3a)** — a nested AND MatchStep is a conjunction sharing the binding table, so
+>   `collectPatterns` flattens its children (recursively) into the same pattern list.
+> - **modulated pattern bodies** — a match arg body is now `normalize`d before classification, so
+>   `order().by()`, `repeat().times()`, `sack().by()` and every modulator folds into ONE `IRStep` and the
+>   body runs through the fold (invariant 1), instead of declining on a raw split `order`/`by` pair.
+> - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
+>   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
+>
+> **Remaining: P3 (`or(…)` → UNION of branches, nested `match`, top-level `not(match(…))`), P4 (map
+> bodies, `count()` after match), and the P2/P1 tails** — a moving no-end existence semi-join, a
+> filter-after-reduce end (`count().is(gt(10)).as(b)`), a `fold()` list end, and `where(key,P)` /
+> `where(<moving body>)` as steps AFTER the match over the record stream.
 >
 > `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
@@ -147,20 +159,28 @@ landing order of one engine, not a support matrix.
 - **P2 — filter legs.** **P2a LANDED 2026-08-13:** an inline `where('a', P.eq/neq('c'))` leg is a
   two-variable THETA clause between bound ELEMENT aliases — a `Filter` comparing two rowids, binding
   nothing, reads both keys (`readsOf`). Reaps the inline-where-leg scenarios (580 grateful, 253's where
-  arm). ⚠️ **Still open, and it is the SUBSTRATE piece:** the TRAVERSAL legs `not(as('a')…as('b'))` /
-  `where(as('c').<moving body>)` need a correlated `[NOT] EXISTS` / SEMI-ANTI JOIN with MULTI-COLUMN
+  arm). **P2b LANDED (`fc38f23`, `629e35e`, `23153c9`):** the TRAVERSAL legs `not(as('a')…as('b'))` /
+  `where(as('c').<moving body>)` CONSTRUCT a correlated `[NOT] EXISTS` / SEMI-ANTI JOIN with MULTI-COLUMN
   correlation — the leg body references SEVERAL outer aliases (`not(as('a').out().as('b'))` correlates
-  on a AND b), which `correlatedExists` (single correlation, `body[0]` a movement) cannot express.
-  Calcite's exact mapping (`SubQueryRemoveRule`, `JoinRelType` SEMI/ANTI); `src/rel/emit.ts:404`
-  already RENDERS semi/anti as `[NOT] EXISTS`, but nothing CONSTRUCTS those nodes — match's legs are
-  the first constructor. Also `where('a', P.neq('c'))` as a step AFTER the match (scenario 95) is a
+  on a AND b), which `correlatedExists` (single correlation) cannot express. `legRight` builds the walk
+  FRESH (a source of its own, binding the start and each `where(P.eq/neq(label))` position at ANY depth
+  as a channel) and `make.join` correlates it back on every position — `semi` for `where`, `anti` for
+  `not`. Calcite's exact mapping (`SubQueryRemoveRule`, `JoinRelType` SEMI/ANTI); `src/rel/emit.ts:404`
+  RENDERS semi/anti as `[NOT] EXISTS`, and match's legs are the first CONSTRUCTOR of those nodes.
+  ⚠️ **Still open:** `where('a', P.neq('c'))` as a step AFTER the match (scenario 95) is a
   downstream `where(key,P)` over the record stream, a separate `where('a',P)` gap. `where('a',P)` over
   SCALAR aliases and non-eq/neq ops also await.
-- **P3 — connectives & nesting.** `and(…)` binding group; `or(…)` → UNION of branches; nested `match`
-  in a pattern; top-level `not(match(…).where(…).select(…))`.
-- **P4 — modulated bodies & downstream collectors.** `outE.order.by.limit.inV`, `repeat.times`, `map(mean)`
-  bodies (these fall out of invariant 1 — verify, don't build); `dedup("a","b"[,…])` keyed on alias
-  columns; `count()`/`select().count()` after match.
+- **P3 — connectives & nesting.** ✅ **`and(…)` LANDED** — `collectPatterns` flattens the conjunction
+  into the shared binding table (a nested AND MatchStep shares the parent variable scope). Remaining:
+  `or(…)` → UNION of branches (needs a per-branch table merge, and BOTH corpus `or` scenarios also need
+  a filter-after-reduce end, so it does not reap alone); nested `match` in a pattern; top-level
+  `not(match(…).where(…).select(…))`.
+- **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
+  `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
+  classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`
+  (raw `stepChain` left them split and the fold declined). ✅ **Keyed `dedup("a","b"[,…])[.by(proj)]`
+  LANDED** — `recordTail` over the record's own alias channels, reusing `dedupOn`'s ranked window.
+  Remaining: `count()`/`select().count()` after match (a reduction over the record stream).
 
 Each phase, per the working rules: land the L2 SQL snapshots + the cucumber tag in `tags.ts`, keep L1
 100%, and — when a phase closes a shape L5 could generate — promote it to an L4 `.feature`.

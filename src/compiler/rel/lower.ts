@@ -35,7 +35,7 @@ import {
     keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
-import { bindAliases, liveAliases, selectSpec } from './alias.ts';
+import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChainRead, ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
@@ -1488,7 +1488,7 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   // where the payload IS the key (an element `id`) and would erase five columns of a property row. The
   // window keeps ONE member's payload whole, which is what "the first occurrence survives" means when a
   // traverser is more than its identity — the honest lowering this comment block predicted.
-  if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, shape, fresh);
+  if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -1552,7 +1552,7 @@ function dedupBy(
   const domain = productive
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
     : input;
-  return dedupOn([key], domain, shape, fresh);
+  return dedupOn([key], domain, [shape.tie(domain)], fresh);
 }
 
 /**
@@ -1586,7 +1586,7 @@ function dedupBy(
  * cost today.
  */
 function dedupOn(
-  keys: readonly Expr[], domain: Rel, shape: RowShape, fresh: Minter,
+  keys: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
 ): Rel | null {
   // The PAYLOAD survives whole, which is what makes this form serve a traverser that is more than its
   // identity: only `bulk` is rewritten.
@@ -1603,7 +1603,7 @@ function dedupOn(
       spec: {
         partitionBy: keys,
         orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
-          { expr: shape.tie(domain), dir: 'asc' as const }],
+          ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
       },
     }]],
   });
@@ -1616,6 +1616,51 @@ function dedupOn(
     exprs: cols.map((column) => [column.name,
       column.name === 'bulk' ? compilerInt(1) : col(survivors.id, column.name)] as const),
   });
+}
+
+/**
+ * `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the tuple of ALREADY-BOUND alias values, TinkerPop's
+ * `DedupGlobalStep` with `dedupLabels`: the survivor's key is the LIST of each label's `Pop.last` scope
+ * value run through the shared `by()` projection (`DedupGlobalStep.filter`,
+ * `vendor/tinkerpop/gremlin-core/.../DedupGlobalStep.java:80-88`). With no `by()`, an element alias keys
+ * by rowid and a scalar alias by stored value; with a `by()`, each label's element is the host the
+ * projection reads (`dedup('a','b').by(label)` keys on `(label(a), label(b))`). Every named label must
+ * be LIVE, or TinkerPop drops the whole path (a null scope value fails the
+ * `objects.size() == dedupLabels.size()` check) — modelled as a DECLINE, fail closed — and a
+ * non-productive `by()` drops the row (`productivityFilter`, the same rule `dedup().by()` obeys). The
+ * survivor keeps its WHOLE payload (a following `select('a')` reads a field the dropped duplicates
+ * could differ on), so this is `dedupOn`'s ranked window — a fully deterministic tie over every column,
+ * since a keyed dedup carries no emission order of its own.
+ */
+function dedupByLabels(
+  step: IRStep, rel: Rel, labels: AliasMap, keys: readonly string[],
+  by: Modulation | undefined, ctx: ChainCtx, fresh: Minter,
+): Rel | null {
+  const seam = childSeam(ctx, fresh);
+  const keyExprs: Expr[] = [];
+  const productive: Expr[] = [];
+  for (const k of keys) {
+    const proj = aliasProjection(rel, labels, k, 'last', fresh);
+    if (!proj) return null;
+    const column = col(rel.id, proj.entry.col);
+    if (by) {
+      // A `by()` projection reads each label's ELEMENT as its host; a scalar/list alias under a `by()`
+      // is a later phase.
+      if (proj.read.kind !== 'element') return null;
+      const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
+      const key = byExpr(by, host, fresh, false, seam);
+      if (!key) return null;
+      keyExprs.push(key);
+      const prod = productivityFilter(step, key);
+      if (prod) productive.push(prod);
+    } else if (proj.read.kind === 'element') keyExprs.push(aliasIdAt(column, 'last'));
+    else if (proj.read.kind === 'value') keyExprs.push(aliasValueAt(column, 'last'));
+    else return null; // a list-valued alias key with no `by()` is a later phase — decline.
+  }
+  const domain = productive.length
+    ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: productive.reduce((a, b) => and(a, b)) })
+    : rel;
+  return dedupOn(keyExprs, domain, domain.type.cols.map((c) => col(domain.id, c.name)), fresh);
 }
 
 /** The fan-out re-mint: renumber by the incoming position, tie-broken on the element id so rows
@@ -4719,9 +4764,25 @@ function recordTail(
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    // Everything else DECLINES. A record is an ordinary per-row traverser, so `dedup()`, a local-scope
-    // slice over its ENTRIES and `unfold()` to `Map.Entry` rows are all expressible and simply not
-    // built yet — declining is the honest answer rather than dropping the record's fields silently.
+    // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the record's own alias channels. A bare `dedup()`
+    // over a record (identity grouping) is a separate increment; a LABELLED dedup reads the bound
+    // aliases the record already carries and collapses the tuple, optionally under a shared `by()`.
+    if (step.name === 'dedup' && !isLocalScope(step)) {
+      const keys = argValues(step);
+      if (keys.length && keys.every((k) => typeof k === 'string')) {
+        const bys = modulations(step, 1, childSeam(ctx, fresh));
+        if (!bys) return null;
+        const deduped = dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh);
+        if (!deduped) return null;
+        rel = deduped;
+        continue;
+      }
+    }
+
+    // Everything else DECLINES. A record is an ordinary per-row traverser, so a bare `dedup()`, a
+    // local-scope slice over its ENTRIES and `unfold()` to `Map.Entry` rows are all expressible and
+    // simply not built yet — declining is the honest answer rather than dropping the record's fields
+    // silently.
     return null;
   }
   return { rel, framing: { kind: 'record', fields }, aliases: labels, bulked: false };

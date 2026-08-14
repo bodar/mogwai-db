@@ -1,4 +1,5 @@
 import { arg, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
+import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -72,6 +73,17 @@ type Pattern =
    *  reading SEVERAL is a multi-column SEMI/ANTI join. */
   | { readonly kind: 'leg'; readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] };
 
+/** A pattern chain PARSED AND NORMALIZED. The Pass pipeline folds `order().by()`, `repeat().times()`,
+ *  `sack().by()` and every other modulator into ONE `IRStep` (`normalize`, `passes.ts:336` — "`order().by()`
+ *  must arrive as ONE `IRStep` before any shape-aware lowering sees it"), which a raw `stepChain` does
+ *  NOT do. The top-level passes do not recurse into a match pattern, so a modulated body used to arrive
+ *  as split steps and DECLINED at the fold; normalizing here is the same seam every other nested body
+ *  crosses via `childSteps`. A pattern keeps its `as()` anchors, so it runs `normalize` directly rather
+ *  than `childSteps` (which strips a source). `null` where normalizing RAISES — a deferral, not a crash. */
+function patternSteps(nested: unknown, params: Record<string, any>): IRStep[] | null {
+  try { return normalize(stepChain(nested, params), params).steps as IRStep[]; } catch { return null; }
+}
+
 /** The alias labels a pattern READS — all must be bound before it is ready to run. */
 const readsOf = (p: Pattern): readonly string[] =>
   p.kind === 'wpred' ? [p.startKey, p.otherKey] : p.kind === 'leg' ? p.reads : [p.start];
@@ -99,7 +111,8 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
   const negated = head.name === 'not';
   const nested = head.args?.[0]?.value;
   if ((head.args?.length ?? 0) !== 1 || !isNested(nested)) return null;
-  const inner = stepChain((nested as { nested: unknown }).nested, params) as IRStep[];
+  const inner = patternSteps((nested as { nested: unknown }).nested, params);
+  if (!inner) return null;
   // The Pass re-roots a body whose start label is bound; a leg whose leading `as()` it could not
   // rewrite (an unbound start) is not the re-rooted `select` shape, so decline.
   if (inner.length < 2 || inner[0]!.name !== 'select') return null;
@@ -158,7 +171,8 @@ function legRight(start: string, body: readonly IRStep[], host: IRStep, fresh: M
  *  DECLINE here rather than being mis-lowered. */
 function classify(a: unknown, params: Record<string, any>): Pattern | null {
   if (!isNested(a)) return null;
-  const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
+  const chain = patternSteps((a as { nested: unknown }).nested, params);
+  if (!chain) return null;
   // A single `where`/`not` step is a FILTER argument, not an anchored pattern.
   if (chain.length === 1 && (chain[0]!.name === 'where' || chain[0]!.name === 'not')) {
     const head = chain[0]!;
@@ -207,8 +221,8 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
  *  per-branch tables — a different construction, a later phase; it is NOT flattened here.) */
 function andChildren(a: unknown, params: Record<string, any>): readonly Arg[] | null {
   if (!isNested(a)) return null;
-  const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
-  return chain.length === 1 && chain[0]!.name === 'and' ? (chain[0]!.args ?? []) : null;
+  const chain = patternSteps((a as { nested: unknown }).nested, params);
+  return chain?.length === 1 && chain[0]!.name === 'and' ? (chain[0]!.args ?? []) : null;
 }
 
 /** Flatten a match argument list into patterns, expanding every top-level `and(…)` connective into its

@@ -8,7 +8,6 @@ Feature: mogwai addendum — match() pattern shapes
   # josh-created->lop(3),ripple(5); peter(6)-created->lop(3).
 
   @gap:match-patterns
-  @Unsupported
   Scenario: a repeat() body inside a match pattern
     # The two-hop frontier from marko: knows->josh->{lop,ripple} and created->lop (no out-edges).
     # Same answer as the explicit out().out() spelling below — a recursive body carries its own
