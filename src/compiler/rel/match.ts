@@ -324,6 +324,14 @@ export function lowerMatch(
       // then correlate that relation back to the binding table on every alias the leg reads.
       const walk = rightWalk(p.start, p.body);
       if (!walk) return null;
+      // The fresh right EXPOSES only the start and the TRAILING `where(P.eq(end))` ends as channels to
+      // correlate on. TinkerPop's `MatchStartStep.getScopeKeys` reads a leg's whole scope-key set —
+      // including a `where(P.eq(c))` in the MIDDLE of the body (`MatchStep.java` `anyStepRecursively`) —
+      // so a mid-body reference to a bound alias is a genuine correlation this construction does not
+      // expose. Rather than under-correlate (which would keep the wrong rows), DECLINE when the read set
+      // is not exactly the start plus the trailing ends. Fail closed, a later increment.
+      const correlated = new Set<string>([walk.start, ...walk.ends]);
+      if (p.reads.some((r) => !correlated.has(r))) return null;
       const src = child.rooted([syn(step, startProj.read.elem === 'edge' ? 'E' : 'V')]);
       if (!src || src.framing.kind !== 'elements') return null;
       const rightChain: IRStep[] = [syn(step, 'as', [walk.start]), ...walk.body, ...(walk.ends.length ? [syn(step, 'as', [...walk.ends])] : [])];
