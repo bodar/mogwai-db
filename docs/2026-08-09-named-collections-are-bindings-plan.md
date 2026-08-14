@@ -162,11 +162,26 @@ in `test/compiler/count-local-members.exec.test.ts`.
 
 ### Member/variant substrate
 
-**Phase 3b — mixed member SHAPES through the variant.** Two sites contributing different element KINDS (edge
-members beside vertex members), or an element beside a value. `ListOf` has no mixed arm, so this is NOT
-`mergeArms` reused: it is a member-level tagged union one level BELOW the stream-level variant, and the wire
-framer has to read it. One corpus scenario; otherwise combinatorial completeness. Unblocks one of the
-remaining multi-site failures below.
+**Phase 3b — mixed member SHAPES through the variant.** ✅ LANDED. Two sites contributing different element
+KINDS (an edge site beside a vertex site), or an element beside a value, now accumulate into a MIXED
+collection rather than declining (`accumulate`, `collection.ts`). The design turned out SIMPLER than a
+"member-level variant that the framer must learn": the wire's `frameTypedNode` (`execute.ts`) already frames
+ANY self-describing `{t,v}` node — a vertex, an edge, a scalar leaf — so the whole of the wire change was
+routing a new `ListOf.mixed` arm to it (`listItemBuffers`). The ALGEBRA work is the real content: a mixed
+`UNION ALL` shares ONE member column, where a bare rowid is indistinguishable from a scalar, so
+element-until-root cannot hold — each element expands to its `{t,v}` envelope AT THE SITE (`envelopeSites`,
+`elementNode`), the one place that rule is suspended, and each scalar to `typedNode` with its own tag. `cap`
+folds the envelope column like any typed list; `count(Scope.local)` counts members regardless of kind.
+
+`cap("a").unfold()` over a mixed collection emits one traverser PER MEMBER, each framed by its own tag — a
+new per-row `typedNode` framing (`framing.ts`/`render.ts`), distinct from the stream-level `variant` because
+a self-describing envelope preserves a per-member scalar TYPE (a uuid/datetime member) that `variant`'s single
+static scalar arm would infer away (§6·7). It is TERMINAL for the variant's reason: a stream that is a vertex
+on one row and an edge on the next has no uniform continuation, so a follower declines. No corpus scenario
+mixes kinds into one label directly (the multi-site aggregate scenarios use edge steps only as MOVEMENTS
+between vertex sites, so the label stays homogeneous — `elements`, not `mixed`), so this moved neither L3 nor
+the census; it is asserted in `test/L4-addendum/mixed-collection.feature` and
+`test/compiler/mixed-collection.exec.test.ts` (`legality-not-corpus-defines-support`).
 
 ### Leaf gaps — one thing each, no downstream unlock
 
@@ -185,10 +200,11 @@ conservative form.
 **`within(__.cap('a').unfold())`** — ⚠️ declines at the `where`; the predicate operand's label resolution is
 its own gap (Phase 5 was a precondition, not the whole of it). NOT a collection gap.
 
-**The 3 remaining multi-site failures — each blocked elsewhere.** What is left of the original nine: a
-`by(__.inE("created").values("weight").sum())` site (a `by()` whose body is a numeric REDUCER has its type in
-a `vt` column `byField` declines to supply — build plan Phase 2; `by(count())` lowers where `by(sum())` does
-not) · a `cap("a").unfold().path()` tail · one mixed-shape pair (Phase 3b). None a collection gap.
+**The 2 remaining multi-site failures — each blocked elsewhere.** What is left of the original nine (the
+mixed-shape pair is now Phase 3b, landed): a `by(__.inE("created").values("weight").sum())` site (a `by()`
+whose body is a numeric REDUCER has its type in a `vt` column `byField` declines to supply — build plan
+Phase 2; `by(count())` lowers where `by(sum())` does not) · a `cap("a").unfold().path()` tail. Neither a
+collection gap.
 
 **Owned by their own features:** `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree`.
 
