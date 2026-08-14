@@ -4233,6 +4233,13 @@ function elementTail(
       elem = moved.elem;
       continue;
     }
+    // An ALIAS-AWARE where/not — a two-variable theta or a body re-rooted at a bound `as()` label —
+    // reads a PATH label rather than the current traverser, so it is a correlated test over the alias
+    // element that `sourceFilter` (rooted at the current row) cannot express. Try it first; a `null`
+    // means it is an ordinary current-traverser filter and falls through to `sourceFilter` unchanged.
+    const aliased = aliasWhere(step, rel, labels, ctx, fresh);
+    if (aliased === 'decline') return null;
+    if (aliased) { rel = aliased; continue; }
     const clause = sourceFilter(step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, fresh, ctx);
     // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
@@ -4694,6 +4701,53 @@ function propertyTail(
  * and `math()` over its fields are all expressible and simply not built yet; declining is the honest
  * answer rather than dropping the record's fields silently.
  */
+
+/**
+ * A `where(k1, P.eq/neq(k2))` THETA or a `where(<body>)`/`not(<body>)` LEG over a stream's BOUND
+ * ALIASES — the alias-aware filters, shared by every tail that carries live labels: the record a
+ * terminal `match`/`select` produced AND an ordinary ELEMENT stream still carrying `as()` channels
+ * (`g.V().as('a').out().where(__.as('a').values('name').is('josh'))`). Both are TinkerPop's
+ * `WherePredicateStep`/`WhereTraversalStep` reading a PATH label rather than the current traverser, so
+ * the filter is a correlated test over the ALIAS element, not over the row's own payload — which is why
+ * the ordinary `sourceFilter` (rooted at the current traverser) cannot express it.
+ *
+ * Three answers: the filtered relation (HANDLED), `'decline'` (an alias filter it cannot lower — fail
+ * closed), or `null` (NOT an alias filter — the caller falls through to its ordinary where/not dispatch
+ * over the current traverser). It only ever claims a step `sourceFilter` also declines: a two-variable
+ * theta (`sourceFilter` sees `!isNested` and declines) and a body whose head is a `select(<alias>)` the
+ * Pass re-rooted (`sourceFilter`'s `childPredicate` roots at the current traverser and cannot lower a
+ * leading `select`), so routing these here first is pure gain.
+ */
+function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
+  if ((step.name !== 'where' && step.name !== 'not') || step.modulators?.length || step.optionArms) return null;
+  // Two-variable theta: `where(k1, P.eq/neq(k2))` between two bound ELEMENT aliases (rowid compare).
+  if (step.name === 'where') {
+    const wargs = argValues(step);
+    const pred = step.args?.[1]?.value;
+    if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
+      && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
+      const projA = aliasProjection(rel, labels, wargs[0], 'last', fresh);
+      const projB = aliasProjection(rel, labels, pred.operands[0]!.value as string, 'last', fresh);
+      // A non-element theta (a scalar-alias compare) is an unbuilt shape; fall through (sourceFilter
+      // declines it too) rather than over-claiming a fail-closed decline.
+      if (projA && projB && projA.read.kind === 'element' && projB.read.kind === 'element') {
+        const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
+        return make.filter({
+          id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type,
+          pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same },
+        });
+      }
+    }
+  }
+  // A where/not whose body re-roots at a bound alias (`as(k)`→`select(k)`): a filter leg. Only claim it
+  // when every alias it reads is LIVE here; otherwise it is not this stream's alias filter.
+  const leg = classifyWhereLeg(step, ctx.params);
+  if (!leg) return null;
+  const live = liveAliases(labels, rel);
+  if (!leg.reads.every((l) => live.has(l))) return null;
+  return applyLeg(leg, rel, labels, childSeam(ctx, fresh), step, fresh) ?? 'decline';
+}
+
 function recordTail(
   seed: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
@@ -4764,43 +4818,12 @@ function recordTail(
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    // `where(k1, P.eq/neq(k2))` — a two-variable THETA clause over the record's bound ELEMENT aliases,
-    // TinkerPop's `WherePredicateStep` in ordinary (post-match) position. Keeps rows where two alias
-    // channels are the SAME element (`eq`) or DIFFER (`neq`) — the same clause `match`'s inline `wpred`
-    // leg builds, applied to the record stream a terminal `match` produced. Only two-variable eq/neq
-    // (element identity); a `where(k, P<const>)` over one alias and a moving `where(<body>)` are separate.
-    if (step.name === 'where' && !step.modulators?.length && !step.optionArms) {
-      const wargs = argValues(step);
-      const pred = step.args?.[1]?.value;
-      if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
-        && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
-        const projA = aliasProjection(rel, labels, wargs[0], 'last', fresh);
-        const projB = aliasProjection(rel, labels, pred.operands[0]!.value as string, 'last', fresh);
-        if (!projA || !projB || projA.read.kind !== 'element' || projB.read.kind !== 'element') return null;
-        const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
-        rel = make.filter({
-          id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type,
-          pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same },
-        });
-        continue;
-      }
-    }
-
-    // `where(<body>)` / `not(<body>)` — a filter LEG over the record's bound aliases, the SAME
-    // existence semi/anti join `match`'s traversal legs build (`applyLeg`), now applied to the record
-    // stream a terminal `match`/`select` produced. Re-roots at the body's start alias and tests whether
-    // it produces (`where`) or does not (`not`); a `repeat`/`count` body lowers through the fresh-walk
-    // JOIN arm, an ordinary movement body through the correlated `EXISTS`. A leg reads only bound
-    // aliases, so a body naming an unbound one declines.
-    if ((step.name === 'where' || step.name === 'not') && !step.modulators?.length && !step.optionArms) {
-      const leg = classifyWhereLeg(step, ctx.params);
-      if (leg) {
-        const filtered = applyLeg(leg, rel, labels, childSeam(ctx, fresh), step, fresh);
-        if (!filtered) return null;
-        rel = filtered;
-        continue;
-      }
-    }
+    // `where(k1, P.eq/neq(k2))` THETA and `where(<body>)`/`not(<body>)` LEG over the record's bound
+    // aliases — the alias-aware filters, shared with the element tail (`aliasWhere`). A repeat/count leg
+    // body lowers through the fresh-walk join, an ordinary movement body through a correlated EXISTS.
+    const aliased = aliasWhere(step, rel, labels, ctx, fresh);
+    if (aliased === 'decline') return null;
+    if (aliased) { rel = aliased; continue; }
 
     // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the record's own alias channels. A bare `dedup()`
     // over a record (identity grouping) is a separate increment; a LABELLED dedup reads the bound

@@ -171,7 +171,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # .../dsl/graph/GraphTraversal.java:2578.
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_whereXasXaX_outXknowsXX_count
     Given the modern graph
     And the traversal of
