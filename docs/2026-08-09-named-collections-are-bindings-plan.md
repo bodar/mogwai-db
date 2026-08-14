@@ -126,25 +126,21 @@ does this doc's own thesis. So the fold is now CONSUMER-DRIVEN: `cap` recognises
 further along by the admission below (`legality-not-corpus-defines-support`). **This generalises Phase 2b
 (cancel a fold the consumer never needed) and is the substrate the remaining `cap` reads should follow.**
 
-**The ready admission: `local(group("a"))`/`local(groupCount("a"))` as a stream identity** — a KEYED
-`group("a")`/`groupCount("a")` IS a stream identity: `GroupSideEffectStep`/`GroupCountSideEffectStep` both
-extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged
+**The ready admission: `local(group("a"))`/`local(groupCount("a"))` as a stream identity** — ✅ LANDED. A
+KEYED `group("a")`/`groupCount("a")` IS a stream identity: `GroupSideEffectStep`/`GroupCountSideEffectStep`
+both extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged
 (`vendor/tinkerpop/gremlin-core/.../step/sideEffect/SideEffectBarrierStep.java:49-57`), which is
-`AggregateStep`'s contract exactly. So `local(groupCount("a"))` IS `groupCount("a")` and belongs in
-`isStreamIdentity` (`ir/strategies.ts`) beside `aggregate`, gated on the LABEL — a bare `group()`/`groupCount()`
-is a `ReducingBarrierStep` that replaces the stream. Six lines.
+`AggregateStep`'s contract exactly. So `local(groupCount("a"))` IS `groupCount("a")` — now in
+`isStreamIdentity` (`ir/strategies.ts`) beside `aggregate`, gated on the LABEL; a bare `group()`/`groupCount()`
+stays a `ReducingBarrierStep` that replaces the stream. Its merge (count / `GroupBiOperator`) is
+granularity-invariant, so `local()`'s per-traverser barrier is safe (unlike `assign`).
 
-Reverted TWICE, each time for a DIFFERENT blocker — record the SECOND, the first is gone. (1) multi-site keyed
-groups did not exist, so the lowering declined at the second registration. (2, after the substrate landed) the
-scenario continues `…cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")` and the
-lowering declines at `select(Column.keys)` over an ELEMENT-keyed map, so the whole chain declines. Both times
-the hazard was that admitting the splice let the chain lower FURTHER and answer a plausible half instead of
-declining cleanly — a clean DEFERRAL turning into a wrong answer, the one transition no gate structurally sees
-(`ran` +1 with no answer-change flag; now in `test/CLAUDE.md`) and only the census caught it.
-
-⚠️ **So the order is fixed: element-keyed `select(Column.keys)` FIRST, then the admission.** On its own the
-admission fixes zero scenarios — the other `local(group…)` bodies contain a `select`/`count(local)`, which are
-not identities.
+It had been reverted TWICE, and BOTH blockers are now gone: (1) multi-site keyed groups (landed earlier);
+(2) the continuation `…cap("a").select(Column.keys).unfold()…` declining over an element-keyed map — fixed by
+the consumer-driven fold above. The historic hazard (admitting the splice let the chain answer a plausible
+half instead of declining) was checked directly: the admission scenario `GroupCount.feature:212` answers
+EXACTLY `{marko:6,vadas:2,lop:6,josh:6,ripple:2,peter:2}` (matches TinkerPop), and the census re-record moved
+exactly ONE traversal deferred→ran with zero golden answers changed. L3 1546→1547.
 
 **`union()` declines when the stream carries an encounter channel** (`unionArms`' `encounterOf` guard). Any
 chain ending in a collecting consumer demands an encounter, so `g.V().union(__.aggregate("a"), …).cap("a")`
