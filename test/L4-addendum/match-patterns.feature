@@ -52,7 +52,6 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"lop"}] |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: a not() argument filters the binding table and binds nothing
     # marko's out-neighbours are vadas, josh (knows) and lop (created); excluding the created edge
     # leaves the two knows pairs. Only a and b come back — a filter introduces no variable.
@@ -79,7 +78,6 @@ Feature: mogwai addendum — match() pattern shapes
       | result |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: a where(traversal) argument reading a sibling argument's variable
     # marko-created->lop, and lop has 3 in-edges, so the existence check keeps the pair.
     Given the modern graph

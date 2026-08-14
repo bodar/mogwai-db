@@ -6,11 +6,11 @@ import type { Elem } from '../plan/plan.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { asLabelsOf } from '../ir/labels.ts';
 import type { IRStep } from '../ir/step.ts';
-import { eq, type Minter } from './build.ts';
+import { and, eq, type Minter } from './build.ts';
 import type { ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
-import type { ChildHost } from './child.ts';
+import type { ChildHost, Subject } from './child.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 
@@ -54,18 +54,27 @@ import { selectKeys } from './record.ts';
  *  the table (a new column) or, when `end` is already bound, CONSTRAINS it (a back edge). A
  *  `constraint` has no `as(end)` — TinkerPop appends a `MatchEndStep` with a null key that only passes
  *  the traverser through, so the pattern survives iff its body PRODUCES: an existence filter on
- *  `start`, binding nothing (`as('d').has('name','vadas')`). A `filter` head (`where`/`not`/`and`/`or`)
- *  is a later phase. */
+ *  `start`, binding nothing (`as('d').has('name','vadas')`). A `where`/`not` filter head is a `leg`
+ *  (below); the `and`/`or` connective groups are a later phase. */
 type Pattern =
   | { readonly kind: 'binding'; readonly start: string; readonly body: readonly IRStep[]; readonly end: string }
   | { readonly kind: 'constraint'; readonly start: string; readonly body: readonly IRStep[] }
   /** `where('a', P.eq/neq('b'))` — TinkerPop's `WherePredicateStep`, a THETA clause between two
    *  ALREADY-BOUND variables (no sub-traversal, no join). It binds nothing and reads both keys. */
-  | { readonly kind: 'wpred'; readonly startKey: string; readonly op: 'eq' | 'neq'; readonly otherKey: string };
+  | { readonly kind: 'wpred'; readonly startKey: string; readonly op: 'eq' | 'neq'; readonly otherKey: string }
+  /** `where(<body>)` / `not(<body>)` as a match ARGUMENT — TinkerPop's `WhereTraversalStep`/`NotStep`
+   *  in match position: an existence test over a re-rooted sub-traversal that BINDS NOTHING and only
+   *  NARROWS the binding table (`where` keeps rows the body produces for, `not` keeps rows it does
+   *  not). The Pass (`rewriteWhereEndLabels`) has already re-rooted the body's leading `as(start)` to
+   *  `select(start)` and constrained each bound end `.as(e)` to `where(P.eq(e))`, so `start` is the one
+   *  alias it re-roots at and `reads` is every alias the body references (all must be bound). A leg
+   *  reading ONE alias is a single-correlation `[NOT] EXISTS` (the tested predicate seam); a leg
+   *  reading SEVERAL is a multi-column SEMI/ANTI join. */
+  | { readonly kind: 'leg'; readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] };
 
 /** The alias labels a pattern READS — all must be bound before it is ready to run. */
 const readsOf = (p: Pattern): readonly string[] =>
-  p.kind === 'wpred' ? [p.startKey, p.otherKey] : [p.start];
+  p.kind === 'wpred' ? [p.startKey, p.otherKey] : p.kind === 'leg' ? p.reads : [p.start];
 
 /** The adjacency steps — a body containing one FANS the traverser OUT. A no-end constraint whose body
  *  is FILTER-ONLY (none of these) is a pure narrowing of `start` and folds as one re-rooted filter; a
@@ -81,22 +90,76 @@ const MOVEMENTS: ReadonlySet<string> = new Set([
  *  which drops the empty origins. `fold` is absent — it ends a LIST, a later phase. */
 const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min', 'max']);
 
+/** A `where(<body>)`/`not(<body>)` filter LEG, after the Pass has re-rooted its body. The body's head
+ *  is a `select(start)` (the Pass rewrote the leading `as(start)`), and its `reads` are `start` plus
+ *  every alias a `where(P.eq/neq(label))` in the body references (the Pass rewrote each bound end that
+ *  way). A leg BINDS nothing, so an intra-body `as()` — which the Pass leaves alone in the MIDDLE — is
+ *  an unseen shape and declines. */
+function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null {
+  const negated = head.name === 'not';
+  const nested = head.args?.[0]?.value;
+  if ((head.args?.length ?? 0) !== 1 || !isNested(nested)) return null;
+  const inner = stepChain((nested as { nested: unknown }).nested, params) as IRStep[];
+  // The Pass re-roots a body whose start label is bound; a leg whose leading `as()` it could not
+  // rewrite (an unbound start) is not the re-rooted `select` shape, so decline.
+  if (inner.length < 2 || inner[0]!.name !== 'select') return null;
+  const starts = (inner[0]!.args ?? []).map((s) => s.value).filter((v): v is string => typeof v === 'string');
+  if (starts.length !== 1) return null;
+  const start = starts[0]!;
+  const body = inner.slice(1);
+  // A mid-body re-anchor binds a variable; a leg binds nothing, so decline (a later phase).
+  if (body.some((s) => s.name === 'as')) return null;
+  const reads = new Set<string>([start]);
+  for (const s of body) {
+    if (s.name !== 'where') continue;
+    const pred = s.args?.[0]?.value;
+    if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') reads.add(o.value);
+  }
+  return { kind: 'leg', negated, start, body, reads: [...reads] };
+}
+
+/** The FRESH right-side walk for a multi-correlation leg: the `where(P.eq(end))` constraints the Pass
+ *  appended for bound ends, peeled off the TAIL and handed back as `ends` — so the right relation can
+ *  BIND each of those final elements as a channel (`as(...ends)`) to correlate against, rather than
+ *  constraining them to a value it does not hold. A `where(P.eq)` that is NOT in the trailing run
+ *  references a bound alias MID-walk, which this construction cannot expose as a channel; it is left in
+ *  `body` on purpose, so `child.chain` over the fresh source declines on the unbound label rather than
+ *  answering a narrower question. */
+function rightWalk(start: string, body: readonly IRStep[]): { readonly start: string; readonly body: readonly IRStep[]; readonly ends: readonly string[] } | null {
+  const ends: string[] = [];
+  let end = body.length;
+  while (end > 0) {
+    const s = body[end - 1]!;
+    if (s.name !== 'where') break;
+    const pred = s.args?.[0]?.value;
+    if (!isPred(pred) || pred.op !== 'eq' || pred.operands.length !== 1 || typeof pred.operands[0]!.value !== 'string') break;
+    ends.unshift(pred.operands[0]!.value);
+    end--;
+  }
+  return { start, body: body.slice(0, end), ends };
+}
+
 /** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). Admits
- *  the anchored `as(start).<body>[.as(end)]` shapes; the FILTER/connective heads
- *  (`where`/`not`/`and`/`or`) are a later phase and DECLINE here rather than being mis-lowered. */
+ *  the anchored `as(start).<body>[.as(end)]` shapes, the two-variable `where('a', P)` clause, and a
+ *  `where(<body>)`/`not(<body>)` filter leg; the `and`/`or` connective groups are a later phase and
+ *  DECLINE here rather than being mis-lowered. */
 function classify(a: unknown, params: Record<string, any>): Pattern | null {
   if (!isNested(a)) return null;
   const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
-  // `where('a', P.eq/neq('b'))` — a two-variable THETA clause. One step, a label key and a predicate
-  // whose single operand is another label. Only `eq`/`neq` (element identity) here; the other ops over
-  // two element aliases are not meaningful and other where-forms are a later phase.
-  if (chain.length === 1 && chain[0]!.name === 'where') {
-    const wargs = chain[0]!.args ?? [];
-    const pred = wargs[1]?.value;
-    if (wargs.length === 2 && typeof wargs[0]!.value === 'string' && isPred(pred)
-      && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string')
-      return { kind: 'wpred', startKey: wargs[0]!.value, op: pred.op, otherKey: pred.operands[0]!.value };
-    return null;
+  // A single `where`/`not` step is a FILTER argument, not an anchored pattern.
+  if (chain.length === 1 && (chain[0]!.name === 'where' || chain[0]!.name === 'not')) {
+    const head = chain[0]!;
+    // `where('a', P.eq/neq('b'))` — a two-variable THETA clause. A label key and a predicate whose
+    // single operand is another label. Only `eq`/`neq` (element identity) here; the other ops over two
+    // element aliases are not meaningful.
+    if (head.name === 'where') {
+      const wargs = head.args ?? [];
+      const pred = wargs[1]?.value;
+      if (wargs.length === 2 && typeof wargs[0]!.value === 'string' && isPred(pred)
+        && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string')
+        return { kind: 'wpred', startKey: wargs[0]!.value, op: pred.op, otherKey: pred.operands[0]!.value };
+    }
+    return classifyLeg(head, params);
   }
   if (chain.length < 2) return null;
   const head = chain[0]!;
@@ -230,6 +293,58 @@ export function lowerMatch(
       const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
       const clause: Expr = p.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
       rel = make.filter({ id: fresh('mw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      continue;
+    }
+
+    if (p.kind === 'leg') {
+      const startProj = aliasProjection(rel, labels, p.start, 'last', fresh);
+      if (!startProj || startProj.read.kind !== 'element') return null;
+
+      // A SINGLE-correlation leg — its body reads only its own start alias — is a correlated
+      // `[NOT] EXISTS` over that one element, which is EXACTLY the tested predicate seam: re-root at the
+      // start element (the `select(start)` the Pass produced), and hand the rest of the body to
+      // `child.predicate`. `where` keeps rows the body produces for (a semi-join); `not` keeps rows it
+      // does not (an anti-join), and the seam's `negated` flag is that distinction.
+      if (p.reads.length === 1) {
+        const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
+        const clause = child.predicate(p.body, subject, p.negated);
+        if (!clause) return null;
+        rel = make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+        continue;
+      }
+
+      // A MULTI-correlation leg — the body constrains a SECOND bound alias (`not(as('a').out().as('b'))`
+      // correlates on a AND b) — is a multi-column SEMI (where) / ANTI (not) JOIN, the shape a
+      // single-subject EXISTS cannot thread. The `emit` layer already renders semi/anti as
+      // `[NOT] EXISTS (SELECT 1 FROM <right> WHERE <on>)` with the right's outer references resolving
+      // against the LEFT — but only if the right is a relation OF ITS OWN, never a re-derivation of the
+      // binding table (`col(rel.id, …)` on both sides of a join resolves to whichever copy is nearest in
+      // scope, collapsing the correlation). So build the walk FRESH: a source of its own, binding the
+      // start and each `where(P.eq(end))`-constrained end as CHANNELS (the constraint becomes an `as`),
+      // then correlate that relation back to the binding table on every alias the leg reads.
+      const walk = rightWalk(p.start, p.body);
+      if (!walk) return null;
+      const src = child.rooted([syn(step, startProj.read.elem === 'edge' ? 'E' : 'V')]);
+      if (!src || src.framing.kind !== 'elements') return null;
+      const rightChain: IRStep[] = [syn(step, 'as', [walk.start]), ...walk.body, ...(walk.ends.length ? [syn(step, 'as', [...walk.ends])] : [])];
+      const ran = child.chain(src.rel, src.framing, rightChain, new Map());
+      if (!ran) return null;
+      const live = liveAliases(ran.aliases, ran.rel);
+      // One equality per read alias, conjoined — the multi-column correlation. An element alias ties by
+      // rowid, a value alias by its stored scalar; both sides read the SAME shape (the right binds the
+      // walk's own elements/values), so the left's shape decides the compare.
+      let on: Expr | undefined;
+      for (const label of p.reads) {
+        const lproj = aliasProjection(rel, labels, label, 'last', fresh);
+        const rEntry = live.get(label);
+        if (!lproj || !rEntry) return null;
+        const clause = lproj.read.kind === 'element'
+          ? eq(aliasIdAt(col(rel.id, lproj.entry.col), 'last'), aliasIdAt(col(ran.rel.id, rEntry.col), 'last'))
+          : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
+        on = and(on, clause);
+      }
+      if (!on) return null;
+      rel = make.join({ id: fresh('mj'), left: rel, right: ran.rel, join: p.negated ? 'anti' : 'semi', on, channels: rel.channels, type: rel.type });
       continue;
     }
 

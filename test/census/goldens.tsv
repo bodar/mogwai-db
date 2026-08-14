@@ -352,6 +352,7 @@ ran	6	2	1685f76c6dc05c61	ddc78e147f973c33	g.V().match(__.as("a").out("knows").co
 ran	2	2	8f9672180f138ee8	e3b81f7047f4a154	g.V().match(__.as("a").out("knows").values("name").as("b")).identity()
 ran	6	6	f20a0f30d2b71626	0de34caead4a9058	g.V().match(__.as("a").out().as("b"))
 ran	6	4	6c347f75a414b50a	6928779fe836025f	g.V().match(__.as("a").out().as("b")).select("b").by(T.id)
+ran	2	2	891bb5aed7d57d5e	1714032a66ac8cb2	g.V().match(__.as("a").out().as("b"),__.not(__.as("a").out("created").as("b")))
 ran	2	2	db1db31b87eab294	73b41117e90cad37	g.V().match(__.as("b").out("created").as("c"), __.as("a").out("knows").as("b"))
 ran	2	2	cfa5e9cef972c7af	b3e9d571df1786f0	g.V().match(__.as("d").in("knows").as("a"), __.as("d").has("name", "vadas"), __.as("a").out("knows").as("b"), __.as("b").out("created").as("c"))
 ran	4	4	051600264f16263f	9435ddf96f9a192d	g.V().math("_+_").by("age")

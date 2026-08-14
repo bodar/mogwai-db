@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,521<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,522<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -134,11 +134,18 @@ A REDUCING-barrier end (`count()`/`sum`/`mean`/`min`/`max` — `as('a').out().co
 PER-ORIGIN reduction (0 for an empty origin) through the scalar-child seam. Start variables ALREADY
 bound before the match (`V().as('a').out().as('b').match(…)`) run in the zero-root regime (not
 rebound). The bindings MAP is emitted UNCONDITIONALLY (a following `identity`/`limit`/`select` sees the
-map, per `MatchStep.getBindings`). ❌ (fail closed, each a named next phase in the plan doc): a FILTER
-argument (`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a
-filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) or a `fold()` end, a MOVING no-end pattern (an
-existence semi-join), a 0/1-variable bindings map, a nested `match` inside a pattern, `dedup(labels)`,
-and `match()` on an edge stream.
+map, per `MatchStep.getBindings`). Also ✅: a FILTER LEG argument — `where(<body>)`/`not(<body>)`, an
+existence test that binds nothing and only narrows the table. A leg whose body reads ONE alias is a
+correlated `[NOT] EXISTS` over that element (the tested predicate seam); a leg whose body constrains a
+SECOND bound alias (`not(as('a').out('created').as('b'))` correlates on `a` AND `b`) is a MULTI-COLUMN
+SEMI (`where`) / ANTI (`not`) JOIN — a `[NOT] EXISTS` over a FRESH walk of its own (never a
+re-derivation of the binding table, which would collapse the correlation), correlated back on every
+alias the leg reads. Plus the inline `where('a', P.eq/neq('b'))` two-variable THETA clause between two
+bound ELEMENT aliases. ❌ (fail closed, each a named next phase in the plan doc): the `and`/`or`
+connective GROUPS (they BIND their nested ends), `where('a', P.op('b'))` over a non-`eq`/`neq` op or a
+SCALAR alias, a filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) or a `fold()` end, a MOVING
+no-end pattern, a 0/1-variable bindings map, a nested `match` inside a pattern, `dedup(labels)`, and
+`match()` on an edge stream.
 
 `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
 **not yet** rather than never: designed as `call()` services with the four step names as desugar

@@ -106,4 +106,28 @@ describe('match() SQL', () => {
     // Six out-edges in the modern graph → six bound b's.
     expect(rows.length).toBe(6);
   });
+
+  // A SINGLE-correlation where(traversal) leg — its body reads only its own start alias — is a
+  // correlated EXISTS over that one element (the tested predicate seam), keeping rows the body
+  // produces for.
+  test('where(traversal) leg reading one alias → a correlated EXISTS (semi)', () => {
+    const p = read('g.V().match(__.as("a").out("created").as("b"), __.where(__.as("b").in()))');
+    // An existence test, not a negated one — the semi-join keeps rows the body produces for.
+    expect(p.sql).toMatch(/(?<!NOT )EXISTS \(SELECT/);
+    const rows = run(seededStore(), 'g.V().match(__.as("a").out("created").as("b"), __.where(__.as("b").in())).select("a","b").by("name")') as any[];
+    // marko/josh/peter -created-> lop (which has 3 in-edges) and josh -created-> ripple (1 in-edge).
+    expect(rows.length).toBe(4);
+  });
+
+  // A MULTI-correlation not(traversal) leg — the body constrains a SECOND bound alias — is a
+  // multi-column ANTI JOIN: a NOT EXISTS over a FRESH walk (its own source, never a re-derivation of
+  // the binding table) correlated back on every alias the leg reads.
+  test('not(traversal) leg reading two aliases → a multi-column NOT EXISTS (anti)', () => {
+    const p = read('g.V().match(__.as("a").out().as("b"), __.not(__.as("a").out("created").as("b")))');
+    expect(p.sql).toMatch(/NOT EXISTS \(SELECT/);
+    const rows = run(seededStore(), 'g.V().match(__.as("a").out().as("b"), __.not(__.as("a").out("created").as("b"))).select("a","b").by("name")') as any[];
+    // marko's out-neighbours are vadas, josh (knows) and lop (created); excluding the created pair
+    // leaves the two knows pairs.
+    expect(rows.length).toBe(2);
+  });
 });
