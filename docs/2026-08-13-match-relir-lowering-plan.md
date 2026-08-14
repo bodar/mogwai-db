@@ -1,9 +1,14 @@
 # `match()` on the RelIR spine — build plan
 
-> **Status: P0 + P1 + P1c + P2a + P2b + most of P3/P4 LANDED (2026-08-14, L3 1480 → 1539).** Added this
+> **Status: P0 + P1 + P1c + P2a + P2b + most of P3/P4 LANDED (2026-08-14, L3 1480 → 1544).** Added this
 > session: `and(…)`, keyed `dedup(labels)`, modulated pattern bodies, `where(k1,P.eq/neq(k2))` and
 > `where(<body>)`/`not(<body>)` over the record, a moving no-end existence semi-join, nested `match`, a
-> filter-after-reduce end, and a fail-closed guard for a global slice in a pattern body. Binding patterns, back-edge/cyclic, no-end filter
+> filter-after-reduce end, and a fail-closed guard for a global slice in a pattern body. **The filter-leg
+> machinery generalized OUT of match**: `applyLeg`/`aliasWhere` are shared by `recordTail` AND the
+> ELEMENT tail, so `where(k1,P.op(k2))[.by(key)]` (alias-vs-alias identity or value compare) and
+> `where(__.as(k)…)`/`not(__.as(k)…)` (a body re-rooted at a bound `as()` label, incl. a `repeat()` body
+> via the fresh-walk JOIN) now compose over ANY stream carrying live labels, not only a match record.
+> Binding patterns, back-edge/cyclic, no-end filter
 > constraints, per-row + reducing-barrier scalar ends, the zero-root regime, the unconditional bindings
 > map, inline `where(key, P.eq/neq)` legs, and the TRAVERSAL filter legs (`not`/`where(<body>)`) as
 > SEMI/ANTI JOINs with multi-column correlation are all live — and the whole GQL match-STRING front end
@@ -16,10 +21,13 @@
 > - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
 >   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
 >
-> **Remaining: `or(…)` → UNION of branches (both corpus scenarios also need a filter-after-reduce end);
-> `local(match)`; a `map(<mean>)` body; a `where(and(…))` connective inside a leg; top-level
-> `not(match(…))` (needs the top-level filter vocabulary to admit a `match`-headed body); a per-origin
-> windowed slice in a pattern body (currently fail-closed); and a `fold()` list end.**
+> **Remaining (each needs new plumbing beyond the leg/seam reuse): `or(…)` → UNION of branches with
+> alias reconciliation (both corpus scenarios also need a filter-after-reduce end + infix `.and`);
+> `local(match)`; a `map(<mean>)` body; a `where(and(…))` CONNECTIVE inside a leg (recurse the connective
+> in `classifyLeg`); a by-modulated alias compare with `or`/`and` in the predicate (predicate.ts
+> connective over two aliases); top-level `not(match(…))` (the top-level filter vocabulary must admit a
+> `match`-headed body); a per-origin windowed slice in a pattern body (currently fail-closed); a `fold()`
+> list end; and `ProductiveByStrategy` null-keeping semantics for a by-compare (currently fail-closed).**
 >
 > `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
