@@ -96,11 +96,38 @@ const MOVEMENTS: ReadonlySet<string> = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'otherV', 'V', 'E', 'values', 'properties', 'label', 'id',
 ]);
 
+/** Steps whose fold crosses ORIGIN boundaries — a global slice or barrier. `child.chain` runs a
+ *  pattern body over the WHOLE binding table, so any of these applies across all origins at once, while
+ *  TinkerPop runs each pattern per traverser (`MatchStep.java:158-164`). A binding/constraint body
+ *  containing one is a WRONG answer, not a slow one, so it DECLINES (a per-origin windowed lowering is a
+ *  later phase). `order()` is absent — it drops nothing, so a global sort leaves the binding multiset
+ *  unchanged; a reducing barrier as the END is absent from the general path because `reducingEnd` handles
+ *  it per-origin first. */
+const PER_ORIGIN_UNSAFE: ReadonlySet<string> = new Set([
+  'limit', 'range', 'tail', 'skip', 'sample',
+  'dedup', 'fold', 'group', 'groupCount', 'aggregate', 'cap',
+  'count', 'sum', 'mean', 'min', 'max',
+]);
+
 /** The value-REDUCING barrier ends — a pattern like `as('a').out().count().as('c')` binds `c` to a
  *  reduction that must be computed ONCE PER ORIGIN with a 0/empty default. That is the scalar-child
  *  seam's job (`child.scalar`, the same correlated read `by(__.out().count())` uses), NOT the row fold,
  *  which drops the empty origins. `fold` is absent — it ends a LIST, a later phase. */
 const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min', 'max']);
+
+/** A pattern body that ENDS in a value-reducing barrier, optionally followed by scalar `is(P)` filters:
+ *  `as('a').out().count().as('c')` or `as('a').out().count().is(P.gt(10)).as('c')`. Returns the
+ *  `reduceBody` (up to and including the barrier — what `child.scalar` reduces to one value per origin)
+ *  and whether trailing `is()` FILTERS follow (which DROP a row before the reduction binds, exactly the
+ *  predicate `valuePredicate` builds for `where(<…count().is(P)>)`). `null` when the body is not a
+ *  reduction — the ordinary per-row fold takes it. A non-`is` step after the barrier (a second movement)
+ *  is not this shape and declines, since a barrier resets the stream. */
+function reducingEnd(body: readonly IRStep[]): { readonly reduceBody: readonly IRStep[]; readonly filtered: boolean } | null {
+  let i = body.length - 1;
+  while (i >= 0 && body[i]!.name === 'is') i--;
+  if (i < 0 || !REDUCING_ENDS.has(body[i]!.name)) return null;
+  return { reduceBody: body.slice(0, i + 1), filtered: i < body.length - 1 };
+}
 
 /** A `where(<body>)`/`not(<body>)` filter LEG, after the Pass has re-rooted its body. The body's head
  *  is a `select(start)` (the Pass rewrote the leading `as(start)`), and its `reads` are `start` plus
@@ -406,12 +433,26 @@ export function lowerMatch(
     // A REDUCING-barrier end (`as('a').out().count().as('c')`) binds a per-origin reduction with a
     // 0/empty default — the scalar-child seam, rooted at the start alias, NOT the row fold (which
     // drops empty origins). The reduction is a correlated scalar projected into the alias column; the
-    // binding row's own payload is untouched, so `framing` carries.
-    if (p.kind === 'binding' && REDUCING_ENDS.has(p.body[p.body.length - 1]?.name ?? '')) {
+    // binding row's own payload is untouched, so `framing` carries. A trailing `is(P)` filter
+    // (`count().is(P.gt(10)).as('c')`) DROPS the row before the reduction binds — the same predicate
+    // `where(<…count().is(P)>)` builds, applied as a correlated filter over the START element.
+    const reduce = p.kind === 'binding' ? reducingEnd(p.body) : null;
+    if (p.kind === 'binding' && reduce) {
+      if (reduce.filtered) {
+        // The whole body incl. the trailing `is()` is a correlated predicate over the start element —
+        // `child.predicate` routes it through `valuePredicate` (reduce, then compare), which is exactly
+        // the drop this end owes. Filter FIRST, then rebuild the alias read against the narrowed table.
+        const sproj = aliasProjection(rel, labels, p.start, 'last', fresh);
+        if (!sproj || sproj.read.kind !== 'element') return null;
+        const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), rel, elem: sproj.read.elem };
+        const clause = child.predicate(p.body, subject, false);
+        if (!clause) return null;
+        rel = make.filter({ id: fresh('mr'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      }
       const proj = aliasProjection(rel, labels, p.start, 'last', fresh);
       if (!proj || proj.read.kind !== 'element') return null;
       const host: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
-      const produced = child.scalar(p.body, host);
+      const produced = child.scalar(reduce.reduceBody, host);
       if (!produced || produced.framing.kind !== 'scalar') return null;
       if (bound.has(p.end)) {
         const entry = liveAliases(labels, rel).get(p.end);
@@ -426,6 +467,16 @@ export function lowerMatch(
       }
       continue;
     }
+
+    // FAIL CLOSED on a GLOBAL slice/barrier in the body. `child.chain` folds the body over the WHOLE
+    // binding table at once, so a `limit`/`range`/`tail`/`dedup`/`fold`/`group` would apply ACROSS all
+    // origins rather than per-origin — but TinkerPop runs each pattern PER TRAVERSER (`MatchStep`
+    // rewrites a barrier body into a `TraversalFlatMapStep` so it is "locally computable",
+    // `vendor/tinkerpop/gremlin-core/.../MatchStep.java:158-164`). `a.outE.order.by(weight,desc).limit(1).inV.b`
+    // would bind ONE global edge's target instead of one per `a` — a WRONG answer, so decline until a
+    // per-origin windowed lowering exists. A reducing barrier as the END is already handled per-origin
+    // above (`child.scalar`); `order()` alone drops nothing and stays.
+    if (p.body.some((s) => PER_ORIGIN_UNSAFE.has(s.name))) return null;
 
     // Re-root at the pattern's start alias, then run the body through the ONE fold. The result relation
     // carries every prior alias channel (movements keep channels) plus a payload at the body's end.
