@@ -41,8 +41,7 @@
 import { BulkLoader, type BulkEdge, type BulkProperty, type BulkStats } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
-import { keysetPages } from '../rowbatch.ts';
-import { groupByOwner, rowsForOwners } from './drain.ts';
+import { groupByOwner, keysetPages, rowsForOwners } from './drain.ts';
 
 // ---------- RFC 4180 ----------
 

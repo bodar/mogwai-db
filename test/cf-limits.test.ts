@@ -17,9 +17,10 @@ import type { ForeignRow } from '../src/services/spi/types.ts';
 // breaching it (docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d) at a cardinality
 // far past the cap, under a store that fails on the statement a DO would reject.
 //
-// Both are now DO-legal — drop() chunks through RowBatch, and a federated landing rides one JSON
-// bind — so these read as ordinary behaviour tests. What makes them regression gates is the store
-// they run against: the same traversal under a plain BunSqlite would pass either way.
+// Both are now DO-legal — drop()'s cascade deletes by a `json_each(?)` membership over its retained
+// snapshot, and a federated landing rides one JSON bind — so these read as ordinary behaviour tests.
+// What makes them regression gates is the store they run against: the same traversal under a plain
+// BunSqlite would pass either way.
 
 const limited = () => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
 
@@ -63,7 +64,7 @@ const ROW_SCALE_TIMEOUT_MS = 30_000;
 
 // Was the wall of plan doc §1d: `ids.map(() => '?')`, spliced TWICE for `src IN (…) OR tgt IN (…)`,
 // so a DO refused the statement past 50 vertices — and the FTS owner sweep refused it past 99 edges.
-describe('drop() cascades in DO-legal chunks whatever the target count', () => {
+describe('drop() cascades within the DO bind cap whatever the target count', () => {
   test('250 vertices with properties and incident edges', () => {
     const store = limited();
     for (let i = 1; i <= 250; i++) executeQuery(store, `g.addV('person').property('name','p${i}')`, {});

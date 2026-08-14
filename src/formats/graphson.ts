@@ -34,8 +34,7 @@ import {
     BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
-import { keysetPages } from '../rowbatch.ts';
-import { groupByOwner, rowsForOwners } from './drain.ts';
+import { groupByOwner, keysetPages, rowsForOwners } from './drain.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).

@@ -106,7 +106,7 @@ free upgrade.
 | `bun scripts/fix.ts [--organize] [--unused] [--dry] [paths…]` | TypeScript's own `source.*` code actions | tool |
 | `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
 | `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
-| `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT outside `RowBatch` | **CI gate**, at zero |
+| `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT — no hand-rolled `?` synthesis | **CI gate**, at zero |
 | `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |
 | `scripts/lsp.ts` | the shared session library — build new tools on it | library |
 
@@ -159,12 +159,14 @@ allowlist. **`mise run lint`** (`scripts/lint.ts`) is the second: the three unus
 cannot live in `tsconfig.json` because generated `parser/` fails them, run with `parser/` filtered
 out of the OUTPUT and every suppression counted and attributed. Also at zero, also gated.
 **`mise run binds`** (`scripts/binds-check.ts`) is the third, and the one whose absence let a
-production-only wall ship twice: no hand-rolled placeholder repetition outside `src/rowbatch.ts`, and
-every `placeholders(…)` call inside a function that also chunks (enclosing extents come from
-`documentSymbol`, so it is the real declaration and not a brace-matching guess). It deliberately does
-NOT try to decide whether an arbitrary `binds` array is bounded — that is dataflow over every
-`store.query` call, and `store.query(plan.sql, plan.binds)` is unbounded to any local analysis and
-perfectly correct. What is decidable is the IDIOM, and the idiom is what produced both walls.
+production-only wall ship twice: no hand-rolled placeholder repetition ANYWHERE in `src/` — an arrow
+returning `'?'`, `.fill('?')`, `'?,'.repeat(n)`. The sanctioned form for a data-sized set is now ONE
+`json_each(?)` bind (a read's `IN (SELECT value FROM json_each(?))`, a write's relational `Insert` over
+`json_each` — `src/setwrite.ts`, `src/formats/drain.ts`), so there is no chunked placeholder builder to
+route through and a data-sized `IN (…)` list is never correct. It deliberately does NOT try to decide
+whether an arbitrary `binds` array is bounded — that is dataflow over every `store.query` call, and
+`store.query(plan.sql, plan.binds)` is unbounded to any local analysis and perfectly correct. What is
+decidable is the IDIOM, and the idiom is what produced both walls.
 
 One INSTRUMENT, deliberately not a gate, because its answer needs judgement:
 **`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into
@@ -332,9 +334,9 @@ remaining cross-cutting substrate.
   Its one real cost: a BLOB cannot travel, so **a `RETURNING` feeding a retained binding projects
   `json(x)`, never `jsonb`.** Performance merely agrees (chunking ~1.7× faster on `bun:sqlite`, ~2×
   SLOWER on DO) — a tiebreaker, and a reminder that picking the form the DEV runtime prefers is the
-  error `cf-limits.ts` exists to prevent. `src/rowbatch.ts` remains the LEGACY write path's mechanism
-  and is correct until that path is migrated; it is not the pattern to copy into new code, and it
-  shrinks to whatever JSON cannot carry.
+  error `cf-limits.ts` exists to prevent. There is no longer a second write mechanism: the chunked
+  row-at-a-time driver is deleted, and the ONE runtime write driver is `src/setwrite.ts` — a data-sized
+  batch is a relational `Insert` over `json_each`, rendered by the RelIR emitter like any compiled write.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`
@@ -354,9 +356,10 @@ remaining cross-cutting substrate.
   escape it), an **R2 bucket binding** inside a DO (`IO` in wrangler.jsonc — bindings are a property of
   a DO's env exactly as they are a Worker's, so a whole-graph read/write happens where the graph
   lives). **Optional on both**, and absent it fails closed NAMING the missing binding rather than
-  silently doing nothing. Formats are adapters over `RowBatch`, in `src/formats/`: typed GraphSON
-  adjacency is the lossless one (backup, seeding, `io()`), CSV is interop-only and says so by refusing
-  what it cannot carry.
+  silently doing nothing. Formats are adapters in `src/formats/`, draining through the shared
+  keyset-page + `json_each` membership helpers (`src/formats/drain.ts`) and loading through the
+  set-based writer: typed GraphSON adjacency is the lossless one (backup, seeding, `io()`), CSV is
+  interop-only and says so by refusing what it cannot carry.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`): `application(deps)` wires the shared router from one
   injected `GraphManager`. Entry points: `src/bun/server.ts`, `src/cloudflare/worker.ts`.
 - Web-session-only facts (which environment can build this at all, the shallow clone, pushing to a

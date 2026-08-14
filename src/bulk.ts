@@ -1,4 +1,4 @@
-// The bulk loader — N elements into one graph's tables, through RowBatch.
+// The bulk loader — N elements into one graph's tables, through set-based `insertSet` (src/setwrite.ts).
 //
 // Design: docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §2. Measured there: seeding the
 // grateful-dead graph by write traversals is 5,918 ms and 98,198 statements, of which only 17% is

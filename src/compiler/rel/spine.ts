@@ -186,9 +186,8 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
    * which was the real value all along — while production stays governed by the platform itself.
    *
    * What remains keyed to the constants is only ever a STRATEGY, never a refusal: `SET_BIND_LIMIT`
-   * chooses an IN-list over a JSON bind, and `rowbatch`'s `BIND_BUDGET` picks a chunk size. Both stay
-   * correct if the cap moves — merely conservative — which is the test a platform number has to pass
-   * before it may appear in shipping code.
+   * chooses an IN-list over a JSON bind. It stays correct if the cap moves — merely conservative —
+   * which is the test a platform number has to pass before it may appear in shipping code.
    */
   // A traversal that WROTE frames its rows through exactly this projection — the effects ran first, and
   // the framing read is the program's last step. A write reaches the SAME payload projection a pure read

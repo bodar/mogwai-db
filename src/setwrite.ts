@@ -1,6 +1,7 @@
 // SET-BASED WRITES — N literal rows into one table as ONE relational `Insert`, rendered by the
-// RelIR emitter and run by the binding executor. The replacement for `rowbatch`'s chunked,
-// hand-rolled DML: there is no second write renderer and no bind list that scales with row count.
+// RelIR emitter and run by the binding executor. This is the whole runtime write driver: the chunked,
+// hand-rolled multi-row DML it replaced is gone, so there is no second write renderer and no bind
+// list that scales with row count anywhere.
 //
 // The rows cross as ONE JSON bind exploded by `json_each` (§6·2 of the RelIR build plan), the same
 // transport `compiler/rel/foreign.ts` uses to land a barrier's awaited rows and `build.ts`'s
