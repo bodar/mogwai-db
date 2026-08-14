@@ -197,6 +197,12 @@
     "compiler": 63,
     "bound": 4
   },
+  "flatMap": {
+    "binds": 0,
+    "bytes": 821,
+    "compiler": 6,
+    "bound": 0
+  },
   "fold": {
     "binds": 4,
     "bytes": 1016,
@@ -319,8 +325,8 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 131,
-    "compiler": 3,
+    "bytes": 2562,
+    "compiler": 26,
     "bound": 0
   },
   "lTrim": {
@@ -488,7 +494,7 @@
   "select": {
     "binds": 3,
     "bytes": 5056,
-    "compiler": 51,
+    "compiler": 55,
     "bound": 2
   },
   "skip": {

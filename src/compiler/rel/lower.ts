@@ -10,7 +10,8 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { armBatches, assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
+import { armBatches, assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
+import { labelReads, labelsBoundBefore } from '../ir/labels.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
@@ -5660,7 +5661,7 @@ function perTraverserChild(
         : framing.type.kind === 'static' ? { vtype: compilerText(framing.type.type) } : {}),
     };
   const produced = scalarChild(body, host, ctx, fresh);
-  if (!produced) return null;
+  if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
   // `map` takes the first by definition. The seam states which (`ChildValue.yields`) rather than this
@@ -5726,6 +5727,64 @@ function perTraverserChild(
     exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
   });
   return continueAs(shed, payload.framing, steps, at + 1, bulked, ctx, fresh, labels);
+}
+
+/**
+ * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
+ * `scalarChild`'s movement arm explicitly defers ("fan-out `flatMap(__.V()…)` needs the general child
+ * rejoin"). `scalarChild` only produces a body that yields ONE value per traverser; a body that FANS
+ * OUT (`__.out()`, `__.out().values('name')`) is not a correlated scalar, it REJOINS.
+ *
+ * A body with NO stream barrier is TRANSPARENT: `flatMap`/`local` run it per traverser, and with
+ * nothing to scope per-origin the answer is the body inlined into the outer chain — `flatMap(__.out())`
+ * is `out()`, `local(__.out())` is `out()`. So mint the `origin` channel (the seam's `rows` arm), lower
+ * the body over it, then DROP origin: a later `dedup` is whole-row, so leaving origin as a column would
+ * make it distinguish rows by WHICH host they descend from and keep convergent walks that must collapse.
+ *
+ * A barrier INSIDE the body (`local(__.out().order().by(k))`, `local(__.out().fold())`) needs the
+ * order/slice/fold scoped PER ORIGIN — a window partitioned by `origin`, a later increment — so
+ * `isStreamBarrier` declines it here rather than letting the ordinary fold answer the GLOBAL question
+ * (a wrong answer `childRows` would not catch, since `order()`/`limit()` preserve the origin channel).
+ *
+ * `map` is excluded: it takes the FIRST body result, not all, so a fan-out under it is a per-origin
+ * window, not this. A scalar host has no rowid for `origin` (`childRows`' own limit), so only an element
+ * host reaches here.
+ */
+function flatMapRejoin(
+  step: IRStep, rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>,
+  body: readonly IRStep[], steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
+  if (body.some(isStreamBarrier)) return null;
+  // PATH HIDING — "Objects from flatMap traversal should be hidden from path()"
+  // (`vendor/tinkerpop/gremlin-test/.../map/FlatMap.feature:56`): `flatMap(out().out()).path()` is
+  // `[v, end]`, NOT `[v, mid, end]`. The rejoin lowers the body through the ordinary fold, whose hops
+  // each MINT a path position, so under a path demand the body's intermediate objects would leak into
+  // the path. Hiding them (one input→output path step for the whole body) is a later increment; fail
+  // closed while path is tracked.
+  if (ctx.tracksPath) return null;
+  // A LABEL BOUND INSIDE THE BODY THAT THE OUTER CHAIN READS must ESCAPE to the parent scope
+  // (`g.V()…as('a').local(__.out('created').as('b')).select('a','b')` — b is bound in the body and
+  // read after) — and that propagation is the child-body-label-escape feature the rejoin does NOT
+  // wire, so the outer `select('b')` would find b unbound and answer `[]`. Fail closed: decline when a
+  // body-bound label is read downstream, while keeping the cases where the label is consumed WITHIN
+  // the body (`local(__.out().as('a').select('a'))`) or the body binds nothing at all.
+  const bodyBound = labelsBoundBefore(body, body.length, ctx.params);
+  if (bodyBound.size) {
+    const outerReads = labelReads(steps.slice(at + 1), ctx.params);
+    if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
+  }
+  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh);
+  if (!rows) return null;
+  // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
+  // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
+  const channels = rows.rel.channels.filter((channel) => channel.role !== 'origin');
+  const cols = rows.rel.type.cols.filter((column) => column.name !== rows.origin);
+  const shed = make.project({
+    id: fresh('fx'), input: rows.rel, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(rows.rel.id, column.name)] as const),
+  });
+  return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
 /**

@@ -462,6 +462,14 @@ const COVERED = [
   // …and an ENDPOINT re-root is single-valued BY THE SCHEMA without being a reducer, which is the
   // shape that proved the policy could not be read off the framing.
   "g.E().map(__.outV())", "g.E().local(__.outV())", "g.E().flatMap(__.inV())",
+  // A FAN-OUT body under `flatMap`/`local` — the general child REJOIN (`flatMapRejoin`), not a
+  // correlated scalar. A barrier-free body is TRANSPARENT (`flatMap(__.out())` is `out()`), so it
+  // lowers via the seam's `rows` arm with `origin` dropped after. `map` is excluded (takes the first,
+  // a per-origin window) and a barrier in the body declines (per-origin scoping, a later increment).
+  "g.V().flatMap(__.out())", "g.V().local(__.out())", "g.V().local(__.out().out())",
+  "g.V().flatMap(__.out().values('name'))", "g.V().local(__.out().values('name'))",
+  "g.V().local(__.outE().inV())", "g.V().local(__.out().has('lang','java'))",
+  "g.V().local(__.out()).dedup()",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",

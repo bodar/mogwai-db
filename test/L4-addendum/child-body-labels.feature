@@ -30,7 +30,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_localXoutXknowsX_selectXxXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -44,7 +43,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | marko |
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_localXoutXcreatedX_asXaX_selectXaXX_valuesXnameX
     Given the modern graph
     And the traversal of

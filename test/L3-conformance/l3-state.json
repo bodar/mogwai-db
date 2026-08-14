@@ -1,5 +1,5 @@
 {
-  "passing": 1544,
+  "passing": 1546,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -282,6 +282,7 @@
     "g_V_andXhasXage_gt_27X__outE_count_gte_2X_name",
     "g_V_andXhasXname_typeOfXGType_STRINGXX__hasXage_typeOfXGType_INTXXX_valuesXnameX",
     "g_V_andXoutE__hasXlabel_personX_and_hasXage_gte_32XX_name",
+    "g_V_asXaX_flatMapXselectXaXX",
     "g_V_asXaX_hasXname_markoX_asXbX_asXcX_selectXa_b_cX_by_byXnameX_byXageX",
     "g_V_asXaX_hasXname_markoX_asXbX_hasXage_29X_asXcX_path",
     "g_V_asXaX_inXcreatedX_addEXcreatedByX_fromXaX_propertyXyear_2009X_propertyXacl_publicX",
@@ -291,6 +292,7 @@
     "g_V_asXaX_outXcreatedX_inXcreatedX_asXbX_whereXa_gtXbXX_byXageX_selectXa_bX_byXnameX",
     "g_V_asXaX_outXcreatedX_whereXasXaX_name_isXjoshXX_inXcreatedX_name",
     "g_V_asXaX_outXknowsX_and_outXcreatedX_inXcreatedX_asXaX_name",
+    "g_V_asXaX_outXknowsX_asXbX_localXselectXa_bX_byXnameXX",
     "g_V_asXaX_outXknowsX_asXbX_mathXa_plus_bX_byXageX",
     "g_V_asXaX_outXknowsX_asXbX_mathXa_plus_bX_byXageX_asNumberXGType_INTX",
     "g_V_asXaX_out_aggregateXxX_asXbX_selectXa_bX_byXnameX",
@@ -1715,7 +1717,6 @@
     "g_V_asString",
     "g_V_asXaX_andXselectXaX_selectXaXX",
     "g_V_asXaX_both_asXbX_dedupXa_bX_byXlabelX_selectXa_bX",
-    "g_V_asXaX_flatMapXselectXaXX",
     "g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX",
     "g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX_byXmathX_plus_XX",
     "g_V_asXaX_hasXname_markoX_outXcreatedX_asXbX_addVXselectXaX_labelX_propertyXtest_selectXbX_labelX_valueMap_withXtokensX",
@@ -1729,7 +1730,6 @@
     "g_V_asXaX_outXcreatedX_asXbX_whereXandXasXbX_in__notXasXaX_outXcreatedX_hasXname_rippleXXX_selectXa_bX",
     "g_V_asXaX_outXcreatedX_inXcreatedX_whereXneqXaXX_asXbX_addEXcodeveloperX_fromXaX_toXbX_propertyXyear_2009X",
     "g_V_asXaX_outXknowsX_asXaX_selectXall_constantXaXX",
-    "g_V_asXaX_outXknowsX_asXbX_localXselectXa_bX_byXnameXX",
     "g_V_asXaX_out_asXaX_out_asXaX_selectXaX_byXunfold_valuesXnameX_foldX_tailXlocalX_unfold",
     "g_V_asXaX_out_asXaX_out_asXaX_selectXaX_byXunfold_valuesXnameX_foldX_tailXlocal_1X_unfold",
     "g_V_asXaX_out_asXaX_out_asXaX_selectXall_aX_byXunfold_valuesXnameX_foldX",

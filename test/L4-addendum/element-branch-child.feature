@@ -41,7 +41,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
       | d[1].l |
 
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_localXcoalesceXoutXknowsX__outXcreatedXXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -58,7 +57,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
       | lop |
 
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_localXchooseXhasXage_gtX30XX_outXcreatedX__outXknowsXXX_valuesXnameX
     Given the modern graph
     And the traversal of
