@@ -177,7 +177,7 @@ makes a new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 | **`prune`** | column pruning — a walk carries only what its body and its consumer read |
 | **`seek`** | lifts a correlated property `EXISTS` in front of the scan it filters, as a DISTINCT relation the plan is driven from. Switched by `propertySeek` |
 | **`fuse`** | 🚧 small semantic rewrites. Ask what still buys anything the assembler doesn't before wiring it |
-| **`flatten`** | 🚧 join flattening / decorrelation into the P1 envelope; deletes `expandRepeatBody`. Most of it dissolved into `block.ts`'s legality analysis |
+| **`flatten`** | ✅ landed by DISSOLUTION, not as a pass. `expandRepeatBody` is deleted; the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto` — Calcite `SqlImplementor.needNewSubQuery` prior art), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No standalone `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally (block.ts treats a union side as `closed`→derived table while the self-ref stays unwrapped in the term's FROM), so `repeat(__.bothE().inV())` composes without one |
 | **`recognize`** | 🚧 the fast paths as plan rewrites, so a fast-path decline can be lifted |
 
 **Declared is not wired.** Only `name` and `seek` have production callers; there is no object that

@@ -31,6 +31,6 @@ The compiler builds all SQL through a template-first `q` kernel + typed `Relatio
 - **A third mode ("flat accumulation") was measured unnecessary — don't add one.** SQLite's lateral
   rule is positional, not absent: a table-valued function and a correlated scalar subquery both see
   the outer row; only a FROM-clause derived table doesn't. So the only shape needing flat
-  accumulation is a body that FANS OUT inside a recursive term, which `expandRepeatBody` handles as
-  a fast path with a generic body relation behind it. Everything else provisions as a keyed relation
-  + a join.
+  accumulation is a body that FANS OUT inside a recursive term, which the recursive regime
+  (`repeatWalk`, `src/compiler/rel/walk.ts`) handles with a generic body relation behind it.
+  Everything else provisions as a keyed relation + a join.

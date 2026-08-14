@@ -384,9 +384,9 @@ test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', ()
 });
 });
 
-// ---------- the GENERIC repeat body relation (branch.ts repeatBodyRelation) ----------
+// ---------- the GENERIC repeat body relation ----------
 //
-// `expandRepeatBody` is a private movement/filter mini-compiler and therefore a vocabulary wall.
+// The flat movement/filter body expander is a private mini-compiler and therefore a vocabulary wall.
 // The generic route compiles the body ONCE through the ordinary StepFns as a (from_id, to_id)
 // relation the recursive term joins — legal because a recursive term may reference a NON-recursive
 // CTE, which is the way around SQLite having no LATERAL (a derived table in the recursive term's
