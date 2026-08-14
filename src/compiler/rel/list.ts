@@ -1293,7 +1293,11 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  * framer does not unwrap, and `of` has already said every member is an element.
  */
 function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
-  if (of.kind === 'scalar') return jsonOf(list);
+  // A MIXED list's members were expanded to `{t,v}` envelopes AT THE SITE (`collection.ts`
+  // `envelopeSites`) — the one place elements-until-root cannot hold, because a mixed union shares one
+  // member column and a bare rowid is indistinguishable from a scalar in it. So there is nothing to
+  // expand at the root: the column already holds the wire tree, exactly as the scalar arm's does.
+  if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
   if (of.kind === 'elem') {
     const rowids = membersOf(jsonOf(list), fresh);
     const expanded = make.aggregate({

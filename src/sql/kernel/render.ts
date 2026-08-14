@@ -29,7 +29,23 @@ export type ListOf =
   // reduction over these members is a REAL result (`ProductiveByStrategy`) or the framer's signal
   // to emit nothing. Use `withMemberType` to change one without dropping the other.
   | { kind: 'scalar'; type: ScalarType; productiveNull: boolean }
-  | { kind: 'list'; of: ListOf };
+  | { kind: 'list'; of: ListOf }
+  // A MIXED-shape list — members of DIFFERENT kinds (a vertex beside an edge, an element beside a
+  // value), each a self-describing `{t,v}` envelope. The member-level tagged union one level below the
+  // stream `VariantArm` (`compiler/rel/variant.ts`): where that discriminates a per-ROW shape, this
+  // discriminates a per-MEMBER one inside a single list. The wire frames every member through the ONE
+  // self-describing `frameTypedNode` rule (a vertex, an edge, a scalar leaf all decode from their own
+  // `t`), so no per-member descriptor is threaded; `arms` records the complete member vocabulary only
+  // for `unfold()`, which produces a VARIANT stream whose arms are exactly these.
+  | { kind: 'mixed'; arms: readonly MixedArm[] };
+
+/** ONE member-shape a MIXED list can hold — the member-level analogue of a stream `VariantArm`, one
+ *  level down. A mixed list's members are self-describing `{t,v}` envelopes, so a scalar arm carries no
+ *  type: each member states its own tag and the framer infers per value, exactly as an untyped list
+ *  member does. `elem` distinguishes vertex from edge so `unfold()` can declare the right variant arm. */
+export type MixedArm =
+  | { kind: 'elem'; elem: Elem }
+  | { kind: 'scalar' };
 
 // How a map stream's key/value column is shaped — kept at the render boundary (like
 // ListOf/MapEntry) so a MapStream's mapEntry Shape can name it. A key/value is a bare

@@ -227,6 +227,8 @@ function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').List
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
+  // A MIXED-member list frames each member by its own {t,v} tag, exactly as listItemBuffers does.
+  if (of.kind === 'mixed') return listBuffer(items.map(frameTypedNode));
   return ioc.listSerializer.serialize(items);
 }
 
@@ -473,6 +475,10 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
       : as ? items.map((x: any) => frameValue(x, as))
         : items.map((x: any) => ioc.anySerializer.serialize(x));
   }
+  // A MIXED list: every member is a self-describing {t,v} envelope (a vertex, an edge, a scalar leaf),
+  // so the ONE typed-node rule frames each by its own tag — the same rule a typed scalar list's members
+  // already take. `arms` is not read here; it exists for `unfold()`'s variant.
+  if (of.kind === 'mixed') return items.map(frameTypedNode);
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the

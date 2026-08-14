@@ -5,14 +5,15 @@ import { argValues, type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
-import { meetScalarTypes, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, typeCarriedBy, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, typeCarriedBy, UNKNOWN, type ListOf, type MixedArm, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
-import { foldElements, foldScalars } from './list.ts';
-import { carriedCols, eq, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
+import { foldElements, foldScalars, inferredVtype, LIST_COL } from './list.ts';
+import { carriedCols, collectedArray, eq, jsonOf, meta, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
+import { elementNode } from './element.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
@@ -159,7 +160,20 @@ export type Members =
    * "this shape genuinely has no member relation" looks like, and a second registration on the label
    * declines rather than being merged into a map that has already discarded where its rows came from.
    */
-  | { readonly kind: 'reduced'; readonly framing: RelFraming };
+  | { readonly kind: 'reduced'; readonly framing: RelFraming }
+  /**
+   * MIXED MEMBER SHAPES — sites contributing different KINDS into one label (a vertex site beside an
+   * edge site, an element beside a value). The member-level tagged union one level BELOW the
+   * stream-level variant (`variant.ts`): where that discriminates a per-ROW shape, this discriminates a
+   * per-MEMBER one inside a single list.
+   *
+   * Its sites are ALREADY normalised to a single self-describing `{t,v}` envelope column
+   * (`MEMBER_ENVELOPE`), because a mixed `UNION ALL` shares one member column and a bare rowid is
+   * indistinguishable from a scalar in it — so the element-until-root rule the `elements` arm keeps
+   * cannot hold here, and each element is expanded at its SITE (`envelopeSites`). `arms` is the complete
+   * member vocabulary, carried so `cap("a").unfold()` can declare the right VARIANT arms.
+   */
+  | { readonly kind: 'mixed'; readonly arms: readonly MixedArm[] };
 
 /** The registry a chain carries — MUTABLE, because a side effect is chain-global state written at one
  *  step and read at another, which is the one thing a fold's return value cannot carry backwards. */
@@ -299,28 +313,109 @@ function accumulate(held: Collection, added: Collection, fresh: Minter): Collect
   // registration positions read it — so it is carried rather than merged, and the two sides cannot
   // disagree about it by construction.
   const merge = held.merge;
-  if (held.of.kind === 'elements' && added.of.kind === 'elements')
-    return held.of.elem === added.of.elem ? { sites, of: held.of, merge } : null;
-  // TWO KEYED SITES must be the same GROUPING, and `sameGroupRecipe` is the whole test — that is what the
-  // recipe being comparable DATA buys (`map.ts`). Two sites whose recipes differ would otherwise be
-  // aggregated by the first one's, which is a plausibly-wrong map rather than a decline.
-  // A POOLED grouping has no member rows, so a second site has nothing to union onto it — see the
-  // `reduced` arm. It declines rather than silently keeping one site's map.
+  // A KEYED or POOLED grouping is a MAP, not a collection, and it never mixes: `Operator.addAll` over a
+  // Map and a Collection is the reference's own IllegalArgumentException ("Objects must be both of Map
+  // or Collection", `Operator.java:178-196`). Two keyed sites must be the SAME grouping
+  // (`sameGroupRecipe`, `map.ts`), or a plausibly-wrong map results; a pooled `reduced` has no member
+  // rows for a second site to union onto. Both decline rather than going mixed.
   if (held.of.kind === 'reduced' || added.of.kind === 'reduced') return null;
   if (held.of.kind === 'grouped' || added.of.kind === 'grouped')
     return held.of.kind === 'grouped' && added.of.kind === 'grouped'
       && sameGroupRecipe(held.of.recipe, added.of.recipe) ? { sites, of: held.of, merge } : null;
-  if (held.of.kind !== 'scalars' || added.of.kind !== 'scalars') return null;
-  // `productiveNull` is orthogonal to the type and says whether a NULL member is a REAL value or the
-  // framer's signal to emit nothing. Two sites that answer it differently are two different member
-  // encodings, and picking either would silently change one site's answer.
-  if (held.of.productiveNull !== added.of.productiveNull) return null;
-  const type = meetScalarTypes([held.of.type, added.of.type]);
+  // TWO ELEMENT sites of the SAME kind stay `elements` — members are rowids until the root, which keeps
+  // a discarded member free (`foldElements`). Different kinds cannot: their rowids share no table, so
+  // they go MIXED.
+  if (held.of.kind === 'elements' && added.of.kind === 'elements' && held.of.elem === added.of.elem)
+    return { sites, of: held.of, merge };
+  // TWO SCALAR sites MEET their per-value types and stay `scalars`. `productiveNull` is orthogonal to
+  // the type and says whether a NULL member is a REAL value or the framer's signal to emit nothing; two
+  // sites that answer it differently are two member ENCODINGS, so they cannot meet as scalars and go
+  // mixed instead (the envelope encoding is self-describing per member, so the disagreement dissolves).
+  if (held.of.kind === 'scalars' && added.of.kind === 'scalars'
+    && held.of.productiveNull === added.of.productiveNull) {
+    const type = meetScalarTypes([held.of.type, added.of.type]);
+    return {
+      sites: [...honouring(held.sites, held.of.type, type, fresh), ...honouring(added.sites, added.of.type, type, fresh)],
+      of: { kind: 'scalars', type, productiveNull: held.of.productiveNull },
+      merge,
+    };
+  }
+  // EVERYTHING ELSE among {elements, scalars, mixed} is a MIXED collection — the member-level tagged
+  // union. A declared merge POLICY over mixed members has no fold this route spells (a seed is a list
+  // or a scalar, neither of which combines with a heterogeneous multiset), so it declines rather than
+  // dropping the seed.
+  if (merge) return null;
   return {
-    sites: [...honouring(held.sites, held.of.type, type, fresh), ...honouring(added.sites, added.of.type, type, fresh)],
-    of: { kind: 'scalars', type, productiveNull: held.of.productiveNull },
-    merge,
+    sites: [...envelopeSites(held, fresh), ...envelopeSites(added, fresh)],
+    of: { kind: 'mixed', arms: dedupeArms([...armsOf(held.of), ...armsOf(added.of)]) },
+    merge: undefined,
   };
+}
+
+/** The column a MIXED collection's heterogeneous sites UNION on — one self-describing `{t,v}` envelope
+ *  per member. A JSONB blob so the json subtype survives the union boundary; the fold reads it with
+ *  `json()`, the same round trip `list.ts`'s nested-list rebuild makes. */
+const MEMBER_ENVELOPE = 'me';
+
+/** A member shape's arm vocabulary — one arm per element kind, one for scalars. A `mixed` side already
+ *  carries its arms; the others contribute exactly one. `grouped`/`reduced` never reach here. */
+const armsOf = (of: Members): readonly MixedArm[] =>
+  of.kind === 'elements' ? [{ kind: 'elem', elem: of.elem }]
+    : of.kind === 'scalars' ? [{ kind: 'scalar' }]
+      : of.kind === 'mixed' ? of.arms : [];
+
+/** The declared arm vocabulary, DEDUPED — two vertex sites are one `vertex` arm, so `unfold()` declares
+ *  each shape once. */
+const dedupeArms = (arms: readonly MixedArm[]): readonly MixedArm[] => {
+  const seen = new Set<string>();
+  return arms.filter((arm) => {
+    const key = arm.kind === 'elem' ? `e:${arm.elem}` : 's';
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+};
+
+/**
+ * A COLLECTION'S SITES, each normalised to one `{t,v}` envelope column so heterogeneous sites can
+ * `UNION ALL`. A `mixed` side is already in that form and passes through; an `elements`/`scalars` side
+ * converts each member.
+ *
+ * ⚠️ **An element expands to its PUBLIC PAYLOAD HERE, at the site — the one place elements-until-root
+ * cannot hold.** The `elements` arm keeps rowids until the root because a bare rowid is enough when
+ * every member is the same kind; a mixed union shares one column, where a rowid `5` and a scalar `5`
+ * are indistinguishable, so each element must be self-describing before the union. That is why this is
+ * its own arm rather than `elements` reused.
+ */
+function envelopeSites(collection: Collection, fresh: Minter): readonly Site[] {
+  if (collection.of.kind === 'mixed') return collection.sites;
+  return collection.sites.map((site) => {
+    const envelope = memberEnvelope(site.rel, collection.of, fresh);
+    const orderMeta = site.order.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));
+    return {
+      rel: make.project({
+        id: fresh('mez'), input: site.rel, channels: [],
+        type: typeOf(meta(MEMBER_ENVELOPE, 'json', true), ...orderMeta),
+        // `jsonb(<envelope>)` so the blob survives the union; the envelope itself is `json_object` text.
+        exprs: [[MEMBER_ENVELOPE, { kind: 'call', fn: 'jsonb', args: [envelope] }],
+          ...site.order.map((name) => [name, col(site.rel.id, name)] as const)],
+      }),
+      order: site.order,
+      perTraverser: site.perTraverser,
+    };
+  });
+}
+
+/** ONE member's self-describing `{t,v}` envelope. An element is `{"t":"vertex","v":{payload}}`
+ *  (`elementNode`); a scalar is `{"t":<vtype>,"v":<value>}` (`typedNode`), the type read from the
+ *  member's own carrier — a per-row column, a static tag, or inferred from the storage class where the
+ *  stream never declared one. */
+function memberEnvelope(rel: Rel, of: Members, fresh: Minter): Expr {
+  if (of.kind === 'elements') return elementNode(col(rel.id, 'id'), of.elem, fresh);
+  if (of.kind !== 'scalars') throw new Error(`memberEnvelope: ${of.kind} has no scalar member`);
+  const value = col(rel.id, 'v');
+  const column = perRowColumnOf(of.type);
+  const tag = staticTypeOf(of.type);
+  const vtype: Expr = column ? col(rel.id, column) : tag ? compilerText(tag) : inferredVtype(value);
+  return typedNode(value, vtype);
 }
 
 /** Sites re-projected so they can be read as the MET type — a no-op where `from` already IS the meet,
@@ -471,6 +566,21 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
   // What it shares with the other two arms is everything that matters: N sites are a `UNION ALL` of
   // member relations, ordered by (site ordinal, that site's own), reduced ONCE at the read.
   if (collection.of.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: collection.of.framing };
+  // A MIXED collection's sites already hold `{t,v}` envelopes in ONE column (`envelopeSites`), so the
+  // reduction is the ordinary list fold — `UNION ALL` the sites, then `json_group_array` the envelope
+  // column, exactly as `foldScalars` does over a typed member. The framing is a `mixed` list, and
+  // `unfold()` reads its `arms` to build a variant.
+  if (collection.of.kind === 'mixed') {
+    const site = collection.sites.length === 1
+      ? collection.sites[0]!
+      : accumulated(collection.sites, [MEMBER_ENVELOPE], fresh);
+    const order = site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'asc' as const }));
+    const rel = make.aggregate({
+      id: fresh('fx'), input: site.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [], aggs: [[LIST_COL, collectedArray(jsonOf(col(site.rel.id, MEMBER_ENVELOPE)), order)]],
+    });
+    return { rel, framing: { kind: 'list', of: { kind: 'mixed', arms: collection.of.arms } } };
+  }
   if (collection.of.kind === 'grouped') {
     const { recipe } = collection.of;
     const grouped = collection.sites.length === 1
@@ -487,7 +597,10 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
   const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(collection, fresh) : collection;
   if (!seeded) return null;
   const { sites, of, merge } = seeded;
-  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
+  // `grouped`/`reduced` are maps, `mixed` reduced above — the seeded list fold below serves only the two
+  // list arms. A `mixed` here would mean a declared policy over mixed members, which `accumulate`
+  // already refused (a seed cannot fold into a heterogeneous multiset).
+  if (of.kind === 'grouped' || of.kind === 'reduced' || of.kind === 'mixed') return null;
   // `assign` REPLACES, so only the LAST merge survives and every site before it is dead — which makes
   // it the one policy that narrows the site list rather than reading all of it.
   const surviving = merge?.operator === ASSIGN ? [sites[sites.length - 1]!] : sites;
@@ -764,7 +877,8 @@ function seededFold(
 const memberCols = (of: Members): readonly string[] =>
   of.kind === 'elements' ? ['id']
     : of.kind === 'scalars' ? ['v', ...perRowCols(of.type)]
-      : of.kind === 'grouped' ? groupRowCols(of.recipe) : [];
+      : of.kind === 'grouped' ? groupRowCols(of.recipe)
+        : of.kind === 'mixed' ? [MEMBER_ENVELOPE] : [];
 
 /** The ORDINAL of the site a member came from, and that site's own emission position — see
  *  `Collection.sites`. Ordering by the pair is what reproduces `Operator.addAll` appending one whole
