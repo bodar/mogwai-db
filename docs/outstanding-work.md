@@ -13,9 +13,12 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   collections, member variants, maps, aliases, paths, and format adapters. This also
   covers meta-property value typing. The rules are the RelIR plan §6·7; the live gaps
   are its §10. See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
-- **Set-based writes.** Replace the remaining row-at-a-time write driver with relational
-  `Insert`/`Update`/`Delete` programs, then add the read tails and write forms that depend
-  on it. See [the RelIR plan](./2026-08-01-relir-build-plan.md).
+- **Set-based writes.** The row-at-a-time write driver is GONE — the runtime write path is now
+  one relational `Insert` over `json_each` (`src/setwrite.ts`), the bulk loader and IO drains
+  ride it, and format reads cross a page's owners as one `json_each(?)` membership
+  (`src/formats/drain.ts`). Remaining is the dependent WRITE FORM the append-only loader defers:
+  an UPSERT / match-or-create bulk mode, which inherits the interleaved read/write question
+  (plan §9) and needs that design first. See [the RelIR plan](./2026-08-01-relir-build-plan.md).
 - **Retained relations.** The remaining named-collection work is keyed seeds, mixed
   member shapes, and safe direct member re-entry; its downstream gaps are owned by their
   respective substrates. See
