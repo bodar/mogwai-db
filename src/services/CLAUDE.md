@@ -32,5 +32,4 @@ substrings).
 - The `ftsSubstringPredicate` rewrite routes ≥3-char positive substring predicates over stored
   properties through the index; generic `LIKE` stays the authority + fallback for everything else. It
   is a PHYSICAL rewrite over the finished algebra (`src/rel/passes/fts.ts`, applied in `lowered`), not
-  a step-level special case. ⚠️ `FtsSubstringFastPath` in `compiler/plan/plan.ts` is legacy-spine
-  residue with no importers — not the live path.
+  a step-level special case.
