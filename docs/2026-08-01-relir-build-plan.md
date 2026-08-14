@@ -453,7 +453,19 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   (`properties().properties()`, `has(k,v)` over a VertexProperty — a different row, deliberately not
   answered off this one).
 - **The child seam consumer + `origin` naming a rowid-less parent.** `ChildSeam.rows`+`origin` EXISTS; the
-  CONSUMER is what is left. Unlocks the group-scoped reducer (`count()` with a non-empty body, and a SCALAR
+  CONSUMER is what is left. **`flatMap`/`local` FAN-OUT bodies now consume it** (`flatMapRejoin`,
+  `lower.ts`): a barrier-free body is TRANSPARENT (`flatMap(__.out())` is `out()`), so it mints `origin`,
+  lowers the body, drops `origin` after — a downstream whole-row `dedup` must not distinguish rows by which
+  host they descend from. 🚧 What is LEFT of the fan-out multiplier, each fail-closed today and each the SAME
+  per-origin machinery: a **barrier in the body** (`local(__.out().fold())` per-origin fold → `GROUP BY origin`;
+  `local(__.out().limit(n))` per-origin SLICE → a window `PARTITION BY origin`; `local(__.out().order().by(k))`
+  per-origin order) — this is where local() STOPS being flatMap and scopes the barrier, and the same window is
+  what `group().by(k).by(__.out().fold()|limit(n)|order())` needs; a **child-body-label ESCAPE**
+  (`local(out().as('b')).select('a','b')` — the reference's 4 maps, currently declined not `[]`; the same
+  @Unsupported feature as `map(out().as('a')).select('a')`); **path HIDING** through a fan-out
+  (`flatMap(out().out()).path()` is `[v,end]`, `FlatMap.feature:56`); and `map`'s per-origin WINDOW (it takes
+  the FIRST body result). Unlocks the group-scoped reducer (`count()` with a non-empty body — LANDED for the
+  count arm — and a SCALAR
   host — the empty pool is PER-REDUCER and decides INNER vs LEFT: `CountGlobalStep` seeds 0 and keeps its
   key, `SumGlobalStep` does not; a scalar host needs `origin` to name a parent with no rowid) and
   `property(k, <traversal>)` writes. ⚠️ For `property(k,<traversal>)`, two values are provably ONE-ROW (the
