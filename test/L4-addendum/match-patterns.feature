@@ -78,6 +78,21 @@ Feature: mogwai addendum — match() pattern shapes
       | result |
 
   @gap:match-patterns
+  Scenario: a where(traversal) leg whose bound-variable constraint is in the MIDDLE of the body
+    # a-created->b, a-knows->c, and c-created->b (the constraint on b sits before a trailing
+    # values('name'), so it is NOT the leg's end step). marko-created-lop, marko-knows-josh,
+    # josh-created-lop is the only closing triple.
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().match(__.as('a').out('created').as('b'),__.as('a').out('knows').as('c'),__.where(__.as('c').out('created').where(eq('b')).values('name'))).select('a','b','c').by('name')
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"marko","b":"lop","c":"josh"}] |
+
+  @gap:match-patterns
   Scenario: a where(traversal) argument reading a sibling argument's variable
     # marko-created->lop, and lop has 3 in-edges, so the existence check keeps the pair.
     Given the modern graph

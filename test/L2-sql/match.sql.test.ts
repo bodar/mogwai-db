@@ -130,4 +130,21 @@ describe('match() SQL', () => {
     // leaves the two knows pairs.
     expect(rows.length).toBe(2);
   });
+
+  // A leg whose `where(P.eq(bound))` sits in the MIDDLE of the body (a step follows it) is correlated
+  // just the same — every label constraint at any depth binds the walk's position as a channel. Here
+  // `where(P.eq("b"))` is followed by `values("name")`, so it is NOT the trailing end.
+  test('mid-body where(P.eq) in a leg correlates at its position, not only at the tail', () => {
+    const q = 'g.V().match(__.as("a").out("created").as("b"), __.as("a").out("knows").as("c"), __.where(__.as("c").out("created").where(P.eq("b")).values("name")))';
+    const p = read(q);
+    // A semi-join existence test — the leg keeps rows the body produces for.
+    expect(p.sql).toMatch(/(?<!NOT )EXISTS \(SELECT/);
+    const rows = run(seededStore(), q + '.select("a","b","c").by("name")') as any[];
+    // a created b, a knows c, c created b (then a name exists). marko-created-lop, marko-knows-josh,
+    // josh-created-lop → exactly {a:marko, b:lop, c:josh}.
+    expect(rows.length).toBe(1);
+    // The terminal bindings map, one row: {a:marko, b:lop, c:josh}.
+    const map = (rows[0] as { map: string }).map;
+    for (const [k, v] of [['a', 'marko'], ['b', 'lop'], ['c', 'josh']]) expect(map).toContain(`["${k}",{"t":"string","v":"${v}"}]`);
+  });
 });

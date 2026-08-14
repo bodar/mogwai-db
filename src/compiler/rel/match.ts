@@ -118,25 +118,38 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
   return { kind: 'leg', negated, start, body, reads: [...reads] };
 }
 
-/** The FRESH right-side walk for a multi-correlation leg: the `where(P.eq(end))` constraints the Pass
- *  appended for bound ends, peeled off the TAIL and handed back as `ends` — so the right relation can
- *  BIND each of those final elements as a channel (`as(...ends)`) to correlate against, rather than
- *  constraining them to a value it does not hold. A `where(P.eq)` that is NOT in the trailing run
- *  references a bound alias MID-walk, which this construction cannot expose as a channel; it is left in
- *  `body` on purpose, so `child.chain` over the fresh source declines on the unbound label rather than
- *  answering a narrower question. */
-function rightWalk(start: string, body: readonly IRStep[]): { readonly start: string; readonly body: readonly IRStep[]; readonly ends: readonly string[] } | null {
-  const ends: string[] = [];
-  let end = body.length;
-  while (end > 0) {
-    const s = body[end - 1]!;
-    if (s.name !== 'where') break;
-    const pred = s.args?.[0]?.value;
-    if (!isPred(pred) || pred.op !== 'eq' || pred.operands.length !== 1 || typeof pred.operands[0]!.value !== 'string') break;
-    ends.unshift(pred.operands[0]!.value);
-    end--;
+/** One position in a multi-correlation leg's body that must EQUAL/DIFFER from a bound alias — a
+ *  `where(P.eq/neq(label))` the leg reads, wherever it sits in the body. `channel` is the fresh alias
+ *  the fresh right walk BINDS the walk's current position to, so the constraint becomes a join clause
+ *  `op(left.label, right.channel)` rather than a value the right does not hold. */
+interface LegCorrelation { readonly op: 'eq' | 'neq'; readonly label: string; readonly channel: string; }
+
+/** The FRESH right-side walk of a multi-correlation leg, plus its correlation clauses. Every
+ *  `where(P.eq/neq(label))` in the body — at ANY position, so a MID-body constraint is carried, not
+ *  dropped (TinkerPop's `MatchStartStep.getScopeKeys` reads a leg's WHOLE recursive scope-key set,
+ *  `MatchStep.java` `anyStepRecursively`, not only the trailing `WhereEndStep`) — BINDS the walk's
+ *  current position as a fresh channel and contributes one correlation `op(left.label, right.channel)`;
+ *  the start binds a fresh channel correlated by equality. Every other step (movements, `has`, a
+ *  non-label `where`) passes through the fold unchanged. `null` never happens here — an unmodellable
+ *  step declines later, when `child.chain` cannot lower it. */
+function legRight(start: string, body: readonly IRStep[], host: IRStep, fresh: Minter): { readonly chain: IRStep[]; readonly corr: readonly LegCorrelation[] } {
+  const startChannel = fresh('mc');
+  const corr: LegCorrelation[] = [{ op: 'eq', label: start, channel: startChannel }];
+  const chain: IRStep[] = [syn(host, 'as', [startChannel])];
+  for (const s of body) {
+    const pred = s.name === 'where' ? s.args?.[0]?.value : undefined;
+    if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
+      // A label constraint anywhere in the body: bind the current walk position as a fresh channel and
+      // lift the equality/inequality into the join's ON. This is the SAME move a trailing bound end
+      // takes (the Pass turned its `.as(e)` into this `where(P.eq(e))`), applied uniformly at any depth.
+      const channel = fresh('mc');
+      corr.push({ op: pred.op, label: pred.operands[0]!.value, channel });
+      chain.push(syn(host, 'as', [channel]));
+      continue;
+    }
+    chain.push(s);
   }
-  return { start, body: body.slice(0, end), ends };
+  return { chain, corr };
 }
 
 /** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). Admits
@@ -320,36 +333,27 @@ export function lowerMatch(
       // against the LEFT — but only if the right is a relation OF ITS OWN, never a re-derivation of the
       // binding table (`col(rel.id, …)` on both sides of a join resolves to whichever copy is nearest in
       // scope, collapsing the correlation). So build the walk FRESH: a source of its own, binding the
-      // start and each `where(P.eq(end))`-constrained end as CHANNELS (the constraint becomes an `as`),
-      // then correlate that relation back to the binding table on every alias the leg reads.
-      const walk = rightWalk(p.start, p.body);
-      if (!walk) return null;
-      // The fresh right EXPOSES only the start and the TRAILING `where(P.eq(end))` ends as channels to
-      // correlate on. TinkerPop's `MatchStartStep.getScopeKeys` reads a leg's whole scope-key set —
-      // including a `where(P.eq(c))` in the MIDDLE of the body (`MatchStep.java` `anyStepRecursively`) —
-      // so a mid-body reference to a bound alias is a genuine correlation this construction does not
-      // expose. Rather than under-correlate (which would keep the wrong rows), DECLINE when the read set
-      // is not exactly the start plus the trailing ends. Fail closed, a later increment.
-      const correlated = new Set<string>([walk.start, ...walk.ends]);
-      if (p.reads.some((r) => !correlated.has(r))) return null;
+      // start and each `where(P.eq/neq(label))` position — at ANY depth — as a CHANNEL, then correlate
+      // that relation back to the binding table on every such position.
+      const { chain: rightBody, corr } = legRight(p.start, p.body, step, fresh);
       const src = child.rooted([syn(step, startProj.read.elem === 'edge' ? 'E' : 'V')]);
       if (!src || src.framing.kind !== 'elements') return null;
-      const rightChain: IRStep[] = [syn(step, 'as', [walk.start]), ...walk.body, ...(walk.ends.length ? [syn(step, 'as', [...walk.ends])] : [])];
-      const ran = child.chain(src.rel, src.framing, rightChain, new Map());
+      const ran = child.chain(src.rel, src.framing, rightBody, new Map());
       if (!ran) return null;
       const live = liveAliases(ran.aliases, ran.rel);
-      // One equality per read alias, conjoined — the multi-column correlation. An element alias ties by
-      // rowid, a value alias by its stored scalar; both sides read the SAME shape (the right binds the
-      // walk's own elements/values), so the left's shape decides the compare.
+      // One clause per correlation, conjoined. An element alias ties by rowid, a value alias by its
+      // stored scalar; both sides read the SAME shape (the right binds the walk's own elements/values),
+      // so the LEFT's shape decides the compare. `neq` is `NOT (=)` — the same spelling the inline
+      // `where(key, P.neq)` clause uses.
       let on: Expr | undefined;
-      for (const label of p.reads) {
+      for (const { op, label, channel } of corr) {
         const lproj = aliasProjection(rel, labels, label, 'last', fresh);
-        const rEntry = live.get(label);
+        const rEntry = live.get(channel);
         if (!lproj || !rEntry) return null;
-        const clause = lproj.read.kind === 'element'
+        const same = lproj.read.kind === 'element'
           ? eq(aliasIdAt(col(rel.id, lproj.entry.col), 'last'), aliasIdAt(col(ran.rel.id, rEntry.col), 'last'))
           : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
-        on = and(on, clause);
+        on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
       }
       if (!on) return null;
       rel = make.join({ id: fresh('mj'), left: rel, right: ran.rel, join: p.negated ? 'anti' : 'semi', on, channels: rel.channels, type: rel.type });
