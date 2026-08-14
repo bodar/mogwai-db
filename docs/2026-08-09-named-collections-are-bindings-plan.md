@@ -153,9 +153,12 @@ fixed by a whole-body `isStreamIdentity` check (`coalesceArms`, `lower.ts`). Ass
 `test/compiler/branch-collection-sites.exec.test.ts`; no corpus scenario has the shape, so L3/census did not
 move (`legality-not-corpus-defines-support`).
 
-**`count(Scope.local)` — the local-reducer vocabulary.** Over a MAP, `select("a").count(local)` counts ENTRIES
-(3 scenarios). Over an ELEMENT-membered list it declines (over a scalar-membered one it lowers), so an element
-collection's multiset SIZE cannot be asserted directly and the L4 scenarios use `cap("a").unfold()` instead.
+**`count(Scope.local)` — the local-reducer vocabulary.** ✅ LANDED. Over a MAP it counts ENTRIES (already
+worked). The gap was an ELEMENT-membered list: `listRetype` declined every non-bare list up front, but
+`count(Scope.local)` never reads a member's VALUE — it counts members via `membersOf` regardless of kind — so
+it now answers BEFORE the bare-list gate (which the value reducers still need). `aggregate("a").cap("a").count(Scope.local)`
+reports the multiset size directly (`g.V().both().aggregate("a").cap("a").count(Scope.local)` = 12). Asserted
+in `test/compiler/count-local-members.exec.test.ts`.
 
 ### Member/variant substrate
 
