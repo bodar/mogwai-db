@@ -1,7 +1,9 @@
 # `match()` on the RelIR spine — build plan
 
-> **Status: P0 + P1 + P1c + P2a + P2b LANDED, plus `and(…)`, keyed `dedup(labels)` and modulated
-> pattern bodies (2026-08-14, L3 1480 → 1527).** Binding patterns, back-edge/cyclic, no-end filter
+> **Status: P0 + P1 + P1c + P2a + P2b + most of P3/P4 LANDED (2026-08-14, L3 1480 → 1539).** Added this
+> session: `and(…)`, keyed `dedup(labels)`, modulated pattern bodies, `where(k1,P.eq/neq(k2))` and
+> `where(<body>)`/`not(<body>)` over the record, a moving no-end existence semi-join, nested `match`, a
+> filter-after-reduce end, and a fail-closed guard for a global slice in a pattern body. Binding patterns, back-edge/cyclic, no-end filter
 > constraints, per-row + reducing-barrier scalar ends, the zero-root regime, the unconditional bindings
 > map, inline `where(key, P.eq/neq)` legs, and the TRAVERSAL filter legs (`not`/`where(<body>)`) as
 > SEMI/ANTI JOINs with multi-column correlation are all live — and the whole GQL match-STRING front end
@@ -14,10 +16,10 @@
 > - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
 >   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
 >
-> **Remaining: P3 (`or(…)` → UNION of branches, nested `match`, top-level `not(match(…))`), P4 (map
-> bodies, `count()` after match), and the P2/P1 tails** — a moving no-end existence semi-join, a
-> filter-after-reduce end (`count().is(gt(10)).as(b)`), a `fold()` list end, and `where(key,P)` /
-> `where(<moving body>)` as steps AFTER the match over the record stream.
+> **Remaining: `or(…)` → UNION of branches (both corpus scenarios also need a filter-after-reduce end);
+> `local(match)`; a `map(<mean>)` body; a `where(and(…))` connective inside a leg; top-level
+> `not(match(…))` (needs the top-level filter vocabulary to admit a `match`-headed body); a per-origin
+> windowed slice in a pattern body (currently fail-closed); and a `fold()` list end.**
 >
 > `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
@@ -171,10 +173,16 @@ landing order of one engine, not a support matrix.
   downstream `where(key,P)` over the record stream, a separate `where('a',P)` gap. `where('a',P)` over
   SCALAR aliases and non-eq/neq ops also await.
 - **P3 — connectives & nesting.** ✅ **`and(…)` LANDED** — `collectPatterns` flattens the conjunction
-  into the shared binding table (a nested AND MatchStep shares the parent variable scope). Remaining:
-  `or(…)` → UNION of branches (needs a per-branch table merge, and BOTH corpus `or` scenarios also need
-  a filter-after-reduce end, so it does not reap alone); nested `match` in a pattern; top-level
-  `not(match(…).where(…).select(…))`.
+  into the shared binding table. ✅ **Nested `match` in a pattern LANDED** — it already composed via the
+  fold's mid-chain `match` dispatch reached through `child.chain`; the nested-match scenario's real
+  decliner was its MOVING no-end constraint (`b.out('created').has('name','lop')`), now an existence
+  semi-join (a `leg` reading only its start, `child.predicate` → correlated `EXISTS`). ✅ **`where(<body>)`/
+  `not(<body>)` over a record LANDED** — `applyLeg` (extracted from the match loop) is reused by
+  `recordTail`, with a single-correlation fallback to the fresh-walk SEMI/ANTI JOIN so a `repeat()` body
+  composes (`child.chain`, not `correlatedExists`). Remaining: `or(…)` → UNION of branches (needs a
+  per-branch table merge; both corpus `or` scenarios also need a filter-after-reduce end); a
+  `where(and(…))` CONNECTIVE inside a leg; top-level `not(match(…).where(…).select(…))` (needs the
+  top-level filter vocabulary to admit a `match`-headed body).
 - **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
   `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
   classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`
