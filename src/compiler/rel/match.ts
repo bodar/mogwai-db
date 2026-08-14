@@ -1,4 +1,4 @@
-import { arg, isNested, isPred, stepChain } from '../../gremlin/frontend.ts';
+import { arg, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -198,6 +198,39 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
   return { kind: 'constraint', start, body };
 }
 
+/** If a match ARGUMENT is a bare `and(…)` connective, return its child arguments (each itself a
+ *  pattern or a further connective); else `null`. TinkerPop replaces a match arg whose START step is an
+ *  `AndStep` with a nested `MatchStep` of connective AND (`MatchStep.configureStartAndEndSteps`,
+ *  `vendor/tinkerpop/gremlin-core/.../MatchStep.java:122`). An AND sub-match shares the parent's
+ *  variable scope and binding table — every child must match — so it is exactly a CONJUNCTION: its
+ *  children are simply more patterns on the same table. (`or(…)` is a DISJUNCTION — a UNION of
+ *  per-branch tables — a different construction, a later phase; it is NOT flattened here.) */
+function andChildren(a: unknown, params: Record<string, any>): readonly Arg[] | null {
+  if (!isNested(a)) return null;
+  const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
+  return chain.length === 1 && chain[0]!.name === 'and' ? (chain[0]!.args ?? []) : null;
+}
+
+/** Flatten a match argument list into patterns, expanding every top-level `and(…)` connective into its
+ *  children (recursively — a nested `and` flattens too). Each non-connective argument classifies as one
+ *  `Pattern`. Returns `null` to DECLINE the whole step (fail closed) on any unclassifiable argument. */
+function collectPatterns(args: readonly Arg[], params: Record<string, any>): Pattern[] | null {
+  const out: Pattern[] = [];
+  for (const a of args) {
+    const children = andChildren(a.value, params);
+    if (children) {
+      const nested = collectPatterns(children, params);
+      if (!nested) return null;
+      out.push(...nested);
+      continue;
+    }
+    const p = classify(a.value, params);
+    if (!p) return null;
+    out.push(p);
+  }
+  return out;
+}
+
 /** The root label — TinkerPop's `computeStartLabel`: a start that is never an end. The incoming
  *  traverser binds to it, so every pattern (including the root's own) re-roots uniformly via its start
  *  alias. When that set is empty (a CYCLE — every start is also an end, e.g.
@@ -256,12 +289,8 @@ export function lowerMatch(
   const args = step.args ?? [];
   if (!args.length) return null;
 
-  const patterns: Pattern[] = [];
-  for (const a of args) {
-    const p = classify(a.value, params);
-    if (!p) return null; // one unclassifiable pattern declines the whole step — fail closed.
-    patterns.push(p);
-  }
+  const patterns = collectPatterns(args, params);
+  if (!patterns) return null; // one unclassifiable pattern declines the whole step — fail closed.
 
   const root = rootLabel(patterns);
   if (root === null) return null;
