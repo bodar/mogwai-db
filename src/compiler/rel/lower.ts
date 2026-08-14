@@ -4764,6 +4764,28 @@ function recordTail(
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
+    // `where(k1, P.eq/neq(k2))` — a two-variable THETA clause over the record's bound ELEMENT aliases,
+    // TinkerPop's `WherePredicateStep` in ordinary (post-match) position. Keeps rows where two alias
+    // channels are the SAME element (`eq`) or DIFFER (`neq`) — the same clause `match`'s inline `wpred`
+    // leg builds, applied to the record stream a terminal `match` produced. Only two-variable eq/neq
+    // (element identity); a `where(k, P<const>)` over one alias and a moving `where(<body>)` are separate.
+    if (step.name === 'where' && !step.modulators?.length && !step.optionArms) {
+      const wargs = argValues(step);
+      const pred = step.args?.[1]?.value;
+      if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
+        && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
+        const projA = aliasProjection(rel, labels, wargs[0], 'last', fresh);
+        const projB = aliasProjection(rel, labels, pred.operands[0]!.value as string, 'last', fresh);
+        if (!projA || !projB || projA.read.kind !== 'element' || projB.read.kind !== 'element') return null;
+        const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
+        rel = make.filter({
+          id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type,
+          pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same },
+        });
+        continue;
+      }
+    }
+
     // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the record's own alias channels. A bare `dedup()`
     // over a record (identity grouping) is a separate increment; a LABELLED dedup reads the bound
     // aliases the record already carries and collapses the tuple, optionally under a shared `by()`.
