@@ -84,8 +84,10 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
 }
 
 /** The column the grouped relation holds its key in. It is `Aggregate`'s FIRST declared column, because
- *  the emitter names `groupBy` exprs before the aggregates (`emit.ts`'s `aggregate` case). */
-const KEY_COL = 'gk';
+ *  the emitter names `groupBy` exprs before the aggregates (`emit.ts`'s `aggregate` case). Exported so
+ *  the consumer-driven read (`collection.ts`'s `groupedKeys`) can project the key SIDE of a grouping's
+ *  member rows without folding them into a map first. */
+export const KEY_COL = 'gk';
 const VAL_COL = 'gv';
 /** The MEMBER a collecting group puts in its list — the traverser's rowid where the members are the
  *  elements, the projected value where a value `by()` names one. Named once because the aggregate reads

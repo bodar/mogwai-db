@@ -14,7 +14,7 @@ import { byField, isProductiveBy, modulations, productivityFilter } from './modu
 import { foldElements, foldScalars } from './list.ts';
 import { carriedCols, eq, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
-import { groupMap, groupRowCols, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
+import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
@@ -834,4 +834,48 @@ export function readCollection(step: IRStep, collections: Collections, fresh: Mi
   if (label === null) return null;
   const collection = collections.get(label);
   return collection ? reduce(collection, fresh) : null;
+}
+
+/** The collection a `cap("a")` names, WITHOUT reducing it — so a consumer-driven read can pick the
+ *  fold. `null` for a modulated cap or an unknown label, exactly as `readCollection` declines. */
+export function collectionOf(step: IRStep, collections: Collections): Collection | undefined {
+  if (step.modulators?.length) return undefined;
+  const label = labelOf(step);
+  return label === null ? undefined : collections.get(label);
+}
+
+/**
+ * `cap("a").select(Column.keys)` over a KEYED grouping — the DISTINCT keys as a SET traverser,
+ * projected DIRECTLY off the collection's member rows, WITHOUT building the intermediate map blob.
+ *
+ * This is the consumer-driven fold this doc's thesis asks for (§ "reduced at the READ"): the fold to a
+ * JSONB map is chosen by what CONSUMES the collection, not unconditionally at the read.
+ * `select(Column.keys)` wants the KEY SIDE, so it reads the key column of the member relation — for an
+ * element-identity key the ROWID, kept as a rowid the way `foldElements` keeps element-list members,
+ * so the resulting set MOVES (`.unfold().both()`) natively. Folding to the map first expands the key to
+ * a PUBLIC payload (`COALESCE(uid, id)`) and LOSES that rowid — the same trap `list.ts`'s `unfoldList`
+ * calls out for element lists ("would have LOST the rowid the graph is keyed by").
+ *
+ * ELEMENT keys ONLY: a scalar / `by(key)`-keyed grouping reaches its keys through the ordinary map
+ * blob, which is not lossy for a scalar, so this intercepts only the case the blob path cannot serve.
+ * `Column.values` needs the per-key reduction and is a separate read.
+ */
+export function groupedKeys(collection: Collection, fresh: Minter): ListedRel | null {
+  if (collection.of.kind !== 'grouped') return null;
+  const { recipe } = collection.of;
+  if (recipe.keyElem === undefined) return null;
+  // N sites are a UNION of member rows, exactly as `reduce`'s grouped arm accumulates them.
+  const site = collection.sites.length === 1
+    ? collection.sites[0]!
+    : accumulated(collection.sites, groupRowCols(recipe), fresh);
+  // The key column is the ROWID; project it as `id` (what `foldElements` reads) and DEDUP, because
+  // `Column.keys` is the SET of the map's distinct keys — the per-key grouping the blob would have
+  // done, taken on the key alone.
+  const ids = make.project({
+    id: fresh('ck'), input: site.rel, channels: [], type: typeOf(meta('id', 'int')),
+    exprs: [['id', col(site.rel.id, KEY_COL)]],
+  });
+  const distinct = make.distinct({ id: fresh('cd'), input: ids, channels: [], type: ids.type });
+  const folded = foldElements(distinct, recipe.keyElem, { order: ['id'] }, fresh);
+  return { rel: folded.rel, framing: { kind: 'list', of: folded.of, set: true } };
 }

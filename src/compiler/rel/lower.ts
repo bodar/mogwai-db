@@ -53,7 +53,7 @@ import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seed
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
-import { readCollection, registerCollection, registerGrouping, type Collections } from './collection.ts';
+import { collectionOf, groupedKeys, readCollection, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
@@ -2875,6 +2875,19 @@ function scalarTail(
       continue;
     }
     if (step.name === 'cap') {
+      // CONSUMER-DRIVEN FOLD: the reduction a `cap` performs is chosen by what CONSUMES it, not fixed at
+      // the read. `cap("a").select(Column.keys)` over an element-keyed grouping wants the key SIDE, so
+      // it projects the DISTINCT key rowids straight off the member rows — a set that MOVES natively —
+      // instead of folding to a JSONB map that would expand each key to a public payload and lose the
+      // rowid the graph is keyed by (`groupedKeys`, `collection.ts`; the map blob is framed in JS and
+      // cannot expand a rowid back). Only the element-keyed case is intercepted; everything else takes
+      // the ordinary `reduce`.
+      const next = steps[at + 1];
+      if (next && selectedColumn(next) === 'keys' && !next.modulators?.length) {
+        const collection = collectionOf(step, ctx.collections);
+        const keys = collection && groupedKeys(collection, fresh);
+        if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
+      }
       const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
@@ -4381,6 +4394,19 @@ function elementTail(
     // incoming stream is discarded (a cap emits one fresh traverser), so the alias channel goes with
     // it and the list tail takes the rest of the chain.
     if (step.name === 'cap') {
+      // CONSUMER-DRIVEN FOLD: the reduction a `cap` performs is chosen by what CONSUMES it, not fixed at
+      // the read. `cap("a").select(Column.keys)` over an element-keyed grouping wants the key SIDE, so
+      // it projects the DISTINCT key rowids straight off the member rows — a set that MOVES natively —
+      // instead of folding to a JSONB map that would expand each key to a public payload and lose the
+      // rowid the graph is keyed by (`groupedKeys`, `collection.ts`; the map blob is framed in JS and
+      // cannot expand a rowid back). Only the element-keyed case is intercepted; everything else takes
+      // the ordinary `reduce`.
+      const next = steps[at + 1];
+      if (next && selectedColumn(next) === 'keys' && !next.modulators?.length) {
+        const collection = collectionOf(step, ctx.collections);
+        const keys = collection && groupedKeys(collection, fresh);
+        if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
+      }
       const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
