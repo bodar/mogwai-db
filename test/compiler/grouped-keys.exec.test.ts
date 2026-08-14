@@ -37,3 +37,24 @@ describe('element-keyed select(Column.keys) — consumer-driven fold', () => {
     expect(one(store, 'g.V().group("a").by(__.values("name")).cap("a").select(Column.keys).unfold().count()')).toBe(6);
   });
 });
+
+describe('local(group("a"))/local(groupCount("a")) is a stream identity', () => {
+  const one = (store: ReturnType<typeof seededStore>, g: string) =>
+    (run(store, g) as { v: unknown }[])[0]!.v;
+
+  test('a LABELLED groupCount under local() is the same side effect as at chain position', () => {
+    const store = seededStore();
+    // local(groupCount("a")) passes its traversers on (SideEffectBarrierStep), so the chain continues
+    expect(one(store, 'g.V().local(groupCount("a")).count()')).toBe(one(store, 'g.V().count()'));
+    expect(one(store, 'g.V().local(groupCount("a")).cap("a").unfold().count()')).toBe(6);
+  });
+
+  test('the full admission scenario answers exactly (GroupCount.feature:212)', () => {
+    const store = seededStore();
+    const g = 'g.V().both().local(groupCount("a")).out().cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")';
+    const map = JSON.parse((run(store, g) as { map: string }[])[0]!.map) as [{ v: { props: { name: [{ v: string }] } } }, { v: number }][];
+    const byName: Record<string, number> = {};
+    for (const [k, v] of map) byName[k.v.props.name[0].v] = v.v;
+    expect(byName).toEqual({ marko: 6, vadas: 2, lop: 6, josh: 6, ripple: 2, peter: 2 });
+  });
+});

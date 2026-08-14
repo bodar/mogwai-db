@@ -588,6 +588,13 @@ const isAllArg = (a: any): boolean =>
  *  body. Recursive on the hosts themselves, so `local(__.local(__.aggregate("a")))` unwraps too. */
 function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
   if (s.name === 'aggregate' || s.name === 'sideEffect' || s.name === 'identity') return true;
+  // A LABELLED group/groupCount is a SIDE EFFECT: `GroupSideEffectStep`/`GroupCountSideEffectStep`
+  // extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged
+  // (`vendor/tinkerpop/gremlin-core/.../step/sideEffect/SideEffectBarrierStep.java:49-57`) — exactly
+  // `aggregate`'s contract. A BARE `group()`/`groupCount()` is a `ReducingBarrierStep` that REPLACES
+  // the stream with the map, so this is gated on the label. Its merge (count / `GroupBiOperator`) is
+  // granularity-invariant, so `local()`'s per-traverser barrier is safe here (unlike `assign`).
+  if (s.name === 'group' || s.name === 'groupCount') return labelled(s);
   // The MUTATING sack form (`sack(Operator.sum).by("age")`) leaves the traverser alone; the bare read
   // form is a retype to the accumulator's value, which is a different traverser entirely.
   if (s.name === 'sack') return (s.args ?? []).length > 0;
