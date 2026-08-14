@@ -28,7 +28,7 @@
 // v3. Endpoint labels are NOT part of the adjacency form in either version (`inV` is a bare id, and
 // structurally has to be — each vertex is its own line, so a reader resolves the id against that
 // vertex's own entry).
-import { BulkLoader, type BulkEdge, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
+import { BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import {
     BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
@@ -281,8 +281,8 @@ export function graphsonVertexLine(line: string): { vertex: BulkVertex; edges: B
  * Fails closed with the line number on a malformed line — a partially loaded graph is a wrong answer,
  * and the caller can only diagnose it if the failure names where it stopped.
  */
-export function loadGraphson(store: GraphStore, document: string): BulkStats {
-  const loader = new BulkLoader(store);
+export function loadGraphson(store: GraphStore, document: string, options?: BulkOptions): BulkStats {
+  const loader = new BulkLoader(store, options);
   const edges: BulkEdge[] = [];
   let n = 0;
   for (const line of document.split('\n')) {

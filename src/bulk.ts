@@ -23,16 +23,21 @@
 //     `pid` BEFORE the insert, and multi-row `RETURNING` has no defined row order — so ids come from
 //     one `SELECT max(id)` per table, not from a statement per row.
 //
-// SCOPE: APPEND. There is no match-vs-create decision here, which is exactly why this can exist
-// without resolving the interleaved read/write item (plan doc §9): an upsert mode WOULD inherit it,
-// and should be built as this loader's third mode rather than as a fix inside the per-element `run`.
+// TWO COLLISION POLICIES (`onCollision`). APPEND (`'error'`, default) makes no match-vs-create
+// decision — a key that already exists FAILS CLOSED. UPSERT (`'replace'`) resolves the interleaved
+// read/write as a WHOLE-BATCH decision rather than a per-element one: buffer raw, then in ONE pass
+// (`resolveReplace`) dedup by key (last-write-wins), read which keys already exist, wipe the matched
+// elements' owned rows, and land the incoming definition — a set-based form, never a per-element loop.
+// The match domain is the PRE-BATCH snapshot: a row matches what the graph held before the batch, not
+// a sibling row, which is what keeps the whole thing one pass. `docs/outstanding-work.md` (set-based
+// writes) records the semantics.
 //
 // Appending into a NON-EMPTY graph is supported through `idPolicy: 'remap'` (plan doc §7): local
 // rowids have no cross-graph meaning, so a second graph's ids collide for no reason, and remapping is
 // one pass with no schema change. Under the default `'preserve'` a collision fails closed with a
 // message naming the option — never a silent merge, and never a raw UNIQUE constraint error.
 import type { GraphStore } from './storage.ts';
-import { insertSet, type SetColumn } from './setwrite.ts';
+import { deleteMembers, insertSet, type SetColumn } from './setwrite.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -91,8 +96,26 @@ export interface BulkEdge {
  */
 export type IdPolicy = 'preserve' | 'remap' | 'renumber';
 
+/**
+ * What a load does when an incoming element's NATURAL ID (a numeric id → `nodes`/`edges.id`, a string
+ * id → `.uid`) already names an element — pre-existing in the graph OR appearing twice in one batch,
+ * which are the same event (a match by that key) resolved the same way.
+ *
+ *   `'error'` (default) — a collision FAILS CLOSED, naming the element and the option (`assertNoCollisions`).
+ *     The append modes (phases 1–7) that never match keep exactly this behaviour.
+ *   `'replace'` — LAST WRITE WINS: the matched element's definition is replaced by the newcomer's.
+ *     For a VERTEX this wipes its owned property rows (properties, labels, cardinality, FTS text) and
+ *     re-lands the incoming ones, keeping the vertex's rowid and its incident EDGES — so a re-import
+ *     refreshes data without severing relationships (mirrors `mergeV`'s onMatch). For an EDGE, which
+ *     nothing references, it is a full delete-and-reinsert. Within one batch, duplicate keys collapse
+ *     to the LAST definition. This is the idempotent re-import mode: it matches by natural id and is
+ *     independent of `idPolicy`'s minting.
+ */
+export type CollisionPolicy = 'error' | 'replace';
+
 export interface BulkOptions {
   readonly idPolicy?: IdPolicy;
+  readonly onCollision?: CollisionPolicy;
 }
 
 export interface BulkStats {
@@ -107,6 +130,20 @@ export interface BulkStats {
 /** Rows buffered for one table: `jsonb(?)` columns need their own fixed-shape statement, so a
  *  property batch splits by whether the VALUE is a collection. */
 interface PropertyRows { scalar: unknown[][]; collection: unknown[][] }
+
+/** LAST-WRITE-WINS dedup by natural id, preserving first-seen order. A NUMERIC id keys a different
+ *  namespace from a STRING id (the `id` column vs `uid`), so `1` and `"1"` never collapse together; an
+ *  element with no id has no key and is always kept (it can neither match nor collide). */
+function dedupeByKey<T>(items: readonly T[], keyOf: (item: T) => number | string | null | undefined): T[] {
+  const keyed = new Map<string, T>();
+  const anonymous: T[] = [];
+  for (const item of items) {
+    const key = keyOf(item);
+    if (key === null || key === undefined) anonymous.push(item);
+    else keyed.set(typeof key === 'number' ? `n${key}` : `s${key}`, item);
+  }
+  return [...keyed.values(), ...anonymous];
+}
 
 const VERTEX_PROP_COLUMNS = ['id', 'node', 'key', 'value', 'vtype', 'meta'] as const;
 const EDGE_PROP_COLUMNS = ['id', 'edge', 'key', 'value', 'vtype'] as const;
@@ -134,6 +171,12 @@ export class BulkLoader {
    *  reflects the id POLICY (under `'remap'` a numeric source id becomes a uid, under `'renumber'`
    *  nothing does), which a second `typeof edge.id === 'string'` test at flush time cannot know. */
   private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null }> = [];
+  /** Under `onCollision: 'replace'` the elements are buffered RAW and resolved at `flush`: a rowid
+   *  cannot be assigned until a batched read has decided which keys already exist, and an in-batch
+   *  duplicate must collapse to its LAST definition before anything is materialized. The append modes
+   *  leave these empty and buffer eagerly as before. */
+  private rawVertices: BulkVertex[] = [];
+  private rawEdges: BulkEdge[] = [];
   private nextNode: number;
   private nextEdge: number;
   private nextVertexProp: number;
@@ -144,9 +187,11 @@ export class BulkLoader {
   /** The resolved policy — `options.idPolicy` defaults to `'preserve'` HERE rather than at each use,
    *  because a `=== 'preserve'` test against an absent option silently skipped the collision check. */
   private readonly policy: IdPolicy;
+  private readonly onCollision: CollisionPolicy;
 
   constructor(private store: GraphStore, options: BulkOptions = {}) {
     this.policy = options.idPolicy ?? 'preserve';
+    this.onCollision = options.onCollision ?? 'error';
     // One query per table, not per row (invariant 4). `max(id)` of an empty table is NULL → start 1.
     this.nextNode = this.maxOf('nodes') + 1;
     this.nextEdge = this.maxOf('edges') + 1;
@@ -185,24 +230,41 @@ export class BulkLoader {
     return { rowid: next(), uid: typeof id === 'string' ? id : null };
   }
 
-  /** Buffer one vertex; returns its rowid. */
+  /** Buffer one vertex; returns its rowid (0 under `'replace'`, where the rowid is decided at `flush`
+   *  and no caller here reads the return anyway). */
   vertex(v: BulkVertex): number {
+    if (this.onCollision === 'replace') { this.rawVertices.push(v); return 0; }
     const { rowid, uid } = this.idOf(v.id, () => this.nextNode++);
     // A numeric id may sit past the mint cursor, and the next minted id must not collide with it.
     if (rowid >= this.nextNode) this.nextNode = rowid + 1;
-    this.nodeRows.push([rowid, uid]);
+    this.bufferVertex(rowid, uid, v, true);
+    return rowid;
+  }
+
+  /** Land one vertex's rows into the buffers, given an already-resolved (rowid, uid). `pushRow` is
+   *  false for a REPLACE match, whose `nodes` row already exists and is kept (rowid + edges survive) —
+   *  only its owned property rows are wiped and re-landed. */
+  private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
+    if (pushRow) this.nodeRows.push([rowid, uid]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
       this.property(this.vertexProps, 'node', rowid, p, () => p.id ?? this.nextVertexProp++, 'vertex');
     this.counts.vertices++;
+  }
+
+  /** Buffer one edge; returns its rowid (0 under `'replace'`, as `vertex`). */
+  edge(e: BulkEdge): number {
+    if (this.onCollision === 'replace') { this.rawEdges.push(e); return 0; }
+    const { rowid, uid } = this.idOf(e.id, () => this.nextEdge++);
+    if (rowid >= this.nextEdge) this.nextEdge = rowid + 1;
+    this.bufferEdge(rowid, uid, e);
     return rowid;
   }
 
-  /** Buffer one edge; returns its rowid. Endpoints resolve now when known, at `flush` otherwise. */
-  edge(e: BulkEdge): number {
-    const { rowid, uid } = this.idOf(e.id, () => this.nextEdge++);
-    if (rowid >= this.nextEdge) this.nextEdge = rowid + 1;
+  /** Land one edge's rows into the buffers, given an already-resolved (rowid, uid). Endpoints resolve
+   *  now when the source vertex is known, at `flush` otherwise. */
+  private bufferEdge(rowid: number, uid: string | null, e: BulkEdge): void {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
     if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt]);
@@ -210,7 +272,6 @@ export class BulkLoader {
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
     this.counts.edges++;
-    return rowid;
   }
 
   /** One property row plus its FTS rows, both through the shared write-path helpers (invariant 3). */
@@ -242,7 +303,10 @@ export class BulkLoader {
    * edge_properties — and property_fts last, since nothing references it.
    */
   flush(): BulkStats {
-    this.assertNoCollisions();
+    // REPLACE resolves the raw buffer into rowids and wipes matched elements' subtrees BEFORE landing;
+    // it owns collision handling, so the append-only collision CHECK is exactly what it replaces.
+    if (this.onCollision === 'replace') this.resolveReplace();
+    else this.assertNoCollisions();
     this.land('nodes', ['id', 'uid'], this.nodeRows);
     this.land('vertex_labels', ['node', 'label'], this.vertexLabelRows);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.scalar);
@@ -267,7 +331,119 @@ export class BulkLoader {
     this.vertexProps = { scalar: [], collection: [] };
     this.edgeProps = { scalar: [], collection: [] };
     this.ftsRows = [];
+    this.rawVertices = []; this.rawEdges = [];
     return { ...this.counts, ftsRows: fts };
+  }
+
+  /**
+   * RESOLVE THE 'replace' RAW BUFFER (last-write-wins), then land through the same buffers `flush`
+   * reads. Three passes, and the ORDER is the whole of the correctness:
+   *
+   *  1. **Dedup by natural id, keeping the LAST** — an in-batch duplicate collapses to its final
+   *     definition, so only one set of rows is ever materialized for a key. An element with no id has
+   *     no key: it can neither match nor collide, so it is always a fresh insert.
+   *  2. **Resolve which keys already exist**, in ONE batched read per element kind and column
+   *     (`json_each` membership, never a per-element lookup). A matched vertex REUSES its existing
+   *     rowid — which is what keeps its incident edges valid — and does not re-land its `nodes` row; a
+   *     matched edge is deleted whole (nothing references it) and re-inserted fresh.
+   *  3. **Wipe matched elements' owned rows BEFORE `flush` lands the new ones** — a vertex's
+   *     properties/labels/cardinality/FTS, an edge's row/properties/FTS — so old and new never coexist.
+   *
+   * Vertices are placed before edges so an edge's endpoints resolve against this batch's assigned
+   * rowids (`vertexIds`), matched or minted.
+   */
+  private resolveReplace(): void {
+    const vertices = dedupeByKey(this.rawVertices, (v) => v.id);
+    const numericV = vertices.filter((v) => typeof v.id === 'number').map((v) => v.id as number);
+    const uidV = vertices.filter((v) => typeof v.id === 'string').map((v) => v.id as string);
+    const existingId = this.existing('nodes', 'id', numericV);
+    const existingUid = this.existingUid('nodes', uidV);
+
+    const matchedVertices: number[] = [];
+    for (const v of vertices) {
+      if (typeof v.id === 'number') {
+        const matched = existingId.has(v.id);
+        if (matched) matchedVertices.push(v.id);
+        if (v.id >= this.nextNode) this.nextNode = v.id + 1;
+        this.bufferVertex(v.id, null, v, !matched);
+      } else if (typeof v.id === 'string') {
+        const rowid = existingUid.get(v.id);
+        if (rowid !== undefined) { matchedVertices.push(rowid); this.bufferVertex(rowid, v.id, v, false); }
+        else this.bufferVertex(this.nextNode++, v.id, v, true);
+      } else {
+        this.bufferVertex(this.nextNode++, null, v, true);
+      }
+    }
+    // A vertex keeps its rowid and edges; only its owned property rows go, to be re-landed by `flush`.
+    this.wipeVertexChildren(matchedVertices);
+
+    const edges = dedupeByKey(this.rawEdges, (e) => e.id);
+    const numericE = edges.filter((e) => typeof e.id === 'number').map((e) => e.id as number);
+    const uidE = edges.filter((e) => typeof e.id === 'string').map((e) => e.id as string);
+    const existingEId = this.existing('edges', 'id', numericE);
+    const existingEUid = this.existingUid('edges', uidE);
+
+    const matchedEdges: number[] = [];
+    for (const e of edges) {
+      if (typeof e.id === 'number') {
+        if (existingEId.has(e.id)) matchedEdges.push(e.id);
+        if (e.id >= this.nextEdge) this.nextEdge = e.id + 1;
+        this.bufferEdge(e.id, null, e);
+      } else if (typeof e.id === 'string') {
+        const old = existingEUid.get(e.id);
+        if (old !== undefined) matchedEdges.push(old);
+        this.bufferEdge(this.nextEdge++, e.id, e);
+      } else {
+        this.bufferEdge(this.nextEdge++, null, e);
+      }
+    }
+    // An edge is referenced by nothing, so a match is a full delete-and-reinsert: drop the old row.
+    this.wipeEdges(matchedEdges);
+  }
+
+  /** The subset of `ids` that already exist in `table.column`, in ONE `json_each` read. */
+  private existing(table: 'nodes' | 'edges', column: 'id', ids: readonly number[]): Set<number> {
+    if (!ids.length) return new Set();
+    this.counts.statements++;
+    return new Set(this.store.query<{ v: number }>(
+      `SELECT ${column} AS v FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`,
+      [JSON.stringify(ids)]).map((r) => r.v));
+  }
+
+  /** The existing rowid for each of `uids` that is already present — one `json_each` read. */
+  private existingUid(table: 'nodes' | 'edges', uids: readonly string[]): Map<string, number> {
+    if (!uids.length) return new Map();
+    this.counts.statements++;
+    return new Map(this.store.query<{ id: number; uid: string }>(
+      `SELECT id, uid FROM ${table} WHERE uid IN (SELECT value FROM json_each(?))`,
+      [JSON.stringify(uids)]).map((r) => [r.uid, r.id] as const));
+  }
+
+  /** Remove a matched vertex's owned rows — everything but the `nodes` row itself and its edges — so
+   *  `flush` re-lands the incoming definition. Each delete is one `json_each` bind. */
+  private wipeVertexChildren(ids: readonly number[]): void {
+    if (!ids.length) return;
+    this.wipeFts('node', ids);
+    this.counts.statements += deleteMembers(this.store, 'vertex_properties', 'node', ids)
+      + deleteMembers(this.store, 'vertex_labels', 'node', ids)
+      + deleteMembers(this.store, 'vertex_property_cardinality', 'node', ids);
+  }
+
+  /** Delete a matched edge whole — its row, its properties, its FTS text. */
+  private wipeEdges(ids: readonly number[]): void {
+    if (!ids.length) return;
+    this.wipeFts('edge', ids);
+    this.counts.statements += deleteMembers(this.store, 'edge_properties', 'edge', ids)
+      + deleteMembers(this.store, 'edges', 'id', ids);
+  }
+
+  /** The FTS sweep is scoped by owner ELEMENT KIND as well as owner id (a node rowid and an edge rowid
+   *  can numerically coincide), so it carries the `owner_elem` predicate `deleteMembers` cannot. */
+  private wipeFts(ownerElem: OwnerElem, ids: readonly number[]): void {
+    this.store.query(
+      `DELETE FROM property_fts WHERE owner_elem=? AND owner IN (SELECT value FROM json_each(?))`,
+      [ownerElem, JSON.stringify([...ids])]);
+    this.counts.statements++;
   }
 
   /**

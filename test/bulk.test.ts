@@ -328,3 +328,97 @@ describe("idPolicy: 'remap' — loading into a graph that already has these ids"
     expect(statements).toBeLessThan(withCheck);
   });
 });
+
+// onCollision: 'replace' — the idempotent-upsert mode (last-write-wins). A match is by NATURAL id (a
+// numeric id → rowid, a string id → uid), and pre-existing and in-batch duplicates are the same event.
+// A vertex keeps its rowid and its incident edges; only its owned property rows are replaced. An edge,
+// referenced by nothing, is delete-and-reinserted whole.
+describe('onCollision: replace', () => {
+  const V = (id: string | number, props: Record<string, unknown>): BulkVertex =>
+    ({ id, labels: ['person'], properties: Object.entries(props).map(([key, value]) => ({ key, value })) });
+  const count = (store: GraphStore, table: string) => store.query<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)[0].n;
+  const propOf = (store: GraphStore, uid: string, key: string) =>
+    store.query<{ v: unknown }>(`SELECT value AS v FROM vertex_properties WHERE key=? AND node=(SELECT id FROM nodes WHERE uid=?)`, [key, uid]);
+
+  test('re-importing the same graph duplicates nothing', () => {
+    const store = fresh();
+    const vs = [V('a', { name: 'marko', age: 29 }), V('b', { name: 'vadas', age: 27 })];
+    const es: BulkEdge[] = [{ id: 'e1', label: 'knows', src: 'a', tgt: 'b', properties: [{ key: 'weight', value: 0.5 }] }];
+    loadBulk(store, vs, es);
+    loadBulk(store, vs, es, { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(2);
+    expect(count(store, 'edges')).toBe(1);
+    expect(count(store, 'vertex_properties')).toBe(4);
+    expect(count(store, 'edge_properties')).toBe(1);
+  });
+
+  test('a match REPLACES the whole element — a property the newcomer omits is dropped', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', { name: 'marko', city: 'sf' })]);
+    loadBulk(store, [V('a', { name: 'marko', age: 29 })], [], { onCollision: 'replace' });
+    expect(store.query<{ key: string }>(`SELECT key FROM vertex_properties WHERE node=(SELECT id FROM nodes WHERE uid='a') ORDER BY key`).map((r) => r.key))
+      .toEqual(['age', 'name']); // city gone
+  });
+
+  test('an in-batch duplicate collapses to the LAST definition', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', { name: 'first' }), V('a', { name: 'last' })], [], { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(1);
+    expect(propOf(store, 'a', 'name')).toEqual([{ v: 'last' }]);
+  });
+
+  test('replacing a vertex keeps its rowid and its incident edges', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', { name: 'x' }), V('b', { name: 'y' })], [{ id: 'e1', label: 'knows', src: 'a', tgt: 'b' }]);
+    const aid = store.query<{ id: number }>(`SELECT id FROM nodes WHERE uid='a'`)[0].id;
+    loadBulk(store, [V('a', { name: 'x2' })], [], { onCollision: 'replace' }); // vertex only, no edges in batch
+    // Same rowid (so the edge still points at it), the edge still there, the property replaced.
+    expect(store.query<{ id: number }>(`SELECT id FROM nodes WHERE uid='a'`)[0].id).toBe(aid);
+    expect(store.query<{ src: number }>(`SELECT src FROM edges`)).toEqual([{ src: aid }]);
+    expect(propOf(store, 'a', 'name')).toEqual([{ v: 'x2' }]);
+  });
+
+  test('a matched edge is refreshed whole', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', {}), V('b', {})], [{ id: 'e1', label: 'knows', src: 'a', tgt: 'b', properties: [{ key: 'weight', value: 0.5 }] }]);
+    loadBulk(store, [], [{ id: 'e1', label: 'knows', src: 'a', tgt: 'b', properties: [{ key: 'weight', value: 0.9 }] }], { onCollision: 'replace' });
+    expect(count(store, 'edges')).toBe(1);
+    expect(store.query<{ v: number }>(`SELECT value AS v FROM edge_properties WHERE key='weight'`)).toEqual([{ v: 0.9 }]);
+  });
+
+  test('the FTS index is refreshed — old text goes, new text lands', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', { name: 'marko' })]);
+    loadBulk(store, [V('a', { name: 'stephen' })], [], { onCollision: 'replace' });
+    // Exactly one name value row, now 'stephen'; nothing indexes 'marko' any more.
+    expect(store.query<{ text: string }>(`SELECT text FROM property_fts WHERE pk='name' AND kind='value'`)).toEqual([{ text: 'stephen' }]);
+    expect(store.query<{ n: number }>(`SELECT count(*) AS n FROM property_fts WHERE text LIKE '%marko%'`)[0].n).toBe(0);
+  });
+
+  test('numeric ids match on the rowid', () => {
+    const store = fresh();
+    loadBulk(store, [{ id: 1, labels: ['person'], properties: [{ key: 'name', value: 'a' }] }]);
+    loadBulk(store, [{ id: 1, labels: ['person'], properties: [{ key: 'name', value: 'b' }] }], [], { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(1);
+    expect(store.query<{ v: unknown }>(`SELECT value AS v FROM vertex_properties WHERE key='name'`)).toEqual([{ v: 'b' }]);
+  });
+
+  test('the default policy still fails closed on a collision', () => {
+    const store = fresh();
+    loadBulk(store, [V('a', { name: 'x' })]);
+    expect(() => loadBulk(store, [V('a', { name: 'y' })])).toThrow(/already exists/);
+  });
+
+  test('a whole modern-graph re-import stays behaviourally identical, under the DO bind cap', () => {
+    const store = freshLimited();
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES);
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES, { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(6);
+    expect(count(store, 'edges')).toBe(6);
+    // Same answers as a single clean import — compared as the framed buffers the executor returns.
+    const ref = fresh();
+    loadBulk(ref, MODERN_VERTICES, MODERN_EDGES);
+    for (const q of ["g.V().has('name','marko').out('knows').values('name')", 'g.E().count()', "g.V().order().by('name').values('name')"])
+      expect(executeQuery(store, q, {})).toEqual(executeQuery(ref, q, {}));
+  });
+});

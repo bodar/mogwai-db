@@ -14,11 +14,15 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   covers meta-property value typing. The rules are the RelIR plan §6·7; the live gaps
   are its §10. See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Set-based writes.** The row-at-a-time write driver is GONE — the runtime write path is now
-  one relational `Insert` over `json_each` (`src/setwrite.ts`), the bulk loader and IO drains
-  ride it, and format reads cross a page's owners as one `json_each(?)` membership
-  (`src/formats/drain.ts`). Remaining is the dependent WRITE FORM the append-only loader defers:
-  an UPSERT / match-or-create bulk mode, which inherits the interleaved read/write question
-  (plan §9) and needs that design first. See [the RelIR plan](./2026-08-01-relir-build-plan.md).
+  one relational `Insert`/`Delete` over `json_each` (`src/setwrite.ts`), the bulk loader and IO
+  drains ride it, and format reads cross a page's owners as one `json_each(?)` membership
+  (`src/formats/drain.ts`). The dependent UPSERT write form has LANDED as the loader's
+  `onCollision: 'replace'` mode (`src/bulk.ts` `resolveReplace`): a whole-batch, snapshot-domain,
+  last-write-wins match on natural id — a vertex keeps its rowid + edges and replaces its property
+  subtree, an edge is delete-and-reinserted. It is reachable programmatically (`loadBulk`,
+  `loadGraphson`, `loadCsv`); the remaining wire is a `g.io(...).with(...)` STEP modulator to select
+  the policy from a traversal, which is front-end work (a new `io()` option), not substrate.
+  See [the RelIR plan](./2026-08-01-relir-build-plan.md).
 - **Retained relations.** The remaining named-collection work is keyed seeds, mixed
   member shapes, and safe direct member re-entry; its downstream gaps are owned by their
   respective substrates. See

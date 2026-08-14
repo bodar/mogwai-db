@@ -38,7 +38,7 @@
 // and detects which it is from the header; `io("x.csv").write()` emits BOTH, at the derived keys
 // `csvPaths` names — and those derived keys are ordinary readable paths, so the round trip is two
 // reads with nothing magic in between.
-import { BulkLoader, type BulkEdge, type BulkProperty, type BulkStats } from '../bulk.ts';
+import { BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
 import { groupByOwner, keysetPages, rowsForOwners } from './drain.ts';
@@ -315,8 +315,8 @@ function required(record: readonly CsvField[], columns: readonly Column[], role:
  * Fails closed with the RECORD NUMBER, for the same reason the GraphSON reader does: a partially
  * loaded graph is only diagnosable if the failure says where it stopped.
  */
-export function loadCsv(store: GraphStore, document: string): BulkStats {
-  const loader = new BulkLoader(store);
+export function loadCsv(store: GraphStore, document: string, options?: BulkOptions): BulkStats {
+  const loader = new BulkLoader(store, options);
   let columns: Column[] | undefined;
   let kind: CsvKind | undefined;
   let n = 0;
