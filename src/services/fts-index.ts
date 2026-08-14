@@ -18,9 +18,7 @@
 //     JSON properly" capability, beyond bare tinker.search).
 //
 // See docs/archive/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
-import type { GraphStore } from '../storage.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
-import { bindChunks, insertRows, placeholders } from '../rowbatch.ts';
 
 /** Which normalized property table `pid` keys into — 'node' for vertex_properties,
  *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind and
@@ -82,26 +80,6 @@ function ftsRowsFor(node: ValueNode): FtsRow[] {
   return rows.filter((r) => r.text.length > 0);
 }
 
-/** Remove every property_fts row for one property instance (owner_elem, pid). Called before
- *  a re-index (single-cardinality replace) and on drop(). UNINDEXED columns are filterable,
- *  so a DELETE … WHERE owner_elem=? AND pid=? is a normal delete on an FTS5 table. */
-export function deleteFtsFor(store: GraphStore, ownerElem: OwnerElem, pid: number): void {
-  store.query('DELETE FROM property_fts WHERE owner_elem=? AND pid=?', [ownerElem, pid]);
-}
-
-/** Remove every property_fts row owned by a set of owner elements (their vertex/edge ids) —
- *  the drop() cascade, where the property rows are deleted wholesale by owner. */
-export function deleteFtsForOwners(store: GraphStore, ownerElem: OwnerElem, ownerIds: readonly number[]): void {
-  // Chunked through RowBatch: the owner list is a function of ROW COUNT, and this statement's
-  // 99-owner ceiling was the first one an edge drop() hit on a Durable Object (plan doc §1d).
-  // `fixedBinds: 1` is the leading owner_elem=?.
-  for (const chunk of bindChunks(ownerIds, { fixedBinds: 1 }))
-    store.query(
-      `DELETE FROM property_fts WHERE owner_elem=? AND owner IN (${placeholders(chunk.length)})`,
-      [ownerElem, ...chunk],
-    );
-}
-
 /** `property_fts`'s columns, in the order `propertyFtsRows` emits cells. */
 export const PROPERTY_FTS_COLUMNS = ['owner_elem', 'pid', 'owner', 'pk', 'kind', 'text'] as const;
 
@@ -136,14 +114,3 @@ export function propertyFtsRows(
  *  8,936, and a divergent index is silent. */
 export const propertyFtsEntries = (val: unknown, typeNode: TypeNode | null): readonly FtsRow[] =>
   ftsRowsFor(valueNodeOf(val, typeNode));
-
-/** Index ONE property instance into property_fts. Caller deletes stale rows first
- *  (single-cardinality replace) — this only inserts. Batched through RowBatch: a collection
- *  property emits one row per nested key/leaf, so the statement count was a function of the
- *  VALUE's size. */
-export function indexProperty(
-  store: GraphStore, ownerElem: OwnerElem, pid: number, owner: number,
-  key: string, val: unknown, typeNode: TypeNode | null,
-): void {
-  insertRows(store, 'property_fts', PROPERTY_FTS_COLUMNS, propertyFtsRows(ownerElem, pid, owner, key, val, typeNode));
-}
