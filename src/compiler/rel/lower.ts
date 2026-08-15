@@ -6208,10 +6208,11 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // apache/tinkerpop/gremlin/process/traversal/step/map/{CountGlobalStep,SumGlobalStep}.java and
     // step/util/ReducingBarrierStep.java). `countExpr` therefore COALESCEs to 0; `reducerAggregate`
     // leaves SQL's NULL alone, and the existing traversal-`by()` productivity filters drop it.
-    const scalar = make.project({
-      id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-      exprs: [['v', col(tail.rel.id, 'v')]],
+    const scalarOf = (column: string): Rel => make.project({
+      id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
+      exprs: [[column, col(tail.rel.id, column)]],
     });
+    const scalar = scalarOf('v');
     // The REDUCER'S OWN framing, unchanged — `count()` is a `long` and a numeric reducer reports its
     // aggregate type. The `result` marker rides with it: a consumer that projects this as a record
     // field needs the same `vt` column the top-level scalar payload declares for the same value.
@@ -6223,9 +6224,19 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // `IS NOT NULL` would answer a different question. Saying it HERE rather than in each consumer is
     // the seam's job: `valuePredicate` and the per-traverser child host both need exactly this fact.
     // A REDUCING barrier has collapsed the child to one row, which is the guard three lines up.
-    return tail.framing.result === 'count'
-      ? { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' }
-      : { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, yields: 'one' };
+    if (tail.framing.result === 'count')
+      return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    // A NUMERIC REDUCER carries its result's TYPE in `vt` — the winner's own Gremlin vtype (min/max) or
+    // the aggregate's SQLite storage class (sum/mean), the dual channel the top-level `scalar` Shape
+    // frames. Exposed as `vtype` so a by()-consumer that projects a second column — a record field, a
+    // collection member — lands it beside the value and `by(sum())` composes exactly as `by(count())`
+    // does; a map side that can carry only one expression ignores it. The `vt` read is a second
+    // correlated subquery over the SAME one-row reducer relation (`collapsedToOneRow` above), the shape
+    // the property arm's value+vtype pair already takes.
+    return {
+      expr: { kind: 'scalar', plan: scalar },
+      framing: tail.framing, vtype: { kind: 'scalar', plan: scalarOf('vt') }, yields: 'one',
+    };
   }
 
   let value: Expr = host.id;

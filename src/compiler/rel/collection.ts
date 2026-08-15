@@ -5,7 +5,7 @@ import { argValues, type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
-import { meetScalarTypes, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, typeCarriedBy, UNKNOWN, type ListOf, type MixedArm, type ScalarType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, PER_ROW, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MixedArm, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -538,11 +538,18 @@ function projectedMembers(
   // CONSTANT `ListOf`, so claiming the type DROPPED this flag, and the resulting "a typed list of
   // nulls emits nothing where a bare one emits null" got recorded as an open question about
   // `MaxLocalStep`. It was never that; it was one field falling out of a constant.
+  // The member type rides in whatever second column `framingCols` declared — `vt` for a numeric
+  // reducer's dynamic type, `vtype` for a stored value — which `foldScalars` reads through
+  // `perRowColumnOf` to build each member's `{t,v}` envelope. A scalar with no type column keeps its
+  // static/unknown tag. This is what carries a `by(sum())` member's type the way `by('age')`'s rides:
+  // the old `typeCarriedBy(field.framing.type)` read `UNKNOWN` off a reducer, whose type lives on
+  // `result:'number'` rather than on the ScalarType, and threw the second column away.
+  const typeColumn = cols.find((column) => column.name !== 'v');
   return {
     sites: [{ rel: rows, order: orderOf(encounter), perTraverser: ranPerTraverser(step) }],
     of: {
       kind: 'scalars',
-      type: typeCarriedBy(field.framing.type, (column) => cols.some((declared) => declared.name === column)),
+      type: typeColumn ? PER_ROW(typeColumn.name) : field.framing.type,
       productiveNull: isProductiveBy(step),
     },
     merge: undefined,

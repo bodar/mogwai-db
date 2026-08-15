@@ -608,8 +608,13 @@ export function byField(
     if (!payload) return null;
     const exprs: (readonly [string, Expr])[] = [[payload.name, produced.expr]];
     for (const column of rest) {
-      if (column.name === 'vtype' && produced.vtype) exprs.push(['vtype', produced.vtype]);
-      else return null;
+      // The one extra column a scalar framing declares is its TYPE column — `vtype` for a stored
+      // value, `vt` for a numeric reducer's dynamic `typeof`. The seam supplies it as `produced.vtype`
+      // under whichever name `framingCols` gave it, so landing it here is what lets `by(sum())` carry
+      // its type into a record field exactly as `by('age')` does, rather than declining for want of a
+      // column it has already computed. Without one the field cannot carry the type, so it declines.
+      if (!produced.vtype) return null;
+      exprs.push([column.name, produced.vtype]);
     }
     return { exprs, framing: produced.framing, optional: droppable() };
   }

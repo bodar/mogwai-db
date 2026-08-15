@@ -301,7 +301,16 @@ function frameTypedNode(node: FrameNode): Buffer {
   // A `Direction` token, the same standing as `T` one enum along — an edge `elementMap()`'s two
   // endpoint entries are keyed by it, and it is a GraphBinary type of its own (`DataType.DIRECTION`).
   if (node.t === 'D') return ioc.anySerializer.serialize(direction[node.v === 'IN' ? 'in' : 'out']);
-  return frameValue(node.v, vtypeToValueType(node.t));
+  // A scalar leaf's tag is EITHER a Gremlin vtype (`int`/`double`/`datetime` — a stored value, or
+  // min/max's winner) OR a numeric reducer's SQLite storage class (`integer`/`real` from sum/mean's
+  // `typeof`). The two are disjoint, so this mirrors the top-level `scalar` Shape (frameValues): resolve
+  // a Gremlin vtype exactly, and route a storage class through `sumBuffer` — which forces DOUBLE for
+  // `real` so a whole-number mean (`30.0`) frames as a Double rather than the Int magnitude inference
+  // would pick. A null tag infers, unchanged.
+  const tag: string | null = node.t;
+  const as = vtypeToValueType(tag);
+  if (as !== undefined) return frameValue(node.v, as);
+  return tag != null ? sumBuffer(node.v, tag) : frameValue(node.v, undefined);
 }
 
 // A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed
