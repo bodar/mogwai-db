@@ -1,5 +1,6 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -392,17 +393,81 @@ export const storedValueOn = (value: Expr, vtype: Expr): Expr => {
  *  `storedCompare`/`storedCompareOn` already have, and for the same reason. */
 export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value'), col(rel, 'vtype'));
 
+/** VTYPE tags that denote a binary64 — SQLite's JSON WRITER serializes these at 15 significant digits
+ *  and cannot round-trip one that needs 16-17 (a mean, a `math()` quotient). Both the Gremlin classes
+ *  and SQLite's own `real` (what `typeof` reports for a computed reducer) are here. */
+const FLOATING_VTYPES: readonly string[] = ['float', 'double', 'real'];
+/** VTYPE tags whose value can exceed 2^53 — a JS reader's `JSON.parse` ROUNDS an integer past that, so
+ *  it must ride as decimal TEXT and be reconstructed via `BigInt` (`frameValue`'s long/bigint arm).
+ *  `int`/`short`/`byte` are ≤2^31 and safe; `integer` is SQLite's class for a computed reducer. */
+const WIDE_INT_VTYPES: readonly string[] = ['long', 'bigint', 'integer'];
+
+const jsonCall = (value: Expr): Expr => ({ kind: 'call', fn: 'json', args: [value] });
+const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf', args: [compilerText(fmt), value] });
+/** A binary64 as a 17-digit JSON NUMBER — 17 digits round-trip binary64 exactly, and the reader parses
+ *  it straight back. Lossy-ONLY: a value already exact at 15 (`0.2`) stays itself rather than becoming
+ *  `0.20000000000000001`. `json(...)` keeps the printed text a JSON number rather than a string. */
+const asExactReal = (value: Expr): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'binary', op: '=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, value]],
+  else: jsonCall(printf('%!.17g', value)),
+});
+/** A wide integer as decimal TEXT past 2^53, reconstructed via `BigInt` at the wire; smaller values
+ *  stay numbers. The same `SAFE_INT` boundary `sumTower` uses, so the two cannot disagree. */
+const asExactWideInt = (value: Expr): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'binary', op: '>', left: { kind: 'call', fn: 'abs', args: [value] }, right: compilerInt(SAFE_INT) }, { kind: 'cast', arg: value, to: 'text' }]],
+  else: value,
+});
+const inList = (vtype: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list', expr: vtype, values: tags.map(compilerText) });
+
 /**
- * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <stored value>)`.
+ * THE SOLE JSON-ENTRY for a stored or computed scalar — how a value crosses INTO a
+ * `json_object`/`json_array`/`json_group_array` losslessly, in ONE `CASE` so the subject is spelled
+ * once per arm rather than nested. It settles the THREE ways SQLite's JSON channel would otherwise
+ * corrupt a value:
+ *
+ * 1. a stored COLLECTION rides as embedded JSON, not a JSON string (`storedValueOn`'s job, folded in
+ *    here so a `{t,v}` member does not nest two CASEs);
+ * 2. a binary64 REAL rides as a 17-digit JSON number — SQLite's writer serializes at 15 significant
+ *    digits and cannot round-trip a `1/3` or a `math()` quotient (`asExactReal`);
+ * 3. an INTEGER past 2^53 rides as decimal TEXT — a JS reader's `JSON.parse` rounds it (`asExactWideInt`).
+ *
+ * Gated on the TYPE TAG, never `typeof(value)`: the value may be a correlated subquery this would
+ * splice (§12 trap 2). A COMPILE-TIME tag folds to a single arm, so a node that knows it is a
+ * string/int/element carries NO `CASE` — the repair reaches exactly the members that can lose a bit,
+ * at any nesting depth. It is NOT `storedValueOn` itself, which also feeds the ROW path where a
+ * `json(printf(...))` becomes text a later `fold()` re-quotes (§12 trap 1); this lives at the entries.
+ */
+export const jsonMember = (value: Expr, vtype: Expr): Expr => {
+  if (literalCollection(vtype) === true) return jsonCall(value);
+  if (vtype.kind === 'lit') {
+    if (vtype.source === 'compiler-text' && FLOATING_VTYPES.includes(vtype.value)) return asExactReal(value);
+    if (vtype.source === 'compiler-text' && WIDE_INT_VTYPES.includes(vtype.value)) return asExactWideInt(value);
+    return value;
+  }
+  return {
+    kind: 'case',
+    whens: [
+      [inList(vtype, COLLECTION_VTYPES), jsonCall(value)],
+      [inList(vtype, FLOATING_VTYPES), asExactReal(value)],
+      [inList(vtype, WIDE_INT_VTYPES), asExactWideInt(value)],
+    ],
+    else: value,
+  };
+};
+
+/**
+ * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <lossless value>)`.
  *
  * The `{t,v}` encoding, expressed in the algebra's own vocabulary because it is EMISSION rather than
- * data. What must not diverge is the payload: a
- * collection value rides as embedded JSON, not as a JSON string, which is why it goes through
- * `storedValueOn` rather than naming the column twice.
+ * data. The value goes through `jsonMember` — the one JSON-entry authority — so a collection rides as
+ * embedded JSON and a numeric value survives SQLite's lossy JSON channel, at every depth a `{t,v}` node
+ * reaches.
  */
 export const typedNode = (value: Expr, vtype: Expr): Expr => ({
   kind: 'json-object',
-  entries: [['t', vtype], ['v', storedValueOn(value, vtype)]],
+  entries: [['t', vtype], ['v', jsonMember(value, vtype)]],
   binary: false,
 });
 

@@ -1,5 +1,5 @@
 {
-  "passing": 1557,
+  "passing": 1558,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -494,6 +494,7 @@
     "g_V_hasLabelXpersonvar_softwarevarX",
     "g_V_hasLabelXreptile_birdX_name_multilabel",
     "g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_maxX",
+    "g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_meanX",
     "g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_minX",
     "g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX",
     "g_V_hasLabelXsoftwareX_localXaggregateXaXX_inXcreatedX_localXaggregateXaXX_outXknowsX_localXaggregateXaXX_capXaX",
@@ -1855,7 +1856,6 @@
     "g_V_hasLabelXpersonX_valuesXageX_isXwithinXunionXVXvid1X_valuesXageX_V_hasXname_lopX_inXcreatedX_valuesXageXX_foldXX",
     "g_V_hasLabelXreptileX_group_byXlabels_order_foldX_byXname_foldX",
     "g_V_hasLabelXsoftwareX_asXnameX_asXlanguageX_asXcreatorsX_selectXname_language_creatorsX_byXnameX_byXlangX_byXinXcreatedX_name_fold_orderXlocalXX",
-    "g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_meanX",
     "g_V_hasLabelXsoftwareX_hasXname_withoutXunionXVXvid1X_outXcreatedX_valuesXnameX_VXvid4X_outXcreatedX_valuesXnameXX_foldXX",
     "g_V_hasLabelXsoftwareX_index_unfold",
     "g_V_hasLabelXsoftwareX_name_fold_orderXlocalX_index_unfold_order_byXtailXlocal_1XX",

@@ -586,15 +586,12 @@ function groupReduced(
   // it — `origin` is typed `int` and a value stream has none (a channels-core change).
   if (host.kind !== 'element') return null;
   if (reducer !== 'count' && !isReducer(reducer)) return null;
-  // `mean` DECLINES, and the reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON
-  // with 15 significant digits (`%!.15g`), so a map value that needs 17 comes back a digit short —
-  // `map/Mean.feature:70` wants `d[0.3333333333333333].d` and the blob carries `0.333333333333333`.
-  // The defect is PROJECT-WIDE — `g.inject(1).math("1/3").fold()` is lossy too — so it is a shared
-  // cause rather than a mean-specific bug (§12). It is invisible for every other reducer here because
-  // `sum`/`min`/`max` of exact inputs stay exact, and it becomes visible only for a mean computed into
-  // the blob. Declining defers it; the fix is to carry an inexact real as
-  // decimal TEXT under its tag, which is the carriage the exact tail already has for a big long.
-  if (reducer === 'mean') return null;
+  // `mean` used to DECLINE for the §12 blob-precision reason: SQLite's JSON writer serializes a REAL at
+  // 15 significant digits, so `map/Mean.feature:70`'s `d[0.3333333333333333].d` came back a digit short.
+  // The map VALUE is a `typedNode` (below), and `typedNode` now makes every numeric member lossless for
+  // the JSON channel (`jsonSafeScalar`, `build.ts`) — a binary64 rides as a 17-digit JSON number — so the
+  // mean survives and the decline is gone. It was never a mean-specific bug; every reducer whose result
+  // needs 16-17 digits goes through the same repair now.
   const counting = reducer === 'count';
   const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
   // A COUNT counts TRAVERSERS, so it needs no value at all and admits any body shape; every other
