@@ -98,9 +98,29 @@ export type { ForeignRow } from '../../api.ts';
  *  is genuinely per-execution. Everything it used to take positionally now arrives where it
  *  belongs: the FederationSource at construction (an app-scope dependency), the params and this
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
+/** WHERE a barrier's `apply` runs — a deployment fact, orthogonal to `kind` (which names the
+ *  ESSENCE: what the contribution is to the plan). Explicit and binary, never derived from a
+ *  capability checklist. See `docs/2026-08-07-edge-compilation-plan.md` §4·3.
+ *
+ *  - `'do'` — runs in the Durable Object, beside the store. The default and overwhelming case: a
+ *    barrier with no remote wait has nothing to free the DO across (pure CPU over a batch already in
+ *    the DO, or a store-bound iteration that must be AT the store), so it stays here however much CPU
+ *    it burns. `io()` is `'do'` too — a rare root-level admin op whose R2 half is not worth hoisting.
+ *  - `'worker'` — the Worker drives it, off the DO, so the DO's request closes and the graph's other
+ *    callers are served meanwhile. Earned ONLY by a REMOTE WAIT (§1's worst occupancy: the DO idle
+ *    but holding while another object works). Today exactly one barrier qualifies: `federate`.
+ *
+ *  **Fail-closed invariant: a `'worker'` barrier's `apply` is store-free** — handed no store and
+ *  closing over no store binding (federate closes over the FederationSource; io closes over the store,
+ *  which is why io is `'do'`). So the value cannot contradict the code.
+ *
+ *  Nothing READS this yet — the Worker-driven drive loop is edge-compilation Phase 2. It is declared
+ *  now so a barrier STATES its residency rather than the loop hardcoding which ones leave. */
+export type BarrierResidency = 'do' | 'worker';
+
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
-  | { readonly kind: 'barrier'; apply(rows: readonly BarrierInput[]): Promise<ForeignRow[]> };
+  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; apply(rows: readonly BarrierInput[]): Promise<ForeignRow[]> };
 
 /**
  * WHAT A MID-TRAVERSAL BARRIER'S HEAD HANDS ITS `apply` — one row per parent traverser, carrying the

@@ -56,6 +56,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
   }),
   resolve: ({ params, federationDepth: depth }) => ({
     kind: 'barrier',
+    // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
+    // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
+    // FederationSource, never the store — which is the fail-closed half of that residency.
+    residency: 'worker',
     apply: async (rows: readonly ForeignRow[]): Promise<ForeignRow[]> => {
       const graph = graphOf(params);
       guardFederationDepth(depth + 1, graph);

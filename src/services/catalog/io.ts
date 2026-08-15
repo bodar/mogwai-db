@@ -98,6 +98,9 @@ export const createIoService = (io: IoStore, store: GraphStore | undefined): Ser
   }),
   resolve: ({ params }) => ({
     kind: 'barrier',
+    // A rare root-level admin op (backup/restore/seed) whose `apply` closes over the store — its R2
+    // wait is real but not worth hoisting off the DO (§4·3). Stays beside the store.
+    residency: 'do',
     apply: async () => {
       const path = pathOf(params);
       const direction = directionOf(params);

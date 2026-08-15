@@ -3,6 +3,9 @@ import { createRegistry, EMPTY_REGISTRY } from '../src/services/spi/registry.ts'
 import { standardRegistry, extendedRegistry } from '../src/services/standard.ts';
 import { createAppScope, type RegistryProvider } from '../src/scopes.ts';
 import { createDirectoryService } from '../src/services/catalog/directory.ts';
+import { createFederateService } from '../src/services/catalog/federate.ts';
+import { createIoService } from '../src/services/catalog/io.ts';
+import type { IoStore } from '../src/iostore.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/spi/types.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
@@ -210,7 +213,7 @@ describe('call() routing (seedCall)', () => {
       name: 'mogwai.graph.federate',
       type: 'barrier',
       describeParams: () => ({}),
-      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+      resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     // compile() is synchronous and cannot resolve a barrier; the executor (executeFramed) drives
@@ -224,7 +227,7 @@ describe('call() routing (seedCall)', () => {
       name: 'mogwai.graph.federate',
       type: 'barrier',
       describeParams: () => ({}),
-      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+      resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: () => reg });
@@ -235,7 +238,7 @@ describe('call() routing (seedCall)', () => {
   test('compilePlan() on a MID-TRAVERSAL barrier yields a segment whose head reads the INJECTED VALUE', () => {
     const federate: Service = {
       name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
-      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+      resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     // The head's shape asserted directly — see the note just below on what it is and why.
@@ -256,7 +259,7 @@ describe('call() routing (seedCall)', () => {
   test('a mid-traversal barrier with an UNSUPPORTED injection fails closed', () => {
     const federate: Service = {
       name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
-      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+      resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     expect(() => compilePlan(
@@ -402,6 +405,7 @@ describe('barrier source form via Executor (stub source → drive → land → f
     describeParams: () => ({}),
     resolve: ({ params, federationDepth }) => ({
       kind: 'barrier',
+      residency: 'worker',
       apply: async () => source!.executor(String(params.graph)).raw('g.V()', {}, federationDepth + 1),
     }),
   });
@@ -431,5 +435,23 @@ describe('barrier source form via Executor (stub source → drive → land → f
   test('the sync path fails closed on a barrier (use framedAsync)', () => {
     expect(() => ex.framed('g.call("mogwai.graph.federate").with("graph","x")', {}))
       .toThrow(/use the async path/);
+  });
+});
+
+// A barrier declares WHERE its apply runs (edge-compilation §4·3). federate is the one barrier that
+// leaves the DO — a sibling hop is a remote wait the Worker drives; io stays on the DO (its R2 half
+// is a rare admin op not worth hoisting, and its apply closes over the store). Nothing reads this
+// yet (the Worker-driven drive loop is Phase 2); the test pins the declared answer so a later change
+// cannot silently reclassify which barrier leaves.
+describe('barrier residency', () => {
+  const site = (params: Record<string, unknown>) => ({ params, boundParams: {}, federationDepth: 0 });
+
+  test('federate is a worker barrier (remote wait), io is a do barrier (store-bound)', () => {
+    const fed = createFederateService(undefined).resolve(site({ graph: 'crew', traversal: 'g.V()' }));
+    const io = createIoService(undefined as unknown as IoStore, undefined).resolve(site({ path: 'g.json', direction: 'read' }));
+    expect(fed.kind).toBe('barrier');
+    expect(io.kind).toBe('barrier');
+    if (fed.kind === 'barrier') expect(fed.residency).toBe('worker');
+    if (io.kind === 'barrier') expect(io.residency).toBe('do');
   });
 });
