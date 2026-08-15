@@ -90,12 +90,22 @@ Decided entirely by whether `Executable` is data.
 | variant | shape | crosses? |
 |---|---|---|
 | `Compiled` | `{kind:'read', sql, binds, shape}` | **yes** |
-| `Program` | `{kind:'program', program: RelPlan, tail?: {sql, binds}, shape}` | **yes** |
+| `Program` | `{kind:'program', steps: RunStep[], columns, shape}` | **yes** |
 
-`Program` is RelIR's several-statement form — **data the algebra produced, not a machine that walks
-the store** (`src/sql/kernel/render.ts`), carrying a `RowsBind` marker the executor fills from
-retained rows. A multi-statement write ships exactly as a read does. There is no longer a closure
-variant to fail the seam: the legacy `WritePlan` that §7 gated on is gone.
+`Program` is RelIR's several-statement form, **RENDERED to plain steps** (`src/sql/kernel/render.ts`,
+`src/program.ts`) — SQL text + plain binds (with `RowsBind` markers the executor fills from retained
+rows), exactly the write-side twin of a read's `Compiled`. A multi-statement write ships exactly as a
+read does, and there is no closure variant to fail the seam (`WritePlan`, gated by §7, is gone).
+
+**Measured wall (2026-08-15): "data" must mean RENDERED, not the live algebra.** Program originally
+carried the RelIR `Plan`, and a `Plan` cannot cross a workerd DO RPC — a `recursive` Rel holds a
+`step: (self)=>Rel` **closure**, and `Rel`/`Stmt` nodes are branded with `unique symbol`s;
+structured clone drops both, so `runProgram`'s `isStmt` guard threw *"statement was not constructed by
+a Stmt factory"* on the DO (caught only by `test/cloudflare.test.ts` on real workerd — invisible to Bun
+in-process). The fix renders the program on the compiling EDGE (`renderProgram`, where `emit` consumes
+the closures and brands), so the DO runs plain steps via `runSteps` and never holds the algebra or
+re-emits — which also moves render work off the DO, a small occupancy bonus. `Compiled` was already
+plain, which is why reads (Phase 1) crossed unchanged.
 
 `shape` travels with both, so the DO can frame or return rows for the edge to frame; framing where
 the rows are is fewer bytes.
@@ -284,19 +294,26 @@ The RelIR write path that made this possible landed via `docs/2026-08-01-write-p
 change, pinned in isolation by `test/drive.test.ts`. The segment loop's ownership no longer belongs to
 the store tier. (§4·3's residency field landed alongside — `barrier` declares `'do' | 'worker'`.)
 
-**Phase 1 — the plan RPC (reads). ✅ LANDED (2026-08-15).** The DO method `runFramed(plan: Compiled)`
-runs + frames a pre-compiled read via the shared `frameResolved`. The edge compiles in a store-free
+**Phase 1 — the plan RPC (reads). ✅ LANDED (2026-08-15).** The DO method `runFramed` runs + frames a
+pre-compiled plan via the shared `frameResolved`. The edge compiles in a store-free
 `createCompileScope(extendedRegistry)` (`src/scopes.ts`) and `EdgeExecutor`
-(`cloudflare-graph-manager.ts`) branches: a non-segment read → `runFramed`; a segment (federation), a
-program (write), or ANY compile throw → the `framed(gremlin)` fallback, so the DO stays the single
-authority for the plan and for errors. Correctness proven in-process (`test/cloudflare-edge.test.ts`:
+(`cloudflare-graph-manager.ts`) branches. Correctness proven in-process (`test/cloudflare-edge.test.ts`:
 store-independence, §2·1 zero store-touches, and the structural payoff — the DO's compile path is not
-hit for a shipped read) and end to end on real workerd via `test/cloudflare.test.ts`'s contract. The
+hit for a shipped plan) and end to end on real workerd via `test/cloudflare.test.ts`'s contract. The
 occupancy MILLISECONDS remain the workerd-only measurement (§8).
 
-**Phase 2 — writes and the segment loop.** Gated on §7 (now MET). `Program` over the same RPC; the
-Worker drives federation (§4·2) — supplying a Worker-side `SegmentHost` whose `readHead` is an RPC to
-the DO; the residency field (§4·3) tells it which barriers may leave.
+**Phase 2a — writes over the same RPC. ✅ LANDED (2026-08-15).** `runFramed` widened `Compiled` →
+`Executable`; the edge ships any `{kind:'sql'}` plan (read or write), only a `segment` falls back.
+Required the Program-rendering refactor above (§3): a write is a `Program`, and a `Program` had to
+become plain rendered steps before it could cross the workerd RPC. Proven persisting on real workerd.
+
+**Phase 2b — the segment loop (Worker-driven federation).** The remaining piece. The Worker drives the
+federation segment loop (§4·2) via the Phase-0 `driveSegments` with a Worker-side `SegmentHost` whose
+`readHead` is a new DO RPC and whose barrier `apply` runs per the §4·3 residency: a `worker` barrier
+(federate) fans out to siblings from the Worker; a `do` barrier (io) stays DO-driven via the `framed`
+fallback. Threads `residency` onto `SegmentPlan` so the loop can decide. **Note the finding above: the
+final resumed plan must be rendered (a `Compiled`, or a rendered `Program`) to cross back — the
+foreign rows ride in its `json_each` binds, which are plain, so that part is already safe.**
 
 ---
 
