@@ -215,7 +215,7 @@ GraphQL endpoint with introspection and tooling, zero config.
 really a question about GraphQL: a DO is single-threaded, and translation needs no store. Putting it
 in the DO would spend a graph's serial budget parsing a document — occupancy no other caller of that
 graph can use — for work a horizontally-scaled runtime does in parallel. Full argument:
-`docs/2026-08-07-edge-compilation-plan.md` §1. It applies here unchanged; this front end is one more
+`docs/archive/2026-08-07-edge-compilation-plan.md` §1. It applies here unchanged; this front end is one more
 thing on the elastic side of the same line.
 
 So the path is `document → (Gremlin) → plan → DO`, with everything left of the DO in the Worker.
@@ -290,7 +290,7 @@ lying around.
 
 ### 5·4 The dependency, and the one thing GraphQL adds
 
-Everything right of the translator belongs to `docs/2026-08-07-edge-compilation-plan.md`. GraphQL
+Everything right of the translator belongs to `docs/archive/2026-08-07-edge-compilation-plan.md`. GraphQL
 must not build a private version of it, and does not need to: until that plan's Phase 1 lands, the
 translator hands `{gremlin, params, paramTypes}` across the existing `GraphManager` seam
 (`src/router.ts`, `src/api.ts:160`) exactly as a Gremlin client does, needing **zero changes** to the
@@ -435,7 +435,7 @@ Gremlin string or `Step[]` — because argument has taken it as far as it goes. 
 document AST + reflected schema → whichever the spike chose, fetching the schema per request (§5·4).
 Router: `POST /graphql/{g}`, `GET /graphql/{g}` for introspection/GraphiQL, explain as a scoped
 `extensions` entry (§5·3). Hands its output across the existing manager seam; picks up plan-shipping
-for free when `docs/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
+for free when `docs/archive/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.
@@ -471,7 +471,7 @@ cross-DO federation is not it); persisted queries; a declarative SDL-with-direct
 on a 20 000-vertex graph took 9.8 s because SQLite had no statistics and inverted the join order —
 since fixed by the plan-stability work (RelIR plan §1 P4). And compilation turns out to touch the
 store zero times, which makes the whole request path splittable
-(`docs/2026-08-07-edge-compilation-plan.md`). Neither is a prerequisite here.
+(`docs/archive/2026-08-07-edge-compilation-plan.md`). Neither is a prerequisite here.
 
 ---
 
@@ -486,7 +486,7 @@ locations were read at the pin and are cited inline.
 
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
 `docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
-`docs/2026-08-07-edge-compilation-plan.md` (a finding §5's probes turned up; the plan-stability
+`docs/archive/2026-08-07-edge-compilation-plan.md` (a finding §5's probes turned up; the plan-stability
 finding has since landed, RelIR plan §1 P4),
 `docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).

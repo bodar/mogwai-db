@@ -1,9 +1,21 @@
 # Compiling at the edge — ship plans, not queries
 
-**✅ COMPLETE (2026-08-15).** All phases (0, 1, 2a, 2b) and the §7 gate have landed and are green on
-real workerd. Compile — and, for a write, render; and, for a federation, the whole segment loop — now
-runs on the elastic Worker; the DO does only what needs its store. The one open item is §8's occupancy
-MILLISECONDS, a workerd-only measurement taken separately. Read on for the rationale and the design.
+**✅ LANDED AND ARCHIVED (2026-08-15).** All phases (0, 1, 2a, 2b) and the §7 gate shipped and are green
+on real workerd. Compile — and, for a write, render; and, for a federation, the whole segment loop —
+now runs on the elastic Worker; the DO does only what needs its store. Kept for the RATIONALE and the
+MEASURED FACTS, which is the whole reason it survives archival:
+- the **workerd structured-clone wall** (§3): a live `Plan` cannot cross a DO RPC (a `recursive` `step`
+  closure + `unique symbol` node brands), so a `Program` ships RENDERED (`renderProgram`/`runSteps`) —
+  and this is invisible on Bun, caught only by the real-workerd contract. (Memory: `workerd-rpc-clone-wall`.)
+- the **single-barrier** fact that made Phase 2b clean (§7 phases): `resume` returns `{kind:'sql'}` or
+  throws, so a segment loop has at most one barrier and its residency is known upfront — no mixed
+  residency, no mid-loop handoff.
+- the **payload measurement** (§8): a compiled plan is 10–115× a gremlin string but tiny in absolute
+  terms (reads ≤ ~2.5 KB, heaviest write ~6.5 KB) and clones in single-digit-to-~22 µs — µs of decode
+  traded for ~ms of compile moved off the DO. Bun proxy; the workerd occupancy MILLISECONDS remain the
+  one un-taken measurement.
+
+The design below is the authority for WHY; the code is the authority for WHAT.
 
 **This is not a performance optimization.** It is a consequence of the one hard constraint the
 platform imposes; the numbers below are evidence the consequence is worth acting on, not the reason

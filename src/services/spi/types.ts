@@ -100,7 +100,7 @@ export type { ForeignRow } from '../../api.ts';
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 /** WHERE a barrier's `apply` runs — a deployment fact, orthogonal to `kind` (which names the
  *  ESSENCE: what the contribution is to the plan). Explicit and binary, never derived from a
- *  capability checklist. See `docs/2026-08-07-edge-compilation-plan.md` §4·3.
+ *  capability checklist. See `docs/archive/2026-08-07-edge-compilation-plan.md` §4·3.
  *
  *  - `'do'` — runs in the Durable Object, beside the store. The default and overwhelming case: a
  *    barrier with no remote wait has nothing to free the DO across (pure CPU over a batch already in

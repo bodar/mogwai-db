@@ -11,7 +11,7 @@
 // belongs to the store tier, which is what lets the Worker drive federation in Phase 2 without a second
 // copy of the loop. Phase 0 changes ONLY where the loop lives — behaviour is identical to the former
 // `Executor.drive` — and today exactly one host exists (execute.ts's Executor builds it).
-// See docs/2026-08-07-edge-compilation-plan.md §4·2 and §4·4.
+// See docs/archive/2026-08-07-edge-compilation-plan.md §4·2 and §4·4.
 
 import type { Compiled, Executable } from './sql/kernel/render.ts';
 import type { Plan } from './compiler/segment.ts';

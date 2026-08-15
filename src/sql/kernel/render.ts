@@ -396,7 +396,7 @@ export interface Compiled {
  * `Plan`: the algebra holds a `recursive` `step` closure and `unique symbol` node brands, neither of
  * which survives structured clone, so it could not cross an RPC — `emit` (run on the compiling edge)
  * consumes all of it and leaves plain SQL + binds. That is exactly what lets a write "ship across an
- * RPC exactly as a read does" (`docs/2026-08-07-edge-compilation-plan.md`) and is the write-side twin
+ * RPC exactly as a read does" (`docs/archive/2026-08-07-edge-compilation-plan.md`) and is the write-side twin
  * of `Compiled`. It replaces the deleted `WritePlan` closure.
  *
  * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
@@ -407,7 +407,7 @@ export interface Program extends RenderedProgram {
 }
 
 /** What `compile()` hands back: one statement, or a several-statement program. Both are DATA — every
- *  traversal, read or write, ships across an RPC (`docs/2026-08-07-edge-compilation-plan.md`). */
+ *  traversal, read or write, ships across an RPC (`docs/archive/2026-08-07-edge-compilation-plan.md`). */
 export type Executable = Compiled | Program;
 
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
