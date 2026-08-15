@@ -127,7 +127,7 @@ feature, separate from this doc.
 
 | shape | blocked by |
 |---|---|
-| `…by(__.inE("created").values("weight").min()/max())…` | the `by(<reducer>)` type gap, NOW NARROWED to min/max. `sum()`/`mean()`/`count()` **LANDED** (`scalarChild` exposes the reducer's `vt` as `vtype`, `byField`/`projectedMembers` land it beside the value, `frameTypedNode` routes a `real` tag through `sumBuffer`; member framing is provably identical to the top-level reducer, `test/compiler/by-reducer-type.exec`). min/max still decline because their argmax path is a window+materialize the correlated arm rejects — a separate increment. The group-scoped POOLED path (`group().by(k).by(sum())`) already covered `sum`; its `mean` is a `map.ts` gap |
+| `…by(__.values("age").max())…` (a bare value stream, NO leading movement) | the `by(<reducer>)` type gap is now **CLOSED for the correlated movement path** — `sum`/`mean`/`count` and (via a `sort`+`limit(1)` argmax sharing `minMaxOrder`/`minMaxWinnerVt` with the global barrier) `min`/`max` all compose in a record field and a collection member, member framing provably identical to the top-level reducer (`test/compiler/by-reducer-type.exec`). What is LEFT is the **scalar-host** arm: a reducer over the HOST's OWN property/value stream with no leading hop (`__.values(k).<reducer>()`), a `scalarHostChild` extension, not this arm. The group-scoped POOLED path already covers `sum`/`min`/`max`; its `mean` is a `map.ts` gap blocked by §12 JSON/REAL precision |
 | `cap("a").unfold().path()` | the path substrate |
 | `within(__.cap('a').unfold())` | predicate-operand label resolution at the `where` (Phase 5 was a precondition, not the whole of it) |
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |
