@@ -441,6 +441,18 @@ export const mapNode = (pairs: Expr): Expr =>
   ({ kind: 'json-object', entries: [['t', compilerText('map')], ['v', pairs]], binary: false });
 
 /**
+ * A wire ARRAY under the typed tree's LIST envelope — `mapNode`'s twin for a value that is a list.
+ *
+ * `members` is the already-expanded wire array (`listPayloadExpr`'s output — element rowids turned into
+ * payload objects, nested collections rebuilt), so this only adds the `{t:'list', v:…}` envelope the
+ * framer reads. One spelling, because the `{t:'list', v:[…]}` node was inlined at four sites
+ * (`map.ts`'s collecting value, `history.ts`, the group value side); a list nested in a `project()`
+ * field must be the SAME node or `frameTypedNode` frames it as an untyped value.
+ */
+export const listNode = (members: Expr): Expr =>
+  ({ kind: 'json-object', entries: [['t', compilerText('list')], ['v', members]], binary: false });
+
+/**
  * The FIRST row of a one-column relation, as an expression — SQL's scalar subquery.
  *
  * Every `by()` projection that reads storage is one of these, and the `ORDER BY … LIMIT 1` is not

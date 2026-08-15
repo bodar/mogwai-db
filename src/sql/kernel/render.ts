@@ -29,6 +29,15 @@ export type ListOf =
   // to emit nothing. Use `withMemberType` to change one without dropping the other.
   | { kind: 'scalar'; type: ScalarType; productiveNull: boolean }
   | { kind: 'list'; of: ListOf }
+  // A list whose members are MAPS — `project(k…).by(…).fold()`, `valueMap().fold()`,
+  // `group().by().by().fold()`: every GraphQL to-many object field at depth ≥ 2. Each member is a
+  // self-describing `[[key, valueNode], …]` PAIRS ARRAY — the SAME encoding `map`/`mapValue` carry in
+  // their `map` column and `recordToMap`/`mapOfGroups` build — so the framer walks it with the ONE
+  // `frameTypedNode` rule that already frames a `{t:'map', v:pairs}` node at any depth (the mixed arm's
+  // rule, one level down). `of` records the map's value-side shape for symmetry with the `list` arm;
+  // framing needs no per-member descriptor because the pairs tree is self-describing, exactly as the
+  // `mixed` arm carries `arms` only for `unfold()`.
+  | { kind: 'map'; of: MapOf }
   // A MIXED-shape list — members of DIFFERENT kinds (a vertex beside an edge, an element beside a
   // value), each a self-describing `{t,v}` envelope. The member-level tagged union one level below the
   // stream `VariantArm` (`compiler/rel/variant.ts`): where that discriminates a per-ROW shape, this

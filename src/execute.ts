@@ -489,6 +489,12 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
   // so the ONE typed-node rule frames each by its own tag — the same rule a typed scalar list's members
   // already take. `arms` is not read here; it exists for `unfold()`'s variant.
   if (of.kind === 'mixed') return items.map(frameTypedNode);
+  // A list of MAPS (project().fold(), valueMap().fold()): each member is the SAME [[key,valueNode],…]
+  // pairs array a `map`/`mapValue` column carries, so it frames by the one `{t:'map'}` rule
+  // frameTypedNode already applies at any depth — the mixed arm's rule with the tag known statically
+  // rather than read per member. `of` is not read here for the reason `mixed`'s `arms` is not: the pairs
+  // tree self-describes; the descriptor exists for unfold().
+  if (of.kind === 'map') return items.map((pairs: any) => frameTypedNode({ t: 'map', v: pairs }));
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the

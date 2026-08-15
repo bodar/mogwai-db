@@ -3,10 +3,11 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, carriedCols, eq, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { and, carriedCols, eq, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
+import { listNodeExpr } from './list.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
@@ -267,9 +268,25 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
     // `project()` slot, or a map-valued child. Its column holds the pairs array, so the member is that
     // array under the same envelope the record arm above adds. One encoding, two producers.
     case 'map': return mapNode(own('map'));
+    // A LIST field — `project('ks').by(__.out().fold())`, the GraphQL to-many object field. The `by()`
+    // body now ends in a `fold()` (the map/scalar/element fold), so this arm is reachable where its
+    // comment used to say no producer existed. `ProjectStep.map` puts whatever `TraversalUtil.produce`
+    // yields into the value, and a `by(__.…fold())` yields a `List`
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:64-67`),
+    // so the map value is a genuine list — framed `{t:'list', v:[…]}`. `listPayloadExpr` expands it to
+    // the wire array (element rowids → payload objects, nested collections rebuilt) at any depth, and
+    // `listNode` adds the one envelope the framer reads. Composes arbitrarily: a list of maps whose
+    // values are lists is `TraversalUtil.produce` nesting, which this recursion mirrors.
+    case 'list': {
+      // `listNodeExpr`, NOT `listPayloadExpr`: this member is framed by the tree walker (`frameTypedNode`),
+      // which needs every leaf tagged (`{t:'vertex',…}`), where the top-level list framer takes bare
+      // element objects — the `elementNode`/`elementObject` split, one level up.
+      const members = listNodeExpr(own('list'), framing.of, fresh);
+      return members && listNode(members);
+    }
     // A per-row TYPED NODE field would be a `cap(mixed).unfold()` in a `project()` slot — terminal, and
     // `byField` produces no such thing, so it declines like `variant` for the same reason.
-    case 'list': case 'path': case 'mapEntry': case 'property': case 'typedNode': case 'discard': return null;
+    case 'path': case 'mapEntry': case 'property': case 'typedNode': case 'discard': return null;
   }
 }
 

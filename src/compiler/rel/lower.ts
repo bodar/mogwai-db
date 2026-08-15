@@ -16,7 +16,7 @@ import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
-import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
+import { recordField, recordNode, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
@@ -43,7 +43,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
@@ -3429,6 +3429,17 @@ function mapTail(
       return continueAs(c.rel, c.framing, steps, at + 1, false, ctx, fresh, labels);
     }
 
+    // `fold()` — every map traverser becomes one member of ONE list: `valueMap().fold()`,
+    // `group().by().by().fold()`. The map stream already carries its pairs array in `MAP_COL`, so this
+    // is the same barrier the record fold reaches after collapsing — the value-side member shape is the
+    // map's own `valOf`, carried through unchanged (a list member is a whole map, framed by the one
+    // `{t:'map'}` rule).
+    if (step.name === 'fold' && !args.length && !isLocalScope(step)) {
+      const encounter = encounterOf(rel.channels);
+      const folded = foldMaps(rel, MAP_COL, valOf, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
+    }
+
     const column = selectedColumn(step);
     if (column) {
       const side = mapSide(rel, column, column === 'keys' ? keyOf : valOf, fresh);
@@ -4949,6 +4960,18 @@ function recordTail(
       if (argValues(step).length) return null;
       const counted = countTail(rel, fresh);
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+    }
+
+    // `fold()` — the record BECOMES a map (its fields spent) and every map value collects into ONE list
+    // traverser: `project(k…).by(…).fold()`, the GraphQL to-many object field. The collapse is
+    // `recordToMap` — the same boundary `select`/wire cross — so the fold sees a `MAP_COL` whatever the
+    // fields were, and the member shape is the map's self-describing pairs array (`MapOf.scalar`).
+    if (step.name === 'fold' && !argValues(step).length && !isLocalScope(step)) {
+      const mapped = recordToMap(rel, fields, fresh);
+      if (!mapped) return null;
+      const encounter = encounterOf(rel.channels);
+      const folded = foldMaps(mapped, MAP_COL, { kind: 'scalar' }, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
     // THE PROJECTORS OVER A RECORD'S FIELDS, and they need nothing record-specific: a variable NAMES A

@@ -3,17 +3,17 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedOf, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
-import { elementObject } from './element.ts';
+import { elementNode, elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { transformExpr } from './transform.ts';
@@ -899,6 +899,43 @@ export function foldElements(
   };
 }
 
+/**
+ * `fold()` OVER A MAP STREAM — the third fold, collecting the per-row PAIRS ARRAY.
+ *
+ * `foldScalars`/`foldElements`' twin for the map shape: `project(k…).by(…).fold()`,
+ * `valueMap().fold()`, `group().by().by().fold()` — every GraphQL to-many object field at depth ≥ 2.
+ * The record collapses to a map first (`recordToMap`) so this side sees ONE column whatever produced
+ * it, and the difference from the scalar fold is one expression: a map member is the whole `[[key,
+ * valueNode], …]` pairs array, collected under `json()` so `json_group_array` keeps each member a
+ * nested JSON array rather than re-encoding it as a string — the SAME double-encoding trap `memberNode`
+ * documents, one shape up.
+ *
+ * `mapCol` is passed rather than imported to keep `list.ts` free of a `map.ts` cycle (map.ts imports
+ * `LIST_COL` from here); the caller supplies `MAP_COL`, which every map-framed relation carries.
+ *
+ * The member order is `foldScalars`' exactly — the columns the caller names, always the one encounter
+ * channel for a `fold()` (a COLLECTING consumer demands an encounter); with none the list keeps
+ * incidental order, which `analyzeChain` guarantees cannot matter for a fold.
+ */
+export function foldMaps(
+  input: Rel, mapCol: string, of: MapOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } {
+  const order: readonly SortTerm[] = opts.order?.length
+    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
+    : [{ expr: col(input.id, mapCol), dir: 'asc' as const }];
+  return {
+    rel: make.aggregate({
+      id: fresh('fm'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [],
+      // `json(mapCol)` for `memberNode`'s reason: the map column is JSONB and `json_group_array` would
+      // re-encode a raw JSONB member as a quoted STRING, so it crosses back to text first and rides in
+      // as a nested array.
+      aggs: [[LIST_COL, collectedArray(jsonOf(col(input.id, mapCol)), order)]],
+    }),
+    of: { kind: 'map', of },
+  };
+}
+
 /** The three storage-class-determined types: a member of one of these needs no envelope, because the
  *  wire would infer exactly that type from the value itself. */
 const LOSSLESS_VTYPES = ['string', 'double', 'int'] as const;
@@ -1331,12 +1368,15 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  * `elementObject` and NOT `elementNode` — a `{t,v}` envelope here would be a level the `of.kind === 'elem'`
  * framer does not unwrap, and `of` has already said every member is an element.
  */
-function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
+export function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
   // A MIXED list's members were expanded to `{t,v}` envelopes AT THE SITE (`collection.ts`
   // `envelopeSites`) — the one place elements-until-root cannot hold, because a mixed union shares one
   // member column and a bare rowid is indistinguishable from a scalar in it. So there is nothing to
   // expand at the root: the column already holds the wire tree, exactly as the scalar arm's does.
-  if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
+  // A MAP-membered list needs no root expansion for the same reason `scalar`/`mixed` do not: each member
+  // is already the self-describing pairs array the framer walks (`foldMaps` collected `json(MAP_COL)`),
+  // so the column holds the wire tree and there are no rowids to expand.
+  if (of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map') return jsonOf(list);
   if (of.kind === 'elem') {
     const rowids = membersOf(jsonOf(list), fresh);
     const expanded = make.aggregate({
@@ -1356,12 +1396,53 @@ function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
   const members = membersOf(jsonOf(list), fresh);
   const inner = listPayloadExpr(col(members.id, MEMBER.value), of.of, fresh);
   if (!inner) return null;
+  return rebuiltMembers(members, inner, fresh);
+}
+
+/** The ordered `json_group_array` of a per-member expression, COALESCEd to `[]` and re-`json()`ed so the
+ *  members' JSON subtype survives the enclosing aggregate. The shared tail of both list expanders. */
+function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
   const rebuilt = make.aggregate({
     id: fresh('lp'), input: members, channels: [], type: typeOf(meta('members', 'json', true)),
     groupBy: [],
-    aggs: [['members', { kind: 'agg', fn: 'json_group_array', args: [inner], orderBy: [memberOrder(members)] }]],
+    aggs: [['members', { kind: 'agg', fn: 'json_group_array', args: [member], orderBy: [memberOrder(members)] }]],
   });
   return jsonOf(coalesce({ kind: 'scalar', plan: rebuilt }, EMPTY_ARRAY));
+}
+
+/**
+ * A list's members as a SELF-DESCRIBING wire array — `listPayloadExpr`'s twin for the tree framer.
+ *
+ * The distinction is which framer reads the result, exactly the `elementNode`/`elementObject` split
+ * (`element.ts`): `listPayloadExpr` targets the top-level `listItemBuffers` framer, whose `elem` arm
+ * takes BARE `{id,label,props}` objects; this targets `frameTypedNode`, which walks a `{t,v}` tree and
+ * needs every member tagged. So a list nested inside a MAP or RECORD field value (`project('ks').by(
+ * __.out().fold())`, `group().by().by(__.out().fold())`) comes through here — its members are framed by
+ * the tree walker, not the top-level list arm.
+ *
+ * - a SCALAR list's members are already frameable by `frameTypedNode` (a bare value infers, a `{t,v}`
+ *   envelope self-describes), so it rides out as `json(list)` unchanged — the same shortcut
+ *   `listPayloadExpr` takes for the same reason;
+ * - a MAP list's members are self-describing pairs arrays; each becomes a `{t:'map', v:pairs}` node so
+ *   the tree walker reads a map rather than an untyped array;
+ * - an ELEMENT list's members are ROWIDS and expand to `elementNode` (the `{t,v}` form) — the one place
+ *   this genuinely differs from `listPayloadExpr`, which expands to the bare `elementObject`;
+ * - a NESTED list recurses under `listNode`, so a list of lists frames as `{t:'list', v:[{t:'list',…}]}`.
+ */
+export function listNodeExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
+  if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
+  if (of.kind === 'map') {
+    const members = membersOf(jsonOf(list), fresh);
+    return rebuiltMembers(members, mapNode(jsonOf(col(members.id, MEMBER.value))), fresh);
+  }
+  if (of.kind === 'elem') {
+    const members = membersOf(jsonOf(list), fresh);
+    return rebuiltMembers(members, jsonOf(elementNode(col(members.id, MEMBER.value), of.elem, fresh)), fresh);
+  }
+  if (of.kind !== 'list') return null;
+  const members = membersOf(jsonOf(list), fresh);
+  const inner = listNodeExpr(col(members.id, MEMBER.value), of.of, fresh);
+  return inner && rebuiltMembers(members, listNode(inner), fresh);
 }
 
 /** The list relation as WIRE ROWS: one `list` column per traverser, in emission order, plus the `Shape`
