@@ -1,7 +1,9 @@
 # Compiling at the edge — ship plans, not queries
 
-**A PLAN. §7's gate is now MET** — `WritePlan` is deleted (2026-08-15); `Executable` is `Compiled | Program`,
-both data. Phases 0/1 are unblocked and Phase 2 no longer waits on a write closure.
+**✅ COMPLETE (2026-08-15).** All phases (0, 1, 2a, 2b) and the §7 gate have landed and are green on
+real workerd. Compile — and, for a write, render; and, for a federation, the whole segment loop — now
+runs on the elastic Worker; the DO does only what needs its store. The one open item is §8's occupancy
+MILLISECONDS, a workerd-only measurement taken separately. Read on for the rationale and the design.
 
 **This is not a performance optimization.** It is a consequence of the one hard constraint the
 platform imposes; the numbers below are evidence the consequence is worth acting on, not the reason
@@ -307,13 +309,26 @@ occupancy MILLISECONDS remain the workerd-only measurement (§8).
 Required the Program-rendering refactor above (§3): a write is a `Program`, and a `Program` had to
 become plain rendered steps before it could cross the workerd RPC. Proven persisting on real workerd.
 
-**Phase 2b — the segment loop (Worker-driven federation).** The remaining piece. The Worker drives the
-federation segment loop (§4·2) via the Phase-0 `driveSegments` with a Worker-side `SegmentHost` whose
-`readHead` is a new DO RPC and whose barrier `apply` runs per the §4·3 residency: a `worker` barrier
-(federate) fans out to siblings from the Worker; a `do` barrier (io) stays DO-driven via the `framed`
-fallback. Threads `residency` onto `SegmentPlan` so the loop can decide. **Note the finding above: the
-final resumed plan must be rendered (a `Compiled`, or a rendered `Program`) to cross back — the
-foreign rows ride in its `json_each` binds, which are plain, so that part is already safe.**
+**Phase 2b — the segment loop (Worker-driven federation). ✅ LANDED (2026-08-15).** The Worker drives
+the federation segment loop (§4·2): `EdgeExecutor` compiles, peeks the segment's `residency`, and for a
+`worker` barrier (federate) drives via `driveSegmentsFrom` — `apply` fans out to siblings from the
+Worker (`EdgeExecutor.raw` → sibling DO), while the top DO runs only the brief `readHead` RPC + final
+`runFramed` and closes across the sibling waits. A `do` barrier (io) stays DO-driven via the `framed`
+fallback. **Clean because the loop is provably single-barrier** — `resume` returns `{kind:'sql'}` or
+throws, so residency is known at the one segment (no lazy discovery, no mixed-residency, no mid-loop
+handoff). All additive: `residency` (already computed in `resolve()`, was dropped at `barrierIn`)
+threaded onto `SegmentPlan`; `readHead` DO RPC; `RpcResult` → `RpcPayload` (+`BarrierInput[]`);
+`createCompileScope` gains an inert-at-compile `source`. Proven end to end on **real workerd across two
+DOs** (`test/contract.ts` `federationContract`, source + mid form), which is the only place a
+`readHead`/`BarrierInput[]` or foreign-row-bind clone fault would surface.
+
+---
+
+**Edge-compilation is COMPLETE.** Every phase (0, 1, 2a, 2b) and its gate (§7) has landed and is
+green on real workerd. The one thing not done in-repo is §8's OCCUPANCY MILLISECONDS — the numbers that
+quantify the freed DO time, which are workerd-only and un-instrumented. Everything testable here proves
+correctness and the structural payoff (the DO no longer compiles a shipped read/write, nor full-drives
+a worker-resident federation); the ms are a production/workerd measurement to be taken separately.
 
 ---
 
