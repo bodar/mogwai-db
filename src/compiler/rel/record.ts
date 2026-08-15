@@ -8,6 +8,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
+import { freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
@@ -328,14 +329,30 @@ function recordPairs(read: FieldRead, fields: readonly RecordField[], fresh: Min
 /** The record relation with its fields COLLAPSED into the one `map` column the map vocabulary reads —
  *  channels intact, because the caller still has to sort by the emission order. */
 export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Minter): Rel | null {
-  const value = recordPairs(readingRel(rel, ''), fields, fresh);
+  // FENCE the record relation when it is SELF-CONTAINED — the collapse below reads each field column
+  // through `jsonMember`'s `CASE`, which spells `v`/`vtype` ~6× per field, and the emitter INLINES a
+  // `Project`'s column definition at every reference. A field whose value is a `firstOf` subquery (a
+  // `by('name')` property read) therefore re-emitted its whole subquery ~6× — a single field grew to 16
+  // `vertex_properties` subqueries, compounding with depth (a depth-3 selection was 27 KB). `Materialize`
+  // computes each field column ONCE in a CTE, so the collapse references cheap CTE columns.
+  // ⚠️ Legal ONLY when the record relation has no FREE reference: a CORRELATED record (a nested
+  // `by(__.…project().fold())`) reads an outer row, and a fence hoists it to a CTE where that reference
+  // resolves to nothing or the wrong relation (`freeRelIds`' own contract, and `check` refuses a fence
+  // over a self-reference for the same reason). `freeRelIds` is the one authority for "is this
+  // self-contained", shared with `name`/`flatten`, so the gate cannot disagree with what the emitter will
+  // accept. Measured: `project('n').by('name')` 2570 → 1243 bytes; correlated folds stay unfenced and
+  // unchanged.
+  const base = freeRelIds(rel).size === 0
+    ? make.materialize({ id: fresh('rmf'), input: rel, channels: rel.channels, type: rel.type })
+    : rel;
+  const value = recordPairs(readingRel(base, ''), fields, fresh);
   return value && make.project({
-    id: fresh('rm'), input: rel, channels: rel.channels,
-    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(rel.channels)),
+    id: fresh('rm'), input: base, channels: base.channels,
+    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(base.channels)),
     // `jsonb()` for `mapOfGroups`' reason: the column is the relational JSONB form and `mapPayload`'s
     // `json()` is what turns it back into the text the framer parses.
     exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [value] }],
-      ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      ...base.channels.map((channel) => [channel.col, col(base.id, channel.col)] as const)],
   });
 }
 
@@ -346,6 +363,8 @@ export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Min
 export function recordPayload(
   rel: Rel, fields: readonly RecordField[], fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
+  // The fence that de-duplicates the field-column reads lives in `recordToMap` (gated on
+  // self-containment), so both the wire payload and the top-level fold get it.
   const mapped = recordToMap(rel, fields, fresh);
   return mapped && mapPayload(mapped, fresh);
 }

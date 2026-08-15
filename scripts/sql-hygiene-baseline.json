@@ -139,7 +139,7 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 5959,
+    "bytes": 6110,
     "compiler": 59,
     "bound": 0
   },
@@ -259,7 +259,7 @@
   },
   "identity": {
     "binds": 0,
-    "bytes": 4145,
+    "bytes": 2706,
     "compiler": 39,
     "bound": 0
   },
@@ -325,7 +325,7 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 6885,
+    "bytes": 2681,
     "compiler": 44,
     "bound": 0
   },
@@ -337,7 +337,7 @@
   },
   "match": {
     "binds": 0,
-    "bytes": 7635,
+    "bytes": 8069,
     "compiler": 97,
     "bound": 0
   },
@@ -439,7 +439,7 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 3397,
+    "bytes": 1641,
     "compiler": 42,
     "bound": 0
   },
@@ -493,7 +493,7 @@
   },
   "select": {
     "binds": 3,
-    "bytes": 11582,
+    "bytes": 5466,
     "compiler": 84,
     "bound": 2
   },
@@ -583,7 +583,7 @@
   },
   "where": {
     "binds": 0,
-    "bytes": 6528,
+    "bytes": 6883,
     "compiler": 83,
     "bound": 0
   }

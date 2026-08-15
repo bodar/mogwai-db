@@ -461,10 +461,20 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   field is only optional when its `by()` body can be UNPRODUCTIVE; a `fold()`/`count()` seeds and is
   always productive, so `byField` reads the seam's `present === ALWAYS_PRODUCTIVE` (moved to `child.ts`
   as the one shared object) and drops the guard. Measured: depth-2 6.2 KB → 3.3 KB, depth-3 27 KB → 8 KB,
-  and the `select`/`tail` hygiene baselines returned to their pre-feature bytes. 🚧 The residual
-  duplication is one level down — a `values(k)` `by()` read spells its correlated `vertex_properties`
-  subquery ~6× (presence, `t`/vtype, and the collection-value `CASE` branch each re-issue it); the fix is
-  the LEFT-JOIN-carrying-value+vtype the property `by()` comment already names, a separate increment.
+  and the `select`/`tail` hygiene baselines returned to their pre-feature bytes.
+  ⚠️ **The map COLLAPSE re-emits each field column too** — `jsonMember`'s `CASE` spells `v`/`vtype` ~6×
+  per field and the emitter INLINES a `Project` column's definition at every reference, so a field whose
+  value is a `firstOf` property subquery re-emitted the whole subquery ~6× (a single `project('n').by('name')`
+  → 16 `vertex_properties` subqueries). `recordToMap` now FENCES the record relation (`Materialize`) so each
+  field column is computed once in a CTE — but ONLY when `freeRelIds(rel).size === 0` (self-contained): a
+  CORRELATED record inside a `by(__.…fold())` reads an outer row and a fence would hoist it out of that
+  scope (`freeRelIds` is the shared authority `name`/`flatten` use, and `check` refuses a fence over a
+  self-reference for the same reason). Measured: `project('n').by('name')` 2570 → 1243 B, `select` family
+  −53 %, behaviour byte-identical (census answer-change gate clean). 🚧 What is LEFT: a CORRELATED inner
+  fold (`by(__.out().project().fold())` at depth ≥ 2) cannot be fenced, so its per-field property read still
+  duplicates; the fix there is the single-subquery `{t,v}` node (a `propertyValueNode` mirroring
+  `propertyNode`, value/vtype as columns of ONE correlated read) — the LEFT-JOIN direction the property
+  `by()` comment names, a separate increment.
 - **A `by()` body over a LIST host — LANDED for element members.** `select(Pop.all).by(__.unfold().values(k).fold())`
   and `.by(__.unfold().count())`: the traverser is a COLLECTION, so `ChildHost` grew a `list` variant
   (`child.ts`, carrying the list value + its `ListOf`) and `scalarChild` a `listHostChild` arm. `unfold()`
