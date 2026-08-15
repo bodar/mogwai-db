@@ -220,8 +220,24 @@ thing on the elastic side of the same line.
 
 So the path is `document → (Gremlin) → plan → DO`, with everything left of the DO in the Worker.
 
-### 5·2 Emission: a Gremlin string, or `Step[]` directly — OPEN
+### 5·2 Emission: a Gremlin string, or `Step[]` directly — ✅ DECIDED BY SPIKE: **a Gremlin string**
 
+**The spike found a fact argument could not: the direct-`Step[]` path is not wired end to end.**
+`compile()`/`compilePlan()` (`src/compiler/compiler.ts`) start from a STRING — `parseGremlin` then the
+`extractSack`/`extractSideEffects`/`extractStrategies` walkers ALL read the ANTLR parse tree, not
+`Step[]`. `gql.ts` emits `Step[]` only because a Pass SPLICES it into an already-parsed chain (it never
+calls `compile(Step[])`); a standalone translator emitting `Step[]` would have to reproduce those
+extract-walkers over IR — real, untested plumbing. So the string path is the plan's "tested door"
+argument made concrete: the translator emits Gremlin text and `compile()` carries it through the fully
+instrumented entry. The **hybrid still applies** for the type concern — the renderer IS the pipeline
+output (not a separate display layer), and a spike test confirmed `parseGremlin(render(steps))`
+round-trips, so grammar-legality holds by construction. The one residual cost (typed inline literals,
+`30` vs `30L`) is bounded: most values are variables (params map + `paramTypes`, typed either way), and
+the renderer controls the literal FORM for the inline minority. Measured: a depth-2 selection rendered
+to `g.V().hasLabel('person').project('name','friends').by(__.values('name')).by(__.out('knows')
+.project('name').by(__.values('name')).fold())` and ran to the correct nested result.
+
+Historical trade (kept for the record — the spike above supersedes it):
 Both translation and compilation now happen in the same Worker process, which retires the two
 arguments that used to settle this: nothing is serialized (so emitting IR is not "reinventing the
 bytecode TinkerPop 4 deleted" — a `Step[]` is an in-process object handed to `runPasses`), and the

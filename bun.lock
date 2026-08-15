@@ -8,6 +8,7 @@
         "@bodar/lazyrecords": "npm:@jsr/bodar__lazyrecords",
         "@bodar/yadic": "^0.495.349",
         "antlr4ng": "^3.0.16",
+        "graphql": "^16.11.0",
         "gremlin": "link:gremlin",
       },
       "devDependencies": {
@@ -15,6 +16,7 @@
         "@types/bun": "^1.3.14",
         "antlr-ng": "^1.0.10",
         "fast-check": "^4.9.0",
+        "graphql-http": "^1.22.4",
         "typescript": "^7.0.2",
         "wrangler": "^4.110.0",
       },
@@ -240,6 +242,10 @@
     "fast-printf": ["fast-printf@1.6.10", "", {}, "sha512-GwTgG9O4FVIdShhbVF3JxOgSBY2+ePGsu2V/UONgoCPzF9VY6ZdBMKsHKCYQHZwNk3qNouUolRDsgVxcVA5G1w=="],
 
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
+
+    "graphql": ["graphql@16.14.2", "", {}, "sha512-Chq1s4CY7jmh8gO2qvLIJyfCDIN+EHLFW/9iShnp1z8FjBQMoodWP1kDC36VAMXXIvAjj4ARa7ntfAV2BrjsbA=="],
+
+    "graphql-http": ["graphql-http@1.23.0", "", { "peerDependencies": { "graphql": ">=0.11 <=17" } }, "sha512-nQbRzoaqyNBVFG6X6r0mXC6S4X9eZOmmGz6t3l9H3MVKc2em3KeQAx+KhZKKFzj56ePDEncMOXeLu/hjO/4LQg=="],
 
     "gremlin": ["gremlin@link:gremlin", {}],
 
