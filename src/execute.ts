@@ -7,7 +7,7 @@ import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, t
 import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
-import { runProgram } from './program.ts';
+import { runSteps } from './program.ts';
 import { driveSegments, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
 
@@ -609,7 +609,7 @@ export function* frameResolved(store: GraphStore, plan: Executable): Generator<F
   // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
   // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
   // effects change WHERE the rows come from and nothing about how they are framed.
-  const rows = (plan.kind === 'program' ? runProgram(store, plan.program, plan.tail) : store.query(plan.sql, plan.binds)) as any[];
+  const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
   const shape = plan.shape;
   if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
   if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }

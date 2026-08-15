@@ -1,7 +1,7 @@
 import { q, type Query, type Relation } from './q.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
-import type { Plan as RelPlan } from '../../rel/plan.ts';
+import type { RenderedProgram } from '../../program.ts';
 
 // ---------- compile output contract ----------
 //
@@ -388,23 +388,21 @@ export interface Compiled {
 }
 
 /**
- * A compiled traversal WITH EFFECTS — RelIR's §3.0 program: an ordered list of bindings the executor
- * runs, statements and retained reads alike, ending in the rows to frame.
+ * A compiled traversal WITH EFFECTS — RelIR's §3.0 program, RENDERED to transport-safe steps: an
+ * ordered list the executor runs, statements and retained reads alike, ending in the rows to frame.
  *
  * It sits beside `Compiled` rather than inside it because the difference is real — a read is ONE
- * statement and this is several. It is DATA the algebra produced and one executor runs, not a machine
- * that walks the store; a write ships across an RPC exactly as a read does (see
- * `docs/2026-08-07-edge-compilation-plan.md`). It is what the deleted `WritePlan` closure was replaced by.
+ * statement and this is several. It carries the RENDERED steps (`RenderedProgram`), not the live
+ * `Plan`: the algebra holds a `recursive` `step` closure and `unique symbol` node brands, neither of
+ * which survives structured clone, so it could not cross an RPC — `emit` (run on the compiling edge)
+ * consumes all of it and leaves plain SQL + binds. That is exactly what lets a write "ship across an
+ * RPC exactly as a read does" (`docs/2026-08-07-edge-compilation-plan.md`) and is the write-side twin
+ * of `Compiled`. It replaces the deleted `WritePlan` closure.
  *
  * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
  */
-export interface Program {
+export interface Program extends RenderedProgram {
   kind: 'program';
-  program: RelPlan;
-  /** The FRAMING read, composed above RelIR and run last — absent when the traversal produces no
-   *  traverser at all (`drop()`), where the program's own last statement is the result. Its binds
-   *  may hold a `RowsBind` marker, which the executor fills with the rows it retained. */
-  tail?: { sql: string; binds: any[] };
   shape: Shape;
 }
 

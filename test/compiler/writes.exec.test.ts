@@ -6,9 +6,18 @@ import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { idAlreadyExists, run, seededStore, written } from '../support/harness.ts';
-import { emit } from '../../src/rel/emit.ts';
+import { isRowsBind } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
+import type { RunStep } from '../../src/program.ts';
+
+// A SNAPSHOT read on the rendered steps: a retained READ (not a mutation) whose rows a LATER step
+// references via a json_each RowsBind — the pre-mutation read a cascade/merge depends on. A mutation's
+// own RETURNING rows are also retained+referenced, so the non-mutation filter is what isolates the read.
+const snapshotReads = (steps: readonly RunStep[]): readonly RunStep[] => {
+  const referenced = new Set(steps.flatMap((step) => step.emitted.binds.filter(isRowsBind).map((bind) => bind.rowsOf)));
+  return steps.filter((step) => step.binding !== undefined && referenced.has(step.binding) && !/^\s*(INSERT|UPDATE|DELETE)/i.test(step.emitted.sql));
+};
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -67,17 +76,19 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
   const vertex = compile('g.V().has("name","marko").drop()', {});
   expect(vertex.kind).toBe('program');
   if (vertex.kind !== 'program') throw new Error('unreachable');
-  const snapshots = vertex.program.bindings.filter((binding) => binding.snapshot);
-  // Two: the matched vertices, and the edges incident to them.
-  expect(snapshots.length).toBe(2);
-  const steps = emit(vertex.program);
-  expect(steps.filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(8);
-  expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
+  // The snapshot property, asserted on the SHIPPED steps (the algebra no longer travels on a Program).
+  // A snapshot is a retained READ referenced by a LATER statement as ONE json_each RowsBind — so the
+  // cascade reads the pre-mutation ids rather than re-scanning a table an earlier delete already
+  // changed. Two here: the matched vertices, and the edges incident to them. (A mutation's own
+  // RETURNING rows are also retained+referenced, so filter those out — a snapshot is a read.)
+  expect(snapshotReads(vertex.steps).length).toBe(2);
+  expect(vertex.steps.filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(8);
+  expect(Math.max(...vertex.steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
 
   const edge = compile('g.E().drop()', {});
   if (edge.kind !== 'program') throw new Error('an edge drop() is a program too');
   // No cascade to an element: an edge takes only its own property rows and their FTS text.
-  expect(emit(edge.program).filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(3);
+  expect(edge.steps.filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(3);
 });
 
 // THE PROPERTY THE WHOLE WRITE WEDGE EXISTS FOR, asserted rather than described.
@@ -351,17 +362,17 @@ test('mergeV compiles to a RelIR program whose two branches are both uncondition
   const plan = compile('g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 33])', {});
   expect(plan.kind).toBe('program');
   if (plan.kind !== 'program') throw new Error('unreachable');
-  // ONE snapshot: the search. Nothing else here is read after being written.
-  expect(plan.program.bindings.filter((binding) => binding.snapshot).length).toBe(1);
-  const steps = emit(plan.program);
+  // ONE snapshot: the search, a retained READ referenced (as a json_each RowsBind) after the writes
+  // changed what it asked about. Asserted on the shipped steps, since the algebra no longer travels.
+  expect(snapshotReads(plan.steps).length).toBe(1);
   // Both branches emit, in one program, on every run: the create's INSERT INTO nodes and the onMatch
   // write's INSERT INTO vertex_properties are both there, and which of them writes a row is decided by
   // a predicate rather than by which statements were assembled.
-  expect(steps.some((step) => /INSERT INTO nodes/.test(step.emitted.sql))).toBe(true);
-  expect(steps.some((step) => /INSERT INTO vertex_properties/.test(step.emitted.sql))).toBe(true);
+  expect(plan.steps.some((step) => /INSERT INTO nodes/.test(step.emitted.sql))).toBe(true);
+  expect(plan.steps.some((step) => /INSERT INTO vertex_properties/.test(step.emitted.sql))).toBe(true);
   // Same platform budget every write program is held to — the search crosses as ONE JSON value (§6·2),
   // so no statement's bind count is a function of how many elements the search matched.
-  expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
+  expect(Math.max(...plan.steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
 });
 
 // A merge's statement count is a function of the PLAN, exactly as `property()`'s is above: the search

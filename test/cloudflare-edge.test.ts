@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test';
 import { CloudflareGraphManager } from '../src/cloudflare/cloudflare-graph-manager.ts';
 import type { GraphDatabase } from '../src/cloudflare/graph-store-do.ts';
-import { compilePlan, type Compiled } from '../src/compiler/compiler.ts';
+import { compilePlan, type Executable } from '../src/compiler/compiler.ts';
 import { createAppScope, createCompileScope } from '../src/scopes.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { frameResolved, type Framed } from '../src/execute.ts';
@@ -19,9 +19,9 @@ import { decodeAll } from './support/decode.ts';
 /** A fake DO stub over a real store: `runFramed` executes the shipped plan exactly as the DO would
  *  (via the shared `frameResolved`); `framed`/`raw` only RECORD that the fallback path was taken. */
 function fakeManager(store: GraphStore) {
-  const calls = { runFramed: 0, framed: 0, raw: 0, lastPlan: null as Compiled | null, lastGremlin: '' };
+  const calls = { runFramed: 0, framed: 0, raw: 0, lastPlan: null as Executable | null, lastGremlin: '' };
   const stub = {
-    runFramed: async (plan: Compiled): Promise<Framed[]> => {
+    runFramed: async (plan: Executable): Promise<Framed[]> => {
       calls.runFramed++; calls.lastPlan = plan;
       return [...frameResolved(store, plan)];
     },
@@ -46,17 +46,22 @@ describe('edge compilation — EdgeExecutor routing', () => {
     // The edge shipped exactly the plan a direct compile produces (same sql + binds + shape).
     const direct = compilePlan('g.V().has("name","marko").values("age")', {}, { app: createCompileScope(extendedRegistry) });
     expect(direct.kind).toBe('sql');
-    if (direct.kind === 'sql') expect(calls.lastPlan).toEqual(direct.compiled as Compiled);
+    if (direct.kind === 'sql') expect(calls.lastPlan).toEqual(direct.compiled as Executable);
     // …and the framed result is the real answer (marko is 29).
     expect(await decodeAll(out.map((f) => f.buf))).toEqual([29]);
   });
 
-  test('a WRITE (program) falls back to shipping the string', async () => {
+  test('a WRITE (program) is compiled + rendered at the edge and shipped to runFramed (Phase 2a)', async () => {
     const store = seededStore();
     const { mgr, calls } = fakeManager(store);
-    await mgr.executor('g').framedAsync('g.addV("person").property("name","x")', {});
-    expect(calls.runFramed).toBe(0);
-    expect(calls.framed).toBe(1);
+    const out = await mgr.executor('g').framedAsync('g.addV("person").property("name","zephyr")', {});
+    expect(calls.runFramed).toBe(1);       // the rendered write program shipped as data
+    expect(calls.framed).toBe(0);          // the DO did not compile
+    expect(calls.lastPlan?.kind).toBe('program');
+    expect(out.length).toBe(1);            // the added vertex frames back
+    // …and it PERSISTED in the DO's store — a follow-up read (also edge-compiled) counts it.
+    const check = await mgr.executor('g').framedAsync('g.V().has("name","zephyr").count()', {});
+    expect(await decodeAll(check.map((f) => f.buf))).toEqual([1]);
   });
 
   test('a FEDERATED call (segment) falls back to shipping the string', async () => {

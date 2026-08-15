@@ -1,6 +1,7 @@
 import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
+import { renderProgram } from '../../program.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
@@ -160,12 +161,13 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
 
   // A DISCARD leaves through its own door, and the reason is that there is nothing to read: `drop()`'s
   // result relation is a statement with an empty `RETURNING`, so the whole traversal IS its effects.
-  // What travels is the `Plan` itself — the executor runs it (`runProgram`), and the retained-rows
-  // transport §6·2 requires rides with it rather than being re-derived at the edge.
+  // What travels is the RENDERED program (`renderProgram`) — plain steps the DO runs (`runSteps`), not
+  // the live `Plan`, whose `recursive` closure and symbol-branded nodes cannot cross an RPC. The
+  // retained-rows transport §6·2 requires rides in those steps' binds rather than being re-derived.
   const isDiscard = lowered.shape.kind === 'discard';
   if (isDiscard || !relational) {
     if (!isDiscard || relational) throw new Error('RelIR spine: a discard shape and a relational result disagree about whether this program yields traversers');
-    return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' } };
+    return { kind: 'program', ...renderProgram(lowered.plan), shape: { kind: 'discard' } };
   }
 
   const { sql, binds } = render(relational);
@@ -194,6 +196,6 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
   // does rather than a write-shaped copy, which is the property §6·3 had to preserve while moving where
   // that projection is built.
   return effects.length
-    ? { kind: 'program', program: lowered.plan, tail: { sql, binds }, shape: lowered.shape }
+    ? { kind: 'program', ...renderProgram(lowered.plan, { sql, binds }), shape: lowered.shape }
     : { kind: 'read', sql, binds, shape: lowered.shape };
 }

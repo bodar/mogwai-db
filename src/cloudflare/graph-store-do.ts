@@ -4,7 +4,7 @@ import { GraphStore } from '../storage.ts';
 import { graphInfo } from '../manager.ts';
 import type { GraphInfo, Executor, ForeignRow } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, type Framed } from '../execute.ts';
-import type { Compiled } from '../compiler/compiler.ts';
+import type { Executable } from '../compiler/compiler.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
@@ -74,17 +74,18 @@ export class GraphDatabase extends DurableObject<Env> {
     return rpcTry(() => this.executor().framedAsync(gremlin, params, paramTypes));
   }
 
-  /** Data-plane RPC: run + FRAME an ALREADY-COMPILED read plan (edge-compilation Phase 1). The edge
-   *  Worker compiled it — compile is a pure function that touches no store — so the DO does only what
-   *  needs the store: execute + frame, through the SAME `frameResolved` the string path uses, so the
-   *  wire result is byte-identical. No parse, no compile, no registry, no executor. The edge ships
-   *  ONLY a non-segment read here; writes/federation still take `framed(gremlin)`.
+  /** Data-plane RPC: run + FRAME an ALREADY-COMPILED plan — a `read` Compiled or a `program` write,
+   *  both plain rendered DATA (edge-compilation Phase 1 + 2a). The edge Worker compiled AND rendered it
+   *  — compile is pure and touches no store — so the DO does only what needs the store: execute + frame,
+   *  through the SAME `frameResolved` the string path uses, so the wire result is byte-identical. No
+   *  parse, no compile, no emit, no registry, no executor. The edge ships any NON-segment plan here; a
+   *  segment (federation) still takes `framed(gremlin)` until Phase 2b.
    *
    *  SECURITY (edge-compilation §5): unlike `framed(gremlin)`, which runs only what the compiler
-   *  produces from a Gremlin string, this runs raw SQL + binds the CALLER supplies — a wider surface.
-   *  Same trust domain today (only the paired Worker holds this DO binding); it would be a real
-   *  widening the moment anything else can reach this stub. */
-  async runFramed(plan: Compiled): Promise<RpcResult<Framed[]>> {
+   *  produces from a Gremlin string, this runs raw SQL + binds the CALLER supplies — a wider surface,
+   *  and for a write it is a caller-supplied MUTATION. Same trust domain today (only the paired Worker
+   *  holds this DO binding); it would be a real widening the moment anything else can reach this stub. */
+  async runFramed(plan: Executable): Promise<RpcResult<Framed[]>> {
     return rpcTry(async () => {
       this.ensureLive();
       return [...frameResolved(this.store, plan)];
