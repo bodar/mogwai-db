@@ -9,7 +9,7 @@ import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX 
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonMember, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
@@ -884,7 +884,9 @@ export function foldScalars(
       whens: [[col(flagged.id, LOSSY_COL), typedNode(value, col(flagged.id, vtypeCol!))]],
       else: value,
     } as Expr
-    : staticTag ? jsonMember(value, compilerText(staticTag)) : value;
+    // A STATIC tag gates `jsonMember` at compile time; an UNKNOWN one (an inject literal, an untyped
+    // stream) has no tag, so it infers from `typeof(value)` — safe because the member IS a column.
+    : staticTag ? jsonMember(value, compilerText(staticTag)) : jsonMemberByTypeof(value);
   // The CARRIER moves; the type does not. A column-carried per-row type becomes envelope-carried
   // because a member has no column of its own; `static`/`unknown` cross unchanged, `text` flag and
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.

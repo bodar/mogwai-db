@@ -46,6 +46,15 @@ describe('a binary64 survives the JSON blob (§12 real precision)', () => {
     expect(list[0]).toBe(1 / 3);
   });
 
+  test('an injected real literal keeps full precision — scalar and list', () => {
+    // An inject value's declared type is UNKNOWN (a bare decimal), so the fold member / list item is
+    // repaired by `typeof` (jsonMemberByTypeof) — a scalar through foldScalars, a list item at injectList.
+    const scalar = JSON.parse((run(seededStore(), 'g.inject(0.3333333333333333).fold()') as { list: string }[])[0]!.list) as number[];
+    expect(scalar[0]).toBe(0.3333333333333333);
+    const list = JSON.parse((run(seededStore(), 'g.inject([0.3333333333333333]).unfold().fold()') as { list: string }[])[0]!.list) as number[];
+    expect(list[0]).toBe(0.3333333333333333);
+  });
+
   test('a computed real as a MAP VALUE carries its static tag AND full precision', () => {
     // group().by(k).by(__.…math()) — a child scalar with a STATIC double type. byNode used to drop the
     // tag (t:null) so a whole result inferred Int and the value lost precision; now it tags 'double'.

@@ -32,7 +32,7 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES,
-    keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
+    jsonMemberByTypeof, keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -3109,8 +3109,13 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
     // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
     // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
     const members = listArg.members;
-    const items = values.map((value, mi) =>
-      constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi))));
+    const items = values.map((value, mi) => {
+      const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
+      // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
+      // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
+      // the repair. `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
+      return item && typeof value === 'number' && !Number.isInteger(value) ? jsonMemberByTypeof(item) : item;
+    });
     return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
   });
   if (rows.some((row) => !row)) return null;

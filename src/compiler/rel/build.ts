@@ -458,6 +458,23 @@ export const jsonMember = (value: Expr, vtype: Expr): Expr => {
 };
 
 /**
+ * `jsonMember` for a value whose type is UNKNOWN at compile time but whose expression is a materialized
+ * COLUMN — an inject literal, an untyped fold member. There is no tag to gate on, so it gates on
+ * `typeof(value)` instead, which is safe ONLY because a column is not the spliced subquery §12 trap 2
+ * warns about. A run-time `real` or wide `integer` is still made lossless; everything else passes
+ * through. The caller asserts the column-ness by choosing this over `jsonMember`.
+ */
+export const jsonMemberByTypeof = (value: Expr): Expr => {
+  const typeofEq = (storageClass: string): Expr =>
+    ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
+  return {
+    kind: 'case',
+    whens: [[typeofEq('real'), asExactReal(value)], [typeofEq('integer'), asExactWideInt(value)]],
+    else: value,
+  };
+};
+
+/**
  * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <lossless value>)`.
  *
  * The `{t,v}` encoding, expressed in the algebra's own vocabulary because it is EMISSION rather than
