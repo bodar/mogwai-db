@@ -460,19 +460,18 @@ export const jsonMember = (value: Expr, vtype: Expr): Expr => {
 /**
  * `jsonMember` for a value whose type is UNKNOWN at compile time but whose expression is a materialized
  * COLUMN — an inject literal, an untyped fold member. There is no tag to gate on, so it gates on
- * `typeof(value)` instead, which is safe ONLY because a column is not the spliced subquery §12 trap 2
- * warns about. A run-time `real` or wide `integer` is still made lossless; everything else passes
- * through. The caller asserts the column-ness by choosing this over `jsonMember`.
+ * `typeof(value)`, which is safe ONLY because a column is not the spliced subquery §12 trap 2 warns
+ * about. It repairs a run-time REAL only — a 17-digit JSON NUMBER the reader infers back as a Double,
+ * needing no tag. A wide INTEGER is deliberately NOT touched here: its exact form is decimal TEXT,
+ * which a reader can only tell from a String by a `long`/`bigint` TAG, and this arm has none — so a
+ * wide integer that arrived UNTYPED stays a bare number (type-correct, magnitude-inferred; the tagged
+ * `jsonMember` path is where a wide integer rides as TEXT). Everything else passes through.
  */
-export const jsonMemberByTypeof = (value: Expr): Expr => {
-  const typeofEq = (storageClass: string): Expr =>
-    ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
-  return {
-    kind: 'case',
-    whens: [[typeofEq('real'), asExactReal(value)], [typeofEq('integer'), asExactWideInt(value)]],
-    else: value,
-  };
-};
+export const jsonMemberByTypeof = (value: Expr): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, asExactReal(value)]],
+  else: value,
+});
 
 /**
  * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <lossless value>)`.
