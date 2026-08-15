@@ -219,12 +219,15 @@ adjacency), while io-read is a **permanent mutation** (`loadGraphson` writes the
 *future* federate that imports part of a graph is the transient version of what io-read does
 permanently — a distinct operation on the same landing machinery, not a collapse of the two.
 
-### 4·4 The enabling refactor
+### 4·4 The enabling refactor — LANDED (Phase 0, 2026-08-15)
 
-`drive()` is a private method closing over `this.store` and `this.app`. Make it a free function over
-an interface — read-head / apply / resume, with store access injected — so the same loop runs
-in-process on Bun (no boundary, none of this matters) and Worker-side on Cloudflare, unchanged. Worth
-doing while `call()` is mid-migration onto the `rel` arm, not retrofitting afterwards.
+`drive()` was a private `Executor` method closing over `this.store` and `this.app`. It is now
+`driveSegments` (`src/drive.ts`) — a free function over an injected `SegmentHost` (`compile` +
+`readHead`), so the same loop runs in-process on Bun (readHead a sync `store.query`) and, in Phase 2,
+Worker-side on Cloudflare (readHead an RPC to the DO) with no second copy. `readHead` returns
+Promise-or-value so the Worker host is async without touching the loop. `Executor` supplies the
+in-process host and delegates. Pure refactor; the loop's semantics are pinned in isolation by
+`test/drive.test.ts`.
 
 ---
 
@@ -273,16 +276,18 @@ The RelIR write path that made this possible landed via `docs/2026-08-01-write-p
 
 ### Phases
 
-**Phase 0 — the refactor safe today.** Lift `drive()` out of `Executor` into a free function over an
-injected store interface (§4·4). Pure refactor, no behaviour change, testable in-process; stops the
-segment loop's ownership from setting further while `call()` migrates.
+**Phase 0 — the refactor safe today. ✅ LANDED (2026-08-15).** `drive()` is now `driveSegments`
+(`src/drive.ts`), a free function over an injected `SegmentHost` (§4·4). Pure refactor, no behaviour
+change, pinned in isolation by `test/drive.test.ts`. The segment loop's ownership no longer belongs to
+the store tier. (§4·3's residency field landed alongside — `barrier` declares `'do' | 'worker'`.)
 
 **Phase 1 — the plan RPC (reads).** A DO method taking a `Compiled`, returning rows or framed
 buffers. Edge compiles, branches on `plan.kind` (§4·1), falls back otherwise. Measurable end to end
 against the §2·2 numbers.
 
-**Phase 2 — writes and the segment loop.** Gated on §7. `Program` over the same RPC; the Worker
-drives federation (§4·2); the service split gets named (§4·3).
+**Phase 2 — writes and the segment loop.** Gated on §7 (now MET). `Program` over the same RPC; the
+Worker drives federation (§4·2) — supplying a Worker-side `SegmentHost` whose `readHead` is an RPC to
+the DO; the residency field (§4·3) tells it which barriers may leave.
 
 ---
 
