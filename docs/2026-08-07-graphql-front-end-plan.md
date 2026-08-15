@@ -398,7 +398,12 @@ by size:
 1. **`ListOf` gains a `map` arm — ✅ LANDED** (`src/sql/kernel/render.ts`) — §2·2. The vocabulary gap at
    the render boundary; it unblocked everything after it and nothing unblocked it. Shipped WITH its
    producers (`fold()` on the record/map tails, `foldMaps`) and its nested-field caller
-   (`listNodeExpr`), so a list of maps is producible, framable, and composes to depth-2 selections.
+   (`listNodeExpr`), so a list of maps is producible, framable, and composes to **depth-3 selections
+   and beyond** (measured: `person { name, created { name, creators { name } } }` — nesting is
+   structural, `fieldNode`/`listNodeExpr`/`frameTypedNode` all recurse). `unfold()` closes the round
+   trip, and a `by()` body over a list host (`select(Pop.all).by(__.unfold().values(k).fold())`) landed
+   for element members — see the RelIR §10 "list whose members are MAPS" and "a `by()` body over a LIST
+   host" bullets.
 2. **The property shape** — `valueMap` / `elementMap` (51). The smallest family that is pure
    projection, and every GraphQL leaf object depends on it.
 3. **Row ops inside a child scope** — `order` / `dedup` / `range` / `limit` (30). GraphQL's per-level

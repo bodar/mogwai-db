@@ -771,6 +771,46 @@ export function unfoldList(
 }
 
 /**
+ * A list VALUE's members as a CORRELATED relation, re-entering the member vocabulary — the seed a
+ * `by()` body over a list host (`select(Pop.all).by(__.unfold()…)`) opens with.
+ *
+ * `unfold()` over a list traverser is a relation-level explode (`unfoldList`); `unfold()` inside a
+ * `by()` is the SAME explode CORRELATED to one host's list value — no `input`, exactly as `membersOf`
+ * is correlated. An ELEMENT-membered list re-enters the element loop (the members are rowids, `unfoldList`'s
+ * own round-trip rule), so the rest of the body is the ordinary correlated element body; a bare-scalar
+ * list re-enters the scalar loop. Other member shapes (`typed`/`mixed`/`map`/nested `list`) decline
+ * here — their correlated re-entry is its own increment.
+ *
+ * Returns the correlated member relation plus what it framed, so the caller routes the tail to the
+ * matching loop exactly as `unfoldList`'s caller does.
+ */
+export function correlatedListMembers(
+  list: Expr, of: ListOf, fresh: Minter,
+): { readonly rel: Rel; readonly elem: Elem } | { readonly rel: Rel; readonly scalar: ScalarType } | null {
+  const exploded = membersOf(jsonOf(list), fresh);
+  if (of.kind === 'elem') {
+    return {
+      rel: make.project({
+        id: fresh('cue'), input: exploded, channels: [], type: typeOf(meta('id', 'int')),
+        // The same rowid CAST the relation-level element unfold states, for the same reason.
+        exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }]],
+      }),
+      elem: of.elem,
+    };
+  }
+  if (isBareList(of)) {
+    return {
+      rel: make.project({
+        id: fresh('cuv'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
+        exprs: [['v', memberPayload(of, exploded)]],
+      }),
+      scalar: memberTypeOf(of) ?? UNKNOWN,
+    };
+  }
+  return null;
+}
+
+/**
  * `fold()` — the SCALAR stream's barrier into one list traverser, and the other half of the
  * `jsonbList` arm (109 of the family's remaining blockers all stop here).
  *

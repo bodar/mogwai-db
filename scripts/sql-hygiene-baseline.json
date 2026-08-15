@@ -439,7 +439,7 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 3719,
+    "bytes": 3397,
     "compiler": 42,
     "bound": 0
   },
@@ -494,7 +494,7 @@
   "select": {
     "binds": 3,
     "bytes": 11582,
-    "compiler": 78,
+    "compiler": 84,
     "bound": 2
   },
   "skip": {
@@ -518,7 +518,7 @@
   "tail": {
     "binds": 0,
     "bytes": 2494,
-    "compiler": 16,
+    "compiler": 33,
     "bound": 0
   },
   "to": {

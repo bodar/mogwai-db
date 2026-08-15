@@ -510,7 +510,11 @@ export function selectKeys(
  */
 function selectedHost(read: AliasRead, payload: ReadonlyMap<string, Expr>, rel: Rel, aliases: AliasMap): ChildHost | null {
   if (read.kind === 'element') return { kind: 'element', id: payload.get('id')!, elem: read.elem, row: { rel, aliases } };
-  if (read.kind === 'list') return null;
+  // A LIST label (a `Pop.all` history, a `fold()`-bound alias) becomes a LIST host: the body iterates
+  // the collection (`select(Pop.all).by(__.unfold()…)`), which the child arm lowers correlated to this
+  // list value. A bare `by()` over one still reads the host framing (identity); only a body that
+  // consumes the list needs this host to exist.
+  if (read.kind === 'list') return { kind: 'list', list: payload.get('list')!, of: read.of, row: { rel, aliases } };
   const vtype = payload.get('vtype');
   return { kind: 'scalar', value: payload.get('v')!, row: { rel, aliases }, ...(vtype ? { vtype } : {}) };
 }

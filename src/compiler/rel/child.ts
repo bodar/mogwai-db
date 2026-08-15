@@ -1,4 +1,4 @@
-import type { Expr } from '../../rel/expr.ts';
+import { compilerInt, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -6,6 +6,7 @@ import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
+import type { ListOf } from '../../sql/kernel/render.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -184,6 +185,14 @@ export interface ChildValue {
   readonly present?: Expr;
 }
 
+/** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where
+ *  the answer is "always", since its absence means "cannot say" and the two must stay distinguishable.
+ *  A constant true; SQLite folds it and the emitter never sees a branch on it. It lives HERE, beside the
+ *  `present` field it fills, so every producer (`lower.ts`) and every consumer (`modulator.ts`'s
+ *  `optional` decision) reads the SAME object — the productivity test is a reference-equality check, and
+ *  a second copy would silently answer "cannot say" where one meant "always". */
+export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
+
 /**
  * WHICH normalization a nested argument gets, and the two are not interchangeable.
  *
@@ -216,7 +225,14 @@ export type ChildHost =
    *  the side effects and the path labels, so `by(__.select('b'))` over a `project('a','b')` names the
    *  FIELD and not a same-named `as()` label. The fields ride on the host rather than on `HostRow`
    *  because they are what the traverser IS, not state carried beside it. */
-  | { readonly kind: 'record'; readonly fields: readonly RecordField[]; readonly row?: HostRow };
+  | { readonly kind: 'record'; readonly fields: readonly RecordField[]; readonly row?: HostRow }
+  /** A LIST traverser — a collection VALUE the body iterates. `select(Pop.all).by(__.unfold()…)`,
+   *  `project('ks').by(__.select('a').unfold()…)`: the traverser IS a list, and a `by()` over it opens
+   *  with a step that consumes the collection (`unfold()`, `count(Scope.local)`). `list` is the value
+   *  expression (a JSONB array) and `of` its member encoding, exactly the pair the `list` framing carries
+   *  — so the child body re-enters the list vocabulary correlated to this one host, the same way the
+   *  element host re-enters the element loop. */
+  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf; readonly row?: HostRow };
 
 /**
  * THE ROW the host traverser rides on — its relation and the labels bound on it.

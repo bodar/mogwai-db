@@ -38,12 +38,12 @@ import {
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
-import type { ChainRead, ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, type ChainRead, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
@@ -166,10 +166,6 @@ type Tail = ChainRead & {
  */
 const inBody = (ctx: ChainCtx): ChainCtx => (ctx.collapse ? { ...ctx, collapse: false } : ctx);
 
-/** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where
- *  the answer is "always", since its absence means "cannot say" and the two must stay distinguishable.
- *  A constant true; SQLite folds it and the emitter never sees a branch on it. */
-const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
 
 /** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
 const NO_ALIASES: AliasMap = new Map();
@@ -6101,6 +6097,11 @@ function hostSelf(host: ChildHost): { readonly framing: RelFraming; readonly col
     const row = host.row;
     return row ? { framing: { kind: 'record', fields: host.fields }, col: (name) => col(row.rel.id, name) } : null;
   }
+  // A LIST host's identity `by()` is the whole collection — the `list` framing over the host's own list
+  // value, so `project('ks').by()` where the traverser is a list projects it unchanged, exactly as the
+  // element/scalar identity arms project theirs.
+  if (host.kind === 'list')
+    return { framing: { kind: 'list', of: host.of }, col: (name) => (name === LIST_COL ? host.list : compilerNull()) };
   return { framing: { kind: 'property', ownerElem: host.ownerElem }, col: () => compilerNull() };
 }
 
@@ -6293,6 +6294,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
   // way round — the guard exists because an element is not a value, and here there is one.
   if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), fresh);
+  if (host.kind === 'list') return listHostChild(body, host, ctx, fresh);
   if (host.kind !== 'element') return null;
 
   // A REDUCER OVER A CORRELATED BODY, rooted TWO ways through ONE engine (`correlatedReduce`): a
@@ -6516,6 +6518,33 @@ function scalarHostChild(
   // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
   // replaces it and every transform maps it, neither of which can produce a second.
   return valueRun(body, at, { value, type, vtype, yields: 'one' }, host.row, child, fresh);
+}
+
+/**
+ * A `by()` BODY over a LIST host — `select(Pop.all).by(__.unfold().values('name').fold())`.
+ *
+ * The traverser is a collection, so a body over it opens by CONSUMING the collection. `unfold()` is the
+ * one such opener: it explodes the host's list value into a correlated member relation
+ * (`correlatedListMembers`, `list.ts`), and the rest of the body is then the ordinary correlated body
+ * over those members — an ELEMENT-membered list re-enters `correlatedReduce` (the exact engine
+ * `by(__.out().values('name').fold())` already uses, rooted at the members instead of an adjacency), so
+ * `values('name').fold()` / a trailing reducer compose for free and the empty-list seed rule
+ * (`[]`/no-emit) is the one `correlatedReduce` already states.
+ *
+ * `count(Scope.local)` over the list is the map-size shape and belongs to `mapTail`/`listTail`, not
+ * here; other openers and non-element members decline (fail closed) — their correlated re-entry is a
+ * later increment.
+ */
+function listHostChild(
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'list' }>, ctx: ChainCtx, fresh: Minter,
+): ChildValue | null {
+  const first = body[0];
+  if (!first || first.name !== 'unfold' || argValues(first).length || body.length < 2) return null;
+  const members = correlatedListMembers(host.list, host.of, fresh);
+  if (!members || !('elem' in members)) return null; // element members only, for now
+  // The body after `unfold()` is the ordinary correlated body over the exploded elements — the SAME
+  // engine an adjacency-rooted `by()` reducer uses, so a trailing `values(k).fold()` / reducer is free.
+  return correlatedReduce(members.rel, members.elem, body, 1, ctx, fresh);
 }
 
 function addedVertices(

@@ -455,6 +455,27 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   `Scope.local`) fail closed pending their own arms (`count(local)` is shape-agnostic and works); and
   `group().by(k).by(__.out().values().fold())` — a scalar-fold in the GROUP VALUE position — is a separate
   pre-existing gap in the group-value `by()`.
+  ⚠️ **A record field's PRESENCE guard re-emits the field's whole value expression** (`recordPairs`'s
+  `CASE WHEN <value> IS NOT NULL THEN json_insert(…, <value>)`), so an OPTIONAL nested field spells its
+  entire correlated subquery TWICE — and it COMPOUNDS with nesting (a depth-3 selection was 27 KB). A
+  field is only optional when its `by()` body can be UNPRODUCTIVE; a `fold()`/`count()` seeds and is
+  always productive, so `byField` reads the seam's `present === ALWAYS_PRODUCTIVE` (moved to `child.ts`
+  as the one shared object) and drops the guard. Measured: depth-2 6.2 KB → 3.3 KB, depth-3 27 KB → 8 KB,
+  and the `select`/`tail` hygiene baselines returned to their pre-feature bytes. 🚧 The residual
+  duplication is one level down — a `values(k)` `by()` read spells its correlated `vertex_properties`
+  subquery ~6× (presence, `t`/vtype, and the collection-value `CASE` branch each re-issue it); the fix is
+  the LEFT-JOIN-carrying-value+vtype the property `by()` comment already names, a separate increment.
+- **A `by()` body over a LIST host — LANDED for element members.** `select(Pop.all).by(__.unfold().values(k).fold())`
+  and `.by(__.unfold().count())`: the traverser is a COLLECTION, so `ChildHost` grew a `list` variant
+  (`child.ts`, carrying the list value + its `ListOf`) and `scalarChild` a `listHostChild` arm. `unfold()`
+  is the opener that CONSUMES the collection — `correlatedListMembers` (`list.ts`) explodes the host's
+  list value into a CORRELATED member relation (no `input`, exactly as `membersOf` is), and an element
+  list then re-enters `correlatedReduce` — the SAME engine an adjacency-rooted `by(__.out().values(k).fold())`
+  uses, rooted at the members instead of a hop, so the trailing `values(k).fold()` / reducer and the
+  empty-list seed rule are free. `hostSelf` gained the list identity arm (a bare `by()` over a list
+  selection projects the collection). 🚧 What is LEFT: SCALAR/`typed`/`mixed`/nested-list and MAP members
+  decline (fail closed) — their correlated re-entry is a later increment; and `select()` inside a list-host
+  body (`by(__.select('a').unfold()…)`) is the other opener, not yet built.
 - **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
   now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
   the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the

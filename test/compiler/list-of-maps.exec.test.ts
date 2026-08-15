@@ -78,6 +78,15 @@ describe('a nested selection — a list of maps as a project() FIELD', () => {
     expect(r).toEqual([{ name: 'marko', known: ['josh', 'vadas'] }]);
   });
 
+  test('an EMPTY fold field keeps its key with [] — the fold is always productive', async () => {
+    // vadas knows nobody. A `fold()` seeds `[]`, so the field is never absent: the key stays with an
+    // empty list, NOT dropped. This is also why the field carries no presence guard (which would
+    // otherwise re-emit the whole value subquery — the depth-3 duplication fix).
+    const r = await decoded(
+      "g.V().has('name','vadas').project('name','knows').by('name').by(__.out('knows').values('name').fold())");
+    expect(r).toEqual([{ name: 'vadas', knows: [] }]);
+  });
+
   test('an ELEMENT-fold field frames its members as vertices, not untyped objects', async () => {
     // The `elementNode`/`elementObject` distinction: nested in a map value, a folded element list must
     // ride as `{t:'vertex',…}` so the tree framer decodes real Vertices.
@@ -114,5 +123,27 @@ describe('unfold() over a list of maps — the round trip', () => {
       .toEqual([['marko'], ['vadas'], ['josh'], ['peter']]);
     // A group's {t,v}-key select, untouched by the tolerant match.
     expect(await decoded("g.V().hasLabel('person').groupCount().by('name').select('marko')")).toEqual([1]);
+  });
+});
+
+describe('a by() body over a LIST host — the list ChildHost', () => {
+  test('select(Pop.all).by(__.unfold().values(k).fold()) — the collection re-entry', async () => {
+    // Each 'a' position holds the WHOLE history (a list of elements); the by() body unfolds it and
+    // re-collects the names, so every result is one list per traverser.
+    const r = await decoded("g.V().as('a').out().as('a').out().as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
+    // Two length-3 paths from marko: [marko,josh,lop] and [marko,josh,ripple], names sorted per list.
+    expect(r).toEqual([['josh', 'lop', 'marko'], ['josh', 'marko', 'ripple']]);
+  });
+
+  test('select(Pop.all).by(__.unfold().count()) counts the collection', async () => {
+    const r = await decoded("g.V().as('a').out().as('a').out().as('a').select(Pop.all,'a').by(__.unfold().count())");
+    expect(r).toEqual([3, 3]);
+  });
+
+  test('the Pop.all history accumulates per traverser, and the by() body reduces each', async () => {
+    // marko is bound to 'a', then each knows-target appends: history [marko,vadas] and [marko,josh].
+    // Two traversers, each unfolded and its names re-collected (sorted per list).
+    const r = await decoded("g.V().has('name','marko').as('a').out('knows').as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
+    expect(r).toEqual([['marko', 'vadas'], ['josh', 'marko']]);
   });
 });

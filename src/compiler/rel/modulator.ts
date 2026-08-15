@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import type { ChildHost, ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, EDGE_COLS, firstOf, mapNode, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
@@ -238,6 +238,11 @@ export function byExpr(
   // declines rather than picking a field.
   if (host.kind === 'record') return null;
 
+  // A LIST host has no `byExpr` projection either: a bare `by()` over a collection is the whole list
+  // (the identity arm reads it off the host framing), and a `by(key)`/`by(token)` over a collection has
+  // no value to read — the by()-over-a-list vocabulary is `unfold()` in the CHILD arm, not this one.
+  if (host.kind === 'list') return null;
+
   if (host.kind === 'property') {
     // `T.key` / `T.value` — a property's OWN two tokens, read off the stored row through the one
     // authority for that row's columns (`propertyReadOf`, `property.ts`), so a key read here and a
@@ -471,6 +476,10 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
   // over one declines here.
   if (host.kind === 'record') return null;
 
+  // A LIST as a map-value node is the FIELD vocabulary's business too (`fieldNode`'s list arm, reached
+  // through `byField`'s child path); this non-field node projection over a collection declines.
+  if (host.kind === 'list') return null;
+
   if (host.kind === 'property') {
     // A bare `by()` over a PROPERTY projects the VertexProperty itself, and unlike the element case
     // below it is answered rather than declined: the element arm declines because `groupBarrier` has a
@@ -616,7 +625,14 @@ export function byField(
       if (!produced.vtype) return null;
       exprs.push([column.name, produced.vtype]);
     }
-    return { exprs, framing: produced.framing, optional: droppable() };
+    // A body the seam PROVES always-productive (a `fold()` seeds `[]`, a `count()` seeds 0) is never
+    // absent, so the field carries NO presence guard — which matters for more than tidiness: `presence`
+    // re-emits the field's whole value expression inside a `CASE WHEN … IS NOT NULL`, so a nested
+    // `by(__.…fold())` would spell its entire correlated subquery TWICE. `ALWAYS_PRODUCTIVE` is the same
+    // shared object the seam fills `present` with, so this is the reference-equality test every other
+    // productivity consumer uses.
+    const alwaysProductive = produced.present === ALWAYS_PRODUCTIVE;
+    return { exprs, framing: produced.framing, optional: droppable() && !alwaysProductive };
   }
 
   if (host.kind === 'record') return null;
@@ -643,10 +659,11 @@ export function byField(
     };
   }
 
-  // A SCALAR and a PROPERTY host both stop here for the same reason: what is left below is the ELEMENT
-  // vocabulary (a stored property of the traverser), and neither traverser has one. A property's own
-  // three projections are STEPS and reached through the child arm above.
-  if (host.kind === 'scalar' || host.kind === 'property') return null;
+  // A SCALAR, PROPERTY and LIST host all stop here for the same reason: what is left below is the
+  // ELEMENT vocabulary (a stored property of the traverser), and none of the three has one. A property's
+  // own three projections are STEPS reached through the child arm above; a list's `by(key)` is likewise
+  // not a stored-property read.
+  if (host.kind === 'scalar' || host.kind === 'property' || host.kind === 'list') return null;
 
   // A PROPERTY FIELD keeps its stored type, so it is TWO correlated reads of the same property row —
   // the value and its `vtype`. They cannot share one subquery (SQL's scalar subquery yields one
