@@ -3,13 +3,13 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonMember, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
@@ -831,13 +831,20 @@ export function foldScalars(
   const order: readonly SortTerm[] = opts.order?.length
     ? opts.order.map((column) => ({ expr: col(flagged.id, column), dir: 'asc' as const }))
     : [{ expr: value, dir: 'asc' as const }];
+  // A PER-ROW member envelopes when the whole list is lossy (any member's type does not survive its
+  // storage class — now including `double`, whose whole-number members would infer back as Int and whose
+  // 17-digit members would lose a bit), else stays bare (the remaining lossless types — `string`/`int` —
+  // infer back exactly). A STATIC member has one tag for the list, so it never needs the envelope, but a
+  // static REAL still crosses the lossy JSON writer — `jsonMember` makes it exact (a no-op for a static
+  // string/int). Both paths reach the one JSON-entry authority.
+  const staticTag = vtype ? undefined : staticTypeOf(opts.type);
   const member = vtype
     ? {
       kind: 'case',
       whens: [[col(flagged.id, LOSSY_COL), typedNode(value, col(flagged.id, vtypeCol!))]],
       else: value,
     } as Expr
-    : value;
+    : staticTag ? jsonMember(value, compilerText(staticTag)) : value;
   // The CARRIER moves; the type does not. A column-carried per-row type becomes envelope-carried
   // because a member has no column of its own; `static`/`unknown` cross unchanged, `text` flag and
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
@@ -941,9 +948,12 @@ export function foldMaps(
   };
 }
 
-/** The three storage-class-determined types: a member of one of these needs no envelope, because the
- *  wire would infer exactly that type from the value itself. */
-const LOSSLESS_VTYPES = ['string', 'double', 'int'] as const;
+/** The storage-class-determined types a bare member infers back to EXACTLY — `string` and `int`, the two
+ *  whose JS value round-trips its own type and precision through the JSON channel. `double` is NOT one:
+ *  a whole-number double (`1.0`) infers back as an Int, and a 16-17 digit double loses a bit through
+ *  SQLite's 15-digit JSON writer — so a double member takes the `{t,v}` envelope, which carries its tag
+ *  AND makes it lossless (`jsonMember`). */
+const LOSSLESS_VTYPES = ['string', 'int'] as const;
 
 const LOSSY_COL = 'lossy';
 

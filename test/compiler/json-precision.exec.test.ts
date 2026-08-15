@@ -30,4 +30,19 @@ describe('a binary64 survives the JSON blob (§12 real precision)', () => {
     const m = meanByName('g.V().hasLabel("person").group().by("name").by(__.bothE().values("weight").mean())');
     expect(m.josh!.v).toBe(2.4 / 3);
   });
+
+  test('a whole-number double in a bare fold takes the {t:double} envelope, not a bare Int', () => {
+    // A per-row double member used to go BARE (LOSSLESS_VTYPES claimed 'double' infers), so a weight of
+    // 1.0 came back a JSON `1` and framed as Int. Now every double member is enveloped and framed by tag.
+    const list = JSON.parse((run(seededStore(), 'g.V().outE().values("weight").fold()') as { list: string }[])[0]!.list) as { t: string; v: number }[];
+    expect(list.every((m) => m.t === 'double')).toBe(true);
+    expect(list.some((m) => m.v === 1)).toBe(true); // the two 1.0 weights, now tagged double not inferred Int
+  });
+
+  test('a computed real in a static-typed fold keeps full precision', () => {
+    // `math()` yields a STATIC double, so its fold members are bare with one tag for the list — but the
+    // value still crosses SQLite's 15-digit writer, so `jsonMember` makes each exact.
+    const list = JSON.parse((run(seededStore(), 'g.inject(1).math("1.0/3.0").fold()') as { list: string }[])[0]!.list) as number[];
+    expect(list[0]).toBe(1 / 3);
+  });
 });
