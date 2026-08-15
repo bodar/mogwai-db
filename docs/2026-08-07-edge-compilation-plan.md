@@ -158,30 +158,66 @@ price and it is shape-dependent: a reducing fan-out (counts, narrow projections)
 shipping large row sets between barriers is worse. Sibling latency dominating is the case federation
 exists for, so this should usually win — and "usually" is measurable before it is built (§8).
 
-### 4·3 Which services can leave, and which cannot
+### 4·3 Residency — where a barrier's `apply` runs, declared not derived
 
-`call()` is not only federation. Name the split before the loop moves, or it gets decided by
-accident:
+A `rel` contribution is SQL inline in the plan; it has no placement choice — it runs wherever the
+plan runs. Only a `barrier` has an `apply` that *could* run elsewhere, so **only the barrier arm
+carries a residency**, and it is a plain, explicit, deployment-honest binary:
 
-- a barrier needing the **local store** stays DO-side;
-- a barrier needing an **external resource** — `io()`'s R2 binding — can run either side, and R2
-  bindings are if anything more natural in a Worker.
+```ts
+residency: 'do' | 'worker'
+```
 
-`io()` on a graph's own data still needs the store for one half of the operation, so it is a **split**
-barrier, not a movable one. Naming that distinction is part of Phase 3, not a detail of it.
+`kind` (`rel`/`barrier`) names the **essence** — what the contribution is to the plan. `residency`
+names the **deployment** — where `apply` runs. Two orthogonal fields, each named for what it is; we do
+not derive one from a checklist of capabilities (that is just a clumsier declaration) and we do not
+overload `kind`. Default and overwhelming case: **`do`**.
 
-**An iterative, store-bound barrier is DO-RESIDENT, and this is the constraint Phase 2 must not
-regress.** The graph-algorithms plan (`docs/2026-07-24-graph-algorithms-plan.md`) lands OLAP
-(pageRank/wcc/…) as a `barrier` whose body is a **host-driven convergence loop** — 20–50 bulk SQL
-statements, each O(E) over *this graph's own edges*, stopping on a dynamic `MAX(ABS(Δ)) < tolerance`.
-Every iteration needs the local store, and the loop is not expressible as a static `Program`. The
-Worker drives the segment BOUNDARY (which segment runs where); a barrier whose body is a store-bound
-loop must run that loop inside ONE DO call, **never** as Worker-driven per-iteration RPCs — that would
-turn N in-DO statements into N round trips, each crossing the |V|-sized score relation twice (§4·2).
-Federation and a future regex barrier (`docs/2026-08-12-regex-as-a-barrier-research.md`, whose JS
-predicate touches no store) are the *movable* case; an iterative store-bound barrier is the
-DO-resident one, beside `io()`'s split half. So `apply()`'s residence, not just its segmentation, is
-part of the §4·3 classification.
+**The rule for `worker`: a barrier leaves the DO only to get off a REMOTE WAIT.** §1's worst
+occupancy is the DO idle-but-holding while *another object* works. That — and only that — is worth
+hoisting: the Worker drives the wait, the DO's request closes, and the graph's other callers are
+served meanwhile. A barrier with no remote wait has nothing to free the DO *across*, so it stays `do`
+however much CPU it burns — because its working set is already in the DO, and shipping it out to a
+Worker to compute and shipping the result back is more transport than the compute saved.
+
+| barrier | needs local store? | remote wait? | residency | why |
+|---|---|---|---|---|
+| **federate** | no | yes — siblings | **`worker`** | hot, per-request, shared graph; free the DO across the sibling wait |
+| regex (future) | no | **no** | `do` | pure CPU; input (candidates) > output (survivors) and already in the DO — moving it ships the *larger* set out to save microseconds of V8 regex |
+| OLAP (future) | **yes**, every iteration | no | `do` | host-driven convergence loop, O(E) over this graph's edges per iteration; must be at the store, and can't be a static `Program` |
+| `io()` | **yes** | yes — R2 | `do` | see below |
+
+So today exactly **one** thing is `worker`: `federate`. The field is still worth declaring
+explicitly — it lets OLAP and regex *state* `do` rather than lean on the drive loop's hardcoded
+knowledge, and it is where the next barrier says which it is.
+
+**The fail-closed invariant that keeps explicit honest: a `worker` barrier's `apply` is store-free.**
+It is handed no store and closes over no store binding — federate closes over the FederationSource,
+not the store; io closes over both, which is exactly why io is `do`. The residency value therefore
+cannot contradict the code: a `worker` barrier that reached for the store would be reaching for
+something it was never given.
+
+**Why `io` is `do`, not a movable or a "split".** `io()` is a rare, whole-graph, **root-level admin
+op** (backup / restore / seed), not a hot per-request barrier — it takes no input from the traversal
+above it (its `apply` ignores its rows and returns none) and produces no traversers. Its R2 wait is
+real, but the DO-pinned leg (whole-graph read for `write`; the set-based load for `read`) *is* the
+bulk of the work, and during a wholesale load/dump the graph is under maintenance — freeing the DO to
+serve concurrent callers of a half-written graph is dubious value, not a win. So there is nothing to
+gain by moving io's R2 half off the DO. **io is `do`.**
+
+**There is no `split` residency.** A barrier is never both — the binary is complete. If some *future*
+barrier genuinely needed a DO leg and a Worker leg, that is **desugaring, not a third value**: express
+it as two calls, each a single residency, with the byte payload flowing between them as ordinary
+segment data — which is already how the async seam works (`io()` itself desugars to a `call()`,
+`ir/strategies.ts` `desugarIo`). We do not build that ahead of a measured need; the mechanism is there
+the day one appears.
+
+**io ≈ federate?** Cousins on shared substrate, not aliases — and the difference is *persistence*, not
+deployment. Both cross "rows from elsewhere" as one `json_each` bind (federate's `foreignRelation`;
+io-read's set-based writer). But federate lands **detached, transient** rows (this query only, no
+adjacency), while io-read is a **permanent mutation** (`loadGraphson` writes the store, persisted). A
+*future* federate that imports part of a graph is the transient version of what io-read does
+permanently — a distinct operation on the same landing machinery, not a collapse of the two.
 
 ### 4·4 The enabling refactor
 
