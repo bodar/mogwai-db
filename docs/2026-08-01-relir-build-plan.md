@@ -588,14 +588,19 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 
 **Leaf gaps — one family, no downstream unlock:**
 
-- **Exact REAL → JSON.** SQLite's JSON *writer* uses 15 significant digits and cannot round-trip a binary64
-  (the parser is exact). Apply ONLY where precision is lost: `CASE WHEN CAST(printf('%.15g',v) AS REAL) = v
-  THEN v ELSE json(printf('%!.17g',v)) END`. ⚠️ Four traps, each cost a cycle: (1) a JSON-ENTRY rule, NOT a
-  stored-value rule — in `storedValueOn` it corrupts the ROW path (`values('weight')`→JSON text a later
-  `fold()` quotes); (2) gate on the VTYPE, not `typeof(value)` — the value can be a whole correlated subquery
-  spliced three times; (3) `%.17g` drops real-ness (`1.0`→`1`), `%!.17g` always writes 17 digits
-  (`0.2`→`0.20000000000000001`) — hence the lossy-only guard; (4) SQLite's JSON subtype survives only when
-  `json()` is the aggregate's direct argument.
+- ✅ **Exact REAL → JSON — LANDED as ONE authority, `jsonMember`/`jsonMemberByTypeof` (`build.ts`).** Every
+  scalar crossing INTO a `json_object`/`json_array`/`json_group_array` is now lossless at any depth: a
+  binary64 rides as a 17-digit JSON number (lossy-only guard) and a wide integer as decimal TEXT (BigInt
+  at the wire, generalizing `sumTower`'s exact tail to any blob). Routed through by `typedNode` (all `{t,v}`
+  members), `foldScalars` (static/per-row/unknown), `byNode` (map keys/values — a computed scalar carries
+  its static tag so a count key frames Long and a `math()` value keeps its digits), and `injectList`/
+  `injectSource`. This unblocked group-scoped `mean` (`map/Mean.feature`, L3 +1) and fixed whole-number
+  doubles (`1.0` was framing Int) and wide ints in folds. The four traps still hold and are encoded:
+  (1) JSON-ENTRY not `storedValueOn` (the row path re-quotes); (2) gate on the TAG where there is one, and
+  on `typeof(value)` ONLY for a materialized COLUMN (`jsonMemberByTypeof`) — never a subquery; (3) the
+  lossy-only guard; (4) `json()` as the aggregate's direct argument. ⚠️ The `typeof` arm repairs a REAL
+  only: a wide integer's TEXT needs a `long`/`bigint` tag the untyped path lacks, so an untyped wide int
+  stays a magnitude-inferred number rather than a wrong-type String.
 - **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis. The lossy test
   must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag
   is a DIFFERENT question, measured wrong: `values('name').fold()` is `typed` while every member is bare at
