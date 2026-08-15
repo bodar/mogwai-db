@@ -472,9 +472,15 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   self-reference for the same reason). Measured: `project('n').by('name')` 2570 → 1243 B, `select` family
   −53 %, behaviour byte-identical (census answer-change gate clean). 🚧 What is LEFT: a CORRELATED inner
   fold (`by(__.out().project().fold())` at depth ≥ 2) cannot be fenced, so its per-field property read still
-  duplicates; the fix there is the single-subquery `{t,v}` node (a `propertyValueNode` mirroring
-  `propertyNode`, value/vtype as columns of ONE correlated read) — the LEFT-JOIN direction the property
-  `by()` comment names, a separate increment.
+  duplicates (correct, just verbose). ⚠️ The fix is NOT to route `recordNode`/the inline record through
+  `byNode`: measured, that regresses a TYPED record key/value to `t: null` because `byNode` DROPS a per-row
+  vtype (its "compute-once invariant" — a plain map side cannot carry one, but a record field must, and the
+  `group().by(__.project(…))` L2 assertions pin `t:'string'`/`t:'int'`). The correct shape is a single
+  correlated subquery projecting `{t: vtype, v: jsonMember(value, vtype)}` with value/vtype as COLUMNS of
+  ONE scan — `byNode`'s own property-KEY arm (`firstOf(typedNode(col,col))`) already does exactly this, so
+  the increment is teaching the record-field path to reuse that shape per host WITHOUT the vtype-dropping
+  scalar arm. Low urgency: exactly ONE corpus traversal has `by(__.project(…))`, and the common
+  depth-1/non-correlated selections are already fenced.
 - **A `by()` body over a LIST host — LANDED for element members.** `select(Pop.all).by(__.unfold().values(k).fold())`
   and `.by(__.unfold().count())`: the traverser is a COLLECTION, so `ChildHost` grew a `list` variant
   (`child.ts`, carrying the list value + its `ListOf`) and `scalarChild` a `listHostChild` arm. `unfold()`
