@@ -418,8 +418,17 @@ inside a branch arm). `mise run rel-blockers` is the progress instrument: each i
 family off the ranking, and if it does not, the diagnosis was wrong. Ships value with or without the
 rest of this plan — 2 through 5 are the engine's main line whether GraphQL ever exists.
 
-**Phase 1 — schema reflection as a service.** `call('schema')` → the label/property/edge model.
-SDL printing on top. Cached against a write counter.
+**Phase 1 — schema reflection as a service. ✅ MOSTLY LANDED.** `g.call('mogwai.schema')`
+(`src/services/catalog/schema.ts`) reflects the label/property/edge model as a STREAM of one
+self-describing map per schema element — `{kind:'vertexLabel',name,count}`, `{kind:'property',label,key,type}`,
+`{kind:'edge',label,src,tgt}` — a handful of `GROUP BY`/`DISTINCT`s over the five schema tables, zero
+binds. The stream shape (not a single document) is the prior-art answer: TinkerPop's own `--list`
+meta-service and Neo4j's `db.schema.nodeTypeProperties` both emit one record per element, and it composes
+with the map vocabulary (`.count()`, `.fold()` verified — `.fold()` rides the list-of-maps substrate).
+Namespaced `mogwai.schema` (our extension → `extendedRegistry` only, NEVER `standardRegistry`, so the
+reference-exact `--list` conformance surface is unchanged). 🚧 What is LEFT: SDL printing on top (belongs
+in `src/graphql/`, Phase 2), a `with('aggregate', true)` document variant if ever wanted, edge-property
+types, and the write-counter cache (an optimisation, not correctness). `src/graphql/` reads THIS.
 
 **Phase 2 — the translator, in the Worker (§5·1).** Opens with a **spike settling §5·2** — emit a
 Gremlin string or `Step[]` — because argument has taken it as far as it goes. Then `src/graphql/`:

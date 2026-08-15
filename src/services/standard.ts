@@ -5,6 +5,7 @@ import { degreeCentralityService } from './catalog/degree-centrality.ts';
 import { searchService } from './catalog/search.ts';
 import { createFederateService } from './catalog/federate.ts';
 import { createIoService } from './catalog/io.ts';
+import { schemaService } from './catalog/schema.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -35,7 +36,11 @@ import { createIoService } from './catalog/io.ts';
 export const standardRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store)]);
 
-/** The reference services PLUS our mogwai.* extensions (federation). Production. */
+/** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
+ *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
+ *  the live registry, and the reference-exact conformance host asserts the exact TinkerPop provider set,
+ *  so a `mogwai.*` service in the reference registry would fail the official `g_call`/`g_V_callXlistX`
+ *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */
 export const extendedRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createFederateService(app.source)]);
+    createFederateService(app.source), schemaService]);

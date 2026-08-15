@@ -89,7 +89,7 @@ describe('ServiceRegistry', () => {
 
   test('extendedRegistry.list() is the reference surface PLUS our mogwai.* extensions', () => {
     expect(resolved(extendedRegistry).list().map((s) => s.name).sort())
-      .toEqual(['mogwai.graph.federate', 'tinker.degree.centrality', 'tinker.search']);
+      .toEqual(['mogwai.graph.federate', 'mogwai.schema', 'tinker.degree.centrality', 'tinker.search']);
     expect(resolved(extendedRegistry).get('--list')?.name).toBe('--list');
   });
 });
@@ -453,5 +453,53 @@ describe('barrier residency', () => {
     expect(io.kind).toBe('barrier');
     if (fed.kind === 'barrier') expect(fed.residency).toBe('worker');
     if (io.kind === 'barrier') expect(io.residency).toBe('do');
+  });
+});
+
+describe('mogwai.schema — reflect the implicit schema as a map stream', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const g of MODERN_SEED) executeQuery(store, g, {});
+  // Decode the stream to plain objects: each row is a GraphBinary Map. Collect into an array of
+  // plain-object records so the assertions read as the schema, not the framing.
+  const schema = async (): Promise<Record<string, unknown>[]> => {
+    const out: Record<string, unknown>[] = [];
+    for (const b of exec(store, extendedRegistry).buffers("g.call('mogwai.schema')", {})) {
+      const m: any = await decode(b);
+      out.push(Object.fromEntries([...m]));
+    }
+    return out;
+  };
+  const of = (rows: Record<string, unknown>[], kind: string) => rows.filter((r) => r.kind === kind);
+
+  test('vertex labels — one record per label with its vertex count', async () => {
+    const rows = of(await schema(), 'vertexLabel');
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.count]))).toEqual({ person: 4, software: 2 });
+  });
+
+  test('properties — one record per (label, key) with its Gremlin type', async () => {
+    const rows = of(await schema(), 'property').map((r) => `${r.label}.${r.key}:${r.type}`).sort();
+    expect(rows).toEqual(['person.age:int', 'person.name:string', 'software.lang:string', 'software.name:string']);
+  });
+
+  test('edges — one record per DISTINCT (srcLabel, edgeLabel, tgtLabel) triple', async () => {
+    const rows = of(await schema(), 'edge').map((r) => `${r.src}-${r.label}->${r.tgt}`).sort();
+    expect(rows).toEqual(['person-created->software', 'person-knows->person']);
+  });
+
+  test('the stream is composable — count() reaches every element', async () => {
+    const [n] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').count()", {}));
+    expect(Number(n)).toBe(8); // 2 labels + 4 properties + 2 edge triples
+  });
+
+  test('fold() collects the whole schema into one list — the list-of-maps substrate', async () => {
+    const [list] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').fold()", {}));
+    expect((list as unknown[]).length).toBe(8);
+  });
+
+  test('mogwai.schema is an EXTENSION — absent from the reference registry', () => {
+    // In `standardRegistry` (the reference-exact surface the L3 corpus asserts) it must NOT appear, or
+    // `--list` would enumerate a non-reference service and fail the official g_call scenarios.
+    expect(resolved(standardRegistry).get('mogwai.schema')).toBeUndefined();
+    expect(resolved(extendedRegistry).get('mogwai.schema')?.name).toBe('mogwai.schema');
   });
 });
