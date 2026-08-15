@@ -24,7 +24,7 @@
 
 import type { Compiled, Executable } from '../sql/kernel/render.ts';
 import type { ForeignRow } from '../api.ts';
-import type { BarrierInput, CallParams } from '../services/spi/types.ts';
+import type { BarrierInput, BarrierResidency, CallParams } from '../services/spi/types.ts';
 
 /** The capability a barrier's `apply` needs to reach OTHER graphs: get an executor for a graph
  *  id and run a raw (detached-row) traversal on it at a given federation depth. A minimal view of
@@ -50,6 +50,10 @@ export interface SegmentPlan {
   readonly head: Compiled | null;
   readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
   readonly params: CallParams;
+  /** WHERE this barrier's `apply` runs (§4·3): `'worker'` — the Worker may drive the loop off the DO
+   *  (federate); `'do'` — must run beside the store, so the edge falls back to the DO's own drive (io).
+   *  Threaded from the resolved `Contribution.residency`; the drive decision (`EdgeExecutor`) reads it. */
+  readonly residency: BarrierResidency;
   /** Turn the barrier's awaited OUTPUT (`foreign`) into the next Plan. `headRows` is the drained
    *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs the VALUE each parent
    *  asked with, to scatter the returned pool back over the parents by a real SQL JOIN on that value

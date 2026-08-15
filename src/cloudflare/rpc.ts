@@ -16,6 +16,12 @@
 // still throw for real, because they are not raised through this path.
 import type { Framed } from '../execute.ts';
 import type { ForeignRow } from '../api.ts';
+import type { BarrierInput } from '../services/spi/types.ts';
+
+/** The data-plane payloads that may cross a DO RPC. `Framed[]` (framed()/runFramed()), `ForeignRow[]`
+ *  (raw(), a federated hop), and `BarrierInput[]` (readHead(), Worker-driven federation §4·2). A new
+ *  RPC that returns something else must add its payload here — the bound is deliberately closed. */
+type RpcPayload = Framed[] | ForeignRow[] | BarrierInput[];
 
 /** A failure crossing a DO RPC boundary as data. The brand key is deliberately obscure: the
  *  success arms are arrays, so no legitimate payload can be mistaken for one. */
@@ -25,14 +31,13 @@ export interface RpcFailure {
 }
 
 /** `T` or a failure — the return type of every data-plane RPC on {@link GraphDatabase}. Restricted
- *  to the two payloads that exist rather than generic over anything, so a new RPC has to say so.
- *  `runFramed` (edge-compilation Phase 1) reuses the `Framed[]` arm — its INPUT is a compiled plan,
- *  but its result is still framed buffers — so this type is unchanged; only the arm count of RPCs
- *  sharing it grew. */
-export type RpcResult<T extends Framed[] | ForeignRow[]> = T | RpcFailure;
+ *  to the payloads in {@link RpcPayload} rather than generic over anything, so a new RPC has to say so.
+ *  `runFramed` (Phase 1/2a) reuses the `Framed[]` arm; `readHead` (Phase 2b) adds the `BarrierInput[]`
+ *  arm — its INPUT is a compiled head, its result the drained barrier-input rows. */
+export type RpcResult<T extends RpcPayload> = T | RpcFailure;
 
 /** Run a data-plane body, returning its failure rather than throwing it across the boundary. */
-export async function rpcTry<T extends Framed[] | ForeignRow[]>(body: () => Promise<T>): Promise<RpcResult<T>> {
+export async function rpcTry<T extends RpcPayload>(body: () => Promise<T>): Promise<RpcResult<T>> {
   try {
     return await body();
   } catch (e: any) {
@@ -41,7 +46,7 @@ export async function rpcTry<T extends Framed[] | ForeignRow[]>(body: () => Prom
 }
 
 /** The caller half: rethrow what {@link rpcTry} captured, DO-side stack and all. */
-export function rpcUnwrap<T extends Framed[] | ForeignRow[]>(r: RpcResult<T>): T {
+export function rpcUnwrap<T extends RpcPayload>(r: RpcResult<T>): T {
   if (Array.isArray(r)) return r;
   const e = new Error(r.__rpcError);
   if (r.stack) e.stack = r.stack;

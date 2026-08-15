@@ -104,8 +104,11 @@ export function createAppScope(deps?: Partial<{
  *  The caller MUST pass the SAME registry + fastPaths the executing tier uses, or the edge would ship
  *  a plan the DO would not have compiled — so both are explicit, not defaulted here. This is the
  *  "multiple app scopes, shared code" split: one factory, the edge omitting what it cannot have. */
-export function createCompileScope(registry: RegistryProvider, fastPaths?: FastPathConfig): AppScope {
-  return createAppScope({ registry, fastPaths });
+export function createCompileScope(
+  registry: RegistryProvider,
+  opts?: { fastPaths?: FastPathConfig; source?: FederationSource },
+): AppScope {
+  return createAppScope({ registry, fastPaths: opts?.fastPaths, source: opts?.source });
 }
 
 /** Mint a request scope from an app scope for ONE client request (one traversal, or one

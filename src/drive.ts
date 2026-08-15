@@ -30,22 +30,28 @@ export interface SegmentHost {
   readHead(head: Compiled): BarrierInput[] | Promise<BarrierInput[]>;
 }
 
-/** Drive a (possibly segmented) plan to its final synchronous `Executable`. A non-segmented
- *  traversal returns immediately (no barrier → no await beyond `compile`); a barrier loops:
- *  read+drain the head → await `apply` → land the foreign rows + `resume` into the next Plan. This is
- *  the ONE await boundary of the read/federation path. */
-export async function driveSegments(
+/** Drive an ALREADY-COMPILED plan to its final synchronous `Executable`, given only a `readHead`. A
+ *  non-segmented plan returns immediately; a barrier loops: read+drain the head → await `apply` → land
+ *  the foreign rows + `resume` into the next Plan. This is the ONE await boundary of the read/federation
+ *  path. Split from the initial compile so a caller that already holds the first Plan (the Worker edge,
+ *  which compiles to PEEK residency before deciding to drive) reuses this loop without recompiling. */
+export async function driveSegmentsFrom(readHead: SegmentHost['readHead'], first: Plan): Promise<Executable> {
+  let p: Plan = first;
+  while (p.kind === 'segment') {
+    const rows = p.head ? await readHead(p.head) : [];
+    const foreign = await p.apply(rows);
+    p = p.resume(foreign, rows);
+  }
+  return p.compiled;
+}
+
+/** Compile a traversal, then drive it — the ordinary entry point (in-process `Executor`). */
+export function driveSegments(
   host: SegmentHost,
   gremlin: string,
   params: Record<string, any>,
   paramTypes: Record<string, TypeNode>,
   federationDepth: number,
 ): Promise<Executable> {
-  let p: Plan = host.compile(gremlin, params, paramTypes, federationDepth);
-  while (p.kind === 'segment') {
-    const rows = p.head ? await host.readHead(p.head) : [];
-    const foreign = await p.apply(rows);
-    p = p.resume(foreign, rows);
-  }
-  return p.compiled;
+  return driveSegmentsFrom(host.readHead, host.compile(gremlin, params, paramTypes, federationDepth));
 }

@@ -4,32 +4,36 @@ import type { GraphDatabase } from '../src/cloudflare/graph-store-do.ts';
 import { compilePlan, type Executable } from '../src/compiler/compiler.ts';
 import { createAppScope, createCompileScope } from '../src/scopes.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
-import { frameResolved, type Framed } from '../src/execute.ts';
+import { frameResolved, readSegmentHead, type Framed } from '../src/execute.ts';
+import type { ForeignRow } from '../src/api.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { seededStore } from './support/harness.ts';
 import { decodeAll } from './support/decode.ts';
 
-// Edge-compilation Phase 1: the Worker EDGE compiles a non-segment READ and ships the `Compiled` to
-// the DO's `runFramed`; everything else (writes → program, federation → segment, a compile throw)
-// falls back to shipping the Gremlin string to `framed`. These tests exercise the real
-// CloudflareGraphManager → EdgeExecutor seam in-process, with a FAKE DO stub recording which RPC it
-// received — no workerd. (The real-workerd end-to-end lives in test/cloudflare.test.ts's contract.)
+// Edge-compilation: the Worker EDGE compiles/renders a plan and runs it on the DO — a non-segment plan
+// (read or write) via `runFramed`; a `worker`-resident federation segment DRIVEN from the Worker (Phase
+// 2b) via `readHead` + `apply`(siblings via `raw`) + `runFramed`; everything else falls back to
+// shipping the Gremlin string to `framed`. These tests exercise the real CloudflareGraphManager →
+// EdgeExecutor seam in-process with a FAKE DO stub recording which RPC fired — no workerd. (The
+// real-workerd end-to-end lives in test/cloudflare.test.ts's contract.)
 
-/** A fake DO stub over a real store: `runFramed` executes the shipped plan exactly as the DO would
- *  (via the shared `frameResolved`); `framed`/`raw` only RECORD that the fallback path was taken. */
-function fakeManager(store: GraphStore) {
-  const calls = { runFramed: 0, framed: 0, raw: 0, lastPlan: null as Executable | null, lastGremlin: '' };
+/** A fake DO stub over a real store: `runFramed`/`readHead` execute exactly as the DO would (via the
+ *  shared `frameResolved`/`readSegmentHead`); `raw` returns fixed sibling rows; `framed` (the DO's own
+ *  compile+drive fallback) only RECORDS that the fallback path was taken. */
+function fakeManager(store: GraphStore, siblingRows: ForeignRow[] = []) {
+  const calls = { runFramed: 0, framed: 0, raw: 0, readHead: 0, lastPlan: null as Executable | null, lastGremlin: '' };
   const stub = {
     runFramed: async (plan: Executable): Promise<Framed[]> => {
       calls.runFramed++; calls.lastPlan = plan;
       return [...frameResolved(store, plan)];
     },
+    readHead: async (head: any) => { calls.readHead++; return readSegmentHead(store, head); },
     framed: async (gremlin: string): Promise<Framed[]> => {
       calls.framed++; calls.lastGremlin = gremlin;
       return []; // routing sentinel — the real DO compiles here; we only assert the path was taken
     },
-    raw: async (): Promise<any[]> => { calls.raw++; return []; },
+    raw: async (): Promise<ForeignRow[]> => { calls.raw++; return siblingRows; },
   };
   const ns = { getByName: () => stub } as unknown as DurableObjectNamespace<GraphDatabase>;
   return { mgr: new CloudflareGraphManager(ns), calls };
@@ -64,12 +68,41 @@ describe('edge compilation — EdgeExecutor routing', () => {
     expect(await decodeAll(check.map((f) => f.buf))).toEqual([1]);
   });
 
-  test('a FEDERATED call (segment) falls back to shipping the string', async () => {
+  test('a worker-resident FEDERATE (source form) is DRIVEN from the Worker, not full-driven by the DO (Phase 2b)', async () => {
+    const store = seededStore();
+    // The sibling "crew" graph returns one detached vertex from its raw() hop.
+    const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'zeta' }] } }];
+    const { mgr, calls } = fakeManager(store, sibling);
+    const out = await mgr.executor('g').framedAsync('g.call("mogwai.graph.federate").with("graph","crew").with("traversal","g.V()")', {});
+    // The payoff: the top DO did NOT full-drive the loop (framed = 0). The Worker drove it — fanning
+    // out to the sibling (raw = 1) and running only the final framing on the DO (runFramed = 1). A
+    // source-form federate has a null head, so no readHead.
+    expect(calls.framed).toBe(0);
+    expect(calls.runFramed).toBe(1);
+    expect(calls.raw).toBe(1);
+    expect(calls.readHead).toBe(0);
+    expect(out.length).toBe(1);   // the sibling's vertex, framed
+  });
+
+  test('a MID-traversal federate reads its head on the DO (readHead) but the Worker drives the loop', async () => {
+    const store = seededStore();
+    const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: {} }];
+    const { mgr, calls } = fakeManager(store, sibling);
+    await mgr.executor('g').framedAsync('g.V().has("name","marko").call("mogwai.graph.federate", ["graph":"crew","traversal":"g.V()"], __.values("name"))', {});
+    expect(calls.readHead).toBe(1);   // the per-parent injected value was read on the DO
+    expect(calls.raw).toBe(1);        // one batched sibling hop, from the Worker
+    expect(calls.framed).toBe(0);     // the DO did not full-drive
+    expect(calls.runFramed).toBe(1);  // the final rejoin framed on the DO
+  });
+
+  test('a do-resident barrier (io) is NOT worker-driven — it falls back to the DO', async () => {
     const store = seededStore();
     const { mgr, calls } = fakeManager(store);
-    await mgr.executor('g').framedAsync('g.call("mogwai.graph.federate").with("graph","crew")', {});
-    expect(calls.runFramed).toBe(0);
+    // io's apply needs the local store the Worker lacks, so residency is 'do' → string fallback.
+    await mgr.executor('g').framedAsync('g.io("data/x.json").read()', {});
     expect(calls.framed).toBe(1);
+    expect(calls.runFramed).toBe(0);
+    expect(calls.readHead).toBe(0);
   });
 
   test('a MALFORMED traversal falls back — the throw is caught, the DO reports the error', async () => {

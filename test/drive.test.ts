@@ -33,6 +33,7 @@ describe('driveSegments', () => {
       kind: 'segment',
       head: head('HEAD_SQL'),
       params: {},
+      residency: 'worker',
       apply: async (rows) => { seen.applyRows.push(rows); return foreign; },
       resume: (f, headRows) => { seen.resumeForeign.push(f); expect(headRows).toBe(headRowsRef); return { kind: 'sql', compiled: sql('RESUMED') }; },
     };
@@ -51,7 +52,7 @@ describe('driveSegments', () => {
   test('a SOURCE-form barrier (null head) never calls readHead; apply gets []', async () => {
     let reads = 0;
     const segment: Plan = {
-      kind: 'segment', head: null, params: {},
+      kind: 'segment', head: null, params: {}, residency: 'worker',
       apply: async (rows) => { expect(rows).toEqual([]); return []; },
       resume: () => ({ kind: 'sql', compiled: sql('SRC') }),
     };

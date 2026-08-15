@@ -1,6 +1,6 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
-import type { BarrierInput, CallSite, CallSpec, ForeignRow, InjectionKind, Service } from '../../services/spi/types.ts';
+import type { BarrierInput, BarrierResidency, CallSite, CallSpec, ForeignRow, InjectionKind, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
@@ -33,6 +33,9 @@ interface Barrier {
   readonly site: CallSite;
   readonly spec: CallSpec;
   readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
+  /** WHERE this barrier's `apply` runs (§4·3) — carried through to the `SegmentPlan` so the drive
+   *  loop can decide whether the Worker may drive it (`'worker'`) or it must stay DO-side (`'do'`). */
+  readonly residency: BarrierResidency;
 }
 
 /** What a segment needs from the enclosing request — the same settled values the RelIR route takes,
@@ -70,7 +73,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply };
+    return { at, site, spec, apply: contribution.apply, residency: contribution.residency };
   }
   return null;
 }
@@ -143,6 +146,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     head,
     params: barrier.site.params,
     apply: barrier.apply,
+    residency: barrier.residency,
     resume: (foreign: ForeignRow[], headRows: readonly BarrierInput[]): Plan =>
       resumed(steps, barrier, request, foreign, {
         values: headRows.map((row) => row.injectedValue), injection,
@@ -158,6 +162,7 @@ function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: Segm
     head: null,
     params: barrier.site.params,
     apply: barrier.apply,
+    residency: barrier.residency,
     resume: (foreign: ForeignRow[]): Plan => resumed(steps, barrier, request, foreign),
   };
 }

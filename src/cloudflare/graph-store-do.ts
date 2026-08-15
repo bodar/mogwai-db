@@ -3,8 +3,9 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo } from '../manager.ts';
 import type { GraphInfo, Executor, ForeignRow } from '../api.ts';
-import { Executor as ExecutorImpl, frameResolved, type Framed } from '../execute.ts';
-import type { Executable } from '../compiler/compiler.ts';
+import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
+import type { Compiled, Executable } from '../compiler/compiler.ts';
+import type { BarrierInput } from '../services/spi/types.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
@@ -89,6 +90,18 @@ export class GraphDatabase extends DurableObject<Env> {
     return rpcTry(async () => {
       this.ensureLive();
       return [...frameResolved(this.store, plan)];
+    });
+  }
+
+  /** Data-plane RPC: run a barrier segment's HEAD and return the drained barrier-input rows
+   *  (edge-compilation Phase 2b, Worker-driven federation §4·2). The Worker holds the segment loop and
+   *  its `apply` (fanning out to siblings); the DO runs only this brief head read against its store and
+   *  its request closes, instead of being held open across every sibling hop. The head is a `Compiled`
+   *  the Worker compiled — plain data — and the result is plain `BarrierInput`-shaped rows. */
+  async readHead(head: Compiled): Promise<RpcResult<BarrierInput[]>> {
+    return rpcTry(async () => {
+      this.ensureLive();
+      return readSegmentHead(this.store, head);
     });
   }
 

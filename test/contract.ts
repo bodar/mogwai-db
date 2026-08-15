@@ -36,6 +36,58 @@ export function graphContract(name: string, harness: Harness) {
     managementContract(() => origin);
     docsContract(() => origin);
     ioContract(() => origin);
+    federationContract(() => origin);
+  });
+}
+
+/**
+ * Cross-graph `federate()` on the REAL runtime — the ONLY place edge-compilation's Worker-driven
+ * federation (Phase 2b) is proven end to end. On Cloudflare this exercises the whole seam across TWO
+ * real Durable Objects: the Worker compiles the federate to a segment, DRIVES the loop itself, reads
+ * the head via the `readHead` RPC (mid form), runs `apply` on the Worker (hopping to the sibling DO via
+ * `raw`), and frames the resumed plan via `runFramed`. The Program refactor proved a clone/RPC fault is
+ * invisible on Bun and only surfaces on workerd, so a `readHead`/`BarrierInput[]` or foreign-row-bind
+ * fault would surface HERE and nowhere in the unit tests. Runs on Bun too (in-process), proving parity.
+ */
+function federationContract(getOrigin: () => string) {
+  describe('federation', () => {
+    const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
+
+    test('source-form federate hops to a sibling graph and returns its vertices (Worker-driven on CF)', async () => {
+      const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const crewId = `fed-${stamp}-crew`;
+      const home = new DriverRemoteConnection(graphUrl(`fed-${stamp}-home`));
+      const crew = new DriverRemoteConnection(graphUrl(crewId));
+      const gh = traversal().with_(home), gc = traversal().with_(crew);
+      try {
+        await gc.addV('person').property('name', 'zeta').iterate();
+        await gc.addV('person').property('name', 'theta').iterate();
+        // home is empty of persons; the names below can only have come from the crew sibling.
+        const fed = (await gh.call('mogwai.graph.federate')
+          .with_('graph', crewId).with_('traversal', __.V().hasLabel('person'))
+          .values('name').toList()).sort();
+        expect(fed).toEqual(['theta', 'zeta']);
+      } finally { await home.close(); await crew.close(); }
+    }, 40_000);
+
+    test('mid-traversal federate reads its head via RPC and rejoins (exercises readHead on CF)', async () => {
+      const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const crewId = `fed-${stamp}-crew`;
+      const home = new DriverRemoteConnection(graphUrl(`fed-${stamp}-home`));
+      const crew = new DriverRemoteConnection(graphUrl(crewId));
+      const gh = traversal().with_(home), gc = traversal().with_(crew);
+      try {
+        await gh.addV('person').property('name', 'marko').iterate();   // shared name
+        await gh.addV('person').property('name', 'onlyhome').iterate();
+        await gc.addV('person').property('name', 'marko').iterate();   // shared name
+        await gc.addV('person').property('name', 'onlycrew').iterate();
+        // For each home person, hop to crew matching on the injected name; only "marko" is shared.
+        const fed = await gh.V().hasLabel('person')
+          .call('mogwai.graph.federate', { graph: crewId, traversal: __.V().has('name', gremlin.process.t.value) }, __.values('name'))
+          .values('name').toList();
+        expect(fed).toEqual(['marko']);
+      } finally { await home.close(); await crew.close(); }
+    }, 40_000);
   });
 }
 

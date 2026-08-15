@@ -821,7 +821,7 @@ export class Executor implements ExecutorApi {
   private readonly segmentHost: SegmentHost = {
     compile: (gremlin, params, paramTypes, federationDepth) =>
       compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes),
-    readHead: (head) => this.readSegmentHead(head),
+    readHead: (head) => readSegmentHead(this.store, head),
   };
 
   /** Drive a (possibly segmented) plan to a final synchronous Compiled/Program — the ONE await
@@ -833,21 +833,24 @@ export class Executor implements ExecutorApi {
     return driveSegments(this.segmentHost, gremlin, params, paramTypes, federationDepth);
   }
 
-  /** Read a barrier segment's HEAD into the barrier's input rows (mid-traversal parent
-   *  projection, 6b — a source-form barrier has a null head and never calls this). Synchronous:
-   *  the row array is fully drained before any barrier await (no cursor across an await). */
-  private readSegmentHead(head: Compiled): BarrierInput[] {
-    const rows = this.store.query(head.sql, head.binds) as any[];
-    // A SCALAR head is the injected VALUE itself, one row per parent — everything a barrier reads of
-    // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
-    // materialized the whole parent tuple to reach the same one field.
-    if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
-    // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
-    // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
-    // not framed). `injVal` is absent on a source-form head (which never reaches this method).
-    const inj = (r: any) => ('injVal' in r ? { injectedValue: r.injVal } : {});
-    if (head.shape.kind === 'edge')
-      return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
-    return rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
-  }
+}
+
+/** Read a barrier segment's HEAD into the barrier's input rows (mid-traversal parent projection, 6b —
+ *  a source-form barrier has a null head and never calls this). Synchronous: the row array is fully
+ *  drained before any barrier await (no cursor across an await). A free function (like `frameResolved`)
+ *  so the DO can expose it as an RPC for Worker-driven federation (§4·2) — the Worker holds the loop,
+ *  the DO runs this brief head read and its request closes. */
+export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput[] {
+  const rows = store.query(head.sql, head.binds) as any[];
+  // A SCALAR head is the injected VALUE itself, one row per parent — everything a barrier reads of
+  // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
+  // materialized the whole parent tuple to reach the same one field.
+  if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
+  // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
+  // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
+  // not framed). `injVal` is absent on a source-form head (which never reaches this method).
+  const inj = (r: any) => ('injVal' in r ? { injectedValue: r.injVal } : {});
+  if (head.shape.kind === 'edge')
+    return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
+  return rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
 }
