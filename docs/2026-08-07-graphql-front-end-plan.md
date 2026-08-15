@@ -446,12 +446,20 @@ reference-exact `--list` conformance surface is unchanged). 🚧 What is LEFT: S
 in `src/graphql/`, Phase 2), a `with('aggregate', true)` document variant if ever wanted, edge-property
 types, and the write-counter cache (an optimisation, not correctness). `src/graphql/` reads THIS.
 
-**Phase 2 — the translator, in the Worker (§5·1).** Opens with a **spike settling §5·2** — emit a
-Gremlin string or `Step[]` — because argument has taken it as far as it goes. Then `src/graphql/`:
-document AST + reflected schema → whichever the spike chose, fetching the schema per request (§5·4).
-Router: `POST /graphql/{g}`, `GET /graphql/{g}` for introspection/GraphiQL, explain as a scoped
-`extensions` entry (§5·3). Hands its output across the existing manager seam; picks up plan-shipping
-for free when `docs/archive/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
+**Phase 2 — the translator. ✅ TRANSLATOR CORE LANDED.** The §5·2 spike settled emission (a Gremlin
+string). `src/graphql/` is built: `schema.ts` folds the `mogwai.schema` rows into an addressable
+`GraphSchema` (a GraphQL object type = a vertex label, a scalar field = a property key, an object field
+= an edge — reflection-first, an in/out pair disambiguated by a `_in` suffix), and `translate.ts` walks
+a document top-down against it — a root → `V().hasLabel(Type)`, a scalar → `by(__.values(key))`, an
+object field → `by(__.<out|in>(edge).project(…)….fold())`, recursing to any depth. Emits `{gremlin,
+params}` across the EXISTING manager seam (zero executor changes), and the full **reflect → translate →
+run** path is verified over a live seeded graph to depth-3, both edge directions. Fail-closed:
+arguments, fragments, mutations, multiple roots, unknown fields all RAISE `GraphQLTranslationError`
+rather than emit a half-Gremlin string. 🚧 What is LEFT of Phase 2: the HTTP edge (router `POST/GET
+/graphql/{g}`, explain as a scoped `extensions` entry §5·3, per-request schema fetch §5·4);
+field ARGUMENTS → `has()`/`order()`/`limit()` (the filter/order/first tail of §1·1); variables → the
+params map (§6); `@skip`/`@include`; interfaces/unions; and `__typename`. It picks up plan-shipping for
+free now that `docs/archive/2026-08-07-edge-compilation-plan.md` has landed.
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.
