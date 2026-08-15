@@ -445,10 +445,16 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   frames through `listNodeExpr`, NOT `listPayloadExpr` — the same `elementNode`/`elementObject` split one
   level up: a member inside a map value is read by the TREE walker (`frameTypedNode`), which needs every
   leaf tagged, where the top-level list framer takes bare element objects; getting this wrong frames a
-  folded element list as untyped objects (`[null,…]` off the wire). 🚧 What is LEFT: member ops over a
-  list-of-maps (`unfold`/`order`/`range` at `Scope.local`) fail closed pending their own arms
-  (`count(local)` is shape-agnostic and works); and `group().by(k).by(__.out().values().fold())` — a
-  scalar-fold in the GROUP VALUE position — is a separate pre-existing gap in the group-value `by()`.
+  folded element list as untyped objects (`[null,…]` off the wire). **`unfold()` closes the round trip**
+  (`unfoldMapMembers`, `unfoldNested`'s twin): a map-membered list unfolds to one MAP traverser per
+  member, re-entering `mapTail`, so `project().fold().unfold()` and `select(Pop.all).by(__.…fold()).unfold()`
+  compose. ⚠️ That surfaced a LATENT key-encoding split — `group()`/`valueMap()` emit a `{t,v}` node key,
+  `project()` a BARE string key; both frame identically but `select(<key>)` read only the `{t,v}` form, so
+  the map-key match is now tolerant of both (`keyMatches`, `COALESCE($[0].v, $[0])`, shared by
+  `mapKey`/`mapSelect`). 🚧 What is LEFT: the remaining member ops over a list-of-maps (`order`/`range` at
+  `Scope.local`) fail closed pending their own arms (`count(local)` is shape-agnostic and works); and
+  `group().by(k).by(__.out().values().fold())` — a scalar-fold in the GROUP VALUE position — is a separate
+  pre-existing gap in the group-value `by()`.
 - **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
   now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
   the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the
