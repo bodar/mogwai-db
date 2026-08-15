@@ -134,17 +134,23 @@ express — nested projection with per-level filter, order and slice, `rel2sql`'
 (`vendor/calcite`). GraphQL asks not for a concept the engine lacks but for the concepts the fold is
 furthest through designing and has not finished lowering.
 
-### 2·2 The one item that is not a family
+### 2·2 The one item that is not a family — **LANDED**
 
-**`ListOf` has no record member** — `src/sql/kernel/render.ts:16`. The union is
-`elem | property | scalar | list`. A *list of maps* has no representation at the render boundary, so
-no producer above it can emit one, whatever the fold learns to lower.
+**`ListOf` gained a `map` member.** The union was `elem | property | scalar | list | mixed`; a *list of
+maps* had no representation at the render boundary, so no producer above it could emit one whatever the
+fold learned to lower. It is now `… | { kind: 'map'; of: MapOf }` (`src/sql/kernel/render.ts`) — the
+total-union completion this section predicted, framed by the one `frameTypedNode` `{t:'map'}` rule
+already in `execute.ts`, rather than a coarse view bolted beside it.
 
-Every GraphQL to-many object field is a list of maps, at every depth ≥ 2. So this is the substrate
-item and it comes first — it is a vocabulary gap at the boundary where shape is DECLARED, not a
-lowering gap, and it is the shape of cleanup `docs/2026-07-28-scalartype-refactoring-pattern.md`
-describes: a total union gaining the arm that makes the vocabulary complete, rather than a coarse
-view bolted beside it.
+Every GraphQL to-many object field is a list of maps, at every depth ≥ 2, and this was the substrate
+item that comes first. With it landed, so did the producers and the callers: `fold()` gained an arm on
+the record and map tails, `foldMaps` collects the per-row pairs array, and a list NESTED in a
+`project()` field frames through `listNodeExpr` (the self-describing twin of `listPayloadExpr`). So
+`project(k…).by(…).fold()`, `valueMap().fold()`, `group().…fold()`, and a nested
+`project().by(__.…project().fold())` — the depth-2 GraphQL selection — all lower and frame to real
+GraphBinary maps. The owning worklist is the RelIR plan's §10 (its "a list whose members are MAPS"
+bullet); the coverage is `test/compiler/list-of-maps.exec.test.ts` (the corpus underexercises deep
+selections, so this is where the shape is checked).
 
 ---
 
@@ -389,8 +395,10 @@ carry it with the same comment discipline as `antlr4ng`'s pin.
 **Phase 0 — the substrate (no GraphQL in it at all).** §2's families, in dependency order rather than
 by size:
 
-1. **`ListOf` gains a `record` arm** (`src/sql/kernel/render.ts:16`) — §2·2. A vocabulary gap at the
-   render boundary, so it unblocks everything after it and nothing unblocks it.
+1. **`ListOf` gains a `map` arm — ✅ LANDED** (`src/sql/kernel/render.ts`) — §2·2. The vocabulary gap at
+   the render boundary; it unblocked everything after it and nothing unblocked it. Shipped WITH its
+   producers (`fold()` on the record/map tails, `foldMaps`) and its nested-field caller
+   (`listNodeExpr`), so a list of maps is producible, framable, and composes to depth-2 selections.
 2. **The property shape** — `valueMap` / `elementMap` (51). The smallest family that is pure
    projection, and every GraphQL leaf object depends on it.
 3. **Row ops inside a child scope** — `order` / `dedup` / `range` / `limit` (30). GraphQL's per-level

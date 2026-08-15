@@ -433,6 +433,22 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   compares an Element by id, `ElementHelper` hashes it by id. 🚧 What is LEFT: the map-family residue
   (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map
   entries), and a PROPERTY-member or NESTED-list member list in the same arms.
+- **A list whose members are MAPS — LANDED.** `project(k…).by(…).fold()`, `valueMap().fold()`,
+  `group().…fold()`, and a nested `project().by(__.…project().fold())` — every GraphQL to-many object
+  field at depth ≥ 2 (`docs/2026-08-07-graphql-front-end-plan.md` §2·2, the substrate item it names
+  first). `fold()` had an arm only on the scalar/element tails; it now has one on `recordTail`/`mapTail`
+  too, a record collapsing via `recordToMap` FIRST so `foldMaps` (`list.ts`, `foldScalars`' twin) sees
+  ONE map column whatever produced it — the per-row pairs array, collected under `json()` so
+  `json_group_array` keeps each member a nested array rather than a re-encoded string. `ListOf` grew a
+  `{ kind: 'map'; of: MapOf }` arm (`render.ts` — the total-union completion, framed by the one
+  `frameTypedNode` `{t:'map'}` rule already in `execute.ts`). ⚠️ A list NESTED inside a `project()` field
+  frames through `listNodeExpr`, NOT `listPayloadExpr` — the same `elementNode`/`elementObject` split one
+  level up: a member inside a map value is read by the TREE walker (`frameTypedNode`), which needs every
+  leaf tagged, where the top-level list framer takes bare element objects; getting this wrong frames a
+  folded element list as untyped objects (`[null,…]` off the wire). 🚧 What is LEFT: member ops over a
+  list-of-maps (`unfold`/`order`/`range` at `Scope.local`) fail closed pending their own arms
+  (`count(local)` is shape-agnostic and works); and `group().by(k).by(__.out().values().fold())` — a
+  scalar-fold in the GROUP VALUE position — is a separate pre-existing gap in the group-value `by()`.
 - **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
   now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
   the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the
