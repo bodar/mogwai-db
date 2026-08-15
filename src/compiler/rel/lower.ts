@@ -2773,11 +2773,6 @@ function scalarTail(
         // UNKNOWN case (a heterogeneous stream, no vtype) falls back to `typeof`, whose storage-class
         // value the framer routes to `sumBuffer`; there the reference's cross-type error cannot be
         // raised, so this is the documented divergence (§6·7n).
-        const staticVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
-        const vtypeExpr = carries('vtype') ? col(rel.id, 'vtype')
-          : staticVt ? compilerText(staticVt) : undefined;
-        const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
-        const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
         const rank = 'red_rank';
         // NULL is SKIPPED by min/max — `NumberHelper.max/min` return the non-null side — so it never
         // WINS. It must not be FILTERED, though, and that distinction cost four conformance
@@ -2789,14 +2784,14 @@ function scalarTail(
         // both directions: SQLite orders NULLs first ascending and last descending, which is why the
         // `IS NULL` term is explicit rather than left to the direction.
         const present = rel;
-        const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
         const ranked = make.window({
           id: fresh('rw'), input: present, channels: present.channels,
           type: typeOf(...present.type.cols, meta(rank, 'int')),
           specs: [[rank, {
             kind: 'window-expr', fn: 'row_number', args: [],
-            // A total tie-break on the raw value keeps the survivor deterministic under a reversed scan.
-            spec: { partitionBy: [], orderBy: [{ expr: nullsLast, dir: 'asc' }, { expr: key, dir }, { expr: col(present.id, 'v'), dir }] },
+            // The single-type-space order + a total raw-value tie-break, shared with the correlated
+            // by()-reducer arm (`minMaxOrder`) so the two positions cannot drift.
+            spec: { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') },
           }]],
         });
         // The rank filter reads a windowed column, so fence it (a window may not sit inside another
@@ -2806,12 +2801,9 @@ function scalarTail(
           id: fresh('rk'), input: frame, channels: frame.channels, type: frame.type,
           pred: { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) },
         });
-        const vt: Expr = carries('vtype') ? col(winner.id, 'vtype')
-          : staticVt ? compilerText(staticVt)
-          : { kind: 'call', fn: 'typeof', args: [col(winner.id, 'v')] };
         rel = make.project({
           id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', col(winner.id, 'v')], ['vt', vt]],
+          exprs: [['v', col(winner.id, 'v')], ['vt', minMaxWinnerVt(winner, out)]],
         });
         out = numeric;
         continue;
@@ -3828,6 +3820,35 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
     case 'discard': return { rel: chain.rel, shape: { kind: 'discard' } };
   }
 };
+
+/**
+ * THE ARGMIN/ARGMAX ORDER of a scalar `rel` — ONE construction so the GLOBAL barrier (a `row_number`
+ * window over the whole stream) and the per-host CORRELATED subquery (a `sort`+`limit(1)`) pick the
+ * SAME element. Gremlin orders within a single TYPE SPACE via `storedCompareOn` (the `order().by()`
+ * cast authority, so a `long` carried as decimal TEXT past 2^53 orders as a number, not lexically),
+ * skips NULL — sorted LAST in both directions so an all-null input still surfaces its one null rather
+ * than a real value — and breaks ties on the raw value so the survivor is deterministic under a
+ * reversed scan (`test:perturbed`).
+ */
+function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): readonly SortTerm[] {
+  const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
+  const carries = rel.type.cols.some((column) => column.name === 'vtype');
+  const vtypeExpr = carries ? col(rel.id, 'vtype') : staticVt ? compilerText(staticVt) : undefined;
+  const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
+  const dir: 'asc' | 'desc' = isMin ? 'asc' : 'desc';
+  const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
+  return [{ expr: nullsLast, dir: 'asc' }, { expr: key, dir }, { expr: col(rel.id, 'v'), dir }];
+}
+
+/** The winner row's own GREMLIN vtype — `int`/`long`/`string` from the stored `vtype` column or the
+ *  source's static tag, else `typeof` (whose storage-class value the `result:'number'` framer routes to
+ *  `sumBuffer`). The twin of `minMaxOrder`: the same authority, read off the SURVIVING row. */
+function minMaxWinnerVt(rel: Rel, framing: RelFraming): Expr {
+  const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
+  return rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype')
+    : staticVt ? compilerText(staticVt)
+    : { kind: 'call', fn: 'typeof', args: [col(rel.id, 'v')] };
+}
 
 /**
  * THE SCALAR PAYLOAD — `SELECT v[, <the type column>]`, in emission order.
@@ -6170,6 +6191,34 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // so bare `__.count()` and `__.label().count()` fall through to the expression arm and decline.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
   if (child) {
+    // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
+    // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer
+    // row, so the numeric arm below declines it. The correlated pick is the SAME element as a
+    // `sort`+`limit(1)` over the SAME single-type-space order (`minMaxOrder`, shared with the global
+    // barrier so the two cannot drift), and the winner's own vtype is `minMaxWinnerVt`. Productivity
+    // for min/max is NOT the value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE
+    // null (`ReducingBarrierStep`) — so a per-host EXISTS over the value rows is the `present` signal.
+    const last = body.at(-1);
+    if (last && (last.name === 'min' || last.name === 'max') && !argValues(last).length && !isLocalScope(last) && body.length >= 2) {
+      const values = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body.slice(0, -1), 1, false, inBody(ctx), fresh, NO_ALIASES);
+      let fenced = false;
+      if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
+      const probeCol = values?.rel.type.cols[0];
+      if (values && !fenced && probeCol && values.framing.kind === 'scalar' && values.framing.result === undefined) {
+        const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
+        const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
+        const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
+        const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
+        const probe = make.project({ id: fresh('mp'), input: values.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(values.rel.id, probeCol.name)]] });
+        return {
+          expr: { kind: 'scalar', plan: vExpr },
+          framing: { kind: 'scalar', type: UNKNOWN, result: 'number' },
+          vtype: { kind: 'scalar', plan: vtExpr },
+          present: { kind: 'exists', plan: probe, negated: false },
+          yields: 'one',
+        };
+      }
+    }
     const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
     // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say.
     //

@@ -52,11 +52,29 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
     for (const m of members) { expect(m.v).toBeCloseTo(1.0, 9); expect(['real', 'integer']).toContain(m.t); }
   });
 
-  test('min()/max() in a by() still fail closed (window+materialize path, a separate increment)', () => {
+  test('project().by(min()/max()) argmax picks the extreme and keeps its type', () => {
     const store = seededStore();
+    // lop's inbound created weights are 0.4, 0.4, 0.2 — max 0.4, min 0.2, both Double.
+    const mx = run(store, 'g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").max())');
+    expect(field(mx, 'w')).toEqual({ t: 'double', v: 0.4 });
+    const mn = run(store, 'g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").min())');
+    expect(field(mn, 'w')).toEqual({ t: 'double', v: 0.2 });
+  });
+
+  test('aggregate().by(min()/max()).cap() member frames IDENTICALLY to the top-level reducer', () => {
     for (const reducer of ['min', 'max']) {
-      expect(() => run(store, `g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").${reducer}())`))
-        .toThrow(/not supported yet/);
+      const store = seededStore();
+      const top = run(store, `g.V().has("name","lop").inE("created").values("weight").${reducer}()`);
+      const mem = run(store, `g.V().has("name","lop").aggregate("a").by(__.inE("created").values("weight").${reducer}()).cap("a").unfold()`);
+      expect(mem.map((x) => ({ v: x.v, vt: x.vt }))).toEqual(top.map((x) => ({ v: x.v, vt: x.vt })));
     }
+  });
+
+  test('a bare values().min()/max() in a by() — no leading movement — still fails closed', () => {
+    // The correlated argmax arm roots at a movement (inE/outE/both); a reducer over the HOST's own
+    // property stream is the scalar-host arm, a separate increment. It refuses rather than mis-executes.
+    const store = seededStore();
+    expect(() => run(store, 'g.V().hasLabel("person").aggregate("a").by(__.values("age").max()).cap("a")'))
+      .toThrow(/not supported yet/);
   });
 });
