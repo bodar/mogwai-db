@@ -1032,6 +1032,24 @@ export const ENTRY = { key: 'mk', val: 'mv' } as const;
  *  in the map (`json_each.key`, which for a JSON array IS the index). */
 const PAIR = { value: 'ev', ord: 'eo' } as const;
 
+/**
+ * Does this pair's KEY equal `key` — tolerant of BOTH key encodings the map vocabulary carries.
+ *
+ * A map key is a string here (a property name, a `project()` label), but the two producers spell it
+ * differently: `group()`/`valueMap()` emit a `{t,v}` node key (`[{"t":"string","v":"name"},…]`), while
+ * `project()` emits a BARE string key (`["n",…]` — `record.ts`'s deliberate choice, since a project key
+ * is never in question and the wire framer infers a bare member). Both frame identically, so it was a
+ * latent split until `project().fold().unfold().select(k)` made a bare-key map re-enter `mapTail`. So
+ * the match reads `$[0].v` (the enveloped key) and falls back to `$[0]` (the bare key) — one comparison
+ * that both encodings satisfy, rather than a producer-specific reader.
+ */
+const keyMatches = (pair: Expr, key: string): Expr => eq(
+  { kind: 'call', fn: 'COALESCE', args: [
+    { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0].v')] },
+    { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0]')] },
+  ] },
+  compilerText(key));
+
 /** The map's pairs as a relation — `FROM json_each(<map>)`. No `input`, which is what makes it a
  *  correlated subquery over ONE traverser's map (`rel.ts`); the row-multiplying form is `unfoldMap`. */
 const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
@@ -1169,10 +1187,9 @@ function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
  */
 export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Rel | null {
   const rel = fenced(input, fresh);
-  // The KEY SIDE is a `{t,v}` node, so the match reads its `v` — a key is a string here (a property
-  // name or, under tokens, a `T` whose `v` is the token name, which no `select(<label>)` can name).
-  const matching = (pairs: Rel): Expr =>
-    eq({ kind: 'call', fn: 'json_extract', args: [col(pairs.id, PAIR.value), compilerText('$[0].v')] }, compilerText(key));
+  // The key match is tolerant of both key encodings (`keyMatches`) — a `{t,v}` node key from
+  // `group()`/`valueMap()` or a bare-string key from `project().fold().unfold()`.
+  const matching = (pairs: Rel): Expr => keyMatches(col(pairs.id, PAIR.value), key);
   const probePairs = pairsOf(col(rel.id, MAP_COL), fresh);
   // THE PRESENCE FILTER COMES FIRST, and the order is forced rather than chosen: the projection below
   // spends the `map` column, so a filter after it would reference a column that no longer exists.
@@ -1213,8 +1230,7 @@ export function mapSelect(
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   const rel = fenced(input, fresh);
   const map = col(rel.id, MAP_COL);
-  const matching = (pairs: Rel, key: string): Expr =>
-    eq({ kind: 'call', fn: 'json_extract', args: [col(pairs.id, PAIR.value), compilerText('$[0].v')] }, compilerText(key));
+  const matching = (pairs: Rel, key: string): Expr => keyMatches(col(pairs.id, PAIR.value), key);
   // PRESENCE, per key — the traverser survives only if EVERY key is in the map, because a `select` over
   // a map FILTERS on a missing key rather than binding a null entry (the `EmptyTraverser` above).
   const present = keys.map((key): Expr => {

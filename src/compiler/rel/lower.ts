@@ -3231,9 +3231,10 @@ function listTail(
         { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
       ];
       const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
-        : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
-          : unfolded.elem ? [meta('id', 'int')]
-            : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
+        : unfolded.mapVal ? [meta(MAP_COL, 'json')]
+          : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
+            : unfolded.elem ? [meta('id', 'int')]
+              : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
       const positioned = renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh);
       // A MIXED list's members are HETEROGENEOUS self-describing nodes, so the unfolded stream is a
       // per-row `typedNode` — terminal, exactly as a variant is (a stream that is a vertex on one row
@@ -3242,6 +3243,11 @@ function listTail(
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
       if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels);
+      // A MAP-membered list's members are MAPS, so each unfolds to a map traverser and re-enters
+      // `mapTail`. The key side is self-describing (`{kind:'scalar'}` — a map key states its own type);
+      // the value side is whatever the list member carried (`mapVal`). This closes the
+      // `project().fold().unfold()` round trip and serves `select(Pop.all).by(__.…fold()).unfold()`.
+      if (unfolded.mapVal) return mapTail(positioned, { kind: 'scalar' }, unfolded.mapVal, steps, at + 1, ctx, fresh, labels);
       // AN ELEMENT list's members are ELEMENTS, so the round trip closes: the relation carries an `id`
       // again and the rest of the chain is the ordinary element loop. `bulked` is false — a fold reset
       // the multiplicity when it collapsed the stream to one traverser, and each member now stands for

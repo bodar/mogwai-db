@@ -685,10 +685,15 @@ export const NODE_COL = 'node';
 
 export function unfoldList(
   rel: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly elem?: Elem; readonly nodes?: readonly MixedArm[] } | null {
+): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly mapVal?: MapOf; readonly elem?: Elem; readonly nodes?: readonly MixedArm[] } | null {
   // A NESTED list unfolds into one LIST traverser per member (a `product()`'s pair-lists), which is
   // the same explode with a different payload column — so it is one arm rather than a second function.
   if (of.kind === 'list') return unfoldNested(rel, of, fresh);
+  // A MAP-membered list unfolds into one MAP traverser per member (`project().fold().unfold()` round-trip,
+  // `select(Pop.all).by(__.…fold()).unfold()`): the same explode as a nested list, landing the member's
+  // pairs array in `MAP_COL` and re-entering `mapTail`. `UnfoldStep` iterates the List and yields each
+  // Map (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/flatMap/UnfoldStep.java`).
+  if (of.kind === 'map') return unfoldMapMembers(rel, of, fresh);
   // A MIXED list unfolds into one SELF-DESCRIBING NODE per member: the members are heterogeneous
   // `{t,v}` envelopes (a vertex beside an edge beside a value), so each becomes a `typedNode` row the
   // wire frames by its own tag. There is no single element/scalar vocabulary to re-enter — a stream
@@ -1315,6 +1320,29 @@ function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: M
     ord: MEMBER.ord,
     typed: false,
     member: of.of,
+  };
+}
+
+/** `unfold()` over a list of MAPS — `unfoldNested`'s twin, landing each member's pairs array in the
+ *  `MAP_COL` the map vocabulary reads (`'map'`, spelled here rather than imported for the `map.ts` cycle
+ *  `foldMaps` already documents). The member is a self-describing pairs array, so `json()` around it for
+ *  the nested arm's reason: without it the enclosing explode's subtype does not survive. */
+function unfoldMapMembers(rel: Rel, of: ListOf & { readonly kind: 'map' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly mapVal: MapOf } {
+  const exploded = make.explode({
+    id: fresh('um'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
+    type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
+  });
+  return {
+    rel: make.project({
+      id: fresh('umv'), input: exploded, channels: rel.channels,
+      type: typeOf(meta('map', 'json'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
+      exprs: [['map', { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
+        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+        [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+    }),
+    ord: MEMBER.ord,
+    typed: false,
+    mapVal: of.of,
   };
 }
 

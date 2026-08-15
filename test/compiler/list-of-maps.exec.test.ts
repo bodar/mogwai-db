@@ -85,3 +85,34 @@ describe('a nested selection — a list of maps as a project() FIELD', () => {
     expect(r).toEqual([{ friends: [{ V: 2 }, { V: 4 }] }]);
   });
 });
+
+describe('unfold() over a list of maps — the round trip', () => {
+  test('project().fold().unfold() restores the map stream', async () => {
+    const r = await decoded("g.V().hasLabel('person').project('n').by('name').fold().unfold()");
+    expect(r).toEqual([{ n: 'marko' }, { n: 'vadas' }, { n: 'josh' }, { n: 'peter' }]);
+  });
+
+  test('valueMap().fold().unfold() likewise, list values intact', async () => {
+    const r = await decoded("g.V().hasLabel('person').valueMap('name').fold().unfold()");
+    expect(r).toEqual([{ name: ['marko'] }, { name: ['vadas'] }, { name: ['josh'] }, { name: ['peter'] }]);
+  });
+
+  test('groupCount().fold().unfold() restores the single barrier map', async () => {
+    const r = await decoded("g.V().hasLabel('person').groupCount().by('name').fold().unfold()");
+    expect(r).toEqual([{ marko: 1, vadas: 1, josh: 1, peter: 1 }]);
+  });
+
+  test('select(<key>) re-reads a field off the unfolded map — the BARE-key path', async () => {
+    // The unfolded map's key is a bare string (project()'s encoding), so `mapKey` must read it through
+    // the tolerant `keyMatches`. Before that, this select returned the empty result.
+    const r = await decoded("g.V().hasLabel('person').project('n').by('name').fold().unfold().select('n')");
+    expect(r).toEqual(['marko', 'vadas', 'josh', 'peter']);
+  });
+
+  test('select(<key>) over a {t,v}-key map (group/valueMap) still resolves — no regression', async () => {
+    expect(await decoded("g.V().hasLabel('person').valueMap('name').fold().unfold().select('name')"))
+      .toEqual([['marko'], ['vadas'], ['josh'], ['peter']]);
+    // A group's {t,v}-key select, untouched by the tolerant match.
+    expect(await decoded("g.V().hasLabel('person').groupCount().by('name').select('marko')")).toEqual([1]);
+  });
+});
