@@ -93,6 +93,21 @@ export function createAppScope(deps?: Partial<{
   return app;
 }
 
+/** A STORE-FREE app scope for compiling where no store exists — the Worker EDGE, which compiles a
+ *  traversal and ships the plan to the DO (edge-compilation Phase 1). It is `createAppScope` with the
+ *  execution-only slots left at their defaults: `store`/`source` undefined, `io` the fail-closed
+ *  NO_IO_STORE. That is sound because compile reads only settled VALUES (fastPaths, the registry
+ *  resolved to named services, the request's params/sourceOptions) and never INVOKES the store/io/
+ *  source — those are captured by service constructors and used only in a barrier's `apply`, which is
+ *  execution, not compile.
+ *
+ *  The caller MUST pass the SAME registry + fastPaths the executing tier uses, or the edge would ship
+ *  a plan the DO would not have compiled — so both are explicit, not defaulted here. This is the
+ *  "multiple app scopes, shared code" split: one factory, the edge omitting what it cannot have. */
+export function createCompileScope(registry: RegistryProvider, fastPaths?: FastPathConfig): AppScope {
+  return createAppScope({ registry, fastPaths });
+}
+
 /** Mint a request scope from an app scope for ONE client request (one traversal, or one
  *  federated hop into a sibling graph — which is a request of its own, one level deeper). */
 export function createRequestScope(app: AppScope, deps: {

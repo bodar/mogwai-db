@@ -599,7 +599,7 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
 // The write path and all non-element value shapes frame through frameValues (bulk 1); only the
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
-function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> {
+export function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> {
   // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
   // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
   // effects change WHERE the rows come from and nothing about how they are framed.

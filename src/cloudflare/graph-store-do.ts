@@ -3,7 +3,8 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo } from '../manager.ts';
 import type { GraphInfo, Executor, ForeignRow } from '../api.ts';
-import { Executor as ExecutorImpl, type Framed } from '../execute.ts';
+import { Executor as ExecutorImpl, frameResolved, type Framed } from '../execute.ts';
+import type { Compiled } from '../compiler/compiler.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
@@ -71,6 +72,23 @@ export class GraphDatabase extends DurableObject<Env> {
    *  the storage tier. */
   async framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<RpcResult<Framed[]>> {
     return rpcTry(() => this.executor().framedAsync(gremlin, params, paramTypes));
+  }
+
+  /** Data-plane RPC: run + FRAME an ALREADY-COMPILED read plan (edge-compilation Phase 1). The edge
+   *  Worker compiled it — compile is a pure function that touches no store — so the DO does only what
+   *  needs the store: execute + frame, through the SAME `frameResolved` the string path uses, so the
+   *  wire result is byte-identical. No parse, no compile, no registry, no executor. The edge ships
+   *  ONLY a non-segment read here; writes/federation still take `framed(gremlin)`.
+   *
+   *  SECURITY (edge-compilation §5): unlike `framed(gremlin)`, which runs only what the compiler
+   *  produces from a Gremlin string, this runs raw SQL + binds the CALLER supplies — a wider surface.
+   *  Same trust domain today (only the paired Worker holds this DO binding); it would be a real
+   *  widening the moment anything else can reach this stub. */
+  async runFramed(plan: Compiled): Promise<RpcResult<Framed[]>> {
+    return rpcTry(async () => {
+      this.ensureLive();
+      return [...frameResolved(this.store, plan)];
+    });
   }
 
   /** Data-plane RPC: the INTERNAL raw-row path — a federated hop FROM a sibling DO lands here.

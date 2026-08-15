@@ -25,7 +25,10 @@ export interface RpcFailure {
 }
 
 /** `T` or a failure — the return type of every data-plane RPC on {@link GraphDatabase}. Restricted
- *  to the two payloads that exist rather than generic over anything, so a new RPC has to say so. */
+ *  to the two payloads that exist rather than generic over anything, so a new RPC has to say so.
+ *  `runFramed` (edge-compilation Phase 1) reuses the `Framed[]` arm — its INPUT is a compiled plan,
+ *  but its result is still framed buffers — so this type is unchanged; only the arm count of RPCs
+ *  sharing it grew. */
 export type RpcResult<T extends Framed[] | ForeignRow[]> = T | RpcFailure;
 
 /** Run a data-plane body, returning its failure rather than throwing it across the boundary. */
