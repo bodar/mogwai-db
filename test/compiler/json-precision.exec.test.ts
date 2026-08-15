@@ -45,4 +45,14 @@ describe('a binary64 survives the JSON blob (§12 real precision)', () => {
     const list = JSON.parse((run(seededStore(), 'g.inject(1).math("1.0/3.0").fold()') as { list: string }[])[0]!.list) as number[];
     expect(list[0]).toBe(1 / 3);
   });
+
+  test('a computed real as a MAP VALUE carries its static tag AND full precision', () => {
+    // group().by(k).by(__.…math()) — a child scalar with a STATIC double type. byNode used to drop the
+    // tag (t:null) so a whole result inferred Int and the value lost precision; now it tags 'double'.
+    const rows = run(seededStore(), 'g.V().hasLabel("person").group().by("name").by(__.values("age").math("_/3"))') as { map: string }[];
+    const m = Object.fromEntries((JSON.parse(rows[0]!.map) as [{ v: string }, { t: string; v: number }][]).map(([k, v]) => [k.v, v]));
+    expect(m.marko!.t).toBe('double');
+    expect(m.marko!.v).toBe(29 / 3);       // full precision, not 15-digit
+    expect(m.josh!.v).toBe(32 / 3);
+  });
 });

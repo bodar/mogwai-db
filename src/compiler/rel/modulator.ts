@@ -1,7 +1,7 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
@@ -413,6 +413,14 @@ export function scopedHost(label: string, host: ChildHost): ChildHost | null {
  * a framed element, which the materializer expands per pair rather than tagging) and anything `byExpr`
  * already refuses.
  */
+/** A `{t,v}` node's tag from a scalar type: the STATIC class as a literal where the type names one,
+ *  else SQL NULL (an UNKNOWN or a per-row type the framer must infer — a per-row column cannot ride a
+ *  map side, so it is dropped here). A literal, so it never duplicates a correlated read. */
+const staticTagExpr = (type: ScalarType): Expr => {
+  const tag = staticTypeOf(type);
+  return tag ? compilerText(tag) : compilerNull('text');
+};
+
 export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
@@ -431,13 +439,13 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     // record. Both preserve SQL NULL outside the node for the reason the scalar arm does.
     const member = produced.framing.kind === 'elements' ? elementNode(value, produced.framing.elem, fresh)
       : produced.framing.kind === 'map' ? mapNode(value)
-        // For `T.id`'s reason, a plain child value stays UNTAGGED here and the framer infers from it.
-        // The seam does carry a stored `vtype` (`ChildValue.vtype`) and a consumer that can project a
-        // second COLUMN uses it (`byField`), but a map side is one expression: splicing the tag in
-        // would emit its correlated read twice — once as `t` and once inside `storedValueOn`'s CASE —
-        // which is the COMPUTE-ONCE invariant a map key expression is measured against. So the tag
-        // rides where there is room for it and is dropped where there is not.
-        : produced.framing.kind === 'scalar' ? typedNode(value, compilerNull('text'))
+        // A body with a STATIC type (`by(__.values('age').math('_/3'))` is always a double) tags the
+        // node with it — a literal `t`, so no correlated read is duplicated, and `jsonMember` then makes
+        // the value lossless AND a whole-number result frames Double rather than an inferred Int. A
+        // PER-ROW or UNKNOWN type stays untagged: `T.id` genuinely cannot say, and a stored value's tag
+        // is a second correlated read a map side has no room for (the COMPUTE-ONCE invariant). So the
+        // tag rides where it is a constant and is dropped where it is a column.
+        : produced.framing.kind === 'scalar' ? typedNode(value, staticTagExpr(produced.framing.type))
           : null;
     if (!member) return null;
     // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
