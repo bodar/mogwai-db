@@ -17,9 +17,10 @@
 // shape depend on the PRIOR barrier's runtime output, so the compiler cannot know the count
 // without running one. `resume` is a pure function from a barrier's output rows back into the
 // NEXT Plan (itself possibly another segment). Gluing is function composition, driven by the
-// async trampoline — which is a PRIVATE method on Executor (execute.ts), because it needs the
-// executor's collaborators (store + the federation source). This module is TYPES ONLY: the
-// cycle-free description of a plan, importing only leaf types, never the store / framing / engine.
+// async trampoline `driveSegments` (src/drive.ts) — a FREE FUNCTION over an injected host (compile +
+// readHead), so the same loop runs in-process on Bun and Worker-side on Cloudflare; the Executor is
+// only the in-process host (edge-compilation §4·4). This module is TYPES ONLY: the cycle-free
+// description of a plan, importing only leaf types, never the store / framing / engine.
 
 import type { Compiled, Executable } from '../sql/kernel/render.ts';
 import type { ForeignRow } from '../api.ts';

@@ -2,12 +2,13 @@ import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
-import type { FederationSource, Plan } from './compiler/segment.ts';
+import type { FederationSource } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runProgram } from './program.ts';
+import { driveSegments, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -798,20 +799,23 @@ export class Executor implements ExecutorApi {
     return plan.compiled;
   }
 
+  /** This Executor as a `SegmentHost` (src/drive.ts): compile bound to this app scope, and the
+   *  segment-head read against this store. Built once — `driveSegments` is a free function so the
+   *  SAME loop runs in-process here and Worker-side in Phase 2; the Executor is only the in-process
+   *  host. `federationDepth` threads through `compile` so a recursive federate hops at depth+1. */
+  private readonly segmentHost: SegmentHost = {
+    compile: (gremlin, params, paramTypes, federationDepth) =>
+      compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes),
+    readHead: (head) => this.readSegmentHead(head),
+  };
+
   /** Drive a (possibly segmented) plan to a final synchronous Compiled/Program — the ONE await
    *  boundary, and the ONLY async loop outside a runtime entry point. A pure single-segment
    *  traversal (all of Phases 1-5) returns immediately, zero async overhead. A barrier (federate)
-   *  loops: read+drain head → await apply() → land + resume. `federationDepth` rides
-   *  CompileOptions beside the registry, reaching the service's CallSite so the barrier's
-   *  apply closure captures it (a recursive federate hops at depth+1). */
-  private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Executable> {
-    let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);
-    while (p.kind === 'segment') {
-      const rows = p.head ? this.readSegmentHead(p.head) : [];
-      const foreign = await p.apply(rows);
-      p = p.resume(foreign, rows);
-    }
-    return p.compiled;
+   *  loops: read+drain head → await apply() → land + resume. The loop itself is `driveSegments`;
+   *  this method only supplies the in-process host. */
+  private drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Executable> {
+    return driveSegments(this.segmentHost, gremlin, params, paramTypes, federationDepth);
   }
 
   /** Read a barrier segment's HEAD into the barrier's input rows (mid-traversal parent
