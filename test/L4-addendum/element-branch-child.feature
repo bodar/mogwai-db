@@ -25,7 +25,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
       | peter |
 
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_mapXunionXout__inX_countX
     Given the modern graph
     And the traversal of

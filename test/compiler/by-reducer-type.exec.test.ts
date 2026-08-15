@@ -70,11 +70,22 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
     }
   });
 
-  test('a bare values().min()/max() in a by() — no leading movement — still fails closed', () => {
-    // The correlated argmax arm roots at a movement (inE/outE/both); a reducer over the HOST's own
-    // property stream is the scalar-host arm, a separate increment. It refuses rather than mis-executes.
+  test('a self-rooted reducer — by(__.values(k).<reducer>()), NO leading movement — composes too', () => {
+    // The correlated engine roots at a one-row SELF relation, not only a movement, so a reducer over
+    // the HOST's own property values goes through the same path.
     const store = seededStore();
-    expect(() => run(store, 'g.V().hasLabel("person").aggregate("a").by(__.values("age").max()).cap("a")'))
-      .toThrow(/not supported yet/);
+    const mx = run(store, 'g.V().hasLabel("person").project("n","a").by("name").by(__.values("age").max())');
+    // Each person's single age is its own max; framed by the reducer's type, not inference.
+    expect(field(mx.filter((r) => JSON.parse(r.map)[0][1].v === 'marko'), 'a')).toEqual({ t: 'int', v: 29 });
+    // count of a single-valued property is 1 (a long, always productive).
+    const ct = run(store, 'g.V().has("name","marko").project("n","a").by("name").by(__.values("age").count())');
+    expect(field(ct, 'a')).toEqual({ t: 'long', v: 1 });
+  });
+
+  test('self-rooted aggregate member frames IDENTICALLY to the top-level reducer', () => {
+    const store = seededStore();
+    const top = run(store, 'g.V().has("name","marko").values("age").max()');
+    const mem = run(store, 'g.V().has("name","marko").aggregate("a").by(__.values("age").max()).cap("a").unfold()');
+    expect(mem.map((x) => ({ v: x.v, vt: x.vt }))).toEqual(top.map((x) => ({ v: x.v, vt: x.vt })));
   });
 });

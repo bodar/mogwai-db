@@ -6109,6 +6109,86 @@ function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extract<Chi
  * type, and a bare `label()` is a string. Recomputing any of that from the finished `Expr` is
  * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
  */
+/**
+ * A REDUCER OVER A CORRELATED BODY, rooted at `root` — `by(__.inE('created').values('weight').sum())`
+ * and `by(__.values('age').max())` are the SAME lowering rooted differently (a movement hop, or a
+ * one-row SELF relation). The body from `from` is the ordinary fold against `root`; EVERY path returns
+ * (a `ChildValue` or `null`), so a caller either takes it or declines.
+ */
+function correlatedReduce(
+  root: Rel, rootElem: Elem, body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+): ChildValue | null {
+  // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
+  // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer row,
+  // so the numeric arm below declines it. The correlated pick is the SAME element as a `sort`+`limit(1)`
+  // over the SAME single-type-space order (`minMaxOrder`, shared with the global barrier so the two
+  // cannot drift), and the winner's own vtype is `minMaxWinnerVt`. Productivity for min/max is NOT the
+  // value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE null (`ReducingBarrierStep`)
+  // — so a per-host EXISTS over the value rows is the `present` signal.
+  const last = body.at(-1);
+  if (last && (last.name === 'min' || last.name === 'max') && !argValues(last).length && !isLocalScope(last) && body.length >= 2) {
+    const values = continueAs(root, { kind: 'elements', elem: rootElem }, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
+    let fenced = false;
+    if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
+    const probeCol = values?.rel.type.cols[0];
+    if (values && !fenced && probeCol && values.framing.kind === 'scalar' && values.framing.result === undefined) {
+      const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
+      const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
+      const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
+      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
+      const probe = make.project({ id: fresh('mp'), input: values.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(values.rel.id, probeCol.name)]] });
+      return {
+        expr: { kind: 'scalar', plan: vExpr },
+        framing: { kind: 'scalar', type: UNKNOWN, result: 'number' },
+        vtype: { kind: 'scalar', plan: vtExpr },
+        present: { kind: 'exists', plan: probe, negated: false },
+        yields: 'one',
+      };
+    }
+  }
+  const tail = continueAs(root, { kind: 'elements', elem: rootElem }, body, from, false, inBody(ctx), fresh, NO_ALIASES);
+  // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say. `result` is a
+  // TYPE fact, not a CARDINALITY one: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so a
+  // non-collapsed subquery has as many rows as the fan-out and SQLite silently takes the first
+  // (measured: `[1,3,3,null,null,null]` where the reference gives `[1,1,1,3,3,3]`).
+  if (!tail || !collapsedToOneRow(tail.rel)) return null;
+  // A fence anywhere below is also a decline: this plan is correlated to the outer row, and a
+  // Materialize forces a named CTE that cannot reference it.
+  let materialized = false;
+  forEachRel(tail.rel, (rel) => { if (rel.kind === 'materialize') materialized = true; });
+  if (materialized) return null;
+  // A PER-ORIGIN FOLD — the correlated body reduced to ONE list. `foldScalars`/`foldElements` COALESCE
+  // an empty fold to `[]` (FoldStep's `ArrayListSupplier` seed), so a sink host emits `[]` with no
+  // per-origin seed machinery; the fold IS the collapse `collapsedToOneRow` requires, and it is ALWAYS
+  // productive (it seeds).
+  if (tail.framing.kind === 'list') {
+    const list = make.project({
+      id: fresh('bl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      exprs: [[LIST_COL, col(tail.rel.id, LIST_COL)]],
+    });
+    return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  }
+  if (tail.framing.kind !== 'scalar' || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
+  // `count()` and the numeric reducers differ only in empty-input productivity: `CountGlobalStep` seeds
+  // 0 (COALESCEd, ALWAYS productive), while `SumGlobalStep` leaves SQL's NULL alone and the by()
+  // productivity filters drop it. A NUMERIC reducer carries its result's TYPE in `vt` — the winner's own
+  // Gremlin vtype (min/max) or the SQLite storage class (sum/mean) — exposed as `vtype` so a consumer
+  // that projects a second column (a record field, a collection member) lands it beside the value and
+  // `by(sum())` composes exactly as `by(count())` does; a map side that carries one expression ignores
+  // it.
+  const scalarOf = (column: string): Rel => make.project({
+    id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
+    exprs: [[column, col(tail.rel.id, column)]],
+  });
+  const scalar = scalarOf('v');
+  if (tail.framing.result === 'count')
+    return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  return {
+    expr: { kind: 'scalar', plan: scalar },
+    framing: tail.framing, vtype: { kind: 'scalar', plan: scalarOf('vt') }, yields: 'one',
+  };
+}
+
 function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   const first = body[0]!;
@@ -6186,106 +6266,26 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), fresh);
   if (host.kind !== 'element') return null;
 
-  // THE MOVEMENT-THEN-REDUCER ARM is `correlatedExists` minus EXISTS: root the first hop directly at
-  // the outer row, then hand the rest to the ordinary fold. A movement is required in this increment,
-  // so bare `__.count()` and `__.label().count()` fall through to the expression arm and decline.
+  // A REDUCER OVER A CORRELATED BODY, rooted TWO ways through ONE engine (`correlatedReduce`): a
+  // MOVEMENT hop (`by(__.inE('created').values('weight').sum())`) roots the fold at the adjacency, and a
+  // value chain over the HOST ITSELF (`by(__.values('age').max())`) roots it at a one-row SELF relation.
+  // A movement is not required — what is required is that the body END in a reducer; a bare
+  // `__.count()`/`__.values(k)` with no reduction falls through to the expression arm below.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
-  if (child) {
-    // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
-    // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer
-    // row, so the numeric arm below declines it. The correlated pick is the SAME element as a
-    // `sort`+`limit(1)` over the SAME single-type-space order (`minMaxOrder`, shared with the global
-    // barrier so the two cannot drift), and the winner's own vtype is `minMaxWinnerVt`. Productivity
-    // for min/max is NOT the value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE
-    // null (`ReducingBarrierStep`) — so a per-host EXISTS over the value rows is the `present` signal.
-    const last = body.at(-1);
-    if (last && (last.name === 'min' || last.name === 'max') && !argValues(last).length && !isLocalScope(last) && body.length >= 2) {
-      const values = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body.slice(0, -1), 1, false, inBody(ctx), fresh, NO_ALIASES);
-      let fenced = false;
-      if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
-      const probeCol = values?.rel.type.cols[0];
-      if (values && !fenced && probeCol && values.framing.kind === 'scalar' && values.framing.result === undefined) {
-        const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
-        const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
-        const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
-        const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
-        const probe = make.project({ id: fresh('mp'), input: values.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(values.rel.id, probeCol.name)]] });
-        return {
-          expr: { kind: 'scalar', plan: vExpr },
-          framing: { kind: 'scalar', type: UNKNOWN, result: 'number' },
-          vtype: { kind: 'scalar', plan: vtExpr },
-          present: { kind: 'exists', plan: probe, negated: false },
-          yields: 'one',
-        };
-      }
-    }
-    const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
-    // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say.
-    //
-    // `result` is a TYPE fact — "this value is a count", which decides the `vt` column and the wire tag
-    // — and it was being read as a CARDINALITY one. That held only while the sole producer of a
-    // reducing framing was a global barrier. The moment `local(__.<reducer>)` became a per-TRAVERSER
-    // producer it stopped holding: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so
-    // the subquery has as many rows as the fan-out and SQLite silently takes the first. Measured — it
-    // answered `[1,3,3,null,null,null]` where the reference gives `[1,1,1,3,3,3]`.
-    if (!tail || !collapsedToOneRow(tail.rel)) return null;
-
-    // A fence anywhere below is also a decline: this plan is correlated to the outer row, and a
-    // Materialize forces a named CTE that cannot reference it.
-    let materialized = false;
-    forEachRel(tail.rel, (rel) => { if (rel.kind === 'materialize') materialized = true; });
-    if (materialized) return null;
-
-    // A PER-ORIGIN FOLD — the correlated body reduced to ONE list, `local(__.out().fold())`'s "a list
-    // per HOST". `foldScalars`/`foldElements` (`list.ts`) COALESCE an empty fold to `[]` — FoldStep's
-    // `ArrayListSupplier` seed (`vendor/tinkerpop/gremlin-core/.../step/map/FoldStep.java:47`) — so a
-    // sink host emits `[]` from the correlated subquery over an empty body with NO per-origin seed
-    // machinery. (Calcite frames a per-group aggregate the same way, `SqlSplittableAggFunction`.) The
-    // fold IS the collapse `collapsedToOneRow` requires, and a fold is ALWAYS productive (it seeds).
-    if (tail.framing.kind === 'list') {
-      const list = make.project({
-        id: fresh('bl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
-        exprs: [[LIST_COL, col(tail.rel.id, LIST_COL)]],
-      });
-      return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
-    }
-    if (tail.framing.kind !== 'scalar' || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
-
-    // `count()` and the numeric reducers deliberately differ only in empty-input productivity.
-    // CountGlobalStep seeds 0, while SumGlobalStep leaves NON_EMITTING_SEED in place and
-    // ReducingBarrierStep then emits no traverser (vendor/tinkerpop/gremlin-core/src/main/java/org/
-    // apache/tinkerpop/gremlin/process/traversal/step/map/{CountGlobalStep,SumGlobalStep}.java and
-    // step/util/ReducingBarrierStep.java). `countExpr` therefore COALESCEs to 0; `reducerAggregate`
-    // leaves SQL's NULL alone, and the existing traversal-`by()` productivity filters drop it.
-    const scalarOf = (column: string): Rel => make.project({
-      id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
-      exprs: [[column, col(tail.rel.id, column)]],
-    });
-    const scalar = scalarOf('v');
-    // The REDUCER'S OWN framing, unchanged — `count()` is a `long` and a numeric reducer reports its
-    // aggregate type. The `result` marker rides with it: a consumer that projects this as a record
-    // field needs the same `vt` column the top-level scalar payload declares for the same value.
-    //
-    // A COUNT SAYS IT IS ALWAYS PRODUCTIVE, and that is a CLAIM rather than the silence `undefined`
-    // means: `CountGlobalStep` seeds 0, so a count over an empty child still emits. Every other
-    // reducer stays silent because its productivity is not cheaply expressible — the aggregate is NULL
-    // over an empty child, but ALSO over an all-null one that `MaxLocalStep` genuinely emits, so
-    // `IS NOT NULL` would answer a different question. Saying it HERE rather than in each consumer is
-    // the seam's job: `valuePredicate` and the per-traverser child host both need exactly this fact.
-    // A REDUCING barrier has collapsed the child to one row, which is the guard three lines up.
-    if (tail.framing.result === 'count')
-      return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
-    // A NUMERIC REDUCER carries its result's TYPE in `vt` — the winner's own Gremlin vtype (min/max) or
-    // the aggregate's SQLite storage class (sum/mean), the dual channel the top-level `scalar` Shape
-    // frames. Exposed as `vtype` so a by()-consumer that projects a second column — a record field, a
-    // collection member — lands it beside the value and `by(sum())` composes exactly as `by(count())`
-    // does; a map side that can carry only one expression ignores it. The `vt` read is a second
-    // correlated subquery over the SAME one-row reducer relation (`collapsedToOneRow` above), the shape
-    // the property arm's value+vtype pair already takes.
-    return {
-      expr: { kind: 'scalar', plan: scalar },
-      framing: tail.framing, vtype: { kind: 'scalar', plan: scalarOf('vt') }, yields: 'one',
-    };
+  if (child) return correlatedReduce(child.rel, child.elem, body, 1, ctx, fresh);
+  // The SELF root: no leading hop, so the reducer aggregates/argmaxes the host's OWN property rows
+  // exactly as it does an adjacency's — a `values(k)` join against a one-row relation carrying the host
+  // id. Only when the body actually ENDS in a reducer; a plain `by(__.values(k))` stays the expression
+  // arm below, which takes the FIRST value (a different cardinality, `yields: 'first'`).
+  const terminal = body.at(-1);
+  if (body.length >= 2 && terminal && (isReducer(terminal.name) || terminal.name === 'count')) {
+    // A ONE-ROW multiplier (`Values`), then a `project` naming the host id — the same source shape
+    // `addV`/`mergeV` use, so the host id rides in a projected column the join can read by name rather
+    // than in a `Values` row whose columns are positional.
+    const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
+    const reduced = correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+    if (reduced) return reduced;
   }
 
   let value: Expr = host.id;
