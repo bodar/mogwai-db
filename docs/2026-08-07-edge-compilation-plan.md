@@ -89,8 +89,8 @@ Decided entirely by whether `Executable` is data.
 
 | variant | shape | crosses? |
 |---|---|---|
-| `Compiled` | `{kind:'read', sql, binds, shape, spine}` | **yes** |
-| `Program` | `{kind:'program', program: RelPlan, tail?: {sql, binds}, shape, spine}` | **yes** |
+| `Compiled` | `{kind:'read', sql, binds, shape}` | **yes** |
+| `Program` | `{kind:'program', program: RelPlan, tail?: {sql, binds}, shape}` | **yes** |
 
 `Program` is RelIR's several-statement form — **data the algebra produced, not a machine that walks
 the store** (`src/sql/kernel/render.ts`), carrying a `RowsBind` marker the executor fills from
@@ -239,8 +239,11 @@ in-process host and delegates. Pure refactor; the loop's semantics are pinned in
   identical loop. **Any design that only makes sense on Cloudflare is wrong — one router, two
   runtimes.**
 - **Not a security boundary change in intent, but one in fact.** The DO grows an "execute this plan"
-  RPC method. Same trust domain today; a real widening the moment anything else can reach that
-  binding, and the phase that adds it should say so out loud.
+  RPC method — `runFramed(plan: Compiled)`, landed in Phase 1 (`graph-store-do.ts`). Where
+  `framed(gremlin)` runs only what the compiler produces from a Gremlin string, `runFramed` runs raw
+  SQL + binds the CALLER supplies. Same trust domain today (only the paired Worker holds the DO
+  binding), but a real widening the moment anything else can reach that binding — said out loud here
+  and in a comment on the method.
 
 ---
 
@@ -281,9 +284,15 @@ The RelIR write path that made this possible landed via `docs/2026-08-01-write-p
 change, pinned in isolation by `test/drive.test.ts`. The segment loop's ownership no longer belongs to
 the store tier. (§4·3's residency field landed alongside — `barrier` declares `'do' | 'worker'`.)
 
-**Phase 1 — the plan RPC (reads).** A DO method taking a `Compiled`, returning rows or framed
-buffers. Edge compiles, branches on `plan.kind` (§4·1), falls back otherwise. Measurable end to end
-against the §2·2 numbers.
+**Phase 1 — the plan RPC (reads). ✅ LANDED (2026-08-15).** The DO method `runFramed(plan: Compiled)`
+runs + frames a pre-compiled read via the shared `frameResolved`. The edge compiles in a store-free
+`createCompileScope(extendedRegistry)` (`src/scopes.ts`) and `EdgeExecutor`
+(`cloudflare-graph-manager.ts`) branches: a non-segment read → `runFramed`; a segment (federation), a
+program (write), or ANY compile throw → the `framed(gremlin)` fallback, so the DO stays the single
+authority for the plan and for errors. Correctness proven in-process (`test/cloudflare-edge.test.ts`:
+store-independence, §2·1 zero store-touches, and the structural payoff — the DO's compile path is not
+hit for a shipped read) and end to end on real workerd via `test/cloudflare.test.ts`'s contract. The
+occupancy MILLISECONDS remain the workerd-only measurement (§8).
 
 **Phase 2 — writes and the segment loop.** Gated on §7 (now MET). `Program` over the same RPC; the
 Worker drives federation (§4·2) — supplying a Worker-side `SegmentHost` whose `readHead` is an RPC to
