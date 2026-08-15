@@ -17,7 +17,7 @@ which is why the reduction moved to the cap, and why a shape the fold cannot ser
 
 ---
 
-## ✅ What already exists (the substrate)
+## The substrate (what a `Collection` IS)
 
 A `Collection` holds MEMBER rows, not a folded list; `reduce()` at the `cap` is the ONE place its fold is
 chosen. `Collection.sites` is a chain-ordered list reduced to a `UNION ALL` at the read, so sites stay APART
@@ -26,26 +26,19 @@ until then (which keeps the reference's order expressible). Member TYPES meet pe
 side effect lives on the ROOT, `AggregateStep.java:57`). A site is a `snapshot` Binding, so a collection
 survives a mutating chain. The merge policy is built in FULL (its own section below). A keyed
 `group("a")`/`groupCount("a")` is `(key, contribution)` MEMBER ROWS merged per key (`groupRows`/`groupMap`,
-`map.ts`, the `grouped` `Members` arm) — same argument as `aggregate`, one container along.
+`map.ts`, the `grouped` `Members` arm) — same argument as `aggregate`, one container along. Mixed-kind
+labels are the `mixed` `Members` arm (self-describing `{t,v}` envelopes; `envelopeSites`).
 
-Learnings from that substrate, worth not re-deriving:
+Facts worth not re-deriving:
 
-- ✅ **An unrolled `repeat()` body IS N sites.** The unroll's admitted-body set had excluded side-effect steps
-  on the belief that "accumulation ACROSS phases" needed its own argument; multi-site accumulation IS that
-  argument, so `aggregate` and the keyed groupings joined `UNROLLABLE_BARRIERS` with nothing crossing a phase
-  boundary. `g.V().repeat(__.aggregate("a")).times(2).cap("a").unfold()` returns each vertex TWICE
-  (`Aggregate.feature:743-763`).
-- ✅ **The substrate moved nothing; the PASS that then used it moved +6 L3.** Watch the shape of that win — a
-  compounding lesson, not a headline for the merge machinery itself.
-- ✅ **The `reduced` arm is NOT transitional — do not delete it.** A POOLED value (`by(<reducing traversal>)`)
+- **An unrolled `repeat()` body IS N sites** — `aggregate`/the keyed groupings are in `UNROLLABLE_BARRIERS`
+  with nothing crossing a phase boundary. `g.V().repeat(__.aggregate("a")).times(2).cap("a").unfold()`
+  returns each vertex TWICE (`Aggregate.feature:743-763`).
+- **The `reduced` arm is NOT transitional — do not delete it.** A POOLED value (`by(<reducing traversal>)`)
   has no `(key, contribution)` row behind it (child rows pool, barrier reduces once), so it is single-site BY
   CONSTRUCTION. Deleting it cost a scenario before the census caught it.
-- ⚠️ **The keyed merge moved NEITHER L3 nor the census on its own, and that is the finding, not a
-  disappointment.** Every scenario it answers is blocked further along its own chain, so
-  `test/L4-addendum/group-multi-site.feature` is the only place it is asserted —
-  `legality-not-corpus-defines-support` applied exactly.
-- ⚠️ *Read a decline's REASON, not its date* — the stale "side effects can't unroll" claim outlived its truth
-  in two other docs by two days.
+- **The keyed merge is asserted in `test/L4-addendum/group-multi-site.feature` alone** — every corpus
+  scenario it answers is blocked further along its own chain (`legality-not-corpus-defines-support`).
 
 ---
 
@@ -84,9 +77,10 @@ Two neighbouring shapes stay REFUSED, both refusals rather than gaps:
 
 - **a SCALAR constant on an aggregated label** — `addAll(1, bulkSet)` is the reference's own
   IllegalArgumentException ("Objects must be both of Map or Collection"); answering the members and pretending
-  the seed was not there would be the wrong answer this phase removed.
+  the seed was not there would be the wrong answer this phase removed. (A LIST seed beside element/mixed
+  members is DIFFERENT — `addAll` concatenates, so it folds to a mixed collection; only a scalar seed refuses.)
 - **a declared policy on a KEYED label** (`registerMap`) — a seeded `group("a")` accumulates INTO the declared
-  map, which is Phase 4's (below).
+  map. This is the one remaining feature (below), a multi-mechanism build left fail-closed.
 
 One scenario looks like this and is not: `Aggregate.feature`'s second set-seed scenario supplies the side
 effect through the cucumber harness (`using the side effect a defined as "s[]"`) rather than in the
@@ -104,151 +98,44 @@ since GraphBinary spells List and Set differently.
 
 ---
 
-## 🚧 What is LEFT — in compounding-substrate order
+## 🚧 What is LEFT
 
-Ranked by what a gap UNLOCKS, not by L3 gain: substrate that opens other families first, leaf gaps last. None
-of it is collection work — the collection substrate is done.
+**The collection SUBSTRATE is DONE.** Every phase this doc planned has landed: multi-site accumulation, the
+`snapshot` binding, the full merge policy, keyed `group`/`groupCount` merge, element-keyed
+`select(Column.keys)`, `local(group("a"))` stream-identity, branch-arm sites, `count(Scope.local)` over a
+member multiset, the MIXED member arm (Phase 3b — `ListOf.mixed`/`Members.mixed`, `envelopeSites`, the
+per-row `typedNode` framing for `cap().unfold()`, and the list-seed-beside-non-scalar `addAll` case), and the
+`cap().unfold()` fold-cancel (Phase 2b — `readUnfolded`/`capUnfolded`). Tests: `grouped-keys`,
+`branch-collection-sites`, `count-local-members`, `mixed-collection`, `cap-unfold-cancel` (`test/compiler/`)
++ `mixed-collection`/`group-multi-site` (`test/L4-addendum/`). Nothing below is collection substrate.
 
-### Substrate — each unlocks several, do these first
+### The one real remaining feature — a KEYED-label seed, left fail-closed
 
-**Element-keyed `select(Column.keys)`** — ✅ LANDED (keys; `Column.values` still pending, below), and the fix
-was DEEPER than the framing tweak this bullet first guessed. The real defect was a PREMATURE FOLD: `cap`
-folded the grouping into a JSONB map, which expands each element key to a PUBLIC `COALESCE(uid,id)` payload —
-and the map blob is framed in JS (`execute.ts`), which cannot expand a rowid back, so the key node had to be
-pre-expanded, LOSING the rowid the graph is keyed by. That is fatal for the admission's
-`select(Column.keys).unfold().both()` (`GroupCount.feature:212`): the keys must MOVE, and movement needs the
-rowid — the same reason element LISTS keep rowids-until-root (`list.ts` `unfoldList`). Both references agree
-(TinkerPop keys are live `Vertex` objects; Calcite key-selection is a projection over `(key,agg)` rows), as
-does this doc's own thesis. So the fold is now CONSUMER-DRIVEN: `cap` recognises a following
-`select(Column.keys)` and projects the DISTINCT key rowids straight off the member rows into a Set
-(`collection.ts` `groupedKeys` + the `cap` lookahead in `lower.ts`), which moves natively. Asserted in
-`test/compiler/grouped-keys.exec.test.ts`; L3/census did not move because the direct corpus scenario is gated
-further along by the admission below (`legality-not-corpus-defines-support`). **This generalises Phase 2b
-(cancel a fold the consumer never needed) and is the substrate the remaining `cap` reads should follow.**
+**A declared policy on a KEYED label is a multi-mechanism feature, NOT a leaf.** A seeded `group("a")`
+accumulates INTO the declared map, and the one corpus scenario (`Group.feature:186`,
+`withSideEffect("a",[marko:["666"],noone:["blah"]]).V().group("a").by("name").by(__.outE().label().fold()).cap("a").unfold().group().by(Column.keys).by(select(Column.values).order(local))`)
+stacks four separate mechanisms: a MAP-seed parsed and merged PER KEY (`GroupBiOperator` concatenates value
+lists per key — not the `(key,contribution)` member-row union this module has, but a map-level merge); a
+`fold()` VALUE, i.e. the `reduced`/pooled arm (single-site), so the seed cannot be member rows; and a trailing
+`group().by(Column.keys).by(select(Column.values).order(local))` that is its own gap. Even the simplest seeded
+shape (`withSideEffect([marko:[999]]).V().group("a").by("name")`) produces a MIXED value list (an int seed
+item beside vertices), which is mixed-members at the group-VALUE level that `map.ts` does not build. There is
+no clean small slice; `registerGrouping` declining is the honest answer, not a punt. Building it is a real
+feature, separate from this doc.
 
-**The ready admission: `local(group("a"))`/`local(groupCount("a"))` as a stream identity** — ✅ LANDED. A
-KEYED `group("a")`/`groupCount("a")` IS a stream identity: `GroupSideEffectStep`/`GroupCountSideEffectStep`
-both extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged
-(`vendor/tinkerpop/gremlin-core/.../step/sideEffect/SideEffectBarrierStep.java:49-57`), which is
-`AggregateStep`'s contract exactly. So `local(groupCount("a"))` IS `groupCount("a")` — now in
-`isStreamIdentity` (`ir/strategies.ts`) beside `aggregate`, gated on the LABEL; a bare `group()`/`groupCount()`
-stays a `ReducingBarrierStep` that replaces the stream. Its merge (count / `GroupBiOperator`) is
-granularity-invariant, so `local()`'s per-traverser barrier is safe (unlike `assign`).
+### Gaps owned by OTHER substrates — not collection work
 
-It had been reverted TWICE, and BOTH blockers are now gone: (1) multi-site keyed groups (landed earlier);
-(2) the continuation `…cap("a").select(Column.keys).unfold()…` declining over an element-keyed map — fixed by
-the consumer-driven fold above. The historic hazard (admitting the splice let the chain answer a plausible
-half instead of declining) was checked directly: the admission scenario `GroupCount.feature:212` answers
-EXACTLY `{marko:6,vadas:2,lop:6,josh:6,ripple:2,peter:2}` (matches TinkerPop), and the census re-record moved
-exactly ONE traversal deferred→ran with zero golden answers changed. L3 1546→1547.
-
-**Branch-arm collection sites** — ✅ LANDED. The `union()`-declines-on-an-encounter-channel guard this
-bullet described is gone: `union`/`choose` merge a FRESH UNORDERED stream, dropping the spent encounter and
-minting a deterministic one only where a downstream collecting/positional consumer demands it
-(`withFanoutOrder`, the branch-emission-order substrate), so `g.V().union(__.aggregate("a"), …).cap("a")`
-compiles. The remaining neighbour was `coalesce`: a non-final arm needs a "produced nothing" predicate and
-`alwaysProduces` reads the LAST step alone, so a pure side-effect arm (`aggregate("a")`, labelled
-`groupCount("a")`, `sideEffect(…)`, `identity()`) was not seen as always-firing and `coalesce` declined —
-fixed by a whole-body `isStreamIdentity` check (`coalesceArms`, `lower.ts`). Asserted in
-`test/compiler/branch-collection-sites.exec.test.ts`; no corpus scenario has the shape, so L3/census did not
-move (`legality-not-corpus-defines-support`).
-
-**`count(Scope.local)` — the local-reducer vocabulary.** ✅ LANDED. Over a MAP it counts ENTRIES (already
-worked). The gap was an ELEMENT-membered list: `listRetype` declined every non-bare list up front, but
-`count(Scope.local)` never reads a member's VALUE — it counts members via `membersOf` regardless of kind — so
-it now answers BEFORE the bare-list gate (which the value reducers still need). `aggregate("a").cap("a").count(Scope.local)`
-reports the multiset size directly (`g.V().both().aggregate("a").cap("a").count(Scope.local)` = 12). Asserted
-in `test/compiler/count-local-members.exec.test.ts`.
-
-### Member/variant substrate
-
-**Phase 3b — mixed member SHAPES through the variant.** ✅ LANDED. Two sites contributing different element
-KINDS (an edge site beside a vertex site), or an element beside a value, now accumulate into a MIXED
-collection rather than declining (`accumulate`, `collection.ts`). The design turned out SIMPLER than a
-"member-level variant that the framer must learn": the wire's `frameTypedNode` (`execute.ts`) already frames
-ANY self-describing `{t,v}` node — a vertex, an edge, a scalar leaf — so the whole of the wire change was
-routing a new `ListOf.mixed` arm to it (`listItemBuffers`). The ALGEBRA work is the real content: a mixed
-`UNION ALL` shares ONE member column, where a bare rowid is indistinguishable from a scalar, so
-element-until-root cannot hold — each element expands to its `{t,v}` envelope AT THE SITE (`envelopeSites`,
-`elementNode`), the one place that rule is suspended, and each scalar to `typedNode` with its own tag. `cap`
-folds the envelope column like any typed list; `count(Scope.local)` counts members regardless of kind.
-
-`cap("a").unfold()` over a mixed collection emits one traverser PER MEMBER, each framed by its own tag — a
-new per-row `typedNode` framing (`framing.ts`/`render.ts`), distinct from the stream-level `variant` because
-a self-describing envelope preserves a per-member scalar TYPE (a uuid/datetime member) that `variant`'s single
-static scalar arm would infer away (§6·7). It is TERMINAL for the variant's reason: a stream that is a vertex
-on one row and an edge on the next has no uniform continuation, so a follower declines. No corpus scenario
-mixes kinds into one label directly (the multi-site aggregate scenarios use edge steps only as MOVEMENTS
-between vertex sites, so the label stays homogeneous — `elements`, not `mixed`), so this moved neither L3 nor
-the census; it is asserted in `test/L4-addendum/mixed-collection.feature` and
-`test/compiler/mixed-collection.exec.test.ts` (`legality-not-corpus-defines-support`).
-
-Landing the substrate also discharged the deferral `seedAsSite` had carried since Phase 7: a
-`withSideEffect(k, [items], Operator.addAll)` LIST seed beside ELEMENT (or already-mixed) members —
-`addAll([1,2,3], bulkSetOfVertices)` = `[1,2,3, v…]` — now prepends the seed's items as site 0 and folds
-to a mixed collection, where it used to decline ("a scalar seed beside ELEMENT members … not this
-function's to invent"). `accumulate`'s mixed-merge guard admits `addAll` (it CONCATENATES, so the seed
-items' kinds and the members' need not agree) while still declining every arithmetic operator over a
-heterogeneous multiset (a ClassCastException in the reference). A `Set` seed's dedup rides through as
-`firstOccurrences` over the envelope column.
-
-### Leaf gaps — one thing each, no downstream unlock
-
-**A declared policy on a KEYED label.** ⚠️ **NOT a leaf — a multi-mechanism feature, left fail-closed
-deliberately.** A seeded `group("a")` accumulates INTO the declared map, and the one corpus scenario
-(`Group.feature:186`, `withSideEffect("a",[marko:["666"],noone:["blah"]]).V().group("a").by("name").by(__.outE().label().fold()).cap("a").unfold().group().by(Column.keys).by(select(Column.values).order(local))`)
-stacks four separate mechanisms: a MAP-seed parsed and merged PER KEY (`GroupBiOperator` concatenates
-value lists per key — not the `(key,contribution)` member-row union this module has, but a map-level
-merge); a `fold()` VALUE, i.e. the `reduced`/pooled arm (single-site), so the seed cannot be member rows;
-and a trailing `group().by(Column.keys).by(select(Column.values).order(local))` that is its own gap. Even
-the simplest seeded shape (`withSideEffect([marko:[999]]).V().group("a").by("name")`) produces a MIXED
-value list (an int seed item beside vertices), which is mixed-members at the group-VALUE level that
-`map.ts` does not build. There is no clean small slice; `registerGrouping` declining is the honest answer,
-not a punt. Building it is a real feature, separate from this doc.
-
-**Phase 2b — the reduction a `cap().unfold()` never needed.** ✅ LANDED. `cap("a").unfold()` used to fold
-members into a JSONB array and immediately `json_each` them back; now the fold is CANCELLED — `readUnfolded`
-(`collection.ts`) hands the member relation straight out and `capUnfolded` (`lower.ts`) mints an encounter
-from the SITE ORDER, so the emitted plan reads `nodes`/`v`/the envelope column directly (no `json_each`) and
-each member re-enters the ordinary element/scalar/typed-node loop. The order trap this bullet warned about
-is discharged by the mint, not dodged: the `ROW_NUMBER` over the site order reproduces the fold's `ORDER BY`
-plus `unfold`'s re-mint EXACTLY, so the cancel is order-preserving and `mise run test:perturbed` stays at its
-pre-existing count (measured — the same 5 unrelated failures, none from this). Only a PLAIN multiset cancels:
-a declared merge (a seed prepend, a `Set` dedup, an `assign` narrowing) is not a no-op so it takes the
-ordinary `reduce`, and a `grouped`/`reduced` collection is a MAP whose `unfold` is entries. Asserted in
-`test/compiler/cap-unfold-cancel.exec.test.ts` (the plan no longer folds; answers unchanged, which the census
-also holds).
-
-**`within(__.cap('a').unfold())`** — ⚠️ declines at the `where`; the predicate operand's label resolution is
-its own gap (Phase 5 was a precondition, not the whole of it). NOT a collection gap.
-
-**The 2 remaining multi-site failures — each blocked elsewhere.** What is left of the original nine (the
-mixed-shape pair is now Phase 3b, landed): a `by(__.inE("created").values("weight").sum())` site (a `by()`
-whose body is a numeric REDUCER has its type in a `vt` column `byField` declines to supply — build plan
-Phase 2; `by(count())` lowers where `by(sum())` does not) · a `cap("a").unfold().path()` tail. Neither a
-collection gap.
-
-**Owned by their own features:** `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree`.
-
-### Capstone — the shapes still not covered
-
-**The silent-overwrite problem is discharged by the single-spine cut.** The wrong answer this was once a
-capstone over — a last-write-wins that answered a plausible half of a multi-site label — is gone with the
-second spine it lived in. A multi-site shape the lowering does not cover now raises `UnsupportedTraversal`, the
-fail-closed answer, not a quiet wrong one. What is LEFT is COVERAGE: the shapes below still decline, each
-blocked in a DIFFERENT substrate four features away.
-
-| shape | why the lowering declines it |
+| shape | blocked by |
 |---|---|
+| `…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap — a reducer-body's type rides in a `vt` column `byField` won't supply (RelIR build plan Phase 2; `by(count())` lowers, `by(sum())` does not) |
+| `cap("a").unfold().path()` | the path substrate |
+| `within(__.cap('a').unfold())` | predicate-operand label resolution at the `where` (Phase 5 was a precondition, not the whole of it) |
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |
 | `…local(aggregate("a")).bothE().sample(1).otherV()…` | `sample()` |
-| `…by(__.outE("created").count())…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap |
+| `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree` | their own features |
 
-(The `…union(__.out(), __.in()).local(aggregate("a"))…` row is GONE — branch-arm sites now compile;
-`g.V().local(aggregate("a")).union(__.out(),__.in()).local(aggregate("a")).cap("a").unfold().count()` = 18.)
-
-So `test/L4-addendum/group-multi-site.feature` is where the keyed merge is asserted at all: the corpus's one
-multi-site scenario is unreachable until the element-keyed `select(Column.keys)` above lands.
+**Fail-closed by design:** a multi-site shape the lowering does not cover raises `UnsupportedTraversal` (the
+single-spine cut removed the last-write-wins that once answered a plausible half of a multi-site label).
 
 ---
 
@@ -274,7 +161,8 @@ member relations is the correct lowering and no interleave-by-encounter is requi
 ## ⚠️ Traps that still guard unbuilt work
 
 1. **The order is a LICENCE, not an obligation.** Do not invent a total order across sites to be safe; do not
-   assume one either.
+   assume one either. (The `cap().unfold()` fold-cancel keeps this honest by MINTING the encounter from the
+   site order, so it reproduces the fold's order rather than dropping it — `mise run test:perturbed` checks.)
 2. **`withLossyFlag` is a WHOLE-RELATION decision** (a `MAX(…) OVER ()`), so it must see every site's members.
    Per-site gives a silently inconsistent member encoding — which is exactly why it belongs at the read.
 3. **The `by()` projection is correlated and STAYS at the write site.** Only the FOLD moves; moving the
