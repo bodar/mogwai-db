@@ -127,7 +127,7 @@ feature, separate from this doc.
 
 | shape | blocked by |
 |---|---|
-| `…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap — a reducer-body's type rides in a `vt` column `byField` won't supply (RelIR build plan Phase 2; `by(count())` lowers, `by(sum())` does not) |
+| `…by(__.inE("created").values("weight").min()/max())…` | the `by(<reducer>)` type gap, NOW NARROWED to min/max. `sum()`/`mean()`/`count()` **LANDED** (`scalarChild` exposes the reducer's `vt` as `vtype`, `byField`/`projectedMembers` land it beside the value, `frameTypedNode` routes a `real` tag through `sumBuffer`; member framing is provably identical to the top-level reducer, `test/compiler/by-reducer-type.exec`). min/max still decline because their argmax path is a window+materialize the correlated arm rejects — a separate increment. The group-scoped POOLED path (`group().by(k).by(sum())`) already covered `sum`; its `mean` is a `map.ts` gap |
 | `cap("a").unfold().path()` | the path substrate |
 | `within(__.cap('a').unfold())` | predicate-operand label resolution at the `where` (Phase 5 was a precondition, not the whole of it) |
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |
