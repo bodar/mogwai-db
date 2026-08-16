@@ -25,11 +25,12 @@ export interface OracleVertex {
   readonly label: string;
   readonly props: Readonly<Record<string, unknown>>;
 }
-/** An edge triple in the plain model. */
+/** An edge triple in the plain model, with the edge's OWN properties (for the `_edges` companion). */
 export interface OracleEdge {
   readonly label: string;
   readonly from: number;
   readonly to: number;
+  readonly props: Readonly<Record<string, unknown>>;
 }
 export interface GraphModel {
   readonly vertices: readonly OracleVertex[];
@@ -57,11 +58,28 @@ export async function readModel(store: GraphStore, registry?: RegistryProvider):
     }
     return { id, label, props };
   });
-  const emaps = await decodeAll(e.buffers(
-    "g.E().project('label','from','to').by(label()).by(outV().id()).by(inV().id())", {}));
+  // `E().elementMap()` carries the edge's id/label, its endpoints (`Direction.OUT`/`Direction.IN`, each a
+  // vertex map whose `T.id` is the endpoint id), and the edge's own properties — one independent read for
+  // the whole edge model, including the props the `_edges` companion needs.
+  // A map's keys decode as EnumValue objects for the T.*/Direction.* tokens (String()→"T.id"/"Direction.OUT")
+  // and plain strings for properties — so every key comparison goes through String(k), INCLUDING the nested
+  // endpoint map's own `T.id` key (which is also an EnumValue, not the literal string).
+  const idOf = (endpoint: Map<unknown, unknown>): number => {
+    for (const [k, v] of endpoint) if (String(k) === 'T.id') return v as number;
+    return -1;
+  };
+  const emaps = await decodeAll(e.buffers('g.E().elementMap()', {}));
   const edges: OracleEdge[] = emaps.map((m: Map<unknown, unknown>) => {
-    const o = Object.fromEntries([...m].map(([k, v]) => [String(k), v]));
-    return { label: o.label as string, from: o.from as number, to: o.to as number };
+    let label = '', from = -1, to = -1;
+    const props: Record<string, unknown> = {};
+    for (const [rawK, v] of m) {
+      const k = String(rawK);
+      if (k === 'T.label') label = v as string;
+      else if (k === 'Direction.OUT') from = idOf(v as Map<unknown, unknown>);
+      else if (k === 'Direction.IN') to = idOf(v as Map<unknown, unknown>);
+      else if (k !== 'T.id') props[k] = v;
+    }
+    return { label, from, to, props };
   });
   return { vertices, edges };
 }
@@ -89,7 +107,7 @@ function matchesOp(value: unknown, op: string, operand: unknown): boolean {
 
 /** `where: { field: { op: value } }` as an AND over every field and every operator — the same implicit-AND
  *  the translator emits as a run of `has()` clauses. */
-function passesWhere(v: OracleVertex, where: Record<string, Record<string, unknown>> | undefined): boolean {
+function passesWhere(v: { readonly props: Readonly<Record<string, unknown>> }, where: Record<string, Record<string, unknown>> | undefined): boolean {
   if (!where) return true;
   for (const [key, ops] of Object.entries(where)) {
     if (ops == null) continue;
@@ -100,7 +118,7 @@ function passesWhere(v: OracleVertex, where: Record<string, Record<string, unkno
 
 /** `sort: [{ field: ASC|DESC }]` as a stable multi-key comparison — the tie-break order Gremlin's chained
  *  `order().by(k, dir)` gives. A single object is accepted for the one-key case, matching `args.ts`. */
-function applySort(vs: OracleVertex[], sort: unknown): OracleVertex[] {
+function applySort<T extends { readonly props: Readonly<Record<string, unknown>> }>(vs: T[], sort: unknown): T[] {
   if (!sort) return vs;
   const specs = (Array.isArray(sort) ? sort : [sort]) as Record<string, 'ASC' | 'DESC'>[];
   return [...vs].sort((a, b) => {
@@ -116,9 +134,11 @@ function applySort(vs: OracleVertex[], sort: unknown): OracleVertex[] {
   });
 }
 
-/** filter → sort → slice, the semantic order the translator emits (`args.ts`). */
-function applyArgs(vs: OracleVertex[], args: Record<string, unknown>): OracleVertex[] {
-  let out = vs.filter((v) => passesWhere(v, args.where as any));
+/** filter → sort → slice, the semantic order the translator emits (`args.ts`). Generic over anything with
+ *  a `props` map — a vertex OR an edge — so the edge companion filters edges on the edge's own properties
+ *  through the same code path. */
+function applyArgs<T extends { readonly props: Readonly<Record<string, unknown>> }>(items: T[], args: Record<string, unknown>): T[] {
+  let out = items.filter((v) => passesWhere(v, args.where as any));
   out = applySort(out, args.sort);
   const offset = typeof args.offset === 'number' ? args.offset : 0;
   const limit = typeof args.limit === 'number' ? args.limit : undefined;
@@ -163,6 +183,22 @@ export function oracleResolvers(model: GraphModel, schema: GraphSchema): Resolve
           if (other != null) { const v = byId.get(other); if (v) neighbours.push(v); }
         }
         return applyArgs(neighbours, args).map(toNode);
+      };
+    },
+    edgeCompanion: (typeName, fieldName) => {
+      const edge = schema.types.get(typeName)?.edges.get(fieldName);
+      if (!edge) throw new Error(`oracle: no edge field '${typeName}.${fieldName}'`);
+      // Navigate the parent's EDGES (not vertices), arg-process them on the edge's own props, then map each
+      // to a wrapper `{ ...edgeProps, node: farVertex }` — the shape the `_edges` companion returns.
+      return (src, args) => {
+        const parentId = (src as Node).__id;
+        const incident = model.edges.filter((e) => e.label === edge.label &&
+          (edge.direction === 'out' ? e.from === parentId : e.to === parentId));
+        return applyArgs(incident, args).map((e) => {
+          const otherId = edge.direction === 'out' ? e.to : e.from;
+          const far = byId.get(otherId);
+          return { ...e.props, node: far ? toNode(far) : null };
+        });
       };
     },
   };

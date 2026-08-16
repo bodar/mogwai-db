@@ -1,5 +1,5 @@
 import { parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode } from 'graphql';
-import { type GraphSchema, type TypeSchema } from './schema.ts';
+import { type GraphSchema, type TypeSchema, type EdgeSchema, EDGE_COMPANION_SUFFIX } from './schema.ts';
 import { argClauses } from './args.ts';
 import { Bindings } from './bindings.ts';
 
@@ -156,7 +156,52 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
     const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k), binds)}`;
     return `${move}.${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
   }
+  // The edge COMPANION field (`created_edges`) surfaces the edge's OWN properties (§ edge-field data). It
+  // strips the `_edges` suffix to find the base edge field, so `created_edges`→`created` and an incoming
+  // `created_in_edges`→`created_in`. Only an edge WITH properties gets one (`sdl.ts` mints the field), so
+  // a companion on a propertyless edge is a schema mismatch, refused here.
+  if (name.endsWith(EDGE_COMPANION_SUFFIX)) {
+    const baseEdge = type.edges.get(name.slice(0, -EDGE_COMPANION_SUFFIX.length));
+    if (baseEdge && baseEdge.properties.size) return edgeCompanionBy(field, baseEdge, schema, binds);
+  }
   throw new GraphQLTranslationError(`type '${type.name}' has no field '${name}'`);
+}
+
+/**
+ * The `by()` body for an edge COMPANION field — the Neo4j-style edge wrapper (`schema.ts`
+ * `edgeCompanionFieldName`). Where a plain edge field steps to the far VERTEX (`out(edge)`), the companion
+ * steps to the EDGE (`outE(edge)`), so it can read the edge's own properties, and reaches the far vertex
+ * through a `node` sub-field (`inV()` for an out edge, `outV()` for an in edge). Verified to compile and
+ * run (out, in, and edge-property filtering) before writing.
+ *
+ * Each selected field is either the special `node` (→ the far-vertex projection) or an edge PROPERTY
+ * (→ `values(key)` on the edge). `where`/`sort`/`limit` here filter/order/slice the EDGES on their own
+ * properties, so they sit right after `outE`/`inE` — the same argument surface, applied one hop earlier.
+ */
+function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, schema: GraphSchema, binds: Bindings): string {
+  const to = schema.types.get(edge.to);
+  if (!to) throw new GraphQLTranslationError(`edge companion points at unknown type '${edge.to}'`);
+  const sels = fields(field.selectionSet!);
+  if (!sels.length) throw new GraphQLTranslationError(`empty selection on edge '${edge.label}'`);
+  const keys = sels.map((f) => glit(keyOf(f))).join(', ');
+  const bys = sels.map((f) => {
+    const fn = f.name.value;
+    if (fn === 'node') {
+      if (!f.selectionSet) throw new GraphQLTranslationError(`'node' on edge '${edge.label}' needs a selection set`);
+      // The far vertex: an out edge's other end is `inV()`, an in edge's is `outV()`.
+      const step = edge.direction === 'out' ? 'inV' : 'outV';
+      return `.by(__.${step}().${projectBody(f.selectionSet, to, schema, binds)})`;
+    }
+    const prop = edge.properties.get(fn);
+    if (!prop) throw new GraphQLTranslationError(`edge '${edge.label}' has no property '${fn}' (edge fields are 'node' or an edge property)`);
+    if (f.selectionSet) throw new GraphQLTranslationError(`edge property '${edge.label}.${fn}' cannot have a selection set`);
+    if ((f.arguments ?? []).length) throw new GraphQLTranslationError(`edge property '${edge.label}.${fn}' takes no arguments`);
+    return `.by(__.values(${glit(prop.key)}))`;
+  }).join('');
+  // `where`/`sort`/`limit` filter the EDGES on their OWN properties (validated against the edge's props).
+  const stepE = edge.direction === 'out' ? 'outE' : 'inE';
+  const move = `__.${stepE}(${glit(edge.label)})${argClauses(field.arguments ?? [], (k) => edge.properties.has(k), binds)}`;
+  return `${move}.project(${keys})${bys}.fold()`;
 }
 
 /**

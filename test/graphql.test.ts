@@ -23,6 +23,8 @@ const MODERN_SCHEMA: SchemaRow[] = [
   { kind: 'property', label: 'software', key: 'lang', type: 'string' },
   { kind: 'edge', label: 'knows', src: 'person', tgt: 'person' },
   { kind: 'edge', label: 'created', src: 'person', tgt: 'software' },
+  { kind: 'edgeProperty', label: 'knows', key: 'weight', type: 'double' },
+  { kind: 'edgeProperty', label: 'created', key: 'weight', type: 'double' },
 ];
 const schema = buildSchema(MODERN_SCHEMA);
 const norm = (v: any): any =>
@@ -50,6 +52,37 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     expect(translate(`{ software { name created_in { name } } }`, schema).gremlin)
       .toBe("g.V().hasLabel('software').project('name', 'created_in')"
         + ".by(__.values('name')).by(__.in('created').project('name').by(__.values('name')).fold())");
+  });
+
+  describe('edge companion — the Neo4j-style `_edges` wrapper surfaces edge properties', () => {
+    test('an out-edge companion → outE().project(prop, node).by(inV()…)', () => {
+      expect(translate(`{ person { name created_edges { weight node { name } } } }`, schema).gremlin)
+        .toBe("g.V().hasLabel('person').project('name', 'created_edges')"
+          + ".by(__.values('name')).by(__.outE('created').project('weight', 'node')"
+          + ".by(__.values('weight')).by(__.inV().project('name').by(__.values('name'))).fold())");
+    });
+
+    test('an in-edge companion steps outV() for the far vertex', () => {
+      expect(translate(`{ software { created_in_edges { weight node { name } } } }`, schema).gremlin)
+        .toContain("__.inE('created').project('weight', 'node').by(__.values('weight')).by(__.outV().project('name')");
+    });
+
+    test('edge-property where/sort filters the EDGES on their own props', () => {
+      expect(translate(`{ person { created_edges(where: { weight: { gt: 0.3 } }, sort: [{ weight: DESC }]) { weight node { name } } } }`, schema).gremlin)
+        .toContain("__.outE('created').has('weight', P.gt(0.3)).order().by('weight', desc).project('weight', 'node')");
+    });
+
+    describe('fail closed', () => {
+      const refuses = (q: string, m: RegExp) => expect(() => translate(q, schema)).toThrow(m);
+      test('a companion on a propertyless edge is not a field', () => {
+        const noProps = buildSchema(MODERN_SCHEMA.filter((r) => r.kind !== 'edgeProperty'));
+        expect(() => translate(`{ person { created_edges { node { name } } } }`, noProps)).toThrow(/no field 'created_edges'/);
+      });
+      test('an unknown edge sub-field (not node, not an edge property)', () =>
+        refuses(`{ person { created_edges { bogus node { name } } } }`, /has no property 'bogus'/));
+      test('node without a selection set', () =>
+        refuses(`{ person { created_edges { weight node } } }`, /'node'.*needs a selection set/));
+    });
   });
 
   describe('fail closed — an unsupported document raises, never a half-Gremlin string', () => {

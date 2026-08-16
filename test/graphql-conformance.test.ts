@@ -132,14 +132,16 @@ describe('§7·2 graphql-js differential — reference execution over the same g
   };
 
   // graphql-js returns fields in SELECTION ORDER and objects are compared structurally by bun's `toEqual`,
-  // which is order-insensitive for object keys — so the comparison is on VALUES. Lists are compared in
-  // order, so each case sorts by a stable key (name) where the graph root order is not constrained.
-  const sortedByName = (obj: any, rootKey: string) => {
-    const sortRec = (rows: any[]): any[] => rows.map((r) => {
-      const out: any = {};
-      for (const [k, v] of Object.entries(r)) out[k] = Array.isArray(v) ? sortRec(v) : v;
-      return out;
-    }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  // which is order-insensitive for object keys — so the comparison is on VALUES. Lists ARE compared in
+  // order, but a graph root / neighbour list is not order-constrained unless the query sorts it, so every
+  // list is canonicalised: sort each level by its element's stable JSON form (works for a vertex row and an
+  // edge-wrapper row alike — no reliance on a `name` field being present).
+  const canon = (obj: any, rootKey: string) => {
+    const sortRec = (rows: any[]): any[] => rows.map((r) =>
+      (r && typeof r === 'object' && !Array.isArray(r))
+        ? Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Array.isArray(v) ? sortRec(v) : v]))
+        : r
+    ).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     return { [rootKey]: sortRec(obj[rootKey]) };
   };
 
@@ -157,16 +159,18 @@ describe('§7·2 graphql-js differential — reference execution over the same g
     { name: 'where on a nested edge', query: `{ person(where:{name:{eq:"marko"}}) { name created(where:{lang:{eq:"java"}}) { name } } }` },
     { name: 'a variable bind (gt)', query: `query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, variables: { m: 30 } },
     { name: 'a list variable', query: `query($ns: [String]) { person(where: { name: { in: $ns } }) { name } }`, variables: { ns: ['marko', 'josh'] } },
+    { name: 'an edge companion (weight + node)', query: `{ person { name created_edges { weight node { name } } } }` },
+    { name: 'an edge-companion where on edge props', query: `{ person { name created_edges(where: { weight: { gt: 0.3 } }) { weight node { name } } } }` },
   ];
 
   for (const c of cases) {
     test(c.name, async () => {
       const { oracle, mogwai } = await differential(c.query, c.variables);
       const rootKey = Object.keys(mogwai)[0]!;
-      // A root selection's order is not constrained unless the query sorts it; sort both by name for those
-      // cases. The two sort/limit cases DO constrain order, so compare them as-is.
+      // A root selection's order is not constrained unless the query sorts it; canonicalise both for those
+      // cases. A case that sorts the ROOT DOES constrain order, so compare it as-is.
       if (c.query.includes('sort:')) expect(mogwai).toEqual(oracle as any);
-      else expect(sortedByName(mogwai, rootKey)).toEqual(sortedByName(oracle as any, rootKey));
+      else expect(canon(mogwai, rootKey)).toEqual(canon(oracle as any, rootKey));
     });
   }
 });

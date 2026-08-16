@@ -4,7 +4,8 @@ import {
   GraphQLInputObjectType, GraphQLEnumType, type GraphQLFieldConfig,
   type GraphQLInputFieldConfig, type GraphQLInputType, type GraphQLScalarType,
 } from 'graphql';
-import type { GraphSchema, TypeSchema, PropertySchema } from './schema.ts';
+import type { GraphSchema, TypeSchema, PropertySchema, EdgeSchema } from './schema.ts';
+import { edgeCompanionFieldName } from './schema.ts';
 
 // ---------- the reflected schema, as a graphql-js GraphQLSchema ----------
 //
@@ -62,48 +63,76 @@ export function buildGraphQLSchema(schema: GraphSchema, resolvers?: Resolvers): 
 
   const scalarField = (prop: PropertySchema): GraphQLFieldConfig<unknown, unknown> => ({ type: scalarFor(prop.type) });
 
-  const argsFor = (t: TypeSchema): Record<string, { type: GraphQLInputType }> => ({
-    where: { type: whereInput(t) },
-    sort: { type: new GraphQLList(new GraphQLNonNull(sortInput(t))) },
+  // `argsFor`/`whereInput`/`sortInput` take a NAMESPACE (a name + a property map), not a `TypeSchema`, so
+  // the SAME `where`/`sort`/`limit`/`offset` surface serves both a vertex type and an EDGE companion (whose
+  // args filter/order/slice the edges on the edge's own properties). One code path, so the two cannot drift.
+  type Namespace = { readonly name: string; readonly properties: ReadonlyMap<string, PropertySchema> };
+  const argsFor = (ns: Namespace): Record<string, { type: GraphQLInputType }> => ({
+    where: { type: whereInput(ns) },
+    sort: { type: new GraphQLList(new GraphQLNonNull(sortInput(ns))) },
     limit: { type: GraphQLInt },
     offset: { type: GraphQLInt },
   });
 
   const whereInputs = new Map<string, GraphQLInputObjectType>();
   const sortInputs = new Map<string, GraphQLInputObjectType>();
-  /** The per-type `where` input — one nested operator object per property (`{ eq, neq, gt, … }`). Cached
-   *  per type for graphql-js type identity, and empty-safe: a type with no properties gets a single
-   *  placeholder field so graphql-js accepts the (never-usefully-populated) input object. */
-  function whereInput(t: TypeSchema): GraphQLInputObjectType {
-    let w = whereInputs.get(t.name);
+  /** The per-namespace `where` input — one nested operator object per property (`{ eq, neq, gt, … }`).
+   *  Cached per namespace name for graphql-js type identity, and empty-safe: a namespace with no properties
+   *  gets a single placeholder field so graphql-js accepts the (never-usefully-populated) input object. */
+  function whereInput(ns: Namespace): GraphQLInputObjectType {
+    let w = whereInputs.get(ns.name);
     if (!w) {
       w = new GraphQLInputObjectType({
-        name: `${gqlTypeName(t.name)}Where`,
+        name: `${ns.name}Where`,
         fields: () => {
           const fields: Record<string, GraphQLInputFieldConfig> = {};
-          for (const prop of t.properties.values()) fields[prop.key] = { type: opInput(prop) };
+          for (const prop of ns.properties.values()) fields[prop.key] = { type: opInput(prop) };
           return Object.keys(fields).length ? fields : { _noop: { type: GraphQLBoolean } };
         },
       });
-      whereInputs.set(t.name, w);
+      whereInputs.set(ns.name, w);
     }
     return w;
   }
-  function sortInput(t: TypeSchema): GraphQLInputObjectType {
-    let s = sortInputs.get(t.name);
+  function sortInput(ns: Namespace): GraphQLInputObjectType {
+    let s = sortInputs.get(ns.name);
     if (!s) {
       s = new GraphQLInputObjectType({
-        name: `${gqlTypeName(t.name)}Sort`,
+        name: `${ns.name}Sort`,
         fields: () => {
           const fields: Record<string, GraphQLInputFieldConfig> = {};
-          for (const prop of t.properties.values()) fields[prop.key] = { type: SortDir };
+          for (const prop of ns.properties.values()) fields[prop.key] = { type: SortDir };
           return Object.keys(fields).length ? fields : { _noop: { type: SortDir } };
         },
       });
-      sortInputs.set(t.name, s);
+      sortInputs.set(ns.name, s);
     }
     return s;
   }
+
+  // Edge COMPANION wrapper types (`<Type><Field>Edge`), minted lazily and cached for type identity. Each
+  // carries a `node` (the far vertex) + the edge's own property fields — the Neo4j-style edge wrapper
+  // (`schema.ts` `edgeCompanionFieldName`). Only edges WITH properties get one; a `node`-only wrapper is
+  // pure noise. Named `<ownerType><capitalised field>Edge` so the two directions of one label
+  // (`created`/`created_in`) and the same label on two owners never collide.
+  const edgeWrapperTypes = new Map<string, GraphQLObjectType>();
+  const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const edgeWrapperType = (ownerType: string, fieldName: string, edge: EdgeSchema, to: GraphQLObjectType): GraphQLObjectType => {
+    const wrapperName = `${gqlTypeName(ownerType)}${capitalise(fieldName)}Edge`;
+    let w = edgeWrapperTypes.get(wrapperName);
+    if (!w) {
+      w = new GraphQLObjectType({
+        name: wrapperName,
+        fields: () => {
+          const fields: Record<string, GraphQLFieldConfig<unknown, unknown>> = { node: { type: new GraphQLNonNull(to) } };
+          for (const prop of edge.properties.values()) fields[prop.key] = scalarField(prop);
+          return fields;
+        },
+      });
+      edgeWrapperTypes.set(wrapperName, w);
+    }
+    return w;
+  };
 
   const fieldsFor = (t: TypeSchema): Record<string, GraphQLFieldConfig<unknown, unknown>> => {
     const fields: Record<string, GraphQLFieldConfig<unknown, unknown>> = {};
@@ -116,6 +145,16 @@ export function buildGraphQLSchema(schema: GraphSchema, resolvers?: Resolvers): 
         args: argsFor(schema.types.get(edge.to)!),
         ...(resolvers ? { resolve: resolvers.edge(t.name, fieldName) } : {}),
       };
+      // The companion `_edges` field, only for an edge that HAS properties. Its args filter/order/slice the
+      // EDGES on the edge's own properties (the edge is the namespace), one hop earlier than the plain field.
+      if (edge.properties.size) {
+        const wrapper = edgeWrapperType(t.name, fieldName, edge, to);
+        fields[edgeCompanionFieldName(fieldName)] = {
+          type: new GraphQLList(new GraphQLNonNull(wrapper)),
+          args: argsFor({ name: `${gqlTypeName(t.name)}${capitalise(fieldName)}EdgeProps`, properties: edge.properties }),
+          ...(resolvers ? { resolve: resolvers.edgeCompanion(t.name, fieldName) } : {}),
+        };
+      }
     }
     return fields;
   };
@@ -181,4 +220,6 @@ const gqlTypeName = (label: string): string => label;
 export interface Resolvers {
   root(typeName: string): GraphQLFieldConfig<unknown, unknown>['resolve'];
   edge(typeName: string, fieldName: string): GraphQLFieldConfig<unknown, unknown>['resolve'];
+  /** The edge COMPANION field (`created_edges`) — resolves to the edge wrappers (`{node, …edgeProps}`). */
+  edgeCompanion(typeName: string, fieldName: string): GraphQLFieldConfig<unknown, unknown>['resolve'];
 }

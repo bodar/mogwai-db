@@ -57,6 +57,17 @@ export interface GraphSchema {
 export const edgeFieldName = (label: string, direction: 'out' | 'in'): string =>
   direction === 'out' ? label : `${label}_in`;
 
+/** The COMPANION field that surfaces an edge's OWN properties, alongside the plain edge field that
+ *  returns the far vertex directly. The shape follows Neo4j (`@relationshipProperties`), our nearest
+ *  analogue — no TinkerPop DB has a GraphQL surface to copy — but flat, with no Relay cursor/`pageInfo`
+ *  boilerplate (we have no cursor pagination, so those would be dead fields, and advertising a field we
+ *  cannot honour is the accept-and-ignore stub this project forbids). So `created` stays `[software!]`
+ *  and `created_edges` is added, returning `[<Type><Edge>Edge!]` where each has `node` + the edge's own
+ *  property fields. Only edges that HAVE properties get a companion — a `node`-only wrapper adds nothing.
+ *  The suffix appends to the base edge field name, so an incoming edge's companion is `created_in_edges`. */
+export const EDGE_COMPANION_SUFFIX = '_edges';
+export const edgeCompanionFieldName = (edgeFieldName: string): string => `${edgeFieldName}${EDGE_COMPANION_SUFFIX}`;
+
 /** One `mogwai.schema` row, as the decoded map the service streams. The translator/consumer decodes the
  *  GraphBinary maps to these plain records; `buildSchema` folds them into the addressable model. */
 export type SchemaRow =
