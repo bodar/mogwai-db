@@ -1,9 +1,9 @@
 # A GraphQL front end — design and build plan
 
-**STATUS (2026-08-16): Phases 0–2 have LANDED; the front end is live and deployable.** A GraphQL client
-can `POST`/`GET /graphql/{g}` on both Bun and Cloudflare and get spec-shaped JSON. What works, end to
-end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, `test/graphql.test.ts`,
-`test/services.test.ts`):
+**STATUS (2026-08-16): Phases 0–3 have LANDED; the front end is live, deployable, and CONFORMANCE-tested.**
+A GraphQL client can `POST`/`GET /graphql/{g}` on both Bun and Cloudflare and get spec-shaped JSON. What
+works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, `test/graphql.test.ts`,
+`test/graphql-conformance.test.ts`, `test/services.test.ts`):
 
 - **Schema reflection** — `g.call('mogwai.schema')` (a `mogwai.*` extension in `extendedRegistry` only)
   streams the label / property / edge / edge-property model; `src/graphql/schema.ts` folds it into an
@@ -15,16 +15,27 @@ end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, `test/graphql.
   graph-native convention, researched), `sort: [{ field: ASC|DESC }]`, flat `limit`/`offset`, in the
   semantic order filter → order → slice, at the root and every object field.
 - **Variables** BIND, not inline (§6); `@skip`/`@include` resolved; `__typename`; aliases.
-- **The HTTP edge** — `POST`/`GET` GraphQL-over-HTTP, `{data}`/`{errors}` envelope, the scoped
-  `extensions:{"mogwai:explain"}` payload. NO server-rendered HTML (deliberate — see §5·2).
+- **graphql-js owns parse/validate/introspection** (§7·4) — the edge routes a document through
+  graphql-js against the reflected schema (`src/graphql/sdl.ts`: reflected `GraphSchema` → a
+  `GraphQLSchema`), so a syntax/field/argument/type error is a spec-shaped GraphQL error and
+  `__schema`/`__type`/root `__typename` are served WITHOUT touching the store. We own only translation.
+- **The HTTP edge is a conformant GraphQL-over-HTTP server** — `POST`/`GET`, `{data}`/`{errors}`
+  envelope, **content negotiation** (`application/graphql-response+json` vs `application/json` and their
+  differing 4xx/200 error semantics), `operationName` selection, null optional params, `Content-Type`
+  checks, the scoped `extensions:{"mogwai:explain"}` payload. NO server-rendered HTML (deliberate — §5·2).
+- **Phase 3 — the three conformance oracles** (`test/graphql-conformance.test.ts`, in `ci` via the
+  ordinary `test/` sweep): `graphql-http` `serverAudits` as a ratchet (**60 ok, 0 MUST/SHOULD
+  failures**, 1 informational notice — GET mutations, a Phase-5 concern); the **graphql-js
+  differential** (a naive-resolver oracle over a plain in-memory graph model, 13 cases, two engines
+  compared — `test/support/graphql-oracle.ts`); the **introspection round-trip** (reflected SDL →
+  introspection → `buildClientSchema` → `printSchema`, identical).
 - Everything **fails closed**: an unsupported feature raises `GraphQLTranslationError`, never a
   half-Gremlin string.
 
-**WHAT IS LEFT** (all additive, none blocked): **Phase 3 — the conformance oracles** (`graphql-http`
-`serverAudits`, the graphql-js differential, introspection round-trip — §7, the recommended next step;
-`graphql-http` is already a dev dep); interfaces/unions; exposing edge properties as GraphQL edge-field
-data (types reflected, surface not); a variable in `sort`/`limit`; the §5·4 schema cache; Phase 4 (the
-`@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
+**WHAT IS LEFT** (all additive, none blocked): interfaces/unions; exposing edge properties as GraphQL
+edge-field data (types reflected, surface not); a variable in `sort`/`limit`; the §5·4 schema cache;
+Phase 4 (the `@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps
+are in §8.
 
 Below is the ORIGINAL design rationale (the probes, the placement/emission decisions, the conformance
 plan). Every "will/should/probe" in §1–§7 is design-time reasoning; §8's per-phase LANDED/LEFT markers
@@ -524,8 +535,30 @@ GraphQL edge-field data (the reflected types are now there, the surface is not);
 `sort`/`limit` (structural, literal-only today); and the §5·4 compare-and-swap schema cache (an
 optimisation — two DO round trips per request today, correct and un-cached).
 
-**Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
-differential; the introspection round-trip. Wire into `mise run ci`.
+**Phase 3 — the oracles. ✅ LANDED** (`test/graphql-conformance.test.ts`, in `ci` via the ordinary
+`test/` sweep — no separate task; the file lives under `test/` so `bun test` discovers it, and `ci`
+depends on `test`). All three oracles are green:
+
+- **`graphql-http` `serverAudits`** — the GraphQL-over-HTTP compliance suite, run against the live
+  router IN-PROCESS (a `fetch`-handler, no socket — the same shape L3 uses for cucumber). A ratchet like
+  L3: **60 ok, 0 MUST (`error`) / 0 SHOULD (`warn`) failures**, and the ok count floored so it may only
+  rise. The one remaining `notice` is `MAY NOT allow executing mutations on GET` — informational (a
+  `MAY NOT`), and mutations are Phase 5, so it does not gate. ⚠️ THIS ORACLE FORCED REAL PROTOCOL WORK:
+  the previous hand-rolled edge failed 7 MUSTs (no content negotiation, refused `operationName`, no
+  `application/graphql-response+json`). The fix was to route parse/validate/introspection through
+  graphql-js (§7·4) and add content negotiation to the edge — see the STATUS header. The lesson §7·1
+  called "cheap" was cheap in TEST code and a real refactor in PRODUCTION code, which is the ratchet
+  working as intended.
+- **The graphql-js differential** — an INDEPENDENT execution oracle: the reflected schema with a naive
+  resolver set (`test/support/graphql-oracle.ts`) over a plain in-memory graph model (`readModel`, a
+  trivial `elementMap`/`E()` scan — not the compiler under test). For each document, run BOTH the mogwai
+  path (translate → Gremlin → shape) and graphql-js `execute`, and compare `{data}`. Where they
+  disagree graphql-js is right (§7·2). 13 cases today (scalars, aliases, depth-2/3, `where`/`sort`/
+  `limit`/`offset`, variables); a generator from the reflected schema (the L5 shape) is the growth path.
+- **The introspection round-trip** — `getIntrospectionQuery()` → graphql-js `execute` over the reflected
+  schema → `buildClientSchema()` → `printSchema()`, asserted IDENTICAL to the reflector's own
+  `printSchema`. One assertion that validates the whole schema layer (§7·3), plus a live-edge check that
+  `POST { __typename }` → `Query` and `__schema` introspects.
 
 **Phase 4 — the escape ladder.** `@recurse(depth:)` → `repeat().times()`; a `_gremlin(query: String!)`
 root field for everything the tree cannot say. Both are non-standard by necessity — every
