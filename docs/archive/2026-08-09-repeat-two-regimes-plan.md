@@ -22,6 +22,22 @@ for anything `repeat()`-shaped from now on:
 | §3.5 — a parameterised `times($x)` should PREFER the walk | unbuilt | the unroll forces the one early parameter reduction the root `CLAUDE.md` names; the walk keeps it a bind |
 | §6's last cell — an unbounded body whose UNION is not the top node (`repeat(__.bothE().inV())`) | declines on shape | ~0 corpus reach. Needs the same distribution through a JOIN (Calcite's `JoinUnionTransposeRule`); `repeat(__.outE().inV())` already walks because it has one arm |
 
+**AMENDMENT 2026-08-16 — bare `emit()` now lands in the BOUNDED unroll too, not only the walk.** The
+original split (§1 table) sent bare `emit()` to the `Recursive` walk because "no finite n exists". That
+is only true of `emit()` WITHOUT `times`. `repeat(b).emit().times(n)` has a compile-time n and is
+therefore bounded: the emitter is the UNION ALL of the frontier after each emitted level —
+`union(b, b·b, …, b^n)` (emit-after, levels 1..n) or `union(identity, b, …, b^(n-1))` (emit-first,
+levels 0..n-1), a single level spliced inline. This is squarely §1a's bounded regime, so each level
+collapses and it never touches the walk's aggregate-in-recursive-term wall; a UNION ALL of
+independently-unrolled prefixes is multiset-exact and self-loop-safe (the §6 disjunctive trap is the
+walk's compound arms, not this). `tryUnroll` (`src/compiler/ir/strategies.ts`) admits a bare `emit`
+beside `times`; `until` still declines to the walk, and `emit(pred)` declines (fail closed). Verified
+against `Repeat.feature:76` (`repeat(__.out()).times(2).emit()` → count 8). Landed with L3 1561→1564,
+census +8 newly executing / 0 changed. ⚠️ Still blocked for a `by()`-nested recursed field: a `union`
+at the head of a `project().by()` arm does not lower yet (works in `local()`, at source, and as a union
+arm) — that is the next repeat-adjacent engine step, and it is what a GraphQL `@recurse` inside a
+selection needs.
+
 ⚠️ **Everything below is the record as written during the work, including its own corrections.** Where a
 section says "NEXT" or "what is left", read it as history — the table above is the live answer.
 
