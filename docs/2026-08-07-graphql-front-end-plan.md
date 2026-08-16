@@ -469,10 +469,17 @@ directions) AND end-to-end through the real router (`test/graphql.test.ts`). It 
 manager seam (zero executor changes) and picks up plan-shipping for free now that
 `docs/archive/2026-08-07-edge-compilation-plan.md` has landed.
 
-🚧 What is LEFT of Phase 2 (all additive, no new gates): field ARGUMENTS → `has()`/`order()`/`limit()`
-(the filter/order/first tail of §1·1); variables → the params map (§6); `@skip`/`@include`;
-interfaces/unions; `__typename`; and the §5·4 compare-and-swap schema cache (an optimisation — two DO
-round trips per request today, correct and un-cached).
+**Field arguments LANDED** (`src/graphql/args.ts`): `where: { field: { op: value } }` with UNPREFIXED
+operators (`eq`/`neq`/`gt`/`lt`/`gte`/`lte`/`in`/`contains`/`startsWith`/`endsWith`) — the convention
+researched across Neo4j, Hasura, PostGraphile, Dgraph, matching the two GRAPH databases and mapping 1:1
+onto Gremlin (`P.*`/`TextP.*`/`within`); `sort: [{ field: ASC|DESC }]` → `order().by(k, dir)`; flat
+`limit`/`offset` → `limit`/`skip`. Emitted in the SEMANTIC order filter → order → slice, at the root
+(over source vertices) and on any object field (over the far endpoint before its fold). Fail-closed on
+an unknown operator / non-property key / bad direction / bare value / unrecognised argument.
+
+🚧 What is LEFT of Phase 2 (all additive, no new gates): variables → the params map (§6); `@skip`/
+`@include`; interfaces/unions; `__typename`; and the §5·4 compare-and-swap schema cache (an optimisation
+— two DO round trips per request today, correct and un-cached).
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.

@@ -60,31 +60,73 @@ function predicate(key: string, opObj: ObjectValueNode): string[] {
 }
 
 /**
- * A field's `where` argument → the `.has(key, predicate)` Gremlin clauses it contributes, or `[]` when
- * there is no `where`. Every non-`where` argument RAISES: `sort`/`limit`/`offset` are the reserved
- * paging/order names a later increment claims, and an arbitrary argument is not part of the surface, so
- * accepting it silently would be the accept-and-ignore stub this project forbids.
- *
- * Each `where` entry is `field: { op: value }` — the field must be a known PROPERTY (the caller passes a
- * `has(key)` predicate — checking membership is the caller's, since it holds the type schema); this
- * module owns only the `{op:value}` → predicate translation. A bare `field: value` (no operator object)
- * is refused: the convention is explicit-operator, and a bare value would be an ambiguous shorthand the
- * research showed no graph provider uses.
- */
-export function whereClauses(args: readonly ArgumentNode[], allowed: (key: string) => boolean): string {
+/** `where: { field: { op: value } }` → the `.has(key, predicate)` clauses. Each field is a known
+ *  PROPERTY (`allowed`), each value an operator object; a bare value is refused (the convention is
+ *  explicit-operator, which the research showed every graph provider uses). */
+function whereClauses(arg: ArgumentNode, allowed: (key: string) => boolean): string {
+  if (arg.value.kind !== Kind.OBJECT)
+    throw new GraphQLTranslationError(`'where' must be an object of { field: { op: value } }`);
   const clauses: string[] = [];
-  for (const arg of args) {
-    if (arg.name.value !== 'where')
-      throw new GraphQLTranslationError(`unsupported argument '${arg.name.value}' (only 'where' is supported yet)`);
-    if (arg.value.kind !== Kind.OBJECT)
-      throw new GraphQLTranslationError(`'where' must be an object of { field: { op: value } }`);
-    for (const field of arg.value.fields) {
-      const key = field.name.value;
-      if (!allowed(key)) throw new GraphQLTranslationError(`cannot filter on '${key}' — not a property of this type`);
-      if (field.value.kind !== Kind.OBJECT)
-        throw new GraphQLTranslationError(`filter on '${key}' must be an operator object { op: value }, not a bare value`);
-      for (const pred of predicate(key, field.value)) clauses.push(`.has(${glit(key)}, ${pred})`);
-    }
+  for (const field of arg.value.fields) {
+    const key = field.name.value;
+    if (!allowed(key)) throw new GraphQLTranslationError(`cannot filter on '${key}' — not a property of this type`);
+    if (field.value.kind !== Kind.OBJECT)
+      throw new GraphQLTranslationError(`filter on '${key}' must be an operator object { op: value }, not a bare value`);
+    for (const pred of predicate(key, field.value)) clauses.push(`.has(${glit(key)}, ${pred})`);
   }
   return clauses.join('');
+}
+
+/** `sort: [{ field: ASC|DESC }]` → `.order().by(key, asc|desc)…` — a LIST so tie-breaks order (Neo4j's
+ *  shape). A single object `sort: { field: ASC }` is accepted too (the common one-key case). Each field
+ *  is a known property; the direction is the `ASC`/`DESC` enum (default `ASC` if omitted). */
+function sortClause(arg: ArgumentNode, allowed: (key: string) => boolean): string {
+  const specs = arg.value.kind === Kind.LIST ? arg.value.values : [arg.value];
+  const bys: string[] = [];
+  for (const spec of specs) {
+    if (spec.kind !== Kind.OBJECT || spec.fields.length !== 1)
+      throw new GraphQLTranslationError(`each 'sort' entry must be one { field: ASC|DESC }`);
+    const f = spec.fields[0]!;
+    const key = f.name.value;
+    if (!allowed(key)) throw new GraphQLTranslationError(`cannot sort on '${key}' — not a property of this type`);
+    if (f.value.kind !== Kind.ENUM || (f.value.value !== 'ASC' && f.value.value !== 'DESC'))
+      throw new GraphQLTranslationError(`sort direction for '${key}' must be ASC or DESC`);
+    bys.push(`.by(${glit(key)}, ${f.value.value === 'DESC' ? 'desc' : 'asc'})`);
+  }
+  return bys.length ? `.order()${bys.join('')}` : '';
+}
+
+/** A non-negative Int argument (`limit`/`offset`), or a refusal. */
+function intArg(arg: ArgumentNode): number {
+  if (arg.value.kind !== Kind.INT) throw new GraphQLTranslationError(`'${arg.name.value}' must be an integer`);
+  const n = parseInt(arg.value.value, 10);
+  if (n < 0) throw new GraphQLTranslationError(`'${arg.name.value}' must be >= 0`);
+  return n;
+}
+
+/**
+ * A field's arguments → the full Gremlin suffix, in the ORDER Gremlin needs: filter (`has`) → order
+ * (`order().by`) → range (`skip`/`limit`). The order is semantic, not cosmetic — filtering after a slice
+ * would slice the wrong set, ordering after it likewise — so this owns the whole suffix rather than
+ * letting the caller concatenate pieces.
+ *
+ * The four reserved names are `where`/`sort`/`limit`/`offset`; anything else RAISES (an arbitrary
+ * argument is not part of the surface, and accepting it silently is the accept-and-ignore stub this
+ * project forbids). `limit`/`offset` become `skip(offset).limit(limit)`: `range(a,b)` would need the two
+ * folded, and skip+limit reads the same and composes when only one is given.
+ */
+export function argClauses(args: readonly ArgumentNode[], allowed: (key: string) => boolean): string {
+  const by = new Map<string, ArgumentNode>();
+  for (const arg of args) {
+    const name = arg.name.value;
+    if (name !== 'where' && name !== 'sort' && name !== 'limit' && name !== 'offset')
+      throw new GraphQLTranslationError(`unsupported argument '${name}' (expected where/sort/limit/offset)`);
+    if (by.has(name)) throw new GraphQLTranslationError(`argument '${name}' given twice`);
+    by.set(name, arg);
+  }
+  const where = by.get('where') ? whereClauses(by.get('where')!, allowed) : '';
+  const sort = by.get('sort') ? sortClause(by.get('sort')!, allowed) : '';
+  const offset = by.get('offset') ? `.skip(${intArg(by.get('offset')!)})` : '';
+  const limit = by.get('limit') ? `.limit(${intArg(by.get('limit')!)})` : '';
+  return `${where}${sort}${offset}${limit}`;
 }

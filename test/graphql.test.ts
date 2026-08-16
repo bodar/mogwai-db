@@ -57,7 +57,7 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('a field the schema does not declare', () => refuses(`{ person { bogus } }`, /no field 'bogus'/));
     test('a scalar field with a selection set', () => refuses(`{ person { name { x } } }`, /cannot have a selection set/));
     test('an object field with no selection set', () => refuses(`{ person { created } }`, /needs a selection set/));
-    test('an unrecognised argument name (only where is supported)', () => refuses(`{ person(id: 1) { name } }`, /only 'where' is supported/));
+    test('an unrecognised argument name', () => refuses(`{ person(id: 1) { name } }`, /expected where\/sort\/limit\/offset/));
     test('a mutation operation', () => refuses(`mutation { addPerson { name } }`, /only 'query'/));
     test('a fragment', () => refuses(`{ person { ...F } }`, /fragments are not supported/));
     test('a query that declares variables (dropping them would be a wrong answer)', () =>
@@ -111,8 +111,49 @@ describe('the where filter — { field: { op: value } }, the graph-native conven
     test('an unknown operator', () => refuses(`{ person(where: { name: { bogus: "x" } }) { name } }`, /unknown filter operator 'bogus'/));
     test('a non-property key', () => refuses(`{ person(where: { nope: { eq: "x" } }) { name } }`, /cannot filter on 'nope'/));
     test('a bare value with no operator object', () => refuses(`{ person(where: { name: "marko" }) { name } }`, /operator object/));
-    test('an argument other than where', () => refuses(`{ person(first: 2) { name } }`, /only 'where' is supported/));
+    test('an unrecognised argument', () => refuses(`{ person(first: 2) { name } }`, /expected where\/sort\/limit\/offset/));
     test('a scalar field taking an argument', () => refuses(`{ person { name(where: {}) } }`, /takes no arguments/));
+  });
+});
+
+describe('sort / limit / offset — ordering and pagination args', () => {
+  const run = async (q: string) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const g of MODERN_SEED) executeQuery(store, g, {});
+    return (await decodeAll(exec(store).buffers(translate(q, schema).gremlin, {}))).map((r: any) => norm(r).name);
+  };
+
+  test('sort ASC → order().by(k, asc)', () => {
+    expect(translate(`{ person(sort: [{ name: ASC }]) { name } }`, schema).gremlin)
+      .toBe("g.V().hasLabel('person').order().by('name', asc).project('name').by(__.values('name'))");
+  });
+
+  test('sort DESC orders descending', async () => {
+    expect(await run(`{ person(sort: [{ age: DESC }]) { name } }`)).toEqual(['peter', 'josh', 'marko', 'vadas']);
+  });
+
+  test('limit slices; offset skips (skip.limit, in that order)', async () => {
+    expect(await run(`{ person(sort: [{ name: ASC }], limit: 2) { name } }`)).toEqual(['josh', 'marko']);
+    expect(await run(`{ person(sort: [{ name: ASC }], offset: 1, limit: 2) { name } }`)).toEqual(['marko', 'peter']);
+  });
+
+  test('where + sort + limit compose in the semantic order (filter → order → slice)', async () => {
+    expect(await run(`{ person(where: { age: { gt: 20 } }, sort: [{ age: DESC }], limit: 2) { name } }`)).toEqual(['peter', 'josh']);
+    expect(translate(`{ person(where: { age: { gt: 20 } }, sort: [{ age: DESC }], limit: 2) { name } }`, schema).gremlin)
+      .toBe("g.V().hasLabel('person').has('age', P.gt(20)).order().by('age', desc).limit(2).project('name').by(__.values('name'))");
+  });
+
+  test('a single sort object (not a list) is accepted for the one-key case', () => {
+    expect(translate(`{ person(sort: { name: ASC }) { name } }`, schema).gremlin).toContain("order().by('name', asc)");
+  });
+
+  describe('fail closed', () => {
+    const refuses = (q: string, m: RegExp) => expect(() => translate(q, schema)).toThrow(m);
+    test('a bad sort direction', () => refuses(`{ person(sort: [{ name: SIDEWAYS }]) { name } }`, /must be ASC or DESC/));
+    test('sorting on a non-property', () => refuses(`{ person(sort: [{ nope: ASC }]) { name } }`, /cannot sort on 'nope'/));
+    test('a non-integer limit', () => refuses(`{ person(limit: "two") { name } }`, /'limit' must be an integer/));
+    test('a negative offset', () => refuses(`{ person(offset: -1) { name } }`, /'offset' must be >= 0/));
+    test('a duplicate argument', () => refuses(`{ person(limit: 1, limit: 2) { name } }`, /given twice/));
   });
 });
 

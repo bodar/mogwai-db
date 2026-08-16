@@ -1,6 +1,6 @@
 import { parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode } from 'graphql';
 import { type GraphSchema, type TypeSchema } from './schema.ts';
-import { whereClauses } from './args.ts';
+import { argClauses } from './args.ts';
 
 // ---------- the GraphQL translator — a document + reflected schema → a Gremlin string ----------
 //
@@ -18,12 +18,11 @@ import { whereClauses } from './args.ts';
 //     folded because a graph edge is to-MANY (every GraphQL object-over-an-edge field is a list;
 //     single-valued fields are a later schema refinement).
 //
-// SCOPE (first cut, deliberately narrow and fail-closed): one query operation, named-type root fields,
-// scalar + object fields. No arguments/filters/order/first yet (§8 Phase 2 tail), no fragments,
-// no `__typename`/introspection (introspection is served from the schema directly, not translated),
-// no variables. Anything outside scope RAISES a clear `GraphQLTranslationError` — never emits a
-// half-Gremlin string, the fail-closed rule (root CLAUDE.md: never silently answer a different
-// question).
+// SCOPE (fail-closed): one query operation, named-type root fields, scalar + object fields, and the
+// `where`/`sort`/`limit`/`offset` field arguments (`args.ts`). Still out: fragments, `__typename`,
+// introspection (served from the schema directly, not translated), variables, interfaces/unions.
+// Anything outside scope RAISES a clear `GraphQLTranslationError` — never emits a half-Gremlin string,
+// the fail-closed rule (root CLAUDE.md: never silently answer a different question).
 
 export class GraphQLTranslationError extends Error {
   constructor(message: string) { super(message); this.name = 'GraphQLTranslationError'; }
@@ -120,8 +119,8 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): strin
     if (!to) throw new GraphQLTranslationError(`edge field '${type.name}.${name}' points at unknown type '${edge.to}'`);
     // `where` filters the far endpoint, so its `has()` clauses sit AFTER the movement and BEFORE the
     // nested projection — `out(edge).has(k, …).project(…).fold()` — filtering the neighbour set that is
-    // folded. The keys must be properties of the far type (`to`), which is what `whereClauses` validates.
-    const move = `__.${edge.direction}(${glit(edge.label)})${whereClauses(args, (k) => to.properties.has(k))}`;
+    // folded. The keys must be properties of the far type (`to`), which is what `argClauses` validates.
+    const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k))}`;
     return `${move}.${projectBody(field.selectionSet, to, schema)}.fold()`;
   }
   throw new GraphQLTranslationError(`type '${type.name}' has no field '${name}'`);
@@ -144,7 +143,7 @@ export function translate(source: string, schema: GraphSchema): Translation {
   if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
   if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
   // The root `where` filters the source vertices: `V().hasLabel(Type).has(k, …).project(…)`.
-  const where = whereClauses(root.arguments ?? [], (k) => type.properties.has(k));
+  const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k));
   const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, schema)}`;
   return { gremlin, params: {}, rootKey: keyOf(root) };
 }
