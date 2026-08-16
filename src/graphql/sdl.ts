@@ -1,8 +1,8 @@
 import {
   GraphQLSchema, GraphQLObjectType, GraphQLList, GraphQLNonNull,
   GraphQLString, GraphQLInt, GraphQLFloat, GraphQLBoolean,
-  GraphQLInputObjectType, GraphQLEnumType, type GraphQLFieldConfig,
-  type GraphQLInputFieldConfig, type GraphQLInputType, type GraphQLScalarType,
+  GraphQLInputObjectType, GraphQLEnumType, GraphQLDirective, DirectiveLocation, specifiedDirectives,
+  type GraphQLFieldConfig, type GraphQLInputFieldConfig, type GraphQLInputType, type GraphQLScalarType,
 } from 'graphql';
 import type { GraphSchema, TypeSchema, PropertySchema, EdgeSchema } from './schema.ts';
 import { edgeCompanionFieldName } from './schema.ts';
@@ -178,8 +178,20 @@ export function buildGraphQLSchema(schema: GraphSchema, resolvers?: Resolvers): 
       return roots;
     },
   });
-  return new GraphQLSchema({ query, types: [...objectTypes.values()] });
+  return new GraphQLSchema({ query, types: [...objectTypes.values()], directives: [...specifiedDirectives, RECURSE_DIRECTIVE] });
 }
+
+/** `@recurse(depth: Int!)` on an object field — the transitive-walk extension (`translate.ts`
+ *  `recurseDepth`). Declared on the schema so graphql-js VALIDATES a document using it (an undeclared
+ *  directive is a validation error), and so it appears in introspection like any other directive. The
+ *  built-in `@skip`/`@include`/`@deprecated` are kept (`specifiedDirectives`) — omitting them would make
+ *  those undefined. Standard GraphQL has no `@recurse`; this is the documented graph extension (§1·2). */
+const RECURSE_DIRECTIVE = new GraphQLDirective({
+  name: 'recurse',
+  description: 'Walk this edge transitively, emitting every level up to `depth`. A graph-over-GraphQL extension.',
+  locations: [DirectiveLocation.FIELD],
+  args: { depth: { type: new GraphQLNonNull(GraphQLInt), description: 'Maximum number of hops (>= 1).' } },
+});
 
 // (the `GraphQLInputType` used by `argsFor`/`whereInput` is imported above)
 

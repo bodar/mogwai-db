@@ -68,6 +68,9 @@ function keepField(field: FieldNode): boolean {
   let keep = true;
   for (const dir of field.directives ?? []) {
     const name = dir.name.value;
+    // `@recurse` is handled at the edge-field lowering (`recurseDepth`), not here — it is not a
+    // keep/drop directive. Skip it in this pass; an unknown directive is still refused.
+    if (name === 'recurse') continue;
     if (name !== 'skip' && name !== 'include')
       throw new GraphQLTranslationError(`unsupported directive @${name} on '${field.name.value}'`);
     const ifArg = (dir.arguments ?? []).find((a) => a.name.value === 'if');
@@ -77,6 +80,28 @@ function keepField(field: FieldNode): boolean {
     if (name === 'skip' ? ifArg.value.value : !ifArg.value.value) keep = false;
   }
   return keep;
+}
+
+/**
+ * The `@recurse(depth: N)` directive on an edge field, or `null` if absent. It lowers the edge movement to
+ * a bounded transitive walk that emits every level up to N — `repeat(<move>).emit().times(N)` — so a
+ * client reads a whole reachability network from one field (`docs/2026-08-07-graphql-front-end-plan.md`
+ * §1·2, Phase 4). This is the standard GraphQL-over-a-graph extension (Dgraph `@recurse`), and the
+ * emit-all-levels-to-depth semantics match Dgraph's (the only prior art).
+ *
+ * `depth` must be a POSITIVE Int LITERAL — a variable is refused, like `@skip(if:)`, because the level
+ * count shapes the plan (the unroll needs a compile-time N; §6). Fail closed on a missing/non-int/non-
+ * positive depth rather than guessing one.
+ */
+function recurseDepth(field: FieldNode): number | null {
+  const dir = (field.directives ?? []).find((d) => d.name.value === 'recurse');
+  if (!dir) return null;
+  const depthArg = (dir.arguments ?? []).find((a) => a.name.value === 'depth');
+  if (!depthArg || depthArg.value.kind !== Kind.INT)
+    throw new GraphQLTranslationError(`@recurse needs an integer literal 'depth:' argument`);
+  const n = parseInt(depthArg.value.value, 10);
+  if (n < 1) throw new GraphQLTranslationError(`@recurse 'depth:' must be >= 1`);
+  return n;
 }
 
 /** The plain field selections of a set, with `@skip`/`@include` RESOLVED (a dropped field is gone from
@@ -154,6 +179,17 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
     // nested projection — `out(edge).has(k, …).project(…).fold()` — filtering the neighbour set that is
     // folded. The keys must be properties of the far type (`to`), which is what `argClauses` validates.
     const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k), binds)}`;
+    const depth = recurseDepth(field);
+    if (depth !== null) {
+      // `@recurse(depth:N)` — the edge is walked TRANSITIVELY, emitting every level up to N. It requires
+      // the endpoint type to EQUAL the field's owner type (`knows`: person→person), because the same
+      // nested selection is applied at every level and only a self-returning edge keeps it valid.
+      // `repeat(<move>).emit().times(N)` is the emit-unrolled bounded walk (a union of level-prefixes);
+      // the far-endpoint `where`/args apply INSIDE the repeat body (filtering each level's frontier).
+      if (edge.to !== type.name)
+        throw new GraphQLTranslationError(`@recurse on '${type.name}.${name}' needs a self-returning edge (it points at '${edge.to}', not '${type.name}')`);
+      return `__.repeat(${move}).emit().times(${depth}).${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
+    }
     return `${move}.${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
   }
   // The edge COMPANION field (`created_edges`) surfaces the edge's OWN properties (§ edge-field data). It

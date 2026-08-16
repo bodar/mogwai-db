@@ -255,6 +255,40 @@ describe('directives, __typename, and variables', () => {
   });
 });
 
+describe('@recurse(depth:) — the transitive-walk extension (Phase 4)', () => {
+  test('an edge with @recurse becomes repeat(move).emit().times(N)', () => {
+    expect(translate(`{ person { name knows @recurse(depth: 2) { name } } }`, schema).gremlin)
+      .toBe("g.V().hasLabel('person').project('name', 'knows').by(__.values('name'))"
+        + ".by(__.repeat(__.out('knows')).emit().times(2).project('name').by(__.values('name')).fold())");
+  });
+
+  test('depth 1 walks one hop; the emit-all-levels semantics come from the unroll', () => {
+    expect(translate(`{ person { knows @recurse(depth: 1) { name } } }`, schema).gremlin)
+      .toContain("__.repeat(__.out('knows')).emit().times(1)");
+  });
+
+  test('a recursed walk runs to the reachability set end to end', async () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const g of MODERN_SEED) executeQuery(store, g, {});
+    const rows = (await decodeAll(exec(store).buffers(
+      translate(`{ person(where:{name:{eq:"marko"}}) { name knows @recurse(depth: 2) { name } } }`, schema).gremlin, {}))).map(norm);
+    // marko knows {vadas, josh}; neither knows anyone → the depth-2 network is exactly those two.
+    expect(rows[0].name).toBe('marko');
+    expect((rows[0].knows as any[]).map((k: any) => k.name).sort()).toEqual(['josh', 'vadas']);
+  });
+
+  describe('fail closed', () => {
+    const refuses = (q: string, m: RegExp) => expect(() => translate(q, schema)).toThrow(m);
+    test('@recurse on a non-self-returning edge (person→software)', () =>
+      refuses(`{ person { created @recurse(depth: 2) { name } } }`, /needs a self-returning edge/));
+    test('@recurse with no depth argument', () =>
+      refuses(`{ person { knows @recurse { name } } }`, /needs an integer literal 'depth:'/));
+    test('@recurse with depth 0', () => refuses(`{ person { knows @recurse(depth: 0) { name } } }`, /'depth:' must be >= 1/));
+    test('@recurse with a variable depth (structural, literal-only)', () =>
+      expect(() => translate(`query($d: Int) { person { knows @recurse(depth: $d) { name } } }`, schema, { d: 2 })).toThrow(/integer literal/));
+  });
+});
+
 describe('reflect → translate → run — the full path over a live graph', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(store, g, {});
@@ -371,6 +405,16 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
     const { body } = await post({ query: `{ person { name } }`, operationName: 'Missing' });
     expect(body.data).toBeUndefined();
     expect(body.errors[0].message).toMatch(/no operation named 'Missing'/);
+  });
+
+  test('@recurse walks a transitive relationship end to end through the router', async () => {
+    const { status, body } = await post({ query: `{ person(where: { name: { eq: "marko" } }) { name knows @recurse(depth: 2) { name } } }` });
+    expect(status).toBe(200);
+    expect(body.errors).toBeUndefined();
+    // marko's `knows` network to depth 2 — validated by graphql-js (the directive is declared), translated
+    // to repeat().emit().times(2), run through the real executor seam.
+    expect(body.data.person[0].name).toBe('marko');
+    expect(body.data.person[0].knows.map((k: any) => k.name).sort()).toEqual(['josh', 'vadas']);
   });
 
   test('GET runs a query from the ?query= param — GraphQL-over-HTTP GET, not a page', async () => {
