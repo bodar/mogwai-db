@@ -2,7 +2,7 @@ import { Kind, type ArgumentNode, type ValueNode, type ObjectValueNode } from 'g
 import { GraphQLTranslationError } from './translate.ts';
 import type { Bindings } from './bindings.ts';
 
-// ---------- field arguments — the `where` filter, and (later) sort/limit/offset ----------
+// ---------- field arguments — the `where` filter, `sort`, and `limit`/`offset` ----------
 //
 // The convention is the industry-universal one (researched across Neo4j, Hasura, PostGraphile,
 // Dgraph): a `where` argument holding a nested per-field operator object,
@@ -101,12 +101,19 @@ function sortClause(arg: ArgumentNode, allowed: (key: string) => boolean): strin
   return bys.length ? `.order()${bys.join('')}` : '';
 }
 
-/** A non-negative Int argument (`limit`/`offset`), or a refusal. */
-function intArg(arg: ArgumentNode): number {
-  if (arg.value.kind !== Kind.INT) throw new GraphQLTranslationError(`'${arg.name.value}' must be an integer`);
+/**
+ * A `limit`/`offset` count → the Gremlin argument for its `limit()`/`skip()` step. A LITERAL Int is
+ * inlined (non-negative, else refused); a VARIABLE BINDS (§6) — the compiler takes a bound parameter in a
+ * `limit()`/`skip()` count exactly as it does in a `has()` predicate, so `limit: $n` rides in `params`
+ * like every other variable and two calls differing only in the page size share one cached plan. A
+ * variable's value is validated at bind time by the store; a non-Int/non-variable literal is refused.
+ */
+function countArg(arg: ArgumentNode, binds: Bindings): string {
+  if (arg.value.kind === Kind.VARIABLE) return binds.reference(arg.value.name.value);
+  if (arg.value.kind !== Kind.INT) throw new GraphQLTranslationError(`'${arg.name.value}' must be an integer or a variable`);
   const n = parseInt(arg.value.value, 10);
   if (n < 0) throw new GraphQLTranslationError(`'${arg.name.value}' must be >= 0`);
-  return n;
+  return String(n);
 }
 
 /**
@@ -129,13 +136,13 @@ export function argClauses(args: readonly ArgumentNode[], allowed: (key: string)
     if (by.has(name)) throw new GraphQLTranslationError(`argument '${name}' given twice`);
     by.set(name, arg);
   }
-  // `where` VALUES may be variables (they bind, §6); `sort`/`limit`/`offset` are structural in this cut —
-  // a `limit: $n` is a value the PLAN shape depends on (a `limit` step's count is not a bind here), so it
-  // stays a literal, and a variable there is refused by `intArg`. `sort` keys are property names, not
-  // values, so never variable.
+  // `where` VALUES and `limit`/`offset` COUNTS may all be variables (they bind, §6) — a `limit()`/`skip()`
+  // count takes a bound parameter exactly as a `has()` predicate does (measured), so `limit: $n` shares one
+  // cached plan across page sizes. `sort` keys are property NAMES and directions are `ASC`/`DESC` enum
+  // TOKENS — both structural (they shape the plan, not a value the plan reads), so neither is variable.
   const where = by.get('where') ? whereClauses(by.get('where')!, allowed, binds) : '';
   const sort = by.get('sort') ? sortClause(by.get('sort')!, allowed) : '';
-  const offset = by.get('offset') ? `.skip(${intArg(by.get('offset')!)})` : '';
-  const limit = by.get('limit') ? `.limit(${intArg(by.get('limit')!)})` : '';
+  const offset = by.get('offset') ? `.skip(${countArg(by.get('offset')!, binds)})` : '';
+  const limit = by.get('limit') ? `.limit(${countArg(by.get('limit')!, binds)})` : '';
   return `${where}${sort}${offset}${limit}`;
 }

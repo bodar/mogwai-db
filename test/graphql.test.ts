@@ -147,6 +147,24 @@ describe('sort / limit / offset — ordering and pagination args', () => {
     expect(translate(`{ person(sort: { name: ASC }) { name } }`, schema).gremlin).toContain("order().by('name', asc)");
   });
 
+  test('a variable limit/offset BINDS (not inlines) — the count rides in params', () => {
+    const t = translate(`query($n: Int, $o: Int) { person(sort: [{ name: ASC }], offset: $o, limit: $n) { name } }`, schema, { n: 2, o: 1 });
+    expect(t.gremlin).toContain('.skip(gqv0).limit(gqv1)');
+    expect(t.gremlin).not.toMatch(/skip\(\d/); // never inlined
+    expect(t.params).toEqual({ gqv0: 1, gqv1: 2 });
+  });
+
+  test('a variable limit pages correctly end to end', async () => {
+    const run = async (q: string, vars: Record<string, unknown>) => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      for (const g of MODERN_SEED) executeQuery(store, g, {});
+      const t = translate(q, schema, vars);
+      return (await decodeAll(exec(store).buffers(t.gremlin, t.params))).map((r: any) => norm(r).name);
+    };
+    expect(await run(`query($n: Int) { person(sort: [{ name: ASC }], limit: $n) { name } }`, { n: 2 })).toEqual(['josh', 'marko']);
+    expect(await run(`query($o: Int, $n: Int) { person(sort: [{ name: ASC }], offset: $o, limit: $n) { name } }`, { o: 2, n: 2 })).toEqual(['peter', 'vadas']);
+  });
+
   describe('fail closed', () => {
     const refuses = (q: string, m: RegExp) => expect(() => translate(q, schema)).toThrow(m);
     test('a bad sort direction', () => refuses(`{ person(sort: [{ name: SIDEWAYS }]) { name } }`, /must be ASC or DESC/));
