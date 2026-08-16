@@ -33,10 +33,18 @@ independently-unrolled prefixes is multiset-exact and self-loop-safe (the §6 di
 walk's compound arms, not this). `tryUnroll` (`src/compiler/ir/strategies.ts`) admits a bare `emit`
 beside `times`; `until` still declines to the walk, and `emit(pred)` declines (fail closed). Verified
 against `Repeat.feature:76` (`repeat(__.out()).times(2).emit()` → count 8). Landed with L3 1561→1564,
-census +8 newly executing / 0 changed. ⚠️ Still blocked for a `by()`-nested recursed field: a `union`
-at the head of a `project().by()` arm does not lower yet (works in `local()`, at source, and as a union
-arm) — that is the next repeat-adjacent engine step, and it is what a GraphQL `@recurse` inside a
-selection needs.
+census +8 newly executing / 0 changed.
+
+**FOLLOW-ON LANDED 2026-08-16 — a `union` at the head of a `project().by()` arm now lowers.** It used to
+work in `local()`, at source, and as a union arm, but not inside a `by()`, so an emit-unrolled recurse
+(a `union` of level-prefixes) could not sit inside a projection. `scalarChild`
+(`src/compiler/rel/lower.ts`) gained a branch arm: a `BRANCH_HOSTS`-headed body roots at the one-row SELF
+relation carrying the host id (the same shape the numeric self-reducer one hop below uses) and hands the
+WHOLE body to `correlatedReduce`, whose `continueAs` already lowers a chain-position branch and whose
+per-origin fold already collapses the tail — so no branch-in-`by()` special case, just the self-root
+composed with the fold. L3 1564→1568 (+4), census unchanged (the corpus underexercises deep selections).
+This is what a GraphQL `@recurse` inside a selection needs; that directive is now UNBLOCKED at the engine
+level.
 
 ⚠️ **Everything below is the record as written during the work, including its own corrections.** Where a
 section says "NEXT" or "what is left", read it as history — the table above is the live answer.
