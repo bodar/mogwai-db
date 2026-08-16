@@ -1,5 +1,5 @@
 {
-  "passing": 1564,
+  "passing": 1568,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -630,6 +630,10 @@
     "g_V_localXoutE_countX",
     "g_V_localXoutE_foldX_unfold",
     "g_V_localXoutE_limitX1X_inVX_limitX3X",
+    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_maxXlocalX",
+    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_meanXlocalX",
+    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_minXlocalX",
+    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_sumXlocalX",
     "g_V_matchXa_0sungBy_b__a_0sungBy_c__b_writtenBy_d__c_writtenBy_e__d_hasXname_George_HarisonX__e_hasXname_Bob_MarleyXX",
     "g_V_matchXa_0sungBy_b__a_0writtenBy_c__b_writtenBy_dX_whereXc_sungBy_dX_whereXd_hasXname_GarciaXX",
     "g_V_matchXa_0sungBy_b__a_0writtenBy_c__b_writtenBy_d__c_sungBy_d__d_hasXname_GarciaXX",
@@ -1927,10 +1931,6 @@
     "g_V_localXout_in_simplePathX_path",
     "g_V_localXout_localXcountXX",
     "g_V_localXpropertiesXlocationX_order_byXvalueX_limitX2XX_value",
-    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_maxXlocalX",
-    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_meanXlocalX",
-    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_minXlocalX",
-    "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_sumXlocalX",
     "g_V_mapXbothE_weight_foldX_order_byXsumXlocalX_descX_byXcountXlocalX_descX",
     "g_V_mapXconstantXnullXX",
     "g_V_mapXin_hasIdX1XX_limitX2X_valuesXnameX",

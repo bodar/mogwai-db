@@ -6309,6 +6309,19 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // `__.count()`/`__.values(k)` with no reduction falls through to the expression arm below.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
   if (child) return correlatedReduce(child.rel, child.elem, body, 1, ctx, fresh);
+  // A BRANCH-headed body (`by(__.union(a,b)….fold())`) — the union fans the host out over its arms, then
+  // the tail reduces. `continueAs` already lowers a `union`/`choose`/`coalesce` over an INPUT relation
+  // (the chain-position branch), so rooting it at the one-row SELF relation carrying the host id and
+  // handing the WHOLE body (from 0) to `correlatedReduce` composes it with the per-origin fold that
+  // arm already builds — no branch-in-by special case, just the self-root the numeric self-reducer above
+  // uses one hop later. This is what lets an emit-unrolled recurse (`union` of level-prefixes) sit inside
+  // a `project().by()`, the shape a GraphQL `@recurse` field lowers to.
+  if (BRANCH_HOSTS.has(body[0]!.name)) {
+    const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
+    const reduced = correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+    if (reduced) return reduced;
+  }
   // The SELF root: no leading hop, so the reducer aggregates/argmaxes the host's OWN property rows
   // exactly as it does an adjacency's — a `values(k)` join against a one-row relation carrying the host
   // id. Only when the body actually ENDS in a reducer; a plain `by(__.values(k))` stays the expression
