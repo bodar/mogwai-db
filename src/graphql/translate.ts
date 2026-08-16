@@ -1,5 +1,6 @@
 import { parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode } from 'graphql';
 import { type GraphSchema, type TypeSchema } from './schema.ts';
+import { whereClauses } from './args.ts';
 
 // ---------- the GraphQL translator — a document + reflected schema → a Gremlin string ----------
 //
@@ -57,12 +58,12 @@ function soleQuery(doc: DocumentNode): OperationDefinitionNode {
 }
 
 /** The plain field selections of a set, refusing anything this cut cannot express (fragments, inline
- *  fragments) rather than skipping it silently. A field with arguments is refused too (filters/order
- *  are the Phase 2 tail), so an unsupported query never yields a subtly-wrong traversal. */
+ *  fragments) rather than skipping it silently. Field ARGUMENTS are no longer refused here — a field's
+ *  `where` is translated where the field is (`fieldBy`/root), which is the only place the type schema
+ *  needed to validate a filter key is in hand; an unsupported argument fails closed THERE (`args.ts`). */
 function fields(set: SelectionSetNode): readonly FieldNode[] {
   return set.selections.map((sel) => {
     if (sel.kind !== Kind.FIELD) throw new GraphQLTranslationError(`fragments are not supported yet (${sel.kind})`);
-    if (sel.arguments && sel.arguments.length) throw new GraphQLTranslationError(`field arguments are not supported yet ('${sel.name.value}')`);
     return sel;
   });
 }
@@ -104,9 +105,12 @@ function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchem
  */
 function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): string {
   const name = field.name.value;
+  const args = field.arguments ?? [];
   const prop = type.properties.get(name);
   if (prop) {
     if (field.selectionSet) throw new GraphQLTranslationError(`scalar field '${type.name}.${name}' cannot have a selection set`);
+    // A scalar field is a value read, not a collection, so a `where` on it has nothing to filter.
+    if (args.length) throw new GraphQLTranslationError(`scalar field '${type.name}.${name}' takes no arguments`);
     return `__.values(${glit(prop.key)})`;
   }
   const edge = type.edges.get(name);
@@ -114,7 +118,10 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): strin
     if (!field.selectionSet) throw new GraphQLTranslationError(`object field '${type.name}.${name}' needs a selection set`);
     const to = schema.types.get(edge.to);
     if (!to) throw new GraphQLTranslationError(`edge field '${type.name}.${name}' points at unknown type '${edge.to}'`);
-    const move = `__.${edge.direction}(${glit(edge.label)})`;
+    // `where` filters the far endpoint, so its `has()` clauses sit AFTER the movement and BEFORE the
+    // nested projection — `out(edge).has(k, …).project(…).fold()` — filtering the neighbour set that is
+    // folded. The keys must be properties of the far type (`to`), which is what `whereClauses` validates.
+    const move = `__.${edge.direction}(${glit(edge.label)})${whereClauses(args, (k) => to.properties.has(k))}`;
     return `${move}.${projectBody(field.selectionSet, to, schema)}.fold()`;
   }
   throw new GraphQLTranslationError(`type '${type.name}' has no field '${name}'`);
@@ -136,7 +143,9 @@ export function translate(source: string, schema: GraphSchema): Translation {
   const type = schema.types.get(root.name.value);
   if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
   if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
-  const gremlin = `g.V().hasLabel(${glit(type.name)}).${projectBody(root.selectionSet, type, schema)}`;
+  // The root `where` filters the source vertices: `V().hasLabel(Type).has(k, …).project(…)`.
+  const where = whereClauses(root.arguments ?? [], (k) => type.properties.has(k));
+  const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, schema)}`;
   return { gremlin, params: {}, rootKey: keyOf(root) };
 }
 

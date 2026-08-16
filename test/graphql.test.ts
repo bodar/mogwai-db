@@ -57,7 +57,7 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('a field the schema does not declare', () => refuses(`{ person { bogus } }`, /no field 'bogus'/));
     test('a scalar field with a selection set', () => refuses(`{ person { name { x } } }`, /cannot have a selection set/));
     test('an object field with no selection set', () => refuses(`{ person { created } }`, /needs a selection set/));
-    test('field arguments (filters not built yet)', () => refuses(`{ person(id: 1) { name } }`, /arguments are not supported/));
+    test('an unrecognised argument name (only where is supported)', () => refuses(`{ person(id: 1) { name } }`, /only 'where' is supported/));
     test('a mutation operation', () => refuses(`mutation { addPerson { name } }`, /only 'query'/));
     test('a fragment', () => refuses(`{ person { ...F } }`, /fragments are not supported/));
     test('a query that declares variables (dropping them would be a wrong answer)', () =>
@@ -67,6 +67,52 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('the error type is GraphQLTranslationError', () => {
       expect(() => translate(`{ person { bogus } }`, schema)).toThrow(GraphQLTranslationError);
     });
+  });
+});
+
+describe('the where filter — { field: { op: value } }, the graph-native convention', () => {
+  const run = async (q: string) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const g of MODERN_SEED) executeQuery(store, g, {});
+    return (await decodeAll(exec(store).buffers(translate(q, schema).gremlin, {}))).map(norm);
+  };
+  const names = (rows: any[]) => rows.map((r: any) => r.name).sort();
+
+  test('eq → has(k, P.eq(v))', () => {
+    expect(translate(`{ person(where: { name: { eq: "marko" } }) { name } }`, schema).gremlin)
+      .toBe("g.V().hasLabel('person').has('name', P.eq('marko')).project('name').by(__.values('name'))");
+  });
+
+  test('a comparison operator filters — age gt 30', async () => {
+    expect(names(await run(`{ person(where: { age: { gt: 30 } }) { name } }`))).toEqual(['josh', 'peter']);
+  });
+
+  test('in → within(...)', async () => {
+    expect(names(await run(`{ person(where: { name: { in: ["marko", "josh"] } }) { name } }`))).toEqual(['josh', 'marko']);
+  });
+
+  test('a substring operator → TextP', () => {
+    expect(translate(`{ person(where: { name: { contains: "ark" } }) { name } }`, schema).gremlin)
+      .toContain("has('name', TextP.containing('ark'))");
+  });
+
+  test('where on an object field filters the far endpoint', async () => {
+    const rows = await run(`{ person(where:{name:{eq:"marko"}}) { name created(where:{lang:{eq:"java"}}) { name } } }`);
+    expect(rows).toEqual([{ name: 'marko', created: [{ name: 'lop' }] }]);
+  });
+
+  test('an Int value is bare; a Float forces a decimal so it parses as a double', () => {
+    expect(translate(`{ person(where: { age: { eq: 29 } }) { name } }`, schema).gremlin).toContain('P.eq(29)');
+    expect(translate(`{ person(where: { age: { gt: 30.0 } }) { name } }`, schema).gremlin).toContain('P.gt(30.0)');
+  });
+
+  describe('fail closed', () => {
+    const refuses = (q: string, m: RegExp) => expect(() => translate(q, schema)).toThrow(m);
+    test('an unknown operator', () => refuses(`{ person(where: { name: { bogus: "x" } }) { name } }`, /unknown filter operator 'bogus'/));
+    test('a non-property key', () => refuses(`{ person(where: { nope: { eq: "x" } }) { name } }`, /cannot filter on 'nope'/));
+    test('a bare value with no operator object', () => refuses(`{ person(where: { name: "marko" }) { name } }`, /operator object/));
+    test('an argument other than where', () => refuses(`{ person(first: 2) { name } }`, /only 'where' is supported/));
+    test('a scalar field taking an argument', () => refuses(`{ person { name(where: {}) } }`, /takes no arguments/));
   });
 });
 
