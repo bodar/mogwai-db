@@ -458,10 +458,10 @@ types, and the write-counter cache (an optimisation, not correctness). `src/grap
 - `edge.ts` is the `POST/GET /graphql/{g}` handler (§5·1, in the Worker): §5·4's `reflect schema →
   translate → run → {data}` flow, a spec-shaped `{data}`/`{errors}` JSON envelope (200 for an executed
   op, 400 for malformed transport), and the scoped `extensions: {"mogwai:explain"}` payload (§5·3). BOTH
-  verbs are GraphQL-over-HTTP: `POST` reads the JSON body, `GET` reads `?query=` (the spec's GET form,
-  what `graphql-http`'s audit grades) — there is deliberately NO server-rendered HTML (an early
-  hand-rolled GraphiQL page reflected the untrusted path id → XSS; deleted rather than escaped, because
-  the endpoint is the product and the page had no payoff). Wired into the shared `makeRouter`
+  verbs are GraphQL-over-HTTP and BOTH return JSON only: `POST` reads the JSON body, `GET` reads
+  `?query=` (the spec's GET form, what `graphql-http`'s audit grades). The edge serves NO HTML — no
+  in-browser explorer, no server-rendered page of any kind; the endpoint is the product and a page
+  reflecting the path id is a surface with no payoff. Wired into the shared `makeRouter`
   (`src/router.ts`) on a path SEPARATE from the gremlin prefix, so the two protocols never collide.
 
 The full **reflect → translate → run** path is verified over a live seeded graph to depth-3 (both edge

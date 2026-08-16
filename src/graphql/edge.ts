@@ -23,8 +23,9 @@ export interface GraphQLExecutor {
 }
 
 /** The four GraphQL-over-HTTP request parameters (the spec names exactly these; all other top-level
- *  names are reserved — §5·3). `variables`/`operationName`/`extensions` are accepted for shape even
- *  though this cut reads only `query` + the scoped explain flag. */
+ *  names are reserved — §5·3). This cut reads `query` + the scoped explain flag and REFUSES a request
+ *  that carries `variables` or `operationName` (fail closed — see `execute`, which will not
+ *  accept-and-ignore them); `extensions` is read only for the explain key. */
 interface GraphQLRequest {
   readonly query?: unknown;
   readonly variables?: unknown;
@@ -89,6 +90,14 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 async function execute(executor: GraphQLExecutor, req: GraphQLRequest): Promise<Response> {
   if (typeof req.query !== 'string')
     return jsonResponse(errors('a GraphQL request must carry a string `query`'), 400);
+  // REFUSE what this cut cannot honour rather than accept-and-ignore it — a request carrying `variables`
+  // or naming an `operationName` would otherwise be silently mistranslated (the translator drops both),
+  // which is a wrong answer, not a partial one. `variables !== undefined` covers an empty `{}` too: a
+  // client that sends the field expects it to matter.
+  if (req.variables !== undefined)
+    return jsonResponse(errors('query variables are not supported yet'));
+  if (req.operationName != null)
+    return jsonResponse(errors('operationName is not supported yet (send a single-operation document)'));
 
   const explain = req.extensions?.[EXPLAIN_KEY] === true;
   let translation: Translation;

@@ -40,13 +40,19 @@ export interface Translation {
   readonly rootKey: string;
 }
 
-/** The single query operation, or a clear refusal. A document with zero or several operations, or a
- *  mutation/subscription, is out of this cut's scope — fail closed rather than pick one. */
+/** The single query operation, or a clear refusal. A document with zero or several operations, a
+ *  mutation/subscription, or a query that DECLARES VARIABLES is out of this cut's scope — fail closed
+ *  rather than pick one or silently drop what it cannot honour. The variable check is load-bearing: the
+ *  edge accepts a `variables` map, and translating a `query($x)` while ignoring `$x` would answer a
+ *  DIFFERENT question than the client asked (root CLAUDE.md's cardinal rule). Variables → the bind rule
+ *  (§6) is the next increment; until then a declared variable is refused, never dropped. */
 function soleQuery(doc: DocumentNode): OperationDefinitionNode {
   const ops = doc.definitions.filter((d): d is OperationDefinitionNode => d.kind === Kind.OPERATION_DEFINITION);
   if (ops.length !== 1) throw new GraphQLTranslationError(`expected exactly one operation, got ${ops.length}`);
   const op = ops[0]!;
   if (op.operation !== 'query') throw new GraphQLTranslationError(`only 'query' operations are supported yet, not '${op.operation}'`);
+  if (op.variableDefinitions && op.variableDefinitions.length)
+    throw new GraphQLTranslationError('query variables are not supported yet (they would be silently dropped)');
   return op;
 }
 

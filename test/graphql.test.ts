@@ -60,6 +60,8 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('field arguments (filters not built yet)', () => refuses(`{ person(id: 1) { name } }`, /arguments are not supported/));
     test('a mutation operation', () => refuses(`mutation { addPerson { name } }`, /only 'query'/));
     test('a fragment', () => refuses(`{ person { ...F } }`, /fragments are not supported/));
+    test('a query that declares variables (dropping them would be a wrong answer)', () =>
+      refuses(`query($id: Int) { person { name } }`, /variables are not supported/));
     test('several root fields', () => refuses(`{ person { name } software { name } }`, /one root field/));
     test('an unknown root type', () => refuses(`{ animal { name } }`, /no type 'animal'/));
     test('the error type is GraphQLTranslationError', () => {
@@ -152,6 +154,18 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
     expect(body.errors[0].message).toMatch(/string `query`/);
   });
 
+  test('supplying `variables` is refused, not accepted-and-ignored', async () => {
+    const { body } = await post({ query: `{ person { name } }`, variables: { x: 1 } });
+    expect(body.data).toBeUndefined();
+    expect(body.errors[0].message).toMatch(/variables are not supported/);
+  });
+
+  test('supplying `operationName` is refused, not silently dropped', async () => {
+    const { body } = await post({ query: `{ person { name } }`, operationName: 'Q' });
+    expect(body.data).toBeUndefined();
+    expect(body.errors[0].message).toMatch(/operationName is not supported/);
+  });
+
   test('GET runs a query from the ?query= param — GraphQL-over-HTTP GET, not a page', async () => {
     await seeded;
     const res = await router(new Request('http://x/graphql/g?query=' + encodeURIComponent('{ person { name } }'), { method: 'GET' }));
@@ -169,8 +183,8 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
   });
 
   test('an untrusted graph id in the path is never reflected into a response body', async () => {
-    // The edge renders no HTML at all, so a crafted path id has no reflection surface — the id only
-    // ever selects a graph, never appears in output. (This is why the GraphiQL page was deleted.)
+    // The edge serves JSON only, never HTML, so a crafted path id has no reflection surface — the id
+    // only ever selects a graph, never appears in output.
     await seeded;
     const res = await router(new Request(`http://x/graphql/${encodeURIComponent('<script>alert(1)</script>')}?query=${encodeURIComponent('{ person { name } }')}`, { method: 'GET' }));
     const text = await res.text();
