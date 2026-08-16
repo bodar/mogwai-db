@@ -105,8 +105,8 @@ export function makeRouter(
     const gqlMatch = pathname.match(gqlPath);
     if (gqlMatch) {
       const gid = decodeURIComponent(gqlMatch[1]!);
-      if (req.method === 'POST') return handlePost(mgr.executor(gid), await req.text());
-      if (req.method === 'GET') return handleGet(mgr.executor(gid), new URL(req.url));
+      if (req.method === 'POST') return handlePost(mgr.executor(gid), req);
+      if (req.method === 'GET') return handleGet(mgr.executor(gid), req);
       return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
     }
 

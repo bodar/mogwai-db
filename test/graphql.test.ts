@@ -275,11 +275,13 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
     expect(body.data.person.length).toBe(4);
   });
 
-  test('a translation refusal is a 200 with {errors} and no data (well-formed request, bad op)', async () => {
+  test('an unknown field is a validation error (graphql-js validates before translating)', async () => {
+    // graphql-js now validates the document against the reflected schema, so an unknown field is caught
+    // as a spec-standard validation error — the message clients expect — not our translator's refusal.
     const { status, body } = await post({ query: `{ person { bogus } }` });
-    expect(status).toBe(200);
+    expect(status).toBe(200); // application/json (default Accept) → 200 with {errors}
     expect(body.data).toBeUndefined();
-    expect(body.errors[0].message).toMatch(/no field 'bogus'/);
+    expect(body.errors[0].message).toMatch(/Cannot query field "bogus" on type "person"/);
   });
 
   test('a malformed transport (no query) is a 400', async () => {
@@ -308,10 +310,16 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
     expect(status).toBe(400);
   });
 
-  test('supplying `operationName` is refused, not silently dropped', async () => {
-    const { body } = await post({ query: `{ person { name } }`, operationName: 'Q' });
+  test('`operationName` selects a named operation (graphql-js resolves it)', async () => {
+    const { body } = await post({ query: `query Q { person { name } }`, operationName: 'Q' });
+    expect(body.errors).toBeUndefined();
+    expect(body.data.person.map((p: any) => p.name).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+  });
+
+  test('a missing named operation is an error naming it', async () => {
+    const { body } = await post({ query: `{ person { name } }`, operationName: 'Missing' });
     expect(body.data).toBeUndefined();
-    expect(body.errors[0].message).toMatch(/operationName is not supported/);
+    expect(body.errors[0].message).toMatch(/no operation named 'Missing'/);
   });
 
   test('GET runs a query from the ?query= param — GraphQL-over-HTTP GET, not a page', async () => {
