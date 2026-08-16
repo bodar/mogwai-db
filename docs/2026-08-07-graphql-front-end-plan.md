@@ -1,7 +1,34 @@
 # A GraphQL front end — design and build plan
 
-**A PLAN — nothing here has landed.** Every capability claim in §2 is a **probe result** (method: §10).
-The one dependency is approved (§7·4).
+**STATUS (2026-08-16): Phases 0–2 have LANDED; the front end is live and deployable.** A GraphQL client
+can `POST`/`GET /graphql/{g}` on both Bun and Cloudflare and get spec-shaped JSON. What works, end to
+end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, `test/graphql.test.ts`,
+`test/services.test.ts`):
+
+- **Schema reflection** — `g.call('mogwai.schema')` (a `mogwai.*` extension in `extendedRegistry` only)
+  streams the label / property / edge / edge-property model; `src/graphql/schema.ts` folds it into an
+  addressable `GraphSchema`.
+- **Translation** — a document → a Gremlin STRING (the §5·2 spike settled this; string reaches the
+  tested compiler door), reflection-first: type = vertex label, scalar field = property, object field =
+  edge (`out`/`in`, in disambiguated `_in`), nesting to any depth.
+- **Field arguments** — `where: { field: { op: value } }` (unprefixed `eq`/`gt`/`contains`/`in`/…, the
+  graph-native convention, researched), `sort: [{ field: ASC|DESC }]`, flat `limit`/`offset`, in the
+  semantic order filter → order → slice, at the root and every object field.
+- **Variables** BIND, not inline (§6); `@skip`/`@include` resolved; `__typename`; aliases.
+- **The HTTP edge** — `POST`/`GET` GraphQL-over-HTTP, `{data}`/`{errors}` envelope, the scoped
+  `extensions:{"mogwai:explain"}` payload. NO server-rendered HTML (deliberate — see §5·2).
+- Everything **fails closed**: an unsupported feature raises `GraphQLTranslationError`, never a
+  half-Gremlin string.
+
+**WHAT IS LEFT** (all additive, none blocked): **Phase 3 — the conformance oracles** (`graphql-http`
+`serverAudits`, the graphql-js differential, introspection round-trip — §7, the recommended next step;
+`graphql-http` is already a dev dep); interfaces/unions; exposing edge properties as GraphQL edge-field
+data (types reflected, surface not); a variable in `sort`/`limit`; the §5·4 schema cache; Phase 4 (the
+`@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
+
+Below is the ORIGINAL design rationale (the probes, the placement/emission decisions, the conformance
+plan). Every "will/should/probe" in §1–§7 is design-time reasoning; §8's per-phase LANDED/LEFT markers
+are the current truth. The one dependency is approved and added (§7·4).
 
 **What this answers.** A mogwai graph is driven the normal way, over Gremlin. This doc is about the
 *other* caller: a client that speaks only GraphQL, pointed at that same graph. The question is **which
@@ -207,7 +234,7 @@ GraphQL endpoint with introspection and tooling, zero config.
 
 ---
 
-## 5. Placement — **locked**. Emission — **open, decide by spike**
+## 5. Placement — **locked**. Emission — **DECIDED (a Gremlin string, §5·2)**
 
 ### 5·1 Placement: the Worker. Locked.
 
@@ -447,7 +474,9 @@ reference-exact `--list` conformance surface is unchanged). Edge-property types 
 `with('aggregate', true)` document variant if ever wanted, and the write-counter cache (an optimisation,
 not correctness). `src/graphql/` reads THIS.
 
-**Phase 2 — the translator + the HTTP edge. ✅ LANDED (core surface).** The §5·2 spike settled emission
+**Phase 2 — the translator + the HTTP edge. ✅ LANDED** (queries, field arguments, variables, directives,
+`__typename` — see the STATUS header for the full list; interfaces/unions are the one translator gap
+left). The §5·2 spike settled emission
 (a Gremlin string). `src/graphql/` is built:
 - `schema.ts` folds the `mogwai.schema` rows into an addressable `GraphSchema` (a GraphQL object type =
   a vertex label, a scalar field = a property key, an object field = an edge — reflection-first, an
