@@ -1269,13 +1269,24 @@ export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, bo
 
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
 function tryUnroll(region: Step[], params: Record<string, any>, childBody: ChildBody): Step[] | null {
-  if (region.length !== 2) return null;
+  // The bounded regime is `repeat`+`times`, optionally with a bare `emit` (repeat+times+emit). A region
+  // carrying `until` is the UNBOUNDED regime — no compile-time n — and belongs to the walk (`walk.ts`),
+  // not the unroll; decline it here rather than unrolling a loop whose bound is a runtime predicate.
+  if (region.length < 2 || region.length > 3) return null;
+  if (region.some((s) => s.name === 'until')) return null;
   // Typed `IRStep` at the declaration, not cast at the use: the mark below is a compiler-side field
   // and every value reaching this pass IS an `IRStep` (the pipeline's chain type). A cast at the read
   // would be the `as any` trap in disguise — a rename would survive it and yield `undefined`.
   const rep: IRStep | undefined = region.find((s) => s.name === 'repeat');
   const times = region.find((s) => s.name === 'times');
+  const emit = region.find((s) => s.name === 'emit');
   if (!rep || !times) return null;
+  if (region.length === 3 && !emit) return null; // the third step, if any, must be `emit` (until declined above)
+  // `emit(pred)` — a predicate emit — emits only the levels where the predicate holds, which a flat
+  // union of level-prefixes cannot express (each arm would need the predicate as a trailing filter, and
+  // the emit-first/last position interacts with it). Bare `emit()` is a constant-true predicate and IS a
+  // union of prefixes; a predicate emit declines here (fail closed) and reaches the walk or a refusal.
+  if (emit && (emit.args ?? []).length) return null;
   const n = (times.args ?? [])[0]?.value;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) return null;
   // A named `repeat("a", body)` carries a loop counter `loops("a")` can read from arbitrarily deep
@@ -1326,9 +1337,37 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
   // set and provider-independent concern do not define this compiler's physical regime split.
   // No ceiling here: the platform enforces its own statement limits, and the build asserts them.
-  const phases: Step[] = [];
-  for (let k = 0; k < n; k++) phases.push(...body.map((s) => ({ ...s })));
-  return phases;
+  const phase = (): Step[] => body.map((s) => ({ ...s }));
+
+  // WITHOUT emit — the plain bounded repeat. The output is the frontier after EXACTLY n iterations, so
+  // splice n copies of the body inline (each an ordinary phase that collapses).
+  if (!emit) {
+    const phases: Step[] = [];
+    for (let k = 0; k < n; k++) phases.push(...phase());
+    return phases;
+  }
+
+  // WITH bare emit — the frontier is emitted at EVERY level, so the output is the UNION ALL of the
+  // frontier after each emitted level (`docs/archive/2026-08-09-repeat-two-regimes-plan.md` §1a: bounded,
+  // so it unrolls and collapses per level — it never touches the walk's aggregate-in-recursive-term wall).
+  //   - emit AFTER repeat (the common form, `repeat(b).emit().times(n)`): levels 1..n → union(b, b·b, …, b^n).
+  //   - emit BEFORE repeat (`emit().repeat(b).times(n)`): the starting traverser is emitted too, so
+  //     levels 0..n-1 → union(identity, b, …, b^(n-1)) — level 0 is the origin itself (`identity`).
+  // A UNION ALL of independently-unrolled prefixes is multiset-exact and self-loop-safe: each arm is
+  // materialised on its own, so a self-loop's extra traverser is preserved (the §6 disjunctive-join trap
+  // is about the RECURSIVE walk's compound arms, not a flat union of prefixes). `union` lowers already.
+  const emitFirst = region.indexOf(emit) < region.indexOf(rep);
+  const arms: Step[][] = [];
+  for (let level = emitFirst ? 0 : 1; level <= (emitFirst ? n - 1 : n); level++) {
+    const arm: Step[] = [];
+    for (let k = 0; k < level; k++) arm.push(...phase());
+    // Level 0 is the origin unchanged — `identity()` so the arm is a legal non-empty traversal.
+    arms.push(arm.length ? arm : [{ name: 'identity', args: [], ctx: rep.ctx }]);
+  }
+  // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
+  // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
+  // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` declined above).
+  return arms.length === 1 ? arms[0]! : [{ name: 'union', args: arms.map((a) => arg({ nested: a })), ctx: rep.ctx }];
 }
 
 /**
