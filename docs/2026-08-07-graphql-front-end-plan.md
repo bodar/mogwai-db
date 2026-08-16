@@ -33,9 +33,11 @@ works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, 
   half-Gremlin string.
 
 **WHAT IS LEFT** (all additive, none blocked): interfaces/unions; exposing edge properties as GraphQL
-edge-field data (types reflected, surface not); a variable in `sort`/`limit`; the §5·4 schema cache;
-Phase 4 (the `@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps
-are in §8.
+edge-field data (types reflected, surface not); the §5·4 schema cache; Phase 4 (the `@recurse`/`_gremlin`
+escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
+(**A variable in `limit`/`offset` now BINDS** — landed; a `limit()`/`skip()` count takes a bound
+parameter as measured, so it rides in `params` like any other variable. `sort` keys and `ASC`/`DESC`
+tokens stay literal — they are structural, not values.)
 
 Below is the ORIGINAL design rationale (the probes, the placement/emission decisions, the conformance
 plan). Every "will/should/probe" in §1–§7 is design-time reasoning; §8's per-phase LANDED/LEFT markers
@@ -530,9 +532,12 @@ type is fixed at that point in the walk). **Edge-property types LANDED** too: `m
 `{kind:'edgeProperty', label, key, type}` arm and `EdgeSchema` a `properties` map (folded
 order-independently), so the reflected schema is complete for edge fields.
 
+A variable in `limit`/`offset` now BINDS too (`countArg` in `args.ts`): a `limit()`/`skip()` count takes a
+bound parameter as measured, so `limit: $n` shares one cached plan across page sizes. `sort` keys and
+`ASC`/`DESC` remain literal — structural, not values.
+
 🚧 What is LEFT of Phase 2 (all additive, no new gates): interfaces/unions; exposing edge properties as
-GraphQL edge-field data (the reflected types are now there, the surface is not); a variable in
-`sort`/`limit` (structural, literal-only today); and the §5·4 compare-and-swap schema cache (an
+GraphQL edge-field data (the reflected types are now there, the surface is not); and the §5·4 compare-and-swap schema cache (an
 optimisation — two DO round trips per request today, correct and un-cached).
 
 **Phase 3 — the oracles. ✅ LANDED** (`test/graphql-conformance.test.ts`, in `ci` via the ordinary
