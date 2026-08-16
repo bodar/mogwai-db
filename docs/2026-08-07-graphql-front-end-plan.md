@@ -32,12 +32,13 @@ works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, 
 - Everything **fails closed**: an unsupported feature raises `GraphQLTranslationError`, never a
   half-Gremlin string.
 
-**WHAT IS LEFT** (all additive, none blocked): interfaces/unions; exposing edge properties as GraphQL
-edge-field data (types reflected, surface not); the §5·4 schema cache; Phase 4 (the `@recurse`/`_gremlin`
-escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
-(**A variable in `limit`/`offset` now BINDS** — landed; a `limit()`/`skip()` count takes a bound
-parameter as measured, so it rides in `params` like any other variable. `sort` keys and `ASC`/`DESC`
-tokens stay literal — they are structural, not values.)
+**WHAT IS LEFT** (all additive, none blocked): interfaces/unions; the §5·4 schema cache; Phase 4 (the
+`@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
+(Two items landed since Phase 3: **a variable in `limit`/`offset` now BINDS** — a `limit()`/`skip()` count
+takes a bound parameter as measured, so it rides in `params` like any other variable (`sort` keys and
+`ASC`/`DESC` tokens stay literal — structural, not values); and **edge properties are surfaced as GraphQL
+edge-field data** — a Neo4j-style `_edges` companion field returning `node` + the edge's own properties,
+flat with no Relay cursor/`pageInfo` boilerplate, no TinkerPop DB having a GraphQL surface to copy.)
 
 Below is the ORIGINAL design rationale (the probes, the placement/emission decisions, the conformance
 plan). Every "will/should/probe" in §1–§7 is design-time reasoning; §8's per-phase LANDED/LEFT markers
@@ -536,9 +537,22 @@ A variable in `limit`/`offset` now BINDS too (`countArg` in `args.ts`): a `limit
 bound parameter as measured, so `limit: $n` shares one cached plan across page sizes. `sort` keys and
 `ASC`/`DESC` remain literal — structural, not values.
 
-🚧 What is LEFT of Phase 2 (all additive, no new gates): interfaces/unions; exposing edge properties as
-GraphQL edge-field data (the reflected types are now there, the surface is not); and the §5·4 compare-and-swap schema cache (an
-optimisation — two DO round trips per request today, correct and un-cached).
+**Edge properties are now surfaced as GraphQL edge-field data** (the Neo4j-style `_edges` companion —
+`schema.ts` `edgeCompanionFieldName`, `translate.ts` `edgeCompanionBy`, the wrapper types in `sdl.ts`).
+`created` still returns `[software!]`; `created_edges` is added, returning `[personCreatedEdge!]` where
+`personCreatedEdge { node: software!, weight: Float }` — the edge's own properties plus the far vertex under
+`node`. It lowers to `outE(L).<edge where/sort/limit>.project(props…, 'node').by(values(prop)).by(inV()
+.project(…)).fold()` (`inV` for an out edge, `outV` for an in edge); its `where`/`sort`/`limit` filter the
+EDGES on the edge's own properties, one hop earlier than the plain field. Only an edge WITH properties gets
+a companion (a `node`-only wrapper is noise). The shape follows Neo4j (`@relationshipProperties`) — our
+nearest analogue, since no TinkerPop DB (JanusGraph, Neptune, Cosmos) ships a GraphQL surface — but FLAT,
+with no Relay cursor/`pageInfo`, because there is no cursor pagination to honour and advertising a dead
+field is the accept-and-ignore stub this project forbids. `where`/`sort`/`limit` themselves stay the flat
+graph-native convention (Relay governs pagination, not filtering, and is not a GraphQL standard; the two
+comparable graph DBs — Neo4j, Dgraph — use the flat convention this front end already chose).
+
+🚧 What is LEFT of Phase 2 (all additive, no new gates): interfaces/unions; and the §5·4 compare-and-swap
+schema cache (an optimisation — two DO round trips per request today, correct and un-cached).
 
 **Phase 3 — the oracles. ✅ LANDED** (`test/graphql-conformance.test.ts`, in `ci` via the ordinary
 `test/` sweep — no separate task; the file lives under `test/` so `bun test` discovers it, and `ci`
