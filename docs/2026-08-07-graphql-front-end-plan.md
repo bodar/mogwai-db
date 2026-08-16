@@ -32,13 +32,16 @@ works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, 
 - Everything **fails closed**: an unsupported feature raises `GraphQLTranslationError`, never a
   half-Gremlin string.
 
-**WHAT IS LEFT** (all additive, none blocked): interfaces/unions; the §5·4 schema cache; Phase 4 (the
-`@recurse`/`_gremlin` escape ladder); Phase 5 (mutations). Per-phase detail + the traps are in §8.
-(Two items landed since Phase 3: **a variable in `limit`/`offset` now BINDS** — a `limit()`/`skip()` count
-takes a bound parameter as measured, so it rides in `params` like any other variable (`sort` keys and
-`ASC`/`DESC` tokens stay literal — structural, not values); and **edge properties are surfaced as GraphQL
-edge-field data** — a Neo4j-style `_edges` companion field returning `node` + the edge's own properties,
-flat with no Relay cursor/`pageInfo` boilerplate, no TinkerPop DB having a GraphQL surface to copy.)
+**WHAT IS LEFT** (all additive, none blocked): interfaces/unions; the §5·4 schema cache; the `_gremlin`
+escape field (the other half of Phase 4); Phase 5 (mutations). Per-phase detail + the traps are in §8.
+(Landed since Phase 3: **a variable in `limit`/`offset` now BINDS** — a `limit()`/`skip()` count takes a
+bound parameter as measured, so it rides in `params` like any other variable (`sort` keys and `ASC`/`DESC`
+tokens stay literal — structural, not values); **edge properties are surfaced as GraphQL edge-field data**
+— a Neo4j-style `_edges` companion field returning `node` + the edge's own properties, flat with no Relay
+cursor/`pageInfo` boilerplate, no TinkerPop DB having a GraphQL surface to copy; and **`@recurse(depth: N)`**
+— the transitive-walk extension (Phase 4's first half), lowering an edge field to `repeat(<move>).emit()
+.times(N)`, unblocked by this session's engine work (emit-in-unroll + a `union` at the head of a
+`project().by()` arm).)
 
 Below is the ORIGINAL design rationale (the probes, the placement/emission decisions, the conformance
 plan). Every "will/should/probe" in §1–§7 is design-time reasoning; §8's per-phase LANDED/LEFT markers
@@ -579,9 +582,20 @@ depends on `test`). All three oracles are green:
   `printSchema`. One assertion that validates the whole schema layer (§7·3), plus a live-edge check that
   `POST { __typename }` → `Query` and `__schema` introspects.
 
-**Phase 4 — the escape ladder.** `@recurse(depth:)` → `repeat().times()`; a `_gremlin(query: String!)`
-root field for everything the tree cannot say. Both are non-standard by necessity — every
-implementation has them, and they are where "GraphQL over a *graph*" stops being a document API.
+**Phase 4 — the escape ladder. `@recurse` ✅ LANDED; `_gremlin` LEFT.** `@recurse(depth: N)` on an edge
+field lowers to `repeat(<move>).emit().times(N).project(…).fold()` — the emit-all-levels-to-depth
+semantics of Dgraph's `@recurse` (the only prior art; no TinkerPop DB has a GraphQL surface). It required
+two engine pieces this session, both compounding substrate for every caller, not just GraphQL:
+**emit() in the bounded unroll** (`repeat(b).emit().times(n)` → a `UNION ALL` of level-prefixes,
+`src/compiler/ir/strategies.ts`, L3 +3) and **a `union` at the head of a `project().by()` arm**
+(`src/compiler/rel/lower.ts` `scalarChild`'s branch arm, L3 +4). `translate.ts` `recurseDepth` reads the
+directive and requires a SELF-returning edge (`knows`: person→person) so the nested selection is valid at
+every level; `sdl.ts` declares the directive so graphql-js validates and introspects it. Fail-closed on a
+non-self edge / missing / non-positive / variable depth. Note the original plan said `repeat().times()`;
+the correct lowering is `.emit().times()` — bare `times()` returns only the Nth ring, not the network.
+🚧 LEFT: `_gremlin(query: String!)` — a root field taking raw Gremlin for everything the tree cannot say.
+Non-standard by necessity — every implementation has it, and it is where "GraphQL over a *graph*" stops
+being a document API.
 
 **Phase 5 — mutations.** `addV`/`addE`/`property`/`drop`/`mergeV`, generated per label from the same
 reflected schema.
