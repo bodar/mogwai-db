@@ -1347,9 +1347,12 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
     return phases;
   }
 
-  // WITH bare emit — the frontier is emitted at EVERY level, so the output is the UNION ALL of the
-  // frontier after each emitted level (`docs/archive/2026-08-09-repeat-two-regimes-plan.md` §1a: bounded,
-  // so it unrolls and collapses per level — it never touches the walk's aggregate-in-recursive-term wall).
+  // The frontier is emitted at EVERY level, so the output is the UNION ALL of the frontier after each
+  // emitted level (`docs/archive/2026-08-09-repeat-two-regimes-plan.md` §1a: bounded, so it unrolls and
+  // collapses per level — it never touches the walk's aggregate-in-recursive-term wall). A barrier in the
+  // body needs no special case: each arm applies the body-prefix INDEPENDENTLY, so a per-arm `dedup`
+  // dedups that arm's own stream — exactly the per-iteration semantics `emit().repeat(__.dedup()).times(2)`
+  // asks for (each vertex twice, `Repeat.feature:974`). The corpus is the authority on any body shape here.
   //   - emit AFTER repeat (the common form, `repeat(b).emit().times(n)`): levels 1..n → union(b, b·b, …, b^n).
   //   - emit BEFORE repeat (`emit().repeat(b).times(n)`): the starting traverser is emitted too, so
   //     levels 0..n-1 → union(identity, b, …, b^(n-1)) — level 0 is the origin itself (`identity`).

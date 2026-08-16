@@ -119,18 +119,32 @@ describe('the repeat() unroll boundary', () => {
     expect(large).toBeLessThan(small * 5);
   });
 
-  test('the run must be exactly repeat + times — emit, until and a named loop all decline', () => {
-    // Each declines for its own reason: emit() publishes intermediate frontiers (so the result is not
-    // n applications of the body), until() is a predicate rather than a count, and a named
-    // repeat("a", …) carries a counter loops("a") can read. All three keep today's deferral.
+  test('until and a named loop decline — a predicate bound and a live counter, not a fixed n', () => {
+    // until() is a predicate rather than a count (the unbounded regime → the walk), and a named
+    // repeat("a", …) carries a counter loops("a") can read from arbitrarily deep, which the phases have
+    // nowhere to attach. bare emit() is NOT here any more — it unrolls (see the next test).
     for (const q of [
-      'g.V().repeat(__.dedup().both()).times(2).emit()',
-      'g.V().emit().repeat(__.dedup().both()).times(2)',
       "g.V().repeat(__.dedup().both()).until(__.has('name','lop'))",
       // The NAMED loop, which this test's own name has always claimed and its list did not contain —
       // and that gap is exactly how the defect below survived.
       'g.V().repeat("a", __.dedup().both()).times(2)',
     ]) expect(() => compile(q, {})).toThrow();
+  });
+
+  test('bare emit() unrolls — repeat(b).emit().times(n) is a UNION ALL of levels 1..n', () => {
+    // emit at every level is the union of the frontier after each emitted level, which the BOUNDED unroll
+    // now produces for ANY unrollable body — a barrier in the body applies per-arm (per-iteration), which
+    // is what the semantics ask. Corpus-validated: `repeat(__.out()).times(2).emit()` → count 8
+    // (Repeat.feature:76), and `emit().repeat(__.dedup()).times(2)` → each vertex twice
+    // (Repeat.feature:974). emit(pred) still declines (fail closed) — bare emit only.
+    for (const q of [
+      'g.V().repeat(__.out()).times(2).emit()',
+      'g.V().emit().repeat(__.out()).times(2)',
+      "g.V().hasLabel('person').repeat(__.out('knows')).emit().times(2)",
+      'g.V().emit().repeat(__.dedup()).times(2)',
+    ]) expect(() => compile(q, {})).not.toThrow();
+    // emit(pred) — a predicate emit — is NOT a union of prefixes; it declines to the walk / a refusal.
+    expect(() => compile('g.V().repeat(__.out()).emit(__.has("name","x")).times(2)', {})).toThrow();
   });
 
   test('a NAMED repeat is not unrolled — the identity has nowhere to go', () => {
