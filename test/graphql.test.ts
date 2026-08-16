@@ -10,6 +10,8 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { decode, decodeAll } from './support/decode.ts';
+import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
+import { makeRouter } from '../src/router.ts';
 
 // The modern graph's reflected schema, hand-built for the translator unit tests.
 const MODERN_SCHEMA: SchemaRow[] = [
@@ -100,5 +102,78 @@ describe('reflect → translate → run — the full path over a live graph', ()
     expect(josh.created.find((s: any) => s.name === 'ripple').created_in).toEqual([{ name: 'josh' }]);
     expect(josh.created.find((s: any) => s.name === 'lop').created_in.map((p: any) => p.name).sort())
       .toEqual(['josh', 'marko', 'peter']);
+  });
+});
+
+describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
+  const mgr = new BunGraphManager(undefined, extendedRegistry);
+  const router = makeRouter(mgr);
+  const seeded = (async () => { for (const g of MODERN_SEED) await mgr.executor('g').framedAsync(g, {}); })();
+
+  const post = async (body: unknown) => {
+    await seeded;
+    const res = await router(new Request('http://x/graphql/g', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    return { status: res.status, body: await res.json() as any };
+  };
+
+  test('a query returns a spec-shaped {data} keyed by the root field', async () => {
+    const { status, body } = await post({ query: `{ person { name created { name } } }` });
+    expect(status).toBe(200);
+    const marko = body.data.person.find((p: any) => p.name === 'marko');
+    expect(marko).toEqual({ name: 'marko', created: [{ name: 'lop' }] });
+    expect(body.data.person.find((p: any) => p.name === 'vadas')).toEqual({ name: 'vadas', created: [] });
+    expect(body.errors).toBeUndefined();
+  });
+
+  test('an alias keys the response under the alias', async () => {
+    const { body } = await post({ query: `{ people: person { who: name } }` });
+    expect(body.data.people.map((p: any) => p.who).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+  });
+
+  test('the scoped extensions explain flag returns the compiled Gremlin', async () => {
+    const { body } = await post({ query: `{ person { name } }`, extensions: { 'mogwai:explain': true } });
+    expect(body.extensions['mogwai:explain'].gremlin)
+      .toBe("g.V().hasLabel('person').project('name').by(__.values('name'))");
+    expect(body.data.person.length).toBe(4);
+  });
+
+  test('a translation refusal is a 200 with {errors} and no data (well-formed request, bad op)', async () => {
+    const { status, body } = await post({ query: `{ person { bogus } }` });
+    expect(status).toBe(200);
+    expect(body.data).toBeUndefined();
+    expect(body.errors[0].message).toMatch(/no field 'bogus'/);
+  });
+
+  test('a malformed transport (no query) is a 400', async () => {
+    const { status, body } = await post({ notAQuery: true });
+    expect(status).toBe(400);
+    expect(body.errors[0].message).toMatch(/string `query`/);
+  });
+
+  test('GET runs a query from the ?query= param — GraphQL-over-HTTP GET, not a page', async () => {
+    await seeded;
+    const res = await router(new Request('http://x/graphql/g?query=' + encodeURIComponent('{ person { name } }'), { method: 'GET' }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toMatch(/application\/json/);
+    const body = await res.json() as any;
+    expect(body.data.person.map((p: any) => p.name).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+  });
+
+  test('GET with no query is a 400 (never a server-rendered HTML page)', async () => {
+    await seeded;
+    const res = await router(new Request('http://x/graphql/g', { method: 'GET' }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get('Content-Type')).toMatch(/application\/json/);
+  });
+
+  test('an untrusted graph id in the path is never reflected into a response body', async () => {
+    // The edge renders no HTML at all, so a crafted path id has no reflection surface — the id only
+    // ever selects a graph, never appears in output. (This is why the GraphiQL page was deleted.)
+    await seeded;
+    const res = await router(new Request(`http://x/graphql/${encodeURIComponent('<script>alert(1)</script>')}?query=${encodeURIComponent('{ person { name } }')}`, { method: 'GET' }));
+    const text = await res.text();
+    expect(text).not.toContain('<script>');
   });
 });

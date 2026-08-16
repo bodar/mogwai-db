@@ -34,6 +34,10 @@ export class GraphQLTranslationError extends Error {
 export interface Translation {
   readonly gremlin: string;
   readonly params: Record<string, unknown>;
+  /** The root field's alias-or-name — the key GraphQL's `{data}` envelope nests the result under. The
+   *  translator rooted the traversal at this field, so it hands the key back rather than making the
+   *  HTTP edge re-parse the document to recover it. */
+  readonly rootKey: string;
 }
 
 /** The single query operation, or a clear refusal. A document with zero or several operations, or a
@@ -127,7 +131,7 @@ export function translate(source: string, schema: GraphSchema): Translation {
   if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
   if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
   const gremlin = `g.V().hasLabel(${glit(type.name)}).${projectBody(root.selectionSet, type, schema)}`;
-  return { gremlin, params: {} };
+  return { gremlin, params: {}, rootKey: keyOf(root) };
 }
 
 /** Re-export so a caller builds the schema and translates from one module. */

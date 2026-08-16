@@ -16,6 +16,7 @@ import type { GraphManager } from './manager.ts';
 import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs } from './docs.ts';
+import { handlePost, handleGet } from './graphql/edge.ts';
 
 /** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
@@ -79,6 +80,10 @@ export function makeRouter(
   log: QueryLogger = silentLogger,
 ): (req: Request) => Promise<Response> {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
+  // The GraphQL edge is a SEPARATE, fixed path (§5): a GraphQL client speaks its own
+  // over-HTTP protocol and JSON envelope, never the Gremlin wire, so it does not share the
+  // configurable gremlin prefix or the verb-dispatch below.
+  const gqlPath = new RegExp('^/graphql/([^/]+)/?$');
   const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix);
 
   return async function router(req: Request): Promise<Response> {
@@ -91,6 +96,18 @@ export function makeRouter(
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       if (pathname === '/openapi.json')
         return new Response(OPENAPI_JSON, { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // The GraphQL edge — GraphQL-over-HTTP on `POST /graphql/{g}` (JSON body) and `GET /graphql/{g}`
+    // (`?query=`), the two verbs the spec defines and `graphql-http`'s audit grades (§5). Matched
+    // BEFORE the gremlin path so the two protocols never collide, and it uses the same executor seam a
+    // Gremlin query does. No server-rendered HTML: the endpoint is the product.
+    const gqlMatch = pathname.match(gqlPath);
+    if (gqlMatch) {
+      const gid = decodeURIComponent(gqlMatch[1]!);
+      if (req.method === 'POST') return handlePost(mgr.executor(gid), await req.text());
+      if (req.method === 'GET') return handleGet(mgr.executor(gid), new URL(req.url));
+      return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
     }
 
     // Bare gremlin endpoint: a stock TinkerPop client POSTs to one URL and names the

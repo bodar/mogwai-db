@@ -446,20 +446,33 @@ reference-exact `--list` conformance surface is unchanged). 🚧 What is LEFT: S
 in `src/graphql/`, Phase 2), a `with('aggregate', true)` document variant if ever wanted, edge-property
 types, and the write-counter cache (an optimisation, not correctness). `src/graphql/` reads THIS.
 
-**Phase 2 — the translator. ✅ TRANSLATOR CORE LANDED.** The §5·2 spike settled emission (a Gremlin
-string). `src/graphql/` is built: `schema.ts` folds the `mogwai.schema` rows into an addressable
-`GraphSchema` (a GraphQL object type = a vertex label, a scalar field = a property key, an object field
-= an edge — reflection-first, an in/out pair disambiguated by a `_in` suffix), and `translate.ts` walks
-a document top-down against it — a root → `V().hasLabel(Type)`, a scalar → `by(__.values(key))`, an
-object field → `by(__.<out|in>(edge).project(…)….fold())`, recursing to any depth. Emits `{gremlin,
-params}` across the EXISTING manager seam (zero executor changes), and the full **reflect → translate →
-run** path is verified over a live seeded graph to depth-3, both edge directions. Fail-closed:
-arguments, fragments, mutations, multiple roots, unknown fields all RAISE `GraphQLTranslationError`
-rather than emit a half-Gremlin string. 🚧 What is LEFT of Phase 2: the HTTP edge (router `POST/GET
-/graphql/{g}`, explain as a scoped `extensions` entry §5·3, per-request schema fetch §5·4);
-field ARGUMENTS → `has()`/`order()`/`limit()` (the filter/order/first tail of §1·1); variables → the
-params map (§6); `@skip`/`@include`; interfaces/unions; and `__typename`. It picks up plan-shipping for
-free now that `docs/archive/2026-08-07-edge-compilation-plan.md` has landed.
+**Phase 2 — the translator + the HTTP edge. ✅ LANDED (core surface).** The §5·2 spike settled emission
+(a Gremlin string). `src/graphql/` is built:
+- `schema.ts` folds the `mogwai.schema` rows into an addressable `GraphSchema` (a GraphQL object type =
+  a vertex label, a scalar field = a property key, an object field = an edge — reflection-first, an
+  in/out pair disambiguated by a `_in` suffix).
+- `translate.ts` walks a document top-down against it — a root → `V().hasLabel(Type)`, a scalar →
+  `by(__.values(key))`, an object field → `by(__.<out|in>(edge).project(…)….fold())`, recursing to any
+  depth. Fail-closed: arguments, fragments, mutations, multiple roots, unknown fields all RAISE
+  `GraphQLTranslationError` rather than emit a half-Gremlin string.
+- `edge.ts` is the `POST/GET /graphql/{g}` handler (§5·1, in the Worker): §5·4's `reflect schema →
+  translate → run → {data}` flow, a spec-shaped `{data}`/`{errors}` JSON envelope (200 for an executed
+  op, 400 for malformed transport), and the scoped `extensions: {"mogwai:explain"}` payload (§5·3). BOTH
+  verbs are GraphQL-over-HTTP: `POST` reads the JSON body, `GET` reads `?query=` (the spec's GET form,
+  what `graphql-http`'s audit grades) — there is deliberately NO server-rendered HTML (an early
+  hand-rolled GraphiQL page reflected the untrusted path id → XSS; deleted rather than escaped, because
+  the endpoint is the product and the page had no payoff). Wired into the shared `makeRouter`
+  (`src/router.ts`) on a path SEPARATE from the gremlin prefix, so the two protocols never collide.
+
+The full **reflect → translate → run** path is verified over a live seeded graph to depth-3 (both edge
+directions) AND end-to-end through the real router (`test/graphql.test.ts`). It crosses the EXISTING
+manager seam (zero executor changes) and picks up plan-shipping for free now that
+`docs/archive/2026-08-07-edge-compilation-plan.md` has landed.
+
+🚧 What is LEFT of Phase 2 (all additive, no new gates): field ARGUMENTS → `has()`/`order()`/`limit()`
+(the filter/order/first tail of §1·1); variables → the params map (§6); `@skip`/`@include`;
+interfaces/unions; `__typename`; and the §5·4 compare-and-swap schema cache (an optimisation — two DO
+round trips per request today, correct and un-cached).
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.
