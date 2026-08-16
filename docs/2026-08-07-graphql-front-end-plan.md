@@ -442,9 +442,10 @@ binds. The stream shape (not a single document) is the prior-art answer: TinkerP
 meta-service and Neo4j's `db.schema.nodeTypeProperties` both emit one record per element, and it composes
 with the map vocabulary (`.count()`, `.fold()` verified — `.fold()` rides the list-of-maps substrate).
 Namespaced `mogwai.schema` (our extension → `extendedRegistry` only, NEVER `standardRegistry`, so the
-reference-exact `--list` conformance surface is unchanged). 🚧 What is LEFT: SDL printing on top (belongs
-in `src/graphql/`, Phase 2), a `with('aggregate', true)` document variant if ever wanted, edge-property
-types, and the write-counter cache (an optimisation, not correctness). `src/graphql/` reads THIS.
+reference-exact `--list` conformance surface is unchanged). Edge-property types are reflected too (the
+`edgeProperty` arm). 🚧 What is LEFT: SDL printing on top (belongs in `src/graphql/`, Phase 2), a
+`with('aggregate', true)` document variant if ever wanted, and the write-counter cache (an optimisation,
+not correctness). `src/graphql/` reads THIS.
 
 **Phase 2 — the translator + the HTTP edge. ✅ LANDED (core surface).** The §5·2 spike settled emission
 (a Gremlin string). `src/graphql/` is built:
@@ -477,9 +478,22 @@ onto Gremlin (`P.*`/`TextP.*`/`within`); `sort: [{ field: ASC|DESC }]` → `orde
 (over source vertices) and on any object field (over the far endpoint before its fold). Fail-closed on
 an unknown operator / non-property key / bad direction / bare value / unrecognised argument.
 
-🚧 What is LEFT of Phase 2 (all additive, no new gates): variables → the params map (§6); `@skip`/
-`@include`; interfaces/unions; `__typename`; and the §5·4 compare-and-swap schema cache (an optimisation
-— two DO round trips per request today, correct and un-cached).
+**Variables, `@skip`/`@include`, and `__typename` LANDED.** A GraphQL variable BINDS, never inlines
+(§6): a `$x` reference mints a Gremlin identifier and rides in `params` (`src/graphql/bindings.ts`), so
+two calls differing only in the variable share one cached plan — `where: { age: { gt: $min } }` +
+`variables: {min: 30}` → `has('age', P.gt(gqv0))` with `{gqv0: 30}` (a list variable feeds `in` as one
+bound list). `@skip(if:)`/`@include(if:)` are resolved at translation — ⚠️ this was a FAIL-OPEN trap:
+graphql-js parses the directive but the translator never read `field.directives`, so `@skip` was silently
+IGNORED (a wrong answer) until fixed; the `if:` is a boolean literal (a variable there is refused, like
+variables in sort/limit). `__typename` → `constant(<TypeName>)` (a compile-time constant — the enclosing
+type is fixed at that point in the walk). **Edge-property types LANDED** too: `mogwai.schema` gained an
+`{kind:'edgeProperty', label, key, type}` arm and `EdgeSchema` a `properties` map (folded
+order-independently), so the reflected schema is complete for edge fields.
+
+🚧 What is LEFT of Phase 2 (all additive, no new gates): interfaces/unions; exposing edge properties as
+GraphQL edge-field data (the reflected types are now there, the surface is not); a variable in
+`sort`/`limit` (structural, literal-only today); and the §5·4 compare-and-swap schema cache (an
+optimisation — two DO round trips per request today, correct and un-cached).
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.

@@ -28,6 +28,10 @@ export interface EdgeSchema {
   readonly label: string;
   readonly direction: 'out' | 'in';
   readonly to: string;
+  /** The edge's OWN properties (keyed by property name), reflected from `edge_properties`. They belong
+   *  to the edge itself, so both the out and the in field of one stored edge carry the same set — a later
+   *  increment exposes them as edge-field data/arguments (§4's `edge-field payload types`). */
+  readonly properties: ReadonlyMap<string, PropertySchema>;
 }
 
 /** One vertex label as a GraphQL object type: its property fields and its edge fields. Field lookup is
@@ -58,15 +62,17 @@ export const edgeFieldName = (label: string, direction: 'out' | 'in'): string =>
 export type SchemaRow =
   | { readonly kind: 'vertexLabel'; readonly name: string; readonly count: number }
   | { readonly kind: 'property'; readonly label: string; readonly key: string; readonly type: string }
-  | { readonly kind: 'edge'; readonly label: string; readonly src: string; readonly tgt: string };
+  | { readonly kind: 'edge'; readonly label: string; readonly src: string; readonly tgt: string }
+  | { readonly kind: 'edgeProperty'; readonly label: string; readonly key: string; readonly type: string };
 
 /**
  * Fold the `mogwai.schema` row stream into the addressable `GraphSchema`.
  *
- * ONE pass, order-independent: a `vertexLabel` row mints a type, a `property` row adds a field to its
- * label's type, an `edge` row adds an OUT field to its src type and an IN field to its tgt type. A
- * property/edge row for a label with no `vertexLabel` row still mints the type (a defensive union —
- * the reflection always emits the label row, but folding order must not decide correctness).
+ * Order-independent (the UNION ALL row order is not guaranteed): an `edgeProperty` may arrive before its
+ * `edge`, so edge properties are collected by edge-label FIRST, then attached when the edge fields are
+ * built. A `vertexLabel` row mints a type, a `property` row adds a field, an `edge` row adds an OUT field
+ * to its src type and an IN field to its tgt type — both carrying the edge's own property set. A row for
+ * a label with no `vertexLabel` row still mints the type (folding order must not decide correctness).
  */
 export function buildSchema(rows: Iterable<SchemaRow>): GraphSchema {
   const types = new Map<string, { name: string; count: number; properties: Map<string, PropertySchema>; edges: Map<string, EdgeSchema> }>();
@@ -75,12 +81,25 @@ export function buildSchema(rows: Iterable<SchemaRow>): GraphSchema {
     if (!t) { t = { name, count: 0, properties: new Map(), edges: new Map() }; types.set(name, t); }
     return t;
   };
-  for (const row of rows) {
+  // Two passes over one array: edge properties by edge-label, then everything else — so an edge field
+  // built in pass 2 sees the complete property set regardless of stream order.
+  const all = [...rows];
+  const edgeProps = new Map<string, Map<string, PropertySchema>>();
+  for (const row of all) {
+    if (row.kind === 'edgeProperty') {
+      let m = edgeProps.get(row.label);
+      if (!m) { m = new Map(); edgeProps.set(row.label, m); }
+      m.set(row.key, { key: row.key, type: row.type });
+    }
+  }
+  const propsOf = (label: string): ReadonlyMap<string, PropertySchema> => edgeProps.get(label) ?? new Map();
+  for (const row of all) {
     if (row.kind === 'vertexLabel') typeOf(row.name).count = row.count;
     else if (row.kind === 'property') typeOf(row.label).properties.set(row.key, { key: row.key, type: row.type });
-    else {
-      typeOf(row.src).edges.set(edgeFieldName(row.label, 'out'), { label: row.label, direction: 'out', to: row.tgt });
-      typeOf(row.tgt).edges.set(edgeFieldName(row.label, 'in'), { label: row.label, direction: 'in', to: row.src });
+    else if (row.kind === 'edge') {
+      const properties = propsOf(row.label);
+      typeOf(row.src).edges.set(edgeFieldName(row.label, 'out'), { label: row.label, direction: 'out', to: row.tgt, properties });
+      typeOf(row.tgt).edges.set(edgeFieldName(row.label, 'in'), { label: row.label, direction: 'in', to: row.src, properties });
     }
   }
   return { types };

@@ -90,12 +90,10 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 async function execute(executor: GraphQLExecutor, req: GraphQLRequest): Promise<Response> {
   if (typeof req.query !== 'string')
     return jsonResponse(errors('a GraphQL request must carry a string `query`'), 400);
-  // REFUSE what this cut cannot honour rather than accept-and-ignore it — a request carrying `variables`
-  // or naming an `operationName` would otherwise be silently mistranslated (the translator drops both),
-  // which is a wrong answer, not a partial one. `variables !== undefined` covers an empty `{}` too: a
-  // client that sends the field expects it to matter.
-  if (req.variables !== undefined)
-    return jsonResponse(errors('query variables are not supported yet'));
+  // `variables` now BIND (§6); it must be a JSON object if present, never accepted-and-ignored.
+  // `operationName` is still refused rather than silently dropped (single-operation documents only).
+  if (req.variables !== undefined && (typeof req.variables !== 'object' || req.variables === null || Array.isArray(req.variables)))
+    return jsonResponse(errors('`variables` must be an object'), 400);
   if (req.operationName != null)
     return jsonResponse(errors('operationName is not supported yet (send a single-operation document)'));
 
@@ -104,7 +102,7 @@ async function execute(executor: GraphQLExecutor, req: GraphQLRequest): Promise<
   let rootKey: string;
   try {
     const schema = await reflect(executor);
-    translation = translate(req.query, schema);
+    translation = translate(req.query, schema, (req.variables as Record<string, unknown>) ?? {});
     // The response key is the root field's alias-or-name — `translate` rooted the query there. Parsing
     // it out of the query once more would be a second recognizer; instead the translator hands it back.
     rootKey = translation.rootKey;

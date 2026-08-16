@@ -28,14 +28,15 @@ import type { Rel, Table } from '../../rel/rel.ts';
 // blob is opaque to every downstream step. An aggregate `visualization`-style document, if ever wanted,
 // is a SEPARATE service (or a `with('aggregate', true)`), never the default.
 //
-// ## The three element kinds, one uniform stream
+// ## The four element kinds, one uniform stream
 //
 // Each row is a map with a `kind` discriminator so heterogeneous records share one stream — the shape
 // `db.schema.nodeTypeProperties` takes:
 //
-//   - `{ kind: 'vertexLabel', name, count }`      — one per vertex label + how many carry it.
-//   - `{ kind: 'property', label, key, type }`    — one per (label, property key), with its Gremlin vtype.
-//   - `{ kind: 'edge', label, src, tgt }`         — one per DISTINCT (srcLabel, edgeLabel, tgtLabel) triple.
+//   - `{ kind: 'vertexLabel', name, count }`       — one per vertex label + how many carry it.
+//   - `{ kind: 'property', label, key, type }`     — one per (label, property key), with its Gremlin vtype.
+//   - `{ kind: 'edge', label, src, tgt }`          — one per DISTINCT (srcLabel, edgeLabel, tgtLabel) triple.
+//   - `{ kind: 'edgeProperty', label, key, type }` — one per DISTINCT (edgeLabel, property key), its vtype.
 //
 // ## Reflection is a handful of GROUP BYs over the schema tables
 //
@@ -202,6 +203,35 @@ function edgeTriples(fresh: Minter): Rel {
   ]), fresh);
 }
 
+/** EDGE PROPERTIES — one `{kind:'edgeProperty', label, key, type}` per DISTINCT (edgeLabel, key, vtype).
+ *  The `properties` twin for edges: `edge_properties` JOIN `edges` (for the label id) JOIN `labels` (the
+ *  name). This is what completes the reflected schema for edge fields — the `edge_properties → edge-field
+ *  argument/payload types` the plan's §4 names — so a later increment can expose an edge's own fields. */
+function edgeProperties(fresh: Minter): Rel {
+  const ep = scanAs('edge_properties', [['edge', 'epEdge', 'int'], ['key', 'epKey', 'text'], ['vtype', 'epType', 'text']], fresh);
+  const e = scanAs('edges', [['id', 'eId', 'int'], ['label', 'eLabel', 'int']], fresh);
+  const lbl = scanAs('labels', [['id', 'lId', 'int'], ['name', 'lName', 'text']], fresh);
+  const epE = innerJoin(ep, e, eqExpr(col(ep.id, 'epEdge'), col(e.id, 'eId')), fresh);
+  const onE = make.project({
+    id: fresh('epj'), input: epE,
+    channels: [], type: typeOf(meta('epKey', 'text'), meta('epType', 'text', true), meta('eLabel', 'int')),
+    exprs: [['epKey', col(epE.id, 'epKey')], ['epType', col(epE.id, 'epType')], ['eLabel', col(epE.id, 'eLabel')]],
+  });
+  const joined = innerJoin(onE, lbl, eqExpr(col(onE.id, 'eLabel'), col(lbl.id, 'lId')), fresh);
+  const triple = make.project({
+    id: fresh('epp'), input: joined, channels: [], type: typeOf(meta('name', 'text'), meta('key', 'text'), meta('type', 'text')),
+    exprs: [['name', col(joined.id, 'lName')], ['key', col(joined.id, 'epKey')],
+      ['type', { kind: 'call', fn: 'COALESCE', args: [col(joined.id, 'epType'), compilerText('unknown')] }]],
+  });
+  const distinct = make.distinct({ id: fresh('epd'), input: triple, channels: [], type: triple.type });
+  return asMapRows(distinct, mapRow([
+    ['kind', node(compilerText('edgeProperty'), 'string')],
+    ['label', node(col(distinct.id, 'name'), 'string')],
+    ['key', node(col(distinct.id, 'key'), 'string')],
+    ['type', node(col(distinct.id, 'type'), 'string')],
+  ]), fresh);
+}
+
 export const schemaService: Service = {
   name: 'mogwai.schema',
   type: 'start',
@@ -209,11 +239,11 @@ export const schemaService: Service = {
   resolve: () => ({
     kind: 'rel',
     buildRel: (c: RelCallSite): RelContribution => ({
-      // The three element kinds as one map stream. Each arm is a self-contained relation over the
+      // The FOUR element kinds as one map stream. Each arm is a self-contained relation over the
       // schema tables, UNIONed — the map vocabulary reads a `MAP_COL` and frames each row through the
       // one `{t:'map'}` rule, so the stream is `.where()`/`.groupCount()`/`.fold()`-composable.
       kind: 'relation',
-      rel: make.union({ id: c.fresh('smu'), all: true, inputs: [vertexLabels(c.fresh), properties(c.fresh), edgeTriples(c.fresh)], channels: [], type: typeOf(meta(MAP_COL, 'json')) }),
+      rel: make.union({ id: c.fresh('smu'), all: true, inputs: [vertexLabels(c.fresh), properties(c.fresh), edgeTriples(c.fresh), edgeProperties(c.fresh)], channels: [], type: typeOf(meta(MAP_COL, 'json')) }),
       framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } },
     }),
   }),

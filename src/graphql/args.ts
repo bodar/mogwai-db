@@ -1,5 +1,6 @@
 import { Kind, type ArgumentNode, type ValueNode, type ObjectValueNode } from 'graphql';
 import { GraphQLTranslationError } from './translate.ts';
+import type { Bindings } from './bindings.ts';
 
 // ---------- field arguments — the `where` filter, and (later) sort/limit/offset ----------
 //
@@ -19,19 +20,21 @@ import { GraphQLTranslationError } from './translate.ts';
 const glit = (s: string): string => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
 /**
- * A GraphQL scalar literal → its Gremlin literal FORM, typed lexically so the parser infers the right
- * type (§5·2's concern): an Int is bare (`30`), a Float carries a decimal point (`30.0` — forced so an
- * integral float like `30` still parses as a double), a String is quoted, a Boolean is `true`/`false`.
- * A `null`, a variable, an enum, or a nested object/list is refused — none is a scalar filter value this
- * cut expresses.
+ * A GraphQL filter value → its Gremlin form. A LITERAL is inlined, typed lexically so the parser infers
+ * the right type (§5·2): an Int is bare (`30`), a Float carries a decimal (`30.0` — forced so an
+ * integral float still parses as a double), a String is quoted, a Boolean is `true`/`false`. A VARIABLE
+ * (`$x`) BINDS instead (§6): it emits a minted Gremlin identifier and records its value in `binds`,
+ * never inlining — so `where: { age: { gt: $min } }` shares one cached plan across calls. An enum,
+ * `null`, or a nested object/list is refused — none is a scalar filter value this cut expresses.
  */
-function gremlinScalar(v: ValueNode): string {
+function gremlinValue(v: ValueNode, binds: Bindings): string {
   switch (v.kind) {
     case Kind.INT: return v.value;
     case Kind.FLOAT: return v.value.includes('.') || v.value.includes('e') || v.value.includes('E') ? v.value : `${v.value}.0`;
     case Kind.STRING: return glit(v.value);
     case Kind.BOOLEAN: return v.value ? 'true' : 'false';
-    default: throw new GraphQLTranslationError(`unsupported filter value (${v.kind}) — only Int/Float/String/Boolean scalars are supported`);
+    case Kind.VARIABLE: return binds.reference(v.name.value);
+    default: throw new GraphQLTranslationError(`unsupported filter value (${v.kind}) — only Int/Float/String/Boolean scalars or a variable are supported`);
   }
 }
 
@@ -45,25 +48,27 @@ const TEXT: Record<string, string> = { contains: 'containing', startsWith: 'star
 /** One `{ op: value }` operator object for a property → the Gremlin predicate expression (the second
  *  argument of `has(key, …)`). Exactly one operator per object in this cut; several `has()` clauses
  *  express an AND over a field, which the caller emits by repeating the key. */
-function predicate(key: string, opObj: ObjectValueNode): string[] {
+function predicate(key: string, opObj: ObjectValueNode, binds: Bindings): string[] {
   if (!opObj.fields.length) throw new GraphQLTranslationError(`empty filter object for field '${key}'`);
   return opObj.fields.map((f) => {
     const op = f.name.value;
     if (op === 'in') {
-      if (f.value.kind !== Kind.LIST) throw new GraphQLTranslationError(`'in' on '${key}' needs a list`);
-      return `within(${f.value.values.map(gremlinScalar).join(', ')})`;
+      // `in` takes a LIST literal (`within(a, b, c)`) or a single VARIABLE holding the whole list
+      // (`within($xs)` — one bound param, the list). A scalar there is the error.
+      if (f.value.kind === Kind.LIST) return `within(${f.value.values.map((x) => gremlinValue(x, binds)).join(', ')})`;
+      if (f.value.kind === Kind.VARIABLE) return `within(${binds.reference(f.value.name.value)})`;
+      throw new GraphQLTranslationError(`'in' on '${key}' needs a list or a list variable`);
     }
-    if (COMPARISON[op]) return `P.${COMPARISON[op]}(${gremlinScalar(f.value)})`;
-    if (TEXT[op]) return `TextP.${TEXT[op]}(${gremlinScalar(f.value)})`;
+    if (COMPARISON[op]) return `P.${COMPARISON[op]}(${gremlinValue(f.value, binds)})`;
+    if (TEXT[op]) return `TextP.${TEXT[op]}(${gremlinValue(f.value, binds)})`;
     throw new GraphQLTranslationError(`unknown filter operator '${op}' on '${key}' (expected ${[...Object.keys(COMPARISON), ...Object.keys(TEXT), 'in'].join('/')})`);
   });
 }
 
-/**
 /** `where: { field: { op: value } }` → the `.has(key, predicate)` clauses. Each field is a known
  *  PROPERTY (`allowed`), each value an operator object; a bare value is refused (the convention is
  *  explicit-operator, which the research showed every graph provider uses). */
-function whereClauses(arg: ArgumentNode, allowed: (key: string) => boolean): string {
+function whereClauses(arg: ArgumentNode, allowed: (key: string) => boolean, binds: Bindings): string {
   if (arg.value.kind !== Kind.OBJECT)
     throw new GraphQLTranslationError(`'where' must be an object of { field: { op: value } }`);
   const clauses: string[] = [];
@@ -72,7 +77,7 @@ function whereClauses(arg: ArgumentNode, allowed: (key: string) => boolean): str
     if (!allowed(key)) throw new GraphQLTranslationError(`cannot filter on '${key}' — not a property of this type`);
     if (field.value.kind !== Kind.OBJECT)
       throw new GraphQLTranslationError(`filter on '${key}' must be an operator object { op: value }, not a bare value`);
-    for (const pred of predicate(key, field.value)) clauses.push(`.has(${glit(key)}, ${pred})`);
+    for (const pred of predicate(key, field.value, binds)) clauses.push(`.has(${glit(key)}, ${pred})`);
   }
   return clauses.join('');
 }
@@ -115,7 +120,7 @@ function intArg(arg: ArgumentNode): number {
  * project forbids). `limit`/`offset` become `skip(offset).limit(limit)`: `range(a,b)` would need the two
  * folded, and skip+limit reads the same and composes when only one is given.
  */
-export function argClauses(args: readonly ArgumentNode[], allowed: (key: string) => boolean): string {
+export function argClauses(args: readonly ArgumentNode[], allowed: (key: string) => boolean, binds: Bindings): string {
   const by = new Map<string, ArgumentNode>();
   for (const arg of args) {
     const name = arg.name.value;
@@ -124,7 +129,11 @@ export function argClauses(args: readonly ArgumentNode[], allowed: (key: string)
     if (by.has(name)) throw new GraphQLTranslationError(`argument '${name}' given twice`);
     by.set(name, arg);
   }
-  const where = by.get('where') ? whereClauses(by.get('where')!, allowed) : '';
+  // `where` VALUES may be variables (they bind, §6); `sort`/`limit`/`offset` are structural in this cut —
+  // a `limit: $n` is a value the PLAN shape depends on (a `limit` step's count is not a bind here), so it
+  // stays a literal, and a variable there is refused by `intArg`. `sort` keys are property names, not
+  // values, so never variable.
+  const where = by.get('where') ? whereClauses(by.get('where')!, allowed, binds) : '';
   const sort = by.get('sort') ? sortClause(by.get('sort')!, allowed) : '';
   const offset = by.get('offset') ? `.skip(${intArg(by.get('offset')!)})` : '';
   const limit = by.get('limit') ? `.limit(${intArg(by.get('limit')!)})` : '';

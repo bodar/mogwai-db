@@ -486,14 +486,19 @@ describe('mogwai.schema — reflect the implicit schema as a map stream', () => 
     expect(rows).toEqual(['person-created->software', 'person-knows->person']);
   });
 
+  test('edge properties — one record per (edgeLabel, key) with its type', async () => {
+    const rows = of(await schema(), 'edgeProperty').map((r) => `${r.label}.${r.key}:${r.type}`).sort();
+    expect(rows).toEqual(['created.weight:double', 'knows.weight:double']);
+  });
+
   test('the stream is composable — count() reaches every element', async () => {
     const [n] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').count()", {}));
-    expect(Number(n)).toBe(8); // 2 labels + 4 properties + 2 edge triples
+    expect(Number(n)).toBe(10); // 2 labels + 4 vertex props + 2 edge triples + 2 edge props
   });
 
   test('fold() collects the whole schema into one list — the list-of-maps substrate', async () => {
     const [list] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').fold()", {}));
-    expect((list as unknown[]).length).toBe(8);
+    expect((list as unknown[]).length).toBe(10);
   });
 
   test('mogwai.schema is an EXTENSION — absent from the reference registry', () => {

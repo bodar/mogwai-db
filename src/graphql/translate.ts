@@ -1,6 +1,7 @@
 import { parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode } from 'graphql';
 import { type GraphSchema, type TypeSchema } from './schema.ts';
 import { argClauses } from './args.ts';
+import { Bindings } from './bindings.ts';
 
 // ---------- the GraphQL translator — a document + reflected schema → a Gremlin string ----------
 //
@@ -30,7 +31,8 @@ export class GraphQLTranslationError extends Error {
 
 /** What a translated document hands the compiler seam — the same `{gremlin, params}` a Gremlin client
  *  sends (`src/router.ts`), so the translator needs zero changes to the manager/executor contract
- *  (§5·4). `params` is empty until variables land; it exists now so the seam shape is final. */
+ *  (§5·4). `params` carries the GraphQL variables as bound parameters (§6) — empty when the query used
+ *  none. */
 export interface Translation {
   readonly gremlin: string;
   readonly params: Record<string, unknown>;
@@ -40,31 +42,53 @@ export interface Translation {
   readonly rootKey: string;
 }
 
-/** The single query operation, or a clear refusal. A document with zero or several operations, a
- *  mutation/subscription, or a query that DECLARES VARIABLES is out of this cut's scope — fail closed
- *  rather than pick one or silently drop what it cannot honour. The variable check is load-bearing: the
- *  edge accepts a `variables` map, and translating a `query($x)` while ignoring `$x` would answer a
- *  DIFFERENT question than the client asked (root CLAUDE.md's cardinal rule). Variables → the bind rule
- *  (§6) is the next increment; until then a declared variable is refused, never dropped. */
+/** The single query operation, or a clear refusal. A document with zero or several operations, or a
+ *  mutation/subscription, is out of scope — fail closed rather than pick one. Variable DECLARATIONS
+ *  (`query($x: Int)`) are allowed; each `$x` USE resolves against the request's `variables` map at its
+ *  reference site (`Bindings`), binding rather than inlining (§6). */
 function soleQuery(doc: DocumentNode): OperationDefinitionNode {
   const ops = doc.definitions.filter((d): d is OperationDefinitionNode => d.kind === Kind.OPERATION_DEFINITION);
   if (ops.length !== 1) throw new GraphQLTranslationError(`expected exactly one operation, got ${ops.length}`);
   const op = ops[0]!;
   if (op.operation !== 'query') throw new GraphQLTranslationError(`only 'query' operations are supported yet, not '${op.operation}'`);
-  if (op.variableDefinitions && op.variableDefinitions.length)
-    throw new GraphQLTranslationError('query variables are not supported yet (they would be silently dropped)');
   return op;
 }
 
-/** The plain field selections of a set, refusing anything this cut cannot express (fragments, inline
- *  fragments) rather than skipping it silently. Field ARGUMENTS are no longer refused here — a field's
- *  `where` is translated where the field is (`fieldBy`/root), which is the only place the type schema
- *  needed to validate a filter key is in hand; an unsupported argument fails closed THERE (`args.ts`). */
+/**
+ * `@skip`/`@include` resolved at translation — GraphQL's rule (`@skip(if:true)` drops the field,
+ * `@include(if:false)` drops it), so a KEPT field is one neither excludes. Returns whether to keep.
+ *
+ * ⚠️ This is a FAIL-OPEN trap if left unhandled: graphql-js parses the directive but the translator would
+ * otherwise never read `field.directives`, so `name @skip(if:true)` would silently emit `name` anyway —
+ * a wrong answer, the exact class this project forbids. The `if:` must be a boolean LITERAL in this cut
+ * (a variable `@skip(if:$x)` is refused, since variables are — a directive over a dropped variable would
+ * be the same silent-drop bug one level down). An unknown directive is refused, not ignored.
+ */
+function keepField(field: FieldNode): boolean {
+  let keep = true;
+  for (const dir of field.directives ?? []) {
+    const name = dir.name.value;
+    if (name !== 'skip' && name !== 'include')
+      throw new GraphQLTranslationError(`unsupported directive @${name} on '${field.name.value}'`);
+    const ifArg = (dir.arguments ?? []).find((a) => a.name.value === 'if');
+    if (!ifArg || ifArg.value.kind !== Kind.BOOLEAN)
+      throw new GraphQLTranslationError(`@${name} needs a boolean literal 'if:' argument (a variable is not supported yet)`);
+    // @skip(if:true) drops; @include(if:false) drops. AND across several directives, GraphQL's rule.
+    if (name === 'skip' ? ifArg.value.value : !ifArg.value.value) keep = false;
+  }
+  return keep;
+}
+
+/** The plain field selections of a set, with `@skip`/`@include` RESOLVED (a dropped field is gone from
+ *  the result) and fragments refused rather than skipped silently. Field ARGUMENTS are validated later,
+ *  where the type schema is in hand (`fieldBy`/root); an unsupported argument fails closed THERE. */
 function fields(set: SelectionSetNode): readonly FieldNode[] {
-  return set.selections.map((sel) => {
+  const kept: FieldNode[] = [];
+  for (const sel of set.selections) {
     if (sel.kind !== Kind.FIELD) throw new GraphQLTranslationError(`fragments are not supported yet (${sel.kind})`);
-    return sel;
-  });
+    if (keepField(sel)) kept.push(sel);
+  }
+  return kept;
 }
 
 /** The projection key a field contributes — its alias where given, else its name (GraphQL's own rule,
@@ -85,11 +109,11 @@ const glit = (s: string): string => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "
  * empty `project()` is not a thing — the parser already enforces this, so reaching it is a bug, not a
  * user error, and raising names it.
  */
-function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchema): string {
+function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchema, binds: Bindings): string {
   const fs = fields(set);
   if (!fs.length) throw new GraphQLTranslationError(`empty selection on type '${type.name}'`);
   const keys = fs.map((f) => glit(keyOf(f))).join(', ');
-  const bys = fs.map((f) => `.by(${fieldBy(f, type, schema)})`).join('');
+  const bys = fs.map((f) => `.by(${fieldBy(f, type, schema, binds)})`).join('');
   return `project(${keys})${bys}`;
 }
 
@@ -102,9 +126,18 @@ function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchem
  * `project().by()…` rooted at the movement — the recursion that makes depth compose (verified to
  * depth-3 in the RelIR substrate work).
  */
-function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): string {
+function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds: Bindings): string {
   const name = field.name.value;
   const args = field.arguments ?? [];
+  // `__typename` is GraphQL's meta-field, valid on every object type and resolving to the type's name.
+  // Reflection maps a GraphQL type to a vertex label, and the enclosing type is fixed at THIS point in
+  // the walk, so the answer is a compile-time constant — `constant('person')` — not a `label()` read
+  // (which would also be correct but spend a traversal for a value the translator already holds).
+  if (name === '__typename') {
+    if (field.selectionSet) throw new GraphQLTranslationError(`'__typename' cannot have a selection set`);
+    if (args.length) throw new GraphQLTranslationError(`'__typename' takes no arguments`);
+    return `__.constant(${glit(type.name)})`;
+  }
   const prop = type.properties.get(name);
   if (prop) {
     if (field.selectionSet) throw new GraphQLTranslationError(`scalar field '${type.name}.${name}' cannot have a selection set`);
@@ -120,8 +153,8 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): strin
     // `where` filters the far endpoint, so its `has()` clauses sit AFTER the movement and BEFORE the
     // nested projection — `out(edge).has(k, …).project(…).fold()` — filtering the neighbour set that is
     // folded. The keys must be properties of the far type (`to`), which is what `argClauses` validates.
-    const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k))}`;
-    return `${move}.${projectBody(field.selectionSet, to, schema)}.fold()`;
+    const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k), binds)}`;
+    return `${move}.${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
   }
   throw new GraphQLTranslationError(`type '${type.name}' has no field '${name}'`);
 }
@@ -134,7 +167,7 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema): strin
  * shape — a later increment). The root field's NAME is the vertex label (reflection-first), so the
  * source is `g.V().hasLabel(Type)` and the rest is the ordinary nested projection.
  */
-export function translate(source: string, schema: GraphSchema): Translation {
+export function translate(source: string, schema: GraphSchema, variables: Record<string, unknown> = {}): Translation {
   const op = soleQuery(parse(source));
   const roots = fields(op.selectionSet);
   if (roots.length !== 1) throw new GraphQLTranslationError(`exactly one root field is supported yet, got ${roots.length}`);
@@ -142,10 +175,13 @@ export function translate(source: string, schema: GraphSchema): Translation {
   const type = schema.types.get(root.name.value);
   if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
   if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
+  // A GraphQL variable BINDS (§6): its value rides in `params`, referenced by a minted identifier in
+  // the string, never inlined. `binds` accumulates them as the walk resolves each `$x` at its use.
+  const binds = new Bindings(variables);
   // The root `where` filters the source vertices: `V().hasLabel(Type).has(k, …).project(…)`.
-  const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k));
-  const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, schema)}`;
-  return { gremlin, params: {}, rootKey: keyOf(root) };
+  const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k), binds);
+  const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, schema, binds)}`;
+  return { gremlin, params: binds.params(), rootKey: keyOf(root) };
 }
 
 /** Re-export so a caller builds the schema and translates from one module. */

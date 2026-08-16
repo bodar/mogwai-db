@@ -60,8 +60,8 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('an unrecognised argument name', () => refuses(`{ person(id: 1) { name } }`, /expected where\/sort\/limit\/offset/));
     test('a mutation operation', () => refuses(`mutation { addPerson { name } }`, /only 'query'/));
     test('a fragment', () => refuses(`{ person { ...F } }`, /fragments are not supported/));
-    test('a query that declares variables (dropping them would be a wrong answer)', () =>
-      refuses(`query($id: Int) { person { name } }`, /variables are not supported/));
+    test('a variable USED but not supplied (declared-but-empty would drop it)', () =>
+      expect(() => translate(`query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, schema, {})).toThrow(/not supplied/));
     test('several root fields', () => refuses(`{ person { name } software { name } }`, /one root field/));
     test('an unknown root type', () => refuses(`{ animal { name } }`, /no type 'animal'/));
     test('the error type is GraphQLTranslationError', () => {
@@ -157,6 +157,53 @@ describe('sort / limit / offset — ordering and pagination args', () => {
   });
 });
 
+describe('directives, __typename, and variables', () => {
+  const run = async (q: string, vars: Record<string, unknown> = {}) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const g of MODERN_SEED) executeQuery(store, g, {});
+    return (await decodeAll(exec(store).buffers(translate(q, schema, vars).gremlin, translate(q, schema, vars).params))).map(norm);
+  };
+
+  test('@skip(if:true) drops the field; @skip(if:false) keeps it', async () => {
+    expect((await run(`{ person(where:{name:{eq:"marko"}}) { name @skip(if: true) age } }`))[0]).toEqual({ age: 29 });
+    expect((await run(`{ person(where:{name:{eq:"marko"}}) { name @skip(if: false) } }`))[0]).toEqual({ name: 'marko' });
+  });
+
+  test('@include(if:false) drops the field', async () => {
+    expect((await run(`{ person(where:{name:{eq:"marko"}}) { name @include(if: false) age } }`))[0]).toEqual({ age: 29 });
+  });
+
+  test('__typename resolves to the type name (a constant, no traversal)', async () => {
+    expect(translate(`{ person { __typename } }`, schema).gremlin).toContain("__.constant('person')");
+    expect((await run(`{ person(where:{name:{eq:"marko"}}) { __typename name } }`))[0]).toEqual({ __typename: 'person', name: 'marko' });
+  });
+
+  test('a variable BINDS (not inlines) — same string, value in params', () => {
+    const t = translate(`query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, schema, { m: 30 });
+    expect(t.gremlin).toContain('P.gt(gqv0)');
+    expect(t.gremlin).not.toContain('30'); // the value is bound, never inlined
+    expect(t.params).toEqual({ gqv0: 30 });
+  });
+
+  test('a variable filters correctly end to end', async () => {
+    expect((await run(`query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, { m: 30 })).map((r: any) => r.name).sort())
+      .toEqual(['josh', 'peter']);
+  });
+
+  test('a list variable feeds `in`', async () => {
+    expect((await run(`query($ns: [String]) { person(where: { name: { in: $ns } }) { name } }`, { ns: ['marko', 'josh'] })).map((r: any) => r.name).sort())
+      .toEqual(['josh', 'marko']);
+  });
+
+  describe('fail closed', () => {
+    const refuses = (q: string, m: RegExp, vars: Record<string, unknown> = {}) => expect(() => translate(q, schema, vars)).toThrow(m);
+    test('a used-but-unsupplied variable', () => refuses(`query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, /not supplied/));
+    test('an unknown directive', () => refuses(`{ person { name @deprecated } }`, /unsupported directive @deprecated/));
+    test('a directive with a variable if (variable directives unsupported)', () =>
+      refuses(`query($b: Boolean) { person { name @skip(if: $b) } }`, /boolean literal/, { b: true }));
+  });
+});
+
 describe('reflect → translate → run — the full path over a live graph', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(store, g, {});
@@ -241,10 +288,24 @@ describe('the HTTP edge — POST/GET /graphql/{g} over the real router', () => {
     expect(body.errors[0].message).toMatch(/string `query`/);
   });
 
-  test('supplying `variables` is refused, not accepted-and-ignored', async () => {
-    const { body } = await post({ query: `{ person { name } }`, variables: { x: 1 } });
+  test('variables BIND — supplied via the variables map, referenced in the document', async () => {
+    const { body } = await post({
+      query: `query($min: Int) { person(where: { age: { gt: $min } }) { name } }`,
+      variables: { min: 30 },
+    });
+    expect(body.errors).toBeUndefined();
+    expect(body.data.person.map((p: any) => p.name).sort()).toEqual(['josh', 'peter']);
+  });
+
+  test('a used-but-unsupplied variable is a request error, not a silent null', async () => {
+    const { body } = await post({ query: `query($min: Int) { person(where: { age: { gt: $min } }) { name } }`, variables: {} });
     expect(body.data).toBeUndefined();
-    expect(body.errors[0].message).toMatch(/variables are not supported/);
+    expect(body.errors[0].message).toMatch(/not supplied/);
+  });
+
+  test('a non-object `variables` is a 400', async () => {
+    const { status } = await post({ query: `{ person { name } }`, variables: [1, 2] });
+    expect(status).toBe(400);
   });
 
   test('supplying `operationName` is refused, not silently dropped', async () => {
