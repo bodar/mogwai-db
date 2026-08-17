@@ -14,7 +14,8 @@ works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, 
 - **Field arguments** — `where: { field: { op: value } }` (unprefixed `eq`/`gt`/`contains`/`in`/…, the
   graph-native convention, researched), `sort: [{ field: ASC|DESC }]`, flat `limit`/`offset`, in the
   semantic order filter → order → slice, at the root and every object field.
-- **Variables** BIND, not inline (§6); `@skip`/`@include` resolved; `__typename`; aliases.
+- **Variables** BIND, not inline (§6); `@skip`/`@include` resolved; `__typename`; aliases; **fragments**
+  (named + inline, nested, alias-carrying) inlined at translation.
 - **graphql-js owns parse/validate/introspection** (§7·4) — the edge routes a document through
   graphql-js against the reflected schema (`src/graphql/sdl.ts`: reflected `GraphSchema` → a
   `GraphQLSchema`), so a syntax/field/argument/type error is a spec-shaped GraphQL error and
@@ -554,8 +555,8 @@ field is the accept-and-ignore stub this project forbids. `where`/`sort`/`limit`
 graph-native convention (Relay governs pagination, not filtering, and is not a GraphQL standard; the two
 comparable graph DBs — Neo4j, Dgraph — use the flat convention this front end already chose).
 
-🚧 What is LEFT of Phase 2: interfaces/unions (the ENGINE substrate has landed — see §8·2·1 below; what
-remains is translator work: fragment inlining, union minting in reflection, and null-fill shaping); and the
+🚧 What is LEFT of Phase 2: interfaces/unions (the ENGINE substrate and fragment inlining have both landed
+— see §8·2·1 below; what remains is union minting in reflection plus the SDL, and null-fill shaping); and the
 §5·4 compare-and-swap schema cache (an optimisation — two DO round trips per request today, correct and
 un-cached).
 
@@ -614,9 +615,20 @@ member unreachable — the two software vertices of a person/software dispatch r
 the RelIR plan's branch bullet; `constant` had the same defect before the mapping terminals joined that
 set.
 
-🚧 What the translator still owes: **fragment inlining** (`fields()`, `translate.ts:113`, throws on any
-non-`FIELD` selection — so even `... on person { name }` on a monomorphic type fails today, and §1·1's table
-already claims fragments work); **union minting** in `schema.ts` plus the SDL; and **null-fill shaping** in
+✅ **Fragment inlining has LANDED** — named and inline, nested, alias-carrying, with `@skip`/`@include`
+honoured on the SPREAD and the INLINE FRAGMENT as well as on fields (GraphQL's own directive locations; the
+same silent-wrong-answer if missed, since the whole group would be emitted anyway). A fragment carries no
+execution semantics of its own — the spec's `CollectFields` inlines an applicable spread and skips a
+non-applicable one — so it is purely syntactic grouping and `projectBody` sees only fields.
+**The polymorphic case is ONE refusal**, which is why interfaces/unions are not a feature list here: a type
+condition naming another type is refused rather than inlined (which would read one type's fields off
+another) or dropped (which would silently answer a smaller query), and `conditionApplies` is the single
+predicate that grows when they land — name equality today, "implements or is a member of" then. Validated
+against the reference: six fragment cases in the graphql-js differential, which executes fragments natively
+through its own `CollectFields` while we inline them, so a disagreement in field set, order or alias
+handling shows up as differing `{data}`.
+
+🚧 What the translator still owes: **union minting** in `schema.ts` plus the SDL; and **null-fill shaping** in
 the edge — `edge.ts` is a straight `toJson(decode(...))` passthrough, so a selected field on a vertex
 lacking that property is ABSENT from `{data}` where the spec requires `null`. That last one is a
 pre-existing conformance hole the differential oracle misses (the modern graph is uniform per label), and
