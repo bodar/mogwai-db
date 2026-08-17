@@ -554,8 +554,62 @@ field is the accept-and-ignore stub this project forbids. `where`/`sort`/`limit`
 graph-native convention (Relay governs pagination, not filtering, and is not a GraphQL standard; the two
 comparable graph DBs — Neo4j, Dgraph — use the flat convention this front end already chose).
 
-🚧 What is LEFT of Phase 2 (all additive, no new gates): interfaces/unions; and the §5·4 compare-and-swap
-schema cache (an optimisation — two DO round trips per request today, correct and un-cached).
+🚧 What is LEFT of Phase 2: interfaces/unions (the ENGINE substrate has landed — see §8·2·1 below; what
+remains is translator work: fragment inlining, union minting in reflection, and null-fill shaping); and the
+§5·4 compare-and-swap schema cache (an optimisation — two DO round trips per request today, correct and
+un-cached).
+
+### 8·2·1 Interfaces and unions — the substrate, and the two answers that differ
+
+**A union is REFLECTED; an interface is DECLARED.** They are not one feature, and the difference is where
+the truth comes from:
+
+- **A union falls out of the data.** An edge label whose endpoint set at one (owner, direction) holds more
+  than one label IS a union — and reflection currently gets this WRONG rather than not supporting it:
+  `buildSchema` (`src/graphql/schema.ts`) `Map.set`s the second `edge` row over the first, so `created`
+  person→software *and* person→book advertises one target and silently discards the other, in `UNION ALL`
+  row order. A wrong answer, and unions are its fix.
+- **An interface has no reflected source.** Inferring one from shared property keys mints types out of
+  accidental overlap and makes them flicker as data changes. TinkerPop 4 multi-label vertices look like the
+  subtype relation and are not: `test/fixtures/seed-zoo.ts` says it outright — *"tux is animal + bird +
+  aquatic + endangered, which is not a hierarchy"* — and label containment would mint `endangered implements
+  animal` beside `mammal implements animal`, structurally identical and semantically a tag versus a subtype.
+  Deeper still, GraphQL's `__typename` is single-valued while a vertex bears N labels, so a faithful
+  rendering must pick one label as concrete and make the rest interfaces, and *which one is concrete* is
+  exactly the undecidable part. So interfaces belong to §4's declared-SDL override.
+  **The nearest prior art agrees, independently:** `@neo4j/graphql` is SDL-first, and `@neo4j/introspector`
+  — its reflection tool — generates **no interfaces and no unions at all**, rendering a multi-label node as
+  ONE type carrying `@node(additionalLabels: [...])`. On a genuine property clash it *deletes the field*:
+  "If an element property has mixed types throughout your graph, that property will be excluded from the
+  generated type definitions." Fail-closed by omission.
+
+**The lowering: NOT a padded superset — a branch whose arms each build their own row.** The tempting shape
+is one `project()` over the union of every member's fields, with `by(__.label())` for `__typename`, relying
+on `ifProductive` to omit the keys a member lacks. It measures as COVERED and it is wrong, four ways: an
+alias (`... on software { title: name }` + `... on book { title }`) needs ONE project key with TWO different
+`by()` arms; `ProjectStep` forbids duplicate keys outright (`ProjectStep.java:53`); the same key may hold a
+different TYPE per member (one column, two storage classes); and `label()` returns `labels[0]`, so
+`__typename` is arbitrary on a multi-label vertex.
+
+The correct shape is per-member dispatch — `union(__.hasLabel(A).project(…), __.hasLabel(B).project(…))` —
+which is what the Neo4j GraphQL library emits from Cypher (`CALL { … WITH this0 { .id, __resolveType:
+"Child1" } AS this0 RETURN this0 AS this UNION … }`), each branch building its own map so the members'
+shapes never meet as columns. ✅ **That substrate has LANDED** (the RelIR plan's branch bullet): record-valued
+branch arms merge when they agree, and demote to map values when they do not, so a divergent-member union
+lowers and answers at the root AND nested inside a `project().by(…).fold()` — the union FIELD.
+
+🚧 What the translator still owes: **fragment inlining** (`fields()`, `translate.ts:113`, throws on any
+non-`FIELD` selection — so even `... on person { name }` on a monomorphic type fails today, and §1·1's table
+already claims fragments work); **union minting** in `schema.ts` plus the SDL; and **null-fill shaping** in
+the edge — `edge.ts` is a straight `toJson(decode(...))` passthrough, so a selected field on a vertex
+lacking that property is ABSENT from `{data}` where the spec requires `null`. That last one is a
+pre-existing conformance hole the differential oracle misses (the modern graph is uniform per label), and
+unions make it load-bearing, because after them key-absence would otherwise mean both "wrong member" and
+"property unset". `__typename` disambiguates it, so the shaping is what keeps the two apart.
+
+One perf lesson taken for free: Neo4j's [issue #5061](https://github.com/neo4j/graphql/issues/5061) is that
+they union EVERY implementation even when the document requests no type condition. Branch only over the
+members the document actually selects.
 
 **Phase 3 — the oracles. ✅ LANDED** (`test/graphql-conformance.test.ts`, in `ci` via the ordinary
 `test/` sweep — no separate task; the file lives under `test/` so `bun test` discovers it, and `ci`

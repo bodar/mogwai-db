@@ -666,6 +666,30 @@ pattern this whole stage kept finding:
   deterministic fan-out order (see §10's mint bullet). The SLICE demand's TRAVERSER-major half also
   landed (barrier-free branches + `coalesce`); what is LEFT is the ARM-major / nested / scoped-fold-arm
   residue (see the SLICE bullet). Common pattern, real L3.
+  ✅ **A branch arm may now END in a `project()` — RECORD-valued arms merge, agreeing or not.** Two
+  rungs, and the second is the interesting one. (1) Arms whose records AGREE merge as records:
+  `sameFraming` declined `record` outright ("nothing builds a record-valued branch arm yet"), and the gap
+  was the equality, not a node — `RecordField.prefix` is POSITIONAL, so structurally-equal records already
+  occupy the same columns and the positional `Union` merges them (`sameRecordFields`; `optional` is
+  compared rather than merged, because `mergeArms` adopts the FIRST arm's framing and a wrong flag is a key
+  present where `ifProductive` omits one). (2) Arms whose records DISAGREE demote to MAP values
+  (`mapDemotedArms` → `recordToMap`): the fix is a NARROWER row, not a wider one — the fields collapse into
+  the one `map` column whose entries are self-describing `{t,v}` nodes, so arms with entirely different key
+  sets become two rows of one column. **That makes the same key able to hold a different TYPE per arm**
+  (measured: `{v:29}` … `{v:'java'}`), which as columns is one column with two storage classes and is
+  unrepresentable. Agreeing records deliberately do not demote — they keep their columns — and the
+  demotion costs the COLUMN, not the reachability: `select(k)` still answers through the map's JSON member
+  and correctly DROPS a row whose key is absent (`SelectStep.java:65-90`) instead of reading a sibling
+  arm's value. Prior art both sides: Neo4j's GraphQL library emits exactly this per-branch map
+  (`CALL { … WITH this0 { .id, __resolveType: "Child1" } AS this0 RETURN this0 AS this UNION … }`), and
+  Calcite's `SetOp` (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/SetOp.java`) requires
+  the row-type agreement both rungs establish. Zero L3 (the corpus has no record-armed branch) —
+  `test/compiler/record-branch-arms.exec.test.ts` is the coverage. `coalesce` came with it, via
+  `ALWAYS_PRODUCTIVE_TERMINAL` gaining `project`/`valueMap`/`elementMap` — each a `ScalarMapStep` whose
+  `processNextStart` splits unconditionally (`ScalarMapStep.java:38-40`), `select` deliberately NOT (it
+  returns `EmptyTraverser`), which is what keeps that set a real distinction rather than "map-shaped steps".
+  🚧 LEFT on this tail: a record arm against an ELEMENT/scalar/list arm (declines — `variantArmOf` has no
+  `vk` for a record), and `local(__.project(…))`.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
