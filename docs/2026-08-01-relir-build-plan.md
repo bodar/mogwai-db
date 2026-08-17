@@ -707,6 +707,30 @@ pattern this whole stage kept finding:
   `by(__.union(values,values))` — a fan-out body a `by()` must take the FIRST of
   (`TraversalUtil.produce` → `traversal.next()`), i.e. `yields: 'first'` for a fan-out, which is the
   expression arm's business; and `by(__.properties(k).fold())`, the property-member list.
+  ⚠️ **A FILTERED mapping arm is not always productive — a measured WRONG ANSWER, and the set that caused
+  it was two kinds conflated.** `ALWAYS_PRODUCTIVE_TERMINAL` is read from a body's LAST STEP ALONE, which
+  is sound for a SEEDED terminal (`count`/`fold` emit however empty the input, so nothing before them can
+  matter) and unsound for a MAPPING one (`constant`/`project`/`valueMap`/`elementMap` are `ScalarMapStep`s
+  emitting one traverser per INCOMING traverser — they still need an input). So
+  `coalesce(__.hasLabel('person').project(…), __.hasLabel('software').project(…))` declared arm 1
+  always-firing, exhausted the coalesce, and returned only the person rows — the software vertices vanished.
+  `constant` carried the same defect BEFORE the mapping terminals joined the set, and it would equally have
+  let the filter-no-op Pass delete the filter in `where(__.hasLabel('person').constant(1))`. Fixed as
+  `SEEDED_TERMINAL` vs `MAPPING_TERMINAL` (a mapping terminal qualifies only as the WHOLE body —
+  conservative, because the precise rule wants `isStreamIdentity` and that module imports this one), plus an
+  EXACT reduction in `childPredicate`: a trailing mapping terminal is transparent to the productivity
+  QUESTION, so ask the prefix (`<prefix>.project(k)` produces exactly when `<prefix>` does). The second half
+  is what makes this a capability gain rather than a new decline. **It is load-bearing for GraphQL:** a union
+  field must lower to `coalesce`, not `union`, because GraphQL admits one concrete type per value while a
+  vertex may bear several labels — measured on the zoo's overlapping `aquatic`/`endangered`, `union`
+  duplicates tux and atlas under two type names (11 rows) where `coalesce` resolves each once (8).
+  ✅ **`constant()` carries its DECLARED type.** It framed every plain literal `UNKNOWN` — inference at the
+  wire for a type the front end had already parsed onto `Arg.type` — and inference reads the SQL storage
+  class, which cannot see a LEXICAL distinction (and `constLit` narrows it further, inlining a boolean as
+  INTEGER 1). Three silent wrong wire types, asserted on the TYPE BYTE because JS cannot tell an Int from a
+  Long: `constant(30L)` framed INT, `constant(30.5f)` DOUBLE, `constant(true)` **INT 1 rather than BOOLEAN**.
+  No framer work — a stored boolean already frames as GraphBinary BOOLEAN from an INTEGER column plus a
+  `boolean` tag, so the route existed and the constant simply never named its type (§6·7).
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand

@@ -591,12 +591,28 @@ alias (`... on software { title: name }` + `... on book { title }`) needs ONE pr
 different TYPE per member (one column, two storage classes); and `label()` returns `labels[0]`, so
 `__typename` is arbitrary on a multi-label vertex.
 
-The correct shape is per-member dispatch — `union(__.hasLabel(A).project(…), __.hasLabel(B).project(…))` —
-which is what the Neo4j GraphQL library emits from Cypher (`CALL { … WITH this0 { .id, __resolveType:
-"Child1" } AS this0 RETURN this0 AS this UNION … }`), each branch building its own map so the members'
-shapes never meet as columns. ✅ **That substrate has LANDED** (the RelIR plan's branch bullet): record-valued
-branch arms merge when they agree, and demote to map values when they do not, so a divergent-member union
-lowers and answers at the root AND nested inside a `project().by(…).fold()` — the union FIELD.
+The correct shape is per-member dispatch — one arm per member, each `hasLabel`-guarded and projecting its
+own row — which is what the Neo4j GraphQL library emits from Cypher (`CALL { … WITH this0 { .id,
+__resolveType: "Child1" } AS this0 RETURN this0 AS this UNION … }`), each branch building its own map so
+the members' shapes never meet as columns. ✅ **That substrate has LANDED** (the RelIR plan's branch
+bullet): record-valued branch arms merge when they agree, and demote to map values when they do not, so a
+divergent-member dispatch lowers and answers at the root AND nested inside a `project().by(…).fold()` — the
+union FIELD.
+
+**⚠️ The branch step is `coalesce`, NOT `union` — and this is a CORRECTNESS choice, not a preference.**
+GraphQL requires exactly ONE concrete type per value, and a mogwai vertex may bear several labels, so two
+members of one union can both match. `union` emits the vertex once PER MATCHING ARM; `coalesce` is a
+`FlatMapStep` that takes the first arm that produces, so the vertex resolves to exactly one member.
+Measured on the zoo graph's overlapping `aquatic`/`endangered` (tux and atlas bear both): `union` gives 11
+rows with those two appearing TWICE under different type names, `coalesce` gives 8 — each vertex once. The
+consequence to carry into the schema: **member declaration order IS type-resolution priority**, so it must
+be deterministic (reflection order, not `Map` iteration chance).
+
+This is also why `coalesce` over per-member arms had to be made correct before it could be used: a
+filtered mapping arm was declared always-productive, which exhausted the coalesce and made every later
+member unreachable — the two software vertices of a person/software dispatch returned nothing at all. See
+the RelIR plan's branch bullet; `constant` had the same defect before the mapping terminals joined that
+set.
 
 🚧 What the translator still owes: **fragment inlining** (`fields()`, `translate.ts:113`, throws on any
 non-`FIELD` selection — so even `... on person { name }` on a monomorphic type fails today, and §1·1's table
