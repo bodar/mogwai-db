@@ -27,7 +27,7 @@ import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { BY_HOSTS, isStreamIdentity, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
-import { alwaysProduces } from '../ir/productivity.ts';
+import { alwaysProduces, MAPPING_TERMINAL } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
@@ -437,6 +437,43 @@ function projectionProductive(
  * where the two-valued-versus-three-valued difference is stated once.
  */
 function childPredicate(
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
+): Expr | null {
+  const direct = childPredicateDirect(body, subject, fresh, ctx, negated);
+  if (direct) return direct;
+  // LAST RESORT — a trailing MAPPING terminal contributes nothing to the QUESTION, so ask the prefix.
+  const prefix = withoutMappingTerminal(body);
+  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated) : null;
+}
+
+/**
+ * A body's PRODUCTIVITY question with a trailing mapping terminal removed, or `null` where there is none
+ * to remove.
+ *
+ * `<prefix>.project(k…)` produces exactly when `<prefix>` produces, and the same holds for `valueMap`,
+ * `elementMap` and `constant`: each is a `ScalarMapStep` that emits one traverser per INCOMING traverser
+ * and never drops one — `project()` omits an unproductive KEY (`ProjectStep.map`'s `ifProductive`) and
+ * still emits the map, and `constant()` replaces the value without touching the stream. So for the
+ * question "did this body produce anything", the terminal is transparent and the prefix carries the whole
+ * answer.
+ *
+ * This is what turns `coalesce(__.hasLabel('person').project(…), __.hasLabel('software').project(…))` —
+ * per-member type dispatch, the shape a GraphQL union field takes — from a DECLINE into the right answer:
+ * arm 1's emptiness is `NOT hasLabel('person')`, which the filter route can already build. Without it the
+ * arm is unanswerable, because `scalarChild`'s record arm takes a `project()` only as a WHOLE body, so
+ * `projectionProductive` has no `present` to offer.
+ *
+ * A FALLBACK and not a first move, which is this module's standing rule for a new route: every body the
+ * direct shapes already answered keeps the SQL it has.
+ */
+const withoutMappingTerminal = (body: readonly IRStep[]): readonly IRStep[] | null => {
+  const last = body.at(-1);
+  return last && body.length > 1 && MAPPING_TERMINAL.has(last.name) ? body.slice(0, -1) : null;
+};
+
+/** The three shapes tried in order, unchanged — split out so the mapping-terminal fallback above can
+ *  retry the whole ladder against a prefix rather than duplicating it. */
+function childPredicateDirect(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
 ): Expr | null {
   if (!negated) return bodyPredicate(body, subject, fresh, ctx);
@@ -1923,8 +1960,35 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
       type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
       exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
     }),
-    framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN },
+    framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(step.args[0]) },
   };
+}
+
+/**
+ * A CONSTANT'S OWN TYPE, off the argument that declared it — `UNKNOWN` only where there is genuinely
+ * nothing to say.
+ *
+ * `constant()` used to frame every plain literal `UNKNOWN`, i.e. "infer from the value at the wire", for
+ * a value whose type the front end had already parsed and carried (`Arg.type`). Inference then re-derived
+ * it from the SQL storage class, which cannot see the distinctions Gremlin spells LEXICALLY — and
+ * `constLit` deliberately narrows that storage class further, inlining a boolean as INTEGER 1. Measured
+ * before this, all three silently wrong on the wire: `constant(30L)` framed INT (not LONG),
+ * `constant(30.5f)` DOUBLE (not FLOAT), and `constant(true)` **INT 1 rather than BOOLEAN true**.
+ *
+ * Dropping the INCOMING per-row `vtype` stays correct and is a different question — the stored type no
+ * longer describes the value that is there now, which is what every transform does. What was missing is
+ * the replacement.
+ *
+ * §6·7 in one line: the type is known at compile time, so a static tag is exactly the right carrier, and
+ * the framer already renders a tagged value from a narrower column (a stored boolean is INTEGER + a
+ * `boolean` tag → GraphBinary BOOLEAN). A COLLECTION type has no `ValueType` and no scalar literal form
+ * — `constLit` has already declined it — so it cannot arrive here; `UNKNOWN` remains for a parameter
+ * whose type the client did not send, where inference IS the honest answer.
+ */
+function declaredScalarType(arg: Arg | undefined): ScalarType {
+  const declared = flatType(arg?.type ?? null);
+  if (declared === null || declared === 'list' || declared === 'map' || declared === 'set') return UNKNOWN;
+  return STATIC(declared);
 }
 
 /**

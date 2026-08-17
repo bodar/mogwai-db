@@ -179,6 +179,30 @@ describe('record-valued branch arms', () => {
       .toEqual([27, 29, 32, 35]);
   });
 
+  // A FILTTERED project arm is the case a last-step-only productivity rule got WRONG, and it is exactly
+  // per-member type dispatch — the shape a GraphQL union field takes. A `project()` is a MAPPING terminal
+  // (one traverser out per traverser IN), so a `hasLabel()` in front of it takes its input away and its
+  // productivity with it. Reading only the terminal claimed arm 1 always fires, which exhausted the
+  // coalesce and made arm 2 unreachable: the two software vertices returned NOTHING instead of their
+  // `lang`. Measured, and asserted here so it cannot come back.
+  // The assertions SORT: nothing downstream observes position here, so the merge takes the positionless
+  // route and is arm-major rather than traverser-major (`coalesceArms`' `dropEncounter`; the
+  // order-observing case goes through `mintTraverserMajor` instead). What is under test is WHICH ROWS
+  // exist, and the bug was that two of them did not.
+  test('coalesce() over FILTERED project arms dispatches per member', async () => {
+    expect(sortByJson(await decodedRows(
+      `g.V().coalesce(__.hasLabel('person').project('a').by(__.values('name')),`
+      + `__.hasLabel('software').project('a').by(__.values('lang')))`)))
+      .toEqual(sortByJson([{ a: 'marko' }, { a: 'vadas' }, { a: 'josh' }, { a: 'peter' }, { a: 'java' }, { a: 'java' }]));
+    // The same trap one step down, and it predates the mapping terminals joining the set: `constant()`
+    // also needs an input, so a filtered `constant` arm must not exhaust the coalesce either. Before the
+    // fix this returned four `P`s and NO `S` at all.
+    expect((await decodedRows(`g.V().coalesce(__.hasLabel('person').constant('P'),__.hasLabel('software').constant('S'))`)).sort())
+      .toEqual(['P', 'P', 'P', 'P', 'S', 'S']);
+    expect(sortByJson(await decodedRows(`g.V().coalesce(__.hasLabel('person').valueMap('name'),__.hasLabel('software').valueMap('lang'))`)))
+      .toEqual(sortByJson([{ name: ['marko'] }, { name: ['vadas'] }, { name: ['josh'] }, { name: ['peter'] }, { lang: ['java'] }, { lang: ['java'] }]));
+  });
+
   // FAIL CLOSED where the demotion does NOT apply — an arm that is neither a record nor an already
   // `{t,v}`-valued map. An `elem`- or `list`-valued map's entries are a different physical form, so
   // merging would union two encodings under one framing; declining is the answer, never a first-arm guess.
