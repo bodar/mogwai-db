@@ -5277,6 +5277,13 @@ function mergeArms(
       arms = retyped;
     }
   }
+  // RECORD ARMS THAT DISAGREE DEMOTE TO MAP VALUES — the third rung of the same ladder the two moves
+  // above climb (a tag disagreement widens by one column, a shape disagreement by three), and the one
+  // that needs no widening at all: a record's fields collapse into the single `map` column the map
+  // vocabulary already reads, so the divergence moves INSIDE the value and the arms' row types agree
+  // trivially. See `mapDemotedArms`.
+  const demoted = mapDemotedArms(arms, fresh);
+  if (demoted) [first, ...rest] = (arms = demoted) as unknown as [Tail, ...Tail[]];
   // ARMS THAT DISAGREE ON SHAPE MERGE TO A VARIANT — a per-row tagged union, and the same move the
   // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
   // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
@@ -5677,6 +5684,68 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
                   // decline rather than union two heterogeneous node streams positionally.
                   : left.kind === 'typedNode' ? false
                     : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+
+/** A record collapsed to a map value carries SELF-DESCRIBING `{t,v}` pairs, which is the map
+ *  vocabulary's one scalar encoding on both sides (`MapOf`, `render.ts`: "the scalar side of a map is
+ *  ALWAYS a self-describing {t,v} ValueNode … heterogeneous maps round-trip"). Spelled once here
+ *  because `scalarChild`'s record arm already claims exactly this framing for exactly this relation. */
+const MAP_OF_NODES = { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } } as const;
+
+/**
+ * ARMS WHOSE RECORDS DISAGREE, RE-PROJECTED AS MAP VALUES — or `null` where this route does not apply.
+ *
+ * Two record arms merge as records only when their fields AGREE (`sameRecordFields`), because a record's
+ * payload is its fields' prefixed COLUMNS and a `Union` is positional. That is the common case and the
+ * capable one — the fields stay addressable, so `union(…).select('a')` keeps working. It is also exactly
+ * what a GraphQL interface/union field does NOT satisfy: each member selects its OWN fields, so the arms
+ * disagree by construction.
+ *
+ * The fix is not a wider row — it is a NARROWER one. `recordToMap` collapses a record's fields into the
+ * single `map` column the map vocabulary already reads, whose entries are self-describing `{t,v}` nodes,
+ * so two arms with entirely different key sets become two rows of one column and the positional `Union`
+ * has nothing left to disagree about. This is precisely the shape the Neo4j GraphQL library emits for the
+ * same query — each `CALL` branch does `WITH this0 { .id, __resolveType: "Child1" } AS this0 RETURN this0
+ * AS this`, i.e. builds a MAP inside the branch so the branches union over one column — and it is why
+ * they never hit the same-named-field clash a flattened projection would.
+ *
+ * Three declines, each deliberate:
+ *
+ * - **no record arm at all** — nothing to demote; the ordinary paths own it.
+ * - **records that already AGREE** — demoting would spend the fields' addressability as COLUMNS for no
+ *   gain. A record stays a record wherever it can, which keeps the one-directional rule honest
+ *   (`framing.ts`: a record becomes a map at the boundary that needs a VALUE, and nothing turns a map
+ *   back into a record).
+ * - **an arm that is neither a record nor an already-`{t,v}` map** — an `elem`- or `list`-valued map's
+ *   entries are a different physical form, so merging it with record-derived nodes would union two
+ *   encodings under one framing. Fail closed.
+ *
+ * What the demotion costs is the field's COLUMN, not its reachability: `select(k)` over the merged
+ * stream still answers, through the map vocabulary's JSON member read rather than a prefixed column, and
+ * it answers CORRECTLY on rows where `k` is absent — `SelectOneStep` tries the traverser's own map and a
+ * missing key is a `KeyNotFoundException` → `EmptyTraverser`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:65-90`),
+ * so those rows DROP rather than reading a sibling arm's value. Measured on all three key-presence
+ * arrangements (`record-branch-arms.exec.test.ts`).
+ */
+function mapDemotedArms(arms: readonly Tail[], fresh: Minter): readonly Tail[] | null {
+  const fieldsOf = (arm: Tail): readonly RecordField[] | null => (arm.framing.kind === 'record' ? arm.framing.fields : null);
+  const records = arms.map(fieldsOf);
+  if (!records.some((fields) => fields)) return null;
+  const first = records[0];
+  if (first && records.every((fields) => fields && sameRecordFields(first, fields))) return null;
+  const demotable = (arm: Tail): boolean => arm.framing.kind === 'record'
+    || (arm.framing.kind === 'map' && arm.framing.keyOf.kind === 'scalar' && arm.framing.valOf.kind === 'scalar');
+  if (!arms.every(demotable)) return null;
+  const out: Tail[] = [];
+  for (const [at, arm] of arms.entries()) {
+    const fields = records[at];
+    if (!fields) { out.push(arm); continue; }
+    const mapped = recordToMap(arm.rel, fields, fresh);
+    if (!mapped) return null;
+    out.push({ ...arm, rel: mapped, framing: MAP_OF_NODES });
+  }
+  return out;
+}
 
 /**
  * Do two records describe the same row? Field for field, IN ORDER — `RecordField.prefix` is positional

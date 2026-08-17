@@ -20,8 +20,24 @@ import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
  *
  *  `count()` is 0 and `fold()` is `[]` over an empty stream, and `constant()` ignores its input
  *  entirely — all three always emit. `sum`/`min`/`max`/`mean` are deliberately NOT here: TinkerPop
- *  emits NOTHING for them on empty input, so they can be unproductive. */
-export const ALWAYS_PRODUCTIVE_TERMINAL: ReadonlySet<string> = new Set(['count', 'fold', 'constant']);
+ *  emits NOTHING for them on empty input, so they can be unproductive.
+ *
+ *  `project`/`valueMap`/`elementMap` are here because each is a `ScalarMapStep`, whose
+ *  `processNextStart` is `return traverser.split(this.map(traverser), this)` — UNCONDITIONAL
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ScalarMapStep.java:38-40`)
+ *  — and each one's `map()` returns its `LinkedHashMap` however empty. So a `project()` all of whose
+ *  `by()`s were unproductive still emits `{}` (`ProjectStep.java:63-70`, the `ifProductive` per-KEY
+ *  omission), and a `valueMap()` on a property-free element still emits `{}`
+ *  (`PropertyMapStep.java:80-87`, `ElementMapStep.java:62`).
+ *
+ *  **`select` is the counter-example and must never join them**, which is what makes this set a real
+ *  distinction rather than "map-shaped steps": `SelectStep.processNextStart` `break`s out of its key
+ *  loop and returns `EmptyTraverser.instance()` when a `by()` is unproductive or a key is missing
+ *  (`SelectStep.java:65-90`), dropping the traverser. Same substrate, opposite host rule — the
+ *  asymmetry `record.ts`'s header records. */
+export const ALWAYS_PRODUCTIVE_TERMINAL: ReadonlySet<string> = new Set([
+  'count', 'fold', 'constant', 'project', 'valueMap', 'elementMap',
+]);
 
 /**
  * Steps that touch state beyond their own traverser stream, keyed by the arity that makes them do so.
