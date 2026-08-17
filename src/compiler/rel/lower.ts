@@ -5653,11 +5653,15 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
           // between vertex and edge (`vpid`/`meta`), so a blanket equality would union relations of
           // different widths. Nothing builds a property-valued branch yet; decline until one does.
           : left.kind === 'property' ? false
-            // Two RECORD arms could merge when their fields agree in key, order AND shape — the same
-            // structural equality the map arm would need, one level down. Nothing builds a
-            // record-valued branch arm yet (`project()` is terminal-or-`select()` today), so declining
-            // is the honest answer rather than an equality no test exercises.
-            : left.kind === 'record' ? false
+            // TWO RECORD ARMS MERGE when their fields agree in key, order AND shape — the map arm's
+            // rule one level down, and the same move: a record's payload is its fields' PREFIXED
+            // columns (`framingCols`), so once the fields agree the union is positional and needs
+            // nothing re-projected. It is reachable because a branch arm may now END in a `project()`
+            // — `union(__.hasLabel(A).project(k…), __.hasLabel(B).project(k…))`, the per-member type
+            // dispatch a GraphQL interface/union field lowers to, and the same shape Neo4j's GraphQL
+            // library emits as `CALL { … RETURN this0 {…} AS this UNION … }` (one branch per member,
+            // each building its own row).
+            : left.kind === 'record' ? right.kind === 'record' && sameRecordFields(left.fields, right.fields)
               // A VARIANT arm would be a branch nested inside a branch whose inner merge already went
               // mixed. `variantMerge` flattens no nesting today — an arm's tagged rows would have to
               // be re-tagged onto the outer payload, which is expressible and unbuilt — so declining
@@ -5673,6 +5677,26 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
                   // decline rather than union two heterogeneous node streams positionally.
                   : left.kind === 'typedNode' ? false
                     : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+
+/**
+ * Do two records describe the same row? Field for field, IN ORDER — `RecordField.prefix` is positional
+ * (`prefixAt`, `record.ts`), so position IS the column name and two records that agree here occupy the
+ * same columns by construction.
+ *
+ * `optional` is compared rather than merged, and that is the deliberate narrowing: `mergeArms` adopts
+ * the FIRST arm's framing for the merged stream, so admitting a disagreement would silently impose one
+ * arm's productivity rule on the other's rows — TinkerPop omits an unproductive key
+ * (`ProjectStep.map`'s `ifProductive`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66`),
+ * so getting that flag wrong is a key present where the reference has none. Merging it properly means
+ * recomputing the merged framing, which is the caller's to do if a case ever needs it.
+ */
+const sameRecordFields = (left: readonly RecordField[], right: readonly RecordField[]): boolean =>
+  left.length === right.length && left.every((field, i) => {
+    const other = right[i]!;
+    return field.key === other.key && field.prefix === other.prefix
+      && field.optional === other.optional && sameFraming(field.framing, other.framing);
+  });
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);
