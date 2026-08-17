@@ -51,6 +51,28 @@ export interface Translation {
    *  translator rooted the traversal at this field, so it hands the key back rather than making the
    *  HTTP edge re-parse the document to recover it. */
   readonly rootKey: string;
+  /** The RESPONSE KEYS this document asked for, per level (`ResponseShape`) — what the edge needs to
+   *  complete a row into a spec-shaped object. Handed back for `rootKey`'s reason: the translator has
+   *  just walked the document, so re-deriving it in the edge would be a second walk that can disagree. */
+  readonly shape: ResponseShape;
+}
+
+/**
+ * THE RESPONSE KEYS OF ONE SELECTION LEVEL — what GraphQL requires the response object to CONTAIN, which
+ * is not the same as what the graph happened to produce.
+ *
+ * A Gremlin `project()` OMITS a key whose `by()` was unproductive (`ProjectStep.map`'s `ifProductive`), so
+ * a selected property that this vertex does not carry simply is not in the row. GraphQL's `CompleteValue`
+ * says the opposite: every selected field has an entry, and a nullable field that resolved to nothing is
+ * `null`. Same absence, two contracts — so the edge completes each row against this.
+ *
+ * `keys` is in SELECTION ORDER, which is also the order the spec requires the response to preserve, so
+ * completing a row by rebuilding it in this order satisfies both requirements at once. `children` carries
+ * the nested shape of an object-valued key (applied to every member of its list).
+ */
+export interface ResponseShape {
+  readonly keys: readonly string[];
+  readonly children: ReadonlyMap<string, ResponseShape>;
 }
 
 /** The single query operation, or a clear refusal. A document with zero or several operations, or a
@@ -230,6 +252,25 @@ function refuseForeignConditions(set: SelectionSetNode, type: TypeSchema, ctx: C
  *  and exactly what a `project()` key is). */
 const keyOf = (field: FieldNode): string => field.alias?.value ?? field.name.value;
 
+/**
+ * The `ResponseShape` of a selection set — the keys it asked for, and each object-valued key's own shape.
+ *
+ * Deliberately PURELY SYNTACTIC: a response key is the alias-or-name and a nested shape exists exactly
+ * where the field has a selection set, so this needs no schema and makes no property-versus-edge decision.
+ * That is what keeps it from being a second, disagreeing walk — it reads the SAME flattened field list
+ * `projectBody` projects (`fields`, so fragments are inlined and `@skip` is resolved here too), and the
+ * one thing it adds is nesting, which the document states directly.
+ *
+ * It runs after the projection has been built, so a type-condition refusal has already fired and
+ * `fields` rather than `applicableFields` is sufficient — there is no foreign condition left to catch.
+ */
+function shapeOf(set: SelectionSetNode, ctx: Ctx): ResponseShape {
+  const fs = fields(set, ctx);
+  const children = new Map<string, ResponseShape>();
+  for (const f of fs) if (f.selectionSet) children.set(keyOf(f), shapeOf(f.selectionSet, ctx));
+  return { keys: fs.map(keyOf), children };
+}
+
 /** A Gremlin string literal — single-quoted, the form the grammar parses and the renderer the §5·2
  *  spike verified round-trips. A schema-derived name (a label, a property key) cannot contain a quote
  *  the reflection did not store, but escaping is stated so a future user-named field stays safe. */
@@ -376,7 +417,8 @@ export function translate(source: string, schema: GraphSchema, variables: Record
   // The root `where` filters the source vertices: `V().hasLabel(Type).has(k, …).project(…)`.
   const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k), ctx.binds);
   const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, ctx)}`;
-  return { gremlin, params: ctx.binds.params(), rootKey: keyOf(root) };
+  // The shape is taken AFTER the projection, so every refusal the walk owes has already fired.
+  return { gremlin, params: ctx.binds.params(), rootKey: keyOf(root), shape: shapeOf(root.selectionSet, ctx) };
 }
 
 /** The document's named fragment definitions, by name. A duplicate name is a graphql-js validation error

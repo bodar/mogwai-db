@@ -7,6 +7,7 @@ import type { SchemaRow } from '../src/graphql/schema.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
+import { ZOO_SEED } from './fixtures/seed-zoo.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { decode, decodeAll } from './support/decode.ts';
@@ -380,6 +381,58 @@ describe('reflect → translate → run — the full path over a live graph', ()
     expect(josh.created.find((s: any) => s.name === 'ripple').created_in).toEqual([{ name: 'josh' }]);
     expect(josh.created.find((s: any) => s.name === 'lop').created_in.map((p: any) => p.name).sort())
       .toEqual(['josh', 'marko', 'peter']);
+  });
+});
+
+describe('response completion — every selected field has an ENTRY, null where it resolved to nothing', () => {
+  // A Gremlin `project()` OMITS a key whose `by()` produced nothing (ProjectStep.map's `ifProductive`);
+  // GraphQL's CompleteValue requires the opposite — the key is present, `null` if the field resolved to
+  // nothing. A missing key is a DIFFERENT JSON document from a null one, and a typed client cannot tell
+  // "absent" from "null", so this is conformance rather than cosmetics.
+  //
+  // The ZOO graph is the fixture and it has to be: the modern graph is uniform per label (every person has
+  // name+age), so a selected field is never missing there and the defect is invisible. In the zoo,
+  // `venomous` is on monty ONLY — atlas is a reptile without it.
+  const mgr = new BunGraphManager(undefined, extendedRegistry);
+  const router = makeRouter(mgr);
+  const seeded = (async () => { for (const g of ZOO_SEED) await mgr.executor('zoo').framedAsync(g, {}); })();
+  const post = async (query: string) => {
+    await seeded;
+    const res = await router(new Request('http://x/graphql/zoo', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }),
+    }));
+    return await res.json() as any;
+  };
+
+  test('a property absent on SOME vertices of a label comes back as null, not missing', async () => {
+    const body = await post(`{ reptile { name venomous } }`);
+    expect(body.data.reptile).toEqual([{ name: 'atlas', venomous: null }, { name: 'monty', venomous: false }]);
+    // The KEY must exist — `toEqual` alone would accept a missing key against an explicit undefined, so
+    // the presence is asserted directly. This is the assertion the bug would fail.
+    expect(Object.keys(body.data.reptile[0])).toEqual(['name', 'venomous']);
+  });
+
+  // Completion RECURSES through a folded edge field. monty (the one reptile with `venomous`) eats bitsy,
+  // which has none — so the nested row needs the null too.
+  test('completion applies at every DEPTH, through a folded edge field', async () => {
+    const body = await post(`{ reptile { name eats { name venomous } } }`);
+    const monty = body.data.reptile.find((r: any) => r.name === 'monty');
+    expect(monty.eats).toEqual([{ name: 'bitsy', venomous: null }]);
+    expect(Object.keys(monty.eats[0])).toEqual(['name', 'venomous']);
+  });
+
+  // Rebuilding the row in selection order also gives the spec's key-ORDER requirement for free, and it is
+  // observable: the graph's own emission order for a project() is the projection's, so a query that asks
+  // for the keys in an unusual order must get them back that way.
+  test('response keys come back in SELECTION order', async () => {
+    const body = await post(`{ reptile { venomous name } }`);
+    expect(Object.keys(body.data.reptile[0])).toEqual(['venomous', 'name']);
+  });
+
+  // An ALIAS is the response key, so completion must key off the alias and not the field name.
+  test('an alias is the response key that gets completed', async () => {
+    const body = await post(`{ reptile { n: name v: venomous } }`);
+    expect(body.data.reptile).toEqual([{ n: 'atlas', v: null }, { n: 'monty', v: false }]);
   });
 });
 

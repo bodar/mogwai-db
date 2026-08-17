@@ -24,7 +24,7 @@ import {
   parse, validate, specifiedRules, execute as gqlExecute, getOperationAST, Kind,
   type DocumentNode, type OperationDefinitionNode, type GraphQLError, type GraphQLSchema,
 } from 'graphql';
-import { buildSchema, translate, GraphQLTranslationError, type Translation } from './translate.ts';
+import { buildSchema, translate, GraphQLTranslationError, type Translation, type ResponseShape } from './translate.ts';
 import { buildGraphQLSchema } from './sdl.ts';
 import type { SchemaRow } from './schema.ts';
 
@@ -82,6 +82,43 @@ function toJson(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(toJson);
   if (typeof v === 'bigint') return Number(v);
   return v;
+}
+
+/**
+ * COMPLETE a translated row against the keys the document asked for — GraphQL's `CompleteValue`, and the
+ * one place the two contracts are reconciled.
+ *
+ * A Gremlin `project()` OMITS a key whose `by()` produced nothing (`ProjectStep.map`'s `ifProductive`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66`),
+ * so a selected property that this vertex does not carry is simply not in the row. GraphQL requires the
+ * opposite: **every selected field has an entry**, and a nullable field that resolved to nothing is
+ * `null`. Measured before this: `{ reptile { name venomous } }` over the zoo graph returned
+ * `{"name":"atlas"}` for the reptile with no `venomous` property, where the reference returns
+ * `{"name":"atlas","venomous":null}`. A missing key is a different JSON document from a null one, and a
+ * typed client reading `data.reptile[0].venomous` cannot tell "absent" from "null" — so this is a
+ * conformance defect, not a cosmetic one.
+ *
+ * Rebuilding in `shape.keys` order rather than patching the gaps also gives the spec's OTHER requirement
+ * on this object for free: response keys appear in the order the selection asked for them.
+ *
+ * A LIST maps element-wise (a to-many edge field), and an object recurses through `shape.children`. A key
+ * the shape does not know is passed through untouched rather than dropped — the shape is the authority on
+ * what must be PRESENT, never a filter, so an extra key would be a translator bug to surface rather than
+ * hide.
+ */
+function complete(value: unknown, shape: ResponseShape): unknown {
+  if (Array.isArray(value)) return value.map((v) => complete(v, shape));
+  if (value === null || typeof value !== 'object') return value;
+  const row = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of shape.keys) {
+    const child = shape.children.get(key);
+    const present = Object.prototype.hasOwnProperty.call(row, key);
+    out[key] = present ? (child ? complete(row[key], child) : row[key]) : null;
+  }
+  // Anything the shape did not name, kept as-is (see above).
+  for (const [key, v] of Object.entries(row)) if (!(key in out)) out[key] = v;
+  return out;
 }
 
 /** The graph's reflected schema rows, fetched by running `mogwai.schema` across the executor and decoding
@@ -200,7 +237,9 @@ async function execute(executor: GraphQLExecutor, req: GraphQLRequest, accept: s
   try {
     const framed = await executor.framedAsync(translation.gremlin, translation.params);
     const data: unknown[] = [];
-    for (const f of framed) data.push(toJson(await decode(f.buf)));
+    // COMPLETE each row against the document's response keys — a `project()` omits an unproductive key,
+    // GraphQL requires it present as `null` (`complete`).
+    for (const f of framed) data.push(complete(toJson(await decode(f.buf)), translation.shape));
     return respond({ data: { [rootKey]: data }, ...ext }, mediaType);
   } catch (e) {
     return respond({ ...errorBody([{ message: `execution failed: ${(e as Error).message}` }]), ...ext }, mediaType);
