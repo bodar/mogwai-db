@@ -6317,6 +6317,40 @@ function correlatedReduce(
   };
 }
 
+/**
+ * Does a body ending in this step collapse to ONE value per host, so a `by()` arm may root it at the
+ * host itself rather than take a first value?
+ *
+ * The numeric reducers and `count` were the original members. **`fold` belongs with them and its absence
+ * was a reachability gap, not a decision**: `correlatedReduce` has had a per-origin FOLD arm all along
+ * (`tail.framing.kind === 'list'` → one list per host, `COALESCE`d to `[]` for FoldStep's
+ * `ArrayListSupplier` seed), and nothing could reach it from the self root because this gate named only
+ * the reducers. So `by(__.out().fold())` worked (movement-rooted) while `by(__.values(k).fold())` — a
+ * multi-valued property collected into a list, one of the most ordinary shapes in Gremlin — declined, as
+ * did `by(__.labels().fold())` and `by(__.properties(k).fold())`.
+ *
+ * Deliberately LOCAL rather than a widening of `COLLAPSING_BARRIERS` (`ir/step.ts`), which is the same
+ * question asked for a different purpose: that set also feeds `BATCHED_BARRIERS` and `repeat()`'s
+ * body-barrier reasoning, where `fold`'s membership is a separate claim with its own blast radius. Two
+ * consumers, two authorities, on purpose.
+ */
+const selfCollapses = (name: string): boolean => isReducer(name) || name === 'count' || name === 'fold';
+
+/**
+ * A body rooted at the HOST ITSELF — a one-row `Values` multiplier projected as the host id, handed to
+ * `correlatedReduce` from step 0.
+ *
+ * The `Values`-then-`project` shape is `addV`/`mergeV`'s, so the host id rides in a NAMED column the join
+ * reads by name rather than in a `Values` row whose columns are positional. Extracted because the branch
+ * arm and the collapsing-barrier arm built it identically — two copies of a source shape is two chances
+ * to disagree about what a self root IS.
+ */
+function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+  const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
+  return correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+}
+
 function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   const first = body[0]!;
@@ -6410,23 +6444,17 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // uses one hop later. This is what lets an emit-unrolled recurse (`union` of level-prefixes) sit inside
   // a `project().by()`, the shape a GraphQL `@recurse` field lowers to.
   if (BRANCH_HOSTS.has(body[0]!.name)) {
-    const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-    const reduced = correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+    const reduced = selfRootedReduce(body, host, ctx, fresh);
     if (reduced) return reduced;
   }
-  // The SELF root: no leading hop, so the reducer aggregates/argmaxes the host's OWN property rows
-  // exactly as it does an adjacency's — a `values(k)` join against a one-row relation carrying the host
-  // id. Only when the body actually ENDS in a reducer; a plain `by(__.values(k))` stays the expression
-  // arm below, which takes the FIRST value (a different cardinality, `yields: 'first'`).
+  // The SELF root: no leading hop, so the barrier aggregates/argmaxes/COLLECTS the host's OWN rows
+  // exactly as it does an adjacency's — a `values(k)`/`labels()` join against a one-row relation carrying
+  // the host id. Only when the body actually ENDS in a collapsing barrier; a plain `by(__.values(k))`
+  // stays the expression arm below, which takes the FIRST value (a different cardinality,
+  // `yields: 'first'`), and that is the whole job of this gate.
   const terminal = body.at(-1);
-  if (body.length >= 2 && terminal && (isReducer(terminal.name) || terminal.name === 'count')) {
-    // A ONE-ROW multiplier (`Values`), then a `project` naming the host id — the same source shape
-    // `addV`/`mergeV` use, so the host id rides in a projected column the join can read by name rather
-    // than in a `Values` row whose columns are positional.
-    const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-    const reduced = correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+  if (body.length >= 2 && terminal && selfCollapses(terminal.name)) {
+    const reduced = selfRootedReduce(body, host, ctx, fresh);
     if (reduced) return reduced;
   }
 

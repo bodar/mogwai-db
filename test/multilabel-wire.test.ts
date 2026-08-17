@@ -16,17 +16,15 @@
 // shape of the bug this file exists to keep out.
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
-import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { exec } from './support/executor.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
-import { ZOO_SEED } from './fixtures/seed-zoo.ts';
+import { zooStore } from './support/harness.ts';
 
-const zoo = () => {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const w of ZOO_SEED) exec(store).buffers(w, {});
-  return store;
-};
+// The zoo fixture comes from the shared harness (`zooStore`) rather than a local copy of the seed loop —
+// three files wanted the same graph, and a seeding loop repeated per file is three chances to seed it
+// differently.
+const zoo = zooStore;
 
 /** Run `gremlin` and decode the response with the CLIENT's own reader, so what is asserted is what
  *  a GLV would actually see — not our own view of our own bytes. */

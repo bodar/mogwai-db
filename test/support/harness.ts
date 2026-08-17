@@ -18,6 +18,7 @@ import { runSteps } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
 import { executeQuery } from './executor.ts';
 
 /** Compile and assert a READ plan — the SQL-asserting half of L2 and the compiler tests. */
@@ -29,9 +30,23 @@ export const read = (q: string, options?: CompileOptions) => {
 
 /** An in-memory store seeded by RUNNING the modern-graph write traversals. */
 export function seededStore() {
+  return storeSeededWith(MODERN_SEED);
+}
+
+/** An in-memory store seeded by RUNNING any fixture's write traversals — `seededStore`'s body with the
+ *  seed as a parameter, so a second graph does not mean a second copy of the loop. */
+export function storeSeededWith(seed: readonly string[]) {
   const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
+  for (const q of seed) executeQuery(store, q, {}); // seed by running the write traversals
   return store;
+}
+
+/** The ZOO graph — TinkerPop 4's multi-label showcase, and the only fixture with `Cardinality.list`
+ *  properties. Reach for it whenever the thing under test is a vertex bearing SEVERAL labels or a
+ *  multi-valued property; the modern graph is uniform per label and single-valued, so it cannot see
+ *  either. */
+export function zooStore() {
+  return storeSeededWith(ZOO_SEED);
 }
 
 /**
