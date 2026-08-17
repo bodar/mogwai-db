@@ -690,6 +690,23 @@ pattern this whole stage kept finding:
   returns `EmptyTraverser`), which is what keeps that set a real distinction rather than "map-shaped steps".
   🚧 LEFT on this tail: a record arm against an ELEMENT/scalar/list arm (declines — `variantArmOf` has no
   `vk` for a record), and `local(__.project(…))`.
+  ✅ **A `by()` arm may COLLECT the host's OWN rows — the self-rooted `fold()`.** Pure reachability, and
+  the strange edge it left is the tell: `by(__.out().fold())` worked (movement-rooted) while
+  `by(__.values(k).fold())` — the more ordinary Gremlin — declined. `correlatedReduce` has had a
+  per-origin FOLD arm all along; the gate admitting a body to the SELF root named only the numeric
+  reducers and `count`, so nothing reached it without a leading hop. `selfCollapses` adds `fold`, kept a
+  LOCAL predicate rather than a widening of `COLLAPSING_BARRIERS` (same question, different purpose —
+  that set also feeds `BATCHED_BARRIERS` and `repeat()`'s body-barrier reasoning, where `fold`'s
+  membership is its own claim). Newly answering: `by(__.values(k).fold())` over a `Cardinality.list`
+  property and **`by(__.labels().fold())` over a MULTI-LABEL vertex** — the multi-label read a GraphQL
+  type-identity field needs. Empty is `FoldStep`'s seed both ways (an absent key and a zero-label vertex
+  each give `[]`, never the `[null]` an outer join would). `labels()` emission order is the label
+  dictionary id, the same pick `LabelStep` makes, so the first collected label and `label()` agree — now
+  asserted so the two cannot drift into separate picks. `selfRootedReduce` extracts the one-row self-root
+  source the branch arm and the barrier arm built identically. 🚧 LEFT: a bare `by(__.labels())` and
+  `by(__.union(values,values))` — a fan-out body a `by()` must take the FIRST of
+  (`TraversalUtil.produce` → `traversal.next()`), i.e. `yields: 'first'` for a fan-out, which is the
+  expression arm's business; and `by(__.properties(k).fold())`, the property-member list.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
