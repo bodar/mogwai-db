@@ -1,4 +1,7 @@
-import { parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode } from 'graphql';
+import {
+  parse, Kind, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode, type FieldNode,
+  type FragmentDefinitionNode, type DirectiveNode,
+} from 'graphql';
 import { type GraphSchema, type TypeSchema, type EdgeSchema, EDGE_COMPANION_SUFFIX } from './schema.ts';
 import { argClauses } from './args.ts';
 import { Bindings } from './bindings.ts';
@@ -19,9 +22,17 @@ import { Bindings } from './bindings.ts';
 //     folded because a graph edge is to-MANY (every GraphQL object-over-an-edge field is a list;
 //     single-valued fields are a later schema refinement).
 //
-// SCOPE (fail-closed): one query operation, named-type root fields, scalar + object fields, and the
-// `where`/`sort`/`limit`/`offset` field arguments (`args.ts`). Still out: fragments, `__typename`,
-// introspection (served from the schema directly, not translated), variables, interfaces/unions.
+// SCOPE (fail-closed): one query operation, one root field, scalar + object + edge-companion fields, the
+// `where`/`sort`/`limit`/`offset` field arguments (`args.ts`), variables as BINDS, `@skip`/`@include`,
+// `@recurse`, `__typename`, and FRAGMENTS — named and inline — inlined at translation (`fields`).
+// Introspection is served from the schema directly rather than translated (`edge.ts`).
+//
+// Still out: INTERFACES AND UNIONS, which is one refusal rather than a list — a fragment whose type
+// condition names a type other than the one being walked. The engine substrate for it is in (a
+// `coalesce` of per-member `project()` arms lowers and answers, §8·2·1); what is missing is a schema
+// that MINTS a polymorphic field, so until then such a document asks for something the schema does not
+// offer and is refused rather than answered narrower.
+//
 // Anything outside scope RAISES a clear `GraphQLTranslationError` — never emits a half-Gremlin string,
 // the fail-closed rule (root CLAUDE.md: never silently answer a different question).
 
@@ -64,7 +75,7 @@ function soleQuery(doc: DocumentNode): OperationDefinitionNode {
  * (a variable `@skip(if:$x)` is refused, since variables are — a directive over a dropped variable would
  * be the same silent-drop bug one level down). An unknown directive is refused, not ignored.
  */
-function keepField(field: FieldNode): boolean {
+function keepField(field: { readonly directives?: readonly DirectiveNode[] }, what: string): boolean {
   let keep = true;
   for (const dir of field.directives ?? []) {
     const name = dir.name.value;
@@ -72,7 +83,7 @@ function keepField(field: FieldNode): boolean {
     // keep/drop directive. Skip it in this pass; an unknown directive is still refused.
     if (name === 'recurse') continue;
     if (name !== 'skip' && name !== 'include')
-      throw new GraphQLTranslationError(`unsupported directive @${name} on '${field.name.value}'`);
+      throw new GraphQLTranslationError(`unsupported directive @${name} on '${what}'`);
     const ifArg = (dir.arguments ?? []).find((a) => a.name.value === 'if');
     if (!ifArg || ifArg.value.kind !== Kind.BOOLEAN)
       throw new GraphQLTranslationError(`@${name} needs a boolean literal 'if:' argument (a variable is not supported yet)`);
@@ -104,16 +115,115 @@ function recurseDepth(field: FieldNode): number | null {
   return n;
 }
 
-/** The plain field selections of a set, with `@skip`/`@include` RESOLVED (a dropped field is gone from
- *  the result) and fragments refused rather than skipped silently. Field ARGUMENTS are validated later,
- *  where the type schema is in hand (`fieldBy`/root); an unsupported argument fails closed THERE. */
-function fields(set: SelectionSetNode): readonly FieldNode[] {
+/**
+ * The WALK's ambient state — the reflected schema, the accumulating parameter binds, and the document's
+ * named fragments.
+ *
+ * One record rather than three threaded arguments: `schema` and `binds` were already passed through every
+ * function here, so adding fragments as a fourth would have made five-parameter signatures out of a walk
+ * whose only real arguments are "which selection set" and "over which type". A caller cannot now forget
+ * one of the three either.
+ */
+interface Ctx {
+  readonly schema: GraphSchema;
+  readonly binds: Bindings;
+  /** The document's named fragments, by name — `FragmentSpreadNode` resolves through this. */
+  readonly fragments: ReadonlyMap<string, FragmentDefinitionNode>;
+}
+
+/**
+ * A selection set FLATTENED to plain fields — fragments inlined, `@skip`/`@include` resolved.
+ *
+ * Fragments are how real GraphQL clients are written (every codegen tool emits them), and they carry no
+ * execution semantics of their own: the spec's `CollectFields` inlines a spread whose type condition
+ * applies and skips one whose condition does not, so a fragment is a purely SYNTACTIC grouping. That is
+ * why this belongs here and not in the lowering — by the time a selection set reaches `projectBody` there
+ * are only fields.
+ *
+ * Three kinds of selection, and each is inlined or refused for its own reason:
+ *
+ * - a FIELD is itself;
+ * - an INLINE FRAGMENT (`... on T { … }`) and a NAMED SPREAD (`...F`) inline when their type condition
+ *   names the type being walked, or is absent (an inline fragment may omit it — `... @include(if:) { … }`
+ *   is a directive carrier over the same type);
+ * - a condition naming a DIFFERENT type is the polymorphic case, and it is refused rather than inlined or
+ *   dropped. Both wrong answers are available here and neither is taken: inlining would read the other
+ *   type's fields off this one, and dropping would silently answer a smaller query. It becomes correct
+ *   when a field can HAVE more than one possible type — an interface or union — which needs the schema to
+ *   mint one (§8·2·1); until then the honest answer is that this document asks something the schema does
+ *   not offer.
+ *
+ * `@skip`/`@include` are honoured on the SPREAD as well as on the fields inside it, which is GraphQL's own
+ * rule (the directive is `FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT`) and a silent-wrong-answer if missed —
+ * the same trap `keepField`'s header records one level down.
+ */
+function fields(set: SelectionSetNode, ctx: Ctx, seen: readonly string[] = []): readonly FieldNode[] {
   const kept: FieldNode[] = [];
   for (const sel of set.selections) {
-    if (sel.kind !== Kind.FIELD) throw new GraphQLTranslationError(`fragments are not supported yet (${sel.kind})`);
-    if (keepField(sel)) kept.push(sel);
+    if (sel.kind === Kind.FIELD) {
+      if (keepField(sel, sel.name.value)) kept.push(sel);
+      continue;
+    }
+    if (sel.kind === Kind.INLINE_FRAGMENT) {
+      if (!keepField(sel, `... on ${sel.typeCondition?.name.value ?? '<no type>'}`)) continue;
+      kept.push(...fields(sel.selectionSet, ctx, seen));
+      continue;
+    }
+    // A NAMED SPREAD. graphql-js validation already rejects an unknown fragment and a spread CYCLE
+    // (`KnownFragmentNames`, `NoFragmentCycles`), but `translate` is also called directly, so both are
+    // refused here rather than trusted — an unresolvable name would otherwise read as an empty selection
+    // and a cycle would not return at all.
+    const name = sel.name.value;
+    if (!keepField(sel, `...${name}`)) continue;
+    if (seen.includes(name)) throw new GraphQLTranslationError(`fragment '${name}' spreads itself`);
+    const def = ctx.fragments.get(name);
+    if (!def) throw new GraphQLTranslationError(`no fragment named '${name}' in the document`);
+    kept.push(...fields(def.selectionSet, ctx, [...seen, name]));
   }
   return kept;
+}
+
+/**
+ * Does a fragment's type condition apply to the type being walked?
+ *
+ * Reflection maps a GraphQL object type to a vertex label one-for-one, and a type has no supertypes yet,
+ * so "applies" is name equality — there is no interface to satisfy and no union to be a member of. An
+ * ABSENT condition applies by definition (an inline fragment may omit it).
+ *
+ * Kept as its own function because it is exactly the predicate that grows when interfaces and unions land:
+ * the answer becomes "equal, or `type` implements/is a member of the condition", and the polymorphic
+ * refusal below turns into a per-member dispatch. One place to change, and it is named.
+ */
+const conditionApplies = (condition: string | undefined, type: TypeSchema): boolean =>
+  condition === undefined || condition === type.name;
+
+/** The fields of a set that apply to `type`, with a POLYMORPHIC condition refused rather than guessed.
+ *  Separate from `fields` because the type is only known at the point a selection set is projected, while
+ *  flattening is a document-shape question — so `fields` inlines and this one checks. */
+function applicableFields(set: SelectionSetNode, type: TypeSchema, ctx: Ctx): readonly FieldNode[] {
+  refuseForeignConditions(set, type, ctx, []);
+  return fields(set, ctx);
+}
+
+/** Walk the set's fragment conditions and raise on the first that names another type. Recursive over
+ *  nested spreads, because a condition three fragments deep is the same wrong answer as one at the top. */
+function refuseForeignConditions(set: SelectionSetNode, type: TypeSchema, ctx: Ctx, seen: readonly string[]): void {
+  for (const sel of set.selections) {
+    if (sel.kind === Kind.FIELD) continue;
+    const condition = sel.kind === Kind.INLINE_FRAGMENT
+      ? sel.typeCondition?.name.value
+      : ctx.fragments.get(sel.name.value)?.typeCondition.name.value;
+    if (!conditionApplies(condition, type))
+      throw new GraphQLTranslationError(
+        `fragment on '${condition}' cannot be applied to '${type.name}' — a field with more than one `
+        + `possible type needs an interface or union, which the reflected schema does not mint yet`);
+    const inner = sel.kind === Kind.INLINE_FRAGMENT ? sel.selectionSet : ctx.fragments.get(sel.name.value)?.selectionSet;
+    if (!inner) continue;
+    if (sel.kind === Kind.FRAGMENT_SPREAD) {
+      if (seen.includes(sel.name.value)) continue; // the cycle is `fields`' refusal; do not loop here
+      refuseForeignConditions(inner, type, ctx, [...seen, sel.name.value]);
+    } else refuseForeignConditions(inner, type, ctx, seen);
+  }
 }
 
 /** The projection key a field contributes — its alias where given, else its name (GraphQL's own rule,
@@ -134,11 +244,11 @@ const glit = (s: string): string => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "
  * empty `project()` is not a thing — the parser already enforces this, so reaching it is a bug, not a
  * user error, and raising names it.
  */
-function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchema, binds: Bindings): string {
-  const fs = fields(set);
+function projectBody(set: SelectionSetNode, type: TypeSchema, ctx: Ctx): string {
+  const fs = applicableFields(set, type, ctx);
   if (!fs.length) throw new GraphQLTranslationError(`empty selection on type '${type.name}'`);
   const keys = fs.map((f) => glit(keyOf(f))).join(', ');
-  const bys = fs.map((f) => `.by(${fieldBy(f, type, schema, binds)})`).join('');
+  const bys = fs.map((f) => `.by(${fieldBy(f, type, ctx)})`).join('');
   return `project(${keys})${bys}`;
 }
 
@@ -151,7 +261,7 @@ function projectBody(set: SelectionSetNode, type: TypeSchema, schema: GraphSchem
  * `project().by()…` rooted at the movement — the recursion that makes depth compose (verified to
  * depth-3 in the RelIR substrate work).
  */
-function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds: Bindings): string {
+function fieldBy(field: FieldNode, type: TypeSchema, ctx: Ctx): string {
   const name = field.name.value;
   const args = field.arguments ?? [];
   // `__typename` is GraphQL's meta-field, valid on every object type and resolving to the type's name.
@@ -173,12 +283,12 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
   const edge = type.edges.get(name);
   if (edge) {
     if (!field.selectionSet) throw new GraphQLTranslationError(`object field '${type.name}.${name}' needs a selection set`);
-    const to = schema.types.get(edge.to);
+    const to = ctx.schema.types.get(edge.to);
     if (!to) throw new GraphQLTranslationError(`edge field '${type.name}.${name}' points at unknown type '${edge.to}'`);
     // `where` filters the far endpoint, so its `has()` clauses sit AFTER the movement and BEFORE the
     // nested projection — `out(edge).has(k, …).project(…).fold()` — filtering the neighbour set that is
     // folded. The keys must be properties of the far type (`to`), which is what `argClauses` validates.
-    const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k), binds)}`;
+    const move = `__.${edge.direction}(${glit(edge.label)})${argClauses(args, (k) => to.properties.has(k), ctx.binds)}`;
     const depth = recurseDepth(field);
     if (depth !== null) {
       // `@recurse(depth:N)` — the edge is walked TRANSITIVELY, emitting every level up to N. It requires
@@ -188,9 +298,9 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
       // the far-endpoint `where`/args apply INSIDE the repeat body (filtering each level's frontier).
       if (edge.to !== type.name)
         throw new GraphQLTranslationError(`@recurse on '${type.name}.${name}' needs a self-returning edge (it points at '${edge.to}', not '${type.name}')`);
-      return `__.repeat(${move}).emit().times(${depth}).${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
+      return `__.repeat(${move}).emit().times(${depth}).${projectBody(field.selectionSet, to, ctx)}.fold()`;
     }
-    return `${move}.${projectBody(field.selectionSet, to, schema, binds)}.fold()`;
+    return `${move}.${projectBody(field.selectionSet, to, ctx)}.fold()`;
   }
   // The edge COMPANION field (`created_edges`) surfaces the edge's OWN properties (§ edge-field data). It
   // strips the `_edges` suffix to find the base edge field, so `created_edges`→`created` and an incoming
@@ -198,7 +308,7 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
   // a companion on a propertyless edge is a schema mismatch, refused here.
   if (name.endsWith(EDGE_COMPANION_SUFFIX)) {
     const baseEdge = type.edges.get(name.slice(0, -EDGE_COMPANION_SUFFIX.length));
-    if (baseEdge && baseEdge.properties.size) return edgeCompanionBy(field, baseEdge, schema, binds);
+    if (baseEdge && baseEdge.properties.size) return edgeCompanionBy(field, baseEdge, ctx);
   }
   throw new GraphQLTranslationError(`type '${type.name}' has no field '${name}'`);
 }
@@ -214,10 +324,10 @@ function fieldBy(field: FieldNode, type: TypeSchema, schema: GraphSchema, binds:
  * (→ `values(key)` on the edge). `where`/`sort`/`limit` here filter/order/slice the EDGES on their own
  * properties, so they sit right after `outE`/`inE` — the same argument surface, applied one hop earlier.
  */
-function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, schema: GraphSchema, binds: Bindings): string {
-  const to = schema.types.get(edge.to);
+function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, ctx: Ctx): string {
+  const to = ctx.schema.types.get(edge.to);
   if (!to) throw new GraphQLTranslationError(`edge companion points at unknown type '${edge.to}'`);
-  const sels = fields(field.selectionSet!);
+  const sels = fields(field.selectionSet!, ctx);
   if (!sels.length) throw new GraphQLTranslationError(`empty selection on edge '${edge.label}'`);
   const keys = sels.map((f) => glit(keyOf(f))).join(', ');
   const bys = sels.map((f) => {
@@ -226,7 +336,7 @@ function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, schema: GraphSchema
       if (!f.selectionSet) throw new GraphQLTranslationError(`'node' on edge '${edge.label}' needs a selection set`);
       // The far vertex: an out edge's other end is `inV()`, an in edge's is `outV()`.
       const step = edge.direction === 'out' ? 'inV' : 'outV';
-      return `.by(__.${step}().${projectBody(f.selectionSet, to, schema, binds)})`;
+      return `.by(__.${step}().${projectBody(f.selectionSet, to, ctx)})`;
     }
     const prop = edge.properties.get(fn);
     if (!prop) throw new GraphQLTranslationError(`edge '${edge.label}' has no property '${fn}' (edge fields are 'node' or an edge property)`);
@@ -236,7 +346,7 @@ function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, schema: GraphSchema
   }).join('');
   // `where`/`sort`/`limit` filter the EDGES on their OWN properties (validated against the edge's props).
   const stepE = edge.direction === 'out' ? 'outE' : 'inE';
-  const move = `__.${stepE}(${glit(edge.label)})${argClauses(field.arguments ?? [], (k) => edge.properties.has(k), binds)}`;
+  const move = `__.${stepE}(${glit(edge.label)})${argClauses(field.arguments ?? [], (k) => edge.properties.has(k), ctx.binds)}`;
   return `${move}.project(${keys})${bys}.fold()`;
 }
 
@@ -249,21 +359,33 @@ function edgeCompanionBy(field: FieldNode, edge: EdgeSchema, schema: GraphSchema
  * source is `g.V().hasLabel(Type)` and the rest is the ordinary nested projection.
  */
 export function translate(source: string, schema: GraphSchema, variables: Record<string, unknown> = {}): Translation {
-  const op = soleQuery(parse(source));
-  const roots = fields(op.selectionSet);
-  if (roots.length !== 1) throw new GraphQLTranslationError(`exactly one root field is supported yet, got ${roots.length}`);
-  const root = roots[0]!;
-  const type = schema.types.get(root.name.value);
-  if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
-  if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
+  const doc = parse(source);
+  const op = soleQuery(doc);
   // A GraphQL variable BINDS (§6): its value rides in `params`, referenced by a minted identifier in
   // the string, never inlined. `binds` accumulates them as the walk resolves each `$x` at its use.
-  const binds = new Bindings(variables);
+  const ctx: Ctx = { schema, binds: new Bindings(variables), fragments: fragmentsOf(doc) };
+  // The ROOT selection set carries no type condition of its own to check (the query root is not a
+  // reflected vertex label), so it flattens through `fields` rather than `applicableFields`; a condition
+  // on a root-level fragment is checked once the root's type is known, inside `projectBody`.
+  const roots = fields(op.selectionSet, ctx);
+  if (roots.length !== 1) throw new GraphQLTranslationError(`exactly one root field is supported yet, got ${roots.length}`);
+  const root = roots[0]!;
+  const type = ctx.schema.types.get(root.name.value);
+  if (!type) throw new GraphQLTranslationError(`no type '${root.name.value}' in the reflected schema`);
+  if (!root.selectionSet) throw new GraphQLTranslationError(`root field '${root.name.value}' needs a selection set`);
   // The root `where` filters the source vertices: `V().hasLabel(Type).has(k, …).project(…)`.
-  const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k), binds);
-  const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, schema, binds)}`;
-  return { gremlin, params: binds.params(), rootKey: keyOf(root) };
+  const where = argClauses(root.arguments ?? [], (k) => type.properties.has(k), ctx.binds);
+  const gremlin = `g.V().hasLabel(${glit(type.name)})${where}.${projectBody(root.selectionSet, type, ctx)}`;
+  return { gremlin, params: ctx.binds.params(), rootKey: keyOf(root) };
 }
+
+/** The document's named fragment definitions, by name. A duplicate name is a graphql-js validation error
+ *  (`UniqueFragmentNames`) and last-one-wins here, which is the same shape as its own registry — this map
+ *  never decides correctness for a document the edge has validated. */
+const fragmentsOf = (doc: DocumentNode): ReadonlyMap<string, FragmentDefinitionNode> =>
+  new Map(doc.definitions
+    .filter((d): d is FragmentDefinitionNode => d.kind === Kind.FRAGMENT_DEFINITION)
+    .map((d) => [d.name.value, d]));
 
 /** Re-export so a caller builds the schema and translates from one module. */
 export { buildSchema, edgeFieldName } from './schema.ts';

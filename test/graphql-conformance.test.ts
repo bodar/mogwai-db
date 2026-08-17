@@ -161,6 +161,16 @@ describe('§7·2 graphql-js differential — reference execution over the same g
     { name: 'a list variable', query: `query($ns: [String]) { person(where: { name: { in: $ns } }) { name } }`, variables: { ns: ['marko', 'josh'] } },
     { name: 'an edge companion (weight + node)', query: `{ person { name created_edges { weight node { name } } } }` },
     { name: 'an edge-companion where on edge props', query: `{ person { name created_edges(where: { weight: { gt: 0.3 } }) { weight node { name } } } }` },
+    // FRAGMENTS against the reference implementation — the strongest check available for them, because
+    // graphql-js executes a fragment natively (its own `CollectFields`) while we INLINE it at translation.
+    // If the inlining and the spec's collection disagree in field set, order or alias handling, the {data}
+    // objects differ and this fails.
+    { name: 'an inline fragment on the same type', query: `{ person { name ... on person { age } } }` },
+    { name: 'a named fragment spread', query: `{ person { ...P } } fragment P on person { name age }` },
+    { name: 'a fragment nested in a fragment', query: `{ person { ...P } } fragment P on person { name ...Q } fragment Q on person { age }` },
+    { name: 'a fragment on a nested object field', query: `{ person { name created { ...S } } } fragment S on software { name lang }` },
+    { name: 'a fragment carrying an alias', query: `{ person { ...P } } fragment P on person { who: name }` },
+    { name: '@skip on a fragment spread', query: `{ person { name ...P @skip(if: true) } } fragment P on person { age }` },
   ];
 
   for (const c of cases) {

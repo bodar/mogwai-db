@@ -92,7 +92,7 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('an object field with no selection set', () => refuses(`{ person { created } }`, /needs a selection set/));
     test('an unrecognised argument name', () => refuses(`{ person(id: 1) { name } }`, /expected where\/sort\/limit\/offset/));
     test('a mutation operation', () => refuses(`mutation { addPerson { name } }`, /only 'query'/));
-    test('a fragment', () => refuses(`{ person { ...F } }`, /fragments are not supported/));
+    test('an unknown fragment name', () => refuses(`{ person { ...F } }`, /no fragment named 'F'/));
     test('a variable USED but not supplied (declared-but-empty would drop it)', () =>
       expect(() => translate(`query($m: Int) { person(where: { age: { gt: $m } }) { name } }`, schema, {})).toThrow(/not supplied/));
     test('several root fields', () => refuses(`{ person { name } software { name } }`, /one root field/));
@@ -100,6 +100,63 @@ describe('translate — a GraphQL document to a Gremlin string', () => {
     test('the error type is GraphQLTranslationError', () => {
       expect(() => translate(`{ person { bogus } }`, schema)).toThrow(GraphQLTranslationError);
     });
+  });
+});
+
+describe('fragments — inlined at translation', () => {
+  // A fragment carries NO execution semantics of its own: the spec's CollectFields inlines a spread whose
+  // type condition applies and skips one whose condition does not, so a fragment is purely SYNTACTIC
+  // grouping. Every assertion below therefore compares against the equivalent FRAGMENT-FREE document —
+  // that identity is the whole claim, and it is stronger than pinning a Gremlin string.
+  const same = (withFragments: string, plain: string) =>
+    expect(translate(withFragments, schema).gremlin).toBe(translate(plain, schema).gremlin);
+
+  test('an inline fragment on the SAME type inlines', () =>
+    same(`{ person { name ... on person { age } } }`, `{ person { name age } }`));
+
+  // An inline fragment MAY omit its type condition — it is then a pure directive carrier over the same
+  // type, which is why `conditionApplies` treats an absent condition as applying.
+  test('an inline fragment with NO type condition inlines', () =>
+    same(`{ person { name ... { age } } }`, `{ person { name age } }`));
+
+  test('a named fragment spread inlines', () =>
+    same(`{ person { ...P } } fragment P on person { name age }`, `{ person { name age } }`));
+
+  test('a fragment spread INSIDE a fragment inlines', () =>
+    same(`{ person { ...P } } fragment P on person { name ...Q } fragment Q on person { age }`,
+      `{ person { name age } }`));
+
+  test('a fragment on a NESTED object field inlines against that field type', () =>
+    same(`{ person { name created { ...S } } } fragment S on software { lang } `,
+      `{ person { name created { lang } } }`));
+
+  // `@skip`/`@include` are valid on FRAGMENT_SPREAD and INLINE_FRAGMENT as well as FIELD, and missing that
+  // is the same silent-wrong-answer as missing it on a field — the whole group would be emitted anyway.
+  test('@skip on a SPREAD drops the whole group', () =>
+    same(`{ person { name ...P @skip(if: true) } } fragment P on person { age }`, `{ person { name } }`));
+  test('@include(if: false) on an INLINE fragment drops the whole group', () =>
+    same(`{ person { name ... on person @include(if: false) { age } } }`, `{ person { name } }`));
+
+  describe('fail closed', () => {
+    const refuses = (q: string, match: RegExp) => expect(() => translate(q, schema)).toThrow(match);
+
+    // THE POLYMORPHIC REFUSAL, and the reason interfaces/unions are one refusal rather than a list. Both
+    // wrong answers are available here and neither is taken: inlining would read software's fields off a
+    // person, and dropping would silently answer a smaller query.
+    test('a type condition naming ANOTHER type is refused, not inlined or dropped', () =>
+      refuses(`{ person { name ... on software { lang } } }`, /cannot be applied to 'person'/));
+    test('the refusal names what is missing — an interface or union', () =>
+      refuses(`{ person { ... on software { lang } } }`, /needs an interface or union/));
+    // Nested three deep, because a condition inside a fragment inside a fragment is the same wrong answer.
+    test('a foreign condition NESTED inside fragments is refused too', () =>
+      refuses(`{ person { ...P } } fragment P on person { name ...Q } fragment Q on software { lang }`,
+        /cannot be applied to 'person'/));
+    test('an unresolvable fragment name is refused rather than read as empty', () =>
+      refuses(`{ person { name ...Nope } }`, /no fragment named 'Nope'/));
+    // graphql-js validation (NoFragmentCycles) catches this at the edge, but `translate` is called
+    // directly too, and an unguarded cycle would not return at all.
+    test('a self-spreading fragment is refused rather than looping', () =>
+      refuses(`{ person { ...P } } fragment P on person { name ...P }`, /spreads itself/));
   });
 });
 
