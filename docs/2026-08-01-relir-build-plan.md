@@ -535,8 +535,12 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   NOT this. `coalesce-reduction-arm.feature`. 🚧 LEFT on this arm: a SEEDED reducer only (`count`/`fold`) — a
   non-seeded `max`/`sum` arm whose emptiness needs a `present` filter stays declined; and the mixed shapes the
   merge cannot yet take — a reducer-`result` scalar beside a plain scalar (`coalesce(count, constant)`) and a
-  list-arm-beside-scalar variant UNDER SLICE both decline at the arm merge, not the reduction; and `optional`
-  itself is not yet in `BRANCH_HOSTS` (`optional(t) ≡ coalesce(t, __.identity())`, the next caller). 🚧 What is
+  list-arm-beside-scalar variant UNDER SLICE both decline at the arm merge, not the reduction. ✅ **`optional`
+  now lowers** (`optionalArms`) as `coalesce(t, __.identity())` — an EMPTY-body fallback arm that `continueAs`
+  restores as the input unchanged — so it inherits the reduction arm, the traverser-major slice key, and (a
+  branch, so the `path` channel's `pad` merge already handles it) `optional(…).path()` at depth: the two nested
+  `Optional.feature` path scenarios pass exactly (+2 L3). `optional` is now in `BRANCH_HOSTS`, so a `by()`/`local()`
+  body may self-root it too. 🚧 LEFT: an element re-source arm (`optional(__.V())`). 🚧 What is
   LEFT of the fan-out multiplier,
   fail-closed today: a per-origin SCALAR-order path (`values(k).order().fold()` still declines — a scalar
   stream order in the correlated body), and the reductions with NO fold (`max(local)`/`mean(local)` after a

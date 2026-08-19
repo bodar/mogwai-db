@@ -5159,7 +5159,7 @@ const gremlinSelfName = (framing: RelFraming): string =>
 /** The three steps that MERGE arms over the same input. One set and one dispatcher, so a tail gains all
  *  three at once — the asymmetry this replaces was `union` in the scalar fold and `union`+`choose` in the
  *  element one, with `coalesce` in neither. */
-const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce']);
+const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce', 'optional']);
 
 /** Which arm-merging builder a step wants. Total over `BRANCH_HOSTS`, so a member added there without a
  *  builder is a compile error rather than a silent decline. */
@@ -5170,7 +5170,8 @@ function branchArms(
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels)
       : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
-        : null;
+        : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels)
+          : null;
 }
 
 function unionArms(
@@ -5604,20 +5605,49 @@ function coalesceArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  // `coalesce` is a `FlatMapStep` (`CoalesceStep.java:38`), so it resets PER TRAVERSER and is always
-  // traverser-major, arm-minor — never batched. Under a SLICE demand (`ctx.sliced`) that fixes the
-  // subset a downstream `limit`/`tail` takes (`branch-traverser-major.feature`), so the arms lower
-  // from `augmentParent(input)` — freezing the parent position as the major sort key — and merge
-  // through `mintTraverserMajor`. A COLLECT demand takes any deterministic order (`withFanoutOrder`);
-  // a positionless one drops the order (`dropEncounter`). See `unionArms`.
-  const slice = sliceableBranch(ctx, input);
-  const source = slice ? augmentParent(input, fresh) : input;
-  const subject = branchSubject(source, framing);
-  if (!subject) return null;
   const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
+  return coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels);
+}
+
+/**
+ * `optional(t)` ≡ `coalesce(t, __.identity())` — `OptionalStep` emits t's results where t produces and
+ * the ORIGINAL traverser otherwise (`vendor/tinkerpop/gremlin-core/.../branch/OptionalStep.java`), which
+ * is the coalesce priority over two arms: the body, then an EMPTY-body fallback that `continueAs` lowers
+ * as the input unchanged. `OptionalStep extends AbstractStep` takes one start at a time, so it inherits
+ * the same per-traverser reduction arm and traverser-major slice key `coalesce` uses.
+ */
+function optionalArms(
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): FramedRel | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const [nested, extra] = argValues(step);
+  if (extra !== undefined || !isNested(nested)) return null;
+  const body = bodyOf(nested.nested, ctx.params);
+  if (!body?.length) return null;
+  return coalesceMerge([body, []], input, framing, bulked, ctx, fresh, labels);
+}
+
+/**
+ * THE COALESCE MERGE over explicit arm bodies — shared by `coalesce` and `optional` (its identity
+ * fallback is the one empty body this admits). `coalesce`/`optional` are `FlatMapStep`-family, so they
+ * reset PER TRAVERSER and are always traverser-major, arm-minor — never batched. Under a SLICE demand
+ * (`ctx.sliced`) that fixes the subset a downstream `limit`/`tail` takes (`branch-traverser-major.feature`),
+ * so the arms lower from `augmentParent(input)` — freezing the parent position as the major sort key — and
+ * merge through `mintTraverserMajor`. A COLLECT demand takes any deterministic order (`withFanoutOrder`); a
+ * positionless one drops the order (`dropEncounter`). See `unionArms`.
+ */
+function coalesceMerge(
+  bodies: readonly (readonly IRStep[])[], input: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): FramedRel | null {
+  const slice = sliceableBranch(ctx, input);
+  const source = slice ? augmentParent(input, fresh) : input;
+  const subject = branchSubject(source, framing);
+  if (!subject) return null;
 
   const arms: Tail[] = [];
   let exhausted: Expr | undefined;

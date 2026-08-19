@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,595<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,599<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -96,8 +96,9 @@ the semantic authority.
 |---|:--:|---|
 | `union(a, b…)` | 🟡 | two or more arms ✅, over an ordered input or with an arm-local `order()`/`limit()` (a union is UNORDERED, so the position is dropped). ❌ the SINGLE-arm form; a union whose emission order a downstream slice/collect READS (`union(…).limit(n)`, `.fold()`, `.cap()` — needs the arm-blocked fan-out order, not yet minted) |
 | `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | over ELEMENT and SCALAR streams alike — the condition's subject comes from the framing. A bare `P` is TinkerPop's own `choose(Predicate, …)` overload; a single-arm form passes unmatched traversers through; a `T`-token choice is always productive, so the implicit `Pick.unproductive` arm is provably dead. The boolean form composes over an ordered input or arm-local `order()`/`limit()` (a `choose` is UNORDERED, so the position is dropped). ❌ where a downstream slice/collect READS the fan-out emission order (needs the arm-blocked mint); over a PROPERTY stream |
-| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A non-final arm may be a bare value projection (`coalesce(__.values('name'), __.constant('x'))` — it produces iff the property exists) as well as a movement. A body that always produces (`constant`/`count`/`fold`) exhausts it. Composes over an ordered input (the position is dropped — unordered). ❌ where a downstream slice/collect READS the fan-out emission order (needs the per-traverser mint) |
-| `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |
+| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A non-final arm may be a bare value projection (`coalesce(__.values('name'), __.constant('x'))` — it produces iff the property exists), a movement, or a per-traverser REDUCTION (`coalesce(__.out().count(), …)`, `coalesce(__.values(k).fold(), …)` — one row per host via the child seam). A body that always produces (`constant`/`count`/`fold`) exhausts it. Composes over an ordered input, and a reduction arm carries the fan-out position so it survives a downstream slice. ❌ a non-seeded reducer arm (`max`/`sum`) and a reducer-`result` scalar merged with a plain scalar (`coalesce(count, constant)`) — the arm merge, not the reduction |
+| `optional` | ✅ | `optional(t)` ≡ `coalesce(t, __.identity())`: t's results where t produces, the ORIGINAL traverser otherwise. Over element and scalar streams; inherits `coalesce`'s per-traverser reduction arm and its slice-position carriage; `optional(…).path()` composes at depth (nested `optional(out().optional(out())).path()`). ❌ an element re-source arm (`optional(__.V())`) |
+| `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | (this row is STALE — `map`/`flatMap`/`local` per-traverser bodies do lower; a matrix re-sweep is owed) |
 | `local(__.…)` | ❌ | |
 
 Heterogeneous arms merge into a **variant stream**; after the merge the shape-agnostic steps

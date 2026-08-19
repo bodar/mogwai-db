@@ -282,10 +282,10 @@ Feature: mogwai addendum — scalar-stream re-entry
       | result |
       | d[6].l |
 
-  # Slice: optional() with a SCALAR filter arm restores the dropped inputs → identity over the
-  # values (gt 30 pass through the arm; 27/29 miss and are restored).
+  # optional() with a SCALAR filter arm restores the dropped inputs → identity over the values (gt 30
+  # pass through the arm; 27/29 miss and are restored). Lowers as coalesce(is(gt(30)), __.identity())
+  # (`optionalArms`) — the filter arm keeps the value, the empty fallback restores it.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_optionalXisXgtX30XXX
     Given the modern graph
     And the traversal of
