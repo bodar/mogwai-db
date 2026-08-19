@@ -239,7 +239,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # A count() tail is shape-agnostic over the variant and keeps the assertion deterministic:
   # one input (V(1), age 29) → 1 scalar 'x' + 6 vertices = 7.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_VX1X_valuesXageX_unionXconstantXxX_VX_count
     Given the modern graph
     And the traversal of
@@ -255,7 +254,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # arm) → a VariantStream, ordinal-gated first-productive. is(gt 100) never fires for age 29,
   # so the input falls to V() → 6 vertices; count() over the variant = 6.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_VX1X_valuesXageX_coalesceXisXgtX100XX_VX_count
     Given the modern graph
     And the traversal of

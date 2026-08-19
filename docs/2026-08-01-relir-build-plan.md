@@ -538,7 +538,15 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   `STATIC('long')` type and NO `vt` column, so `meetScalarArms` admits it (count→long, constant→int, a per-row
   tagged scalar; the count wins as a `long` since it seeds, the default is a dead fallback). A `result:'number'`
   reducer (`sum`/`mean`) is still refused there — its type rides on a `vt` column the meet's own `vtype` would
-  contradict — as is a list-arm-beside-scalar variant UNDER SLICE (the arm merge, not the reduction). ✅ **`optional`
+  contradict. ✅ **The SHAPE-AGNOSTIC tail over a variant stream landed** (`variantTail`, `lower.ts`): a mixed-shape
+  merge (`union`/`choose`/`coalesce`/`optional` whose arms disagree on shape) composes with `count()`
+  (`countTail` = `SUM(bulk)`) and the SLICES (`sliceOp` — `limit`/`range`/`skip`), which read only the carried
+  channels. A slice reads the fan-out `encounter` the branch minted, so `union(…).limit(1)`/`.skip(1)` are
+  deterministic under `test:perturbed` (the arm-order pin in `variant-rowops.feature`); `count()` is
+  order-free. 🚧 LEFT: anything that reads the PAYLOAD — `unfold()`, a member transform, a value `dedup` (a
+  per-shape identity) — declines; a variant has no uniform member shape, so that is the variant-MEMBER
+  vocabulary. 12 `@Unsupported` scenarios across `variant-rowops`/`list-branch-child`/`nested-branch-arms`/
+  `scalar-reentry` dropped their tag (verified, incl. `V()`-re-source arms `union(constant(x), __.V()).count()`). ✅ **`optional`
   now lowers** (`optionalArms`) as `coalesce(t, __.identity())` — an EMPTY-body fallback arm that `continueAs`
   restores as the input unchanged — so it inherits the reduction arm, the traverser-major slice key, and (a
   branch, so the `path` channel's `pad` merge already handles it) `optional(…).path()` at depth: the two nested

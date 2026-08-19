@@ -4741,10 +4741,10 @@ function continueAs(
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
-    // A VARIANT is TERMINAL here. A handful of steps over one (a `count`, a slice, an alias compare)
-    // are expressible but none is written, so a step after a variant DECLINES rather than being
-    // silently dropped — the map arm's reasoning exactly.
-    case 'variant': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
+    // A VARIANT's tail is the SHAPE-AGNOSTIC steps only — a slice reads the fan-out encounter, a
+    // `count()` reads bulk, and neither asks what the mixed rows ARE. A payload-reading step (`unfold`,
+    // a member op) DECLINES: a variant has no uniform member shape. See `variantTail`.
+    case 'variant': return variantTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
     // A per-row TYPED NODE is terminal for the variant's reason: a stream whose rows are different
     // shapes has no uniform continuation. A `count`/`dedup` over one is expressible but unwritten, so a
     // follower DECLINES rather than being dropped.
@@ -5240,6 +5240,35 @@ function unionArms(
  * (`count`/`number`) reads its type off a `vt` column the reducer computed, so padding it with a
  * second type column would leave two disagreeing authorities on one row.
  */
+/**
+ * THE SHAPE-AGNOSTIC TAIL OVER A VARIANT STREAM — a mixed-shape branch merge (`union`/`choose`/
+ * `coalesce` whose arms disagree on shape) composes with the steps that read only the carried channels,
+ * never the payload. A SLICE (`sliceOp` — `limit`/`range`/`skip`) reads the fan-out `encounter` the branch
+ * minted (`mintTraverserMajor`/`withFanoutOrder`) and KEEPS the variant; `count()` is `countTail`
+ * (`SUM(bulk)`), the same barrier every other tail uses.
+ *
+ * Anything that reads the payload DECLINES rather than mis-executing: a variant has NO uniform member
+ * shape, so `unfold()`, a member transform, and a value `dedup` (an identity that is per-shape) are the
+ * variant-MEMBER vocabulary, a later increment — the map/property tails' reasoning exactly.
+ */
+function variantTail(
+  rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  let cur = rel;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at]!;
+    const sliced = sliceOp(step, cur, bulked, fresh);
+    if (sliced) { cur = sliced; continue; }
+    if (step.name === 'count' && !argValues(step).length && !isLocalScope(step)) {
+      const counted = countTail(cur, fresh);
+      return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+    }
+    return null;
+  }
+  return { rel: cur, framing, aliases: labels, bulked: false };
+}
+
 function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
   const types: ScalarType[] = [];
   for (const arm of arms) {
