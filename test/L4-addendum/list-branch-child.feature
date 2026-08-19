@@ -41,8 +41,10 @@ Feature: mogwai addendum — a list-armed branch as an all-cardinality child-bod
       | d[1].l |
       | d[0].l |
 
+  # A coalesce whose arms REDUCE per traverser now lowers through the child seam (`reductionArm`):
+  # marko(1)'s out(knows).fold() fires [vadas,josh], the flatMap emits that one list, count(local) is
+  # 2. See coalesce-reduction-arm.feature.
   @gap:list-branch-child
-  @Unsupported
   Scenario: g_V_1_flatMapXcoalesceXoutXknowsX_fold__outXcreatedX_foldXX_countXlocalX
     Given the modern graph
     And the traversal of

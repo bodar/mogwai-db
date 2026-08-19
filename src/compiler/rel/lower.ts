@@ -5625,7 +5625,11 @@ function coalesceArms(
     const domain = exhausted
       ? make.filter({ id: fresh('coa'), input: source, channels: source.channels, type: source.type, pred: exhausted })
       : source;
-    const arm = continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
+    // A per-traverser REDUCTION arm (`__.out().count()`, `__.values(k).fold()`) is CORRECT for `coalesce`
+    // (a `FlatMapStep`, per-traverser) — routed through the child seam, one row per host carrying every
+    // channel; a movement/transform arm returns null and stays the ordinary `continueAs`. See `reductionArm`.
+    const arm = reductionArm(domain, framing, body!, ctx, fresh, labels, bulked)
+      ?? continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
     // The slice path keeps each arm's within-arm order for `mintTraverserMajor` to consume; every
     // other path drops it, as a fresh unordered stream carries none.
@@ -5965,6 +5969,105 @@ function collapsedToOneRow(rel: Rel): boolean {
  * productivity the seam cannot state (`ChildValue.present` absent — a numeric reducer over an empty
  * child, which `correlatedExists` fails closed on for the same reason) declines here too.
  */
+/** The child HOST for a per-traverser body over an element or scalar stream — the subject `scalarChild`
+ *  reads. Extracted so the `map`/`local`/`flatMap` dispatch and a `coalesce`/`optional` reduction arm
+ *  name ONE host shape rather than two copies of it. */
+function reductionHost(
+  rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, labels: AliasMap,
+): ChildHost {
+  return framing.kind === 'elements'
+    ? elementHost(rel, framing.elem, labels)
+    : {
+      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
+      ...(rel.type.cols.some((column) => column.name === 'vtype') ? { vtype: col(rel.id, 'vtype') }
+        : framing.type.kind === 'static' ? { vtype: compilerText(framing.type.type) } : {}),
+    };
+}
+
+/**
+ * A per-traverser reduction's one-value-per-host expression FRAMED as this stream's payload columns — the
+ * projection `perTraverserChild` (map/local/flatMap) and a `coalesce`/`optional` reduction arm share.
+ *
+ * The body's ONE result becomes the payload: an element re-roots to its rowid, a fold's value lands in the
+ * canonical `list` column, a scalar to `v` (plus a `vtype` column where the seam read a stored type). Every
+ * carried channel PASSES THROUGH unchanged (it is one row per host, so a frozen fan-out position survives),
+ * and an arm that can be UNPRODUCTIVE rides its presence out as a column, filters on it, then sheds it — so
+ * the tail sees exactly the payload its framing declares. The assembler fuses the three nodes into one
+ * SELECT. See `perTraverserChild`'s §3.3 note on why the filter is a sibling projection, not nested.
+ */
+function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, labels: AliasMap, bulked: boolean): Tail | null {
+  const present = produced.present;
+  if (!present) return null;
+  const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
+    if (produced.framing.kind === 'elements')
+      return { cols: [[meta('id', 'int', true), produced.expr]], framing: produced.framing };
+    if (produced.framing.kind === 'list')
+      return { cols: [[meta(LIST_COL, 'json'), produced.expr]], framing: produced.framing };
+    if (produced.framing.kind !== 'scalar') return null;
+    return produced.vtype
+      ? {
+        cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), produced.vtype]],
+        framing: { kind: 'scalar', type: PER_ROW('vtype') },
+      }
+      : { cols: [[meta('v', 'any', true), produced.expr]], framing: produced.framing };
+  })();
+  if (!payload) return null;
+  const channels = rel.channels;
+  const dropping = present !== ALWAYS_PRODUCTIVE;
+  const PRESENT = 'mp';
+  const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
+  const projected = make.project({
+    id: fresh('mc'), input: rel, channels,
+    type: typeOf(...cols, ...(dropping ? [meta(PRESENT, 'int', true)] : [])),
+    exprs: [
+      ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
+      ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
+      ...(dropping ? [[PRESENT, present] as const] : []),
+    ],
+  });
+  if (!dropping) return { rel: projected, framing: payload.framing, aliases: labels, bulked };
+  const kept = make.filter({
+    id: fresh('mf'), input: projected, channels, type: projected.type, pred: col(projected.id, PRESENT),
+  });
+  const shed = make.project({
+    id: fresh('ms'), input: kept, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
+  return { rel: shed, framing: payload.framing, aliases: labels, bulked };
+}
+
+/**
+ * A `coalesce`/`optional` arm that REDUCES per traverser — `coalesce(__.out().count(), __.constant(0))`,
+ * `coalesce(__.out('knows').values('name').fold(), __.constant('none'))` — routed through the SAME child
+ * seam a `local()`/`map()`/`by()` body already uses, so a per-origin fold/count is one caller not a second
+ * fold.
+ *
+ * ⚠️ ONLY `coalesce`/`optional`, never `union`/`choose`: `CoalesceStep extends FlatMapStep` and
+ * `OptionalStep extends AbstractStep` take ONE start at a time unconditionally
+ * (`vendor/tinkerpop/gremlin-core/.../branch/CoalesceStep.java:38`), so a barrier arm genuinely reduces
+ * over that traverser's sub-stream. `UnionStep`/`ChooseStep extends BranchStep`, whose `standardAlgorithm`
+ * injects EVERY start at once when any option holds a `Barrier` (`BranchStep.java:87,143` — both
+ * `CountGlobalStep` and `FoldStep extends ReducingBarrierStep`), so THEIR reducer arms reduce over the
+ * whole input and are the batched/arm-major lowering, NOT this (element-branch-child.feature draws the
+ * line, `[6,4]` not per-vertex).
+ *
+ * Gated to a body ENDING in a per-origin collapse (`selfCollapses`) that is ALWAYS PRODUCTIVE (`count`/
+ * `fold` seed, so every host row yields one row and the coalesce exhaustion stays the existing
+ * `alwaysProduces` path — a non-seeded reducer whose arm can be empty stays declined here). A movement or
+ * transform arm returns `null` and keeps the ordinary `continueAs`, which already lowers a
+ * transparent / fan-out arm correctly.
+ */
+function reductionArm(
+  domain: Rel, framing: RelFraming, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter, labels: AliasMap, bulked: boolean,
+): Tail | null {
+  const terminal = body.at(-1);
+  if (body.length < 2 || !terminal || !selfCollapses(terminal.name)) return null;
+  if (framing.kind !== 'elements' && framing.kind !== 'scalar') return null;
+  const produced = scalarChild(body, reductionHost(domain, framing, labels), ctx, fresh);
+  if (!produced || produced.yields !== 'one' || produced.present !== ALWAYS_PRODUCTIVE) return null;
+  return reductionTail(domain, produced, fresh, labels, bulked);
+}
+
 function perTraverserChild(
   step: IRStep, rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, steps: readonly IRStep[], at: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -5975,14 +6078,7 @@ function perTraverserChild(
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
 
-  const host: ChildHost = framing.kind === 'elements'
-    ? elementHost(rel, framing.elem, labels)
-    : {
-      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
-      ...(rel.type.cols.some((column) => column.name === 'vtype') ? { vtype: col(rel.id, 'vtype') }
-        : framing.type.kind === 'static' ? { vtype: compilerText(framing.type.type) } : {}),
-    };
-  const produced = scalarChild(body, host, ctx, fresh);
+  const produced = scalarChild(body, reductionHost(rel, framing, labels), ctx, fresh);
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -5995,65 +6091,10 @@ function perTraverserChild(
   // rather than assumed — `ChildValue.present`'s own contract.
   if (!produced.present) return null;
 
-  /**
-   * The body's ONE result as this stream's PAYLOAD COLUMNS — an element re-roots to its rowid, a value
-   * to `v` plus whatever type column its framing declares. Any other framing declines: a correlated
-   * read yields one column, and a shape needing more is the rejoin's business.
-   */
-  const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
-    if (produced.framing.kind === 'elements')
-      return { cols: [[meta('id', 'int', true), produced.expr]], framing: produced.framing };
-    // A PER-ORIGIN FOLD's value is ONE list per host — the correlated subquery `scalarChild` built,
-    // landed in the canonical `list` column so the list tail (`unfold`, `count(local)`, a set op) reads
-    // it exactly as a global `fold()`'s.
-    if (produced.framing.kind === 'list')
-      return { cols: [[meta(LIST_COL, 'json'), produced.expr]], framing: produced.framing };
-    if (produced.framing.kind !== 'scalar') return null;
-    // The type rides where the seam put it: a stored value's `vtype` is a second correlated read, so it
-    // becomes a column and the framing says `perRow`; a reducer's own tag is static and needs none.
-    return produced.vtype
-      ? {
-        cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), produced.vtype]],
-        framing: { kind: 'scalar', type: PER_ROW('vtype') },
-      }
-      : { cols: [[meta('v', 'any', true), produced.expr]], framing: produced.framing };
-  })();
-  if (!payload) return null;
-
-  /**
-   * PROJECT, THEN FILTER THE COLUMN — never the other way round, and the reason is §3.3's scope rule
-   * rather than a plan-quality preference. Both the value and its productivity are correlated
-   * expressions over the HOST relation, and a `Col` names a relation in SCOPE, which is a node's DIRECT
-   * children. A `Filter` under the projection makes the host a GRANDchild of the projection; a `Filter`
-   * over it makes the host a grandchild of the filter. Either way the checker refuses ("no relation …
-   * is in scope for column 'id'") — measured on `g.V().map(__.values('name'))`.
-   *
-   * So the presence rides out as a COLUMN of the same projection that computes the value, which also
-   * makes it computed once. The third node drops it again so the tail sees exactly the payload its
-   * framing declares; the assembler fuses all three into one SELECT.
-   */
-  const channels = rel.channels;
-  const dropping = produced.present !== ALWAYS_PRODUCTIVE;
-  const PRESENT = 'mp';
-  const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
-  const projected = make.project({
-    id: fresh('mc'), input: rel, channels,
-    type: typeOf(...cols, ...(dropping ? [meta(PRESENT, 'int', true)] : [])),
-    exprs: [
-      ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
-      ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
-      ...(dropping ? [[PRESENT, produced.present] as const] : []),
-    ],
-  });
-  if (!dropping) return continueAs(projected, payload.framing, steps, at + 1, bulked, ctx, fresh, labels);
-  const kept = make.filter({
-    id: fresh('mf'), input: projected, channels, type: projected.type, pred: col(projected.id, PRESENT),
-  });
-  const shed = make.project({
-    id: fresh('ms'), input: kept, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
-  });
-  return continueAs(shed, payload.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  // The body's ONE result framed as this stream's payload, presence filtered and shed — see
+  // `reductionTail`, shared with the `coalesce`/`optional` reduction arm. The tail then continues.
+  const tail = reductionTail(rel, produced, fresh, labels, bulked);
+  return tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
 /**
