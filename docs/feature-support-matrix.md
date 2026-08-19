@@ -24,7 +24,7 @@ unsupported throws a clear error and never mis-executes.
 | `otherV` | ❌ | |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
 | `call(service[, params])`, `.with(k,v)` | ✅ | source and mid-traversal; pure (`rel`) and async (`barrier`) contributions |
-| `io(path).read()` / `.write()` | 🟡 | desugars to `call("mogwai.io", …)`. Typed GraphSON (`.json`) both ways, lossless. Neptune/Neo4j CSV (`.csv`) for interop — reads either dialect, writes Neptune as a `<stem>-vertices`/`<stem>-edges` pair. Documents live behind `IoStore`: a rooted dir on Bun (`$MOGWAI_IO_DIR`), an R2 binding in a DO. ❌ GraphML, Gryo; a CSV export refuses a collection-valued property or a meta-property, and declares `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |
+| `io(path).read()` / `.write()` | ✅ | desugars to `call("mogwai.io", …)`. Typed GraphSON (`.json`) both ways, lossless. Neptune/Neo4j CSV (`.csv`) for interop — reads either dialect, writes Neptune as a `<stem>-vertices`/`<stem>-edges` pair. Documents live behind `IoStore`: a rooted dir on Bun (`$MOGWAI_IO_DIR`), an R2 binding in a DO. 🚫 GraphML, Gryo; a CSV export refuses a collection-valued property or a meta-property, and declares `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |
 
 **Services** — the `call()` registry, a per-runtime DI seam; `--list` enumerates it.
 
