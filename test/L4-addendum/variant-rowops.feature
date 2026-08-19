@@ -68,6 +68,36 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | result |
       | d[3].l |
 
+  # dedup() over a MIXED-shape variant is a whole-PAYLOAD Distinct: the tuple (vk, v, rid, list) is the
+  # identity across arms — an element by (vk, rid), a scalar by (vk, v). marko's out {vadas,josh,lop}
+  # plus values('name') {marko} are all distinct → 4.
+  @gap:variant-position
+  Scenario: g_VX1X_unionXout__valuesXnameXX_dedup_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.out(), __.values("name")).dedup().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
+  # Cross-arm SCALAR dedup by VALUE: constant('marko') and values('name') both frame as scalars (one
+  # variant tag), so the two equal 'marko' values collapse to one — the whole-payload identity the arm
+  # source does not enter.
+  @gap:variant-position
+  Scenario: g_VX1X_unionXconstantXmarkoX__valuesXnameXX_dedup_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant("marko"), __.values("name")).dedup().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
   # ---------- the WINDOW a variant/record slice picks, not just its size ----------
   #
   # `variantSlice` and `recordSlice`'s global branch used to emit `LIMIT n` with no ORDER BY, so

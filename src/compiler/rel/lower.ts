@@ -5264,6 +5264,19 @@ function variantTail(
       const counted = countTail(cur, fresh);
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
+    // A BARE `dedup()` over a variant is a whole-PAYLOAD `Distinct` — the tuple `(vk, v, rid, list)` IS
+    // the identity across every arm: a same-kind element by `(vk, rid)`, a scalar by `(vk, v)`, and two
+    // arms of different shape never collide because `vk` differs (`ElementHelper` hashes by id+class; a
+    // scalar by value). `dedupOn` keeps the first occurrence (`MIN(encounter)`) and resets `bulk`; it
+    // declines through `groupableChannels` where an alias/path sits in the row, exactly as the row-shape
+    // dedup does — a grouping may carry only the roles `CHANNEL_GROUP_POLICY` gives an N→1 answer.
+    if (step.name === 'dedup' && !argValues(step).length && !isLocalScope(step) && !step.modulators?.length) {
+      if (pathCarried(cur) || !groupableChannels(cur.channels)) return null;
+      const deduped = dedupOn(payloadCols(cur).map((column) => col(cur.id, column.name)), cur, [], fresh);
+      if (!deduped) return null;
+      cur = deduped;
+      continue;
+    }
     return null;
   }
   return { rel: cur, framing, aliases: labels, bulked: false };
