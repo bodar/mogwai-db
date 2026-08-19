@@ -32,9 +32,9 @@ unsupported throws a clear error and never mis-executes.
 |---|:--:|---|
 | `--list` | ✅ | `.with("service",…)` filter, `verbose` describe blob |
 | `tinker.degree.centrality` | ✅ | `direction` OUT/IN/BOTH (default IN); composes in `where`/`group`/`order`/`project` |
-| `tinker.search` | 🟡 | FTS5-trigram over property values; `.element()` walks to the owner. `type` Vertex/Edge, **case-insensitive**. ❌ `type=VertexProperty`, `<3`-char term, `regex` |
-| `mogwai.io` | 🟡 | internal; what `io()` desugars to. Coverage as `io()` above |
-| `mogwai.graph.federate` | 🟡 | cross-graph pushdown (async barrier). Source form runs a rooted sub-traversal on a sibling → detached refs; mid-traversal injects each parent's `values`/`id`/`label` via the `T.value` marker, batched one hop and value-rejoined per parent. A detached result supports `id`/`label`/`values` only. ❌ local movement over a detached result; `path()`/`as()` spanning the call |
+| `tinker.search` | ✅ | FTS5-trigram over property values; `.element()` walks to the owner. `type` Vertex/Edge, **case-insensitive**. ❌ `type=VertexProperty`, `<3`-char term, `regex` |
+| `mogwai.io` | ✅ | internal; what `io()` desugars to. Coverage as `io()` above |
+| `mogwai.graph.federate` | ✅ | cross-graph pushdown (async barrier). Source form runs a rooted sub-traversal on a sibling → detached refs; mid-traversal injects each parent's `values`/`id`/`label` via the `T.value` marker, batched one hop and value-rejoined per parent. A detached result supports `id`/`label`/`values` only. ❌ local movement over a detached result; `path()`/`as()` spanning the call |
 
 ## 2. Filters & predicates
 
