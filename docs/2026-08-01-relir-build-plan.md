@@ -673,6 +673,12 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 - **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept
   the rest.
 - **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
+- **`split()` (7 blockers) is DEFERRED BY DESIGN, not a leaf to build.** It is a Java-`StringUtil.split`
+  string→list transform whose every arm diverges from SQL (whole-separator empty-token collapsing,
+  char-split, whitespace-split), so its home is the Java-string-op semantics commitment in
+  `docs/2026-08-12-regex-as-a-barrier-research.md` (a SQL-native `replace`/recursive-CTE form with a
+  documented divergence, or the JS barrier), NOT a bespoke recursive-CTE reproduction of Commons. It
+  fails closed correctly today. Do not build it ahead of that one decision.
 
 Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch (the
 SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>).option(k, arm)` where the

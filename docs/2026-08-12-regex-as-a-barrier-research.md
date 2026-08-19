@@ -149,6 +149,40 @@ bind), not the federate return path. Getting this backwards would trade live adj
    correct-by-construction loosening beats a total, subtly-wrong one — the same principle behind the
    write path's guard-binding refusals (`src/rel/plan.ts` `Guard`).
 
+## A sibling in the same class: `split()`
+
+`split()` (the string→list transform, `SplitGlobalStep`/`SplitLocalStep`) belongs here for the SAME
+reason regex does — its answer is **Java's, and SQL cannot express it without either diverging or a
+JS barrier**. It fails closed today ("no lowering covers", verified: `g.inject("hello world").split(null)`,
+`g.V().values("name").split(null)`, and the non-string-member `g.inject(["a","b"]).split("a")` all
+decline cleanly, no silent coercion) and stays that way until this story lands.
+
+The semantics are Apache Commons `StringUtil.split`
+(`vendor/tinkerpop/gremlin-core/.../util/StringUtil.java:42-52`), and every one of its three arms is a
+Java-vs-SQL divergence:
+
+- **`split(sep)`** — `StringUtils.splitByWholeSeparator`, which COLLAPSES adjacent/leading/trailing
+  separators (no empty tokens). A SQL-native `'["' || replace(str, sep, '","') || '"]'` (parse as JSON)
+  is ~2 lines and handles the common case, but it (a) emits empty tokens where Commons collapses them,
+  and (b) needs the input's `"`/`\` escaped first or it produces malformed JSON. So the SQL-native form
+  is a *slightly-wrong* answer on adjacent-separator inputs — the Band-2/3 divergence call the regex
+  wall already forces, not a free win.
+- **`split("")`** — split into CHARACTERS. Expressible as a recursive CTE (the shape `reverse()`
+  already uses in `compiler/rel/transform.ts`), so this arm alone COULD be SQL-native and exact.
+- **`split(null)`** — split on WHITESPACE (Commons' null-separator rule), collapsing runs — the same
+  no-empty-token behaviour as `split(sep)` over `JAVA_WHITESPACE` (the set `trim()` already carries).
+
+**The decision is the same product/correctness call as regex's §"The two real costs" item 1**: either
+commit to a documented divergence (the SQL-native `replace`/CTE forms, knowingly wrong on empty-token
+edges) or run Java-faithful semantics in the JS barrier. Because `split` produces a LIST rather than a
+membership subset, it is NOT the clean `within(<ids>)` re-injection position §"item 2" describes — it
+is a mid-stream mapping whose output feeds a projection, exactly the case that note says should stay
+fail-closed. So `split`'s honest home is: **decline until the semantics commitment is made, then either
+the documented-divergent SQL-native forms or the JS barrier — one decision, made once, for the whole
+Java-string-op family (`split`, `regex`, and any `trim`/case op whose Java locale rules SQL cannot
+reproduce).** 7 corpus blockers wait on it; none is worth a bespoke recursive-CTE reproduction of
+Commons ahead of that decision.
+
 ## What is REFUTED here
 
 - A **general** lift of the regex wall (regex admitted everywhere it can appear). Position 2 above
