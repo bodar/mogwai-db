@@ -52,18 +52,22 @@ unsupported throws a clear error and never mis-executes.
 | `coin(p)`, `simplePath`, `cyclicPath` | ❌ | |
 | `typeOf(GType)` over a stored property | ✅ | every canonical type, incl. `bigdecimal`/`char`/`duration` |
 
-**Predicates (`P`)** — `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `within`, `without`, `between`, `inside`
-all ✅ in every position a predicate is accepted. ❌ `outside`. `between` is `[lo,hi)`, `inside` is
-`(lo,hi)`.
+**Predicates (`P`)** — all ✅ in every position a predicate is accepted, except as noted.
 
-**Text predicates (`TextP`)** — `containing`, `startingWith`, `endingWith`, and their negations ✅
-wherever a predicate is accepted. Matching is case-insensitive under SQLite `LIKE`; a literal term of
-three or more characters over a stored property uses the `property_fts` trigram access path, while the
-generic typed/escaped predicate remains the semantic authority. `regex` ❌ **not yet** — SQLite has no
-regex operator and DO SQLite has no UDFs, so today it fails closed rather than filtering in JS. It is
-INTENDED, not a locked non-goal: the shape is a batched barrier behind a trigram prefilter, gated on a
-semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than on engineering —
-`docs/2026-08-12-regex-as-a-barrier-research.md`.
+| Predicate | | Notes |
+|---|:--:|---|
+| `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `within`, `without` | ✅ | |
+| `between`, `inside` | ✅ | `between` is `[lo,hi)`, `inside` is `(lo,hi)` |
+| `outside` | ❌ | |
+
+**Text predicates (`TextP`)** — case-insensitive under SQLite `LIKE`; a literal term of ≥3 chars over a
+stored property uses the `property_fts` trigram access path, with the generic typed/escaped predicate as
+the semantic authority.
+
+| Predicate | | Notes |
+|---|:--:|---|
+| `containing`, `startingWith`, `endingWith` + negations | ✅ | wherever a predicate is accepted |
+| `regex` | ❌ | **not yet** — no SQLite regex operator, no DO UDFs; fails closed rather than filtering in JS. INTENDED, not a locked non-goal: a batched barrier behind a trigram prefilter, gated on a semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than engineering — `docs/2026-08-12-regex-as-a-barrier-research.md` |
 
 ## 3. Projections & element data
 
@@ -122,30 +126,31 @@ per-request limit is the backstop.
 
 `match(p1, p2, …)` 🟡 — a BINDING TABLE threaded through the ordinary fold, so a pattern body inherits
 the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
-`docs/2026-08-13-match-relir-lowering-plan.md`). ✅ conjunctive BINDING patterns `as(x).<body>.as(y)`
-(the body is any lowered movement/filter chain — `out().out()`, edge-typed hops, etc.), readiness
-scheduling so argument ORDER is unobservable, a BACK EDGE (`as(y)` re-using a bound variable →
-an equality constraint), the zero-root CYCLE, the terminal bindings MAP, and a downstream
-`select`/`select(…).by(…)`. The GQL match-STRING form (`g.match("MATCH (a)-[:knows]->(b)")`) rides on
-this via its desugar (`src/gremlin/gql.ts`). Also ✅: a NO-END constraint pattern with a filter-only
-body (`as('d').has('name','vadas')` — narrows `d`, binds nothing) and a per-row SCALAR end
-(`values('name').as('b')`, `select(key).as('b')` — binds a value; scalar back-edges compare values).
-A REDUCING-barrier end (`count()`/`sum`/`mean`/`min`/`max` — `as('a').out().count().as('c')`) binds a
-PER-ORIGIN reduction (0 for an empty origin) through the scalar-child seam. Start variables ALREADY
-bound before the match (`V().as('a').out().as('b').match(…)`) run in the zero-root regime (not
-rebound). The bindings MAP is emitted UNCONDITIONALLY (a following `identity`/`limit`/`select` sees the
-map, per `MatchStep.getBindings`). Also ✅: a FILTER LEG argument — `where(<body>)`/`not(<body>)`, an
-existence test that binds nothing and only narrows the table. A leg whose body reads ONE alias is a
-correlated `[NOT] EXISTS` over that element (the tested predicate seam); a leg whose body constrains a
-SECOND bound alias (`not(as('a').out('created').as('b'))` correlates on `a` AND `b`) is a MULTI-COLUMN
-SEMI (`where`) / ANTI (`not`) JOIN — a `[NOT] EXISTS` over a FRESH walk of its own (never a
-re-derivation of the binding table, which would collapse the correlation), correlated back on every
-alias the leg reads. Plus the inline `where('a', P.eq/neq('b'))` two-variable THETA clause between two
-bound ELEMENT aliases. ❌ (fail closed, each a named next phase in the plan doc): the `and`/`or`
-connective GROUPS (they BIND their nested ends), `where('a', P.op('b'))` over a non-`eq`/`neq` op or a
-SCALAR alias, a filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) or a `fold()` end, a MOVING
-no-end pattern, a 0/1-variable bindings map, a nested `match` inside a pattern, `dedup(labels)`, and
-`match()` on an edge stream.
+`docs/2026-08-13-match-relir-lowering-plan.md`). The GQL match-STRING form
+(`g.match("MATCH (a)-[:knows]->(b)")`) rides on this via its desugar (`src/gremlin/gql.ts`).
+
+| Feature | | Notes |
+|---|:--:|---|
+| conjunctive BINDING pattern `as(x).<body>.as(y)` | ✅ | body is any lowered movement/filter chain (`out().out()`, edge-typed hops) |
+| readiness scheduling | ✅ | argument ORDER is unobservable |
+| BACK EDGE `as(y)` re-using a bound variable | ✅ | → an equality constraint; also the zero-root CYCLE |
+| terminal bindings MAP + downstream `select`/`select(…).by(…)` | ✅ | map emitted UNCONDITIONALLY — a following `identity`/`limit`/`select` sees it, per `MatchStep.getBindings` |
+| NO-END constraint, filter-only body | ✅ | `as('d').has('name','vadas')` — narrows `d`, binds nothing |
+| per-row SCALAR end | ✅ | `values('name').as('b')`, `select(key).as('b')` — binds a value; scalar back-edges compare values |
+| REDUCING-barrier end `count`/`sum`/`mean`/`min`/`max` | ✅ | binds a PER-ORIGIN reduction (0 for an empty origin) through the scalar-child seam |
+| start variable bound BEFORE the match | ✅ | `V().as('a').out().as('b').match(…)` — runs in the zero-root regime, not rebound |
+| FILTER LEG `where(<body>)`/`not(<body>)` | ✅ | binds nothing, only narrows. One-alias body → correlated `[NOT] EXISTS`. A second-bound-alias body (`not(as('a').out('created').as('b'))`) → a MULTI-COLUMN SEMI (`where`)/ANTI (`not`) JOIN over a FRESH walk of its own (never a re-derivation of the table), correlated on every alias the leg reads |
+| inline `where('a', P.eq/neq('b'))` | ✅ | two-variable THETA clause between two bound ELEMENT aliases |
+| `and`/`or` connective GROUPS | ❌ | they BIND their nested ends |
+| `where('a', P.op('b'))` non-`eq`/`neq`, or over a SCALAR alias | ❌ | |
+| filter-AFTER-reduce end / `fold()` end | ❌ | `count().is(P.gt(10)).as('b')` |
+| MOVING no-end pattern | ❌ | |
+| 0/1-variable bindings map | ❌ | |
+| nested `match` inside a pattern | ❌ | |
+| `dedup(labels)` | ❌ | |
+| `match()` on an edge stream | ❌ | |
+
+Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-lowering-plan.md`.
 
 `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
 **not yet** rather than never: designed as `call()` services with the four step names as desugar
@@ -163,9 +168,16 @@ Passes (`docs/2026-07-24-graph-algorithms-plan.md`), so the compute stays set-ba
 
 ## 10. Types, math & strings
 
-Every canonical type round-trips with its exact GraphBinary tag: `string`, `boolean`, `byte`, `short`,
-`int`, `long`, `bigint`, `float`, `double`, `bigdecimal`, `char`, `uuid`, `datetime`, `duration`, plus
-lists/sets/maps. Scalar type rides PER ROW, so a heterogeneous stream frames each value by its own tag.
+Every canonical type round-trips with its exact GraphBinary tag; scalar type rides PER ROW, so a
+heterogeneous stream frames each value by its own tag.
+
+| Category | Types |
+|---|---|
+| text / bool | `string`, `boolean`, `char`, `uuid` |
+| integer | `byte`, `short`, `int`, `long`, `bigint` |
+| real | `float`, `double`, `bigdecimal` |
+| temporal | `datetime`, `duration` |
+| collection | `list`, `set`, `map` |
 
 | Step | | Notes |
 |---|:--:|---|
@@ -176,17 +188,15 @@ lists/sets/maps. Scalar type rides PER ROW, so a heterogeneous stream frames eac
 | `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity |
 | `split` | ❌ | |
 
-🔴 Five documented deviations, not defects: host-language typing in Java/.NET; 128-bit arithmetic
-declines; int64 overflow raises natively; 32-bit float arithmetic is not expressible (SQLite REAL is
-always a double); and **`NaN` IS `null`** — SQLite has no NaN (it stores one as `NULL` however it
-arrives), so mogwai folds a `NaN` literal to `null` at ingestion, agreeing with the store rather than
-faking a value it cannot hold. This diverges from Java, where `NaN ≠ null`: `inject(NaN).is(P.eq(null))`
-MATCHES for us (Java returns empty) and `inject(NaN).is(P.neq(null))` is empty (Java returns `[NaN]`).
-The choice is mechanical sympathy with the substrate — NaN is IEEE's in-band `Error<Number>` poison
-value, never a workload value, and it reaches a query only as a conformance-probe literal or from a
-`0.0/0.0` the store already NULLs. `±Infinity` is unaffected: SQLite represents it (a real overflow
-literal `9e999`/`-9e999`), so it compares faithfully. Both fold at one seam (`compiler/rel/const.ts`),
-inlined as constants — never a bind.
+🔴 **Five documented deviations, not defects:**
+
+| Deviation | Detail |
+|---|---|
+| host-language typing in Java/.NET | |
+| 128-bit arithmetic declines | |
+| int64 overflow raises natively | |
+| 32-bit float arithmetic is not expressible | SQLite REAL is always a double |
+| **`NaN` IS `null`** | SQLite has no NaN (stores one as `NULL` however it arrives), so mogwai folds a `NaN` literal to `null` at ingestion — agreeing with the store rather than faking a value it cannot hold. Diverges from Java (`NaN ≠ null`): `inject(NaN).is(P.eq(null))` MATCHES for us (Java returns empty), `inject(NaN).is(P.neq(null))` is empty (Java returns `[NaN]`). Rationale: NaN is IEEE's in-band poison value, never a workload value — it reaches a query only as a conformance-probe literal or a `0.0/0.0` the store already NULLs. `±Infinity` is unaffected: SQLite represents it (`9e999`/`-9e999`), so it compares faithfully. Both fold at one seam (`compiler/rel/const.ts`), inlined as constants — never a bind |
 
 ## 11. Writes
 
@@ -223,23 +233,19 @@ Element ids are integer rowids, externally `COALESCE(uid, id)`.
 
 ## 15. Locked non-goals (🚫)
 
-Two entries, and the list is short on purpose: a 🚫 means **we will not build this**, never "we have
-not got to it".
+Short on purpose: a 🚫 means **we will not build this**, never "we have not got to it".
 
-- **`store(k)`** — gone from the language upstream.
-- **Row-at-a-time interpretation** — the failure mode this project exists to avoid.
+| Non-goal | Why |
+|---|---|
+| `store(k)` | gone from the language upstream |
+| Row-at-a-time interpretation | the failure mode this project exists to avoid |
 
 ## 16. Not yet — INTENDED, unscheduled (❌)
 
-Neither of these is a wall. Both have a design doc, both are unscheduled, and both fail closed with a
-clear deferral until they land — so a query never gets a silently narrower answer in the meantime.
+Neither is a wall: both have a design doc, both are unscheduled, and both fail closed with a clear
+deferral until they land — so a query never gets a silently narrower answer in the meantime.
 
-- **OLAP / graph algorithms** — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`.
-  Designed as `call()` services (the GDS-shaped superset surface) with the four native step names as
-  thin desugar Passes to the same services, so there is one implementation and the compute stays
-  set-based SQL — host-driven iteration, never a row-at-a-time interpreter.
-  **`docs/2026-07-24-graph-algorithms-plan.md`.**
-- **`regex`** — no SQLite operator and no UDFs on DO, so it cannot be an inline predicate. The shape is
-  a batched barrier (already the mechanism `federate`/`io` use) behind a trigram prefilter over the
-  existing `property_fts` index. The blocker is a SEMANTICS commitment — JS `RegExp` is not Java
-  `Pattern` — not the engineering. **`docs/2026-08-12-regex-as-a-barrier-research.md`.**
+| Item | Shape | Doc |
+|---|---|---|
+| OLAP / graph algorithms — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath` | `call()` services (the GDS-shaped superset) with the four native step names as thin desugar Passes to the same services — one implementation, compute stays set-based SQL, never a row-at-a-time interpreter | `docs/2026-07-24-graph-algorithms-plan.md` |
+| `regex` | a batched barrier (the mechanism `federate`/`io` already use) behind a trigram prefilter over the existing `property_fts` index; blocker is a SEMANTICS commitment (JS `RegExp` ≠ Java `Pattern`), not engineering | `docs/2026-08-12-regex-as-a-barrier-research.md` |
