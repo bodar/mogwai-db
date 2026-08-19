@@ -13,7 +13,7 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { armBatches, assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, type Slice, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { labelReads, labelsBoundBefore } from '../ir/labels.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
-import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
@@ -5232,6 +5232,63 @@ function batchedBranch(
   return { ...merged, rel: ordered };
 }
 
+/** An arm whose body holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so when a
+ *  batching branch runs it over the whole input the arm is a global REDUCTION. Deliberately NARROWER
+ *  than `armBatches` (any Barrier): a SLICE arm (`out().limit(1)`) batches too but does not collapse. */
+const isReductionArm = (body: readonly IRStep[]): boolean => body.some((step) => selfCollapses(step.name));
+
+/** Add a `bulk = 1` channel so a COLLAPSED arm can UNION with a STREAMING one that carries its own — a
+ *  batched arm is ONE traverser, so its multiplicity is 1. A no-op where a `bulk` channel already exists. */
+function ensureBulk(rel: Rel, fresh: Minter): Rel {
+  if (rel.channels.some((channel) => channel.role === 'bulk')) return rel;
+  const channels = withChannel(rel.channels, BULK[0]!);
+  const payload = payloadCols(rel);
+  return make.project({
+    id: fresh('eb'), input: rel, channels, type: typeOf(...payload, ...carriedCols(channels)),
+    exprs: [
+      ...payload.map((column) => [column.name, col(rel.id, column.name)] as const),
+      ...channels.map((channel) => [channel.col, channel.role === 'bulk' ? compilerInt(1) : col(rel.id, channel.col)] as const),
+    ],
+  });
+}
+
+/** Normalize a SCALAR arm — a batched `result`-marked reduction OR a streaming per-input arm — to a
+ *  common `[v, vtype, bulk]` scalar, so a MIXED arm-major union can put a collapsed arm and a per-input
+ *  arm in one stream. The vtype is the arm's own: a `number` reduction's `vt` column, a `count`'s
+ *  `long`, a plain scalar's declared type (`withMergedVtype`). `null` for a non-scalar arm (a
+ *  mixed-SHAPE branch is the variant arm-major, a later increment) or a `value`-marked one. */
+function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
+  if (arm.framing.kind !== 'scalar') return null;
+  const result = arm.framing.result;
+  const vtype: ScalarType | null =
+    result === 'number' ? PER_ROW('vt')
+      : result === 'count' ? STATIC('long')
+        : result === undefined ? arm.framing.type
+          : null;
+  if (!vtype) return null;
+  return ensureBulk(withMergedVtype(arm.rel, vtype, fresh), fresh);
+}
+
+/**
+ * A `union` with SOME (not all) batched arms — a MIXED arm-major union, SCALAR arms only: a collapsed
+ * reduction (`min`, one global row) beside a per-input arm (`constant`, one row per traverser), drained
+ * ARM-major (`union(__.min(), __.constant(99))` → `[27, 99, 99, 99, 99]`). Each arm is normalized to a
+ * common `[v, vtype, bulk]` scalar (`toScalarArm` — the batched arm gains `bulk = 1`), then handed to
+ * `batchedBranch`: the same arm-major mint + empty gate the all-batched case uses. A non-scalar arm
+ * (element/list) declines — a mixed-SHAPE arm-major union is the variant arm-major, a later increment —
+ * as does an arm carrying an alias the collapsed arm cannot (`union(min, identity).select('x')`, the
+ * `mintArmMajor` channel check).
+ */
+function mixedScalarBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap): FramedRel | null {
+  const normalized: Tail[] = [];
+  for (const arm of arms) {
+    const rel = toScalarArm(arm, fresh);
+    if (!rel) return null;
+    normalized.push({ ...arm, rel, framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } });
+  }
+  return batchedBranch(normalized, input, fresh, labels);
+}
+
 function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -5263,9 +5320,15 @@ function unionArms(
     if (!arm) return null;
     arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
-  // ALL ARMS BATCH → ARM-MAJOR (`batchedBranch`), each a global reduction over the whole input unioned in
-  // arm order. Only reachable when `!slice` (a batched arm under a slice already declined above).
-  if (!slice && bodies.every((body) => armBatches(body!))) return batchedBranch(arms, input, fresh, labels);
+  // A REDUCTION arm holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so when the
+  // branch batches it, the arm is a global reduction over the whole input. This is NARROWER than
+  // `armBatches` (any Barrier): a SLICE arm (`out().limit(1)`) batches too but does NOT collapse, so it
+  // stays the ordinary merge rather than an arm-major reduction (else `union(out().limit(1), in())`
+  // would wrongly decline). Only reachable when `!slice` (a batched arm under a downstream slice already
+  // declined above).
+  if (!slice && bodies.every((body) => isReductionArm(body!))) return batchedBranch(arms, input, fresh, labels);
+  // SOME (not all) reduce → a MIXED arm-major union of a collapsed arm and a per-input one (`mixedScalarBranch`).
+  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedScalarBranch(arms, input, fresh, labels);
   return slice
     ? mintTraverserMajor(arms, source, labels, fresh)
     : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);

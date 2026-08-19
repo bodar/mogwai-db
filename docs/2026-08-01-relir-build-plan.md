@@ -612,12 +612,18 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     was routed to emits nothing) is an `Exists(input)` where `input` is the SHARED branch source, so `name` CTEs
     it with no replication. `union(__.count(), __.out('created').count())` → `[6,4]`, `union(__.min(),__.max())`
     → `[27,35]`, both deterministic under `test:perturbed` (`element-branch-child`/`scalar-reentry`, 4 tags
-    dropped). 🚧 What is LEFT, each fail-closed today: a **MIXED batched/streaming** arm (`union(__.min(),
-    __.constant(99))` — a collapsed arm beside a per-input one, arm-major over a variant); a **batched `choose`**
-    (same path, unwired); an **alias through a collapsed arm** (`union(count.as('x'), …).select('x')` — the
-    barrier drops the label); a **NESTED** branch inside a sliced arm (needs a key STACK, not one `bord_p`); a
-    **scoped-fold arm** (`union(values('name').fold(), …)` — but note fold/count BATCH in a `union`, so this is
-    the arm-major LIST case, not a per-origin one).
+    dropped). ✅ **The MIXED batched/streaming case landed for SCALAR arms** (`mixedScalarBranch`/`toScalarArm`):
+    a collapsed reduction beside a per-input arm (`union(__.min(), __.constant(99))` → `[27,99,99,99,99]`,
+    `union(__.count(), __.values('age'))` → `[6, ages…]`) — each arm is normalized to a common `[v, vtype, bulk]`
+    scalar (the batched arm gains `bulk = 1`, a `number` reduction's `vt` / a `count`'s `long` / a scalar's own
+    type becomes the shared `vtype`), then handed to `batchedBranch`. ⚠️ The batching test is `isReductionArm`
+    (a body holding a `selfCollapses` barrier), NARROWER than `armBatches` (any Barrier) on purpose: a SLICE arm
+    (`union(out().limit(1), in())`) batches too but does not COLLAPSE, so it stays the ordinary merge — using
+    `armBatches` here stopped two corpus reads executing (census caught it). 🚧 What is LEFT, each fail-closed:
+    a **MIXED-SHAPE** arm-major (`union(__.count(), __.out())` — a collapsed scalar beside a streaming element,
+    the variant arm-major); a **batched `choose`** (same path, unwired); an **alias through a collapsed arm**
+    (`union(min.as('x'), …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm
+    (needs a key STACK, not one `bord_p`).
 - **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
   (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is
   a PERF tail on already-correct queries, gated on measurement — not a pass to build.

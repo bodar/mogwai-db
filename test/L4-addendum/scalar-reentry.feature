@@ -139,7 +139,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # The same fact with a cardinality-mixing pair: `min()` collapses to one row while `constant()`
   # is fed every start, so batching is visible in the ROW COUNT and not only in the values.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXminX_constantX
     Given the modern graph
     And the traversal of

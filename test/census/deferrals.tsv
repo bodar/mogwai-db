@@ -383,7 +383,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().sideEffec
 deferred	this traversal is not supported yet: no lowering covers g.V().sideEffect(__.property(Cardinality.single,"age",22))	g.V().sideEffect(__.property(Cardinality.single,"age",22))
 deferred	this traversal is not supported yet: no lowering covers g.V().times(5)	g.V().times(5)
 unbound	Unbound parameter 'xx1'	g.V().toE(Direction.OUT, xx1).values("weight")
-deferred	this traversal is not supported yet: no lowering covers g.V().union(__.outE().count(), __.local(inE().count()))	g.V().union(__.outE().count(), __.local(inE().count()))
 deferred	this traversal is not supported yet: no lowering covers g.V().union(__.repeat(__.union( __.out("created"), __.in("created"))).times(2), __.repeat(__.union( __.in("created"), __.out("created"))).times(2)).label().groupCount()	g.V().union(__.repeat(__.union( __.out("created"), __.in("created"))).times(2), __.repeat(__.union( __.in("created"), __.out("created"))).times(2)).label().groupCount()
 deferred	this traversal is not supported yet: no lowering covers g.V().union(out(), fail())	g.V().union(out(), fail())
 deferred	this traversal is not supported yet: no lowering covers g.V().until(__.constant(true)).repeat(__.repeat(__.out("created")).until(__.has("name", "ripple"))).emit().values("lang")	g.V().until(__.constant(true)).repeat(__.repeat(__.out("created")).until(__.has("name", "ripple"))).emit().values("lang")
