@@ -107,7 +107,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # AbstractStep` take one start at a time unconditionally, so their arms genuinely are per-traverser.
 
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_unionXcount__outXcreatedX_countX
     Given the modern graph
     And the traversal of
@@ -123,7 +122,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # The barrier is NOT the terminal step here — `hasBarrier` asks whether the option CONTAINS one —
   # so `is(gt(0))` filters ONE collapsed value per arm, not one per vertex.
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_unionXoutXcreatedX_count_isXgtX0XX__inXcreatedX_countX
     Given the modern graph
     And the traversal of
@@ -141,7 +139,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # start was routed to. A `V()` re-source arm makes it unmissable — its rows do not come from the
   # arm's input at all.
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXnoneX_unionXcount__outXcreatedX_countX
     Given the modern graph
     And the traversal of

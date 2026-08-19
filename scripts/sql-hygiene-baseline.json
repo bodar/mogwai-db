@@ -553,8 +553,8 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 5957,
-    "compiler": 78,
+    "bytes": 10082,
+    "compiler": 92,
     "bound": 0
   },
   "V": {

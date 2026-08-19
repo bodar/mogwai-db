@@ -601,12 +601,23 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     `origin`, a rowid, cannot (a scalar parent, and position ≠ id under `order().by(k)`) — plus a
     per-arm `arm_idx` `branchOrder` channel, re-minted into a fresh `encounter` after the ordinary
     `mergeArms` (element/scalar/list/map/variant merge unchanged; the key is orthogonal). Nine
-    `branch-traverser-major`/`emission-order` scenarios pass. 🚧 What is LEFT, each fail-closed today:
-    **ARM-major** (a union/choose with a batched-barrier arm — `hasBarrier`/`armBatches` — needs the
-    batched arm run over the WHOLE input, a separate lowering); a **NESTED** branch inside a sliced arm
-    (needs a key STACK, not one `bord_p`); a **scoped-fold arm** (`union(values('name').fold(), …)` — the
-    per-origin fold's grouping empties `branchOrder` since its group policy is `undefined`; the parent is
-    the group key, so `MIN(bord_p)` would carry it, but that is a channel-core change).
+    `branch-traverser-major`/`emission-order` scenarios pass. ✅ **ARM-major landed for the ALL-BATCHED case**
+    (`batchedBranch`/`mintArmMajor`, `lower.ts`): a `union` where EVERY arm holds a barrier (`armBatches`) is
+    run per arm over the WHOLE input — each arm was already `continueAs`'d as a GLOBAL reduction over the
+    source, so the work is to UNION them ARM-major (`tagArm` + `renumber` over `[arm_idx, payload]`, the mirror
+    of `mintTraverserMajor` with no parent key) with a real `Sort` for the bare-result wire order. Two facts
+    made it tractable: the arms COLLAPSED (a barrier drops the per-row channels), so the merge base is the arms'
+    OWN channels not the input's — which is exactly what made the per-row `mergeArms` refuse them (`[bulk]` vs
+    `[]`); and the EMPTY-INPUT gate (`hasLabel('none').union(count,…)` is EMPTY not `[0,…]` — an option no start
+    was routed to emits nothing) is an `Exists(input)` where `input` is the SHARED branch source, so `name` CTEs
+    it with no replication. `union(__.count(), __.out('created').count())` → `[6,4]`, `union(__.min(),__.max())`
+    → `[27,35]`, both deterministic under `test:perturbed` (`element-branch-child`/`scalar-reentry`, 4 tags
+    dropped). 🚧 What is LEFT, each fail-closed today: a **MIXED batched/streaming** arm (`union(__.min(),
+    __.constant(99))` — a collapsed arm beside a per-input one, arm-major over a variant); a **batched `choose`**
+    (same path, unwired); an **alias through a collapsed arm** (`union(count.as('x'), …).select('x')` — the
+    barrier drops the label); a **NESTED** branch inside a sliced arm (needs a key STACK, not one `bord_p`); a
+    **scoped-fold arm** (`union(values('name').fold(), …)` — but note fold/count BATCH in a `union`, so this is
+    the arm-major LIST case, not a per-origin one).
 - **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
   (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is
   a PERF tail on already-correct queries, gated on measurement — not a pass to build.

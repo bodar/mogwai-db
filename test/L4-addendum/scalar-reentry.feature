@@ -124,7 +124,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # extremes. (`coalesce`/`optional` do NOT extend `BranchStep`, which is why their per-traverser
   # arms are right — see docs/2026-08-01-branch-arm-barrier-scope-plan.md §1.)
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXminX_maxX
     Given the modern graph
     And the traversal of

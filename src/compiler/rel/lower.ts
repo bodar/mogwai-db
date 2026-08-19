@@ -5174,6 +5174,64 @@ function branchArms(
           : null;
 }
 
+/**
+ * THE ARM-MAJOR MERGE — a `union`/`choose` whose EVERY arm holds a batched barrier (`armBatches`), so
+ * `BranchStep.standardAlgorithm` runs each option over the WHOLE input and drains them in ARM ORDER
+ * (`vendor/tinkerpop/gremlin-core/.../branch/BranchStep.java:143`). Each arm was already lowered by
+ * `continueAs` as a GLOBAL reduction over the branch source (a `count`/`fold`/`sum` over the whole input,
+ * not per-traverser), so the only work is to UNION them arm-major: tag each with its ordinal, merge, and
+ * re-mint `encounter` over `[arm_idx, payload]` — the mirror of `mintTraverserMajor` with no parent key.
+ *
+ * The arms COLLAPSED (a barrier drops the per-row channels), so the merge base is the arms' OWN channels,
+ * not the input's — which is exactly what made the per-row `mergeArms` refuse them (base `[bulk]` vs arm
+ * `[]`). They must agree; a disagreement (e.g. one arm kept `bulk`, i.e. it did NOT actually collapse)
+ * declines.
+ */
+const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter): FramedRel | null => {
+  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
+  const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
+  const merged = mergeArms(tagged, withChannel(base, BORD_ARM), labels, fresh);
+  if (!merged) return null;
+  const rel = merged.rel;
+  if (!rel.channels.some((channel) => channel.col === BORD_ARM.col)) return null;
+  const kept = rel.channels.filter((channel) => channel.role !== 'branchOrder');
+  const outChannels = withChannel(kept, ENCOUNTER);
+  const payload = payloadCols(rel);
+  const outCols = [...payload, ...carriedCols(outChannels)];
+  const terms = [
+    { expr: col(rel.id, BORD_ARM.col), dir: 'asc' as const },
+    ...payload.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const })),
+  ];
+  return { ...merged, rel: renumber(rel, terms, outCols, outChannels, fresh) };
+};
+
+/**
+ * A `union`/`choose` all of whose arms BATCH — the arm-major lowering, gated on the source being
+ * non-empty. `mintArmMajor` unions the arms' global reductions in arm order; the EMPTY-INPUT GATE is the
+ * reference's "an option no start was routed to emits nothing" (`element-branch-child.feature` —
+ * `hasLabel('none').union(count, …)` is EMPTY, not `[0, …]`). `input` is the SHARED branch source (every
+ * arm's subplan roots at it), so a second reference from an `Exists` makes `name` CTE it — no replication.
+ */
+function batchedBranch(
+  arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap,
+): FramedRel | null {
+  const merged = mintArmMajor(arms, arms[0]!.rel.channels, labels, fresh);
+  if (!merged) return null;
+  const gated = make.filter({
+    id: fresh('bg'), input: merged.rel, channels: merged.rel.channels, type: merged.rel.type,
+    pred: { kind: 'exists', plan: input, negated: false },
+  });
+  // GUARANTEE the arm-major wire order with a real ORDER BY — the same mechanism `order()` uses. A
+  // batched branch is often the WHOLE result (`union(count, out().count())` → an ordered `[6, 4]`), and a
+  // top-level `ROW_NUMBER` window does not order the wire by itself; a downstream consumer (a `count`,
+  // a `fold` collecting in encounter order) imposes its own, so the redundant sort is harmless there.
+  const enc = encounterOf(gated.channels);
+  const ordered = enc
+    ? make.sort({ id: fresh('bs'), input: gated, channels: gated.channels, type: gated.type, terms: [{ expr: col(gated.id, enc.col), dir: 'asc' }] })
+    : gated;
+  return { ...merged, rel: ordered };
+}
+
 function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -5205,6 +5263,9 @@ function unionArms(
     if (!arm) return null;
     arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
+  // ALL ARMS BATCH → ARM-MAJOR (`batchedBranch`), each a global reduction over the whole input unioned in
+  // arm order. Only reachable when `!slice` (a batched arm under a slice already declined above).
+  if (!slice && bodies.every((body) => armBatches(body!))) return batchedBranch(arms, input, fresh, labels);
   return slice
     ? mintTraverserMajor(arms, source, labels, fresh)
     : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
