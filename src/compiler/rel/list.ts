@@ -525,7 +525,9 @@ export function listMemberOp(
   if (LIST_LOCAL_TX.has(step.name) && isLocalScope(step)) {
     const window = step.name === 'tail'
       ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
-      : (() => { try { return sliceOf(step); } catch { return null; } })();
+      // An illegal `range(Scope.local, 2, 1)` is a `ValueParseError` answer that PROPAGATES (§6·5);
+      // only the "not a slice step" routing throw declines. Mirror of `sliceOp`.
+      : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
     if (!window) return null;
     const members = membersOf(list, fresh);
     const ordered = make.sort({

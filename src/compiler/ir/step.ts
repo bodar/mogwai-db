@@ -1,5 +1,6 @@
 import { gtypeName, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
 import { normalizeTypeName } from '../../gremlin/types.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 
 // ---------- the compiler's step node ----------
 //
@@ -238,7 +239,12 @@ export function sliceOf(step: IRStep): Slice {
     case 'skip': return { scope, offset: nums[0], limit: null };
     case 'range': {
       const [lo, hi] = nums;
-      if (hi >= 0 && lo > hi) throw new Error(`Not a legal range: [${lo}, ${hi}]`);
+      // `RangeGlobalStep`/`RangeLocalStep` throw `IllegalArgumentException("Not a legal range: [lo, hi]")`
+      // in their CONSTRUCTOR when `lo > hi` (both != -1) — the traversal's ANSWER is that error, so it is
+      // a `ValueParseError` that PROPAGATES (§6·5), NOT the plain `Error` the `default` case throws as an
+      // internal "not a slice step" routing signal. A caller catches the latter to decline; it must NOT
+      // catch this one, which is why the two are different classes.
+      if (hi >= 0 && lo > hi) throw new ValueParseError(`Not a legal range: [${lo}, ${hi}]`);
       return { scope, offset: lo, limit: hi < 0 ? null : hi - lo };
     }
     default: throw new Error(`${step.name}() is not a slice step`);

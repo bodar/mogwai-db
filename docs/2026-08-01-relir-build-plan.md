@@ -658,6 +658,13 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   a different error not yet built). Message is the reference's verbatim to the corpus-checked prefix
   (the offending `<class>` is omitted — `Guard.valueColumn` appends, the reference spells it
   mid-sentence, no scenario checks past the prefix). L3 +3.
+- ✅ **An illegal `range(low, high)` (`low > high`, both != -1) RAISES — LANDED.** `RangeGlobalStep`/
+  `RangeLocalStep` throw `"Not a legal range: [low, high]"` in their CONSTRUCTOR
+  (`vendor/tinkerpop/gremlin-core/.../step/filter/RangeGlobalStep.java:65-66`). `sliceOf` already
+  computed the check; it now throws a `ValueParseError` (a propagating ANSWER, §6·5) instead of a plain
+  `Error`, and the two `sliceOp`/`listMemberOp` catchers rethrow that class rather than swallowing it to
+  a generic `UnsupportedTraversal`. Both scopes, though the corpus names only the global — one authority.
+  L3 +2.
 - **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and
   `barrier(Barrier.normSack)`. Both honest.
 - **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;

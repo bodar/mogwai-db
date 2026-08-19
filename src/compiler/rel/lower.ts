@@ -29,7 +29,7 @@ import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { alwaysProduces, MAPPING_TERMINAL } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES,
     jsonMemberByTypeof, keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
@@ -1256,14 +1256,15 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
     return slice(input, last, encounter, 'desc', fresh);
   }
 
-  // `sliceOf` REJECTS an illegal range (`range(2,1)`) by throwing, which is right where it is the
-  // only answer available — but this module's contract is that `null` is its only decline, and a
-  // throw from here would be the lowering raising mid-fold rather than declining cleanly. Catching
-  // and declining keeps that contract. Found by sweeping every prefix of every corpus traversal
-  // under all four switch combinations, which is the only way a decline-contract violation shows up
-  // at all.
+  // `sliceOf` throws in two DIFFERENT senses (§6·5). An illegal range (`range(2,1)`) is a
+  // `ValueParseError` — the traversal's ANSWER is that error, so it PROPAGATES rather than declining
+  // (catching it would turn a required error into a generic `UnsupportedTraversal`, the wrong
+  // classification). Any OTHER throw is the internal "not a slice step" routing signal, which this
+  // module's `null`-only decline contract catches. Found by sweeping every prefix of every corpus
+  // traversal under all four switch combinations, which is the only way a decline-contract violation
+  // shows up at all.
   let window;
-  try { window = sliceOf(step); } catch { return null; }
+  try { window = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
   // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
   // slice must count traversers — which needs a position to accumulate along, so a bulked relation

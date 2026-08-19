@@ -619,6 +619,17 @@ describe('the RelIR spine', () => {
     });
   }
 
+  // `range(low, high)` with `low > high` (both != -1) is a `RangeGlobalStep`/`RangeLocalStep` CONSTRUCTOR
+  // throw (`Not a legal range: [low, high]`, `RangeGlobalStep.java:65-66`) — the traversal's ANSWER is
+  // that error, so `sliceOf` raises a `ValueParseError` that PROPAGATES (§6·5) rather than declining. Both
+  // scopes, though the corpus names only the global form — logical completeness, one authority.
+  test('an illegal range raises, at either scope', () => {
+    for (const gremlin of [
+      'g.V().range(2, 1)', 'g.V().range(3, 2)',
+      'g.V().fold().range(Scope.local, 2, 1)', "g.inject(['a','b','c']).range(Scope.local, 2, 1)",
+    ]) expect(() => compile(gremlin, {}), gremlin).toThrow('Not a legal range:');
+  });
+
   // A LOCAL (`Scope.local`) `StringLocalStep` transform maps over the members, but throws on any member
   // that is neither null nor a String (`StringLocalStep.java:54-58`). The member type is per-row/unknown
   // here (never a static tag), so the check is a RUNTIME guard binding — the plan is a PROGRAM whose
