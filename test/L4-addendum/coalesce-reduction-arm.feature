@@ -69,3 +69,22 @@ Feature: mogwai addendum — a coalesce/optional arm may REDUCE per traverser
       | result |
       | d[0].l |
       | d[2].l |
+
+  @gap:coalesce-reduction-arm
+  Scenario: g_V_hasLabelXpersonX_coalesceXoutXknowsX_count__constantXneg1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").coalesce(__.out("knows").count(), __.constant(-1))
+      """
+    # A count arm (result:'count', STATIC('long')) merges with a plain scalar: the meet is a per-row
+    # tagged scalar (count→long, constant→int) rather than a decline. count() seeds 0 so it always
+    # fires — the constant(-1) is a dead fallback and every result is the LONG count. `d[N].l` pins the
+    # wire type: were the meet dropping the Long tag the framer would emit `d[N].i`.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+      | d[0].l |
+      | d[0].l |
+      | d[0].l |

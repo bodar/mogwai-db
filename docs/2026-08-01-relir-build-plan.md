@@ -533,9 +533,12 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   (`FlatMapStep`/`AbstractStep`, per-traverser); `union`/`choose extends BranchStep` BATCH a reducer arm over
   the whole input (`element-branch-child.feature`, `[6,4]`), so their reducer arms are the arm-major lowering,
   NOT this. `coalesce-reduction-arm.feature`. 🚧 LEFT on this arm: a SEEDED reducer only (`count`/`fold`) — a
-  non-seeded `max`/`sum` arm whose emptiness needs a `present` filter stays declined; and the mixed shapes the
-  merge cannot yet take — a reducer-`result` scalar beside a plain scalar (`coalesce(count, constant)`) and a
-  list-arm-beside-scalar variant UNDER SLICE both decline at the arm merge, not the reduction. ✅ **`optional`
+  non-seeded `max`/`sum` arm whose emptiness needs a `present` filter stays declined. ✅ **A `count` arm now
+  MEETS a plain scalar** (`coalesce(__.out().count(), __.constant(0))`): `result:'count'` carries a
+  `STATIC('long')` type and NO `vt` column, so `meetScalarArms` admits it (count→long, constant→int, a per-row
+  tagged scalar; the count wins as a `long` since it seeds, the default is a dead fallback). A `result:'number'`
+  reducer (`sum`/`mean`) is still refused there — its type rides on a `vt` column the meet's own `vtype` would
+  contradict — as is a list-arm-beside-scalar variant UNDER SLICE (the arm merge, not the reduction). ✅ **`optional`
   now lowers** (`optionalArms`) as `coalesce(t, __.identity())` — an EMPTY-body fallback arm that `continueAs`
   restores as the input unchanged — so it inherits the reduction arm, the traverser-major slice key, and (a
   branch, so the `path` channel's `pad` merge already handles it) `optional(…).path()` at depth: the two nested

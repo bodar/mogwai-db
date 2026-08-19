@@ -5243,7 +5243,12 @@ function unionArms(
 function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
   const types: ScalarType[] = [];
   for (const arm of arms) {
-    if (arm.framing.kind !== 'scalar' || arm.framing.result !== undefined) return null;
+    if (arm.framing.kind !== 'scalar') return null;
+    // A `result:'count'` arm carries a proper `STATIC('long')` type and NO `vt` column, so it meets like
+    // any typed scalar — which is what lets `coalesce(__.out().count(), __.constant(0))` merge (count→long,
+    // constant→int, a per-row tagged scalar). `result:'number'`/`'value'` are refused: their type rides on
+    // a `vt` column the meet's own `vtype` column would then contradict — the two-authorities trap.
+    if (arm.framing.result !== undefined && arm.framing.result !== 'count') return null;
     types.push(arm.framing.type);
   }
   // The MEET itself is `render.ts`'s — the same question a named collection asks of its sites. What
