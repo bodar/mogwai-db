@@ -630,6 +630,37 @@ describe('the RelIR spine', () => {
     ]) expect(() => compile(gremlin, {}), gremlin).toThrow('Not a legal range:');
   });
 
+  // A NULL OPERAND is `Compare`'s null-space rule (comparable(f,s) is false unless BOTH null,
+  // `GremlinValueComparator.java:314-316`): `eq(null)`→IS NULL, `neq(null)`→IS NOT NULL, `gt/lt(null)`
+  // never, `gte/lte(null)`→IS NULL. Verified against `semantics/Comparability.feature`.
+  test('a null predicate operand is the null-space compare', async () => {
+    const cases: [string, unknown[]][] = [
+      ['g.inject(1.0d).is(P.eq(null))', []], ['g.inject(1.0d).is(P.neq(null))', [1.0]],
+      ['g.inject(1.0d).is(P.gt(null))', []], ['g.inject(1.0d).is(P.gte(null))', []],
+      ['g.inject(1.0d).is(P.lt(null))', []], ['g.inject(1.0d).is(P.lte(null))', []],
+      ['g.inject(null).is(P.eq(null))', [null]], ['g.inject(null).is(P.gte(null))', [null]],
+      ['g.inject(null).is(P.neq(null))', []],
+    ];
+    for (const [gremlin, want] of cases)
+      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(want);
+  });
+
+  // ⚠️ NaN IS null on this substrate — a DOCUMENTED DEVIATION (feature-support-matrix §10). SQLite has
+  // no NaN, so `inject(NaN)` folds to `null` at the front door (`const.ts`), a constant not a bind.
+  // `±Infinity` is representable (a real overflow literal) and inlines faithfully.
+  test('NaN folds to null; Infinity inlines as a constant, no bind', () => {
+    for (const [gremlin, sql] of [
+      ['g.inject(NaN)', 'VALUES (NULL)'], ['g.inject(Infinity)', 'VALUES (9e999)'],
+      ['g.inject(-Infinity)', 'VALUES (-9e999)'],
+    ] as const) {
+      const plan = read(gremlin);
+      expect(plan.binds.length, gremlin).toBe(0);
+      expect(plan.sql, gremlin).toContain(sql);
+    }
+    // The deviation's consequence: NaN matches the null-space eq (Java returns empty).
+    expect(read('g.inject(NaN).is(P.eq(null))').sql).toContain('IS NULL');
+  });
+
   // A LOCAL (`Scope.local`) `StringLocalStep` transform maps over the members, but throws on any member
   // that is neither null nor a String (`StringLocalStep.java:54-58`). The member type is per-row/unknown
   // here (never a static tag), so the check is a RUNTIME guard binding — the plan is a PROGRAM whose

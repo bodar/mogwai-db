@@ -28,15 +28,39 @@ import type { Arg } from '../../gremlin/frontend.ts';
  *
  *  Either way, a shape a scalar literal cannot spell — a collection, a map, a nested traversal, or a
  *  big-value carrier (bigint/BigDecimal/Duration, the `oversized` tail) — declines with `null` for the
- *  caller to route (a param of that shape is oversized, handled where collections already are). A
- *  non-finite number (`NaN`/±`Infinity`) has no literal form, so it stays a bound `lit`. */
+ *  caller to route (a param of that shape is oversized, handled where collections already are).
+ *
+ *  ⚠️ **A non-finite CONSTANT INLINES — a bind earned nothing and violated the parameter budget.**
+ *  `±Infinity` HAS a SQLite literal: `9e999` overflows to `+Inf` and `-9e999` to `-Inf`, both stored as
+ *  a real (`typeof(9e999)` = `'real'`, `9e999 > 1e308` is true), identical in SQL to a bound Infinity —
+ *  so binding it spent a parameter to reach the same value a literal reaches for free (the root
+ *  `CLAUDE.md` bind rule: a value the compiler already holds is a constant).
+ *
+ *  ⚠️ **`NaN` FOLDS TO `null` at the front door — a DELIBERATE, documented deviation from Java.** SQLite
+ *  has no NaN: it is `NULL` however it arrives (`typeof(9e999-9e999)` = `'null'`), so the substrate has
+ *  ALREADY collapsed IEEE's `Error<Number>` poison-value into "absent". Rather than let that collapse
+ *  emerge implicitly three layers down, this states it ONCE: `NaN` → `compilerNull()`. Mechanical
+ *  sympathy with the store (`docs/feature-support-matrix.md` §10 records the deviation and its
+ *  consequence — `inject(NaN).is(P.eq(null))` MATCHES where TinkerPop returns empty, because for us NaN
+ *  IS null). No workload carries NaN as a distinct value — it arrives only as a typed conformance-probe
+ *  literal or from a `0.0/0.0` computation SQLite already NULLs — so folding it costs no real query and
+ *  buys one legible rule over a footnoted coincidence. A USER PARAMETER that is `±Infinity` still binds
+ *  (a parameter is the user's intent, the cap is a parameter budget); a NaN parameter is unreachable
+ *  (`NaN` has no wire form to arrive as a bound `GValue`). */
 export const constLit = (a: Arg): Expr | null => {
   const { value, type, name: paramName } = a;
   if (value === null) return paramName != null ? param(value, paramName) : compilerNull();
   if (typeof value === 'string') return paramName != null ? param(value, paramName, 'text') : compilerText(value);
   if (typeof value === 'boolean') return paramName != null ? param(value, paramName) : compilerInt(value ? 1 : 0);
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
+    // `NaN` is `null` on this substrate (see the ⚠️ above) — stated here, not left to `9e999-9e999`.
+    // `±Infinity` inlines as `compilerReal` (the emit spells `9e999`/`-9e999`); a non-finite PARAMETER
+    // binds by the user-intent rule.
+    if (Number.isNaN(value)) return compilerNull();
+    if (!Number.isFinite(value)) {
+      if (paramName != null) return param(value, paramName);
+      return compilerReal(value);
+    }
     if (paramName != null) return param(value, paramName);
     if (!Number.isInteger(value)) return compilerReal(value);
     const flat = flatType(type);

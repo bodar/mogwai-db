@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,581<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,595<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -43,7 +43,7 @@ unsupported throws a clear error and never mis-executes.
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label,…)` | ✅ | every arity, in every position including inside a predicate body |
 | `has(T.id,…)`, `hasId` | ❌ | |
 | `hasKey`, `hasValue` | ✅ | one `HasContainer` on `T.key`/`T.value`; single arg is `eq`, several a `within`, and a NULL member is inert (an all-null set matches nothing). The value compares through the row's own `vtype`, so an exact number carried as decimal TEXT compares numerically |
-| `is(P)` | ✅ | a `constant()` operand folds to its literal; an operand TRAVERSAL compiles to a value compared against its FIRST result, re-sourced or correlated. An unproductive operand is SQL NULL — it drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
+| `is(P)` | ✅ | a `constant()` operand folds to its literal; an operand TRAVERSAL compiles to a value compared against its FIRST result, re-sourced or correlated. An unproductive operand is SQL NULL — it drops the traverser for `eq` and contributes nothing to a `within` set. A **null operand** is `Compare`'s null-space rule, not a value compare (`comparable` is false unless BOTH are null): `eq(null)`→`IS NULL`, `neq(null)`→`IS NOT NULL`, `gt/lt(null)`→never, `gte/lte(null)`→`IS NULL`. ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
 | `where(__.…)`, `not`, `filter(__.…)` | ✅ | single- and multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth, per-parent `order().by(key)` before a slice, and a bare value-projection body (`where(__.values('name'))` — keeps a traverser iff the projection produces). ❌ ordered children using traversal-valued `by()` |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream and alias-column compare work. ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or` | ✅ | infix on STEPS and on PREDICATES (`P.gt(20).and(P.lt(30))`, `P.gt(30).negate()`), to any depth. ❌ `filter(rawPredicate)` |
@@ -176,9 +176,17 @@ lists/sets/maps. Scalar type rides PER ROW, so a heterogeneous stream frames eac
 | `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity |
 | `split` | ❌ | |
 
-🔴 Four documented deviations, not defects: host-language typing in Java/.NET; 128-bit arithmetic
+🔴 Five documented deviations, not defects: host-language typing in Java/.NET; 128-bit arithmetic
 declines; int64 overflow raises natively; 32-bit float arithmetic is not expressible (SQLite REAL is
-always a double).
+always a double); and **`NaN` IS `null`** — SQLite has no NaN (it stores one as `NULL` however it
+arrives), so mogwai folds a `NaN` literal to `null` at ingestion, agreeing with the store rather than
+faking a value it cannot hold. This diverges from Java, where `NaN ≠ null`: `inject(NaN).is(P.eq(null))`
+MATCHES for us (Java returns empty) and `inject(NaN).is(P.neq(null))` is empty (Java returns `[NaN]`).
+The choice is mechanical sympathy with the substrate — NaN is IEEE's in-band `Error<Number>` poison
+value, never a workload value, and it reaches a query only as a conformance-probe literal or from a
+`0.0/0.0` the store already NULLs. `±Infinity` is unaffected: SQLite represents it (a real overflow
+literal `9e999`/`-9e999`), so it compares faithfully. Both fold at one seam (`compiler/rel/const.ts`),
+inlined as constants — never a bind.
 
 ## 11. Writes
 

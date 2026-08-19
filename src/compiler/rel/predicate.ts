@@ -419,6 +419,24 @@ export function predicateExpr(
 
   const comparison = COMPARISON[op];
   if (comparison) {
+    // A NULL OPERAND is `Compare`'s null-space rule, not a value comparison: `comparable(f, s)` is FALSE
+    // unless BOTH are null (`vendor/tinkerpop/gremlin-core/.../util/GremlinValueComparator.java:314-316`),
+    // so every ordering test short-circuits and equality is null-vs-null. SQLite `= NULL` is itself NULL
+    // (never true), which is exactly wrong here — so the operand never reaches `operand()` (which declines
+    // it) and the predicate is spelled as an explicit IS [NOT] NULL:
+    //   eq(null)  → subject IS NULL      neq(null) → subject IS NOT NULL
+    //   gt/lt(null) → FALSE (a value is never > or < null; null-vs-null is compare=0, not >/<)
+    //   gte/lte(null) → subject IS NULL  (true ONLY when both are null: compare=0 satisfies >=/<=)
+    // Verified against `semantics/Comparability.feature` (the `InjectX1dX_*XnullX` and `InjectXnullX_*`
+    // scenarios): over `1.0d` every arm but `neq` is empty; over a null subject `eq`/`gte`/`lte` hold.
+    if (operands[0].value === null && !isPred(operands[0].value)) {
+      switch (op) {
+        case 'eq': case 'gte': case 'lte': return binary('is', subject, compilerNull());
+        case 'neq': return binary('is not', subject, compilerNull());
+        case 'gt': case 'lt': return CONSTANT.false;
+        default: return null;
+      }
+    }
     // The operand inlines as a TYPED literal, storage class following its declared canonical type —
     // the thesis's "we know the type, stop throwing it away" (an integer-valued `P.gt(2.0)` renders
     // `2.0`, not `2`). Result-invariant: SQLite compares an INTEGER and a REAL numerically alike.

@@ -88,9 +88,14 @@ export const compilerInt = (value: number): Expr => {
  * type is `float`/`double`/`bigdecimal` (or a fractional value of any type). Rendered as a literal that
  * carries an explicit REAL storage class (a decimal point or exponent), so an integer-valued double
  * inlines as `2.0` rather than the INTEGER `2` a bare spelling would produce. Query/store numbers must
- * use `lit()` and remain binds. */
+ * use `lit()` and remain binds.
+ *
+ * `±Infinity` is admitted (the emit spells it `9e999`/`-9e999`, a SQLite overflow literal) — a
+ * non-finite CONSTANT inlines rather than binding (`compiler/rel/const.ts`). `NaN` is refused, because
+ * SQLite has no NaN at all and `constLit` renders it as `9e999 - 9e999` (a binary) rather than through
+ * this constructor — a `compilerReal(NaN)` would be a caller error, so it stays a throw. */
 export const compilerReal = (value: number): Expr => {
-  if (!Number.isFinite(value)) throw new Error(`RelIR compiler real must be finite: ${value}`);
+  if (Number.isNaN(value)) throw new Error(`RelIR compiler real cannot be NaN (SQLite has no NaN): ${value}`);
   return { kind: 'lit', value, type: 'real', source: 'compiler-real' };
 };
 

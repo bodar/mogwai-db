@@ -126,8 +126,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           case 'compiler-text': return textLiteral(e.value);
           case 'compiler-int': return raw(String(e.value));
           // A REAL literal must carry a decimal point or exponent, else SQLite reads an integer-valued
-          // double (`2.0`) back as INTEGER `2` and loses the storage class the type declared.
-          case 'compiler-real': { const s = String(e.value); return raw(/[.eE]/.test(s) ? s : `${s}.0`); }
+          // double (`2.0`) back as INTEGER `2` and loses the storage class the type declared. `±Infinity`
+          // has no finite spelling but SQLite overflows `9e999`/`-9e999` to `±Inf` (stored REAL) — and
+          // `String(Infinity)` = `"Infinity"` is not valid SQL, so it is spelled here. (NaN never reaches
+          // this arm — `constLit` renders it `9e999 - 9e999`, since SQLite has no NaN at all.)
+          case 'compiler-real': {
+            if (!Number.isFinite(e.value as number)) return raw((e.value as number) > 0 ? '9e999' : '-9e999');
+            const s = String(e.value); return raw(/[.eE]/.test(s) ? s : `${s}.0`);
+          }
           case 'compiler-null': return raw('NULL');
         }
       case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;
