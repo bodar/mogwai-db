@@ -524,7 +524,20 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   lands a correlated LIST subquery. The seed is FREE — `foldElements`/`foldScalars` already
   `COALESCE(json_group_array, '[]')`, so a sink's subquery over an empty body yields `[]` with no seed
   machinery. And because the body is ONE correlated subquery per host, a barrier INSIDE it (`order()`/`dedup()`
-  before the fold) is scoped per-origin for FREE and correct (L3 +1). 🚧 What is LEFT of the fan-out multiplier,
+  before the fold) is scoped per-origin for FREE and correct (L3 +1). ✅ **A `coalesce`/`optional` ARM is now a
+  consumer too** (`reductionArm`, `lower.ts`): a branch arm ending in a per-origin collapse
+  (`coalesce(__.out().count(), __.constant(0))`, `coalesce(__.values(k).fold(), …)`) routes through the SAME
+  `scalarChild` reduction — one row per host, so a `local`-style per-origin fold/count works as a branch arm
+  AND carries the frozen fan-out position, composing under a downstream slice. `reductionHost`/`reductionTail`
+  are the extracted host + payload projection shared with `perTraverserChild`. ⚠️ ONLY `coalesce`/`optional`
+  (`FlatMapStep`/`AbstractStep`, per-traverser); `union`/`choose extends BranchStep` BATCH a reducer arm over
+  the whole input (`element-branch-child.feature`, `[6,4]`), so their reducer arms are the arm-major lowering,
+  NOT this. `coalesce-reduction-arm.feature`. 🚧 LEFT on this arm: a SEEDED reducer only (`count`/`fold`) — a
+  non-seeded `max`/`sum` arm whose emptiness needs a `present` filter stays declined; and the mixed shapes the
+  merge cannot yet take — a reducer-`result` scalar beside a plain scalar (`coalesce(count, constant)`) and a
+  list-arm-beside-scalar variant UNDER SLICE both decline at the arm merge, not the reduction; and `optional`
+  itself is not yet in `BRANCH_HOSTS` (`optional(t) ≡ coalesce(t, __.identity())`, the next caller). 🚧 What is
+  LEFT of the fan-out multiplier,
   fail-closed today: a per-origin SCALAR-order path (`values(k).order().fold()` still declines — a scalar
   stream order in the correlated body), and the reductions with NO fold (`max(local)`/`mean(local)` after a
   scoped fold); the same machinery is what `group().by(k).by(__.out().fold()|limit(n)|order())` needs;
