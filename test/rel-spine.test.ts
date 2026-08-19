@@ -240,7 +240,7 @@ const COVERED = [
   "g.inject(['a','b']).unfold()", 'g.inject([1,2]).unfold().is(P.gt(1))', "g.inject(['a','b']).unfold().toUpper()",
   "g.inject(['a','b']).unfold().count()", "g.inject(['b','a']).unfold().order()",
   // member transforms — `Scope.local` maps over the members; the GLOBAL spelling is a permanent type
-  // error on a collection, which raises TinkerPop's own message (see the DECLINED list).
+  // error on a collection, which raises TinkerPop's own message (see GLOBAL_STRING_ERRORS below).
   "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
   "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
   "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
@@ -598,6 +598,25 @@ describe('the RelIR spine', () => {
   for (const gremlin of DECLINED) {
     test(`${gremlin} is refused, not mis-answered`, () => {
       expect(() => compile(gremlin, {}), gremlin).toThrow(UnsupportedTraversal);
+    });
+  }
+
+  // A GLOBAL (non-`Scope.local`) string transform over a LIST is a permanent type error, not a gap:
+  // every `*GlobalStep` throws `IllegalArgumentException` on a non-String receiver, and the traverser
+  // IS the list (`vendor/tinkerpop/gremlin-core/.../map/*GlobalStep.java`). So the ANSWER is that error
+  // and the message is the reference's verbatim (§6·5) — the corpus checks the prefix `containing text`,
+  // which is what these assert. `asString` is deliberately absent: its global form stringifies (see
+  // COVERED — `g.inject([1,2]).asString(Scope.local)` and its global answer are real values, not errors).
+  const GLOBAL_STRING_ERRORS: [string, string][] = [
+    ['toUpper', "g.inject(['a','b']).toUpper()"], ['toLower', "g.inject(['a','b']).toLower()"],
+    ['trim', "g.inject(['a','b']).trim()"], ['lTrim', "g.inject(['a','b']).lTrim()"],
+    ['rTrim', "g.inject(['a','b']).rTrim()"], ['length', "g.inject(['a','b']).length()"],
+    ['substring', "g.inject(['aa','bb']).substring(1,2)"], ['replace', "g.inject(['a','b']).replace('a','b')"],
+  ];
+  for (const [step, gremlin] of GLOBAL_STRING_ERRORS) {
+    test(`${gremlin} raises TinkerPop's type error`, () => {
+      expect(() => compile(gremlin, {}), gremlin)
+        .toThrow(`The ${step}() step can only take string as argument`);
     });
   }
 

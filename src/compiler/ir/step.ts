@@ -430,6 +430,17 @@ export const STRING_LOCAL_TX: ReadonlySet<string> = new Set([
   'toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace',
 ]);
 
+/** The members of `STRING_LOCAL_TX` whose GLOBAL (non-`Scope.local`) form is a permanent type error
+ *  over a collection: each is a `*GlobalStep` whose `map` throws `IllegalArgumentException` on a
+ *  non-String traverser (`vendor/tinkerpop/gremlin-core/.../map/{ToUpper,ToLower,Trim,LTrim,RTrim,
+ *  Length,Substring,Replace}GlobalStep.java`). `asString` is the ONE exclusion — `AsStringGlobalStep`
+ *  stringifies ANY value (`String.valueOf`), so `g.inject([1,2]).asString()` answers `"[1, 2]"` and
+ *  only a null traverser raises (`Can't parse null as String.`). So the answer to a global string
+ *  transform over a LIST is that error, not a decline — the shape is CERTAIN (§6·5), it is a list. */
+export const GLOBAL_STRING_THROWS: ReadonlySet<string> = new Set([
+  'toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'length', 'substring', 'replace',
+]);
+
 /** The collection ops with an unambiguous meaning over a PATH: the path coerces to its element
  *  sequence and the op reshapes/filters/explodes that list. `order`/`dedup`/`limit`/`count` are
  *  deliberately absent — over a path those are WHOLE-STREAM ops, so they overlap

@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
-import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
+import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
@@ -266,6 +266,19 @@ export function listMemberOp(
   step: IRStep, input: Rel, of: ListOf, fresh: Minter, child?: ChildSeam,
 ): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean } | null {
   if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms) return null;
+  // A GLOBAL string transform over a collection is a permanent type error, WHATEVER the member framing:
+  // the traverser IS the list, and every `*GlobalStep` throws `IllegalArgumentException` on a non-String
+  // receiver (`vendor/tinkerpop/gremlin-core/.../map/{ToUpper,ToLower,Trim,LTrim,RTrim,Length,Substring,
+  // Replace}GlobalStep.java`). The shape is CERTAIN here — we are in the list vocabulary — so this raises
+  // TinkerPop's own message as the ANSWER (§6·5), before the per-arm member-admission gate below, rather
+  // than declining. `asString` is excluded (`GLOBAL_STRING_THROWS` omits it): `AsStringGlobalStep`
+  // stringifies any value (`String.valueOf` → `"[1, 2]"`), a real answer this module does not yet build.
+  // ⚠️ `replace`'s message alone carries a trailing period (`ReplaceGlobalStep`), the rest do not.
+  if (!isLocalScope(step) && GLOBAL_STRING_THROWS.has(step.name)) {
+    const dot = step.name === 'replace' ? '.' : '';
+    throw new ValueParseError(
+      `The ${step.name}() step can only take string as argument, encountered class java.util.ArrayList${dot}`);
+  }
   // ⚠️ **MEMBER ADMISSION IS PER ARM, NOT AT THE DOOR.** It was one `isBareList` gate, which is the right
   // answer for exactly the arms that read a member AS A VALUE — a string transform and a member
   // predicate cannot be asked of a rowid. It is the wrong answer for every arm that does not: a local
@@ -279,11 +292,10 @@ export function listMemberOp(
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
-  // A STRING transform maps over the members — and only with `Scope.local`. Its global spelling is a
-  // permanent type error on a collection (a list is not a string) — TinkerPop's own message — so this
-  // declines rather than inventing a second one.
+  // A STRING transform maps over the members — and only with `Scope.local` (the global form threw
+  // above). A member read AS A VALUE, so an element member (a ROWID) declines: the transform would
+  // rewrite the id, not a string.
   if (STRING_LOCAL_TX.has(step.name)) {
-    // A member read AS A VALUE: an element member is a ROWID, so the transform would rewrite the id.
     if (!isLocalScope(step) || !isBareList(of)) return null;
     const members = membersOf(list, fresh);
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the

@@ -631,6 +631,21 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 - **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
   `path().by(<transform>)` writes) — inert until tags join a comparison; a null tag means "infer from the
   value" everywhere else.
+- ✅ **A GLOBAL string transform over a LIST is TinkerPop's type error, not a gap — LANDED.**
+  `toUpper/toLower/trim/lTrim/rTrim/length/substring/replace` each have a `*GlobalStep` that throws
+  `IllegalArgumentException` on a non-String receiver, and over a list the receiver IS the list
+  (`vendor/tinkerpop/gremlin-core/.../map/{ToUpper,…,Replace}GlobalStep.java`). The shape is CERTAIN in
+  the list vocabulary (§6·5), so `listMemberOp` raises the reference's verbatim
+  `"The <step>() step can only take string as argument, encountered class java.util.ArrayList"` (a
+  `ValueParseError` that PROPAGATES) rather than declining to a generic `UnsupportedTraversal`
+  (`GLOBAL_STRING_THROWS`, `ir/step.ts`). Calcite's prior art is the LAYER, not the message: an
+  operator over a wrong-typed operand raises at VALIDATION before any plan node
+  (`vendor/calcite/core/.../sql/validate/SqlValidatorImpl.java`), which is exactly a compile-time raise
+  ahead of SQL emission. `asString` is the ONE exclusion — `AsStringGlobalStep` stringifies any value
+  (`"[1, 2]"`), a real answer. 🚧 What is LEFT: the LOCAL form over a provably-non-string member
+  (`g.inject([1,2]).trim(Scope.local)` → `"The trim(local) step can only take string or list of
+  strings, encountered <class> in list"`, `StringLocalStep.java:54-58`) — a PER-MEMBER type check, which
+  needs a member's type known statically (trivial over a literal `[1,2]`, a run-time guard over a column).
 - **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and
   `barrier(Barrier.normSack)`. Both honest.
 - **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
