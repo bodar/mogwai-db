@@ -240,11 +240,10 @@ const COVERED = [
   "g.inject(['a','b']).unfold()", 'g.inject([1,2]).unfold().is(P.gt(1))', "g.inject(['a','b']).unfold().toUpper()",
   "g.inject(['a','b']).unfold().count()", "g.inject(['b','a']).unfold().order()",
   // member transforms — `Scope.local` maps over the members; the GLOBAL spelling is a permanent type
-  // error on a collection, which raises TinkerPop's own message (see GLOBAL_STRING_ERRORS below).
-  "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
-  "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
-  "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
-  "g.inject(['ab','c']).length(Scope.local)", "g.inject([1,2]).asString(Scope.local)",
+  // error on a collection (GLOBAL_STRING_ERRORS below), and a `StringLocalStep` local form carries a
+  // per-member RUNTIME guard, so it is a PROGRAM (see LOCAL_STRING_GUARDED below), not a plain read.
+  // `asString(Scope.local)` stays a read: `AsStringLocalStep` stringifies each member (no throw).
+  "g.inject([1,2]).asString(Scope.local)",
   // member predicates — `all` is "no member FAILS", which differs from "every member passes" once a
   // predicate can be NULL. This was wrong until 2026-08-03 (L4 list-member-predicate).
   "g.inject(['a','a']).all(P.eq('a'))", "g.inject(['a','b']).all(P.eq('a'))",
@@ -275,7 +274,7 @@ const COVERED = [
   "g.V().values('name').fold().count(Scope.local)", "g.V().values('age').fold().sum(Scope.local)",
   "g.V().values('age').fold().max(Scope.local)", "g.V().values('age').fold().min(Scope.local)",
   "g.V().values('age').fold().mean(Scope.local)", "g.V().values('name').fold().conjoin(';')",
-  "g.V().values('name').fold().toUpper(Scope.local)", "g.V().values('name').fold().limit(Scope.local,2)",
+  "g.V().values('name').fold().limit(Scope.local,2)",
   "g.V().values('name').fold().tail(Scope.local,2)", "g.V().values('name').fold().all(P.eq('marko'))",
   "g.V().values('name').fold().any(P.eq('marko'))", "g.V().values('name').fold().unfold().toUpper()",
   // THE SET-OP FAMILY over a list OPERAND — six semantics, one frame, and the operand crosses the seam
@@ -619,6 +618,40 @@ describe('the RelIR spine', () => {
         .toThrow(`The ${step}() step can only take string as argument`);
     });
   }
+
+  // A LOCAL (`Scope.local`) `StringLocalStep` transform maps over the members, but throws on any member
+  // that is neither null nor a String (`StringLocalStep.java:54-58`). The member type is per-row/unknown
+  // here (never a static tag), so the check is a RUNTIME guard binding — the plan is a PROGRAM whose
+  // guard raises iff a non-string member EXISTS. Not a decline (that would refuse the valid all-string
+  // case) and not silent coercion (SQLite `upper(1)`=`'1'` is the wrong answer §12). `asString(local)`
+  // takes NO guard — `AsStringLocalStep` stringifies each member — so it stays a plain read (COVERED).
+  test('a local StringLocalStep transform is a guarded program', () => {
+    for (const gremlin of [
+      "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
+      "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
+      "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
+      "g.inject(['ab','c']).length(Scope.local)", "g.V().values('name').fold().toUpper(Scope.local)",
+    ]) expect(compile(gremlin, {}).kind, gremlin).toBe('program');
+  });
+
+  // The guard FIRES on a provably-non-string member (a literal int list, an `age` fold), keeps a valid
+  // all-string list (a `name` fold, a null-bearing string list), and never fires for `asString`.
+  test('a local StringLocalStep guard raises on a non-string member, passes strings', async () => {
+    for (const gremlin of [
+      'g.inject([1,2]).trim(Scope.local)', 'g.inject([1,2]).length(Scope.local)',
+      "g.inject(['a',1]).trim(Scope.local)",
+      'g.V().hasLabel("person").values("age").order().fold().trim(Scope.local)',
+    ]) expect(() => exec(seededStore()).buffers(gremlin, {}, {}), gremlin)
+      .toThrow('step can only take string or list of strings');
+    const want: [string, unknown[]][] = [
+      ["g.inject(['a','b']).trim(Scope.local)", [['a', 'b']]],
+      ['g.inject(["feature","tESt",null]).toUpper(Scope.local)', [['FEATURE', 'TEST', null]]],
+      ["g.V().values('name').order().fold().toUpper(Scope.local)", [['JOSH', 'LOP', 'MARKO', 'PETER', 'RIPPLE', 'VADAS']]],
+      ['g.inject([1,2]).asString(Scope.local)', [['1', '2']]],
+    ];
+    for (const [gremlin, expected] of want)
+      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(expected);
+  });
 
   test('a re-source carries an alias into a following write', async () => {
     // `GraphStep` splits the incoming traverser, rather than creating a fresh one: `from('a')`

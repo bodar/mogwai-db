@@ -3346,6 +3346,15 @@ function listTail(
       // decides the marker states it and the field is authoritative when present. A rewrite drops it for
       // its own reason: new member values are not the distinct results of anything.
       if (member.set !== undefined) set = member.set;
+      // A member op may owe a RUNTIME guard (a local string transform over a non-string member raises,
+      // §6·5). It is an execution step — a `Binding.guard` the executor runs before the read — so it
+      // recurses the rest of the chain and rides on the tail's `effects`, exactly as a snapshot binding
+      // does. This is the ONE list-loop return that carries a guard, so the merge is here rather than a
+      // loop-wide accumulator.
+      if (member.guard) {
+        const tail = listTail(rel, items, steps, at + 1, ctx, fresh, labels, set);
+        return tail && { ...tail, effects: [member.guard, ...(tail.effects ?? [])] };
+      }
       continue;
     }
 

@@ -1,5 +1,5 @@
 {
-  "passing": 1576,
+  "passing": 1579,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1129,6 +1129,9 @@
     "g_injectX5sX_asNumber",
     "g_injectX777X_asNumberXGType_BIGINTX_isXtypeOfXGType_BIGINTXX_groupCount",
     "g_injectX99X_asNumberXGType_BIGDECIMALX_isXtypeOfXGType_BIGDECIMALXX_groupCount",
+    "g_injectXListX1_2XX_lTrimXlocalX",
+    "g_injectXListX1_2XX_rTrimXlocalX",
+    "g_injectXListX1_2XX_trimXlocalX",
     "g_injectXListXa_bXX_lTrim",
     "g_injectXListXa_bXX_length",
     "g_injectXListXa_bXX_rTrim",
@@ -2120,9 +2123,6 @@
     "g_injectXBinaryXAQIDXX",
     "g_injectXBinaryXAQIDXX_isXeqXBinaryXAQIDXXX",
     "g_injectXBinaryXemptyXX",
-    "g_injectXListX1_2XX_lTrimXlocalX",
-    "g_injectXListX1_2XX_rTrimXlocalX",
-    "g_injectXListX1_2XX_trimXlocalX",
     "g_injectXListXa_bXcX_concat_XdX",
     "g_injectXListXa_bXcX_splitXa_bX",
     "g_injectXUUIDX47af10b_58cc_4372_a567_0f02b2f3d479XX",

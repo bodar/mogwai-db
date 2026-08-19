@@ -642,10 +642,22 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   operator over a wrong-typed operand raises at VALIDATION before any plan node
   (`vendor/calcite/core/.../sql/validate/SqlValidatorImpl.java`), which is exactly a compile-time raise
   ahead of SQL emission. `asString` is the ONE exclusion — `AsStringGlobalStep` stringifies any value
-  (`"[1, 2]"`), a real answer. 🚧 What is LEFT: the LOCAL form over a provably-non-string member
-  (`g.inject([1,2]).trim(Scope.local)` → `"The trim(local) step can only take string or list of
-  strings, encountered <class> in list"`, `StringLocalStep.java:54-58`) — a PER-MEMBER type check, which
-  needs a member's type known statically (trivial over a literal `[1,2]`, a run-time guard over a column).
+  (`"[1, 2]"`), a real answer.
+- ✅ **The LOCAL `StringLocalStep` form over a non-string MEMBER is a runtime guard — LANDED, and it
+  fixed a WRONG ANSWER.** `g.inject([1,2]).trim(Scope.local)` and `values('age').fold().trim(local)`
+  were SILENTLY COERCING (`["1","2"]`) where `StringLocalStep.map` throws per member on a non-null
+  non-string (`vendor/tinkerpop/gremlin-core/.../step/util/StringLocalStep.java:54-58`) — the §12
+  "wrong answer with the right arity" class, banked in the census goldens. The member type here is
+  per-row/unknown (never a static tag), so it can be neither a decline (that refuses the valid
+  all-string `values('name').fold()`) nor a compile-time throw: it is a **runtime VALUE guard**
+  (`localStringMemberGuard`, `list.ts`) — the §6·5 `Binding.guard` mechanism applied to `json_each`
+  members instead of a graph row, raising iff a member's `memberTypeTag` is non-null and not `'string'`.
+  Threaded through the ONE list-loop return that can carry a guard (`lower.ts`, on `effects` like a
+  snapshot). The guard set is exactly `GLOBAL_STRING_THROWS` — `asString(local)` is NOT one
+  (`AsStringLocalStep` stringifies each member; only a null member raises `Can't parse null as String.`,
+  a different error not yet built). Message is the reference's verbatim to the corpus-checked prefix
+  (the offending `<class>` is omitted — `Guard.valueColumn` appends, the reference spells it
+  mid-sentence, no scenario checks past the prefix). L3 +3.
 - **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and
   `barrier(Barrier.normSack)`. Both honest.
 - **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
