@@ -465,9 +465,14 @@ export function predicateExpr(
       if (!fresh) return null;   // no relation minter reached this caller — decline (fail closed)
       return jsonEachInSet(subject, coll.value as readonly unknown[], coll.name, fresh, op === 'without');
     }
-    const memberArgs = coll ? collectionMembers(coll) : operands;
+    // A NULL MEMBER IS INERT — `Contains.within/without` test set membership, and a stored value is
+    // never null, so `null ∈ set` is always false: it can neither add a match to `within` nor remove one
+    // from `without`. Drop it, then the ALL-NULL set folds to the empty-set truth value below (matching
+    // nothing / everything), exactly as `labelSetArgs` treats a null label. Reference: `within(27,null)`
+    // over age 27 matches (27 ∈ {27,null}) and over 29 does not — i.e. `within(27)`.
+    const memberArgs = (coll ? collectionMembers(coll) : operands).filter((o) => o.value !== null);
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
-    // nothing is never, without nothing is always.
+    // nothing is never, without nothing is always (an all-null set lands here too).
     if (!memberArgs.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
     // NO SIZE LIMIT. A vararg set is bounded by the QUERY TEXT, and its members INLINE — 26 literals
     // cost zero bound parameters, so a cap derived from the 100-BIND wall was refusing queries that
