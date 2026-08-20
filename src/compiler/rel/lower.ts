@@ -5107,6 +5107,20 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (step.name === 'where') {
     const wargs = argValues(step);
     const pred = step.args?.[1]?.value;
+    const pred1 = step.args?.[0]?.value; // the bare `where(P)` predicate (no startKey)
+    // A BARE `where(P)` with NO startKey — the subject is the CURRENT traverser, compared against the
+    // label operand(s) (`where(P.neq('a'))`, `where(P.eq('a').or(P.eq('b')))`). `WherePredicateStep`
+    // with a null startKey uses `traverser.get()` as the LHS. Only when the predicate NAMES A LIVE LABEL
+    // (else it is an ordinary value predicate `sourceFilter`/`is` build), only over an ELEMENT stream
+    // (the current row carries an `id` — a scalar-subject or by()-value form is a later phase), and
+    // no `by()` (identity rowid compare).
+    if (wargs.length === 1 && isPred(pred1) && !step.modulators?.length
+      && namesALiveLabel(pred1, labels) && rel.type.cols.some((c) => c.name === 'id')) {
+      const clause = aliasIdentityPred(pred1, col(rel.id, 'id'), rel, labels, fresh);
+      // It named a live label, so this IS the alias-compare route: a build miss DECLINES rather than
+      // falling through to a value comparison that would read the label as a string.
+      return clause ? make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause }) : 'decline';
+    }
     // A COMPOUND connective (`and`/`or`/`not`) over selectKey operands. WITH a `by()` it is a value
     // compare through the ring (`aliasValueWhere`); WITHOUT one the leaves compare rowids
     // (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, `aliasIdentityPred`). The single-binary path below
