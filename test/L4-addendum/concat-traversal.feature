@@ -56,8 +56,8 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
 
   # A label-carried child: select("a") re-roots on the alias bound earlier in the SAME traverser,
   # so each person gets THEIR OWN name appended. The pre-fix answer was "Mr." four times over
-  # (one distinct value); the correct answer is four distinct values.
-  @Unsupported
+  # (one distinct value); the correct answer is four distinct values. Now LOWERED — the concat
+  # operand resolves through the child seam as a correlated scalar (`scalarChild`).
   Scenario: g_V_valuesXnameX_asXaX_constantXMrX_concatXselectXaXX
     Given the modern graph
     And the traversal of
