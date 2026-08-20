@@ -1,6 +1,7 @@
 import { col, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { argValues } from '../../gremlin/frontend.ts';
+import { arg, argValues } from '../../gremlin/frontend.ts';
+import { constLit } from './const.ts';
 import { compileMath, mathVars, type MathOps } from '../../gremlin/math.ts';
 import { FORMAT_FROM_BY, formatTemplate } from '../../gremlin/format.ts';
 import { STATIC } from '../../sql/kernel/render.ts';
@@ -74,6 +75,21 @@ const relMathOps = (resolve: (name: string) => Expr): MathOps<Expr> => ({
 const CURRENT = '_';
 
 /**
+ * A `math()`/`format()` variable resolved to a SIDE-EFFECT CONSTANT — `withSideEffect('x', 100)` read
+ * inside `math('_ + x')` — as an inlined typed literal, or `null` when the name is not a declared
+ * side-effect. `Scoping.getScopeValue` consults the side-effects (before the path labels) for exactly
+ * this; the registry the front-end extracted rides on the seam (`ChildSeam.sideEffects`), and a
+ * `withSideEffect` seed is a compile-time constant, so it inlines at zero bind cost.
+ *
+ * ⚠️ Called only after `scopedHost` misses, so a name that is BOTH a live path label and a side-effect
+ * reads as the LABEL here where the reference would read the side-effect. No corpus scenario overlaps
+ * the two namespaces; a strict pre-check would have to split `scopeValue`'s map/path lookup, which the
+ * one pathological case does not earn.
+ */
+const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
+  child.sideEffects.has(name) ? constLit(arg(child.sideEffects.get(name))) : null;
+
+/**
  * The formula as ONE expression over the host traverser, or `null` to decline.
  *
  * Split from the tail below because a `math()` is not only a chain step: it is a child body
@@ -94,7 +110,14 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, fresh
     const modulation: Modulation = ring.length ? ring[at % ring.length]! : { key: { kind: 'identity' } };
     if (modulation.order !== undefined) return null;
     const varHost = name === CURRENT ? host : scopedHost(name, host);
-    if (!varHost) return null;
+    if (!varHost) {
+      // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
+      // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).
+      const se = name === CURRENT ? null : sideEffectConst(name, child);
+      if (!se) return null;
+      resolved.set(name, se);
+      continue;
+    }
     // An identity projection over an ELEMENT or a RECORD is the traverser itself, which is not a
     // Number — the reference raises rather than coercing, so decline instead of projecting a rowid.
     if (varHost.kind !== 'scalar' && modulation.key.kind === 'identity') return null;

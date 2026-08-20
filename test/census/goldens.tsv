@@ -1355,6 +1355,8 @@ ran	1	1	47f94056624d286a	c12b592fc5924a92	g.withSideEffect("a", true, Operator.a
 ran	1	1	7a9db3f2bec62785	89c83d148ca56380	g.withSideEffect("a", true, Operator.or).V().constant(false).aggregate("a").cap("a")
 ran	1	1	7a9db3f2bec62785	89c83d148ca56380	g.withSideEffect("a", true, Operator.or).V().constant(false).local(aggregate("a")).cap("a")
 ran	1	1	5267a63e49041170	22a862bd1fe8ac92	g.withSideEffect("a", {"alice"}).V().both().values("name").local(aggregate("a")).cap("a")
+ran	4	4	112a5c8ec22670b4	0f017a5120bcda6f	g.withSideEffect("x", 100).V().values("age").math("_ + x").asNumber(GType.LONG)
+ran	4	4	86c00b01100d2ec7	480e35977e30d5d6	g.withSideEffect("x", 100i).V().values("age").math("_ + x")
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.withStrategies(AdjacentToIncidentStrategy).V()
 ran	1	1	9fe914df746aacef	710dd45af8e7ce35	g.withStrategies(AdjacentToIncidentStrategy).V().out().count()
 ran	3	3	5762e8b08b283727	f80801392f5f8307	g.withStrategies(AdjacentToIncidentStrategy).V().where(__.out())
