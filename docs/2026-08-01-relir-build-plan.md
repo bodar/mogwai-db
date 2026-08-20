@@ -768,9 +768,13 @@ pattern this whole stage kept finding:
   `byExpr`/`scalarChild` already dispatch a nested `by()`/`map`/`is`/`concat` body through `child.scalar`,
   so it composes at every host at once — `map(__.select('a').values('name'))`,
   `by(__.select('a').values('name'))` and `order().by(__.select('a')…)` over element AND scalar hosts (L3
-  +2). 🚧 LEFT: a `select` operand of `concat`/`is` still declines at the transform/predicate site (the
-  operand is not routed through the seam yet); a multi-key `select` in a child body (a record); a `Pop`
-  history select.
+  +2). ✅ **`concat(__.<traversal>)` now routes its operand through the seam too** — a nested operand is a
+  correlated scalar (`scalarChild`) whose FIRST result is appended through the same `concat_ws` + all-null
+  guard as the string form, gated to a PROVABLY-PRODUCTIVE operand because `TraversalUtil.apply` THROWS on
+  an empty sub-traversal where a correlated subquery yields the null `concat_ws` skips (`concat(__.select('a'))`,
+  L3 +1). 🚧 LEFT: an `is`/predicate operand that is a nested traversal (routed only for the constant fold
+  today); a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
+  guard, §6·5); a multi-key `select` in a child body (a record); a `Pop` history select.
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
