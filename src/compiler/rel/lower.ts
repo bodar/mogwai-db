@@ -792,14 +792,14 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null);
+      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam);
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -807,7 +807,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, fresh, valType, valParam);
+    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh));
   }
 
   return null;
@@ -858,7 +858,7 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fres
  * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
  * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
-function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null): Expr | null {
   const elem = subject.elem;
   const { table, owner } = PROPERTIES[elem];
   const props = make.scan({
@@ -869,7 +869,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, f
   // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter. A bare value's
   // declared type and param name ride through so it inlines (a literal) or binds (a `$x`).
   const matches = val === undefined ? undefined
-    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh);
+    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh, resolveListSet);
   if (val !== undefined && !matches) return null;
 
   const matching = make.filter({
@@ -895,7 +895,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, f
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null): Expr | null {
   const elem = subject.elem;
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
@@ -905,7 +905,7 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fr
     const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
     const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
     const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
-    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh);
+    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet);
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
@@ -2815,7 +2815,7 @@ function scalarTail(
           ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested) => foldedListSet(nested, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -2847,7 +2847,7 @@ function scalarTail(
      */
     if ((step.name === 'where' || step.name === 'filter') && args.length === 1 && isPred(args[0])) {
       if (namesALiveLabel(args[0], labels)) return null;
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh);
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -6687,6 +6687,34 @@ function childRows(
  * the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered, this
  * declines and the whole traversal is unsupported — the decline contract, one level down.
  */
+/**
+ * A `within`/`without` operand that is a NESTED traversal ending in `fold()` — a RUN-TIME member list
+ * (`P.within(__.V(x).out('knows').values('age').fold())`) — as the SET relation `predicateExpr` explodes
+ * with json_each, or `null` to decline.
+ *
+ * The folded traversal is ROOTED (it re-sources, `__.V(x)…`, so it is one fixed set for every incoming
+ * traverser, correlated to nothing): lower it as a rooted read, take its ONE list value as a scalar
+ * subquery, and explode it sole-from. A member value compares raw against the subject exactly as an
+ * inline `within` list does — `Contains.within` is `.equals`, and a scalar fold's members are bare
+ * (`[27,32]`). A non-list framing (not a fold), an effectful body (a write operand), or a body that does
+ * not lower all decline — the resolver is `null`-total like every seam.
+ */
+function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | null {
+  // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
+  const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
+  if (!steps) return null;
+  const read = rootedRead(steps, ctx, fresh);
+  if (!read || read.effects?.length || read.framing.kind !== 'list') return null;
+  const listValue: Expr = { kind: 'scalar', plan: make.project({
+    id: fresh('wls'), input: read.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
+    exprs: [[LIST_COL, col(read.rel.id, LIST_COL)]],
+  }) };
+  return make.explode({
+    id: fresh('wle'), channels: [], expr: listValue, as: { value: 'sv' },
+    type: typeOf(meta('sv', 'any', true)),
+  });
+}
+
 function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
   if (!steps.length) return null;
   const chain = lowerChain(steps, {

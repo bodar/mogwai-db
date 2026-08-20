@@ -570,7 +570,6 @@ const DECLINED = [
   // `select(label).by(key)` as a CHILD BODY — the by() modulator over an alias read, inside a host.
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
-  "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
   // A vertex property key is MULTI-VALUED, so an every-result policy needs the rejoin rather than the
   // first; a fan-out body has no "first" a correlated subquery can name; a bare `count()` is a barrier

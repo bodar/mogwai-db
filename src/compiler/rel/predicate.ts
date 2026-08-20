@@ -1,7 +1,8 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, type Minter } from './build.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
-import { gtypeName, arg, collectionMembers, type Arg } from '../../gremlin/frontend.ts';
+import type { Rel } from '../../rel/rel.ts';
+import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
@@ -391,6 +392,9 @@ export function valueSet(
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
   opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,
+  /** Resolves a NESTED-traversal `within`/`without` operand (`within(__.…fold())`) to the SET relation it
+   *  produces at run time, exploded by json_each — the caller owns it because it holds the child seam. */
+  resolveListSet?: (nested: unknown) => Rel | null,
 ): Expr | null {
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
@@ -456,6 +460,13 @@ export function predicateExpr(
   }
 
   if (op === 'within' || op === 'without') {
+    // A single NESTED-traversal operand is a RUN-TIME member list (`within(__.V(x).…values(k).fold())`):
+    // the folded traversal produces the set at query time, exploded by json_each. The caller resolves it
+    // (it holds the child seam); a literal / bound-param / vararg set takes the paths below.
+    if (operands.length === 1 && isNested(operands[0].value) && resolveListSet) {
+      const set = resolveListSet(operands[0].value);
+      return set && { kind: 'in-query', negated: op === 'without', expr: subject, plan: set };
+    }
     // A single collection operand — the faithful front-end leaves it whole. A bound list-PARAMETER
     // crosses as ONE `jsonb(?)` bind exploded by `json_each` (the parameter stays a bind of any size and
     // its data never enters the statement text); a LITERAL spreads to its members, each inlining or
