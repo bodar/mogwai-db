@@ -383,14 +383,14 @@ function correlatedExists(
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
  */
 function bodyPredicate(
-  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   let clause: Expr | undefined;
   for (const step of body) {
-    const filter = sourceFilter(step, subject, fresh, ctx);
+    const filter = sourceFilter(step, subject, fresh, ctx, aliases);
     if (!filter) return correlatedExists(body, subject, fresh, ctx, false)
-      ?? valuePredicate(body, subject, fresh, ctx, false)
-      ?? projectionProductive(body, subject, fresh, ctx);
+      ?? valuePredicate(body, subject, fresh, ctx, false, aliases)
+      ?? projectionProductive(body, subject, fresh, ctx, aliases);
     clause = and(clause, filter);
   }
   return clause ?? null;
@@ -412,9 +412,9 @@ function bodyPredicate(
  * not be read as unproductive. A FALLBACK, so every body the two above answer keeps the SQL it has.
  */
 function projectionProductive(
-  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
-  const produced = scalarChild(body, childHostOf(subject), ctx, fresh);
+  const produced = scalarChild(body, childHostOf(subject, aliases), ctx, fresh);
   if (!produced?.present) return null;
   return produced.present === ALWAYS_PRODUCTIVE ? CONSTANT.true : produced.present;
 }
@@ -438,12 +438,51 @@ function projectionProductive(
  */
 function childPredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
-  const direct = childPredicateDirect(body, subject, fresh, ctx, negated);
+  // A body that leads with `select(<label>)` REROOTS the subject to the aliased traverser and continues
+  // — `Scoping.getScopeValue` resolves a label off the traverser's scope for a filter body exactly as it
+  // does for a projection, so `where(__.select('n').hasLabel('person'))` is a filter on the element `n`
+  // named. A bare `select('n')` is productive iff the label is live (`aliasProjection` answers that), so
+  // it is the constant truth value under either polarity.
+  if (body[0]?.name === 'select') {
+    const re = selectRerootSubject(body[0]!, subject, aliases, fresh);
+    if (!re) return null;
+    if (body.length === 1) return negated ? CONSTANT.false : CONSTANT.true;
+    return childPredicate(body.slice(1), re, fresh, ctx, negated, aliases);
+  }
+  const direct = childPredicateDirect(body, subject, fresh, ctx, negated, aliases);
   if (direct) return direct;
   // LAST RESORT — a trailing MAPPING terminal contributes nothing to the QUESTION, so ask the prefix.
   const prefix = withoutMappingTerminal(body);
-  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated) : null;
+  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases) : null;
+}
+
+/**
+ * A `select(<label>)` at the head of a FILTER body, rerooting the SUBJECT — the predicate-seam twin of
+ * `selectRerootHost` (a value body's reroot). The alias scope is the traverser's, so the label reads
+ * off `subject.rel` via `aliasProjection`; an element alias becomes an element subject, a value alias a
+ * scalar subject carrying the label's per-row type. A list/Pop history alias declines (a later phase),
+ * as does an absent/non-live label (fail closed — never a filter over the wrong row).
+ */
+function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, fresh: Minter): Subject | null {
+  if (step.modulators?.length) return null;
+  const spec = selectSpec(step);
+  if (!spec || spec.labels.length !== 1) return null;
+  const proj = aliasProjection(subject.rel, aliases, spec.labels[0]!, spec.pop, fresh);
+  if (!proj) return null;
+  if (proj.read.kind === 'element') return { kind: 'element', id: proj.payload[0]![1]!, elem: proj.read.elem, rel: subject.rel };
+  if (proj.read.kind === 'value') {
+    const vtype = proj.payload[1]?.[1];
+    return {
+      kind: 'scalar', value: proj.payload[0]![1]!, rel: subject.rel,
+      type: vtype ? { kind: 'perRow', vtype }
+        : proj.read.type.kind === 'static' ? { kind: 'static', type: proj.read.type.type, text: proj.read.type.text }
+          : SUBJECT_UNKNOWN,
+      ...(vtype ? { vtype } : {}),
+    };
+  }
+  return null; // a list/Pop history alias in a filter body is a later phase
 }
 
 /**
@@ -475,14 +514,15 @@ const withoutMappingTerminal = (body: readonly IRStep[]): readonly IRStep[] | nu
  *  retry the whole ladder against a prefix rather than duplicating it. */
 function childPredicateDirect(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
-  if (!negated) return bodyPredicate(body, subject, fresh, ctx);
+  if (!negated) return bodyPredicate(body, subject, fresh, ctx, aliases);
   // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
   // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
   const exact = correlatedExists(body, subject, fresh, ctx, true)
-    ?? valuePredicate(body, subject, fresh, ctx, true);
+    ?? valuePredicate(body, subject, fresh, ctx, true, aliases);
   if (exact) return exact;
-  const positive = bodyPredicate(body, subject, fresh, ctx);
+  const positive = bodyPredicate(body, subject, fresh, ctx, aliases);
   return positive && notProduced(positive);
 }
 
@@ -505,10 +545,11 @@ function childPredicateDirect(
  */
 function valuePredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negate: boolean,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   const last = body.at(-1);
   if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
-  const produced = scalarChild(body.slice(0, -1), childHostOf(subject), ctx, fresh);
+  const produced = scalarChild(body.slice(0, -1), childHostOf(subject, aliases), ctx, fresh);
   if (!produced) return null;
   const args = argValues(last);
   if (args.length !== 1) return null;
@@ -618,7 +659,7 @@ type ElementSubject = Extract<Subject, { kind: 'element' }>;
 const elementSubject = (subject: Subject): ElementSubject | null =>
   subject.kind === 'element' ? subject : null;
 
-function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx): Expr | null {
+function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
   // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
   // (it needs the alias channel). So this stays a blanket decline, and `modulator.ts` is what it will
@@ -678,7 +719,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // body that MOVES is a correlated `EXISTS`, and a body that PROJECTS a value is that value
     // compared. This used to offer only the last two, so `where(__.has('age', P.gt(27)))` declined —
     // a body every clause of which this very function builds.
-    return childPredicate(body, subject, fresh, ctx, step.name === 'not');
+    return childPredicate(body, subject, fresh, ctx, step.name === 'not', aliases);
   }
 
   /**
@@ -713,7 +754,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       if (!isNested(arm)) return null;
       const body = bodyOf(arm.nested, ctx.params);
       if (!body?.length) return null;
-      const pred = childPredicate(body, subject, fresh, ctx, false);
+      const pred = childPredicate(body, subject, fresh, ctx, false, aliases);
       // ONE ARM THIS ROUTE CANNOT ANSWER DECLINES THE WHOLE STEP. A connective is not decomposable
       // into the arms it happens to understand: dropping an arm of an `and` widens the result and
       // dropping one of an `or` narrows it, and either is a plausible answer to a different question.
@@ -2808,7 +2849,7 @@ function scalarTail(
     }
 
     if (SCALAR_FILTER_HOSTS.has(step.name)) {
-      const clause = sourceFilter(step, scalarSubject(), fresh, ctx);
+      const clause = sourceFilter(step, scalarSubject(), fresh, ctx, labels);
       if (!clause) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
       continue;
@@ -4440,7 +4481,7 @@ function elementTail(
     const aliased = aliasWhere(step, rel, labels, ctx, fresh);
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }
-    const clause = sourceFilter(step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, fresh, ctx);
+    const clause = sourceFilter(step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, fresh, ctx, labels);
     // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
     // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
@@ -4886,7 +4927,7 @@ function propertyTail(
   // compare, so a value predicate declines rather than answering off the wrong column.
   if (SCALAR_FILTER_HOSTS.has(step.name)) {
     const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
-    const clause = sourceFilter(step, subject, fresh, ctx);
+    const clause = sourceFilter(step, subject, fresh, ctx, labels);
     return clause && propertyTail(
       make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }),
       elem, steps, from + 1, bulked, ctx, fresh, labels);
