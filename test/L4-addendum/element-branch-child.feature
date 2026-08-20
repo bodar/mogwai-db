@@ -279,3 +279,21 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
       | v[vadas] |
       | v[lop] |
       | v[josh] |
+
+  # A LIST-of-ELEMENTS arm (a bare fold() over vertices) also joins the variant now: variantPayload
+  # frames the folded list's members through the SAME listPayloadExpr expansion the non-variant list
+  # uses, so each rowid becomes a full vertex object. V(1)=marko: [marko] folded, then out {vadas,lop,josh}.
+  @gap:element-branch-child
+  Scenario: g_VX1X_unionXfold__outX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.fold(), __.out())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[v[marko]] |
+      | v[vadas] |
+      | v[lop] |
+      | v[josh] |

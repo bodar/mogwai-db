@@ -5294,12 +5294,10 @@ function mixedBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: A
       normalized.push({ ...arm, rel, framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } });
       continue;
     }
-    // ⚠️ A LIST arm may join the variant only when its members are SCALARS: a list of ELEMENTS (a bare
-    // `fold()` over vertices) needs the element (id/label/props) expansion INSIDE the list INSIDE the
-    // variant, which `variantPayload` does not build — `rowVertex` reads an undefined `props` and the
-    // frame throws. A list-of-scalars carries no element to expand, so it is safe.
-    const ok = fr.kind === 'elements' || (fr.kind === 'list' && fr.of.kind === 'scalar');
-    if (!ok) return null;
+    // An ELEMENT or LIST arm joins the variant unchanged but for a `bulk = 1` if it collapsed;
+    // `variantPayload` frames a list-of-elements member by the same `listPayloadExpr` expansion the
+    // non-variant list uses. A map/record/path/property arm declines (no variant `vk`).
+    if (fr.kind !== 'elements' && fr.kind !== 'list') return null;
     normalized.push({ ...arm, rel: ensureBulk(arm.rel, fresh) });
   }
   return batchedBranch(normalized, input, fresh, labels);

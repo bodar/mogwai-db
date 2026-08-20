@@ -622,12 +622,13 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     `armBatches` here stopped two corpus reads executing (census caught it). ✅ **MIXED-SHAPE landed too**
     (`mixedBranch`): a collapsed scalar/list reduction beside a streaming ELEMENT arm merges as a VARIANT
     arm-major — `union(__.count(), __.out())` → `[1, v[vadas], v[lop], v[josh]]`, `union(__.values('name').fold(),
-    __.out())` → `[l[marko], …]` — a scalar arm normalizes via `toScalarArm`, an element/list-of-scalars arm
-    gains `bulk=1` (`ensureBulk`), then `mergeArms`' variant merge reconciles the shapes. ⚠️ A LIST-of-ELEMENTS
-    arm (a bare `fold()` over vertices — `union(__.fold(), __.out())`) still DECLINES: `variantPayload` has no
-    element (id/label/props) expansion INSIDE a list INSIDE a variant, so it would frame an undefined `props`;
-    the gate is `of.kind === 'scalar'`. 🚧 What is LEFT, each fail-closed: that list-of-elements variant framer;
-    a **batched `choose`** (same path, unwired); an **alias through a collapsed arm** (`union(min.as('x'),
+    __.out())` → `[l[marko], …]` — a scalar arm normalizes via `toScalarArm`, an element/list arm gains
+    `bulk=1` (`ensureBulk`), then `mergeArms`' variant merge reconciles the shapes — including a LIST-of-ELEMENTS
+    arm (`union(__.fold(), __.out())` → `[l[v[marko]], v[vadas], …]`): `variantPayload` now frames the folded
+    list's members through the SAME `listPayloadExpr` expansion the non-variant list uses (rowids →
+    `{id,label,props}` objects), where before it passed raw rowids and `rowVertex` threw on an undefined
+    `props`. 🚧 What is LEFT, each fail-closed: a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a
+    **batched `choose`** (same path, unwired); an **alias through a collapsed arm** (`union(min.as('x'),
     …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm (a key STACK).
 - **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
   (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is

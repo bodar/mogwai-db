@@ -6,6 +6,7 @@ import { STATIC, staticTypeOf, UNKNOWN, type Shape, type VariantShapeArm } from 
 import { byEncounter, carriedCols, meta, typeOf, type Minter } from './build.ts';
 import { correlatedElementColumns } from './element.ts';
 import type { RelFraming } from './framing.ts';
+import { listPayloadExpr } from './list.ts';
 
 /**
  * THE VARIANT — a branch whose arms have DIFFERENT SHAPES, as a per-row tagged union.
@@ -149,7 +150,16 @@ export function variantPayload(
       payload.push([meta(name, declared.type, true), { kind: 'case', whens }]);
     }
   }
-  if (listArm) payload.push([meta('list', 'json', true), jsonList(ordered)]);
+  // The list arm's members are framed at the ROOT exactly as a whole-list traverser's are — a
+  // list-of-SCALARS/map is already the wire tree, a list-of-ELEMENTS expands its rowids to
+  // `{id,label,props}` objects (`listPayloadExpr`, the SAME expansion the non-variant list uses), so
+  // `rowVertex` in the framer reads a member object rather than a bare rowid. A member shape it cannot
+  // frame (a nested unframeable) declines the whole variant.
+  if (listArm) {
+    const listExpr = listPayloadExpr(col(ordered.id, 'list'), listArm.of, fresh);
+    if (!listExpr) return null;
+    payload.push([meta('list', 'json', true), listExpr]);
+  }
 
   const declaredArms: VariantShapeArm[] = [
     { kind: 'scalar', type: scalarType },
@@ -167,7 +177,3 @@ export function variantPayload(
 }
 
 const eqTag = (rel: Rel, tag: number): Expr => ({ kind: 'binary', op: '=', left: col(rel.id, VK), right: compilerInt(tag) });
-
-/** The list column as the TEXT the framer parses — the relational column is JSONB, and `json()` is
- *  what turns it into text, exactly as the list payload does for a whole-list traverser. */
-const jsonList = (rel: Rel): Expr => ({ kind: 'call', fn: 'json', args: [col(rel.id, 'list')] });
