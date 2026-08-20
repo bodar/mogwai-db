@@ -24,15 +24,21 @@
 /**
  * What a carried column IS, from the algebra's point of view — never what it means to Gremlin.
  *
- * ⚠️ **`origin` is PARENT IDENTITY as a POSITION, and it is ONE role — the former `branchOrder` was the
- * same thing.** A traverser is identified by its position in the stream, never by its payload (two
- * traversers can carry the same value — bulk, a self-loop `both()`, convergent walks), so "the parent a
- * child descends from" is a positional identity. It is minted from the parent's `encounter` (`augmentParent`,
- * `childRows`), never a rowid — a rowid conflated two traversers reaching one element. The fan-out rejoin
- * (one `origin` column) and the branch traverser-/arm-major keys (`bord_p`/`bord_a`) are all this role:
- * they share every policy below (`identical` merge, `empty` barrier, `undefined` group, not row-unique),
- * which is the algebra's definition of a role. `encounter` is the twin for SELF position (row-unique,
- * `combine` group); `origin` is the PARENT's, which is why it groups `undefined` (it is a grouping key).
+ * ⚠️ **`origin` is a PROVENANCE/IDENTITY key that a rejoin groups children by, and it is ONE role — the
+ * former `branchOrder` was the same thing.** The fan-out rejoin (one `origin` column), the branch
+ * traverser-/arm-major keys (`bord_p`/`bord_a`), and the group-value reducer's member pool are all this
+ * role: they share every policy below (`identical` merge, `empty` barrier, `undefined` group, not
+ * row-unique), which is the algebra's definition of a role — so they are one role, not three. `encounter`
+ * is the twin for SELF position (row-unique, `combine` group); `origin` is a GROUPING key, which is why
+ * it groups `undefined`.
+ *
+ * ⚠️ **Its DERIVATION is the CONSUMER's, and deliberately NOT uniform — MEASURED, not chosen.** A
+ * `group().by(k).by(<reducer>)` pools members by the ELEMENT they reached (`childRows` seeds `origin`
+ * from the rowid so three traversers reaching one `lop` pool together and sum once — verified against
+ * `SideEffectCap.feature` `{lop:96, ripple:32}`); the branch keys are minted from `encounter`
+ * (`augmentParent`). A tempting "unify the derivation too — origin is always a position" was tried and
+ * the census answer-gate refuted it on the spot (it over-partitions the group pool). So the ROLE is one;
+ * the value each producer writes is its own.
  */
 export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops';
 
