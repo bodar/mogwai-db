@@ -576,6 +576,7 @@ ran	2	2	486df719e3fc7bee	4dc52ddcd1ebb692	g.V().values("age").is(P.lt(__.constan
 ran	2	2	486df719e3fc7bee	4dc52ddcd1ebb692	g.V().values("age").is(P.lte(30))
 ran	3	3	86c866e1adeb874f	c01fc53ac760984a	g.V().values("age").is(P.neq(__.constant(35)))
 ran	4	4	27729c79d0b3e0d1	f1d0bdec0d37f464	g.V().values("age").is(P.not(P.typeOf(GType.STRING)))
+ran	2	2	ae2481d6d3909b92	00fd6b6013caa7fb	g.V().values("age").is(P.outside(28, 33))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("age").is(P.typeOf(GType.BIGDECIMAL))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("age").is(P.typeOf(GType.BIGINT))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("age").is(P.typeOf(GType.BINARY))

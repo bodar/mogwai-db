@@ -475,19 +475,23 @@ export function predicateExpr(
     return op === 'within' ? inList : negated(inList);
   }
 
-  // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
-  // subject go through the ordering key for the same reason a range comparison does. A single
-  // collection bound (`between([lo,hi])`) spreads to its two members first.
-  if (op === 'between' || op === 'inside') {
+  // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive both. outside = the OR-complement
+  // of inside, (< lo OR > hi) (`P.outside` = `OrP(lt, gt)`, `P.java`). Both bounds and the subject go
+  // through the ordering key for the same reason a range comparison does. A single collection bound
+  // (`between([lo,hi])`) spreads to its two members first.
+  if (op === 'between' || op === 'inside' || op === 'outside') {
     const bounds = operands.length === 1 && Array.isArray(operands[0].value) ? collectionMembers(operands[0]) : operands;
     if (bounds.length !== 2) return null;
     const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name), operand(bounds[1].value, bounds[1].type, bounds[1].name)];
     if (!low || !high) return null;
-    const [loCmp, hiCmp] = [
-      ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type, bounds[0].type),
-      ordered('<', subject, high, bounds[1].value, type, bounds[1].type),
-    ];
-    return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
+    // outside is a DISJUNCTION either side of the range; between/inside are a conjunction inside it. The
+    // low bound is exclusive for inside/outside (`>`/`<`) and inclusive for between (`>=`).
+    const [loCmp, hiCmp] = op === 'outside'
+      ? [ordered('<', subject, low, bounds[0].value, type, bounds[0].type),
+         ordered('>', subject, high, bounds[1].value, type, bounds[1].type)]
+      : [ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type, bounds[0].type),
+         ordered('<', subject, high, bounds[1].value, type, bounds[1].type)];
+    return loCmp && hiCmp ? binary(op === 'outside' ? 'or' : 'and', loCmp, hiCmp) : null;
   }
 
   const like = operands.length === 1 ? likePattern(op, operands[0]) : null;

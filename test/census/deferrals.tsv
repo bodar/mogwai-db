@@ -403,7 +403,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().values("a
 deferred	The child traversal of is() contains a mutating step (addV) and thus is not read only: a mutating step is not allowed in a value-argument child traversal	g.V().values("age").is(P.gt(__.addV("x").values("age")))
 unbound	Unbound parameter 'xx1'	g.V().values("age").is(P.gte(xx1)).is(P.lt(xx2))
 unbound	Unbound parameter 'xx1'	g.V().values("age").is(P.lte(xx1))
-deferred	this traversal is not supported yet: no lowering covers g.V().values("age").is(P.outside(28, 33))	g.V().values("age").is(P.outside(28, 33))
 deferred	this traversal is not supported yet: no lowering covers g.V().values("age").is(P.typeOf("non-registered-Name"))	g.V().values("age").is(P.typeOf("non-registered-Name"))
 deferred	this traversal is not supported yet: no lowering covers g.V().values("age").is(P.typeOf(GType.MAP))	g.V().values("age").is(P.typeOf(GType.MAP))
 deferred	this traversal is not supported yet: no lowering covers g.V().values("age").is(P.within(__.V(vid1).out("knows").values("age").fold()))	g.V().values("age").is(P.within(__.V(vid1).out("knows").values("age").fold()))
