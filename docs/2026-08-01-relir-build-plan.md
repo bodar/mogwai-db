@@ -791,9 +791,14 @@ pattern this whole stage kept finding:
   single binary `where(k1, P.op(k2))`; `WherePredicateStep` composes `eq`/`neq`/`and`/`or`/`not` over
   `selectKey` operands. `aliasIdentityPred` recurses the connective tree (the mirror of `predicateExpr`'s
   and/or/not), each leaf comparing the start alias's rowid against the operand label's — the no-`by()`
-  IDENTITY form (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, Where.feature). 🚧 LEFT: the `by()`-value
-  compound compare, which needs the `WherePredicateStep` traversal-RING (one `by()` per selectKey in
-  encounter order, cycling) — a focused, order-sensitive piece traced from the reference, not yet built.
+  IDENTITY form (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, Where.feature).
+- ✅ **the `by()`-value compound alias-where over the modulator RING — LANDED** (`aliasValueWhere`).
+  `WherePredicateStep`'s `filter`/`setPredicateValues` project the startKey through `by[0]` once, then
+  each predicate LEAF's operand label through the NEXT `by()` in encounter order, CYCLING (the
+  `TraversalRing` resets per traverser; the `ConnectiveP` tree is walked left-to-right). The LHS is
+  shared across leaves; a non-productive projection drops the row (an `IS NOT NULL` term per projection,
+  a `ProductiveByStrategy` keep-null still declining). Verified row-for-row vs `Where.feature` including
+  the CYCLED `d`→`by[0]` in `where('a', P.lt('b').or(P.gt('c')).and(P.neq('d'))).by('age').by('weight').by(min)`.
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
