@@ -549,7 +549,6 @@ const DECLINED = [
   'g.V().fold().intersect(__.E().fold())',
   'g.V().fold().product(__.V().fold())',
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
-  'g.V().has(T.label,null)',          // a null label VALUE: refused — the reference owns what that means
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
   // declines the other, because answering off the wrong row is the plausible-wrong-answer class.
   'g.V().order().by(T.key)',          // an element has no key
@@ -572,7 +571,6 @@ const DECLINED = [
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
-  "g.V().has('name',null)",           // a null value: not a literal the lowering can compare
   // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
   // A vertex property key is MULTI-VALUED, so an every-result policy needs the rejoin rather than the
   // first; a fan-out body has no "first" a correlated subquery can name; a bare `count()` is a barrier

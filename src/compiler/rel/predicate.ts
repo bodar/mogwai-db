@@ -394,6 +394,12 @@ export function predicateExpr(
 ): Expr | null {
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
+  // A BARE NULL value is `eq(null)` — `has(k, null)`/`is(null)` desugar to `P.eq(null)`, whose null-space
+  // rule is `subject IS NULL` (`comparable` is false unless both are null; SQLite `= NULL` is itself
+  // NULL, never true, which is exactly wrong). Over a stored non-null property this is always false — the
+  // EMPTY result `Has.feature`/`HasLabel.feature` pin — and it must NOT reach `operand()`, which declines
+  // a null and made the whole `has(k, null)` decline. Distinct from `pred === undefined` (presence) above.
+  if (pred === null) return binary('is', subject, compilerNull());
   if (!isPred(pred)) {
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
     // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
