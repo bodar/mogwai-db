@@ -21,8 +21,20 @@
  * out is what makes "a channel is a column" true without exception.
  */
 
-/** What a carried column IS, from the algebra's point of view — never what it means to Gremlin. */
-export type ChannelRole = 'alias' | 'path' | 'origin' | 'branchOrder' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops';
+/**
+ * What a carried column IS, from the algebra's point of view — never what it means to Gremlin.
+ *
+ * ⚠️ **`origin` is PARENT IDENTITY as a POSITION, and it is ONE role — the former `branchOrder` was the
+ * same thing.** A traverser is identified by its position in the stream, never by its payload (two
+ * traversers can carry the same value — bulk, a self-loop `both()`, convergent walks), so "the parent a
+ * child descends from" is a positional identity. It is minted from the parent's `encounter` (`augmentParent`,
+ * `childRows`), never a rowid — a rowid conflated two traversers reaching one element. The fan-out rejoin
+ * (one `origin` column) and the branch traverser-/arm-major keys (`bord_p`/`bord_a`) are all this role:
+ * they share every policy below (`identical` merge, `empty` barrier, `undefined` group, not row-unique),
+ * which is the algebra's definition of a role. `encounter` is the twin for SELF position (row-unique,
+ * `combine` group); `origin` is the PARENT's, which is why it groups `undefined` (it is a grouping key).
+ */
+export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops';
 
 export interface Channel { readonly col: string; readonly role: ChannelRole; }
 export type Channels = readonly Channel[];
@@ -45,7 +57,6 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
   alias: 'union',
   path: 'pad',
   origin: 'identical',
-  branchOrder: 'identical',
   sack: 'identical',
   fromV: 'identical',
   encounter: 'identical',
@@ -66,7 +77,6 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
 export const CHANNEL_BARRIER_POLICY: Readonly<Record<ChannelRole, BarrierPolicy>> = {
   alias: 'consumed',
   origin: 'empty',
-  branchOrder: 'empty',
   path: 'drop',
   sack: 'drop',
   fromV: 'drop',
@@ -87,7 +97,7 @@ export type RigidPolicy = 'peer' | 'rehomed';
  * would see a merge silently reorder its columns. The framing layer's own column accessor is the
  * tie — `test/channel-contracts.test.ts` pins the two against each other.
  */
-export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'branchOrder', 'fromV', 'encounter', 'path'];
+export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
 
@@ -158,7 +168,6 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
   alias: 'undefined',
   path: 'undefined',
   origin: 'undefined',
-  branchOrder: 'undefined',
   sack: 'undefined',
   fromV: 'undefined',
   // Choosing one member's depth when a group spans iterations would be arbitrary.
@@ -196,7 +205,6 @@ export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
   alias: false,
   path: false,
   origin: false,
-  branchOrder: false,
   sack: false,
   fromV: false,
   bulk: false,

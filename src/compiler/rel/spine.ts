@@ -61,7 +61,7 @@ export interface RelRequest {
  * the neutral channel core into a `TraverserLayout` so a separate materializer could compose the
  * payload SELECT over RelIR's relation). §6·3 moved that projection into the algebra, so the bridge
  * is gone along with the alias map that only it read — and with it the wall it was: it could declare
- * no translation for the `path`, `origin` or `branchOrder` roles and THREW, which is what blocked
+ * no translation for the `path` or `origin` roles and THREW, which is what blocked
  * RelIR from carrying a path. The channel core could always hold one; the bridge could not express
  * it. There is no longer such a seam.
  *

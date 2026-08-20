@@ -110,7 +110,7 @@ export interface RelLowering {
    *
    * What went with the transition: `LAYOUT_FIELD`/`layoutOf` (the `Channels`→`TraverserLayout` bridge,
    * which is what blocked the path channel — it could declare no translation for `path`, `origin` or
-   * `branchOrder` and threw), and `RelLowering.aliases` (the alias map had exactly one reader, that bridge).
+   * `origin`/`path` and threw), and `RelLowering.aliases` (the alias map had exactly one reader, that bridge).
    */
   readonly shape: Shape;
 }
@@ -1818,7 +1818,7 @@ const branchResult = (merged: FramedRel | null, ctx: ChainCtx, fresh: Minter): F
   !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh);
 
 /**
- * THE FAN-OUT SORT KEY, carried past the merge as two `branchOrder` channels (the role the channel core
+ * THE FAN-OUT SORT KEY, carried past the merge as two `origin` channels (the role the channel core
  * declares for exactly this — `identical` merge so every arm agrees on it structurally, `empty` at a
  * barrier so a batched arm's per-parent key correctly vanishes, `undefined` group). `BORD_PARENT` is
  * the FROZEN parent position: minted from the branch input's `encounter` and riding each arm UNCHANGED
@@ -1827,11 +1827,11 @@ const branchResult = (merged: FramedRel | null, ctx: ChainCtx, fresh: Minter): F
  * the arm ordinal. `renumber` reads `[BORD_PARENT, BORD_ARM, payload…]` into a fresh `encounter` and the
  * pair is dropped — the SLICE half of §10's fan-out mint (`branch-traverser-major.feature`).
  */
-const BORD_PARENT: Channel = { col: 'bord_p', role: 'branchOrder' };
-const BORD_ARM: Channel = { col: 'bord_a', role: 'branchOrder' };
+const BORD_PARENT: Channel = { col: 'bord_p', role: 'origin' };
+const BORD_ARM: Channel = { col: 'bord_a', role: 'origin' };
 
 /** Does a SLICE-demanded branch take the traverser-major lowering here? Only when the input carries no
- *  branchOrder key already: a branch NESTED inside another's sliced arm would freeze a SECOND parent
+ *  positional (`origin`) key already: a branch NESTED inside another's sliced arm would freeze a SECOND parent
  *  position, and the reference's stacked order (`branch-traverser-major.feature`'s nested scenario)
  *  needs a KEY STACK this single-level mint does not build — so the inner branch declines cleanly
  *  rather than dup the channel (which throws) or mis-order. */
@@ -1841,9 +1841,14 @@ const sliceableBranch = (ctx: ChainCtx, input: Rel): boolean =>
   // global barrier upstream (`g.V().count().as(x).union(…).limit(…)`) dropped the encounter — so the
   // slice declines rather than reference a `bord_p` that was never minted.
   && input.channels.some((channel) => channel.role === 'encounter')
-  && !input.channels.some((channel) => channel.role === 'branchOrder');
+  // No branch parent-position already frozen — a branch NESTED inside another's sliced arm carries the
+  // outer `bord_p`, whose stacked order needs a KEY STACK this single-level mint does not build, so it
+  // declines cleanly rather than dup the channel (a throw) or mis-order. Checked by COLUMN, not by the
+  // (now unified) `origin` role: a fan-out `origin` on the input is a different carrier of the same role
+  // and does not block the branch's own freeze.
+  && !input.channels.some((channel) => channel.col === BORD_PARENT.col);
 
-/** Freeze the branch input's emission position into a `branchOrder` channel so it survives each arm's
+/** Freeze the branch input's emission position into an `origin` channel so it survives each arm's
  *  hops as the traverser-major major key. A no-op where the input carries no position (nothing to
  *  freeze — the caller only reaches this under `ctx.ordered`, so the input always has one). */
 const augmentParent = (input: Rel, fresh: Minter): Rel => {
@@ -1903,13 +1908,13 @@ const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap
   const merged = mergeArms(tagged, base, labels, fresh);
   if (!merged) return null;
   const rel = merged.rel;
-  // FAIL CLOSED if an arm dropped the sort key: a BATCHED barrier inside an arm empties `branchOrder`
+  // FAIL CLOSED if an arm dropped the sort key: a BATCHED barrier inside an arm empties `origin`
   // (`CHANNEL_BARRIER_POLICY`), so a `union`/`choose` with a batched arm (already gated by `armBatches`)
   // and a `coalesce`/`optional` arm whose scoped barrier still collapses the key both arrive here
   // without `bord_p`/`bord_a`. Re-minting over a column not in scope is a THROW, not a decline — so
   // this checks rather than assumes (`rel-sweep` caught `union(name.fold, …)` and a count-before-union).
   if (![BORD_PARENT.col, BORD_ARM.col].every((c) => rel.channels.some((channel) => channel.col === c))) return null;
-  const kept = rel.channels.filter((channel) => channel.role !== 'branchOrder');
+  const kept = rel.channels.filter((channel) => channel.col !== BORD_PARENT.col && channel.col !== BORD_ARM.col);
   const outChannels = withChannel(kept, ENCOUNTER);
   const payload = payloadCols(rel);
   const outCols = [...payload, ...carriedCols(outChannels)];
@@ -5309,7 +5314,7 @@ function recordTail(
  * - **a live EMISSION ORDER.** A branch merge's canonical key is (input traverser, arm, arm position)
  *   and the first term is unrecoverable here: `encounter` is ONE slot which every fan-out inside an
  *   arm re-mints in place, so two arms rank independently and merging them interleaves the streams
- *   (§11). Recovering it needs the `origin`/`branchOrder` channels, which this route does not carry
+ *   (§11). Recovering it needs the `origin` (parent-position) channels, which this route does not carry
  *   and `spine.ts` has no framing translation for. Measured: 5 of the 70 branch-blocked corpus
  *   traversals demand an order, and every one of them contains other uncovered steps as well.
  * - **arms that disagree on their PAYLOAD.** A `Union` emits its arms positionally, so a scalar arm
@@ -5390,7 +5395,7 @@ const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, f
   if (!merged) return null;
   const rel = merged.rel;
   if (!rel.channels.some((channel) => channel.col === BORD_ARM.col)) return null;
-  const kept = rel.channels.filter((channel) => channel.role !== 'branchOrder');
+  const kept = rel.channels.filter((channel) => channel.col !== BORD_PARENT.col && channel.col !== BORD_ARM.col);
   const outChannels = withChannel(kept, ENCOUNTER);
   const payload = payloadCols(rel);
   const outCols = [...payload, ...carriedCols(outChannels)];

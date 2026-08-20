@@ -60,7 +60,7 @@ Feature: mogwai addendum — a coalesce/optional arm may REDUCE per traverser
       """
       g.V().hasLabel("person").order().by("name").coalesce(__.out("knows").count(), __.out("created").count()).limit(2)
       """
-    # The reduction arm is ONE row per host that carries the frozen fan-out position (`branchOrder`),
+    # The reduction arm is ONE row per host that carries the frozen fan-out position (`origin`),
     # so a downstream positional `limit(2)` reads the traverser-major order. order() fixes the input
     # josh, marko, peter, vadas; their out(knows) counts are 0, 2, 0, 0, so the first two are josh's 0
     # and marko's 2 — NOT a global count, and NOT arm-major.

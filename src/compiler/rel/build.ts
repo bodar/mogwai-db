@@ -47,7 +47,6 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
   bulk: { type: 'int', nullable: false },
   encounter: { type: 'int', nullable: false },
   origin: { type: 'int', nullable: false },
-  branchOrder: { type: 'int', nullable: false },
   fromV: { type: 'int', nullable: true },
 };
 
