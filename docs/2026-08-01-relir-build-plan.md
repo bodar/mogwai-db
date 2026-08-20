@@ -787,6 +787,13 @@ pattern this whole stage kept finding:
   over the CHILD relation, whose scope starts empty (an outer label persisting into a moved child body
   is a later, correlated-join phase). 🚧 LEFT: an alias read AFTER a movement inside a filter body
   (`where(__.out().select('n')…)`); a list/Pop history alias in a filter body.
+- ✅ **a COMPOUND alias-compare `where(k, P)` over label identities.** `aliasWhere` accepted only a
+  single binary `where(k1, P.op(k2))`; `WherePredicateStep` composes `eq`/`neq`/`and`/`or`/`not` over
+  `selectKey` operands. `aliasIdentityPred` recurses the connective tree (the mirror of `predicateExpr`'s
+  and/or/not), each leaf comparing the start alias's rowid against the operand label's — the no-`by()`
+  IDENTITY form (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, Where.feature). 🚧 LEFT: the `by()`-value
+  compound compare, which needs the `WherePredicateStep` traversal-RING (one `by()` per selectKey in
+  encounter order, cycling) — a focused, order-sensitive piece traced from the reference, not yet built.
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
