@@ -775,6 +775,18 @@ pattern this whole stage kept finding:
   L3 +1). 🚧 LEFT: an `is`/predicate operand that is a nested traversal (routed only for the constant fold
   today); a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
   guard, §6·5); a multi-key `select` in a child body (a record); a `Pop` history select.
+- ✅ **the FILTER seam now carries the alias scope — a `select`/`as`-variable reads in a predicate body.**
+  `sourceFilter`/`childPredicate`/`bodyPredicate`/`valuePredicate`/`projectionProductive` folded every
+  `where`/`filter`/`not`/`and`/`or` body with `NO_ALIASES`, so no filter body could read a label —
+  where TinkerPop's `Scoping` consults the traverser's scope for a filter body exactly as for a
+  projection. The map is threaded through the seam and `selectRerootSubject` reroots a `select`-led body
+  to the aliased traverser (the predicate-seam twin of `selectRerootHost`). So
+  `where(__.select('n').hasLabel('person'))`, the or/and-of-selects forms, and — via the `as`→`select`
+  where-variable Pass rewrite — the `where(__.and(__.as('b').in(), __.not(__.as('a')…)))` start-variable
+  family lower and answer (Where.feature). `correlatedExists` keeps `NO_ALIASES` on purpose: it folds
+  over the CHILD relation, whose scope starts empty (an outer label persisting into a moved child body
+  is a later, correlated-join phase). 🚧 LEFT: an alias read AFTER a movement inside a filter body
+  (`where(__.out().select('n')…)`); a list/Pop history alias in a filter body.
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
