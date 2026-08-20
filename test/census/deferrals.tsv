@@ -157,8 +157,6 @@ deferred	The child traversal of has() contains a mutating step (addV) and thus i
 deferred	The child traversal of has() contains a mutating step (addV) and thus is not read only: a mutating step is not allowed in a value-argument child traversal	g.V().has("name", P.within(__.addV("x").values("name")))
 unbound	Unbound parameter 'vid1'	g.V().has("name", P.within(__.union(__.V(vid1).out("knows").values("name"), __.V(vid3).out("created").values("name")).fold()))
 unbound	Unbound parameter 'vid1'	g.V().has("name", P.within(__.union(__.V(vid1).out("knows").values("name"), __.constant("peter")).fold()))
-deferred	this traversal is not supported yet: no lowering covers g.V().has("name", P.within(__.values("nonexistent"), __.constant("marko")))	g.V().has("name", P.within(__.values("nonexistent"), __.constant("marko")))
-deferred	this traversal is not supported yet: no lowering covers g.V().has("name", P.within(__.values("nonexistent"), __.values("nonexistent2")))	g.V().has("name", P.within(__.values("nonexistent"), __.values("nonexistent2")))
 deferred	this traversal is not supported yet: no lowering covers g.V().has("name", TextP.notRegex("^mar"))	g.V().has("name", TextP.notRegex("^mar"))
 deferred	this traversal is not supported yet: no lowering covers g.V().has("name", TextP.regex("Tinker")).values("name")	g.V().has("name", TextP.regex("Tinker")).values("name")
 deferred	this traversal is not supported yet: no lowering covers g.V().has("name", TextP.regex("Tinker.*\u00A9")).values("name")	g.V().has("name", TextP.regex("Tinker.*\u00A9")).values("name")

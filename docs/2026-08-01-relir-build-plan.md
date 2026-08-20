@@ -812,9 +812,20 @@ pattern this whole stage kept finding:
   nested operand explodes the resolved set with json_each (`subject IN (SELECT sv FROM json_each(<list>))`).
   `foldedListSet` lowers the folded traversal as a rooted read (it re-sources → one fixed set correlated to
   nothing), takes its one `list` value as a scalar subquery, explodes it sole-from; a member compares raw
-  (`Contains.within` is `.equals`, a scalar fold's members are bare). Wired at `is`/`where`/`has`. 🚧 LEFT: a
-  folded UNION operand (the source-`union` gap, fail closed); the VARARG-traversal-member form
-  (`within(__.values(a), __.constant(b))`), each a correlated scalar rather than one fold.
+  (`Contains.within` is `.equals`, a scalar fold's members are bare). Wired at `is`/`where`/`has`.
+  ✅ **The VARARG-traversal-member form now lowers too** (`within(__.values('nonexistent'), __.constant('marko'))`,
+  `Has.feature`, L3 +2): unlike the fold, each operand is NOT rooted — `P.resolve(traverser)`
+  (`vendor/tinkerpop/gremlin-core/.../P.java:328-373`) runs each child traversal against the CURRENT
+  traverser and takes its FIRST result as ONE element, dropping an operand that produced nothing. So
+  `predicateExpr` gained a `resolveScalar` hook alongside `resolveListSet`: a nested vararg operand resolves
+  to the correlated first value via the element-host `scalarChild` (`varargScalar`), and the members build the
+  ordinary `IN`-list — the operand's `values(k)` becomes a `SELECT … ORDER BY id LIMIT 1` correlated subquery
+  (NULL when unproductive) and a `constant(v)` inlines. The NULL member is INERT in the `IN`/`NOT IN` idiom
+  exactly as a literal null is, so "drop the non-producing operand" and "leave its NULL in the list" are the
+  same answer (both `within`'s empty→no-match and `without`'s empty→match fall out). The single non-fold
+  operand (`within(__.values(k))` = its one first value) falls through the fold check into the SAME path. 🚧 LEFT: a
+  folded UNION operand (the source-`union` gap, fail closed); a vararg operand whose first result is itself a
+  LIST/ELEMENT (a list-valued or element member no scenario names — declined by the scalar-framing gate).
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a

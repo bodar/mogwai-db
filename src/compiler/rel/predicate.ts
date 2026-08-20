@@ -395,6 +395,11 @@ export function predicateExpr(
   /** Resolves a NESTED-traversal `within`/`without` operand (`within(__.…fold())`) to the SET relation it
    *  produces at run time, exploded by json_each — the caller owns it because it holds the child seam. */
   resolveListSet?: (nested: unknown) => Rel | null,
+  /** Resolves a NESTED-traversal `within`/`without` operand that is NOT a fold to the CORRELATED FIRST
+   *  VALUE it produces for the current traverser — the vararg-member form (`within(__.values(k),
+   *  __.constant(v))`), each operand a scalar correlated to the subject element rather than one rooted
+   *  fold. The caller owns it because it holds both the child seam and the element host. */
+  resolveScalar?: (nested: unknown) => Expr | null,
 ): Expr | null {
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
@@ -415,7 +420,7 @@ export function predicateExpr(
   // Each operand is an `Arg`, so its own value + type + parameter name travel together — a `P.gt($x)`
   // / `within($x, $y)` operand binds and a parsed literal inlines, wherever it sits, with no separate
   // parallel-name lookup.
-  const recurse = (o: Arg) => predicateExpr(subject, o.value, type, null, null, fresh);
+  const recurse = (o: Arg) => predicateExpr(subject, o.value, type, null, null, fresh, resolveListSet, resolveScalar);
   const both = (build: (left: Expr, right: Expr) => Expr): Expr | null => {
     const [left, right] = [recurse(operands[0]), recurse(operands[1])];
     return left && right ? build(left, right) : null;
@@ -460,12 +465,13 @@ export function predicateExpr(
   }
 
   if (op === 'within' || op === 'without') {
-    // A single NESTED-traversal operand is a RUN-TIME member list (`within(__.V(x).…values(k).fold())`):
-    // the folded traversal produces the set at query time, exploded by json_each. The caller resolves it
-    // (it holds the child seam); a literal / bound-param / vararg set takes the paths below.
+    // A single NESTED-traversal operand ending in `fold()` is a RUN-TIME member list
+    // (`within(__.V(x).…values(k).fold())`): the folded traversal produces the set at query time,
+    // exploded by json_each. The caller resolves it (it holds the child seam); a NON-fold single
+    // operand, or a mix of traversals and literals, FALLS THROUGH to the vararg member path below.
     if (operands.length === 1 && isNested(operands[0].value) && resolveListSet) {
       const set = resolveListSet(operands[0].value);
-      return set && { kind: 'in-query', negated: op === 'without', expr: subject, plan: set };
+      if (set) return { kind: 'in-query', negated: op === 'without', expr: subject, plan: set };
     }
     // A single collection operand — the faithful front-end leaves it whole. A bound list-PARAMETER
     // crosses as ONE `jsonb(?)` bind exploded by `json_each` (the parameter stays a bind of any size and
@@ -491,7 +497,15 @@ export function predicateExpr(
     // at 0 binds). The set whose size is a function of DATA is the named-collection branch above, which
     // crosses as ONE `json_each` bind unconditionally — that is where the rule lives, and it needs no
     // threshold to enforce it.
-    const members = memberArgs.map((o) => operand(o.value, o.type, o.name));
+    // A member may be a NESTED TRAVERSAL — the vararg form (`within(__.values(k), __.constant(v))`).
+    // `P.resolve` (`vendor/tinkerpop/gremlin-core/.../P.java:328-373`) runs each child traversal against
+    // the current traverser and takes its FIRST result as ONE element, dropping an operand that produced
+    // nothing; the caller's `resolveScalar` returns that correlated first value (NULL when the operand
+    // produces nothing). A NULL member is inert in the `IN`/`NOT IN` idiom below exactly as a literal
+    // null is (an unproductive operand can neither add a `within` match nor remove a `without` one), so
+    // "drop the non-producing operand" and "leave its NULL in the list" are the same answer.
+    const members = memberArgs.map((o) =>
+      isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);

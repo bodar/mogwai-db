@@ -792,14 +792,14 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh));
+      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh));
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -807,7 +807,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh));
+    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
   }
 
   return null;
@@ -858,7 +858,7 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fres
  * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
  * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
-function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null): Expr | null {
+function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
   const elem = subject.elem;
   const { table, owner } = PROPERTIES[elem];
   const props = make.scan({
@@ -869,7 +869,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, f
   // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter. A bare value's
   // declared type and param name ride through so it inlines (a literal) or binds (a `$x`).
   const matches = val === undefined ? undefined
-    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh, resolveListSet);
+    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh, resolveListSet, resolveScalar);
   if (val !== undefined && !matches) return null;
 
   const matching = make.filter({
@@ -895,7 +895,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, f
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null): Expr | null {
+function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
   const elem = subject.elem;
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
@@ -905,7 +905,7 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fr
     const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
     const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
     const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
-    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet);
+    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet, resolveScalar);
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
@@ -6713,6 +6713,27 @@ function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | nu
     id: fresh('wle'), channels: [], expr: listValue, as: { value: 'sv' },
     type: typeOf(meta('sv', 'any', true)),
   });
+}
+
+/**
+ * A `within`/`without` operand that is a NESTED traversal NOT ending in `fold()` — the VARARG-member
+ * form (`P.within(__.values('nonexistent'), __.constant('marko'))`) — as the CORRELATED FIRST VALUE
+ * it produces for the current subject, or `null` to decline.
+ *
+ * Unlike `foldedListSet`, the operand is NOT rooted: `__.values(k)`/`__.constant(v)` are applied to the
+ * CURRENT traverser (`P.resolve(traverser)` — `vendor/tinkerpop/gremlin-core/.../P.java:328-373` — runs
+ * `TraversalUtil.apply(traverser, tv)` per child and takes `tv.next()`, the FIRST result), so this is a
+ * child body over the element host and the correlated scalar seam gives exactly that first value. Each
+ * operand contributes ONE member (not a set), so a fold framing is refused here — the sole-operand fold
+ * is `foldedListSet`'s, and a folded value among varargs would be a list-valued member no scenario names.
+ * A member produced by nothing is a NULL scalar, which the caller's `IN`/`NOT IN` idiom treats as inert
+ * exactly as it treats the reference's "drop the unproductive operand".
+ */
+function varargScalar(operand: unknown, subject: ElementSubject, ctx: ChainCtx, fresh: Minter): Expr | null {
+  const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
+  if (!body?.length) return null;
+  const value = scalarChild(body, { kind: 'element', elem: subject.elem, id: subject.id }, ctx, fresh);
+  return value && value.framing.kind === 'scalar' ? value.expr : null;
 }
 
 function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
