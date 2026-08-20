@@ -807,6 +807,14 @@ pattern this whole stage kept finding:
 - ✅ **`math()`/`format()` resolve a `withSideEffect()` CONSTANT variable** (`math('_ + x')` with
   `withSideEffect('x', 100)`). `Scoping.getScopeValue` consults the side-effects before the path labels;
   `sideEffectConst` inlines the seam's registered constant as a typed literal (zero binds).
+- ✅ **a `within`/`without` operand may be a RUN-TIME folded list** (`P.within(__.V(x).out('knows').values(k).fold())`).
+  `predicateExpr` gained a `resolveListSet` hook (the caller owns it — it holds the child seam); a single
+  nested operand explodes the resolved set with json_each (`subject IN (SELECT sv FROM json_each(<list>))`).
+  `foldedListSet` lowers the folded traversal as a rooted read (it re-sources → one fixed set correlated to
+  nothing), takes its one `list` value as a scalar subquery, explodes it sole-from; a member compares raw
+  (`Contains.within` is `.equals`, a scalar fold's members are bare). Wired at `is`/`where`/`has`. 🚧 LEFT: a
+  folded UNION operand (the source-`union` gap, fail closed); the VARARG-traversal-member form
+  (`within(__.values(a), __.constant(b))`), each a correlated scalar rather than one fold.
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
