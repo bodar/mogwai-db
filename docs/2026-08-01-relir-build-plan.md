@@ -452,9 +452,21 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   `project()` a BARE string key; both frame identically but `select(<key>)` read only the `{t,v}` form, so
   the map-key match is now tolerant of both (`keyMatches`, `COALESCE($[0].v, $[0])`, shared by
   `mapKey`/`mapSelect`). 🚧 What is LEFT: the remaining member ops over a list-of-maps (`order`/`range` at
-  `Scope.local`) fail closed pending their own arms (`count(local)` is shape-agnostic and works); and
-  `group().by(k).by(__.out().values().fold())` — a scalar-fold in the GROUP VALUE position — is a separate
-  pre-existing gap in the group-value `by()`.
+  `Scope.local`) fail closed pending their own arms (`count(local)` is shape-agnostic and works).
+  ✅ **A `by(<pre>.fold())` GROUP VALUE — a LIST per partition — LANDED** (`groupCollected`, `map.ts`):
+  the sibling of `groupReduced`, pooling the pre-fold body's rows through `child.rows` (so
+  `by(__.out().fold())`'s many-per-traverser body flattens exactly as `by(__.out().count())`'s does) and
+  COLLECTING them rather than reducing. A `FoldStep` SEEDS `[]`, so an empty pool keeps its key with `l[]`
+  rather than dropping it — the same SEED row `groupReduced`'s count arm unions in, filtered from the array
+  by the collecting aggregate's `FILTER`. Members frame through `producedMemberNode` (factored out of
+  `byNode`, so an element list rides as `{t:'vertex',…}` nodes), and the pooled rows hand off to `groupMap`
+  unchanged — so a `by(<pre>.fold())` frames identically to the by()-less collect one container along. An
+  `order()` before the fold composes for free (`child.rows` preserves the origin through it, and a global
+  order restricted to a partition IS that partition's order); a `dedup()` before it DECLINES (it collapses
+  the pool). The ELEMENT-identity key (`by()`) now reaches the pooled arm — count AND fold — by taking the
+  key from the child rows' `origin`. L3: the `sideEffect/Group.feature` `byXout_foldX`/`byXout_order_foldX`
+  family plus `map/Group`'s ordered-fold scenarios. 🚧 What is LEFT: a `dedup()`/`sample()` before the fold
+  (a partition-relative barrier the shared pool cannot honour); a SCALAR host.
   ⚠️ **A record field's PRESENCE guard re-emits the field's whole value expression** (`recordPairs`'s
   `CASE WHEN <value> IS NOT NULL THEN json_insert(…, <value>)`), so an OPTIONAL nested field spells its
   entire correlated subquery TWICE — and it COMPOUNDS with nesting (a depth-3 selection was 27 KB). A

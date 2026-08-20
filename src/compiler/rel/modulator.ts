@@ -421,6 +421,32 @@ const staticTagExpr = (type: ScalarType): Expr => {
   return tag ? compilerText(tag) : compilerNull('text');
 };
 
+/**
+ * A CHILD BODY'S RESULT AS A SELF-DESCRIBING `{t,v}` MEMBER NODE — the encoding a value `by()` puts in a
+ * map, and (via `groupCollected`) the one a `by(__.…​.fold())` collects into a list, or `null` for a
+ * shape a node cannot carry.
+ *
+ * Factored out of `byNode` because the pooled fold-collect asks exactly this question of an
+ * already-lowered ROW rather than a re-lowered child expression: given a value and what it IS, wrap it
+ * as the member node the typed tree frames at any depth. An ELEMENT rowid becomes `{t:'vertex', v:{…}}`,
+ * a MAP its pairs array, a scalar its `{t,v}` node tagged where the type is STATIC (a literal `t`, no
+ * correlated read duplicated) and untagged where it is per-row (a stored value's tag is a second read a
+ * member position has no room for). The `null`-preserving CASE outside the node is how the shared
+ * productivity filter tells a child that yielded nothing from a value worth collecting.
+ */
+export function producedMemberNode(value: Expr, framing: RelFraming, fresh: Minter): Expr | null {
+  const member = framing.kind === 'elements' ? elementNode(value, framing.elem, fresh)
+    : framing.kind === 'map' ? mapNode(value)
+      : framing.kind === 'scalar' ? typedNode(value, staticTagExpr(framing.type))
+        : null;
+  if (!member) return null;
+  return {
+    kind: 'case',
+    whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
+    else: member,
+  };
+}
+
 export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
@@ -428,33 +454,10 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     if (!child) return null;
     const produced = child.scalar(key.body, host);
     if (!produced) return null;
-    const value = produced.expr;
     // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
     // ALIAS arm below gives — a child body and a labelled read are the same question about a different
     // scope, so they must not encode their results two ways.
-    //
-    // An ELEMENT body (`by(__.outV())`) hands back a rowid, which becomes the `{t:'vertex', v:{…}}`
-    // member the typed tree frames at any depth. A MAP body (`by(__.project('a','b'))`) hands back the
-    // pairs array a map column carries, so it takes the same envelope `fieldNode` adds to a nested
-    // record. Both preserve SQL NULL outside the node for the reason the scalar arm does.
-    const member = produced.framing.kind === 'elements' ? elementNode(value, produced.framing.elem, fresh)
-      : produced.framing.kind === 'map' ? mapNode(value)
-        // A body with a STATIC type (`by(__.values('age').math('_/3'))` is always a double) tags the
-        // node with it — a literal `t`, so no correlated read is duplicated, and `jsonMember` then makes
-        // the value lossless AND a whole-number result frames Double rather than an inferred Int. A
-        // PER-ROW or UNKNOWN type stays untagged: `T.id` genuinely cannot say, and a stored value's tag
-        // is a second correlated read a map side has no room for (the COMPUTE-ONCE invariant). So the
-        // tag rides where it is a constant and is dropped where it is a column.
-        : produced.framing.kind === 'scalar' ? typedNode(value, staticTagExpr(produced.framing.type))
-          : null;
-    if (!member) return null;
-    // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
-    // child that yielded nothing from a value it can collect or group.
-    return {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
-      else: member,
-    };
+    return producedMemberNode(produced.expr, produced.framing, fresh);
   }
 
   if (key.kind === 'alias') {

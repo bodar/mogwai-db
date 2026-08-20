@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,600<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,609<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -86,7 +86,7 @@ the semantic authority.
 | Step | | Notes |
 |---|:--:|---|
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | a reducer over ZERO rows follows the reference per step: `fold`/`group` seed (`[]`/`{}`), `sum`/`min`/`max` emit nothing |
-| `group().by().by()`, `groupCount()` | ✅ | ❌ a group-scoped `count()` with a non-empty body; a SCALAR host |
+| `group().by().by()`, `groupCount()` | ✅ | value `by()` may be a per-member projection, a pooled scalar reducer (`by(__.out().count/sum/min/max/mean())`), or a **`by(<pre>.fold())` LIST** pooled across the whole partition (`groupCollected`) — an empty pool keeps its key with `l[]` (FoldStep seed), an `order()` before the fold sets the member order. The ELEMENT-identity key (`by()`) now reaches the pooled arm for both count and fold. ❌ a SCALAR host; a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
 | `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | deterministic, not merely ordered, over ELEMENT, SCALAR, RECORD and PROPERTY rows through one engine. A property's own order is per owner kind — a `VertexProperty` by id, an edge `Property` by key then value — and `by(desc)` reverses every term. ❌ ELEMENT-list and `Column`-keyed order forms; `order().by(T.key/T.value)` over a property |
 

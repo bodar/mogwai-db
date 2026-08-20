@@ -2,22 +2,23 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
 
   # `Grouping.determineBarrierStep` (vendor/tinkerpop/gremlin-core/.../step/Grouping.java:74) makes
   # the FIRST non-local Barrier in a group's value traversal the group's REDUCER, so it accumulates
-  # across every traverser that landed on the key. `GroupStep.projectTraverser` feeds the value
-  # traversal ONE traverser at a time — which is exactly our child scope — so a barrier compiled
-  # there sees a single origin's rows and silently does nothing.
+  # across every traverser that landed on the key. A `by(<pre>.fold())` is a FoldStep reducer over
+  # exactly that partition, and `groupCollected` (src/compiler/rel/map.ts) builds it by POOLING the
+  # pre-fold body's rows through `child.rows` — the same pool `groupReduced` sums — then collecting
+  # them into a list per key. So the value barrier sees the whole partition, not one origin's rows.
   #
-  # The official corpus cannot see it. Its group scenarios assert `the result should be unordered`,
-  # and an unordered assertion compares the MAP's entries, not the order INSIDE a value list — so
-  # `by(__.values("name").order().by(desc).fold())` returned vertex-id order and still passed. These
+  # The official corpus cannot see the ORDER inside a value list. Its group scenarios assert `the
+  # result should be unordered`, which compares the MAP's entries — so a child-scoped
+  # `by(__.values("name").order().by(desc).fold())` returning vertex-id order still passed. These
   # scenarios pin the list order itself. They survive `mise run test:perturbed` by construction: the
   # order is an explicit aggregate ORDER BY, and PRAGMA reverse_unordered_selects leaves those alone.
-  #
-  # The dedup case is the same rule with a different aggregate (DISTINCT) and it WAS a wrong answer
-  # the corpus could see: dedup per origin left duplicates in the partition's list.
+  # An `order()` before the fold is safe in the shared pool because a GLOBAL total order restricted to
+  # a partition IS that partition's order — which is why it composes where a partition-relative barrier
+  # would not: a `dedup()` before the fold DECLINES (it collapses the pool, dropping `child.rows`'
+  # origin) rather than answering a global dedup for a per-partition one.
   # @gap:group-value-partition-barrier marks the family.
 
   @gap:group-value-partition-barrier
-  @Unsupported
   Scenario: g_V_group_byXlabelX_byXname_order_byXdescX_foldX
     Given the modern graph
     And the traversal of
@@ -33,7 +34,6 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
       | m[{"person":["vadas","peter","marko","josh"],"software":["ripple","lop"]}] |
 
   @gap:group-value-partition-barrier
-  @Unsupported
   Scenario: g_V_group_byXlabelX_byXname_order_foldX
     Given the modern graph
     And the traversal of

@@ -98,7 +98,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_groupXX_byXnameX_byXoutXcreatedX_selectXxX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of

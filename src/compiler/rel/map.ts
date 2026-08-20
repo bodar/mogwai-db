@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -11,7 +11,7 @@ import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, E
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { propertyNode } from './property.ts';
-import { byExpr, byNode, modulations, productivityFilter, type Modulation } from './modulator.ts';
+import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
@@ -225,6 +225,14 @@ export const groupRowCols = (recipe: GroupRecipe): readonly string[] =>
 const named = (modulation: Modulation | undefined): Modulation | undefined =>
   (modulation && modulation.key.kind === 'identity' && modulation.order === undefined ? undefined : modulation);
 
+/** A bare `by(__.fold())` folds the TRAVERSERS themselves into a list — identical to the by()-less
+ *  collecting arm — so it collapses to no value `by()` at all. A `fold()` with a pre-body
+ *  (`by(__.out().fold())`) is NOT collapsed: its members are the pooled child rows, which is
+ *  `groupCollected`'s pool. */
+const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
+  (modulation && modulation.key.kind === 'child' && modulation.key.body.length === 1
+    && modulation.key.body[0]!.name === 'fold' && modulation.order === undefined ? undefined : modulation);
+
 export function groupRows(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
 ): GroupRows | null {
@@ -267,7 +275,12 @@ export function groupRows(
   // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
   // than silently collecting the elements instead — which would be the right arity and the wrong answer,
   // the one thing the decline contract exists to prevent.
-  const valueBy = named(bys[1]);
+  //
+  // A bare `by(__.fold())` names the TRAVERSERS folded into a list, which is exactly the by()-less
+  // collecting arm — `convertValueTraversal` wraps the identity value as `map(identity).fold()`
+  // (`gremlin-core/.../step/Grouping.java`). So it collapses to that arm rather than reaching
+  // `groupCollected`, whose pool exists for a NON-empty pre-fold body.
+  const valueBy = bareFold(named(bys[1]));
   /**
    * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
    * arm with one extraction rather than a value projection.
@@ -290,8 +303,17 @@ export function groupRows(
   // expression would be a plausible-looking wrong value rather than a decline.
   if (valueBy?.key.kind === 'child' && !lastOnly) {
     const terminal = valueBy.key.body.at(-1)?.name;
+    // A `by(<pre>.fold())` COLLECTS the pooled child rows into a LIST per key — the same pool
+    // `groupReduced` builds, folded rather than reduced. `fold()` is a reducing barrier that SEEDS `[]`,
+    // so an empty pool keeps its key with `l[]` (not a dropped key), which is why it is `groupCollected`
+    // and not the per-input collecting arm. A bare `by(__.fold())` is the traverser-collect the by()-less
+    // arm already builds, so it is left to fall through (`pre` empty → `groupCollected` declines).
+    if (terminal === 'fold') {
+      const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, fresh);
+      if (pooled) return { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
+    }
     if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
-      const pooled = groupReduced(input, host, step, bys[0], valueBy.key.body, bulked, child, fresh);
+      const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, fresh);
       // A POOLED value is already a map, and there is no `(key, contribution)` row behind it — see
       // `GroupRows.done`. The `rel`/`recipe` are unreachable and stated only so the shape stays total.
       return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
@@ -678,6 +700,85 @@ function groupReduced(
     keyOf: entry.keyOf,
     valOf: entry.valOf,
   };
+}
+
+/**
+ * A GROUP whose VALUE is a `by(<pre>.fold())` — the pooled child rows COLLECTED into a list per key, or
+ * `null` to decline.
+ *
+ * The sibling of `groupReduced`, and the front half is the same: `child.rows` pools the pre-fold body's
+ * rows and flattens a many-per-traverser body (`by(__.out().fold())`) exactly as it does for
+ * `by(__.out().count())`, each row naming its parent by `origin`. The KEY is re-projected FROM THE ORIGIN
+ * so N members of one parent share one key. The two diverge at the barrier — a `fold()` COLLECTS where a
+ * reducer REDUCES — which is why they are two functions and not one flag.
+ *
+ * **The SEED is what a `fold()` needs and a `sum()` does not.** `FoldStep` is a reducing barrier that
+ * seeds `[]` and emits over an empty pool, so `g.V()...group().by().by(__.out().fold())` maps a childless
+ * vertex to `l[]` and KEEPS its key — `sideEffect/Group.feature`'s `g_V_..._group_by_byXout_foldX`:
+ * `{"v[vadas]":"l[]", "v[peter]":"l[v[lop]]"}`. `child.rows` is an inner join, so a childless parent
+ * contributes no row; a SEED row per parent (its key, a NULL member) creates the group, and the
+ * collecting aggregate's own `FILTER (WHERE member IS NOT NULL)` drops the seed so the fold is `[]` rather
+ * than `[null]`. This is the same seed `groupReduced`'s COUNT arm unions in, and for the same reason.
+ *
+ * The pooled rows are then handed to `groupMap` unchanged — member encoding, member order, the empty-list
+ * `FILTER`, and the `{t:'list', v}` framing are the collecting arm's, so a `by(<pre>.fold())` frames
+ * identically to the by()-less collect one container along.
+ */
+function groupCollected(
+  input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
+  child: ChildSeam, fresh: Minter,
+): GroupedMap | null {
+  const pre = body.slice(0, -1);
+  // A bare `by(__.fold())` is the by()-less collecting arm (`bareFold` already collapsed it); this pool
+  // exists for a pre-fold body. THE POOLING needs a rowid to name each child row's parent, so only an
+  // ELEMENT host reaches it — `origin` is typed `int` and a value stream has none.
+  if (!pre.length || host.kind !== 'element') return null;
+  const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
+  // A body that lost the origin (a barrier BEFORE the fold — `by(__.out().order().fold())`) is a
+  // different first barrier and declines here rather than folding the wrong pool.
+  if (!rows) return null;
+  // The MEMBER, encoded exactly as a value `by()` member is: an element row's rowid → `{t:'vertex',…}`,
+  // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
+  const valueCol = rows.framing.kind === 'elements' ? col(rows.rel.id, 'id') : col(rows.rel.id, 'v');
+  const member = producedMemberNode(valueCol, rows.framing, fresh);
+  if (!member) return null;
+
+  const elementKey = !keyBy;
+  /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own `id`
+   *  in the seed arm. One function so both arms group by the same thing (`groupReduced`'s rule). */
+  const keyOf = (rowid: Expr): Expr | null =>
+    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, fresh, child));
+  const key = keyOf(col(rows.rel.id, rows.origin));
+  const seedKey = keyOf(col(input.id, 'id'));
+  if (!key || !seedKey) return null;
+
+  // MEMBER ORDER is the child rows' own encounter, the same total order `mise run test:perturbed` pins for
+  // the collecting arm; the seed rows sort with a `0` they never keep (the `FILTER` drops them).
+  const enc = rows.rel.channels.find((channel) => channel.role === 'encounter');
+  const cols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int'));
+  const real = make.project({
+    id: fresh('ck'), input: rows.rel, channels: [], type: cols,
+    exprs: [[KEY_COL, key], [MEMBER_COL, member], [ORD_COL, enc ? col(rows.rel.id, enc.col) : col(rows.rel.id, rows.origin)]],
+  });
+  const seed = make.project({
+    id: fresh('cz'), input, channels: [], type: cols,
+    exprs: [[KEY_COL, seedKey], [MEMBER_COL, compilerNull()], [ORD_COL, compilerInt(0)]],
+  });
+  const arms = make.union({ id: fresh('cu'), all: true, channels: [], type: cols, inputs: [seed, real] });
+  const keyed = make.materialize({ id: fresh('cm'), input: arms, channels: [], type: cols });
+  // TinkerPop drops an unproductive KEY rather than grouping under null, the same rule (and the same
+  // `ProductiveByStrategy` exception) the barrier's own key obeys — asked here because the seed can
+  // introduce a null key a real member never would.
+  const drop = productivityFilter(step, col(keyed.id, KEY_COL));
+  const rowsIn = drop ? make.filter({ id: fresh('cf'), input: keyed, channels: [], type: cols, pred: drop }) : keyed;
+  // The COLLECTING arm frames the list, drops the seed (`memberDrop`), orders by encounter and wraps the
+  // members in a `{t:'list', v}` node — a `by(<pre>.fold())` is that arm over a pooled row set.
+  const recipe: GroupRecipe = {
+    counting: false, keyElem: elementKey ? host.elem : undefined, member: { kind: 'node' },
+    single: false, memberDrop: true, bulkCol: undefined, step,
+  };
+  const grouped = groupMap(rowsIn, recipe, fresh);
+  return grouped;
 }
 
 /** The hosts whose traverser is addressed by a ROWID, so a collecting group can carry it as an integer

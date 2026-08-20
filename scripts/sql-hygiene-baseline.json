@@ -217,7 +217,7 @@
   },
   "group": {
     "binds": 0,
-    "bytes": 3156,
+    "bytes": 3682,
     "compiler": 87,
     "bound": 0
   },
@@ -553,8 +553,8 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 10082,
-    "compiler": 92,
+    "bytes": 5957,
+    "compiler": 78,
     "bound": 0
   },
   "V": {
