@@ -2659,6 +2659,51 @@ function scalarTail(
     const sliced = sliceOp(step, rel, bulked, fresh);
     if (sliced) { rel = sliced; continue; }
 
+    // `concat(__.<t>…)` — a TRAVERSAL operand is a per-traverser CHILD value (`TraversalUtil.apply`),
+    // which makes concat a row boundary the pure `VALUE_TX.concat` declines. Each operand resolves as a
+    // correlated scalar over the traverser (`scalarChild`, the same seam a `by()` body uses), and the
+    // FIRST result is appended — a `ScalarMapStep`, one traverser in and one out.
+    // ⚠️ ONLY a PROVABLY-PRODUCTIVE operand: `TraversalUtil.apply` THROWS on an empty sub-traversal
+    // ("does not map to a value"), which a correlated scalar subquery cannot reproduce — it yields NULL,
+    // which `concat_ws` SKIPS, a different answer. So an operand that MIGHT be empty declines (fail
+    // closed) rather than mis-execute; a live-alias read (`concat(__.select('a'))`) is always productive
+    // because the traverser was bound to the label, which is the corpus form.
+    if (step.name === 'concat' && args.some(isNested)) {
+      const seam = childSeam(ctx, fresh);
+      const host: ChildHost = {
+        kind: 'scalar', value: col(rel.id, 'v'),
+        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}), row: { rel, aliases: labels },
+      };
+      const parts: Expr[] = [];
+      for (const a of args) {
+        if (a === null) continue;         // a null operand is skipped (`ConcatStep`)
+        if (!isNested(a)) return null;     // the Java API cannot MIX string and traversal operands
+        const body = seam.body(a.nested, 'child');
+        if (!body) return null;
+        const cv = scalarChild(body, host, ctx, fresh);
+        if (!cv || cv.framing.kind !== 'scalar' || cv.present !== ALWAYS_PRODUCTIVE) return null;
+        parts.push(cv.expr);
+      }
+      // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
+      // literal to force it, an all-null concatenation must be NULL rather than `''`, so the guard tests
+      // every part (the traverser's own value included) IS NULL. Mirrors `VALUE_TX.concat`.
+      const all = [col(rel.id, 'v'), ...parts];
+      const value: Expr = {
+        kind: 'case',
+        whens: [[all.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
+          .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],
+        else: { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] },
+      };
+      const carried = rel.channels;
+      rel = make.project({
+        id: fresh('cc'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
+        exprs: [['v', value], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      out = { kind: 'scalar', type: UNKNOWN };
+      continue;
+    }
+
     // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
     // into one SELECT (`upper(lower(p.v))`).
     // Membership is checked BEFORE the lowering is asked for, so an unlowerable member of the family
