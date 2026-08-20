@@ -5018,6 +5018,34 @@ function propertyTail(
  *  and, under a `by(key)`, the orderings. `within`/`between`/text ops are not two-single-alias shapes. */
 const ALIAS_CMP: Record<string, BinaryOp | undefined> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
+/**
+ * A COMPOUND alias-compare predicate over IDENTITIES — `where(k, P.not(P.eq('a').or(P.eq('d'))))` — as a
+ * boolean expression, or `null` to decline.
+ *
+ * `WherePredicateStep` composes `eq`/`neq`/`and`/`or`/`not` over `selectKey` operands; without a `by()`
+ * the comparison is over the elements' rowids (TinkerPop compares by IDENTITY there). The recursion
+ * mirrors `predicateExpr`'s connective handling, except a leaf operand is a LABEL resolved to
+ * `aliasIdAt` rather than a literal — and only `eq`/`neq` have identity meaning, so an ordering leaf
+ * declines (that is the `by()`-value form, a further phase). Every referenced label must be a LIVE
+ * element alias or the whole predicate declines, fail closed.
+ */
+function aliasIdentityPred(pred: unknown, startId: Expr, rel: Rel, labels: AliasMap, fresh: Minter): Expr | null {
+  if (!isPred(pred)) return null;
+  const { op, operands } = pred;
+  if (op === 'not') { const inner = aliasIdentityPred(operands[0]!.value, startId, rel, labels, fresh); return inner && { kind: 'unary', op: 'not', arg: inner }; }
+  if (op === 'and' || op === 'or') {
+    const parts = operands.map((o) => aliasIdentityPred(o.value, startId, rel, labels, fresh));
+    return parts.every((p): p is Expr => !!p) ? parts.reduce((a, b) => ({ kind: 'binary', op, left: a, right: b })) : null;
+  }
+  if ((op === 'eq' || op === 'neq') && operands.length === 1 && typeof operands[0]!.value === 'string') {
+    const proj = aliasProjection(rel, labels, operands[0]!.value, 'last', fresh);
+    if (!proj || proj.read.kind !== 'element') return null;
+    const same = eq(startId, aliasIdAt(col(rel.id, proj.entry.col), 'last'));
+    return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+  }
+  return null; // an ordering leaf has no identity meaning — it is the by()-value form, a later phase
+}
+
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
   if ((step.name !== 'where' && step.name !== 'not') || step.optionArms) return null;
   // Two-variable theta: `where(k1, P.op(k2))[.by(key)]` between two bound ELEMENT aliases — TinkerPop's
@@ -5028,6 +5056,17 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (step.name === 'where') {
     const wargs = argValues(step);
     const pred = step.args?.[1]?.value;
+    // A COMPOUND connective over label identities (`where('c', P.not(P.eq('a').or(P.eq('d'))))`) — no
+    // `by()`, so the leaves compare rowids. The single-binary path below is the `by()`-value case and
+    // the bare `eq`/`neq` identity case; a compound one needs the recursion `aliasIdentityPred` gives.
+    if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred) && !step.modulators?.length
+      && (pred.op === 'and' || pred.op === 'or' || pred.op === 'not')) {
+      const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
+      if (startProj && startProj.read.kind === 'element') {
+        const clause = aliasIdentityPred(pred, aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh);
+        if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      }
+    }
     if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
       && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string' && ALIAS_CMP[pred.op]) {
       const projA = aliasProjection(rel, labels, wargs[0], 'last', fresh);

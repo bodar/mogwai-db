@@ -71,6 +71,7 @@ ran	1	1	f950645de8eb9fe9	20d369a4f952d6f6	g.V().as("a").has("name", "marko").as(
 ran	4	4	33fdbc22148727f2	833e3e0f50dc9e28	g.V().as("a").in("created").addE("createdBy").from("a").property("year", 2009).property("acl", "public")
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().as("a").map(__.select("a"))
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().as("a").or(__.select("a"), __.select("a"))
+ran	2	2	c1e5ba63708c3c25	f70052b74c4fb0e7	g.V().as("a").out("created").as("b").in("created").as("c").both("knows").both("knows").as("d").where("c", P.not(P.eq("a").or(P.eq("d")))).select("a", "b", "c", "d")
 ran	4	4	461fd7c3873d9a78	234bedc1a174cad7	g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")
 nondet	4				g.V().as("a").out("created").as("b").order().by(Order.shuffle).select("a", "b")
 ran	2	2	e47c44fd67aeac39	24583925851d6fd7	g.V().as("a").out("created").as("b").where(__.and(__.as("b").in(), __.not(__.as("a").out("created").has("name", "ripple")))).select("a", "b")
