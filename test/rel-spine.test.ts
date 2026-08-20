@@ -520,8 +520,11 @@ const DECLINED = [
   // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
   // disagree only on their TYPE TAG. That is no longer refused: §6·7's lattice meets them at a
   // per-row `vtype` column (`meetScalarArms`), so the payload agrees and the Union is positional
-  // again. What still declines is an arm disagreeing on SHAPE, which is the variant merge.
-  "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
+  // again. A SHAPE disagreement (a variant merge) is also covered now for a `count`/`out()` mix —
+  // `union(__.out(), __.count())` is arm-major over a variant (`mixedBranch`) — so it is no longer
+  // here. What still declines is a variant with a list-of-ELEMENTS arm (`union(__.fold(), __.out())`),
+  // the framer gap below.
+  "g.V().union(__.fold(), __.out())", // list-of-ELEMENTS arm in a variant: variantPayload has no element expansion inside a list
   "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
   // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
   // reference rejects. count()/fold() are not this — both emit a traverser for an empty child.

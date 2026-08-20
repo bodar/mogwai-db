@@ -242,3 +242,40 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # `local(__.union(__.out().limit(1)))`, and the map/flatMap twins — defers today ("local() child shape
   # not yet supported by generic child lowering"). When that shape lands, the scenario to add asserts
   # 3 for the modern graph's four persons: marko/josh/peter one out-neighbour each, vadas none.
+
+  # ---- a MIXED-SHAPE arm-major union: a collapsed reduction beside a streaming element ----
+  #
+  # `union(count(), out())` batches on `count()` (a Barrier), so it is arm-major: arm 0 is one global
+  # count over the whole input, arm 1 streams the out-neighbours. The two shapes (scalar + element)
+  # merge into a VARIANT stream (`mixedBranch`). V(1)=marko: count 1, then out {vadas, lop, josh}.
+  @gap:element-branch-child
+  Scenario: g_VX1X_unionXcount__outX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.count(), __.out())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | v[vadas] |
+      | v[lop] |
+      | v[josh] |
+
+  # A LIST-of-SCALARS arm (not a list of elements) also joins the variant: values('name').fold()
+  # batches to one list ['marko'], then out() streams the neighbours.
+  @gap:element-branch-child
+  Scenario: g_VX1X_unionXvaluesXnameX_fold__outX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.values("name").fold(), __.out())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko] |
+      | v[vadas] |
+      | v[lop] |
+      | v[josh] |

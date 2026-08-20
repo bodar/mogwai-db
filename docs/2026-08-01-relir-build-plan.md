@@ -619,11 +619,16 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     type becomes the shared `vtype`), then handed to `batchedBranch`. ⚠️ The batching test is `isReductionArm`
     (a body holding a `selfCollapses` barrier), NARROWER than `armBatches` (any Barrier) on purpose: a SLICE arm
     (`union(out().limit(1), in())`) batches too but does not COLLAPSE, so it stays the ordinary merge — using
-    `armBatches` here stopped two corpus reads executing (census caught it). 🚧 What is LEFT, each fail-closed:
-    a **MIXED-SHAPE** arm-major (`union(__.count(), __.out())` — a collapsed scalar beside a streaming element,
-    the variant arm-major); a **batched `choose`** (same path, unwired); an **alias through a collapsed arm**
-    (`union(min.as('x'), …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm
-    (needs a key STACK, not one `bord_p`).
+    `armBatches` here stopped two corpus reads executing (census caught it). ✅ **MIXED-SHAPE landed too**
+    (`mixedBranch`): a collapsed scalar/list reduction beside a streaming ELEMENT arm merges as a VARIANT
+    arm-major — `union(__.count(), __.out())` → `[1, v[vadas], v[lop], v[josh]]`, `union(__.values('name').fold(),
+    __.out())` → `[l[marko], …]` — a scalar arm normalizes via `toScalarArm`, an element/list-of-scalars arm
+    gains `bulk=1` (`ensureBulk`), then `mergeArms`' variant merge reconciles the shapes. ⚠️ A LIST-of-ELEMENTS
+    arm (a bare `fold()` over vertices — `union(__.fold(), __.out())`) still DECLINES: `variantPayload` has no
+    element (id/label/props) expansion INSIDE a list INSIDE a variant, so it would frame an undefined `props`;
+    the gate is `of.kind === 'scalar'`. 🚧 What is LEFT, each fail-closed: that list-of-elements variant framer;
+    a **batched `choose`** (same path, unwired); an **alias through a collapsed arm** (`union(min.as('x'),
+    …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm (a key STACK).
 - **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
   (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is
   a PERF tail on already-correct queries, gated on measurement — not a pass to build.

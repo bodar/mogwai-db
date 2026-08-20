@@ -5270,21 +5270,37 @@ function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
 }
 
 /**
- * A `union` with SOME (not all) batched arms — a MIXED arm-major union, SCALAR arms only: a collapsed
- * reduction (`min`, one global row) beside a per-input arm (`constant`, one row per traverser), drained
- * ARM-major (`union(__.min(), __.constant(99))` → `[27, 99, 99, 99, 99]`). Each arm is normalized to a
- * common `[v, vtype, bulk]` scalar (`toScalarArm` — the batched arm gains `bulk = 1`), then handed to
- * `batchedBranch`: the same arm-major mint + empty gate the all-batched case uses. A non-scalar arm
- * (element/list) declines — a mixed-SHAPE arm-major union is the variant arm-major, a later increment —
- * as does an arm carrying an alias the collapsed arm cannot (`union(min, identity).select('x')`, the
- * `mintArmMajor` channel check).
+ * A `union` with SOME (not all) batched arms — a MIXED arm-major union: a collapsed reduction (`min`,
+ * `count`, `fold` — one global row) beside a per-input arm (`constant`, `out()`), drained ARM-major.
+ * Each arm is reconciled to a common CHANNEL set so the arm-major `Union` can carry it, then handed to
+ * `batchedBranch` — the same mint + empty gate the all-batched case uses; the payload SHAPE differences
+ * (`mergeArms`' scalar meet / variant merge) are the union's own.
+ *
+ * The reconciliation is per shape: a SCALAR arm normalizes to `[v, vtype, bulk]` (`toScalarArm` — which
+ * also drops a `result` marker so a `count`/`number` reduction can meet a plain scalar OR join a
+ * variant); an ELEMENT or LIST arm just gains `bulk = 1` if it collapsed (`ensureBulk`). So a same-shape
+ * mix (`union(__.min(), __.constant(99))` → `[27,99,99,99,99]`) meets as scalars and a cross-shape one
+ * (`union(__.count(), __.out())`, `union(__.fold(), __.out())`) becomes a VARIANT stream. A map/record/
+ * path/property arm, or an arm carrying an alias the collapsed arm cannot (`union(min.as('x'),
+ * …).select('x')`, the `mintArmMajor` channel check), declines.
  */
-function mixedScalarBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap): FramedRel | null {
+function mixedBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap): FramedRel | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
-    const rel = toScalarArm(arm, fresh);
-    if (!rel) return null;
-    normalized.push({ ...arm, rel, framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } });
+    const fr = arm.framing;
+    if (fr.kind === 'scalar') {
+      const rel = toScalarArm(arm, fresh);
+      if (!rel) return null;
+      normalized.push({ ...arm, rel, framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } });
+      continue;
+    }
+    // ⚠️ A LIST arm may join the variant only when its members are SCALARS: a list of ELEMENTS (a bare
+    // `fold()` over vertices) needs the element (id/label/props) expansion INSIDE the list INSIDE the
+    // variant, which `variantPayload` does not build — `rowVertex` reads an undefined `props` and the
+    // frame throws. A list-of-scalars carries no element to expand, so it is safe.
+    const ok = fr.kind === 'elements' || (fr.kind === 'list' && fr.of.kind === 'scalar');
+    if (!ok) return null;
+    normalized.push({ ...arm, rel: ensureBulk(arm.rel, fresh) });
   }
   return batchedBranch(normalized, input, fresh, labels);
 }
@@ -5327,8 +5343,8 @@ function unionArms(
   // would wrongly decline). Only reachable when `!slice` (a batched arm under a downstream slice already
   // declined above).
   if (!slice && bodies.every((body) => isReductionArm(body!))) return batchedBranch(arms, input, fresh, labels);
-  // SOME (not all) reduce → a MIXED arm-major union of a collapsed arm and a per-input one (`mixedScalarBranch`).
-  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedScalarBranch(arms, input, fresh, labels);
+  // SOME (not all) reduce → a MIXED arm-major union of a collapsed arm and a per-input one (`mixedBranch`).
+  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedBranch(arms, input, fresh, labels);
   return slice
     ? mintTraverserMajor(arms, source, labels, fresh)
     : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
