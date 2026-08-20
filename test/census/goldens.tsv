@@ -1272,6 +1272,7 @@ ran	1	1	625bdf1ae0f79cd2	18d568f5946e2052	g.mergeV([name: "newperson"]). option(
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.mergeV(null)
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.mergeV(null).option(Merge.onCreate,[:])
 ran	6	6	1c896079cb4d3b31	54b4986ccfb79240	g.union(__.V().hasLabel("software"), __.V().hasLabel("person")).values("name")
+ran	6	6	1c896079cb4d3b31	a23df02ce161bf89	g.union(__.V().values("name"))
 ran	2	2	60c425cdffc68e39	fbe6bb722ef35a7f	g.union(__.inject(1), __.inject(2))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.with("multilabel").E().has("since", 2018).hasLabel("livesIn").elementMap()
 ran	6	6	45b5c9028cd2ca99	64a5c4f90c1fd9f1	g.with("multilabel").V().elementMap()

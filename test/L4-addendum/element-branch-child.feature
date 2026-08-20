@@ -179,7 +179,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # out() over all six vertices is 6 traversers; ONE global limit(2) keeps two of them. Per-origin it
   # kept two per vertex — marko 2, josh 2, peter 1 — which is 5, and is what `local(union(…))` means.
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_unionXoutXlimitX2XX_count
     Given the modern graph
     And the traversal of
@@ -209,7 +208,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # out-neighbours are {vadas, josh, lop, ripple} with lop reached three times, so a global dedup is 4.
   # Per-origin, each vertex's own out-set was already distinct, so it was a no-op at 6.
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_unionXoutXdedupXX_count
     Given the modern graph
     And the traversal of

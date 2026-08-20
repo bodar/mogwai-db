@@ -639,8 +639,13 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     arm (`union(__.fold(), __.out())` → `[l[v[marko]], v[vadas], …]`): `variantPayload` now frames the folded
     list's members through the SAME `listPayloadExpr` expansion the non-variant list uses (rowids →
     `{id,label,props}` objects), where before it passed raw rowids and `rowVertex` threw on an undefined
-    `props`. 🚧 What is LEFT, each fail-closed: a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a
-    **batched `choose`** (same path, unwired); an **alias through a collapsed arm** (`union(min.as('x'),
+    `props`. ✅ **The SINGLE-arm form LANDED** (`unionArms`/`sourceUnion`): `union(t)` IS `t` — `UnionStep`'s
+    one branch takes every traverser — so a non-reduction single arm returns its own lowering (chain- and
+    source-position), which is what makes `union(__.out().limit(2)).count()` the GLOBAL `2` rather than a
+    per-origin `5` (`element-branch-child`, two tags dropped). A single REDUCTION arm still declines (it owes
+    the arm-major `Exists(input)` gate a `Union` of one input cannot carry). 🚧 What is LEFT, each fail-closed:
+    a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a **batched `choose`** (a per-arm gate, not the
+    shared-input one — see the census note); an **alias through a collapsed arm** (`union(min.as('x'),
     …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm (a key STACK).
 - **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
   (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is

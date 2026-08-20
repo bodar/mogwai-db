@@ -515,7 +515,10 @@ const DECLINED = [
   // RelIR now expresses that as the `Filter(false)` §3.3 names. The remaining guard is the one where
   // being empty would be WRONG: a name that resolves in a scope this record builder cannot see.
   "g.V().groupCount('a').select('a')", // a NAMED COLLECTION resolves as a side effect, not as a label
-  "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
+  // NOTE: `union(__.out())` used to sit here — a SINGLE arm. `union(t)` IS `t` (`UnionStep`'s one branch
+  // takes every traverser), so it is no longer refused; a single REDUCTION arm still declines (it owes the
+  // batched empty-input gate), which is what `union(__.count())` below pins.
+  "g.V().union(__.count())",           // a SINGLE reduction arm: still owes the arm-major `Exists(input)` gate
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
   // disagree only on their TYPE TAG. That is no longer refused: §6·7's lattice meets them at a

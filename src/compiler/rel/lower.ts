@@ -5316,9 +5316,22 @@ function unionArms(
   // deterministic order over the whole fan-out after the fact (`withFanoutOrder`, §10) rather than
   // declining — the positionless rows are the same either way.
   const args = argValues(step);
-  if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
+  if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
+
+  // A SINGLE-ARM `union(t)` IS `t`: `UnionStep extends BranchStep` with `Pick.any`, so the one branch
+  // receives every traverser and its output is the whole result (`gremlin-core/.../branch/UnionStep`).
+  // No merge, and — for a non-reduction arm — no arm-major empty gate: the arm emits per input, so an
+  // empty input is an empty output. A single REDUCTION arm (`union(__.count())`) DOES need the batched
+  // path's `Exists(input)` gate (an empty input emits nothing, not the seed), and an arm that binds a
+  // label or a SLICE-demanded one carry merge questions the multi-arm path owns — all three decline here.
+  if (args.length === 1) {
+    if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
+    const only = continueAs(input, framing, bodies[0]!, 0, bulked, inBody(ctx), fresh, labels);
+    if (!only || only.aliases.size !== labels.size) return null;
+    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing }, ctx, fresh);
+  }
 
   const slice = sliceableBranch(ctx, input);
   // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects
@@ -5455,7 +5468,7 @@ function sourceUnion(
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
-  if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
+  if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const arms: Tail[] = [];
   for (const arg of args) {
     const body = rootedSteps((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects);
@@ -5464,6 +5477,10 @@ function sourceUnion(
     if (!read || read.effects?.length) return null;
     arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES, bulked: ctx.collapse });
   }
+  // `g.union(t)` IS `g.t` — the one branch is rooted and its rows are the whole answer, no merge (and a
+  // `Union` needs two inputs anyway). Unlike a chain-position single arm there is no empty-input gate to
+  // owe: a source union's arms each root their own read, which carries its own reducer semantics.
+  if (arms.length === 1) return { rel: arms[0]!.rel, framing: arms[0]!.framing };
   return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, fresh);
 }
 
