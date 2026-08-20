@@ -799,6 +799,14 @@ pattern this whole stage kept finding:
   shared across leaves; a non-productive projection drops the row (an `IS NOT NULL` term per projection,
   a `ProductiveByStrategy` keep-null still declining). Verified row-for-row vs `Where.feature` including
   the CYCLED `d`→`by[0]` in `where('a', P.lt('b').or(P.gt('c')).and(P.neq('d'))).by('age').by('weight').by(min)`.
+- ✅ **a bare `where(P)` alias-compare — the subject is the CURRENT traverser** (`where(P.neq('a'))`,
+  `WherePredicateStep` with a null startKey uses `traverser.get()`). Handled over an element stream as an
+  identity rowid compare (reusing `aliasIdentityPred`), GATED on the predicate naming a live label — else
+  it is an ordinary value predicate and falls through to `sourceFilter`. Unblocks the `addE` co-developer
+  write and the Grateful-Dead `where(P.eq('song'))` join.
+- ✅ **`math()`/`format()` resolve a `withSideEffect()` CONSTANT variable** (`math('_ + x')` with
+  `withSideEffect('x', 100)`). `Scoping.getScopeValue` consults the side-effects before the path labels;
+  `sideEffectConst` inlines the seam's registered constant as a typed literal (zero binds).
 - **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
   variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
