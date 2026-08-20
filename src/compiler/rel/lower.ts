@@ -5046,6 +5046,57 @@ function aliasIdentityPred(pred: unknown, startId: Expr, rel: Rel, labels: Alias
   return null; // an ordering leaf has no identity meaning — it is the by()-value form, a later phase
 }
 
+/**
+ * A COMPOUND alias-compare under a `by()`-RING — `where('a', P.lt('b').or(P.gt('c'))).by('age').by('weight')`
+ * — as a filter clause, or `null`/`'decline'`.
+ *
+ * `WherePredicateStep` (`filter`/`setPredicateValues`) resolves EACH selectKey through the NEXT `by()` in
+ * a cycling `TraversalRing`, in encounter order: the startKey takes `by[0]`, then each predicate LEAF's
+ * operand label takes `by[1]`, `by[2]`, … cycling, walking the `ConnectiveP` tree left-to-right. The LHS
+ * (the startKey's value) is computed ONCE and every leaf compares against it. Any non-productive
+ * projection drops the row (`isProductive()` → `false`), which the conjoined `IS NOT NULL` productivity
+ * terms reproduce (a `ProductiveByStrategy` keep-null is not built, so that declines, matching the
+ * single-binary path).
+ */
+function aliasValueWhere(
+  step: IRStep, startKey: string, pred: unknown, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+): Rel | 'decline' | null {
+  const startProj = aliasProjection(rel, labels, startKey, 'last', fresh);
+  if (!startProj || startProj.read.kind !== 'element') return null; // a scalar-alias theta is unbuilt
+  const ring = modulations(step, step.modulators?.length ?? 0, childSeam(ctx, fresh));
+  if (!ring || !ring.length) return null;
+  const seam = childSeam(ctx, fresh);
+  const hostOf = (proj: NonNullable<ReturnType<typeof aliasProjection>>): ChildHost =>
+    ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
+  const lhs = byExpr(ring[0]!, hostOf(startProj), fresh, true, seam);
+  if (!lhs) return 'decline';
+  const lhsProd = productivityFilter(step, lhs);
+  if (!lhsProd) return 'decline'; // keep-null (ProductiveByStrategy) not built
+  const prod: Expr[] = [lhsProd];
+  let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
+  const build = (p: unknown): Expr | null => {
+    if (!isPred(p)) return null;
+    if (p.op === 'not') { const inner = build(p.operands[0]!.value); return inner && { kind: 'unary', op: 'not', arg: inner }; }
+    if (p.op === 'and' || p.op === 'or') {
+      const parts = p.operands.map((o) => build(o.value));
+      return parts.every((x): x is Expr => !!x) ? parts.reduce((a, b) => ({ kind: 'binary', op: p.op as 'and' | 'or', left: a, right: b })) : null;
+    }
+    if (!ALIAS_CMP[p.op] || p.operands.length !== 1 || typeof p.operands[0]!.value !== 'string') return null;
+    const proj = aliasProjection(rel, labels, p.operands[0]!.value, 'last', fresh);
+    if (!proj || proj.read.kind !== 'element') return null;
+    const by = ring[ringIdx % ring.length]!; ringIdx++;
+    const val = byExpr(by, hostOf(proj), fresh, true, seam);
+    if (!val) return null;
+    const p2 = productivityFilter(step, val);
+    if (!p2) return null; // keep-null not built
+    prod.push(p2);
+    return { kind: 'binary', op: ALIAS_CMP[p.op]!, left: lhs, right: val };
+  };
+  const clause = build(pred);
+  if (!clause) return 'decline';
+  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(prod.reduce((a, b) => and(a, b)), clause) });
+}
+
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
   if ((step.name !== 'where' && step.name !== 'not') || step.optionArms) return null;
   // Two-variable theta: `where(k1, P.op(k2))[.by(key)]` between two bound ELEMENT aliases — TinkerPop's
@@ -5056,15 +5107,21 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (step.name === 'where') {
     const wargs = argValues(step);
     const pred = step.args?.[1]?.value;
-    // A COMPOUND connective over label identities (`where('c', P.not(P.eq('a').or(P.eq('d'))))`) — no
-    // `by()`, so the leaves compare rowids. The single-binary path below is the `by()`-value case and
-    // the bare `eq`/`neq` identity case; a compound one needs the recursion `aliasIdentityPred` gives.
-    if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred) && !step.modulators?.length
+    // A COMPOUND connective (`and`/`or`/`not`) over selectKey operands. WITH a `by()` it is a value
+    // compare through the ring (`aliasValueWhere`); WITHOUT one the leaves compare rowids
+    // (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, `aliasIdentityPred`). The single-binary path below
+    // is the one-operand `by()`-value and bare `eq`/`neq` identity case.
+    if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
       && (pred.op === 'and' || pred.op === 'or' || pred.op === 'not')) {
-      const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
-      if (startProj && startProj.read.kind === 'element') {
-        const clause = aliasIdentityPred(pred, aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh);
-        if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      if (step.modulators?.length) {
+        const built = aliasValueWhere(step, wargs[0], pred, rel, labels, ctx, fresh);
+        if (built) return built;
+      } else {
+        const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
+        if (startProj && startProj.read.kind === 'element') {
+          const clause = aliasIdentityPred(pred, aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh);
+          if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+        }
       }
     }
     if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)

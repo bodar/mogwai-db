@@ -90,6 +90,8 @@ ran	2	2	42c47dd70aac8939	ef52f7103c6c9aac	g.V().as("a").out().as("a").out().as("
 ran	2	2	036509ffcc21879f	9666e16102bfcafa	g.V().as("a").out().as("a").out().as("a").select(Pop.mixed, "a").by(__.unfold().values("name").fold()).tail(Scope.local, 2)
 ran	6	6	32fdede3da3c5f0d	ecb8cea46f4f7e74	g.V().as("a").out().as("b"). select("a", "b").by("name")
 ran	1	1	331662533e96dcca	d40ae5fa8f26703a	g.V().as("a").out().as("b").match(__.as("a").out().count().as("c"), __.as("b").in().count().as("c"))
+ran	4	4	32eb77e88cb5a19f	45fd1695d9431e5f	g.V().as("a").outE("created").as("b").inV().as("c").in("created").as("d").where("a", P.lt("b").or(P.gt("c")).and(P.neq("d"))).by("age").by("weight").by(__.in("created").values("age").min()).select("a", "c", "d").by("name")
+ran	4	4	d4f6169fe7bf75b4	c7feca9a0dcd320e	g.V().as("a").outE("created").as("b").inV().as("c").where("a", P.gt("b").or(P.eq("b"))).by("age").by("weight").by("weight").select("a", "c").by("name")
 ran	4	4	27729c79d0b3e0d1	f1d0bdec0d37f464	g.V().as("a").select("a").by("age")
 ran	1	1	540f5b885450691e	a398f59be2f4de60	g.V().as("a").where(__.out("knows")).select("a")
 ran	4	4	19dd1eecc266f7e2	126ec583879cdaa9	g.V().as("a","n").select("a","n").by("age").by("name")
