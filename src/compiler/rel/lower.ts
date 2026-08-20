@@ -6576,6 +6576,34 @@ function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extract<Chi
 }
 
 /**
+ * A `select(<label>)` in a child body REROOTS to the aliased traverser — the alias analogue of
+ * `rerootedHost`'s endpoint/owner reroots, so `by(__.select('a').values('name'))`,
+ * `concat(__.select('a'))` and `is(__.select('a')…)` all continue the body against whatever the label
+ * named, whatever the current host is.
+ *
+ * The mechanism is entirely `aliasProjection`'s: `Scoping.getScopeValue` resolves a label off the
+ * traverser's scope, and for an element/scalar/property host that scope IS the `HostRow`'s alias map
+ * (a record host's own MAP SCOPE beats the labels, so `recordTail` answers select there and this arm
+ * declines it). An element alias becomes an element host, a value alias a scalar host carrying the
+ * label's per-row type where it had one; a list/Pop history is a later phase and declines with the
+ * same `null` an absent or non-live label gives — fail closed, never a guess off the wrong row.
+ */
+function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): ChildHost | null {
+  if (host.kind === 'record' || !host.row || step.modulators?.length) return null;
+  const spec = selectSpec(step);
+  if (!spec || spec.labels.length !== 1) return null;
+  const proj = aliasProjection(host.row.rel, host.row.aliases, spec.labels[0]!, spec.pop, fresh);
+  if (!proj) return null;
+  const row = { row: host.row } as const;
+  if (proj.read.kind === 'element') return { kind: 'element', id: proj.payload[0]![1]!, elem: proj.read.elem, ...row };
+  if (proj.read.kind === 'value') {
+    const vtype = proj.payload[1]?.[1];
+    return { kind: 'scalar', value: proj.payload[0]![1]!, ...(vtype ? { vtype } : {}), ...row };
+  }
+  return null; // a list/Pop history alias in a child body is a later phase
+}
+
+/**
  * A nested body as a VALUE expression PLUS what that value is — the seam's correlated-SCALAR answer.
  * Collection, selection and branching still decline for later arms.
  *
@@ -6749,6 +6777,22 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // every result may take this expression, not only one that takes the first.
     if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
     return scalarChild(body.slice(1), rerooted, ctx, fresh);
+  }
+
+  // A `select(<label>)` RE-ROOT — the alias analogue of the endpoint/owner reroots above, so a child
+  // body may read a bound label and continue against it. A bare `select('a')` yields the aliased
+  // traverser itself (an element or a value); a chain past it continues against the new host.
+  if (first.name === 'select') {
+    const reHost = selectRerootHost(first, host, fresh);
+    if (!reHost) return null;
+    if (body.length === 1) {
+      if (reHost.kind === 'element') return { expr: reHost.id, framing: { kind: 'elements', elem: reHost.elem }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+      if (reHost.kind === 'scalar') return {
+        expr: reHost.value, framing: { kind: 'scalar', type: reHost.vtype ? PER_ROW('vtype') : UNKNOWN },
+        ...(reHost.vtype ? { vtype: reHost.vtype } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one',
+      };
+    }
+    return scalarChild(body.slice(1), reHost, ctx, fresh);
   }
 
   // A PROPERTY host's three projections are STEPS, and two of them read the stored row. `element()` is

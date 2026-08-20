@@ -199,7 +199,7 @@
   },
   "flatMap": {
     "binds": 0,
-    "bytes": 1160,
+    "bytes": 1156,
     "compiler": 15,
     "bound": 0
   },
@@ -333,6 +333,12 @@
     "binds": 0,
     "bytes": 2000,
     "compiler": 87,
+    "bound": 0
+  },
+  "map": {
+    "binds": 0,
+    "bytes": 1156,
+    "compiler": 15,
     "bound": 0
   },
   "match": {

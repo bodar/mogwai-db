@@ -1,5 +1,5 @@
 {
-  "passing": 1610,
+  "passing": 1612,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -660,6 +660,7 @@
     "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_meanXlocalX",
     "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_minXlocalX",
     "g_V_localXunionXvaluesXageX_outE_valuesXweightXX_foldX_sumXlocalX",
+    "g_V_mapXselectXaXX",
     "g_V_matchXa_0sungBy_b__a_0sungBy_c__b_writtenBy_d__c_writtenBy_e__d_hasXname_George_HarisonX__e_hasXname_Bob_MarleyXX",
     "g_V_matchXa_0sungBy_b__a_0writtenBy_c__b_writtenBy_dX_whereXc_sungBy_dX_whereXd_hasXname_GarciaXX",
     "g_V_matchXa_0sungBy_b__a_0writtenBy_c__b_writtenBy_d__c_sungBy_d__d_hasXname_GarciaXX",
@@ -1373,6 +1374,7 @@
     "g_unionXV_hasLabelXsoftwareX_V_hasLabelXpersonXX_name",
     "g_unionXV_name",
     "g_unionXinjectX1X_injectX2X",
+    "g_withPath_V_asXaX_out_mapXselectXaX_valuesXnameXX",
     "g_withSackX0LX_V_in_barrier_localXsackXsumX_byXageXX_sack",
     "g_withSackX0X_V_outE_sackXsumX_byXweightX_inV_sack_sum",
     "g_withSackX127bX_injectX0_5fX_sackXdivX_sack",
@@ -1951,7 +1953,6 @@
     "g_V_mapXconstantXnullXX",
     "g_V_mapXin_hasIdX1XX_limitX2X_valuesXnameX",
     "g_V_mapXmergeXlabel_person_name_joshXX",
-    "g_V_mapXselectXaXX",
     "g_V_matchXa_hasXsong_name_sunshineX__a_mapX0followedBy_weight_meanX_b__a_0followedBy_c__c_filterXweight_whereXgteXbXXX_outV_dX_selectXdX_byXnameX",
     "g_V_matchXa_outEXcreatedX_order_byXweight_descX_limitX1X_inV_b__b_hasXlang_javaXX_selectXa_bX_byXnameX",
     "g_V_matchXa_whereXa_neqXcXX__a_created_b__orXa_knows_vadas__a_0knows_and_a_hasXlabel_personXX__b_0created_c__b_0created_count_isXgtX1XXX_selectXa_b_cX_byXidX",
@@ -2193,7 +2194,6 @@
     "g_valuesXblobX_isXtypeOfXGType_BINARYXX",
     "g_withBulkXfalseX_withSackX1_sumX_VX1X_localXoutEXknowsX_barrierXnormSackX_inVX_inXknowsX_barrier_sack",
     "g_withBulkXfalseX_withSackX1_sumX_V_out_barrier_sack",
-    "g_withPath_V_asXaX_out_mapXselectXaX_valuesXnameXX",
     "g_withPath_V_asXaX_out_out_asXbX_mapXselectXaX_valuesXnameX_concatXselectXbX_valuesXnameXXX",
     "g_withSackX0X_V_repeatXoutE_sackXsumX_byXweightX_inVX_timesX2X_sack",
     "g_withSackX0X_V_repeatXsackXsumX_byXageX_whereXsack_isXltX59XXXX_timesX2X",
