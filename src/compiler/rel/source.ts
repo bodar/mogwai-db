@@ -65,6 +65,15 @@ export interface GraphSource {
    *  `jsonb(?)` exploded by `json_each`); a landed graph scans its bound CTE and filters its single
    *  `id` column. The caller derives the element KIND from the step name. */
   elementScan(kind: Elem, args: readonly Arg[], fresh: Minter): { scan: Rel; pred?: Expr } | null;
+
+  /** `hasLabel(names…)` (and the label half of `has(label, k, v)`), as a predicate CORRELATED on the
+   *  element `id`. `labels` is the pre-validated NON-EMPTY label-arg set (the caller owns the null /
+   *  all-null / empty cases). `labelCol` is the edge's inline label column when the physical row is in
+   *  scope (the source position), letting `BaseGraph` read the covering index directly instead of a
+   *  correlated id-membership subquery. `BaseGraph` resolves names→ids through `labels` and tests the
+   *  side tables (`edges.label` / `vertex_labels`); a landed graph tests membership of its JSON label
+   *  array. */
+  hasLabelPredicate(kind: Elem, id: Expr, labelCol: Expr | undefined, labels: readonly Arg[], fresh: Minter): Expr;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -151,5 +160,23 @@ export const BaseGraph: GraphSource = {
     const pred = clauses.reduce<Expr | undefined>((left, right) =>
       left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
     return { scan, pred };
+  },
+
+  hasLabelPredicate: (kind, id, labelCol, labels, fresh) => {
+    const ids = labelIds(labels, fresh);
+    if (kind === 'edge') {
+      // Direct where the column is physically present (the source scan), and a membership test on the
+      // edge id where it is not (after a movement, the relation is `id` + channels). Same question, and
+      // the first form keeps the covering-index read the source position deserves.
+      if (labelCol) return { kind: 'in-query', expr: labelCol, plan: ids, negated: false };
+      const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+      const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
+      const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+      return { kind: 'in-query', expr: id, plan: owners, negated: false };
+    }
+    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
+    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
+    return { kind: 'in-query', expr: id, plan: owners, negated: false };
   },
 };

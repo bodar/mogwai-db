@@ -32,7 +32,7 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet,
-    jsonMemberByTypeof, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber,
+    jsonMemberByTypeof, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -680,7 +680,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // `hasLabelClause` validates and lowers each label `Arg` — an inline name inlines, a `$label`
     // scalar / `$labels` collection binds — so a wire parameter's data never enters the statement text.
     const element = elementSubject(subject);
-    return element && hasLabelClause(step.args, element, fresh);
+    return element && hasLabelClause(step.args, element, ctx.source, fresh);
   }
 
   /**
@@ -799,7 +799,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // The KEY must be a parsed string; the LABEL may be a string parameter (`hasLabelClause` binds
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
-      const labelled = hasLabelClause([step.args[0]!], element, fresh);
+      const labelled = hasLabelClause([step.args[0]!], element, ctx.source, fresh);
       const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
       return labelled && valued ? and(labelled, valued) : null;
     }
@@ -845,8 +845,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
  * An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
  * physical questions, which is exactly why `Scan` is the only node that names a table.
  */
-function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fresh: Minter): Expr | null {
-  const elem = subject.elem;
+function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, source: GraphSource, fresh: Minter): Expr | null {
   // A NULL LABEL IS INERT and an ALL-NULL SET MATCHES NOTHING — `labelSetArgs` owns both, and the second
   // is why this cannot be a `filter`: `hasLabel(null)` names a label, so it must reject every element
   // rather than fall through to "no labels named".
@@ -856,21 +855,10 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fres
   // An inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`. An EMPTY argument list
   // reaches here only from a marker the Pass tier should have rewritten, so it declines.
   if (!asked.labels.length) return null;
-  const ids = labelIds(asked.labels, fresh);
-  if (elem === 'edge') {
-    // Direct where the column is physically present (the source scan), and a membership test on
-    // the edge id where it is not (after a movement, the relation is `id` + channels). Same
-    // question, and the first form keeps the covering-index read the source position deserves.
-    if (subject.label) return { kind: 'in-query', expr: subject.label, plan: ids, negated: false };
-    const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-    const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
-    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
-    return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
-  }
-  const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-  const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
-  const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
-  return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+  // The physical name→id resolution and side-table test are the graph SOURCE's; only the arg
+  // normalisation above is the vocabulary's. `subject.label` is the edge's inline label column when
+  // the source scan is in scope, letting `BaseGraph` read the covering index directly.
+  return source.hasLabelPredicate(subject.elem, subject.id, subject.label, asked.labels, fresh);
 }
 
 /**
