@@ -1,6 +1,12 @@
 # The map-value shape carries the value's TRUE shape — substrate plan (2026-08-21)
 
-**Status: read-side + the GROUP producer LANDED; the valueMap producer is the remaining step.** The
+**Status: LANDED — read-side + the GROUP producer + the valueMap producer.** (valueMap: a vertex
+`valueMap(<keys>)` value is always a `List`, so its `valOf` is `{kind:'list', of: TYPED_MEMBERS}` gated
+on non-flat/non-token — `valueMap(true)`'s scalar id/label tokens make a mixed map that stays the
+self-describing scalar arm; edge/`elementMap` values are single. census 0 changed/crashed/stopped, +7
+newly executing all reference-verified via L3 +7 — the `valueMap('location').select(values).unfold()`
+set-op + order/conjoin family; the one sql-hygiene move is a sanctioned collection `json_each` bind the
+newly-covered set-ops carry.) The
 shared machinery (`sideList`/`mapSide`/`sideOf`/`framed` and the `select(<key>)`/entry callers) handles
 a `{kind:'list', of}` value, and `groupMap`'s collecting arm now emits it — so `group().by().by(<fold>)`
 and its `groupCollected` sibling compose `select(Column.values).unfold().order(Scope.local)`/`conjoin`

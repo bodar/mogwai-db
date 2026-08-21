@@ -6348,13 +6348,21 @@ function mapDemotedArms(arms: readonly Tail[], fresh: Minter): readonly Tail[] |
   if (!records.some((fields) => fields)) return null;
   const first = records[0];
   if (first && records.every((fields) => fields && sameRecordFields(first, fields))) return null;
+  // A map arm is demotable whatever its VALUE shape (scalar or list — an `elem` key/value declines): a
+  // demoted record contributes SCALAR-valued entries, so a merge with a list-valued `valueMap` arm
+  // (`union(__.project('a').by(…), __.valueMap('lang'))`) has HETEROGENEOUS values and its merged
+  // descriptor is the self-describing scalar (`MAP_OF_NODES`) — the map blob is unchanged, the value
+  // nodes still self-describe (`{t:'list'}` frames as a list, a scalar node as a scalar), only the
+  // consumer-facing `valOf` widens. So EVERY map arm is re-framed to `MAP_OF_NODES` here, not just the
+  // record-demoted ones — a list `valOf` is precise for a STANDALONE `valueMap`, but a merge that also
+  // carries scalar values cannot promise every value is a list.
   const demotable = (arm: Tail): boolean => arm.framing.kind === 'record'
-    || (arm.framing.kind === 'map' && arm.framing.keyOf.kind === 'scalar' && arm.framing.valOf.kind === 'scalar');
+    || (arm.framing.kind === 'map' && arm.framing.keyOf.kind === 'scalar' && arm.framing.valOf.kind !== 'elem');
   if (!arms.every(demotable)) return null;
   const out: Tail[] = [];
   for (const [at, arm] of arms.entries()) {
     const fields = records[at];
-    if (!fields) { out.push(arm); continue; }
+    if (!fields) { out.push({ ...arm, framing: MAP_OF_NODES }); continue; }
     const mapped = recordToMap(arm.rel, fields, fresh);
     if (!mapped) return null;
     out.push({ ...arm, rel: mapped, framing: MAP_OF_NODES });

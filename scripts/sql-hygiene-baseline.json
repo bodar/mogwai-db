@@ -420,10 +420,10 @@
     "bound": 0
   },
   "order": {
-    "binds": 0,
+    "binds": 1,
     "bytes": 4273,
     "compiler": 60,
-    "bound": 0
+    "bound": 1
   },
   "out": {
     "binds": 0,

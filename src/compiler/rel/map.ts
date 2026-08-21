@@ -1030,7 +1030,13 @@ export function elementValueMap(
     rel: withPayload(input, [[MAP_COL, coalesce({ kind: 'scalar', plan: blob }, { kind: 'call', fn: 'jsonb', args: [jsonOf(compilerText('[]'))] })]],
       [meta(MAP_COL, 'json', true)], fresh),
     keyOf: { kind: 'scalar' },
-    valOf: { kind: 'scalar' },
+    // A vertex `valueMap()` value is ALWAYS a `List` — one `ArrayList` per key regardless of cardinality
+    // (`PropertyMapStep.java:246-267`) — stored here as the `{t:'list', v:values}` node above, so its
+    // TRUE shape is `{kind:'list', of: TYPED_MEMBERS}` (docs/2026-08-21-map-value-shape-plan.md). The FLAT
+    // form (`elementMap`) takes the single last value (`$[#-1]`), an EDGE's key is single by schema, and
+    // `valueMap(true)`'s id/label TOKENS are scalar — a mixed map — so those keep the self-describing
+    // scalar arm (framed-correct, opaque to a consumer until a mixed-value increment).
+    valOf: elem === 'vertex' && !opts.flat && !tokens ? { kind: 'list', of: TYPED_MEMBERS } : { kind: 'scalar' },
   };
 }
 

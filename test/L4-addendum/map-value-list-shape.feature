@@ -43,6 +43,23 @@ Feature: mogwai addendum — a map VALUE that is a list carries its true shape
       | person |
       | software |
 
+  # A vertex valueMap() value is ALWAYS a List (one ArrayList per key, PropertyMapStep.java:246), so the
+  # same select(values).unfold().order(local).conjoin composition works over a valueMap — here the crew
+  # graph's list-cardinality `location` property (Conjoin.feature's crew scenario).
+  Scenario: g_V_valueMapXlocationX_selectXvaluesX_unfold_orderXlocalX_conjoinX1X
+    Given the crew graph
+    And the traversal of
+      """
+      g.V().valueMap("location").select(values).unfold().order(Scope.local).conjoin("1")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | brussels1san diego1santa cruz1santa fe |
+      | centreville1dulles1purcellville |
+      | baltimore1bremen1oakland1seattle |
+      | aachen1kaiserslautern1spremberg |
+
   # conjoin over the unfolded, sorted per-key list — a list→string reduction composed on top.
   Scenario: g_V_group_by_byXout_label_foldX_selectXvaluesX_unfold_orderXlocalX_conjoinXdashX
     Given the modern graph
