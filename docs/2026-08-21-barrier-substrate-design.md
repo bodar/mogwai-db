@@ -53,18 +53,36 @@ want different shapes.
     (a LIST per input, `src/compiler/rel/split.ts`) are both this shape — split just frames its rows as
     lists (`lowerListResume`, `{list, of: BARE_LIST}`) so they re-enter the list vocabulary rather than
     as scalar text. The rest of the string-op family is the same shape.
-- **(B) Heavy materialized local relation — UNBUILT.** A data-sized RELATION with its own local
-  identity/adjacency → a `TEMP` table or a retained materialized binding (RelIR §3.0 `Binding`/`Ref`).
-  Needed by **federate-subgraph** (to traverse a fetched subgraph locally with live adjacency — the
-  current detached result supports only `id`/`label`/`values`, matrix §1) and by **OLAP** (id→score
-  relation, iteration state). This is the "temp table vs `Ref`" open question — settle it ONCE with
-  those two concrete consumers and measurement (DO DDL is unmeasured; `test/cf-probe/` first), not
-  speculatively. See `docs/2026-07-24-graph-algorithms-plan.md` open research §4.
+- **(B) Heavy materialized local relation — ✅ SETTLED (2026-08-21): the TEMP-table form is both
+  IMPOSSIBLE and UNNECESSARY on DO, so there is no substrate (B). MEASURED** on real DO SQLite via
+  `test/cf-probe/substrate-b.probe.ts` (`bun test/cf-probe/substrate-b.probe.ts`):
+  - **A `TEMP` table is authorizer-REFUSED** — `CREATE TEMP TABLE` → `not authorized: SQLITE_AUTH`,
+    the same authorizer that blocks `writable_schema` and dropping the DO's bookkeeping tables. A
+    NORMAL table works but is a poor scratch: DDL+DML in one exec is `SQLITE_LOCKED` (so build/use/drop
+    must be separate statements), and it lands in DURABLE storage — it leaks if the request dies
+    mid-barrier, counts against the store, and is visible across an await (an isolation hazard on the
+    very axis §Axis 1 is about). So the "temp table" half of the old question is dead.
+  - **It is not needed, because both consumers are substrate (A) EXTENDED, no new IR node:**
+    - **federate-subgraph adjacency → pure `json_each` CTEs.** A landed subgraph is a vertices-CTE plus
+      an edges-CTE; local identity is the landed id, adjacency is the edges CTE, and movement lowers as
+      the ordinary join it already is. Measured: a 3-hop reachability over 1 000 edges is ~14 ms,
+      correct.
+    - **OLAP iteration → substrate (A) ITERATED.** Each round crosses the score vector as ONE
+      `json_each` bind, the relaxation is one statement, the segment trampoline drives N rounds. No
+      mutable state table. Measured: 15 pageRank-style rounds over 100 nodes, correct.
+  - **What is genuinely left is NOT a storage substrate.** federate-subgraph's build work is extending
+    the detached landing (`foreignRelation`) to carry an edges CTE the movement steps join — CTE work.
+    OLAP's open question is the OCCUPANCY driver (N rounds = N awaits = N interleave points; alarm-
+    checkpoint vs Worker-driven) — Axis 1, unchanged and unrelated to storage. The "temp table vs
+    `Ref`" question is answered `Ref`/CTE by elimination.
 
-|  | (A) value re-injection (exists) | (B) materialized relation (unbuilt) |
-|---|---|---|
-| **sync** | **regex** | (tiny OLAP, maybe) |
-| **async** | federate value-inject | federate subgraph, OLAP |
+There is therefore ONE substrate — (A) — and the "heavy relation" row of the old table collapses into
+it (a landed subgraph is several (A) relations; OLAP state is (A) re-crossed each round):
+
+|  | value re-injection / landed CTEs (substrate A) |
+|---|---|
+| **sync** | **regex** |
+| **async** | federate value-inject · federate subgraph (CTEs) · OLAP (iterated) |
 
 ## The festering smells this frames (federate)
 
@@ -105,5 +123,12 @@ want different shapes.
   (`order().by(__.…reverse())`) cannot be a barrier and now DECLINES (fail-closed). Handling nested value
   transforms is its own future substrate problem — inline SQL there means the CTE/JSON hacks substrate A
   exists to avoid, so it waits for a real design rather than a per-op hack.
-- **LATER (needs a second concrete consumer + measurement):** substrate (B); moving federate's
-  re-injection onto (A); the OLAP occupancy model (alarm-checkpoint vs Worker-driven).
+- **LANDED (2026-08-21) — federate value-injection moved onto (A).** `substituteInjectionMarker` emits
+  `within([...], INJECT_VALUES_KEY)` → the same `jsonEachInSet` path regex/split use; the inline-literal
+  smell is gone (see the smells section above).
+- **SETTLED (2026-08-21) — substrate (B) does not exist** (see §(B) above): the TEMP-table form is
+  authorizer-refused on DO, and both would-be consumers are substrate (A) extended (federate-subgraph =
+  landed CTEs; OLAP = iterated `json_each` binds). Measured in `test/cf-probe/substrate-b.probe.ts`.
+- **STILL OPEN (not a storage question):** the OLAP occupancy model (alarm-checkpoint vs Worker-driven —
+  Axis 1); federate-subgraph's edges-CTE landing (extending `foreignRelation`); and NESTED value
+  transforms (above). None needs a new materialized-relation substrate.

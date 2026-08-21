@@ -58,8 +58,10 @@ table, each cheap enough to finish in the CPU budget?"**
 
 1. **Compile-to-SQL is absolute (locked decision #3).** No row-at-a-time JS traversal, ever. An
    iterative algorithm is **host-driven iteration**: a JS loop issuing one *bulk, set-based* SQL
-   statement per iteration against a temp table. Each statement is pure SQL. Classic "Pregel-in-SQL" /
-   BSP, **not** interpretation.
+   statement per iteration, the `(id, score)` vector crossing each round as ONE `json_each` bind
+   (substrate (A) iterated — NOT a temp table, which DO refuses; measured 2026-08-21, see §"Two
+   mechanism gaps" below and `docs/2026-08-21-barrier-substrate-design.md` §(B)). Each statement is
+   pure SQL. Classic "Pregel-in-SQL" / BSP, **not** interpretation.
 2. **One implementation, two front-ends.** The algorithm lives once, as a `call()` service. Named
    TinkerPop steps are **desugar Passes** to it — never a second lowering (enforced by test; see
    Guardrails).
@@ -282,9 +284,12 @@ executor's segment loop):
   `coalesce`, gated per POSITION by `bulkObservedFrom` — `src/compiler/ir/bulk.ts`) are the model for
   the frontier arithmetic.
 - ⚠️ **Two mechanism gaps this sketch assumes and the platform has not been measured on.** (a) `pr`
-  as a **`TEMP` table**: §1's envelope covers CTEs, `RETURNING` and the recursive-term laws but says
-  nothing about `CREATE TEMP TABLE` on DO SQLite — probe it in `test/cf-probe/` before designing on
-  it, and note that a retained `Binding` (§3.0) is the substrate answer that needs no DDL at all.
+  as a **`TEMP` table**: ✅ **MEASURED (2026-08-21) and the answer is NO** — `CREATE TEMP TABLE` on DO
+  SQLite is authorizer-refused (`SQLITE_AUTH`; `test/cf-probe/substrate-b.probe.ts`). Do NOT design on a
+  temp table. The substrate is instead **substrate (A) ITERATED** (`docs/2026-08-21-barrier-substrate-
+  design.md` §(B)): each round crosses the `(id, score)` vector as ONE `json_each` bind and the
+  relaxation is one pure-SQL statement — measured working (15 rounds / 100 nodes). A retained `Binding`
+  (§3.0) is the in-plan equivalent when the loop stays within one compile; neither needs DDL.
   (b) A barrier's `apply` returns **`ForeignRow[]`** — detached vertices/edges — not arbitrary
   `(id, score)` tuples. An iterative algorithm's product is a NUMERIC relation, so either the
   contribution shape widens or the loop retains its result as a binding rather than returning it
