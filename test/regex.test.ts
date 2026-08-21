@@ -3,6 +3,10 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode } from './support/decode.ts';
+import { seeded } from './support/graph.ts';
+import { exec } from './support/executor.ts';
+import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
+import { extractMandatoryLiteral } from '../src/compiler/rel/regex.ts';
 
 // End-to-end for the REGEX BARRIER (`has(key, TextP.regex(...))`), on the real stack. `regex` cannot
 // lower to SQL (DO SQLite has no regex function and we do not filter the traversal row-at-a-time), so
@@ -66,6 +70,44 @@ describe('regex barrier — at depth (the resume is the ordinary tail)', () => {
     // ^m on name (marko) then the same vertex's name must also match "rko$".
     expect(names(await run('g.V().has("name", TextP.regex("^m")).has("name", TextP.regex("rko$"))')))
       .toEqual(['marko']);
+  });
+});
+
+describe('regex barrier — trigram prefilter', () => {
+  // The head prefilters with has(key, containing(<mandatory literal>)) so the trigram index narrows
+  // candidates before the JS regex. It must be answer-INVARIANT: over-selecting is fine, dropping a
+  // true match is not. These pin the extractor's CONSERVATIVE contract and the invariance.
+  test('extractMandatoryLiteral is conservative (>=3-char exactly-once run, else null)', () => {
+    expect(extractMandatoryLiteral('^mar')).toBe('mar');
+    expect(extractMandatoryLiteral('Tinker')).toBe('Tinker');
+    expect(extractMandatoryLiteral('Tinker.*©')).toBe('Tinker');
+    expect(extractMandatoryLiteral('rko$')).toBe('rko');
+    expect(extractMandatoryLiteral('^SKU-\\d+')).toBe('SKU-');
+    expect(extractMandatoryLiteral('a?bcd')).toBe('bcd');   // a? optional → dropped
+    expect(extractMandatoryLiteral('^m')).toBeNull();        // literal too short
+    expect(extractMandatoryLiteral('^(mar|jo)')).toBeNull(); // alternation → bail
+    expect(extractMandatoryLiteral('ab+cd')).toBeNull();     // no >=3 contiguous run
+  });
+
+  test('answer-invariant under the trigram toggle (containing() falls back to LIKE)', async () => {
+    const store = seeded(MODERN_SEED);
+    const names = async (fts: boolean) => (await Promise.all(
+      exec(store, undefined, { ...DEFAULT_FAST_PATHS, ftsSubstringPredicate: fts })
+        .framed('g.V().has("name", TextP.regex("^mar"))', {})
+        .map((f) => decode(f.buf))
+    )).map((v: any) => v.properties.find((p: any) => p.label === 'name')?.value).sort();
+    expect(await names(true)).toEqual(['marko']);
+    expect(await names(false)).toEqual(await names(true));   // trigram on ≡ off — the prefilter only picks the access path
+  });
+
+  test('the case-insensitive prefilter is a safe SUPERSET — the regex stays case-sensitive', async () => {
+    // containing("Tinker") matches "tinker" too (case-insensitive index), but the exact JS regex must
+    // reject it: only "Tinker" survives. A buggy prefilter that DECIDED would wrongly keep "tinker".
+    const store = seeded(['g.addV("x").property("name","Tinker")', 'g.addV("x").property("name","tinker")']);
+    const out = await Promise.all(
+      exec(store).framed('g.V().has("name", TextP.regex("Tinker")).values("name")', {}).map((f) => decode(f.buf)),
+    );
+    expect(out.sort()).toEqual(['Tinker']);
   });
 });
 

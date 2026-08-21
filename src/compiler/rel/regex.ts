@@ -103,22 +103,89 @@ function reinject(steps: readonly Step[], at: number, key: string, survivors: re
   return steps.map((s, i) => (i === at ? has : s));
 }
 
+/** The regex metacharacters an escape turns into a literal: `\.` is a literal `.`. */
+const METACHARS = new Set(['.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '^', '$', '\\', '/']);
+
+/**
+ * The longest LITERAL RUN a match must contain (>= 3 chars), or `null`. Used to PREFILTER the barrier's
+ * head with `has(key, containing(L))` so the trigram index narrows candidates before the JS regex — the
+ * standard trigram-indexed-regex technique (Cox, *Regular Expression Matching with a Trigram Index* /
+ * Google Code Search).
+ *
+ * It NARROWS, never decides: over-selecting is corrected by the exact regex in the barrier, but MISSING
+ * a true match would be a WRONG ANSWER — so extraction is CONSERVATIVE. It emits a run only when every
+ * match provably contains it, and emits nothing (an honest full scan) whenever unsure. A run is a
+ * maximal sequence of EXACTLY-ONCE literal characters; a quantifier, a metacharacter (`.`/class/anchor/
+ * group), or a class ENDS it, alternation (`|`) BAILS the whole pattern, and an escaped metacharacter
+ * (`\.`) contributes its literal char while any other escape (`\d`, `\uXXXX`, …) ends the run. `*`/`?`
+ * make the PRECEDING char optional (drop it); `+` keeps it (>= 1) but ends the run; `{…}` is treated as
+ * optional (dropped) — safe under-extraction rather than counting the guaranteed minimum.
+ */
+export function extractMandatoryLiteral(pattern: string): string | null {
+  let best = '';
+  let cur = '';
+  let inClass = false;
+  const flush = () => { if (cur.length > best.length) best = cur; cur = ''; };
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    if (inClass) {
+      if (c === '\\') i++;                 // skip an escaped char inside the class
+      else if (c === ']') inClass = false;
+      continue;                            // a class contributes no mandatory literal
+    }
+    switch (c) {
+      case '|': return null;                                  // alternation — bail
+      case '[': flush(); inClass = true; break;
+      case '(': case ')': case '.': case '^': case '$': flush(); break;
+      case '*': case '?': cur = cur.slice(0, -1); flush(); break;  // preceding char optional
+      case '+': flush(); break;                               // preceding char mandatory, run ends
+      case '{': cur = cur.slice(0, -1); flush(); while (i < pattern.length && pattern[i] !== '}') i++; break;
+      case '\\': {
+        const next = pattern[i + 1];
+        i++;
+        if (next !== undefined && METACHARS.has(next)) cur += next;   // `\.` → literal `.`
+        else flush();                                                 // `\d`/`\uXXXX`/… → run-breaker
+        break;
+      }
+      default: cur += c;                                      // a literal character
+    }
+  }
+  flush();
+  return best.length >= 3 ? best : null;
+}
+
 /**
  * Plan the traversal as a regex barrier SEGMENT, or `null` to decline WHOLE (the traversal then fails
  * closed as before — no regression).
  *
- * The head is `prefix + values(key)`: one candidate VALUE per (element, value) row, over exactly the
- * population the prefix narrowed. It must land as a SCALAR `value` read — anything else is a shape this
- * barrier does not know how to read, so it declines rather than guess. `planOf` turns the resumed chain
- * into its `Plan` (chaining a further regex in the tail into the next segment); it is injected so this
- * module does not import `segmentPlan` back.
+ * The head is `prefix [+ has(key, containing(<literal>))] + values(key)`: one candidate VALUE per
+ * (element, value) row, over the population the prefix narrowed AND (the TRIGRAM PREFILTER) the elements
+ * whose key value contains the regex's mandatory literal run. It must land as a SCALAR `value` read —
+ * anything else is a shape this barrier does not know how to read, so it declines rather than guess.
+ * `planOf` turns the resumed chain into its `Plan` (chaining a further regex in the tail into the next
+ * segment); it is injected so this module does not import `segmentPlan` back.
  */
 export function buildRegexSegment(
   steps: readonly Step[], barrier: RegexBarrier, lowering: Lowering, planOf: (steps: readonly Step[]) => Plan,
 ): SegmentPlan | null {
   const at = barrier.at;
+  const prefix = steps.slice(0, at);
   const read: Step = { name: 'values', args: [arg(barrier.key)], ctx: steps[at]!.ctx };
-  const lowered = lowerToRel([...steps.slice(0, at), read], lowering);
+  // TRIGRAM PREFILTER: a regex match must contain the pattern's mandatory literal run, so narrow the
+  // head to elements whose key value CONTAINS it — a >=3-char literal reaches the `property_fts` trigram
+  // index through the existing `trigramSeek` fast path (`rel/passes/semijoin.ts`), turning the worst case
+  // (regex-only, whole graph) from all rows into trigram candidates. `containing` is a case-insensitive
+  // SUPERSET, so it can only OVER-select candidates the JS regex then rejects — never drop a true match.
+  // Head-only (the resume's `within(<survivors>)` is the semantic authority), and best-effort: if the
+  // prefiltered head does not lower, fall back to the bare head, so the prefilter can never turn a
+  // working regex into a decline. POSITIVE regex ONLY: a `notRegex` survivor is a NON-match, which need
+  // not contain the literal (usually does not) — prefiltering by `containing(L)` would wrongly drop it.
+  const literal = barrier.negated ? null : extractMandatoryLiteral(barrier.pattern);
+  const prefilter: Step | null = literal
+    ? { name: 'has', args: [arg(barrier.key), arg({ op: 'containing', operands: [arg(literal)] })], ctx: steps[at]!.ctx }
+    : null;
+  const lowered = (prefilter && lowerToRel([...prefix, prefilter, read], lowering))
+    || lowerToRel([...prefix, read], lowering);
   if (!lowered) return null;
   const head = finishLowering(lowered);
   if (head.kind !== 'read' || head.shape.kind !== 'value') return null;

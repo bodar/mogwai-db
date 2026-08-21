@@ -67,7 +67,7 @@ the semantic authority.
 | Predicate | | Notes |
 |---|:--:|---|
 | `containing`, `startingWith`, `endingWith` + negations | ✅ | wherever a predicate is accepted |
-| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY, as a batched **barrier** (head projects candidate `values(key)` → one JS `RegExp` pass → survivors re-injected as `within(json_each)`, one bind). Committed to **JS `RegExp`** semantics (Java `matcher.find()`; divergence on Java-only constructs documented in `src/compiler/rel/regex.ts`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) stays a fail-closed deferral. Trigram prefilter is a perf follow-up — `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY, as a batched **barrier** (head projects candidate `values(key)` → one JS `RegExp` pass → survivors re-injected as `within(json_each)`, one bind). A POSITIVE regex with a ≥3-char mandatory literal PREFILTERS the head through the `property_fts` trigram index (`containing(<literal>)`, a case-insensitive superset the regex then refines). Committed to **JS `RegExp`** semantics (Java `matcher.find()`; divergence on Java-only constructs documented in `src/compiler/rel/regex.ts`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) stays a fail-closed deferral — `docs/2026-08-12-regex-as-a-barrier-research.md` |
 
 ## 3. Projections & element data
 
