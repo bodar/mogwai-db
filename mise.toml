@@ -242,6 +242,15 @@ description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-w
 depends = ["install"]
 run = "bun scripts/sql-hygiene.ts"
 
+# EXPLAIN QUERY PLAN over every compiled corpus read. Instrument for the temp-b-tree count (needs
+# judgement), gate for base-table scans (zero today; the base tables are reached through covering
+# indexes, so a scan means the emitted SQL dropped an index path — exits 1). Source + fixture data
+# only, same `depends` as sql-hygiene: it compiles and runs SQL, it never frames a result.
+[tasks.sql-plan]
+description = "Instrument+gate: EXPLAIN QUERY PLAN over corpus reads — no base-table scan; temp-b-trees reported"
+depends = ["install"]
+run = "bun scripts/sql-plan.ts"
+
 [tasks.sql-hygiene-record]
 description = "Bank the sql-hygiene per-family maxima (commit scripts/sql-hygiene-baseline.json)"
 depends = ["install"]
