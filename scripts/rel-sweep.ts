@@ -65,9 +65,12 @@ const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
  * everywhere, and keeps the shards on the four cores of ONE runner instead of paying a fresh provision
  * on four.
  *
- * `min(4, cores)` by default — 4 because that is what a CI runner has, and capped because the shards do
- * not scale for free: total cpu goes 63s at 1 → 99s at 4 → 139s at 6, each re-paying JIT warmup on the
- * same hot lowering loop. Past the core count that trade only worsens.
+ * `min(6, cores)` by default. The shards do not scale for free — each re-pays JIT warmup on the same
+ * hot lowering loop, and the work is allocation/bandwidth-bound, not core-bound — so wall bottoms out
+ * well before the core count. Measured on a 24-core box: 4→39.9s, 6→32.9s, 8→34.7s, 10→32.1s, 12→36.3s,
+ * 16→35.7s: the knee is ~6 and everything past it is flat-to-worse (more JIT rewarm, and a less-even
+ * `index % SHARDS` split). So 6 captures essentially the whole win while leaving the extra cores free;
+ * a CI runner's 4 cores are unchanged (min(6,4)=4). Override with `SWEEP_SHARDS` for a one-off.
  *
  * Free inside `mise run ci` too, which is the case worth checking rather than assuming: there the sweep
  * runs alongside `bun test`, and a matched pair on the same commit gave the same 76s wall either way —
@@ -78,7 +81,7 @@ const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
  * it is the lowest shard index that saw the message, and within a shard the first chain, which is the
  * same "one entry per root cause" discipline as before and not a per-prefix list.
  */
-const SHARDS = Number(Bun.env.SWEEP_SHARDS ?? Math.min(4, navigator.hardwareConcurrency || 1));
+const SHARDS = Number(Bun.env.SWEEP_SHARDS ?? Math.min(6, navigator.hardwareConcurrency || 1));
 const SHARD = Bun.env.SWEEP_SHARD === undefined ? null : Number(Bun.env.SWEEP_SHARD);
 if (!Number.isInteger(SHARDS) || SHARDS < 1) throw new Error(`SWEEP_SHARDS must be a positive integer, got ${Bun.env.SWEEP_SHARDS}`);
 
