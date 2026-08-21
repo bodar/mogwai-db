@@ -1,40 +1,34 @@
 // L5 parallelism scaling bench — an INSTRUMENT, not a gate, and not part of any suite.
 //
-// WHY this exists. L5 is the single biggest CI pole (~380s of the ~640s `test` task, measured
-// 2026-08-21), and it is 100% SYNCHRONOUS CPU work: `test/L5-properties/oracle.ts` has no `await`
-// anywhere — each traversal is compile → bun:sqlite → compare, on one JS thread. `bun test` is one
-// process/one thread and does not parallelise across files, so nothing inside a single run overlaps.
-// The only lever that touches synchronous CPU work is more OS threads/processes — which raises the
-// question this script answers on a GIVEN machine: how far does each flavour of parallelism actually
-// scale THIS workload, and where does it plateau?
+// WHY this exists. L5 is the biggest CI pole, and it is 100% SYNCHRONOUS CPU work
+// (test/L5-properties/oracle.ts has no await): each traversal is compile → bun:sqlite → compare, on
+// one JS thread. `bun test` is one process/one thread and does not parallelise across files, so the
+// only lever is more OS threads/processes — and how far THIS workload scales on a given machine, and
+// whether threads or processes win, is machine-specific and must be measured, not reasoned.
 //
-// The answer is machine-specific and counterintuitive, which is the whole reason it must be measured
-// rather than reasoned. Measured on the 4-core web-session container:
-//   * a pure-CPU busy loop scaled ~linearly (4× on 4 cores) — the box is not throttled;
-//   * this workload only reached ~2.4× across separate PROCESSES and ~1.7× across worker THREADS.
-// The gap is allocation: every read traversal MINTS AND RE-SEEDS a fresh in-memory SQLite store
-// (`seeded(MODERN_SEED)`), and that churn — not the CPU — is the ceiling. THREADS share one process
-// heap and one GC, so they contend on the same allocator and scale WORSE than processes, each of which
-// owns its heap. A 24-core box will therefore NOT give 24×; where it plateaus, and whether threads or
-// processes win there, is exactly what decides which architecture (if any) is worth building.
+// WHAT it measures — three modes over one FIXED working set so every row does identical work:
+//   THREADS — N worker_threads in one process (shared heap/GC), a static slice each.
+//   PROCS   — N child `bun` processes (independent heaps), a static slice each; mirrors `test:shard`.
+//   HYBRID  — a P×T grid: P child processes, each running T worker threads over its sub-slice.
+// All three partition statically (one message per worker), so the wall is bounded by the slowest
+// slice — the honest number for shard-style parallelism — and threads-vs-procs isolates exactly one
+// variable: shared heap/GC vs independent heaps.
 //
-// WHAT it measures. Two modes over one FIXED working set so every row does identical work:
-//   THREADS — a persistent, WORK-STEALING pool of N `node:worker_threads` (stealing because a static
-//             split suffers load imbalance: the first measurement had one slice 2× heavier per
-//             traversal). Only query STRINGS cross the boundary; the graph/store never leaves a worker.
-//   PROCS   — N child `bun` processes over a STATIC partition of the same set (this mirrors the repo's
-//             existing `test:shard` mechanism; static, so its wall is bounded by the unluckiest slice —
-//             the honest number for shard-style parallelism, imbalance included).
-// Pool/spawn cost is timed SEPARATELY and excluded from throughput — a long-lived pool pays it once, so
-// folding it into per-traversal time would slander the steady state. It is reported on its own line.
+// Every row also reports PEAK RSS, because throughput between threads and procs is near-identical on a
+// big box and memory is the tiebreaker: THREADS is one process (its peak RSS); PROCS/HYBRID is N
+// processes (the SUM of their peak RSS — N copies of the compiler module graph). That sum is what makes
+// processes cost more memory than threads for the same parallelism.
 //
-// Zero new dependencies: `node:worker_threads`, `node:child_process`, `node:os` are all built in.
+// Zero new dependencies (node:worker_threads/child_process/os/url). Runs to a clean process.exit(0) to
+// dodge a bun teardown panic seen when tearing down many workers at once (fires after all data prints).
 //
 // Run:  bun scripts/l5-pool-bench.ts
-//       WORKERS=1,2,4,8,12,16,24 WORKSET=1500 MODE=both bun scripts/l5-pool-bench.ts
-//   WORKERS  comma list of pool sizes to sweep (default: 1,2,4,8,… doubling up to core count)
-//   WORKSET  leading corpus traversals to run per row (default 800)
-//   MODE     threads | procs | both   (default both)
+//       WORKERS=1,2,4,8,16,24 WORKSET=1500 MODE=both  bun scripts/l5-pool-bench.ts
+//       MODE=hybrid PROCS=1,2,4 TPP=1,2,4 WORKSET=1500 bun scripts/l5-pool-bench.ts
+//   WORKERS  pool sizes to sweep for threads/procs (default: 1,2,4,8,… doubling up to core count)
+//   WORKSET  leading corpus traversals per row (default 800)
+//   MODE     threads | procs | both | hybrid   (default both)
+//   PROCS/TPP  hybrid grid: process counts × threads-per-process (defaults 1,2,4 × 1,2,4)
 import { isMainThread, Worker, parentPort } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -44,21 +38,23 @@ import { fileURLToPath } from 'node:url';
 // This file's own filesystem path. `import.meta.url` is a file:// URL — fine for `new Worker(url)`,
 // but `bun <arg>` needs a real path (a file:// arg reads as an unresolvable module specifier).
 const SELF = fileURLToPath(import.meta.url);
-
 const CORPUS_URL = new URL('../test/L1-corpus/corpus.txt', import.meta.url);
 const readCorpus = () => readFileSync(CORPUS_URL, 'utf8').split('\n').filter(Boolean);
 
-// ---- shared leaf: run a slice of the corpus in THIS thread/process, return {executed, diverged} ----
-// Mirrors differential.test.ts EXACTLY: one shared store for the `ran` coverage check across the whole
-// slice, and `differential`'s own fresh mint for the actual fast-on-vs-off comparison. Replicating the
-// real test's cost model is the point — a cheaper harness would measure a workload we don't run.
-async function makeRunner() {
+type Tally = { executed: number; diverged: number };
+type Timed = Tally & { ms: number; spawnMs: number };
+type Msg = { ready?: true; done?: true; executed: number; diverged: number };
+
+// Run a corpus slice in THIS thread/process. Mirrors differential.test.ts exactly: one shared store for
+// the `ran` coverage check, and `differential`'s own fresh mint for the fast-on-vs-off comparison —
+// replicating the real cost model, since a cheaper harness would measure a workload we don't run.
+async function makeRunner(): Promise<(q: string) => Tally> {
   const { differential, ran } = await import('../test/L5-properties/oracle.ts');
   const { seeded, isNondeterministic } = await import('../test/support/graph.ts');
   const { MODERN_SEED } = await import('../test/fixtures/seed-modern.ts');
   const shared = seeded(MODERN_SEED);
   const mint = () => seeded(MODERN_SEED);
-  return (q: string): { executed: number; diverged: number } => {
+  return (q: string): Tally => {
     try {
       if (ran(shared, q) && !isNondeterministic(q))
         return { executed: 1, diverged: differential(mint, q).length };
@@ -67,22 +63,51 @@ async function makeRunner() {
   };
 }
 
-if (process.env.CHILD_SLICE) {
-  // ---------- PROC-mode child: run one static slice "offset:count", print a JSON timing line ----------
-  const [off, count] = process.env.CHILD_SLICE.split(':').map(Number);
-  const slice = readCorpus().slice(off, off + count);
-  const runOne = await makeRunner();
-  const t0 = performance.now();
-  let executed = 0, diverged = 0;
-  for (const q of slice) { const r = runOne(q); executed += r.executed; diverged += r.diverged; }
-  console.log(JSON.stringify({ executed, diverged, ms: performance.now() - t0 }));
-} else if (!isMainThread) {
-  // ---------- THREADS-mode worker: run ONE static slice per message, post ONE result ----------
-  // Deliberately not per-query work-stealing: hundreds of sub-10ms round-trips per worker tripped a
-  // bun quirk where a worker→main message failed to wake an idle main loop and the pool deadlocked
-  // (only after seed memoisation made queries fast enough to leave the loop idle between them). One
-  // message each way sidesteps it entirely — and matches PROC mode's static partition, so THREADS vs
-  // PROCS isolates exactly one variable: shared heap/GC (threads) vs independent heaps (processes).
+// A static-partition thread pool over corpus[off, off+count): spawn T workers, give each one contiguous
+// sub-slice, collect one result each. ONE message per worker each way, deliberately — hundreds of
+// sub-10ms round-trips tripped a bun quirk where a worker→main message failed to wake an idle main loop
+// and the pool deadlocked. Used by BOTH the main THREADS sweep and each HYBRID child.
+async function runThreadPool(off: number, count: number, T: number): Promise<Timed> {
+  const onResult = new WeakMap<Worker, (m: Msg) => void>();
+  const workers: Worker[] = [];
+  const s0 = performance.now();
+  await Promise.all(Array.from({ length: T }, () => {
+    const w = new Worker(SELF);
+    workers.push(w);
+    return new Promise<void>((res) => w.on('message', (m: Msg) => {
+      if (m.ready) res();
+      else if (m.done) onResult.get(w)?.(m);
+    }));
+  }));
+  const spawnMs = performance.now() - s0;
+  const per = Math.ceil(count / T);
+  const run = await new Promise<Tally & { ms: number }>((resolve) => {
+    let remaining = T, executed = 0, diverged = 0;
+    const t0 = performance.now();
+    workers.forEach((w, i) => {
+      onResult.set(w, (m) => {
+        executed += m.executed; diverged += m.diverged;
+        if (--remaining === 0) resolve({ executed, diverged, ms: performance.now() - t0 });
+      });
+      const o = off + i * per;
+      w.postMessage({ off: o, count: Math.max(0, Math.min(per, off + count - o)) });
+    });
+  });
+  await Promise.all(workers.map((w) => w.terminate()));
+  return { ...run, spawnMs };
+}
+
+// Peak-RSS sampler for the CURRENT process (used for THREADS, where all workers share this heap).
+const peakSampler = () => {
+  let peak = process.memoryUsage().rss;
+  const t = setInterval(() => { const r = process.memoryUsage().rss; if (r > peak) peak = r; }, 25);
+  return () => { clearInterval(t); return peak; };
+};
+
+if (!isMainThread) {
+  // ---------- worker (in ANY process): run one static slice per message, post one result ----------
+  // Checked FIRST: a worker is a worker whether spawned by the top-level main or by a HYBRID child, and
+  // it inherits the child's CHILD_SLICE env, so the child-process branch below must not catch it.
   const runOne = await makeRunner();
   const corpus = readCorpus();
   parentPort!.on('message', (msg: { off: number; count: number } | null) => {
@@ -94,8 +119,26 @@ if (process.env.CHILD_SLICE) {
     parentPort!.postMessage({ done: true, executed, diverged });
   });
   parentPort!.postMessage({ ready: true });
+} else if (process.env.CHILD_SLICE) {
+  // ---------- child process: run "off:count", optionally across CHILD_THREADS threads; print JSON ----
+  const [off, count] = process.env.CHILD_SLICE.split(':').map(Number);
+  const T = Number(process.env.CHILD_THREADS ?? 1);
+  let out: Tally & { ms: number };
+  if (T <= 1) {
+    const runOne = await makeRunner();
+    const corpus = readCorpus();
+    const t0 = performance.now();
+    let executed = 0, diverged = 0;
+    for (const q of corpus.slice(off, off + count)) { const r = runOne(q); executed += r.executed; diverged += r.diverged; }
+    out = { executed, diverged, ms: performance.now() - t0 };
+  } else {
+    const r = await runThreadPool(off, count, T);
+    out = { executed: r.executed, diverged: r.diverged, ms: r.ms + r.spawnMs };
+  }
+  // maxRSS is this process's PEAK resident set, in KB on Linux (node/bun getrusage). Summed by the parent.
+  console.log(JSON.stringify({ ...out, rssKB: process.resourceUsage().maxRSS }));
 } else {
-  // ---------- MAIN: sweep worker counts, print scaling tables ----------
+  // ---------- MAIN: sweep, print scaling tables with memory ----------
   const cores = availableParallelism();
   const parseList = (s?: string) => s?.split(',').map((n) => Number(n.trim())).filter((n) => n > 0);
   const ladder = () => { const a: number[] = []; for (let n = 1; n < cores; n *= 2) a.push(n); a.push(cores); return a; };
@@ -103,103 +146,77 @@ if (process.env.CHILD_SLICE) {
   const WORKSET = Number(process.env.WORKSET ?? 800);
   const MODE = (process.env.MODE ?? 'both').toLowerCase();
   const workset = readCorpus().slice(0, WORKSET);
+  const gb = (bytes: number) => `${(bytes / 2 ** 30).toFixed(2)}GB`;
 
-  // THREADS: spawn N workers, give each ONE static slice, collect ONE result each. One persistent
-  // message handler per worker (installed at creation) routes {ready} → spawn-resolve and {done} →
-  // the collector runThreads installs via `onResult`. Static partition (not work-stealing) on purpose
-  // — see the worker branch above for why, and note it makes the wall bounded by the slowest slice,
-  // the same honest number PROC mode reports.
-  const onResult = new WeakMap<Worker, (m: { executed: number; diverged: number }) => void>();
-  const spawnThreads = (n: number): Promise<Worker[]> => {
-    const workers: Worker[] = [];
-    const ready = Array.from({ length: n }, () => {
-      const w = new Worker(SELF);
-      workers.push(w);
-      return new Promise<void>((res) => {
-        w.on('message', (m: { ready?: true; done?: true; executed: number; diverged: number }) => {
-          if (m.ready) res();
-          else if (m.done) onResult.get(w)?.(m);
-        });
-      });
-    });
-    return Promise.all(ready).then(() => workers);
-  };
-  const runThreads = (workers: Worker[]) => new Promise<{ executed: number; diverged: number; ms: number }>((resolve) => {
-    const per = Math.ceil(workset.length / workers.length);
-    let remaining = workers.length, executed = 0, diverged = 0;
+  // PROCS/HYBRID: nProc child processes, tpp threads each, over a static partition of the workset.
+  const runProcs = (nProc: number, tpp = 1): Promise<Timed & { rssBytes: number }> => {
+    const per = Math.ceil(workset.length / nProc);
     const t0 = performance.now();
-    workers.forEach((w, i) => {
-      onResult.set(w, (m) => {
-        executed += m.executed; diverged += m.diverged;
-        if (--remaining === 0) resolve({ executed, diverged, ms: performance.now() - t0 });
-      });
-      const off = i * per;
-      w.postMessage({ off, count: Math.max(0, Math.min(per, workset.length - off)) });
-    });
-  });
-
-  // PROCS: N child `bun` processes over a static, contiguous partition of the same workset.
-  const runProcs = (n: number): Promise<{ executed: number; diverged: number; ms: number; spawnMs: number }> => {
-    const per = Math.ceil(workset.length / n);
-    const s0 = performance.now();
-    const kids = Array.from({ length: n }, (_, i) => {
+    const kids = Array.from({ length: nProc }, (_, i) => {
       const off = i * per, count = Math.min(per, workset.length - off);
       const child = spawn(process.execPath, [SELF], {
-        env: { ...process.env, CHILD_SLICE: `${off}:${Math.max(0, count)}`, WORKERS: '', MODE: '' },
+        env: { ...process.env, CHILD_SLICE: `${off}:${Math.max(0, count)}`, CHILD_THREADS: String(tpp), WORKERS: '', MODE: '' },
         stdio: ['ignore', 'pipe', 'inherit'],
       });
-      let out = '';
-      child.stdout!.on('data', (d) => { out += d; });
-      return new Promise<{ executed: number; diverged: number; ms: number }>((res) =>
-        child.on('close', () => res(JSON.parse(out.trim().split('\n').pop() || '{"executed":0,"diverged":0,"ms":0}'))));
+      let buf = '';
+      child.stdout!.on('data', (d) => { buf += d; });
+      return new Promise<Tally & { ms: number; rssKB: number }>((res) =>
+        child.on('close', () => res(JSON.parse(buf.trim().split('\n').pop() || '{"executed":0,"diverged":0,"ms":0,"rssKB":0}'))));
     });
-    const t0 = performance.now();
     return Promise.all(kids).then((rs) => ({
       executed: rs.reduce((a, r) => a + r.executed, 0),
       diverged: rs.reduce((a, r) => a + r.diverged, 0),
-      ms: performance.now() - t0,            // wall = slowest child (static split, imbalance included)
-      spawnMs: t0 - s0,
+      ms: performance.now() - t0,                                  // wall = slowest child, startup included
+      spawnMs: 0,
+      rssBytes: rs.reduce((a, r) => a + (r.rssKB || 0) * 1024, 0), // SUM across processes — the real cost
     }));
   };
 
-  const header = (label: string) => {
-    console.log(`\n=== ${label} ===`);
-    console.log('workers   spawn     wall    exec/s   speedup   (executed/diverged)');
-  };
-  const row = (n: number, spawnMs: number, r: { executed: number; diverged: number; ms: number }, base: number) => {
+  const HEAD = 'label      spawn     wall    exec/s   speedup   peakRSS    (exec/div)';
+  const printRow = (label: string, spawnMs: number, r: Timed & { rssBytes: number }, base: number) => {
     const rate = r.executed / (r.ms / 1000);
     console.log(
-      `${String(n).padStart(4)}   ${(spawnMs / 1000).toFixed(1).padStart(6)}s  ${(r.ms / 1000).toFixed(1).padStart(6)}s  ` +
-      `${rate.toFixed(1).padStart(7)}  ${(rate / (base || rate)).toFixed(2).padStart(6)}x   (${r.executed}/${r.diverged})`);
+      `${label.padEnd(8)} ${(spawnMs / 1000).toFixed(1).padStart(6)}s  ${(r.ms / 1000).toFixed(1).padStart(6)}s  ` +
+      `${rate.toFixed(1).padStart(7)}  ${(rate / (base || rate)).toFixed(2).padStart(6)}x  ${gb(r.rssBytes).padStart(8)}   (${r.executed}/${r.diverged})`);
     return rate;
   };
 
-  console.log(`cores=${cores}  workset=${workset.length} traversals  mode=${MODE}  sweeping workers=[${WORKERS.join(', ')}]`);
+  console.log(`cores=${cores}  workset=${workset.length} traversals  mode=${MODE}`);
 
   if (MODE === 'threads' || MODE === 'both') {
-    header('THREADS (static partition across worker_threads, shared process heap)');
+    console.log(`\n=== THREADS (static partition across worker_threads, ONE shared heap) ===\n${HEAD}`);
     let base = 0;
     for (const n of WORKERS) {
-      const s0 = performance.now();
-      const pool = await spawnThreads(n);
-      const spawnMs = performance.now() - s0;
-      const r = await runThreads(pool);
-      await Promise.all(pool.map((w) => w.terminate()));
-      const rate = row(n, spawnMs, r, base);
+      const stop = peakSampler();
+      const r = await runThreadPool(0, workset.length, n);
+      const rssBytes = stop();
+      const rate = printRow(String(n), r.spawnMs, { ...r, rssBytes }, base);
       if (!base) base = rate;
     }
   }
   if (MODE === 'procs' || MODE === 'both') {
-    header('PROCS (static partition across child bun processes, independent heaps)');
+    console.log(`\n=== PROCS (static partition across child processes, N heaps — RSS summed) ===\n${HEAD}`);
     let base = 0;
     for (const n of WORKERS) {
-      const r = await runProcs(n);
-      const rate = row(n, r.spawnMs, r, base);
+      const r = await runProcs(n, 1);
+      const rate = printRow(String(n), r.spawnMs, r, base);
       if (!base) base = rate;
     }
   }
-  console.log('\nspeedup is vs each table\'s first row.');
-  console.log('THREADS exec/s is steady-state (pool spawn excluded, shown separately). PROCS wall');
-  console.log('INCLUDES per-shard startup+import — inherent to shard parallelism, so its exec/s bakes');
-  console.log('that in. THREADS shares one heap/GC; PROCS gives each shard its own — compare plateaus.');
+  if (MODE === 'hybrid') {
+    const PROCS = parseList(process.env.PROCS) ?? [1, 2, 4];
+    const TPP = parseList(process.env.TPP) ?? [1, 2, 4];
+    console.log(`\n=== HYBRID (P processes × T threads each — RSS summed across processes) ===\n${HEAD}`);
+    let base = 0;
+    for (const p of PROCS) for (const t of TPP) {
+      const r = await runProcs(p, t);
+      const rate = printRow(`${p}x${t}`, r.spawnMs, r, base);
+      if (!base) base = rate;
+    }
+  }
+
+  console.log('\nwall INCLUDES startup for every mode (spawn column is that startup, informational).');
+  console.log('peakRSS: THREADS = the one process; PROCS/HYBRID = SUM of the child processes\' peaks.');
+  console.log('THREADS shares one heap/GC; PROCS/HYBRID trade more memory for independent heaps.');
+  process.exit(0);   // dodge a bun teardown panic tearing down many workers (fires after all data prints)
 }
