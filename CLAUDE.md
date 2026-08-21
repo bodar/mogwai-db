@@ -92,6 +92,15 @@ log path — `mise run ci` leaves `.logs/check.log`, `.logs/test.log`, … — i
 suite because a `tail` scrolled the part you needed past. **Do not pipe a suite through `tail`/`grep`
 and then re-run when you miss something; the whole run is already in the file.**
 
+**`mise run ci`'s EXIT CODE is truthful, but a PIPE hides it — this is a green-that-was-red trap that
+shipped a red commit once.** mise exits non-zero on any failed task (a failed dependency propagates its
+code and the parent `run` is skipped — measured). But `mise run ci 2>&1 | tail`/`| grep` makes the
+PIPELINE return `tail`'s exit 0 (no `pipefail` in the ambient shell), so a red run reads green. No exit
+code survives a pipe — shell semantics, unfixable — so the survivable signal is a terminal LINE: **run
+`bash scripts/ci.sh`, which prints `CI: PASS` / `CI: FAIL (exit N)` as its LAST line and exits with the
+true code.** When you must read a piped run, grep the verdict line (or the presence of the ci task's
+`CI passed`), NEVER trust the pipeline's exit code.
+
 Every tool below is driven by the LSP inside our **pinned `typescript`** (`tsc --lsp --stdio`), so
 none of them can disagree with what `mise run check` gates on. That property is the whole point —
 it is why a second linter is not wanted and why adopting `tsserver` would be a real trade, not a
