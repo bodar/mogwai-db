@@ -674,6 +674,16 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 
 **Leaf gaps — one family, no downstream unlock:**
 
+- ✅ **`simplePath()` / `cyclicPath()` — LANDED for the linear form (was 0 executing / 16 deferred).**
+  `Path.isSimple()` is "no two path objects are equal"; the path is already carried (`tracksPath`, seeded
+  because a PATH_FAMILY step is present, extended at every hop) as a JSONB array of tagged entries
+  (`{k,v[,t]}`), and equal objects produce the IDENTICAL entry (an element by rowid, a value by its
+  `{v,t}`), so uniqueness is a correlated `COUNT(*) = COUNT(DISTINCT entry)` over `json_each(path)`
+  (`pathSimplePredicate`), a filter that keeps the element framing. Verified row-for-row
+  (`V(1).out('created').in('created').simplePath()` → josh,peter; `cyclicPath()` → marko). 🚧 LEFT — most of
+  the corpus needs these INSIDE a `repeat(__.both().simplePath())` (the recursive walk carrying the path,
+  a separate substrate), plus a `by(<proj>)` (compare by a projection), `from`/`to` scoping, and a reducer
+  after a still-path-carrying stream (`simplePath().count()` — the path channel blocks the barrier).
 - ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
   non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,

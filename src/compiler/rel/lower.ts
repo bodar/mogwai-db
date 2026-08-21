@@ -4580,6 +4580,17 @@ function elementTail(
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
+    if (step.name === 'simplePath' || step.name === 'cyclicPath') {
+      // `Path.isSimple()` is "no two path objects are equal" (`PathIsSimpleStep`); `cyclicPath` its
+      // complement. Every position is a tagged history entry (`{k,v[,t]}`), and equal objects — an
+      // element by rowid, a value by (value,type) — produce the IDENTICAL entry, so uniqueness is a
+      // COUNT(DISTINCT) over the path array against its length. The path is already carried
+      // (`tracksPath`, seeded because a PATH_FAMILY step is present) and extended at every hop.
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length || step.modulators?.length) return null;
+      const pred = pathSimplePredicate(rel, step.name === 'cyclicPath', fresh);
+      rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
+      continue;
+    }
     if (step.name === 'addE') {
       if (pathCarried(rel)) return null;
       const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
@@ -6808,6 +6819,34 @@ function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: Ch
   if (!host) return null;
   const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id }, ctx, fresh);
   return value && value.framing.kind === 'scalar' ? value.expr : null;
+}
+
+/**
+ * `simplePath()` / `cyclicPath()` as a FILTER over the carried path array — kept iff the path's
+ * objects are all distinct (`simple`) or not (`cyclic`). Every position is one tagged history entry
+ * (`{k,v[,t]}`) and equal objects produce the IDENTICAL entry (an element by rowid, a value by its
+ * `{v,t}`), so "no two objects equal" is `COUNT(*) = COUNT(DISTINCT entry)` over `json_each(path)` —
+ * a correlated scalar subquery per row. A one-position path is trivially simple (1 = 1), which the
+ * source's seeded p0 guarantees is the shortest case.
+ */
+function pathSimplePredicate(rel: Rel, cyclic: boolean, fresh: Minter): Expr {
+  const json: Expr = { kind: 'call', fn: 'json', args: [col(rel.id, PATH_CHANNEL.col)] };
+  const exploded = make.explode({
+    id: fresh('spx'), channels: [], expr: json, as: { value: 'v' },
+    type: typeOf(meta('v', 'any', true)),
+  });
+  const counted = make.aggregate({
+    id: fresh('spc'), input: exploded, channels: [], type: typeOf(meta('total', 'int'), meta('uniq', 'int')),
+    groupBy: [], aggs: [
+      ['total', { kind: 'agg', fn: 'count', args: [] }],
+      ['uniq', { kind: 'agg', fn: 'count', args: [col(exploded.id, 'v')], distinct: true }],
+    ],
+  });
+  const probe = make.project({
+    id: fresh('spp'), input: counted, channels: [], type: typeOf(meta('one', 'int')),
+    exprs: [['one', { kind: 'binary', op: cyclic ? '!=' : '=', left: col(counted.id, 'total'), right: col(counted.id, 'uniq') }]],
+  });
+  return { kind: 'scalar', plan: probe };
 }
 
 function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
