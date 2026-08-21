@@ -97,13 +97,6 @@ async function runThreadPool(off: number, count: number, T: number): Promise<Tim
   return { ...run, spawnMs };
 }
 
-// Peak-RSS sampler for the CURRENT process (used for THREADS, where all workers share this heap).
-const peakSampler = () => {
-  let peak = process.memoryUsage().rss;
-  const t = setInterval(() => { const r = process.memoryUsage().rss; if (r > peak) peak = r; }, 25);
-  return () => { clearInterval(t); return peak; };
-};
-
 if (!isMainThread) {
   // ---------- worker (in ANY process): run one static slice per message, post one result ----------
   // Checked FIRST: a worker is a worker whether spawned by the top-level main or by a HYBRID child, and
@@ -137,6 +130,7 @@ if (!isMainThread) {
   }
   // maxRSS is this process's PEAK resident set, in KB on Linux (node/bun getrusage). Summed by the parent.
   console.log(JSON.stringify({ ...out, rssKB: process.resourceUsage().maxRSS }));
+  process.exit(0);   // a child that spawned threads hits the same bun teardown panic; exit after flushing
 } else {
   // ---------- MAIN: sweep, print scaling tables with memory ----------
   const cores = availableParallelism();
@@ -172,11 +166,11 @@ if (!isMainThread) {
     }));
   };
 
-  const HEAD = 'label      spawn     wall    exec/s   speedup   peakRSS    (exec/div)';
-  const printRow = (label: string, spawnMs: number, r: Timed & { rssBytes: number }, base: number) => {
+  const HEAD = 'label       wall    exec/s   speedup   peakRSS    (exec/div)';
+  const printRow = (label: string, r: Timed & { rssBytes: number }, base: number) => {
     const rate = r.executed / (r.ms / 1000);
     console.log(
-      `${label.padEnd(8)} ${(spawnMs / 1000).toFixed(1).padStart(6)}s  ${(r.ms / 1000).toFixed(1).padStart(6)}s  ` +
+      `${label.padEnd(8)} ${(r.ms / 1000).toFixed(1).padStart(6)}s  ` +
       `${rate.toFixed(1).padStart(7)}  ${(rate / (base || rate)).toFixed(2).padStart(6)}x  ${gb(r.rssBytes).padStart(8)}   (${r.executed}/${r.diverged})`);
     return rate;
   };
@@ -184,22 +178,20 @@ if (!isMainThread) {
   console.log(`cores=${cores}  workset=${workset.length} traversals  mode=${MODE}`);
 
   if (MODE === 'threads' || MODE === 'both') {
-    console.log(`\n=== THREADS (static partition across worker_threads, ONE shared heap) ===\n${HEAD}`);
+    console.log(`\n=== THREADS (N worker_threads in ONE process, shared heap) ===\n${HEAD}`);
     let base = 0;
     for (const n of WORKERS) {
-      const stop = peakSampler();
-      const r = await runThreadPool(0, workset.length, n);
-      const rssBytes = stop();
-      const rate = printRow(String(n), r.spawnMs, { ...r, rssBytes }, base);
+      const r = await runProcs(1, n);                            // one process, n threads → clean per-row maxRSS
+      const rate = printRow(String(n), r, base);
       if (!base) base = rate;
     }
   }
   if (MODE === 'procs' || MODE === 'both') {
-    console.log(`\n=== PROCS (static partition across child processes, N heaps — RSS summed) ===\n${HEAD}`);
+    console.log(`\n=== PROCS (N processes, independent heaps — RSS summed) ===\n${HEAD}`);
     let base = 0;
     for (const n of WORKERS) {
       const r = await runProcs(n, 1);
-      const rate = printRow(String(n), r.spawnMs, r, base);
+      const rate = printRow(String(n), r, base);
       if (!base) base = rate;
     }
   }
@@ -210,13 +202,15 @@ if (!isMainThread) {
     let base = 0;
     for (const p of PROCS) for (const t of TPP) {
       const r = await runProcs(p, t);
-      const rate = printRow(`${p}x${t}`, r.spawnMs, r, base);
+      const rate = printRow(`${p}x${t}`, r, base);
       if (!base) base = rate;
     }
   }
 
-  console.log('\nwall INCLUDES startup for every mode (spawn column is that startup, informational).');
-  console.log('peakRSS: THREADS = the one process; PROCS/HYBRID = SUM of the child processes\' peaks.');
-  console.log('THREADS shares one heap/GC; PROCS/HYBRID trade more memory for independent heaps.');
+  // Every row now runs in fresh child process(es) and reports kernel maxRSS — ONE consistent metric,
+  // so THREADS (one process) and PROCS (N processes) are directly comparable. wall includes startup.
+  console.log('\npeakRSS: THREADS = the single process\'s peak; PROCS/HYBRID = SUM of the child peaks');
+  console.log('(an upper bound — the per-process peaks need not coincide, but each process needs that');
+  console.log('headroom). THREADS shares one heap/GC; PROCS/HYBRID trade more memory for independent heaps.');
   process.exit(0);   // dodge a bun teardown panic tearing down many workers (fires after all data prints)
 }
