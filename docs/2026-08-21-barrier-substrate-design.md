@@ -138,7 +138,14 @@ it (a landed subgraph is several (A) relations; OLAP state is (A) re-crossed eac
   which re-enters as an ordinary landed vertex. No temp table, no new IR node — the bound vertices are
   a `json_each` relation the movement joins, exactly the substrate-A-extended picture. 2 landing binds
   (edges + vertices) + the mid-traversal injection bind, O(1) in subgraph size.
-- **STILL OPEN (not a storage question):** `out`/`in`/`both` (vertex→vertex) over a subgraph and
-  `has()`/filters over subgraph vertices (the rest of the vocabulary reading the bound relations); the
-  OLAP occupancy model (alarm-checkpoint vs Worker-driven — Axis 1); and NESTED value transforms
+- **LANDED (2026-08-21) — federate-subgraph, `.V()`/`.E()` re-source + vertex→vertex movement.** The
+  subgraph threads a `{vertices, edges}` context (`detachedTail`), so `.V()`/`.E()` re-root a fresh
+  local `sg.traversal()` at the bound relations and `out`/`in`/`both` (`boundVertexMove`) walk the bound
+  edges (`edges.src`/`tgt` = `vertex.id`, inline-label `IN` over the string label column) to the bound
+  vertices for the target's data — reached elements re-enter with full payload. The edges relation is
+  landed ONCE (shared as the stream seed and the movement source). Prior art: TinkerPop `sg.traversal()`,
+  SPARQL `SERVICE`+`CONSTRUCT` then query, Neo4j GDS graph projection.
+- **STILL OPEN (not a storage question):** `has()`/filters over subgraph vertices and shape-agnostic
+  steps (`count`/`dedup`) over the bound stream (the rest of the vocabulary reading the bound relations);
+  the OLAP occupancy model (alarm-checkpoint vs Worker-driven — Axis 1); and NESTED value transforms
   (above). None needs a new materialized-relation substrate.
