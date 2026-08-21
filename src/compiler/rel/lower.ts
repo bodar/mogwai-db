@@ -46,7 +46,7 @@ import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabe
 import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
-import { boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
+import { boundVertexHas, boundVertexHasLabel, boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues, HAS_CMP_OPS } from './foreign.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -4573,6 +4573,27 @@ function detachedTail(
     // the endpoint's DATA; the vertex re-enters with full payload.
     if (elem === 'edge' && (step.name === 'inV' || step.name === 'outV' || step.name === 'bothV')) {
       return detachedTail(endpointVertices(seed, subgraph.vertices, step.name, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+    }
+    // `has`/`hasLabel` FILTER a bound vertex against its landed `{t,v}` property tree / label array — an
+    // `EXISTS` over the exploded json (multi-valued membership). `has(key)`, `has(key, value)` and
+    // `has(key, P)` for the six comparison predicates; `hasLabel(l…)`. A composed/`within`/text predicate,
+    // `has(label, key, value)`, or a bound-parameter operand DECLINE (fail closed) rather than guess.
+    if (elem === 'vertex' && step.name === 'hasLabel') {
+      const labels = argValues(step);
+      if (!labels.length || !labels.every((l) => typeof l === 'string')) return null;
+      return detachedTail(boundVertexHasLabel(seed, labels as string[], fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+    }
+    if (elem === 'vertex' && step.name === 'has' && (step.args.length === 1 || step.args.length === 2) && typeof step.args[0]!.value === 'string') {
+      const key = step.args[0]!.value as string;
+      const operand = step.args[1];
+      if (!operand) return detachedTail(boundVertexHas(seed, key, undefined, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+      if (operand.name == null && !isPred(operand.value) && !isNested(operand.value) && !isTokenArg(operand.value)) {
+        return detachedTail(boundVertexHas(seed, key, { op: '=', value: operand.value }, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+      }
+      const pred = isPred(operand.value) ? operand.value : null;
+      const op = pred && pred.operands.length === 1 && pred.operands[0]!.name == null ? HAS_CMP_OPS[pred.op] : undefined;
+      if (pred && op) return detachedTail(boundVertexHas(seed, key, { op, value: pred.operands[0]!.value }, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+      return null;
     }
     // VERTEX→VERTEX movement walks the bound edges to the bound vertices. A movement's args are edge
     // labels; only INLINE string labels are modelled here (the landed edge's `label` is a string column,

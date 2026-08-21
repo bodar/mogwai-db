@@ -1,4 +1,4 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -158,6 +158,56 @@ export function endpointVertices(edges: Rel, vertices: Rel, step: 'inV' | 'outV'
 
 const eqExpr = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
 const andExpr = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'and', left, right });
+const jsonExtract = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+const jsonKeyPath = (key: string): string => `$."${key.replace(/"/g, '""')}"`;
+
+/** The `BinaryOp` a `has(key, P)` comparison predicate lowers to over a bound vertex value, or `null`
+ *  for a predicate this filter does not yet model (`within`, `containing`, …). */
+export const HAS_CMP_OPS: Readonly<Record<string, '=' | '!=' | '<' | '<=' | '>' | '>='>> = {
+  eq: '=', neq: '!=', lt: '<', lte: '<=', gt: '>', gte: '>=',
+};
+
+/** Wrap a member-matching relation as an `EXISTS` filter over `seed` — the shared tail of `has`/`hasLabel`
+ *  over a landed vertex: the subquery is CORRELATED (it reads `seed`'s json column), so it renders as an
+ *  `EXISTS (SELECT 1 FROM json_each(<seed.col>) WHERE …)`. */
+const existsFilter = (seed: Rel, matched: Rel, fresh: Minter): Rel =>
+  make.filter({
+    id: fresh('hf'), input: seed, channels: [], type: seed.type,
+    pred: { kind: 'exists', negated: false, plan: make.project({ id: fresh('hp'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) },
+  });
+
+/**
+ * `has(key)` / `has(key, cmp)` over a landed SUBGRAPH vertex — filter the vertex iff its `{t,v}` property
+ * tree carries a value at `key` (and, when `cmp` is given, one satisfying `value <op> operand`). A
+ * property is MULTI-VALUED (the key holds an array of `{t,v}` nodes), so membership is an `EXISTS` over
+ * the exploded array, not a first-value read — the same any-member rule `has` has on a stored element.
+ */
+export function boundVertexHas(seed: Rel, key: string, cmp: { op: '=' | '!=' | '<' | '<=' | '>' | '>='; value: unknown } | undefined, fresh: Minter): Rel {
+  const exploded = make.explode({
+    id: fresh('hx'), channels: [], expr: jsonExtract(col(seed.id, 'props'), jsonKeyPath(key)),
+    as: { value: 'hv' }, type: typeOf(meta('hv', 'any', true)),
+  });
+  const matched = cmp
+    ? make.filter({
+      id: fresh('hm'), input: exploded, channels: [], type: exploded.type,
+      pred: { kind: 'binary', op: cmp.op, left: jsonExtract(col(exploded.id, 'hv'), '$.v'), right: lit(cmp.value) },
+    })
+    : exploded;
+  return existsFilter(seed, matched, fresh);
+}
+
+/** `hasLabel(l…)` over a landed vertex — the label column is a json ARRAY (every label), so membership
+ *  is an `EXISTS` over `json_each(label)` against the asked set. */
+export function boundVertexHasLabel(seed: Rel, labels: readonly string[], fresh: Minter): Rel {
+  const exploded = make.explode({
+    id: fresh('hlx'), channels: [], expr: col(seed.id, 'label'), as: { value: 'lv' }, type: typeOf(meta('lv', 'any', true)),
+  });
+  const matched = make.filter({
+    id: fresh('hlm'), input: exploded, channels: [], type: exploded.type,
+    pred: { kind: 'in-list', expr: col(exploded.id, 'lv'), values: labels.map(compilerText) },
+  });
+  return existsFilter(seed, matched, fresh);
+}
 
 /**
  * VERTEX→VERTEX movement over a landed SUBGRAPH — `out`/`in`/`both` from a bound vertex, walking the

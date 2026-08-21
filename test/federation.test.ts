@@ -225,3 +225,40 @@ describe('mogwai.graph.federate — SUBGRAPH re-source and vertex→vertex movem
     expect(await vals(sg('.V().out("develops").out("develops").values("name")'))).toEqual([]);
   });
 });
+
+// has()/hasLabel() FILTER subgraph vertices against their landed {t,v} property tree / label array —
+// an EXISTS over the exploded json (multi-valued membership), so they compose anywhere a vertex is on
+// the bound stream: after .V() and after a movement hop alike.
+describe('mogwai.graph.federate — SUBGRAPH has()/hasLabel filters', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const vals = async (g: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
+  const onCrew = async (g: string) =>
+    (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec))).sort();
+
+  test('hasLabel(person) keeps the developers', async () => {
+    expect(await vals(sg('.V().hasLabel("person").values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").outV().dedup().values("name")'));
+  });
+  test('hasLabel(software) keeps the targets', async () => {
+    expect(await vals(sg('.V().hasLabel("software").values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").inV().dedup().values("name")'));
+  });
+  test('has(name, value) filters by an exact property value', async () => {
+    expect(await vals(sg('.V().has("name","marko").values("name")'))).toEqual(['marko']);
+  });
+  test('has(key) keeps vertices that carry the property', async () => {
+    // every subgraph vertex has a name; none has an "age" (crew persons carry location, not age).
+    expect((await vals(sg('.V().has("name").values("name")'))).length).toBe(5);
+    expect(await vals(sg('.V().has("age").values("name")'))).toEqual([]);
+  });
+  test('has(name, P.neq(...)) — a comparison predicate over the bound value', async () => {
+    expect(await vals(sg('.V().hasLabel("person").has("name", P.neq("marko")).values("name")')))
+      .toEqual(['matthias', 'stephen']);
+  });
+  test('has() composes AFTER a movement hop (multiset — one per matching edge)', async () => {
+    expect(await vals(sg('.V().hasLabel("person").out("develops").has("name","gremlin").values("name")')))
+      .toEqual(['gremlin', 'gremlin', 'gremlin']);
+  });
+});
