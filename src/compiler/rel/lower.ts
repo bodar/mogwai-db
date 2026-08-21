@@ -2879,6 +2879,18 @@ function scalarTail(
       continue;
     }
 
+    if (step.name === 'all' || step.name === 'any' || step.name === 'none') {
+      // Over a SCALAR traverser, `all`/`any`/`none` produce NOTHING: their `filter` returns FALSE for a
+      // non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the
+      // `return false` after the `instanceof Iterable` block), so a value stream drops whole. The LIST
+      // form (`listMemberOp`) tests each member; here the traverser is one value, not a collection.
+      // The predicate is irrelevant to the outcome — TinkerPop resolves it for side effects then returns
+      // false regardless — so a single-arg quantifier drops without evaluating it.
+      if (args.length !== 1 || isLocalScope(step) || step.modulators?.length) return null;
+      rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: CONSTANT.false });
+      continue;
+    }
+
     if (step.name === 'dedup') {
       // `Distinct` is WHOLE-ROW and only whole row (§3.3), so what the row IS decides the answer —
       // and a channel must not be in it. Two reasons, both load-bearing:

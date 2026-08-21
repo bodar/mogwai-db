@@ -674,6 +674,15 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 
 **Leaf gaps — one family, no downstream unlock:**
 
+- ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
+  non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
+  after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
+  `inject(7).all(P.eq(7))`, `inject(null).any(P.eq(null))`) drops WHOLE regardless of the predicate. The
+  scalar tail now filters `CONSTANT.false` for a single-arg quantifier; the LIST form (`listMemberOp`, member
+  testing) is unchanged. L3 +9. 🚧 LEFT: a nested-traversal member predicate over a LIST
+  (`inject([…]).none(P.eq(__.V(9999).values(k)))`) — needs the `resolveScalar` rooted hook threaded into
+  `list.ts`'s `memberPredicate` via the child seam's `rooted`.
+
 - ✅ **Exact REAL → JSON — LANDED as ONE authority, `jsonMember`/`jsonMemberByTypeof` (`build.ts`).** Every
   scalar crossing INTO a `json_object`/`json_array`/`json_group_array` is now lossless at any depth: a
   binary64 rides as a 17-digit JSON number (lossy-only guard) and a wide integer as decimal TEXT (BigInt
