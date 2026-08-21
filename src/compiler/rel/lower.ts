@@ -4744,6 +4744,24 @@ function elementTail(
       const dropped = elementDrop(rel, elem, fresh);
       return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
     }
+    // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the bound alias tuple, on the ELEMENT stream
+    // BEFORE any `select`. The traverser stays the current element; only the first per-tuple survives.
+    // `dedupByLabels` reads each label's `Pop.last` off the live alias map and ranks the survivor's
+    // whole payload, so a following `select('a','b')`/`path()` reads a field the dropped duplicates
+    // could differ on. The RECORD tail wires the SAME helper for the post-`select` form; this is the
+    // pre-`select` one, and the only missing caller (the algebra was already built).
+    if (step.name === 'dedup' && !isLocalScope(step) && (step.args ?? []).length && !step.optionArms) {
+      const keys = argValues(step);
+      if (keys.every((k) => typeof k === 'string')) {
+        const bys = modulations(step, 1, childSeam(ctx, fresh));
+        if (!bys) return null;
+        const deduped = dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh);
+        if (!deduped) break;
+        rel = deduped;
+        bulked = false;
+        continue;
+      }
+    }
     const row = rowOp(step, rel, elementRowShape(rel, elem, labels), bulked, ctx, fresh);
     if (!row) break;
     // A `dedup()` THAT LOWERED RESET THE MULTIPLICITY, and the fold learns it. Every arm `rowOp`

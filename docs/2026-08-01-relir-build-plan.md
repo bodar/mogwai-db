@@ -759,6 +759,18 @@ reads), side effects, then `local`, `match`, `where`, the `path` tails.
 
 🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
 pattern this whole stage kept finding:
+- ✅ **a KEYED `dedup(k1,…,kn)[.by(proj)]` on the ELEMENT stream — LANDED, and it was PURELY a missing
+  caller.** `dedupByLabels` (`lower.ts`, `DedupGlobalStep` with `dedupLabels`) was already built and wired
+  into the RECORD tail (the post-`select` form); the PRE-`select` form (`g.V().as('a').both().as('b').dedup('a','b').by(T.label).select('a','b')`,
+  `dedup('a','b').path().by('name')`) declined only because the element loop's `rowOp` rejects an
+  args-bearing `dedup` and nothing called the helper where the live alias map is in scope. One `if` before
+  the `rowOp` call reuses it verbatim: each label's `Pop.last` identity (rowid, or the shared `by()`
+  projection) tuples into `dedupOn`'s ranked window, the survivor keeps its whole payload+path, and a
+  non-live label or unproductive `by()` declines/drops per the reference. The representative is
+  impl-defined ("should be of"), so the deterministic first-per-tuple is a valid member and the pinned
+  COUNT (distinct tuples) is perturbation-invariant. L3 +3 (`filter/Dedup.feature`, `SubgraphStrategy.feature`).
+  🚧 LEFT: a bare `dedup()` over a path-carrying element stream (still the `pathCarried` decline), and a
+  `Scope.local` `dedup(labels)` over a fold.
 - ✅ **a `select(<label>)` RE-ROOT in a child body — LANDED.** `selectRerootHost` (`lower.ts`) is the alias
   analogue of `rerootedHost`'s endpoint/owner reroots: a body leading with `select('a')` reads the label
   off the `HostRow`'s alias map (`aliasProjection`, `Scoping.getScopeValue` resolves a label off the
