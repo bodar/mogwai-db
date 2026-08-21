@@ -30,7 +30,7 @@ So a barrier should DECLARE which it is, and the drive loop should run a **sync*
 
 | Barrier | sync/async | why |
 |---|---|---|
-| **regex**, **reverse** | **sync** | pure CPU over an in-DO batch; MUST be atomic (a value transform inside one grammar query) |
+| **regex**, **reverse**, **split** | **sync** | pure CPU over an in-DO batch; MUST be atomic (a value transform inside one grammar query) |
 | `federate` (value-inject) | async | remote wait (sibling DO); non-isolated is documented + accepted |
 | `io` | async | R2 object get/put |
 | federate (subgraph) | async | remote wait |
@@ -47,8 +47,11 @@ want different shapes.
   - **filter** — `within(json_each)` re-runs the prefix and keeps survivors; the stream is unchanged.
     **regex** (`src/compiler/rel/regex.ts`). Federate's *value*-injection is morally this too (smell below).
   - **value-source** — the barrier's computed values ARE the resumed stream, sourced from
-    `json_each` and continued by `scalarTail` (`lowerValueResume`, the value twin of `lowerForeignResume`).
-    **reverse** (`src/compiler/rel/reverse.ts`); **split** and the string-op family are the same shape.
+    `json_each` and continued by the ordinary tail (`lowerValueResume`/`lowerListResume`, the value twins
+    of `lowerForeignResume`). **reverse** (scalar values, `src/compiler/rel/reverse.ts`) and **split**
+    (a LIST per input, `src/compiler/rel/split.ts`) are both this shape — split just frames its rows as
+    lists (`lowerListResume`, `{list, of: BARE_LIST}`) so they re-enter the list vocabulary rather than
+    as scalar text. The rest of the string-op family is the same shape.
 - **(B) Heavy materialized local relation — UNBUILT.** A data-sized RELATION with its own local
   identity/adjacency → a `TEMP` table or a retained materialized binding (RelIR §3.0 `Binding`/`Ref`).
   Needed by **federate-subgraph** (to traverse a fetched subgraph locally with live adjacency — the
@@ -86,6 +89,14 @@ want different shapes.
   recursive subquery PER ROW); as a barrier it is **424 B, ~2× faster, ~2× cheaper to compile, and
   reverses lists** (which the CTE could not). A/B measured on `values('name').reverse()`. The CTE is
   deleted.
+- **LANDED (2026-08-21) — `split()` on the same value-source arm.** `split(sep)` over a scalar string
+  stream is the second value-transform barrier: the JS `splitValue` (faithful to `SplitGlobalStep`/
+  Commons `StringUtil.split`) computes ONE LIST per traverser, and `lowerListResume` re-injects them as a
+  `LIST_COL`-carrying read framed `{list, of: BARE_LIST}` — the shape `inject([...])` produces — so a
+  following list op composes through the ordinary list vocabulary. The one new piece over reverse is
+  `lowerListResume` (a scalar `value` resume would frame each list as its JSON TEXT, a string on the
+  wire). `split(Scope.local, …)` over a folded list (member-wise string→LIST) and a LIST-shaped head
+  stay fail-closed deferrals.
 - **KNOWN GAP the reverse work surfaced — NESTED value transforms.** A barrier segments the WHOLE query,
   so it can only lower a TOP-LEVEL value transform; a `reverse()`/`split()` inside a child body
   (`order().by(__.…reverse())`) cannot be a barrier and now DECLINES (fail-closed). Handling nested value

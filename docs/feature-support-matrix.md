@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,706<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,710<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -188,7 +188,7 @@ heterogeneous stream frames each value by its own tag.
 | `asString`, `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | a literal that cannot parse RAISES the reference's message, at compile time |
 | `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
 | `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity. Top-level SCALAR reverse is a value-transform **barrier** (`compiler/rel/reverse.ts`, substrate A — a JS map re-injected as a `json_each` value source; smaller/faster than the retired recursive CTE); the LIST/path form is a list-order operation. ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
-| `split` | ❌ | |
+| `split` | 🟡 | GLOBAL `split(sep)` over a SCALAR string stream is a value-transform **barrier** (`compiler/rel/split.ts`, substrate A — a JS map re-injected as a `json_each` LIST source, framed back as lists). Faithful to `SplitGlobalStep`/`StringUtil.split`: an empty separator → characters, a null separator → whitespace, else a whole-separator split with empty tokens removed; null passes through; a non-string traverser RAISES the reference's `IllegalArgumentException`. The produced lists re-enter the ordinary list vocabulary (`split(sep).unfold()`). ❌ `split(Scope.local, sep)` over a folded list (a member-wise string→LIST transform), and a LIST-shaped head — both fail-closed deferrals |
 
 🔴 **Five documented deviations, not defects:**
 

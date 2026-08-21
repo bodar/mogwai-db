@@ -156,13 +156,18 @@ bind), not the federate return path. Getting this backwards would trade live adj
    correct-by-construction loosening beats a total, subtly-wrong one — the same principle behind the
    write path's guard-binding refusals (`src/rel/plan.ts` `Guard`).
 
-## A sibling in the same class: `split()`
+## A sibling in the same class: `split()` — ✅ LANDED (2026-08-21) as a JS barrier
 
-`split()` (the string→list transform, `SplitGlobalStep`/`SplitLocalStep`) belongs here for the SAME
+`split()` (the string→list transform, `SplitGlobalStep`/`SplitLocalStep`) belonged here for the SAME
 reason regex does — its answer is **Java's, and SQL cannot express it without either diverging or a
-JS barrier**. It fails closed today ("no lowering covers", verified: `g.inject("hello world").split(null)`,
-`g.V().values("name").split(null)`, and the non-string-member `g.inject(["a","b"]).split("a")` all
-decline cleanly, no silent coercion) and stays that way until this story lands.
+JS barrier**. **The decision below was made: run Java-faithful semantics in the JS barrier, no divergence.**
+The GLOBAL form over a scalar string stream now lowers as substrate A's value-source barrier
+(`src/compiler/rel/split.ts` + `lowerListResume`): the JS `splitValue` reproduces Commons exactly (no
+recursive-CTE reproduction was needed after all — `str.split(sep).filter(t => t !== '')` IS
+`splitByWholeSeparator`), and the produced lists re-inject as one `json_each` LIST source framed back as
+lists (`docs/2026-08-21-barrier-substrate-design.md`). `split(Scope.local, …)` over a folded list and a
+LIST-shaped head stay fail-closed deferrals. The paragraphs below are kept as the research that reached
+that call.
 
 The semantics are Apache Commons `StringUtil.split`
 (`vendor/tinkerpop/gremlin-core/.../util/StringUtil.java:42-52`), and every one of its three arms is a

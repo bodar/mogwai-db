@@ -4274,6 +4274,31 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
 }
 
 /**
+ * THE LIST-SOURCE RESUME — substrate A's value arm for a barrier whose per-traverser output is a LIST
+ * (`split()`), the list-shaped twin of `lowerValueResume`.
+ *
+ * The transform computed one list per traverser (a null passing straight through); the lists are DATA, so
+ * they cross as ONE `json_each` bind and re-enter as a `LIST_COL`-carrying read framed `{list, of: BARE_
+ * LIST}` — the same shape `inject([...])` produces, so a following list op (`unfold()`, a local reducer)
+ * composes through `continueAs`'s list loop exactly as it would over an injected list. A scalar `value`
+ * resume would frame each list as its JSON TEXT (a string on the wire), which is why the list producer
+ * needs its own seed rather than reusing `lowerValueResume`.
+ */
+export function lowerListResume(lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
+  if (facts.demandsEncounter || facts.tracksPath) return null;
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, lists, fresh);
+  const seed = make.project({
+    id: fresh('lrp'), input: exploded, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
+    exprs: [[LIST_COL, col(exploded.id, 'sv')]],
+  });
+  const chain = continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES);
+  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+}
+
+/**
  * THE CHAIN, lowered to a bare RELATION — the same fold, minus the naming and the budget.
  *
  * The split exists so a chain can be lowered INSIDE another one. A rooted sub-read used as a VALUE
