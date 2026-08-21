@@ -292,6 +292,34 @@ describe('mogwai.graph.federate — count()/dedup() over the landed stream', () 
   });
 });
 
+// ELEMENT-TERMINAL subgraph traversals — the chain ends on a bound element, so the WHOLE vertex/edge
+// (id, label, property bag) crosses to the wire. This is the leaf-framing path (a bound element frames
+// through the landed payload), distinct from the scalar-terminal cases above that end in values()/id()/
+// count(). The oracle is the SAME endpoint traversal run directly on the sibling — compared on the
+// framed name properties AND the labels, so the whole element round-trips, not just a projected value.
+describe('mogwai.graph.federate — SUBGRAPH element-terminal (whole vertices to the wire)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const elems = async (g: string) => (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec)));
+  const vlabels = (vs: any[]) => vs.map((v: any) => v.label).sort();
+  // The oracle is the SAME traversal read one step SHORTER — its `.values("name")` / `.label()` are
+  // validated against the crew sibling above. So an element-terminal result frames correctly iff the
+  // WHOLE vertices carry exactly the names and labels that projected value stream does. This pins the
+  // leaf-framing (a bound element → id/label/props on the wire) without re-deriving a fresh oracle.
+  const projNames = async (t: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(sg(`${t}.values("name")`), {})).map(dec))).sort();
+  const projLabels = async (t: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(sg(`${t}.label()`), {})).map(dec))).sort();
+
+  for (const t of ['.inV()', '.V()', '.V().out("develops")', '.V().hasLabel("person")']) {
+    test(`${t} returns the vertices WHOLE — names+labels match the projected streams`, async () => {
+      const got = await elems(sg(t));
+      expect(names(got)).toEqual(await projNames(t));
+      expect(vlabels(got)).toEqual(await projLabels(t));
+    });
+  }
+});
+
 // Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
 // V(ids)/E(ids) filtering the bound source by id.
 describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {

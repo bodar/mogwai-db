@@ -157,6 +157,39 @@ step. The base graph's SQL stays semantically identical until step 4. `bash scri
   until then.
 - **FTS / `trigramSeek` over a bound graph** — the base FTS index does not exist for a landed subgraph, so
   `has(containing…)` over a bound graph would be a linear JSON scan (or a decline). Decide when reached.
+## The bound-stream model — LOCKED to id-carry + rejoin (2026-08-22)
+
+Confirmed against BOTH vendored references (prior-art check requested by the user):
+
+- **TinkerPop = model (A), id-carry.** The handle is `id` (`GraphStep.convertElementsToIds` downgrades any
+  element to `.id()`, `vendor/tinkerpop/gremlin-core/.../step/map/GraphStep.java:183-190`); movement
+  re-reads the live graph (`VertexStep.flatMap` → `traverser.get().vertices(dir,labels)`,
+  `.../step/map/VertexStep.java:71-75`); re-attach = re-fetch by id (`Attachable.getVertex` =
+  `hostGraph.vertices(id)`, `.../structure/util/Attachable.java:183-186`). Payload-carry is exactly
+  TinkerPop's **detached/inert** form — `DetachedVertex` carries a property snapshot but its
+  `edges()`/`vertices()` return empty and it is doc'd *"not traversable"*
+  (`.../structure/util/detached/DetachedVertex.java:46-47,163-171`). A subgraph is a FILTER decoration over
+  a normal structure-reading traversal (`.../strategy/decoration/SubgraphStrategy.java:104-115`), not a
+  detached bag.
+- **Calcite = model (A).** Source binds ONLY at the leaf (`RelOptTable`; every other node's
+  `getTable()==null`, `vendor/calcite/core/.../plan/RelOptTable.java` + `.../rel/AbstractRelNode.java:319-321`);
+  columns re-derived by ordinal `RexInputRef`, never carried (`.../rel/core/TableScan.java:112-114`;
+  `rel2sql` renders `FROM <source>`, `.../rel/rel2sql/RelToSqlConverter.java:958-974`); correlated re-fetch =
+  `Correlate` join keyed by a column bitset (`.../rel/core/Correlate.java:47-57`). Payload-carry has NO analog.
+- **The perf con is dissolved by Calcite's planner move:** repeated re-fetch of the same derived relation is
+  a MATERIALIZATION concern (`RelOptMaterialization` swaps the leaf scan; Spool-to-table), NOT a reason to
+  carry payload. So **materialize the landed relation ONCE** (one CTE referenced N times) rather than
+  re-exploding the JSON literal per rejoin.
+
+Why it fits us: the `GraphSource` interface (Steps 1-2) is id-carry BY CONSTRUCTION — predicates correlate
+on `id`, `propertyValues` takes an id-bearing input — so payload-carry never fit it; keeping payload-carry
+= keeping `foreign.ts` as a permanent second vocabulary, which this plan retires.
+
+**Obligation:** id-carry drops payload mid-stream, so the LEAF framing (a bound element → wire) must REJOIN
+the landed CTE for id/label/props (**Mechanism B**) — under pure id-carry it can NOT stay deferred. Net for
+the rewrite = the element-terminal subgraph tests in `test/federation.test.ts` (added 2026-08-22) +
+`test/cloudflare*.test.ts` (green Bun ci is not sufficient for this DO-boundary path).
+
 - **The label-id remapping for a bound graph** — `BoundGraph.edgeLabelMatch` is `label IN (names)` (no id
   table), so there is nothing to remap; the base keeps its id-set. This is why the boundary is a predicate,
   not a shared representation.
