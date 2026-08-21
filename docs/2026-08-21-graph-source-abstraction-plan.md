@@ -1,13 +1,30 @@
 # GraphSource — one traversal vocabulary over two graph shapes (PLAN)
 
 **Status: IN PROGRESS.** Plan of record. **Naming SETTLED (step 1): `GraphSource` / `BaseGraph` /
-`BoundGraph`** (compiler words for machinery, per root `CLAUDE.md`). **Step 1 LANDED** (`95ad5ba`):
-`GraphSource` + `BaseGraph` defined in `src/compiler/rel/source.ts`, threaded on `ChainCtx.source`
-(default `BaseGraph`), and the `movement` chokepoint's edge scan + label predicate rerouted through
-`adjacencyEdges` / `edgeLabelMatch` — census-invariant. The interface grows ONE method per rerouted
-chokepoint (no speculative/dead methods); step 2 continues with `values`/`has` → labels →
-`elementScan`. It supersedes the piecemeal bound-graph vocabulary that landed in
-`src/compiler/rel/foreign.ts` +
+`BoundGraph`** (compiler words for machinery, per root `CLAUDE.md`). `GraphSource` + `BaseGraph` live in
+`src/compiler/rel/source.ts`, threaded on `ChainCtx.source` (default `BaseGraph`). The interface grows
+ONE method per rerouted chokepoint (no speculative/dead methods).
+
+**Steps 1 + most of 2 LANDED** — six Mechanism-A chokepoints rerouted, each census-invariant + ci-green:
+- `movement` adjacency → `adjacencyEdges` + `edgeLabelMatch` (`95ad5ba`)
+- `values()` value stream → `propertyValues` (`bff0300`)
+- `V()`/`E()` element sourcing → `elementScan` (`3861a94`)
+- `hasLabel()` + label half of `has(label,k,v)` → `hasLabelPredicate` (`15fc002`)
+- `has(k[,v])` property filter → `hasPropertyPredicate` (value comparison stays vocabulary via a
+  callback handed the graph's value+vtype exprs; the indexSeek/trigramSeek EXISTS shape preserved) (`3a0b845`)
+- `has(T.id/T.label)` → `hasTokenPredicate` (`5c79e55`)
+
+**Step 2 REMAINING — the label-scalar cluster.** `label()`/`id()`/`by(T.label)`/`by(T.id)`/`labels()`
+(edge arm)/`labelled()` all read through **`byExpr`'s token arm** (`modulator.ts:267-312`) — a correlated
+scalar reader (external id `COALESCE(uid,id)`; first-label side-table pick). Rerouting it means source
+methods `externalId(kind, hostId)` / `labelScalar(kind, hostId)`, but `byExpr` is a pure function called
+from **~22 sites across 6 files** with no `ctx`/`source` in hand — so threading `source` is an API choice
+(param on `byExpr` vs a field on the host). `byExpr` is also BASE-ONLY today (the bound tail uses
+`foreignLabelValue`/`foreignValues` directly), so this reroute is prep with no bound consumer until step
+4. The vertex `labels()` FAN-OUT (`lower.ts:2094-2139`) is a second remaining item; its order-mint
+(`renumber`) is stream vocabulary, only the two-join name fan-out is source.
+
+It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
 `detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
 is CORRECT and pinned the semantics, but it is a **second hand-written traversal vocabulary**, and this
 plan retires it in favour of one vocabulary parameterised by a graph source.
