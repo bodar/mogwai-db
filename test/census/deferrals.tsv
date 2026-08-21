@@ -701,7 +701,6 @@ deferred	this traversal is not supported yet: no lowering covers g.inject(["a","
 deferred	this traversal is not supported yet: no lowering covers g.inject(["a":1], ["b":2], ["b":4]).fold([:], Operator.addAll)	g.inject(["a":1], ["b":2], ["b":4]).fold([:], Operator.addAll)
 deferred	this traversal is not supported yet: no lowering covers g.inject(["a":1],["b":2]).fold([:], Operator.addAll)	g.inject(["a":1],["b":2]).fold([:], Operator.addAll)
 deferred	The substring() step can only take string as argument, encountered class java.util.ArrayList	g.inject(["aa","bb"]).substring(1, 2)
-deferred	this traversal is not supported yet: no lowering covers g.inject(["marko","josh"]).none(P.eq(__.V(9999).values("name")))	g.inject(["marko","josh"]).none(P.eq(__.V(9999).values("name")))
 deferred	this traversal is not supported yet: no lowering covers g.inject(["test"]).is(P.typeOf(GType.LIST)).groupCount()	g.inject(["test"]).is(P.typeOf(GType.LIST)).groupCount()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2, 3, 4]).asNumber()	g.inject([1, 2, 3, 4]).asNumber()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2, 3, 4]).unfold().asNumber()	g.inject([1, 2, 3, 4]).unfold().asNumber()

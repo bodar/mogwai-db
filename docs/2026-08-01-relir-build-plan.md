@@ -689,9 +689,10 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
   `inject(7).all(P.eq(7))`, `inject(null).any(P.eq(null))`) drops WHOLE regardless of the predicate. The
   scalar tail now filters `CONSTANT.false` for a single-arg quantifier; the LIST form (`listMemberOp`, member
-  testing) is unchanged. L3 +9. 🚧 LEFT: a nested-traversal member predicate over a LIST
-  (`inject([…]).none(P.eq(__.V(9999).values(k)))`) — needs the `resolveScalar` rooted hook threaded into
-  `list.ts`'s `memberPredicate` via the child seam's `rooted`.
+  testing) is unchanged. L3 +9. ✅ **The nested-traversal member predicate over a LIST also lands**
+  (`inject([…]).none(P.eq(__.V(9999).values(k)))`): `memberPredicate` gained a `resolveScalar` hook built
+  from the child seam's `rooted` read (a member list has no element host, so only the rooted arm applies —
+  the cross-module twin of `nestedFirstValue`'s rooted branch, since `list.ts` cannot reach `lower.ts`).
 
 - ✅ **Exact REAL → JSON — LANDED as ONE authority, `jsonMember`/`jsonMemberByTypeof` (`build.ts`).** Every
   scalar crossing INTO a `json_object`/`json_array`/`json_group_array` is now lossless at any depth: a

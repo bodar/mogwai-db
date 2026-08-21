@@ -1176,6 +1176,7 @@ ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.inject(["abc","cde"]).any(P.eq("bcd"
 ran	1	1	04cf7cab21ff60cb	9473aa8de01d665e	g.inject(["bcd","bcd"]).all(P.eq("bcd"))
 ran	1	1	04cf7cab21ff60cb	9473aa8de01d665e	g.inject(["bcd","bcd"]).none(P.eq("abc"))
 ran	1	1	39691a530d180e28	d860c75273fc2067	g.inject(["feature","tESt",null]).toUpper(Scope.local)
+ran	1	1	2a846ddababb8a50	8c0c32135c19b815	g.inject(["marko","josh"]).none(P.eq(__.V(9999).values("name")))
 ran	7	6	838816ec2acdacec	270bd643367223f8	g.inject(["marko"]).combine(__.V().values("name").fold()).unfold()
 ran	1	1	745bc1c771310b4d	4acb791e01e3701f	g.inject(["marko"]).conjoin("-")
 ran	1	1	92be0de233d50880	6d198c29ad318cbb	g.inject(["marko"]).difference(__.V().values("name").fold())

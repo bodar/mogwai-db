@@ -242,10 +242,10 @@ export const inferredVtype = (value: Expr): Expr => ({
  * `Objects.equals`. Getting this wrong answered `IS NULL` for EVERY `eq` — see
  * `test/L4-addendum/list-member-predicate.feature`.
  */
-const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
+const memberPredicate = (member: Expr, pred: unknown, resolveScalar?: (nested: unknown) => Expr | null): Expr | null => {
   if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands[0]?.value === null)
     return { kind: 'binary', op: pred.op === 'eq' ? 'is' : 'is not', left: member, right: compilerNull() };
-  return predicateExpr(member, pred, SUBJECT_UNKNOWN);
+  return predicateExpr(member, pred, SUBJECT_UNKNOWN, null, null, undefined, undefined, resolveScalar);
 };
 
 /** The member ops that HOST a `by()`, so the blanket modulator decline must exempt exactly these two —
@@ -565,7 +565,21 @@ export function listMemberOp(
     // and therefore the child seam's, not this module's.
     if (args.length !== 1 || !isBareList(of)) return null;
     const members = membersOf(list, fresh);
-    const pred = memberPredicate(memberPayload(of, members), args[0]);
+    // A member predicate operand that is a ROOTED nested traversal (`none(P.eq(__.V(9999).values(k)))`)
+    // resolves to its FIRST value — the operand form the seam owns, here via the child seam's `rooted`
+    // read (a member list has no element host, so only the rooted arm applies). Mirrors
+    // `nestedFirstValue`'s rooted branch across the module boundary (`list.ts` cannot reach `lower.ts`).
+    const resolveScalar = child ? (nested: unknown): Expr | null => {
+      const steps = child.body(isNested(nested) ? nested.nested : nested, 'rooted');
+      if (!steps?.length) return null;
+      const read = child.rooted(steps);
+      if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
+      return { kind: 'scalar', plan: make.project({
+        id: fresh('lmv'), input: read.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+        exprs: [['v', col(read.rel.id, 'v')]],
+      }) };
+    } : undefined;
+    const pred = memberPredicate(memberPayload(of, members), args[0], resolveScalar);
     if (!pred) return null;
     const failing: Expr = { kind: 'binary', op: 'is not', left: pred, right: compilerInt(1) };
     const probe = (test: Expr): Rel => make.project({
