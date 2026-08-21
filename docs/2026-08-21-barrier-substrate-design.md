@@ -30,7 +30,7 @@ So a barrier should DECLARE which it is, and the drive loop should run a **sync*
 
 | Barrier | sync/async | why |
 |---|---|---|
-| **regex** | **sync** | pure CPU over an in-DO batch; MUST be atomic (a filter inside one grammar query) |
+| **regex**, **reverse** | **sync** | pure CPU over an in-DO batch; MUST be atomic (a value transform inside one grammar query) |
 | `federate` (value-inject) | async | remote wait (sibling DO); non-isolated is documented + accepted |
 | `io` | async | R2 object get/put |
 | federate (subgraph) | async | remote wait |
@@ -41,10 +41,14 @@ So a barrier should DECLARE which it is, and the drive loop should run a **sync*
 Orthogonal to Axis 1. Federate's detached-`ForeignRow[]` landing is federate-specific; other consumers
 want different shapes.
 
-- **(A) Lightweight value/set re-injection — EXISTS.** A data-sized set of VALUES re-injected as
-  `within(json_each)` (one bind, data never in the statement text) and re-filtering LIVE local tables.
-  No new identity, no storage. **regex** is this (`src/compiler/rel/regex.ts`). Federate's *value*-
-  injection is morally this too — see the smell below.
+- **(A) Lightweight value re-injection — EXISTS, two shapes.** A data-sized relation of VALUES crosses
+  as ONE `json_each` bind (data never in the statement text) and re-enters the LIVE stream. No new
+  identity, no storage. Two re-injection shapes have landed:
+  - **filter** — `within(json_each)` re-runs the prefix and keeps survivors; the stream is unchanged.
+    **regex** (`src/compiler/rel/regex.ts`). Federate's *value*-injection is morally this too (smell below).
+  - **value-source** — the barrier's computed values ARE the resumed stream, sourced from
+    `json_each` and continued by `scalarTail` (`lowerValueResume`, the value twin of `lowerForeignResume`).
+    **reverse** (`src/compiler/rel/reverse.ts`); **split** and the string-op family are the same shape.
 - **(B) Heavy materialized local relation — UNBUILT.** A data-sized RELATION with its own local
   identity/adjacency → a `TEMP` table or a retained materialized binding (RelIR §3.0 `Binding`/`Ref`).
   Needed by **federate-subgraph** (to traverse a fetched subgraph locally with live adjacency — the
@@ -72,10 +76,20 @@ want different shapes.
 
 ## What is decided vs deferred
 
-- **LANDED (2026-08-21):** Axis 1 is explicit — `SegmentPlan` is a discriminated union on `mode`
+- **LANDED (2026-08-21) — Axis 1 (sync/async).** `SegmentPlan` is a discriminated union on `mode`
   (`compiler/segment.ts`); a `SyncSegmentPlan` has no `apply`/`residency` and is driven with NO `await`
   (`driveSegmentsSync`, reachable from the sync `framed()` path), an `AsyncSegmentPlan` keeps the await
-  trampoline. **regex is sync** — it runs atomically on the sync path (so it now executes in the sync
-  census too), and federate/io are async.
+  trampoline. regex and reverse are sync; federate/io are async.
+- **LANDED (2026-08-21) — substrate A's value-source arm + `reverse` migrated off its CTE.**
+  `lowerValueResume` seeds the resumed stream from the barrier's computed values (`json_each`) and
+  continues via `scalarTail`. `reverse()` was a per-row recursive CTE (string-only, ~882 B SQL, a
+  recursive subquery PER ROW); as a barrier it is **424 B, ~2× faster, ~2× cheaper to compile, and
+  reverses lists** (which the CTE could not). A/B measured on `values('name').reverse()`. The CTE is
+  deleted.
+- **KNOWN GAP the reverse work surfaced — NESTED value transforms.** A barrier segments the WHOLE query,
+  so it can only lower a TOP-LEVEL value transform; a `reverse()`/`split()` inside a child body
+  (`order().by(__.…reverse())`) cannot be a barrier and now DECLINES (fail-closed). Handling nested value
+  transforms is its own future substrate problem — inline SQL there means the CTE/JSON hacks substrate A
+  exists to avoid, so it waits for a real design rather than a per-op hack.
 - **LATER (needs a second concrete consumer + measurement):** substrate (B); moving federate's
   re-injection onto (A); the OLAP occupancy model (alarm-checkpoint vs Worker-driven).

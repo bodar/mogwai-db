@@ -187,7 +187,7 @@ heterogeneous stream frames each value by its own tag.
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asString`, `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | a literal that cannot parse RAISES the reference's message, at compile time |
 | `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
-| `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity |
+| `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity. Top-level SCALAR reverse is a value-transform **barrier** (`compiler/rel/reverse.ts`, substrate A — a JS map re-injected as a `json_each` value source; smaller/faster than the retired recursive CTE); the LIST/path form is a list-order operation. ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
 | `split` | ❌ | |
 
 🔴 **Five documented deviations, not defects:**

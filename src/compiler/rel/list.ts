@@ -368,7 +368,7 @@ export function listMemberOp(
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
     // decline here exactly as they do over a column.
-    const tx = transformExpr(step, memberPayload(of, members), false, fresh);
+    const tx = transformExpr(step, memberPayload(of, members), false);
     if (!tx) return null;
     // The `*LocalStep`s that EXTEND `StringLocalStep` throw on a non-null non-string MEMBER (the set is
     // exactly `GLOBAL_STRING_THROWS` — every one has a `*GlobalStep`/`*LocalStep` pair over

@@ -54,9 +54,8 @@ const COVERED = [
   // second source loop.
   "g.V().has('name','marko').as('a').V().has('name','vadas')",
   "g.V().hasLabel('person').values('age').map(__.V().count())",
-  // SQLite has no reverse scalar function, so the transform is a correlated Recursive relation
-  // embedded as one scalar expression. Non-string and null values are ReverseStep identities.
-  "g.V().values('name').reverse()", 'g.inject("abc").reverse()', 'g.inject(3).reverse()', 'g.inject(null).reverse()',
+  // (top-level scalar `reverse()` is a value-transform BARRIER now, not a sync compile — see the
+  // reverse barrier tests; the LIST/path reverse forms below still compile inline.)
   // THE SHAPE BOUNDARY: both of these retype element -> scalar, so they exercise the framing
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",

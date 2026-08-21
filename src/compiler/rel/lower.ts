@@ -2806,7 +2806,7 @@ function scalarTail(
       // `seed.kind === 'values'` IS "the value is a compile-time literal": an `inject()` source is the
       // only one, and it is the population that gets constant-folded. Read off the SEED rather than the
       // current relation, because a preceding transform does not stop a value being literal-derived.
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', fresh);
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values');
       if (!tx) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
@@ -4240,6 +4240,36 @@ export function lowerForeignResume(
   // rejoin the relation is the same landed shape a source-form call produces.
   const seed = rejoin ? foreignRejoin(landed, elem, rejoin.values, rejoin.injection, fresh) : landed;
   const chain = detachedTail(seed, elem, steps, from, ctx, fresh);
+  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+}
+
+/** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
+ *  of a data-sized set, underscore-namespaced so it cannot collide with a user parameter. */
+const VALUE_RESUME_PARAM = '_mogwai_value_resume';
+
+/**
+ * THE VALUE-SOURCE RESUME — substrate A's value arm, the value-stream twin of `lowerForeignResume`.
+ *
+ * A value-transform barrier (reverse, split, …) computed a NEW value per traverser in JS; its output IS
+ * the resumed stream, so — unlike regex's `within` FILTER, which re-runs the prefix — the barrier's
+ * values seed the stream directly. They are DATA, so they cross as ONE `json_each` bind (`jsonEachSet`),
+ * in array order (a 1:1 map preserves stream order), and `scalarTail` continues the chain over them just
+ * as `detachedTail` continues over a landed element relation. The values frame UNKNOWN (inferred from
+ * the JS value) — the same tag the transform's own output carried, so nothing is re-guessed.
+ */
+export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
+  // No channel crossed the boundary — a tail that DEMANDS an encounter or a path cannot be seeded from a
+  // bare value list, so it declines rather than compile a plan with the column silently missing.
+  if (facts.demandsEncounter || facts.tracksPath) return null;
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, values, fresh);
+  const seed = make.project({
+    id: fresh('vrp'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', col(exploded.id, 'sv')]],
+  });
+  const chain = scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh);
   return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
@@ -7421,7 +7451,7 @@ function valueRun(
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;
-    const transformed = transformExpr(step, value, false, fresh);
+    const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
     value = transformed.expr;
     type = transformed.type ?? UNKNOWN;

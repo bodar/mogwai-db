@@ -6,6 +6,7 @@ import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
+import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import type { Elem } from '../plan/plan.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
@@ -118,13 +119,20 @@ function injectionOf(step: IRStep, barrier: Barrier, params: Record<string, any>
 export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): SegmentPlan | null {
   const call = barrierIn(steps, request);
   const regex = regexBarrierIn(steps);
+  const reverseAt = reverseBarrierIn(steps);
   // The EARLIEST boundary wins: a segment's head is the prefix BEFORE it, so a later barrier belongs to
-  // that head's resumed tail, not to this segment. A regex `has()` is a boundary just as a barrier
-  // `call()` is — asked here rather than discovered in the fold, for the same reason (§6·5).
-  if (regex && (!call || regex.at < call.at))
-    return buildRegexSegment(steps, regex, request.lowering, (tail) => planOf(tail, request));
-  if (!call) return null;
-  return call.at === 0 ? sourceSegment(steps, call, request) : midSegment(steps, call, request);
+  // that head's resumed tail, not to this segment. A value-transform boundary (a regex `has()`, a
+  // `reverse()`) is asked here rather than discovered in the fold, for the same reason as a barrier
+  // `call()` (§6·5). Each is a distinct step, so their positions never tie. A declined value-transform
+  // barrier (e.g. a non-scalar `reverse()` head) returns `null` so the fold lowers the step its own way.
+  const callAt = call ? call.at : Infinity;
+  const regexAt = regex ? regex.at : Infinity;
+  const revAt = reverseAt ?? Infinity;
+  const earliest = Math.min(callAt, regexAt, revAt);
+  if (earliest === Infinity) return null;
+  if (earliest === revAt) return buildReverseSegment(steps, reverseAt!, request.lowering);
+  if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
+  return call!.at === 0 ? sourceSegment(steps, call!, request) : midSegment(steps, call!, request);
 }
 
 /** A resumed chain to its `Plan` — another segment if the tail STILL holds a barrier (a second regex,
