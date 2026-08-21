@@ -60,6 +60,40 @@ Feature: mogwai addendum — a map VALUE that is a list carries its true shape
       | baltimore1bremen1oakland1seattle |
       | aachen1kaiserslautern1spremberg |
 
+  # ELEMENT KEYS: select(Column.keys) of an identity-keyed group (groupCount) is a SET of the grouped
+  # vertices — each a self-describing {t:'vertex'} node framed through the mixed→typedNode path, not the
+  # lossy scalar-list framer. unfold() yields the four person vertices.
+  Scenario: g_V_hasLabelXpersonX_groupCount_selectXkeysX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").groupCount().select(Column.keys).unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | v[marko] |
+      | v[vadas] |
+      | v[josh] |
+      | v[peter] |
+
+  # MAP-VALUED map: a group whose value is a project() is a Map<K,Map>. select(Column.values).unfold()
+  # peels to each inner MAP (re-entering mapTail), so select("x") reads the inner field — the ages. Before
+  # the map valOf carried its true shape this silently mis-shaped the inner map as a scalar ([{}]).
+  Scenario: g_V_hasLabelXpersonX_group_byXnameX_byXprojectXxX_byXageXX_selectXvaluesX_unfold_selectXxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.project("x").by(__.values("age"))).select(Column.values).unfold().select("x")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[29].i |
+      | d[27].i |
+      | d[32].i |
+      | d[35].i |
+
   # conjoin over the unfolded, sorted per-key list — a list→string reduction composed on top.
   Scenario: g_V_group_by_byXout_label_foldX_selectXvaluesX_unfold_orderXlocalX_conjoinXdashX
     Given the modern graph

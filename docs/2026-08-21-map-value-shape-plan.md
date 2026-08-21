@@ -1,6 +1,22 @@
 # The map-value shape carries the value's TRUE shape — substrate plan (2026-08-21)
 
-**Status: LANDED — read-side + the GROUP producer + the valueMap producer.** (valueMap: a vertex
+**Status: LANDED — the map value/key shapes are complete: scalar, list, MAP, and element KEYS.**
+The leaf shapes finished last (0 corpus/L3 coverage — completeness, verified by L4 not the corpus):
+- **element KEYS** — `select(Column.keys)` of an identity-keyed group (`groupCount()`) frames each
+  vertex through the mixed→typedNode path (`sideList` elem → `{kind:'mixed', arms:[{elem}]}`); the
+  scalar-list framer decoded element nodes lossily, so this was a decline, not a wrong answer.
+- **map-VALUED maps** — a `Map<K,Map>` (`group().by().by(__.project(…))`, nested groups) now carries
+  `valOf: {kind:'map', of}` (a new `MapOf` arm), captured from the value-by child's framing at the
+  producer (`groupRows` lowers a child value-by via `child.scalar` to keep its framing, not `byNode`
+  which discards it). `sideList`/`mapSide`/`sideOf` gained the map arm (root encoding — unwrap the
+  `{t:'map', v:pairs}` node to its pairs array), and `select(values).unfold()`/`select(<key>)` re-enter
+  `mapTail`. This FIXED a pre-existing silent wrong answer: `…by(__.project('x')…).select(values).unfold()`
+  returned `[{}]` (opaque scalar mis-shape) instead of the inner maps.
+- Still opaque (documented, correct-but-not-decomposed): a `valueMap(true)` token-bearing MIXED map,
+  and a nested value-by whose child is itself a BARRIER (`by(__.groupCount())`) — a barrier-in-value-by,
+  a separate substrate that fails closed.
+
+**The GROUP + valueMap list producers (the high-value, reference-verified core):** (valueMap: a vertex
 `valueMap(<keys>)` value is always a `List`, so its `valOf` is `{kind:'list', of: TYPED_MEMBERS}` gated
 on non-flat/non-token — `valueMap(true)`'s scalar id/label tokens make a mixed map that stays the
 self-describing scalar arm; edge/`elementMap` values are single. census 0 changed/crashed/stopped, +7

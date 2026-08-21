@@ -187,6 +187,10 @@ export interface GroupRecipe {
   /** `by(__.tail())` / an anonymous child value: the group's value is ONE member, extracted from the
    *  collected array's end, rather than the array itself. */
   readonly single: boolean;
+  /** The SHAPE of that single value — `{kind:'map', of}` for a MAP-producing child (`by(__.project())`,
+   *  a nested `by(__.group())`), `{kind:'scalar'}` otherwise. What makes a `Map<K,Map>`'s `valOf` carry
+   *  the inner map instead of collapsing to an opaque scalar. Unused when `single` is false. */
+  readonly singleOf?: MapOf;
   /** The value `by()` owes a productivity drop, applied as the aggregate's own `FILTER (WHERE …)` so the
    *  GROUP survives with an empty list rather than the key vanishing. */
   readonly memberDrop: boolean;
@@ -203,6 +207,7 @@ export interface GroupRecipe {
 export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
   a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single
   && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
+  && JSON.stringify(a.singleOf) === JSON.stringify(b.singleOf)
   && a.member?.kind === b.member?.kind
   && (a.member?.kind !== 'rowid' || (b.member as { host: ChildHost }).host.kind === a.member.host.kind);
 
@@ -319,8 +324,27 @@ export function groupRows(
       return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
     }
   }
-  const member = valueBy && !lastOnly ? byNode(valueBy, host, fresh, child) : undefined;
-  if (valueBy && !lastOnly && !member) return null;
+  // A CHILD value `by()` (`by(__.project(…))`, `by(__.valueMap())`) is lowered here rather than through
+  // `byNode` so its FRAMING is captured, not discarded: a MAP-shaped child makes the value a `Map<K,Map>`,
+  // whose true `valOf` is `{kind:'map', of}` (`docs/2026-08-21-map-value-shape-plan.md`). Without the
+  // shape `select(values).unfold()` silently mis-shaped the inner map as a scalar (`[{}]`). The node
+  // encoding is identical to `byNode`'s (both `producedMemberNode`), so only the shape is new.
+  let member: Expr | undefined;
+  let singleOf: MapOf = { kind: 'scalar' };
+  if (valueBy && !lastOnly) {
+    if (valueBy.key.kind === 'child') {
+      const produced = child.scalar(valueBy.key.body, host);
+      if (!produced) return null;
+      const node = producedMemberNode(produced.expr, produced.framing, fresh);
+      if (!node) return null;
+      member = node;
+      if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
+    } else {
+      const node = byNode(valueBy, host, fresh, child);
+      if (!node) return null;
+      member = node;
+    }
+  }
   // A collecting arm is what `tail()` needs, and it is the hosts whose traverser is a ROWID that have
   // members to collect: an element and a property. A scalar host's members are its own value nodes,
   // which `member` already covers, and a record's are not addressable at all.
@@ -425,6 +449,7 @@ export function groupRows(
       keyElem: elementKey?.elem,
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
       single: lastOnly || valueBy?.key.kind === 'child',
+      singleOf,
       memberDrop: !!member,
       bulkCol: bulked && bulk ? bulk.col : undefined,
       step,
@@ -504,7 +529,9 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
     // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
     // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
     keyOf: keyElem ? { kind: 'elem', elem: keyElem } : { kind: 'scalar' },
-    valOf: counting || recipe.single ? { kind: 'scalar' } : { kind: 'list', of: TYPED_MEMBERS },
+    valOf: counting ? { kind: 'scalar' }
+      : recipe.single ? (recipe.singleOf ?? { kind: 'scalar' })
+        : { kind: 'list', of: TYPED_MEMBERS },
   };
   return {
     // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
@@ -1189,8 +1216,14 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  */
 const sideList = (of: MapOf): ListOf | null =>
   of.kind === 'scalar' ? TYPED_MEMBERS
-    : of.kind === 'list' ? of
-      : null;
+    // A `list` or `map` VALUE becomes a select(values) member of the SAME kind — the translation is the
+    // identity (`{kind:'list'|'map', of}` describes both the value and the member), and both collect at
+    // the ROOT encoding in `mapSide` so the existing `unfoldNested`/`unfoldMapMembers`/`listPayloadExpr`
+    // serve them. An `elem` KEY frames through the mixed→typedNode path (its nodes self-describe; the
+    // scalar list framer decodes them lossily).
+    : of.kind === 'list' || of.kind === 'map' ? of
+      : of.kind === 'elem' ? { kind: 'mixed', arms: [{ kind: 'elem', elem: of.elem }] }
+        : null;
 
 /**
  * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.
@@ -1217,7 +1250,7 @@ export function mapSide(
   // unchanged (`docs/2026-08-21-map-value-shape-plan.md`, the encoding fork). A scalar side keeps its
   // self-describing `{t,v}` node (`TYPED_MEMBERS`).
   const node = pairSide(col(pairs.id, PAIR.value), side);
-  const member = of.kind === 'list'
+  const member = of.kind === 'list' || of.kind === 'map'
     ? jsonOf({ kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] })
     : jsonOf(node);
   const sides = collectedOf(pairs, member, [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }], LIST_COL, fresh);
@@ -1296,6 +1329,9 @@ function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
   // caller continues with `listTail` (`docs/2026-08-21-map-value-shape-plan.md`). Without this a list
   // `valOf` would make `select(<key>)` DECLINE where it executes today — a regression, not a gap.
   if (of.kind === 'list') return withPayload(input, [[LIST_COL, jsonOf(field('v'))]], [meta(LIST_COL, 'json', true)], fresh);
+  // A MAP value UNWRAPS its `{t:'map', v:pairs}` node to the raw pairs array in `MAP_COL`, so the caller
+  // continues with `mapTail` — a nested `group().by().by(__.group()…)`'s inner map re-enters the map loop.
+  if (of.kind === 'map') return withPayload(input, [[MAP_COL, jsonOf(field('v'))]], [meta(MAP_COL, 'json', true)], fresh);
   if (of.kind !== 'scalar') return null;
   return withPayload(input, [['v', field('v')], ['vtype', field('t')]],
     [meta('v', 'any', true), meta('vtype', 'text', true)], fresh);

@@ -66,7 +66,15 @@ export type MapOf =
   // (rejoined from a rowid) or a list value can't be a scalar envelope → their own kinds.
   | { kind: 'scalar' }
   | { kind: 'elem'; elem: Elem }
-  | { kind: 'list'; of: ListOf };
+  | { kind: 'list'; of: ListOf }
+  // A map VALUE that is itself a MAP — a nested `group().by().by(__.group()…)` /
+  // `by(__.project(…))` / `by(__.valueMap())`. `of` records the inner map's VALUE-side shape (its keys
+  // are self-describing in the pairs tree, so `select(Column.values).unfold()` re-enters `mapTail` with
+  // a scalar key side, exactly as `unfoldMapMembers` does for a `{kind:'map'}` list member). Without
+  // this arm the value framed correct-but-opaque as `{kind:'scalar'}`, and `select(values).unfold()`
+  // silently mis-shaped it as a scalar — `[{}]` instead of the inner map
+  // (`docs/2026-08-21-map-value-shape-plan.md`).
+  | { kind: 'map'; of: MapOf };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its typed payload.

@@ -3690,9 +3690,11 @@ function mapTail(
         const keyed = mapKey(rel, key, valOf, fresh);
         if (!keyed) return null;
         // A LIST value continues as a LIST stream (its members have shape `valOf.of`), so
-        // `select('k').unfold()`, `select('k').order(Scope.local)` and every member op compose; a scalar
-        // value is the ordinary per-row-typed value stream.
+        // `select('k').unfold()`, `select('k').order(Scope.local)` and every member op compose; a MAP
+        // value re-enters `mapTail` (a nested group's inner map, keys self-describing so scalar-keyed);
+        // a scalar value is the ordinary per-row-typed value stream.
         if (valOf.kind === 'list') return listTail(keyed, valOf.of, steps, at + 1, ctx, fresh, labels);
+        if (valOf.kind === 'map') return mapTail(keyed, { kind: 'scalar' }, valOf.of, steps, at + 1, ctx, fresh, labels);
         return scalarTail(keyed, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
       }
       // MULTI-KEY `select(k1, k2, …)` is a SUB-MAP projection. A key that also names a LIVE alias
@@ -3812,9 +3814,10 @@ function mapEntryTail(
       const sideShape = column === 'keys' ? keyOf : valOf;
       const side = entrySide(rel, column, sideShape, fresh);
       if (!side) return null;
-      // A LIST value side continues as a LIST stream (`entrySide`'s value from a `Map<K,List>` entry);
-      // every other side is the ordinary per-row-typed value stream.
+      // A LIST value side continues as a LIST stream (`entrySide`'s value from a `Map<K,List>` entry); a
+      // MAP value side re-enters `mapTail`; every other side is the ordinary per-row-typed value stream.
       if (sideShape.kind === 'list') return listTail(side, sideShape.of, steps, at + 1, ctx, fresh, labels);
+      if (sideShape.kind === 'map') return mapTail(side, { kind: 'scalar' }, sideShape.of, steps, at + 1, ctx, fresh, labels);
       return scalarTail(side, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
     }
 
