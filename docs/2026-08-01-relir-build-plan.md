@@ -772,9 +772,20 @@ pattern this whole stage kept finding:
   correlated scalar (`scalarChild`) whose FIRST result is appended through the same `concat_ws` + all-null
   guard as the string form, gated to a PROVABLY-PRODUCTIVE operand because `TraversalUtil.apply` THROWS on
   an empty sub-traversal where a correlated subquery yields the null `concat_ws` skips (`concat(__.select('a'))`,
-  L3 +1). 🚧 LEFT: an `is`/predicate operand that is a nested traversal (routed only for the constant fold
-  today); a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
-  guard, §6·5); a multi-key `select` in a child body (a record); a `Pop` history select.
+  L3 +1). ✅ **A COMPARISON/`eq` predicate operand that is a nested traversal now resolves too**
+  (`is(P.gt(__.V(x).values(k)))`, `has(k, P.eq(__.V(9999).values(k)))`, bare `is(__.V(9999)…)` =
+  `is(P.eq(…))`): `predicateExpr`'s `resolveScalar` hook (shared with the within/without vararg member)
+  returns the operand's FIRST value via `nestedFirstValue` — a ROOTED operand (`__.V(x)…`) as a scalar
+  SUBQUERY over `rootedRead` (SQLite reads the first row = `tv.next()`), a CORRELATED one (`__.values(k)`)
+  via the element-host `scalarChild`. The compare is DIRECT (`binary(cmp, subject, nested)`, not `ordered`'s
+  vtype cast — a runtime operand has no compile-time type; SQLite's storage-class order matches
+  `GremlinValueComparator` for the same-typed pairs the corpus makes). An unproductive operand is a NULL
+  scalar and `subject <cmp> NULL` → not-true, which is the SCALAR predicate's empty-operand SHORT-CIRCUIT
+  (`P.resolve` → `resolvedEmpty` → `test` false) for every op but `neq`, which declines (its `IS NOT 1`
+  negation reads a NULL as true; no corpus pairs `neq` with a traversal). Wired at `has`/`is`/`where`. L3 +5.
+  🚧 LEFT: a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
+  guard, §6·5); a `select`/alias operand in a comparison (needs the alias scope on the operand seam); a
+  multi-key `select` in a child body (a record); a `Pop` history select.
 - ✅ **the FILTER seam now carries the alias scope — a `select`/`as`-variable reads in a predicate body.**
   `sourceFilter`/`childPredicate`/`bodyPredicate`/`valuePredicate`/`projectionProductive` folded every
   `where`/`filter`/`not`/`and`/`or` body with `NO_ALIASES`, so no filter body could read a label —

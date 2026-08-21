@@ -792,14 +792,14 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
+      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -807,7 +807,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => varargScalar(nested, element, ctx, fresh));
+    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
   }
 
   return null;
@@ -2815,7 +2815,7 @@ function scalarTail(
           ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested) => foldedListSet(nested, ctx, fresh));
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -2847,7 +2847,7 @@ function scalarTail(
      */
     if ((step.name === 'where' || step.name === 'filter') && args.length === 1 && isPred(args[0])) {
       if (namesALiveLabel(args[0], labels)) return null;
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh));
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -6716,23 +6716,41 @@ function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | nu
 }
 
 /**
- * A `within`/`without` operand that is a NESTED traversal NOT ending in `fold()` — the VARARG-member
- * form (`P.within(__.values('nonexistent'), __.constant('marko'))`) — as the CORRELATED FIRST VALUE
- * it produces for the current subject, or `null` to decline.
+ * A NESTED-traversal PREDICATE OPERAND as the FIRST scalar VALUE it produces — the operand form of
+ * `within`/`without` varargs (`within(__.values(k), __.constant(v))`) AND of a comparison against a
+ * traversal (`is(P.gt(__.V(x).values(k)))`, `has(k, P.eq(__.V(9999).values(k)))`). Returns `null` to
+ * decline.
  *
- * Unlike `foldedListSet`, the operand is NOT rooted: `__.values(k)`/`__.constant(v)` are applied to the
- * CURRENT traverser (`P.resolve(traverser)` — `vendor/tinkerpop/gremlin-core/.../P.java:328-373` — runs
- * `TraversalUtil.apply(traverser, tv)` per child and takes `tv.next()`, the FIRST result), so this is a
- * child body over the element host and the correlated scalar seam gives exactly that first value. Each
- * operand contributes ONE member (not a set), so a fold framing is refused here — the sole-operand fold
- * is `foldedListSet`'s, and a folded value among varargs would be a list-valued member no scenario names.
- * A member produced by nothing is a NULL scalar, which the caller's `IN`/`NOT IN` idiom treats as inert
- * exactly as it treats the reference's "drop the unproductive operand".
+ * `P.resolve(traverser)` (`vendor/tinkerpop/gremlin-core/.../P.java:328-373`) runs each child traversal
+ * against the current traverser and takes `tv.next()` — its FIRST result — dropping an operand that
+ * produced nothing. Two shapes reach that first value, and the operand's OWN head decides which:
+ *
+ * - a ROOTED operand (`__.V(x)…`, `__.E()…`) re-sources, so it is the SAME for every incoming traverser
+ *   (correlated to nothing) — `rootedRead` lowers it and a scalar SUBQUERY over it takes the first row
+ *   (SQLite reads the first row of a scalar subquery, which is `tv.next()`'s impl-defined order). This
+ *   needs NO host, which is why `is`/`where` over a value stream reach it while a correlated operand
+ *   there cannot.
+ * - a CORRELATED operand (`__.values(k)`, `__.constant(v)`) is applied to the current traverser, so it
+ *   is a child body over the element `host` and the correlated scalar seam gives the first value.
+ *
+ * A fold framing is refused (that is `foldedListSet`'s sole-operand set); a WRITE operand (`__.addV`)
+ * has no scalar arm and declines, which is the right answer for a mutation inside a read predicate. A
+ * member produced by nothing is a NULL scalar, inert in the caller's `IN`/`=` idiom exactly as the
+ * reference's dropped-unproductive-operand is.
  */
-function varargScalar(operand: unknown, subject: ElementSubject, ctx: ChainCtx, fresh: Minter): Expr | null {
+function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter): Expr | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!body?.length) return null;
-  const value = scalarChild(body, { kind: 'element', elem: subject.elem, id: subject.id }, ctx, fresh);
+  if (body[0]!.name === 'V' || body[0]!.name === 'E') {
+    const read = rootedRead(body, ctx, fresh);
+    if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
+    return { kind: 'scalar', plan: make.project({
+      id: fresh('nfv'), input: read.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', col(read.rel.id, 'v')]],
+    }) };
+  }
+  if (!host) return null;
+  const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id }, ctx, fresh);
   return value && value.framing.kind === 'scalar' ? value.expr : null;
 }
 

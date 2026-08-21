@@ -410,6 +410,12 @@ export function predicateExpr(
   // a null and made the whole `has(k, null)` decline. Distinct from `pred === undefined` (presence) above.
   if (pred === null) return binary('is', subject, compilerNull());
   if (!isPred(pred)) {
+    // A BARE TRAVERSAL value is `is(P.eq(traversal))` (`GraphTraversal.is(Object)` wraps a non-`P` in
+    // `P.eq`), so it takes the same FIRST-value resolution a `P.eq(traversal)` operand does below.
+    if (isNested(pred)) {
+      const nested = resolveScalar ? resolveScalar(pred) : null;
+      return nested && binary('=', subject, nested);
+    }
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
     // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
     const value = operand(pred, opType, opParam);
@@ -451,6 +457,20 @@ export function predicateExpr(
         case 'gt': case 'lt': return CONSTANT.false;
         default: return null;
       }
+    }
+    // A NESTED-traversal operand — the predicate compares against the operand's FIRST produced value
+    // (`P.resolve`, `vendor/tinkerpop/gremlin-core/.../P.java:328-373`). Its runtime TYPE is unknown, so
+    // this is a DIRECT compare (SQLite's storage-class order, which matches `GremlinValueComparator` for
+    // the same-typed operands the corpus pairs — `age` vs `age`, `name` vs `name`) rather than
+    // `ordered`'s vtype-driven cast, which has no compile-time type to read. An unproductive operand is a
+    // NULL scalar and `subject <cmp> NULL` is NULL → not-true, which is the SCALAR predicate's
+    // empty-operand SHORT-CIRCUIT (`resolvedEmpty` → `test` returns false) for every op EXCEPT `neq`,
+    // whose `IS NOT 1` negation would read a NULL as true — so `neq` over a traversal declines (no corpus
+    // pairs one, and mis-answering an empty operand is worse than a gap).
+    if (isNested(operands[0].value)) {
+      if (op === 'neq' || !resolveScalar) return null;
+      const nested = resolveScalar(operands[0].value);
+      return nested && binary(comparison, subject, nested);
     }
     // The operand inlines as a TYPED literal, storage class following its declared canonical type —
     // the thesis's "we know the type, stop throwing it away" (an integer-valued `P.gt(2.0)` renders
