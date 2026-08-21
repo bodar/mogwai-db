@@ -795,6 +795,13 @@ pattern this whole stage kept finding:
   scalar and `subject <cmp> NULL` → not-true, which is the SCALAR predicate's empty-operand SHORT-CIRCUIT
   (`P.resolve` → `resolvedEmpty` → `test` false) for every op but `neq`, which declines (its `IS NOT 1`
   negation reads a NULL as true; no corpus pairs `neq` with a traversal). Wired at `has`/`is`/`where`. L3 +5.
+  ✅ **Also wired into a `choose`/`where`/`filter` CONDITION** (`sourceFilter`'s `is`, `valuePredicate`) — so
+  `choose(__.is(P.eq(__.V(9999).values(k))), …)` and `choose(__.is(P.gte(__.V().…mean())), …)` lower. That
+  surfaced a latent `choose` bug and FIXED it: `ChooseStep` routes on the condition's PRODUCTIVITY (produced
+  → then, else → else), and the else arm was `NOT pred`, which is NULL (row dropped from BOTH arms) when the
+  condition is UNPRODUCTIVE — an absent value or an empty `V(9999)` operand. It is now `notProduced(pred)`
+  (`pred IS NOT 1`), sending a false-OR-null condition to the else, identical to `NOT pred` wherever pred
+  cannot be null (census: 0 changed answers, so no live `choose` had a nullable condition before). L3 +2.
   🚧 LEFT: a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
   guard, §6·5); a `select`/alias operand in a comparison (needs the alias scope on the operand seam); a
   multi-key `select` in a child body (a record); a `Pop` history select.

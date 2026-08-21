@@ -558,7 +558,8 @@ function valuePredicate(
   const type: SubjectType = produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : SUBJECT_UNKNOWN;
-  const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh);
+  const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
+    (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh));
   if (!pred) return null;
   /**
    * PRODUCTIVITY IS ITS OWN CONJUNCT, not a property of the comparison — and the paragraph above,
@@ -691,7 +692,8 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
    */
   if (step.name === 'is') {
     if (subject.kind !== 'scalar' || args.length !== 1 || collectionAssert(step)) return null;
-    return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
+    return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
+      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh));
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
@@ -6142,9 +6144,16 @@ function chooseArms(
 
   const pred = bodyPredicate(condition, subject, fresh, ctx);
   if (!pred) return null;
+  // A `choose` routes on the condition's PRODUCTIVITY, not a two-valued boolean: `ChooseStep` takes the
+  // TRUE arm iff the condition traversal PRODUCED for this traverser, and the FALSE arm otherwise
+  // (`vendor/tinkerpop/gremlin-core/.../branch/ChooseStep.java`). So the else arm's negation must be
+  // NULL-SAFE — an UNPRODUCTIVE condition is a NULL predicate (an absent value, an empty operand under
+  // `is(P.eq(__.V(9999)…))`), and `NOT NULL` is NULL, which would drop the row from BOTH arms where the
+  // reference routes it to the else. `notProduced` (`pred IS NOT 1`) sends a false-OR-null condition to
+  // the else, which is the productivity split; it is identical to `NOT pred` wherever pred cannot be null.
   const guarded = (negated: boolean): Rel => make.filter({
     id: fresh('cg'), input: source, channels: source.channels, type: source.type,
-    pred: negated ? { kind: 'unary', op: 'not', arg: pred } : pred,
+    pred: negated ? notProduced(pred) : pred,
   });
 
   const armThen = continueAs(guarded(false), framing, then, 0, bulked, inBody(ctx), fresh, labels);
