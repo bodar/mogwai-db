@@ -812,9 +812,14 @@ pattern this whole stage kept finding:
   `by(__.select('a').values('name'))` and `order().by(__.select('a')…)` over element AND scalar hosts (L3
   +2). ✅ **`concat(__.<traversal>)` now routes its operand through the seam too** — a nested operand is a
   correlated scalar (`scalarChild`) whose FIRST result is appended through the same `concat_ws` + all-null
-  guard as the string form, gated to a PROVABLY-PRODUCTIVE operand because `TraversalUtil.apply` THROWS on
-  an empty sub-traversal where a correlated subquery yields the null `concat_ws` skips (`concat(__.select('a'))`,
-  L3 +1). ✅ **A COMPARISON/`eq` predicate operand that is a nested traversal now resolves too**
+  guard as the string form. A PROVABLY-PRODUCTIVE operand rides no extra machinery; a MAYBE-empty one no
+  longer DECLINES — it now carries a runtime throw guard (`concatEmptyGuard`, §6·5) because
+  `TraversalUtil.apply` THROWS on an empty sub-traversal where a correlated subquery would yield the null
+  `concat_ws` silently skips. The guard runs the operand-`present` predicate over the surviving traversers
+  and raises the reference's verbatim `'The provided traverser does not map to a value'` iff SOME row's
+  operand produced nothing, so `concat(__.select('a').values('lang'))` over software SUCCEEDS ({lop,ripple}
+  uses java) and a mixed stream RAISES rather than fabricating a short answer (`concat(__.select('a'))`,
+  L3 +1; the maybe-empty form, +2). ✅ **A COMPARISON/`eq` predicate operand that is a nested traversal now resolves too**
   (`is(P.gt(__.V(x).values(k)))`, `has(k, P.eq(__.V(9999).values(k)))`, bare `is(__.V(9999)…)` =
   `is(P.eq(…))`): `predicateExpr`'s `resolveScalar` hook (shared with the within/without vararg member)
   returns the operand's FIRST value via `nestedFirstValue` — a ROOTED operand (`__.V(x)…`) as a scalar
@@ -832,8 +837,7 @@ pattern this whole stage kept finding:
   condition is UNPRODUCTIVE — an absent value or an empty `V(9999)` operand. It is now `notProduced(pred)`
   (`pred IS NOT 1`), sending a false-OR-null condition to the else, identical to `NOT pred` wherever pred
   cannot be null (census: 0 changed answers, so no live `choose` had a nullable condition before). L3 +2.
-  🚧 LEFT: a maybe-empty concat operand (`concat(__.select('a').values('lang'))` — needs a per-row throw
-  guard, §6·5); a `select`/alias operand in a comparison (needs the alias scope on the operand seam); a
+  🚧 LEFT: a `select`/alias operand in a comparison (needs the alias scope on the operand seam); a
   multi-key `select` in a child body (a record); a `Pop` history select.
 - ✅ **the FILTER seam now carries the alias scope — a `select`/`as`-variable reads in a predicate body.**
   `sourceFilter`/`childPredicate`/`bodyPredicate`/`valuePredicate`/`projectionProductive` folded every
