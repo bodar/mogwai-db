@@ -1,4 +1,4 @@
-import { col, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
@@ -74,6 +74,19 @@ export interface GraphSource {
    *  side tables (`edges.label` / `vertex_labels`); a landed graph tests membership of its JSON label
    *  array. */
   hasLabelPredicate(kind: Elem, id: Expr, labelCol: Expr | undefined, labels: readonly Arg[], fresh: Minter): Expr;
+
+  /** `has(key[, value-or-predicate])` over a stored property, as a predicate CORRELATED on the element
+   *  `id` — an EXISTS, because a property FILTER asks whether a row is there (a JOIN would multiply the
+   *  traverser once per matching property). `valuePred` is the vocabulary's value comparison: the source
+   *  hands it the graph's own value + vtype expressions (so the Gremlin `P` semantics live in the
+   *  caller while the physical columns stay the source's), and it returns the comparison Expr, or `null`
+   *  where the predicate could not be built (which declines the whole clause). `valuePred` is `undefined`
+   *  for a bare `has(key)` presence test. The `BaseGraph` EXISTS shape is what `semijoin.ts`'s
+   *  `indexSeek`/`trigramSeek` recognise, so it is preserved exactly. */
+  hasPropertyPredicate(
+    kind: Elem, id: Expr, key: string,
+    valuePred: ((value: Expr, vtype: Expr) => Expr | null) | undefined, fresh: Minter,
+  ): Expr | null;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -178,5 +191,24 @@ export const BaseGraph: GraphSource = {
     const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
     const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
     return { kind: 'in-query', expr: id, plan: owners, negated: false };
+  },
+
+  hasPropertyPredicate: (kind, id, key, valuePred, fresh) => {
+    const { table, owner } = PROPERTIES[kind];
+    const props = make.scan({
+      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    // The property row's own `vtype` is in scope here, so an ordering comparison gets the vtype-aware
+    // key — the whole reason the value predicate is a callback the caller supplies.
+    const matches = valuePred ? valuePred(col(props.id, 'value'), col(props.id, 'vtype')) : undefined;
+    if (valuePred && !matches) return null;
+    const base = and(eq(col(props.id, owner), id), eq(col(props.id, 'key'), compilerText(key)));
+    const matching = make.filter({
+      id: fresh('f'), input: props, channels: [], type: props.type,
+      pred: matches ? and(base, matches) : base,
+    });
+    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return { kind: 'exists', plan: probe, negated: false };
   },
 };

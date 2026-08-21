@@ -32,7 +32,7 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet,
-    jsonMemberByTypeof, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber,
+    jsonMemberByTypeof, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, propertyKeyArgs, renumber,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -779,7 +779,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // `hasNot(null)` is the negation of a `has(null)` that rejects everything, so it keeps everything.
     if (element && args.length === 1 && args[0] === null) return CONSTANT.true;
     if (!element || args.length !== 1 || typeof args[0] !== 'string') return null;
-    const present = hasPropertyClause(args[0], undefined, element, fresh);
+    const present = hasPropertyClause(args[0], undefined, element, ctx.source, fresh);
     return present && { kind: 'unary', op: 'not', arg: present };
   }
 
@@ -800,7 +800,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, ctx.source, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+      const valued = hasPropertyClause(args[1], args[2], element, ctx.source, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
@@ -815,7 +815,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+    return hasPropertyClause(key, val, element, ctx.source, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
   }
 
   // `hasId(...)` reads the element's EXTERNAL id (`COALESCE(uid, id)`), the same row `has(T.id, …)`
@@ -871,28 +871,15 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
  * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
  * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
-function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
-  const elem = subject.elem;
-  const { table, owner } = PROPERTIES[elem];
-  const props = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  // The property row's own `vtype` is in scope here, so an ordering comparison gets the
-  // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter. A bare value's
-  // declared type and param name ride through so it inlines (a literal) or binds (a `$x`).
-  const matches = val === undefined ? undefined
-    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh, resolveListSet, resolveScalar);
-  if (val !== undefined && !matches) return null;
-
-  const matching = make.filter({
-    id: fresh('f'), input: props, channels: [], type: props.type,
-    pred: matches
-      ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), compilerText(key))), matches)
-      : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), compilerText(key))),
-  });
-  const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  return { kind: 'exists', plan: probe, negated: false };
+function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
+  // The VALUE COMPARISON is the vocabulary's — Gremlin `P` semantics, vtype-aware compare, a bare
+  // value's declared type/param name riding through so it inlines (a literal) or binds (a `$x`). The
+  // source owns the physical property row and the EXISTS scaffold; it hands the comparison the graph's
+  // own value + vtype expressions. `undefined` for a bare `has(key)` presence test.
+  const valuePred = val === undefined ? undefined
+    : (value: Expr, vtype: Expr): Expr | null =>
+      predicateExpr(value, val, { kind: 'perRow', vtype }, valType, valParam, fresh, resolveListSet, resolveScalar);
+  return source.hasPropertyPredicate(subject.elem, subject.id, key, valuePred, fresh);
 }
 
 /**
