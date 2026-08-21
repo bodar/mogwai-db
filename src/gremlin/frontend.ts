@@ -17,7 +17,7 @@ class Errors extends BaseErrorListener {
   }
 }
 
-export function parseGremlin(query: string) {
+function parseGremlinUncached(query: string) {
   const lexer = new GremlinLexer(CharStream.fromString(query));
   const parser = new GremlinParser(new CommonTokenStream(lexer));
   const errs = new Errors();
@@ -25,6 +25,34 @@ export function parseGremlin(query: string) {
   lexer.addErrorListener(errs); parser.addErrorListener(errs);
   const tree = parser.queryList();
   if (errs.errors.length) throw new Error(`Gremlin parse error: ${errs.errors.join('; ')}`);
+  return tree;
+}
+
+// Parsing is the dominant cost of a compile — profiling put antlr's ALL(*) prediction (ATN closure
+// computation) on the stack for ~85% of a corpus-execution run, dwarfing lowering and (on any real
+// graph, amortised) SQLite. And a parse tree is a PURE function of the query string: `queryList()`
+// reads the token stream and the downstream front-end only WALKS the tree (extract*/stepChain read,
+// never mutate it), so the same tree can be reused across compiles. So `parseGremlin` is a memoising
+// WRAPPER around the unchanged `parseGremlinUncached`. It pays off wherever one string is compiled
+// repeatedly — L5 compiles each corpus traversal 3–4× (fast side, slow side, coverage check), the
+// census re-compiles, and in production a client resending the same query re-parses it every request.
+// Behaviour-preserving: the returned tree is identical to a fresh parse, proven by the census/L5 gates.
+// A PARSE ERROR is never cached — `parseGremlinUncached` throws before the wrapper reaches its `set`.
+//
+// Bounded LRU so a long-lived Durable Object isolate cannot grow the cache without limit: distinct
+// query strings per graph are bounded in practice, and the cap evicts the least-recently-used beyond it.
+const PARSE_CACHE_MAX = 512;
+const parseCache = new Map<string, ReturnType<typeof parseGremlinUncached>>();
+
+export function parseGremlin(query: string): ReturnType<typeof parseGremlinUncached> {
+  const hit = parseCache.get(query);
+  if (hit !== undefined) {
+    parseCache.delete(query); parseCache.set(query, hit);   // LRU: move to most-recently-used
+    return hit;
+  }
+  const tree = parseGremlinUncached(query);
+  parseCache.set(query, tree);
+  if (parseCache.size > PARSE_CACHE_MAX) parseCache.delete(parseCache.keys().next().value!);
   return tree;
 }
 
