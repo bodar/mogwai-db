@@ -193,3 +193,35 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
       .rejects.toThrow(/not supported after a barrier call/);
   });
 });
+
+// SUBGRAPH re-source (TinkerPop's sg.traversal()): `.V()`/`.E()` root a fresh traversal at the fetched
+// subgraph, and out/in/both walk the bound edges to the bound vertices — vertex→vertex movement over a
+// bound edge Ref. The oracle is always the SAME traversal run directly on the sibling.
+describe('mogwai.graph.federate — SUBGRAPH re-source and vertex→vertex movement', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const vals = async (g: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
+  const onCrew = async (g: string) =>
+    (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec))).sort();
+
+  test('.V() re-sources at the subgraph vertices (the distinct endpoints)', async () => {
+    // The subgraph vertices are exactly the endpoints of the develops edges.
+    expect(await vals(sg('.V().values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").bothV().dedup().values("name")'));
+  });
+  test('.V().out(develops) walks vertex→vertex over the bound edges', async () => {
+    expect(await vals(sg('.V().out("develops").values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").inV().values("name")'));
+  });
+  test('.V().in(develops) walks the other way', async () => {
+    expect(await vals(sg('.V().in("develops").values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").outV().values("name")'));
+  });
+  test('.V().out() with no label = every bound edge (only develops here)', async () => {
+    expect(await vals(sg('.V().out().values("name")'))).toEqual(await vals(sg('.V().out("develops").values("name")')));
+  });
+  test('a 2-hop walk terminates on the subgraph boundary (software has no out-develops)', async () => {
+    expect(await vals(sg('.V().out("develops").out("develops").values("name")'))).toEqual([]);
+  });
+});

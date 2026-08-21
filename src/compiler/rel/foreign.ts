@@ -156,6 +156,64 @@ export function endpointVertices(edges: Rel, vertices: Rel, step: 'inV' | 'outV'
     : first!;
 }
 
+const eqExpr = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
+const andExpr = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'and', left, right });
+
+/**
+ * VERTEX→VERTEX movement over a landed SUBGRAPH — `out`/`in`/`both` from a bound vertex, walking the
+ * bound EDGES to the bound VERTICES (with data).
+ *
+ * `out(l)` is `stream ⋈ edges ON edges.src = stream.id [AND edges.label ∈ l] ⋈ vertices ON vertices.id
+ * = edges.tgt`, projecting the TARGET vertex tuple; `in` swaps the endpoints and `both` is their UNION
+ * (the multiset rule movement uses). The landed edge's `label` is a STRING column, so the label filter
+ * is a plain `IN` over it — no label-id table like the base-graph `edges` scan needs. Columns are
+ * prefixed before each join so the source vertex's `id`/`label`/`props`, the edge's, and the target's do
+ * not collide, then projected back to the canonical vertex payload — the target re-enters `detachedTail`
+ * as an ordinary landed vertex, so `values`/`id`/`label` and a further hop compose over it.
+ */
+export function boundVertexMove(
+  stream: Rel, edges: Rel, vertices: Rel, step: 'out' | 'in' | 'both', labels: readonly string[], fresh: Minter,
+): Rel {
+  const E = { id: 'eid', label: 'elabel', src: 'esrc', tgt: 'etgt', props: 'eprops' } as const;
+  const edgesR = make.project({
+    id: fresh('bme'), input: edges, channels: [],
+    type: typeOf(meta(E.id, 'any', true), meta(E.label, 'text', true), meta(E.src, 'any', true), meta(E.tgt, 'any', true), meta(E.props, 'json')),
+    exprs: [[E.id, col(edges.id, 'id')], [E.label, col(edges.id, 'label')], [E.src, col(edges.id, 'src')], [E.tgt, col(edges.id, 'tgt')], [E.props, col(edges.id, 'props')]],
+  });
+  const V = { id: 'vid', label: 'vlabel', props: 'vprops' } as const;
+  const vertsR = make.project({
+    id: fresh('bmv'), input: vertices, channels: [],
+    type: typeOf(meta(V.id, 'any', true), meta(V.label, 'json', true), meta(V.props, 'json', true)),
+    exprs: [[V.id, col(vertices.id, 'id')], [V.label, col(vertices.id, 'label')], [V.props, col(vertices.id, 'props')]],
+  });
+  const payload = foreignPayloadCols('vertex');
+  const dirs: readonly (readonly ['esrc' | 'etgt', 'esrc' | 'etgt'])[] =
+    step === 'out' ? [[E.src, E.tgt]] : step === 'in' ? [[E.tgt, E.src]] : [[E.src, E.tgt], [E.tgt, E.src]];
+  const arms = dirs.map(([near, far]) => {
+    const adj = eqExpr(col(edgesR.id, near), col(stream.id, 'id'));
+    const on = labels.length
+      ? andExpr(adj, { kind: 'in-list', expr: col(edgesR.id, E.label), values: labels.map(compilerText) })
+      : adj;
+    const j1 = make.join({
+      id: fresh('bmj'), left: stream, right: edgesR, join: 'inner', channels: [],
+      type: typeOf(...stream.type.cols, ...edgesR.type.cols), on,
+    });
+    const j2 = make.join({
+      id: fresh('bmk'), left: j1, right: vertsR, join: 'inner', channels: [],
+      type: typeOf(...j1.type.cols, ...vertsR.type.cols),
+      on: eqExpr(col(vertsR.id, V.id), col(j1.id, far)),
+    });
+    return make.project({
+      id: fresh('bmp'), input: j2, channels: [], type: typeOf(...payload),
+      exprs: [['id', col(j2.id, V.id)], ['label', col(j2.id, V.label)], ['props', col(j2.id, V.props)]],
+    });
+  });
+  const [first, ...rest] = arms;
+  return rest.length
+    ? make.union({ id: fresh('bmu'), inputs: arms, all: true, channels: [], type: typeOf(...payload) })
+    : first!;
+}
+
 /**
  * A landed element's OWN value under the injection kind — what a parent's injected value is matched
  * against. `values(key)` reads the logical value at that key out of the landed `{t,v}` tree: a vertex's
