@@ -312,7 +312,6 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[35].i |
 
   @gap:scalar-position
-  @Unsupported
   Scenario: g_injectXstrX_splitX_X
     Given an empty graph
     And the traversal of
