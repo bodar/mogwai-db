@@ -837,8 +837,18 @@ pattern this whole stage kept finding:
   condition is UNPRODUCTIVE — an absent value or an empty `V(9999)` operand. It is now `notProduced(pred)`
   (`pred IS NOT 1`), sending a false-OR-null condition to the else, identical to `NOT pred` wherever pred
   cannot be null (census: 0 changed answers, so no live `choose` had a nullable condition before). L3 +2.
-  🚧 LEFT: a `select`/alias operand in a comparison (needs the alias scope on the operand seam); a
-  multi-key `select` in a child body (a record); a `Pop` history select.
+  ✅ **the operand seam now carries the traverser's SCOPE — a `select`/alias or `sack` read as a comparison
+  operand.** `nestedFirstValue` built its element child host with no `row`, so `scalarChild`'s select arm
+  (`selectRerootHost`, which reads `host.row.aliases`) and the sack channel had nothing to resolve against;
+  a `select`/`sack`-led operand therefore declined where a rooted `__.V(x)…` or a bare `__.values(k)` did
+  not. Threading the alias map onto that host — the operand-seam twin of `selectRerootHost` in a
+  `by()`/`map()` body — makes `has(k, P.gt(__.select('a').values(k)))` compare each traverser to its aliased
+  START (`g.V().as('a').out().has('age', P.gt(__.select('a').values('age')))` keeps the neighbour older than
+  the vertex it was reached from) and `has(k, P.gt(__.sack()))` compare against the sack. L3 +2; census +1
+  newly executing (`withSack(29).V().has('age',P.gt(__.sack())).values('name')`, verified = `P.gt(29)`), 0
+  changed. Pinned in `test/L4-addendum/predicate-operand-scope.feature`. 🚧 LEFT: the SCALAR-stream `is`/`where`
+  callers still pass a null host (`values('age').is(P.gt(__.select('a')…))`); a multi-key `select` in a child
+  body (a record); a `Pop` history select.
 - ✅ **the FILTER seam now carries the alias scope — a `select`/`as`-variable reads in a predicate body.**
   `sourceFilter`/`childPredicate`/`bodyPredicate`/`valuePredicate`/`projectionProductive` folded every
   `where`/`filter`/`not`/`and`/`or` body with `NO_ALIASES`, so no filter body could read a label —

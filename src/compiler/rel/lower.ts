@@ -559,7 +559,7 @@ function valuePredicate(
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
-    (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh));
+    (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   if (!pred) return null;
   /**
    * PRODUCTIVITY IS ITS OWN CONJUNCT, not a property of the comparison — and the paragraph above,
@@ -693,7 +693,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
   if (step.name === 'is') {
     if (subject.kind !== 'scalar' || args.length !== 1 || collectionAssert(step)) return null;
     return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
-      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh));
+      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
@@ -794,14 +794,14 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
+      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -809,7 +809,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
+    return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
   }
 
   // `hasId(...)` reads the element's EXTERNAL id (`COALESCE(uid, id)`), the same row `has(T.id, …)`
@@ -826,7 +826,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     const val: unknown = single && isPred(single.value) ? single.value
       : { op: 'within', operands: idArgs };
     return hasTokenClause('id', val, element, fresh, single?.type ?? null, single?.name ?? null,
-      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
+      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
   }
 
   return null;
@@ -6839,7 +6839,7 @@ function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | nu
  * member produced by nothing is a NULL scalar, inert in the caller's `IN`/`=` idiom exactly as the
  * reference's dropped-unproductive-operand is.
  */
-function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter): Expr | null {
+function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES): Expr | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!body?.length) return null;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
@@ -6851,7 +6851,12 @@ function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: Ch
     }) };
   }
   if (!host) return null;
-  const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id }, ctx, fresh);
+  // The alias scope rides on the host's `row` so a `select(<label>)`-led operand can RE-ROOT to the
+  // aliased traverser (`scalarChild`'s select arm → `selectRerootHost`), the operand-seam twin of
+  // `selectRerootHost` in a `by()`/`map()` body — `has(k, P.gt(__.select('a').values(k)))` reads
+  // alias `a`'s value for the current traverser. A correlated `__.values(k)` operand still resolves
+  // against the element host exactly as before (the `row` is inert for it).
+  const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id, row: { rel: host.rel, aliases } }, ctx, fresh);
   return value && value.framing.kind === 'scalar' ? value.expr : null;
 }
 

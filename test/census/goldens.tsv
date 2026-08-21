@@ -1357,6 +1357,7 @@ ran	6	1	797856de190a6eb4	a21d906158be7d8d	g.withSack(2).V().sack(Operator.div).b
 ran	1	1	9e96ded9134ec08b	e110082c992a6127	g.withSack(2147483647i).inject(0.5f).sack(div).sack()
 ran	1	1	86b8d5495b8568eb	11cc2f7838445aed	g.withSack(2147483647i).inject(1i).sack(sum).sack()
 ran	1	1	9e96ded9134ec08b	e110082c992a6127	g.withSack(2147483647i).inject(2i).sack(mult).sack()
+ran	2	2	155db079836fe22e	2dbc7a9505886910	g.withSack(29).V().has("age", P.gt(__.sack())).values("name")
 ran	1	1	5e496c8d2830a8a1	ce2ba656a804950f	g.withSack(32767s).inject(0.5f).sack(div).sack()
 ran	1	1	9fa44f01e28b7416	ed1b860b55f142dc	g.withSack(32767s).inject(1s).sack(sum).sack()
 ran	1	1	5e496c8d2830a8a1	ce2ba656a804950f	g.withSack(32767s).inject(2s).sack(mult).sack()
