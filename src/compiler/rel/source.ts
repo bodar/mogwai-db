@@ -87,6 +87,18 @@ export interface GraphSource {
     kind: Elem, id: Expr, key: string,
     valuePred: ((value: Expr, vtype: Expr) => Expr | null) | undefined, fresh: Minter,
   ): Expr | null;
+
+  /** `has(T.id, …)` / `has(T.label, …)` — a TOKEN key, which reads the element itself rather than a
+   *  property row, CORRELATED on the element `id` as an EXISTS. `T.id` is the EXTERNAL id
+   *  (`COALESCE(uid, id)`); `T.label` is ANY label (a multi-label vertex matches on any). The value
+   *  comparison is the vocabulary's callback, handed the token EXPRESSION (the external id, or the label
+   *  name) so the caller owns the `P` semantics; `null` from it declines. `BaseGraph` reads
+   *  `nodes`/`edges` and the `labels` side tables; a landed graph reads its landed id / JSON label
+   *  array. */
+  hasTokenPredicate(
+    kind: Elem, id: Expr, token: 'id' | 'label',
+    valuePred: (tokenExpr: Expr) => Expr | null, fresh: Minter,
+  ): Expr | null;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -209,6 +221,41 @@ export const BaseGraph: GraphSource = {
       pred: matches ? and(base, matches) : base,
     });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return { kind: 'exists', plan: probe, negated: false };
+  },
+
+  hasTokenPredicate: (kind, id, token, valuePred, fresh) => {
+    if (token === 'id') {
+      const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
+      const scan = make.scan({ id: fresh('ti'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
+      const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
+      const matches = valuePred(external);
+      if (!matches) return null;
+      const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), id), matches) });
+      const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+      return { kind: 'exists', plan: probe, negated: false };
+    }
+    const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+    const matches = valuePred(col(labels.id, 'name'));
+    if (!matches) return null;
+    if (kind === 'edge') {
+      // An edge's label is a COLUMN, so the join is against the correlated edge row.
+      const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+      const joined = make.join({
+        id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
+        type: typeOf(meta('id', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+        on: and(and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), id)), matches),
+      });
+      const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+      return { kind: 'exists', plan: probe, negated: false };
+    }
+    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const joined = make.join({
+      id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
+      type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+      on: and(and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), id)), matches),
+    });
+    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
 };

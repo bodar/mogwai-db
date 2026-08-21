@@ -31,8 +31,8 @@ import { alwaysProduces, MAPPING_TERMINAL } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet,
-    jsonMemberByTypeof, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, propertyKeyArgs, renumber,
+    and, byEncounter, carriedCols, elementCols, eq, jsonEachSet,
+    jsonMemberByTypeof, labelSetArgs, meta, minter, notProduced, or, payloadCols, propertyKeyArgs, renumber,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -807,7 +807,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, ctx.source, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -831,7 +831,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     const single = idArgs.length === 1 ? idArgs[0]! : null;
     const val: unknown = single && isPred(single.value) ? single.value
       : { op: 'within', operands: idArgs };
-    return hasTokenClause('id', val, element, fresh, single?.type ?? null, single?.name ?? null,
+    return hasTokenClause('id', val, element, ctx.source, fresh, single?.type ?? null, single?.name ?? null,
       (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
   }
 
@@ -895,46 +895,17 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, s
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
-  const elem = subject.elem;
+function hasTokenClause(token: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
   if (val === undefined) return null;
-
-  if (name === 'id') {
-    const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
-    const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
-    const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
-    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet, resolveScalar);
-    if (!matches) return null;
-    const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
-    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
-  }
-
-  const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN, valType, valParam, fresh);
-  if (!matches) return null;
-  if (elem === 'edge') {
-    // An edge's label is a COLUMN, so the join is against whichever expression carries it — the scan's
-    // own where there is one, a correlated read of the edge row otherwise.
-    const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-    const joined = make.join({
-      id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
-      type: typeOf(meta('id', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-      on: and(and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), subject.id)), matches),
-    });
-    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
-  }
-  const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-  const joined = make.join({
-    id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
-    type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-    on: and(and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), subject.id)), matches),
-  });
-  const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  return { kind: 'exists', plan: probe, negated: false };
+  // The value comparison is the vocabulary's, handed the token EXPRESSION the source builds. The `id`
+  // arm resolves nested list-set / scalar operands; the `label` name arm never does (a label predicate
+  // takes no nested operand) — the two closures differ exactly there, preserving the prior byte shape.
+  const valuePred = name === 'id'
+    ? (external: Expr): Expr | null => predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet, resolveScalar)
+    : (nameCol: Expr): Expr | null => predicateExpr(nameCol, val, SUBJECT_UNKNOWN, valType, valParam, fresh);
+  return source.hasTokenPredicate(subject.elem, subject.id, name, valuePred, fresh);
 }
 
 /**
