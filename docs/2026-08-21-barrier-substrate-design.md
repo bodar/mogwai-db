@@ -45,7 +45,8 @@ want different shapes.
   as ONE `json_each` bind (data never in the statement text) and re-enters the LIVE stream. No new
   identity, no storage. Two re-injection shapes have landed:
   - **filter** — `within(json_each)` re-runs the prefix and keeps survivors; the stream is unchanged.
-    **regex** (`src/compiler/rel/regex.ts`). Federate's *value*-injection is morally this too (smell below).
+    **regex** (`src/compiler/rel/regex.ts`) and **federate**'s mid-traversal value-injection
+    (`substituteInjectionMarker`, now literally this same `jsonEachInSet` path, not just morally).
   - **value-source** — the barrier's computed values ARE the resumed stream, sourced from
     `json_each` and continued by the ordinary tail (`lowerValueResume`/`lowerListResume`, the value twins
     of `lowerForeignResume`). **reverse** (scalar values, `src/compiler/rel/reverse.ts`) and **split**
@@ -67,12 +68,14 @@ want different shapes.
 
 ## The festering smells this frames (federate)
 
-- **Inline-literal re-injection.** Federate re-injects its distinct injected values as INLINE LITERALS
-  in the statement text (`within(v1,…,vN)` via `substituteInjectionMarker`) — a data-sized set baked
-  into the SQL string, spending the 100 KB statement-text budget and putting data in the plan. The 25-
-  literal cap is GONE (`predicate.ts` — inline literals cost zero binds), but the inlining itself is the
-  smell. Fix: route it through (A)'s `within(json_each)` — one bind, fixed text — the same path regex
-  uses. Removes a caveat and de-duplicates the re-injection.
+- **Inline-literal re-injection — ✅ FIXED (2026-08-21).** Federate USED to re-inject its distinct
+  injected values as INLINE LITERALS in the statement text (`within(v1,…,vN)` via
+  `substituteInjectionMarker`) — a data-sized set baked into the SQL string, spending the 100 KB
+  statement-text budget and putting data in the plan. `substituteInjectionMarker` now emits ONE
+  named-collection operand `within([...], INJECT_VALUES_KEY)`, which lowers through the same
+  `jsonEachInSet` path regex/split use: one `json_each` bind of any size, fixed statement text. N marker
+  sites in one sibling share ONE bind via the kernel's reuse-key dedup (`?1` reused). The three barrier
+  consumers (regex, split, federate value-inject) now share the exact re-injection substrate.
 - **Detached returns.** A federate result has no live adjacency (matrix §1). The subgraph vision (bring
   a sibling subgraph into local storage and traverse it) is exactly substrate (B); whether federate
   *should* support a subgraph is the good indicator that (B) is worth building.

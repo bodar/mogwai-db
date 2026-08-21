@@ -8,10 +8,13 @@
 // field), so recognizing it there is collision-free.
 //
 // The sibling receives the sub-traversal as an ordinary query PLUS a params entry under the reserved
-// key below holding the DISTINCT injected values. When has()/is()/within() compilation sees the marker
-// operand AND this params entry, it substitutes a `within(<values>)` predicate — one batched sibling
-// hop over the distinct set (SPARQL bound-join). No string surgery: apply just supplies a params
-// value, exactly as any bound param arrives.
+// key below holding the DISTINCT injected values. A Pass (`substituteInjectionMarker`, strategies.ts)
+// rewrites the marker operand to a `within([...], INJECT_VALUES_KEY)` — ONE named-collection operand,
+// so it lowers to a single `json_each` bind (`predicate.ts` `jsonEachInSet`), the same data-sized-set
+// re-injection the regex/split barriers use. One batched sibling hop over the distinct set (a SPARQL
+// bound-join), the injected values crossing as one bind of any size rather than inline literals baked
+// into the statement text. No string surgery: apply just supplies a params value, and N marker sites
+// share ONE bind via the kernel's reuse-key dedup (they name the same key).
 //
 // This module is a dependency-free leaf (a string constant + two pure predicates) so both the compiler
 // (filter.ts) and the service (federate.ts) import it without a cycle.

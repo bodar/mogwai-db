@@ -5,7 +5,7 @@ import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
-import { injectedValues, isInjectionMarker } from './injection.ts';
+import { INJECT_VALUES_KEY, injectedValues, isInjectionMarker } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -744,7 +744,14 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
 export function substituteInjectionMarker(steps: IRStep[], params: Record<string, any>): IRStep[] {
   const values = injectedValues(params);
   if (!values) return steps;
-  const within = { op: 'within', operands: values.map((v) => arg(v)) };
+  // ONE named-collection operand, not N inline literals. The injected set is DATA-SIZED (one distinct
+  // parent value per row), so it crosses as a single `json_each` bind — `within([...], INJECT_VALUES_KEY)`
+  // lowers through `jsonEachInSet` (`predicate.ts`), the exact re-injection form the regex/split barriers
+  // use. The former `values.map(v => arg(v))` spread every value as an inline literal in the statement
+  // text: correct on bind COUNT (a literal spends no bound param) but data in the plan, and it burned the
+  // 100 KB statement-text budget on a set whose size is a function of the parent population. A named array
+  // operand is fixed text + one bind of any size (root `CLAUDE.md`'s data-sized-set rule).
+  const within = { op: 'within', operands: [arg(values, null, INJECT_VALUES_KEY)] };
   return steps.map((s) => {
     const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
     let changed = false;
