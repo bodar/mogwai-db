@@ -262,3 +262,32 @@ describe('mogwai.graph.federate — SUBGRAPH has()/hasLabel filters', () => {
       .toEqual(['gremlin', 'gremlin', 'gremlin']);
   });
 });
+
+// Shape-agnostic row ops (count/dedup) over a landed stream — a detached federated result OR a bound
+// subgraph. Neither reads the base tables (count reads cardinality, dedup collapses by element id), so
+// both are correct on the landed relation; this also fixes the misattributed "V() not supported" that
+// a following count/dedup used to raise.
+describe('mogwai.graph.federate — count()/dedup() over the landed stream', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const one = async (g: string) => {
+    const r = await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec));
+    return Number(r[0]);
+  };
+  test('.V().count() counts the subgraph vertices', async () => {
+    expect(await one(sg('.V().count()'))).toBe(5);
+  });
+  test('.count() counts the edge stream', async () => {
+    expect(await one(sg('.count()'))).toBe(5);
+  });
+  test('dedup() collapses by element identity, then count()', async () => {
+    // 5 develops edges → 5 targets, but only 2 DISTINCT target vertices.
+    expect(await one(sg('.V().out("develops").count()'))).toBe(5);
+    expect(await one(sg('.V().out("develops").dedup().count()'))).toBe(2);
+  });
+  test('count() works over a plain (non-subgraph) detached result too', async () => {
+    const crewCount = await one('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V()).count()');
+    const direct = Number((await Promise.all((await mgr.executor('crew').framedAsync('g.V().count()', {})).map(dec)))[0]);
+    expect(crewCount).toBe(direct);
+  });
+});

@@ -4607,6 +4607,20 @@ function detachedTail(
       return detachedTail(boundVertexMove(seed, subgraph.edges, subgraph.vertices, step.name, labels, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
     }
   }
+  // SHAPE-AGNOSTIC row ops over ANY landed element stream (a detached federated result or a bound
+  // subgraph): `count()` reads the stream's cardinality (`countExpr` falls to `COUNT(*)` with no bulk
+  // channel — a landed row IS one traverser) and `dedup()` collapses by element identity (`id` is a
+  // column and functionally determines the rest of the tuple, so `Distinct` over the landed relation IS
+  // dedup-by-id). Neither reads the base tables, so both are correct on a detached stream — the honest
+  // decline the rest of this tail keeps was overbroad for them.
+  if (step.name === 'count' && argValues(step).length === 0 && !isLocalScope(step)) {
+    const counted = countTail(seed, fresh);
+    return continueAs(counted.rel, counted.framing, steps, from + 1, false, ctx, fresh, NO_ALIASES);
+  }
+  if (step.name === 'dedup' && argValues(step).length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms) {
+    const deduped = make.distinct({ id: fresh('dtd'), input: seed, channels: seed.channels, type: seed.type });
+    return detachedTail(deduped, elem, steps, from + 1, ctx, fresh, subgraph);
+  }
   if (step.name === 'id' || step.name === 'label') {
     const value = step.name === 'id' ? col(seed.id, 'id') : foreignLabelValue(seed, elem);
     const rel = make.project({
