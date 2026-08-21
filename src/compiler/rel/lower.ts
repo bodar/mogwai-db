@@ -32,7 +32,7 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES,
-    jsonMemberByTypeof, keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
+    jsonMemberByTypeof, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -2263,29 +2263,8 @@ function terminal(
     const asked = propertyKeyArgs(args);
     if (!asked) return null;
 
-    const { table, owner } = PROPERTIES[elem];
-    const props = make.scan({
-      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    });
-    // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying
-    // the row is the answer rather than the bug it would be in a filter. `ordered` for the same
-    // reason the hop is: the stream drives and `vp_node_key(node,key)` is probed, rather than the
-    // planner leading with `vp_key_value(key)` — every `name` row in the graph — and rediscovering
-    // the traverser afterwards.
-    const joined = make.join({
-      id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
-      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-      on: and(eq(col(props.id, owner), col(input.id, 'id')),
-        keyMembership(col(props.id, 'key'), asked.all ? null : asked.keys)),
-    });
     return {
-      rel: make.project({
-        id: fresh('sv'), input: joined, channels: input.channels,
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
-        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
-          ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
-      }),
+      rel: ctx.source.propertyValues(input, elem, asked.all ? null : asked.keys, fresh),
       // The value's Gremlin type is PER ROW, off the stored `vtype` column — one compile-time tag
       // would be a lie for an untyped property key.
       framing: { kind: 'scalar', type: PER_ROW('vtype') },

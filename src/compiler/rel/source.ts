@@ -1,8 +1,9 @@
-import type { Expr } from '../../rel/expr.ts';
+import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
-import { labelIds, meta, typeOf, type Minter } from './build.ts';
+import type { Elem } from '../plan/plan.ts';
+import { and, carriedCols, elementCols, eq, keyMembership, labelIds, meta, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -47,6 +48,14 @@ export interface GraphSource {
    *  a landed graph returns `label IN (names)` over its name-string column — which is why the boundary
    *  is a predicate, not a shared representation. */
   edgeLabelMatch(labelCol: Expr, labels: readonly Arg[], fresh: Minter): Expr;
+
+  /** `values(keys…)` — one traverser PER matching property VALUE off an element relation, as a
+   *  relation carrying `(v, vtype)` plus the input's channels (a JOIN, so the multiset multiplies).
+   *  `keys` is `null` for EVERY key and a name list otherwise (`keyMembership`'s distinction). The
+   *  value's Gremlin type is PER ROW off `vtype`, so the CALLER wraps `PER_ROW('vtype')` framing —
+   *  the source owns the ROWS, the vocabulary the framing. `BaseGraph` joins `vertex_properties` /
+   *  `edge_properties`; a landed graph explodes the inline `{t,v}` tree. */
+  propertyValues(input: Rel, kind: Elem, keys: readonly string[] | null, fresh: Minter): Rel;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -59,4 +68,26 @@ export const BaseGraph: GraphSource = {
 
   edgeLabelMatch: (labelCol, labels, fresh) =>
     ({ kind: 'in-query', expr: labelCol, plan: labelIds(labels, fresh), negated: false }),
+
+  propertyValues: (input, kind, keys, fresh) => {
+    const { table, owner } = PROPERTIES[kind];
+    const props = make.scan({
+      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying the
+    // row is the answer. `ordered` so the stream drives and `vp_node_key(node,key)` is probed rather
+    // than the planner leading with a whole-graph `key=?` scan.
+    const joined = make.join({
+      id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
+      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      on: and(eq(col(props.id, owner), col(input.id, 'id')), keyMembership(col(props.id, 'key'), keys)),
+    });
+    return make.project({
+      id: fresh('sv'), input: joined, channels: input.channels,
+      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
+      exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
+        ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
+    });
+  },
 };
