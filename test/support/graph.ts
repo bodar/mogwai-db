@@ -16,12 +16,30 @@ export function rawVertex(store: GraphStore, id: number, ...labelNames: string[]
   store.addVertexLabels(id, labelNames);
 }
 
+// Minting a seed graph is expensive: each seed traversal re-compiles through the whole antlr→IR→SQL
+// pipeline (~87ms for MODERN_SEED), and L5 + the census mint once PER corpus traversal — so that cost
+// was paid thousands of times per run and dominated both (measured 2026-08-21: ~65% of every L5
+// traversal). But a seed is a STABLE array reference (MODERN_SEED is a module const), so its compiled
+// result is memoisable: compile once, snapshot the database to bytes, and restore an independent
+// writable copy per call in ~0.8ms (110× faster). The copy is isolated — a write mutates only its own,
+// rowids reset (no AUTOINCREMENT) — so this preserves EXACTLY the fresh-store-per-mint semantics the
+// differential and census rely on; it just stops recompiling the same graph. Keyed by array reference:
+// a one-off seed built inline compiles as before; the hot MODERN_SEED path pays one compile per process.
+const snapshotCache = new WeakMap<readonly string[], Uint8Array>();
+
 /** Seed a fresh in-memory graph by running write traversals through the normal query path (the
- *  same way every other test seeds — no runtime-specific store hook). */
+ *  same way every other test seeds — no runtime-specific store hook). Memoised per seed reference:
+ *  see `snapshotCache` above. */
 export function seeded(seed: readonly string[]): GraphStore {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of seed) exec(store).buffers(q, {});
-  return store;
+  let snapshot = snapshotCache.get(seed);
+  if (snapshot === undefined) {
+    const raw = new BunSqlite(':memory:');
+    const store = new GraphStore(raw);
+    for (const q of seed) exec(store).buffers(q, {});
+    snapshot = raw.serialize();
+    snapshotCache.set(seed, snapshot);
+  }
+  return new GraphStore(BunSqlite.fromSnapshot(snapshot));
 }
 
 /** Mints a graph at a known baseline state. A READ shares one store (reads don't mutate); a WRITE

@@ -33,9 +33,13 @@ const CF_LIMITS = env?.MOGWAI_CF_LIMITS === '1';
 export class BunSqlite implements Sql {
   private db: Database;
 
-  constructor(path = ':memory:') {
-    this.db = new Database(path);
-    this.db.exec('PRAGMA journal_mode = WAL');
+  constructor(source: string | Database = ':memory:') {
+    const fresh = typeof source === 'string';
+    this.db = fresh ? new Database(source) : source;
+    // WAL is a no-op on :memory:, and re-issuing it on a `deserialize`d handle is pointless — only a
+    // path-backed database ever benefits. The unordered perturbation IS a live connection pragma, so
+    // it applies to a snapshot-restored store too (else `test:perturbed` would skip the seeded graph).
+    if (fresh) this.db.exec('PRAGMA journal_mode = WAL');
     if (REVERSE_UNORDERED) this.db.exec('PRAGMA reverse_unordered_selects = ON');
   }
 
@@ -51,5 +55,21 @@ export class BunSqlite implements Sql {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Snapshot the whole database to a portable byte buffer (bun:sqlite `serialize`). BunSqlite-ONLY
+   *  and deliberately NOT on the shared `Sql` interface: the DO runtime (`ctx.storage.sql`) has no
+   *  such primitive, and the one caller is the test seed template (test/support/graph.ts). Building
+   *  the modern reference graph re-compiles ~12 write traversals through the whole antlr→IR→SQL
+   *  pipeline (~89ms), and that was paid once PER read traversal across L5 and the census. */
+  serialize(): Uint8Array {
+    return this.db.serialize();
+  }
+
+  /** Reconstruct a WRITABLE store from a `serialize()` snapshot — an independent in-memory database
+   *  with the snapshot's schema+data already present, in ~0.03ms (bun:sqlite `Database.deserialize`;
+   *  the `false` is `readonly=false`, since a write traversal mutates its own fresh copy). */
+  static fromSnapshot(bytes: Uint8Array): BunSqlite {
+    return new BunSqlite(Database.deserialize(bytes, false));
   }
 }
