@@ -77,12 +77,21 @@ if (process.env.CHILD_SLICE) {
   for (const q of slice) { const r = runOne(q); executed += r.executed; diverged += r.diverged; }
   console.log(JSON.stringify({ executed, diverged, ms: performance.now() - t0 }));
 } else if (!isMainThread) {
-  // ---------- THREADS-mode worker: serve one query per message from the work-stealing pool ----------
+  // ---------- THREADS-mode worker: run ONE static slice per message, post ONE result ----------
+  // Deliberately not per-query work-stealing: hundreds of sub-10ms round-trips per worker tripped a
+  // bun quirk where a worker→main message failed to wake an idle main loop and the pool deadlocked
+  // (only after seed memoisation made queries fast enough to leave the loop idle between them). One
+  // message each way sidesteps it entirely — and matches PROC mode's static partition, so THREADS vs
+  // PROCS isolates exactly one variable: shared heap/GC (threads) vs independent heaps (processes).
   const runOne = await makeRunner();
-  parentPort!.on('message', (q: string | null) => {
-    if (q === null) { parentPort!.close(); return; }
-    const r = runOne(q);
-    parentPort!.postMessage({ done: true, ...r });
+  const corpus = readCorpus();
+  parentPort!.on('message', (msg: { off: number; count: number } | null) => {
+    if (msg === null) { parentPort!.close(); return; }
+    let executed = 0, diverged = 0;
+    for (const q of corpus.slice(msg.off, msg.off + msg.count)) {
+      const r = runOne(q); executed += r.executed; diverged += r.diverged;
+    }
+    parentPort!.postMessage({ done: true, executed, diverged });
   });
   parentPort!.postMessage({ ready: true });
 } else {
@@ -95,24 +104,38 @@ if (process.env.CHILD_SLICE) {
   const MODE = (process.env.MODE ?? 'both').toLowerCase();
   const workset = readCorpus().slice(0, WORKSET);
 
-  // THREADS: spawn N workers, then hand each the next query the instant it returns (work stealing).
+  // THREADS: spawn N workers, give each ONE static slice, collect ONE result each. One persistent
+  // message handler per worker (installed at creation) routes {ready} → spawn-resolve and {done} →
+  // the collector runThreads installs via `onResult`. Static partition (not work-stealing) on purpose
+  // — see the worker branch above for why, and note it makes the wall bounded by the slowest slice,
+  // the same honest number PROC mode reports.
+  const onResult = new WeakMap<Worker, (m: { executed: number; diverged: number }) => void>();
   const spawnThreads = (n: number): Promise<Worker[]> => {
-    const ws = Array.from({ length: n }, () => new Worker(import.meta.url));
-    return Promise.all(ws.map((w) => new Promise<Worker>((res) => w.once('message', () => res(w)))));
+    const workers: Worker[] = [];
+    const ready = Array.from({ length: n }, () => {
+      const w = new Worker(SELF);
+      workers.push(w);
+      return new Promise<void>((res) => {
+        w.on('message', (m: { ready?: true; done?: true; executed: number; diverged: number }) => {
+          if (m.ready) res();
+          else if (m.done) onResult.get(w)?.(m);
+        });
+      });
+    });
+    return Promise.all(ready).then(() => workers);
   };
   const runThreads = (workers: Worker[]) => new Promise<{ executed: number; diverged: number; ms: number }>((resolve) => {
-    let next = 0, outstanding = 0, executed = 0, diverged = 0;
+    const per = Math.ceil(workset.length / workers.length);
+    let remaining = workers.length, executed = 0, diverged = 0;
     const t0 = performance.now();
-    const feed = (w: Worker) => { if (next < workset.length) { outstanding++; w.postMessage(workset[next++]); } };
-    for (const w of workers) {
-      w.on('message', (m: { done?: true; executed: number; diverged: number }) => {
-        if (!m.done) return;
-        outstanding--; executed += m.executed; diverged += m.diverged;
-        if (next < workset.length) feed(w);
-        else if (outstanding === 0) resolve({ executed, diverged, ms: performance.now() - t0 });
+    workers.forEach((w, i) => {
+      onResult.set(w, (m) => {
+        executed += m.executed; diverged += m.diverged;
+        if (--remaining === 0) resolve({ executed, diverged, ms: performance.now() - t0 });
       });
-      feed(w);
-    }
+      const off = i * per;
+      w.postMessage({ off, count: Math.max(0, Math.min(per, workset.length - off)) });
+    });
   });
 
   // PROCS: N child `bun` processes over a static, contiguous partition of the same workset.
@@ -154,7 +177,7 @@ if (process.env.CHILD_SLICE) {
   console.log(`cores=${cores}  workset=${workset.length} traversals  mode=${MODE}  sweeping workers=[${WORKERS.join(', ')}]`);
 
   if (MODE === 'threads' || MODE === 'both') {
-    header('THREADS (work-stealing worker_threads pool, shared process heap)');
+    header('THREADS (static partition across worker_threads, shared process heap)');
     let base = 0;
     for (const n of WORKERS) {
       const s0 = performance.now();
