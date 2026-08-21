@@ -32,6 +32,15 @@
  * is the twin for SELF position (row-unique, `combine` group); `origin` is a GROUPING key, which is why
  * it groups `undefined`.
  *
+ * ⚠️ **This is a POLICY-based unification, and Calcite would NOT phrase it as one thing — the cross-check
+ * that keeps the claim honest.** Calcite tracks the two underlying CONCEPTS as SEPARATE metadata: a
+ * position is a collation trait (`RelCollation` — "physical ordering", `vendor/calcite/core/.../rel/RelCollation.java:25`)
+ * and a parent identity is a correlation variable (`CorrelationId`,
+ * `vendor/calcite/core/.../rel/core/CorrelationId.java:33`). Our channel core is POLICY-major where Calcite
+ * is CONCEPT-major, so two carriers with identical merge/barrier/group/row-unique policies ARE one role
+ * here even though Calcite keeps their concepts apart — a deliberate, simpler abstraction, not a claim
+ * that Calcite merges them.
+ *
  * ⚠️ **Its DERIVATION is the CONSUMER's, and deliberately NOT uniform — MEASURED, not chosen.** A
  * `group().by(k).by(<reducer>)` pools members by the ELEMENT they reached (`childRows` seeds `origin`
  * from the rowid so three traversers reaching one `lop` pool together and sum once — verified against

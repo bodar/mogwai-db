@@ -2528,6 +2528,22 @@ function naturalSort(
  * scope — is READ OFF `rel` rather than tracked beside it. Two accumulator variables used to shadow
  * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
+/**
+ * The `concat(__.<t>…)` EMPTY-OPERAND guard (§6·5): a binding whose relation holds a row iff some
+ * surviving traverser had an operand that produced nothing, so the executor raises `TraversalUtil.apply`'s
+ * message rather than let `concat_ws` silently skip the NULL a correlated scalar leaves for an empty read.
+ * `presents` are the operands' "did it produce" predicates over `rel`'s columns, so the guard filters
+ * `rel` directly (a member's `present` references `rel.id`); `NOT (all produced)` is "some was empty".
+ */
+function concatEmptyGuard(rel: Rel, presents: readonly Expr[], fresh: Minter): Binding {
+  const anyEmpty = presents.map((p) => ({ kind: 'unary', op: 'not', arg: p } as Expr))
+    .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
+  const offenders = make.filter({ id: fresh('cgf'), input: rel, channels: rel.channels, type: rel.type, pred: anyEmpty });
+  const one = make.project({ id: fresh('cgp'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const node = make.limit({ id: fresh('cgl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
+  return { name: `${fresh('cg')}`, node, guard: { message: 'The provided traverser does not map to a value', raiseWhen: 'rows' } };
+}
+
 function scalarTail(
   seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES,
@@ -2728,11 +2744,12 @@ function scalarTail(
     // which makes concat a row boundary the pure `VALUE_TX.concat` declines. Each operand resolves as a
     // correlated scalar over the traverser (`scalarChild`, the same seam a `by()` body uses), and the
     // FIRST result is appended — a `ScalarMapStep`, one traverser in and one out.
-    // ⚠️ ONLY a PROVABLY-PRODUCTIVE operand: `TraversalUtil.apply` THROWS on an empty sub-traversal
-    // ("does not map to a value"), which a correlated scalar subquery cannot reproduce — it yields NULL,
-    // which `concat_ws` SKIPS, a different answer. So an operand that MIGHT be empty declines (fail
-    // closed) rather than mis-execute; a live-alias read (`concat(__.select('a'))`) is always productive
-    // because the traverser was bound to the label, which is the corpus form.
+    // ⚠️ `TraversalUtil.apply` THROWS on an EMPTY operand ("does not map to a value"), where a correlated
+    // scalar subquery yields NULL — which `concat_ws` SKIPS, a DIFFERENT answer. So an operand that is not
+    // provably productive rides a runtime GUARD (§6·5): the concat is computed, and a guard binding raises
+    // the reference's message iff any surviving traverser's operand actually produced nothing. A live-alias
+    // read (`concat(__.select('a'))`) is always productive and needs none; `concat(__.select('a').values(k))`
+    // over a filtered stream where the key is present succeeds, and raises only where it is genuinely empty.
     if (step.name === 'concat' && args.some(isNested)) {
       const seam = childSeam(ctx, fresh);
       const host: ChildHost = {
@@ -2740,14 +2757,21 @@ function scalarTail(
         ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}), row: { rel, aliases: labels },
       };
       const parts: Expr[] = [];
+      const mayBeEmpty: Expr[] = []; // productivity predicates for operands not provably productive
       for (const a of args) {
         if (a === null) continue;         // a null operand is skipped (`ConcatStep`)
         if (!isNested(a)) return null;     // the Java API cannot MIX string and traversal operands
         const body = seam.body(a.nested, 'child');
         if (!body) return null;
         const cv = scalarChild(body, host, ctx, fresh);
-        if (!cv || cv.framing.kind !== 'scalar' || cv.present !== ALWAYS_PRODUCTIVE) return null;
+        if (!cv || cv.framing.kind !== 'scalar') return null;
         parts.push(cv.expr);
+        // Where the seam cannot say productivity at all (`present` undefined) there is nothing to guard on
+        // — decline rather than risk a silent skip; otherwise collect a concrete "did it produce" predicate.
+        if (cv.present !== ALWAYS_PRODUCTIVE) {
+          if (!cv.present) return null;
+          mayBeEmpty.push(cv.present);
+        }
       }
       // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
       // literal to force it, an all-null concatenation must be NULL rather than `''`, so the guard tests
@@ -2760,13 +2784,18 @@ function scalarTail(
         else: { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] },
       };
       const carried = rel.channels;
-      rel = make.project({
+      const projected = make.project({
         id: fresh('cc'), input: rel, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', value], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
-      out = { kind: 'scalar', type: UNKNOWN };
-      continue;
+      // A provably-productive concat continues the fold; a guarded one is an EXECUTION step, so it recurses
+      // the rest of the chain and the guard rides on the tail's `effects` (the `localStringMemberGuard`
+      // pattern). The guard reads `rel`'s columns, so it fences and filters `rel`, not `projected`.
+      if (!mayBeEmpty.length) { rel = projected; out = { kind: 'scalar', type: UNKNOWN }; continue; }
+      const guard = concatEmptyGuard(rel, mayBeEmpty, fresh);
+      const tail = scalarTail(projected, { kind: 'scalar', type: UNKNOWN }, steps, at + 1, bulked, ctx, fresh, labels);
+      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
     }
 
     // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
@@ -6765,6 +6794,11 @@ function childRows(
  * inline `within` list does — `Contains.within` is `.equals`, and a scalar fold's members are bare
  * (`[27,32]`). A non-list framing (not a fold), an effectful body (a write operand), or a body that does
  * not lower all decline — the resolver is `null`-total like every seam.
+ *
+ * Calcite prior art, and it matches EXACTLY: a value `IN` a collection is `RexSubQuery.in(rel, …)` over
+ * an `Uncollect` — the `UNNEST` of the collection into rows (`vendor/calcite/core/.../sql2rel/SqlToRelConverter.java:6370`,
+ * `vendor/calcite/core/.../rel/core/Uncollect.java:60`). `json_each` IS SQLite's `UNNEST`, so
+ * `subject IN (SELECT sv FROM json_each(<list>))` is that lowering spelled in SQLite's dialect.
  */
 function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | null {
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.

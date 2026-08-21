@@ -73,9 +73,9 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
       | Mr.peter |
 
   # A string concat() and a traversal concat() are SEPARATE steps (the grammar's two productions are
-  # mutually exclusive — `concat(" x ", __.select("a"))` is a parse error), so they chain. The
-  # pre-fix answer kept the trailing space and never appended lang: "lop uses ".
-  @Unsupported
+  # mutually exclusive — `concat(" x ", __.select("a"))` is a parse error), so they chain. Now LOWERED —
+  # the operand is a correlated scalar, guarded so an empty read raises rather than silently skips (all
+  # software carry lang, so the guard is inert and it succeeds).
   Scenario: g_V_asXaX_valuesXnameX_concatX_usesX_concatXselectXaXvaluesXlangXX
     Given the modern graph
     And the traversal of

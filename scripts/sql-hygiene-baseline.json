@@ -103,8 +103,8 @@
   },
   "concat": {
     "binds": 2,
-    "bytes": 689,
-    "compiler": 14,
+    "bytes": 975,
+    "compiler": 27,
     "bound": 2
   },
   "conjoin": {
