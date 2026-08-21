@@ -47,6 +47,7 @@ import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldM
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { boundById, boundVertexHas, boundVertexHasLabel, boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues, HAS_CMP_OPS, type HasMatch } from './foreign.ts';
+import { BaseGraph, type GraphSource } from './source.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -272,6 +273,11 @@ interface ChainCtx extends FilterCtx {
    *  from (every vertex holds a set — `src/api.ts`). Settled before a compile starts, so it travels
    *  as a value rather than being re-derived from a source-options map inside the lowering. */
   readonly labelRegime: LabelRegime;
+  /** THE GRAPH SOURCE this chain reads physical rows through — `BaseGraph` (SQLite tables) by default,
+   *  a landed `BoundGraph` for a subgraph segment. Threaded here so every physical-access chokepoint
+   *  (movement, `values`, `has`, labels, `elementScan`) reads ONE graph abstraction rather than naming
+   *  a table inline. See `src/compiler/rel/source.ts`. */
+  readonly source: GraphSource;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
   /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
@@ -325,7 +331,7 @@ function correlatedExists(
   // the two that do.
   if (subject.kind !== 'element') return null;
   const elem = subject.elem;
-  const child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
+  const child = movement(body[0]!, { correlated: subject.id }, elem, ctx.source, fresh);
   if (!child) return null;
   // THE REST OF THE BODY IS THE ORDINARY FOLD, started at the correlated child — the same insight the
   // arm merge rests on, one position further in. This used to be a hand-rolled movement|filter walk,
@@ -1156,7 +1162,7 @@ const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
 const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
 
-function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { rel: Rel; elem: Elem } | null {
+function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter): { rel: Rel; elem: Elem } | null {
   const hops = HOPS[step.name];
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
@@ -1181,13 +1187,10 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   const carried = input ? input.channels : BULK;
   const armCols = elementCols(carried);
   const arms = hops.map((hop) => {
-    const e = make.scan({
-      id: fresh('mv'), table: 'edges', alias: fresh('rme'), channels: [],
-      type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-    });
+    const e = graph.adjacencyEdges(fresh);
     const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
     const on = and(eq(col(e.id, hop.from), incoming),
-      labelArgs.length ? { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labelArgs, fresh), negated: false }
+      labelArgs.length ? graph.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh)
         // NAMED labels, none of which can match — `out(null)`. NEVER, not "every label".
         : asked.given ? CONSTANT.false : undefined);
     // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
@@ -4350,7 +4353,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
     facts,
     ctx: {
       params, correlatedChildren, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
-      labelRegime, sideEffects, sideEffectPolicies, services, sack, collections,
+      labelRegime, source: BaseGraph, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
     },
   };
@@ -4680,7 +4683,7 @@ function elementTail(
       const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
       return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
     }
-    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
+    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
       // emission order must not collapse, whether that order was seeded at the source or minted by
@@ -7406,7 +7409,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // value chain over the HOST ITSELF (`by(__.values('age').max())`) roots it at a one-row SELF relation.
   // A movement is not required — what is required is that the body END in a reducer; a bare
   // `__.count()`/`__.values(k)` with no reduction falls through to the expression arm below.
-  const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
+  const child = movement(body[0]!, { correlated: host.id }, host.elem, ctx.source, fresh);
   if (child) return correlatedReduce(child.rel, child.elem, body, 1, ctx, fresh);
   // A BRANCH-headed body (`by(__.union(a,b)….fold())`) — the union fans the host out over its arms, then
   // the tail reduces. `continueAs` already lowers a `union`/`choose`/`coalesce` over an INPUT relation
