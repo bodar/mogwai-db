@@ -114,6 +114,6 @@ export class UnsupportedTraversal extends Error {
 export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Executable {
   const plan = compilePlan(gremlin, params, options, paramTypes);
   if (plan.kind === 'segment')
-    throw new Error('call(): barrier/async services require the segment executor (executeFramed); compile() cannot resolve one synchronously');
+    throw new Error('a barrier step (an async call(), or a regex predicate) requires the segment executor (executeFramed); compile() cannot resolve one synchronously');
   return plan.compiled;
 }

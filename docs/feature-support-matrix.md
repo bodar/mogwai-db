@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,689<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,693<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -67,7 +67,7 @@ the semantic authority.
 | Predicate | | Notes |
 |---|:--:|---|
 | `containing`, `startingWith`, `endingWith` + negations | ✅ | wherever a predicate is accepted |
-| `regex` | ❌ | **not yet** — no SQLite regex operator, no DO UDFs; fails closed rather than filtering in JS. INTENDED, not a locked non-goal: a batched barrier behind a trigram prefilter, gated on a semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than engineering — `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY, as a batched **barrier** (head projects candidate `values(key)` → one JS `RegExp` pass → survivors re-injected as `within(json_each)`, one bind). Committed to **JS `RegExp`** semantics (Java `matcher.find()`; divergence on Java-only constructs documented in `src/compiler/rel/regex.ts`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) stays a fail-closed deferral. Trigram prefilter is a perf follow-up — `docs/2026-08-12-regex-as-a-barrier-research.md` |
 
 ## 3. Projections & element data
 
@@ -244,10 +244,11 @@ Short on purpose: a 🚫 means **we will not build this**, never "we have not go
 
 ## 16. Not yet — INTENDED, unscheduled (❌)
 
-Neither is a wall: both have a design doc, both are unscheduled, and both fail closed with a clear
-deferral until they land — so a query never gets a silently narrower answer in the meantime.
+Not a wall: it has a design doc, is unscheduled, and fails closed with a clear deferral until it
+lands — so a query never gets a silently narrower answer in the meantime. (`regex` was here; it
+LANDED as a barrier — see §2. Its `apply` shape and the barrier substrate it shares with OLAP are
+`docs/2026-08-21-barrier-substrate-design.md`.)
 
 | Item | Shape | Doc |
 |---|---|---|
-| OLAP / graph algorithms — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath` | `call()` services (the GDS-shaped superset) with the four native step names as thin desugar Passes to the same services — one implementation, compute stays set-based SQL, never a row-at-a-time interpreter | `docs/2026-07-24-graph-algorithms-plan.md` |
-| `regex` | a batched barrier (the mechanism `federate`/`io` already use) behind a trigram prefilter over the existing `property_fts` index; blocker is a SEMANTICS commitment (JS `RegExp` ≠ Java `Pattern`), not engineering | `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| OLAP / graph algorithms — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath` | `call()` services (the GDS-shaped superset) with the four native step names as thin desugar Passes to the same services — one implementation, compute stays set-based SQL, never a row-at-a-time interpreter | `docs/2026-07-24-graph-algorithms-plan.md`, substrate `docs/2026-08-21-barrier-substrate-design.md` |

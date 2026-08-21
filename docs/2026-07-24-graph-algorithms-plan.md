@@ -373,7 +373,10 @@ Substrate that unlocks several algorithm families first; leaf, single-algorithm 
    DO SQLite — probe `test/cf-probe/` first; §1 says nothing about DDL) versus a **retained `Binding`**
    (§3.0, `retained(binding)` = `isStmt(node) || snapshot`, a `Ref` resolving to the rows as one JSON
    bind). The binding needs no DDL, is already `checkPlan`-proven, and is the shape `decorate` requires
-   anyway. Settle this before writing an algorithm.
+   anyway. Settle this before writing an algorithm. **This is barrier output-shape substrate (B) in
+   `docs/2026-08-21-barrier-substrate-design.md`** — the SAME temp-table-vs-`Ref` question federate-
+   subgraph raises; that note also fixes the barrier's sync/async axis (OLAP is async/yielding — it must
+   NOT busy-lock the DO across its iterations; §"occupancy").
 5. **DO alarm checkpointing** for large-graph iterative jobs (`stream`/`mutate`/`stats` only).
 6. **PageRank dangling-node handling** the conformance scenarios expect (leaf — PageRank only).
 7. **Louvain** feasibility spike (batch synchronous local moves + coarsening) — quality vs GDS, and

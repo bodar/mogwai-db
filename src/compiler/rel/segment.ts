@@ -5,6 +5,7 @@ import { injectionKindOf, parseCallSpec } from '../../services/params/call-param
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
+import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import type { Elem } from '../plan/plan.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
@@ -115,9 +116,27 @@ function injectionOf(step: IRStep, barrier: Barrier, params: Record<string, any>
  * values to match on, and how many there are.
  */
 export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): SegmentPlan | null {
-  const barrier = barrierIn(steps, request);
-  if (!barrier) return null;
-  return barrier.at === 0 ? sourceSegment(steps, barrier, request) : midSegment(steps, barrier, request);
+  const call = barrierIn(steps, request);
+  const regex = regexBarrierIn(steps);
+  // The EARLIEST boundary wins: a segment's head is the prefix BEFORE it, so a later barrier belongs to
+  // that head's resumed tail, not to this segment. A regex `has()` is a boundary just as a barrier
+  // `call()` is — asked here rather than discovered in the fold, for the same reason (§6·5).
+  if (regex && (!call || regex.at < call.at))
+    return buildRegexSegment(steps, regex, request.lowering, (tail) => planOf(tail, request));
+  if (!call) return null;
+  return call.at === 0 ? sourceSegment(steps, call, request) : midSegment(steps, call, request);
+}
+
+/** A resumed chain to its `Plan` — another segment if the tail STILL holds a barrier (a second regex,
+ *  a `call()`), else the SQL compile. A resume CANNOT decline (`resumed`), so a chain the lowering
+ *  cannot cover after re-injecting `within(<survivors>)` RAISES, naming the failure, rather than
+ *  returning a silent different answer. */
+function planOf(steps: readonly IRStep[], request: SegmentRequest): Plan {
+  const segment = segmentPlan(steps, request);
+  if (segment) return segment;
+  const lowered = lowerToRel(steps, request.lowering);
+  if (!lowered) throw new Error('regex barrier resume: no lowering covers the traversal after re-injecting within(<survivors>)');
+  return { kind: 'sql', compiled: finishLowering(lowered) };
 }
 
 /** A MID-traversal barrier: the prefix plus the injection read is the head, and the pool comes back to

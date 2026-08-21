@@ -1,11 +1,14 @@
-# Regex as a barrier service — INTENDED, not scheduled
+# Regex as a barrier service — LANDED (increment 1), 2026-08-21
 
-**Status: intended future work. Reviewed 2026-08-13 against the RelIR spine; no code change yet, no
-date.** `regex` is **no longer a locked non-goal** — the intention is to implement it. What is still
-open is the SEMANTICS COMMITMENT below (§"The two real costs", item 1), which is a product decision
-and the only thing standing in the way; the engineering is reuse of machinery that has since shipped.
-Not in `docs/outstanding-work.md` because nothing is scheduled, and until it lands the behaviour is
-unchanged: `regex` fails closed with a deferral and is never JS-filtered.
+**Status: `has(key, regex)`/`notRegex` LANDED 2026-08-21 as a batched barrier (`src/compiler/rel/regex.ts`).**
+The SEMANTICS COMMITMENT below (§"The two real costs", item 1) was RESOLVED: committed to **JS `RegExp`**
+semantics (Java `matcher.find()`), divergence on Java-only constructs documented in the code — the corpus
+exercises none of them. The re-injection is the VALUE bound-join (§"The observation"): head projects
+`values(key)` → one JS pass → survivors re-injected as `within(json_each)` (one bind). Everything OUTSIDE
+`has(key, regex)` (`is`/`where`/`match`) stays a fail-closed deferral (§item 2). **Still open:** the
+trigram PREFILTER (§"the trigram prefilter" — a perf follow-up, not correctness) and making the barrier
+explicitly SYNCHRONOUS (`docs/2026-08-21-barrier-substrate-design.md`, Axis 1). The rest of this note is
+the research that produced the landing.
 
 ⚠️ **Reviewed against the single-spine cut.** Everything below held up, and two things got STRONGER —
 see "What the RelIR spine changed". The grammar spelling is `TextP.regex(…)` (`Gremlin.g4:1327`), not

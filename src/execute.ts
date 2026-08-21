@@ -810,7 +810,7 @@ export class Executor implements ExecutorApi {
   private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Executable {
     const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0 }, paramTypes);
     if (plan.kind === 'segment')
-      throw new Error('this traversal contains a federated call() — use the async path (framedAsync / raw), not the sync framed()/buffers()');
+      throw new Error('this traversal suspends at a barrier (a federated call(), or a regex predicate) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
     return plan.compiled;
   }
 
