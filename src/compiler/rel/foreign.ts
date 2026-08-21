@@ -120,6 +120,43 @@ export function foreignRejoin(
 }
 
 /**
+ * AN ENDPOINT HOP over a landed SUBGRAPH — `inV`/`outV`/`bothV` off a landed EDGE, resolved to the
+ * incident VERTEX with its full data.
+ *
+ * The edge already carries `src`/`tgt` (the endpoint ids); the bound `vertices` relation carries the
+ * endpoint's payload. So the hop is a JOIN — `vertices.id = edge.<end>` — projecting the VERTEX tuple,
+ * which re-enters `detachedTail` as an ordinary landed vertex (its `values`/`label`/`id` and a further
+ * hop then compose). `bothV` is the UNION of the two ends, the same multiset rule movement uses. The
+ * vertex columns are renamed before the join (`vid`/`vlabel`/`vprops`) so the edge's own `id`/`label`/
+ * `props` do not collide, then projected back to the canonical vertex payload names.
+ */
+export function endpointVertices(edges: Rel, vertices: Rel, step: 'inV' | 'outV' | 'bothV', fresh: Minter): Rel {
+  const V = { id: 'vid', label: 'vlabel', props: 'vprops' } as const;
+  const renamed = make.project({
+    id: fresh('sve'), input: vertices, channels: [],
+    type: typeOf(meta(V.id, 'any', true), meta(V.label, 'json', true), meta(V.props, 'json', true)),
+    exprs: [[V.id, col(vertices.id, 'id')], [V.label, col(vertices.id, 'label')], [V.props, col(vertices.id, 'props')]],
+  });
+  const payload = foreignPayloadCols('vertex');
+  const ends: readonly ('src' | 'tgt')[] = step === 'inV' ? ['tgt'] : step === 'outV' ? ['src'] : ['src', 'tgt'];
+  const arms = ends.map((end) => {
+    const joined = make.join({
+      id: fresh('svj'), left: edges, right: renamed, join: 'inner', channels: [],
+      type: typeOf(...foreignPayloadCols('edge'), meta(V.id, 'any', true), meta(V.label, 'json', true), meta(V.props, 'json', true)),
+      on: { kind: 'binary' as const, op: '=' as const, left: col(renamed.id, V.id), right: col(edges.id, end) },
+    });
+    return make.project({
+      id: fresh('svp'), input: joined, channels: [], type: typeOf(...payload),
+      exprs: [['id', col(joined.id, V.id)], ['label', col(joined.id, V.label)], ['props', col(joined.id, V.props)]],
+    });
+  });
+  const [first, ...rest] = arms;
+  return rest.length
+    ? make.union({ id: fresh('svu'), inputs: arms, all: true, channels: [], type: typeOf(...payload) })
+    : first!;
+}
+
+/**
  * A landed element's OWN value under the injection kind — what a parent's injected value is matched
  * against. `values(key)` reads the logical value at that key out of the landed `{t,v}` tree: a vertex's
  * key holds an array of nodes, an edge's holds one, and a MISSING key yields NULL, which matches

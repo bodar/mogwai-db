@@ -129,6 +129,16 @@ it (a landed subgraph is several (A) relations; OLAP state is (A) re-crossed eac
 - **SETTLED (2026-08-21) — substrate (B) does not exist** (see §(B) above): the TEMP-table form is
   authorizer-refused on DO, and both would-be consumers are substrate (A) extended (federate-subgraph =
   landed CTEs; OLAP = iterated `json_each` binds). Measured in `test/cf-probe/substrate-b.probe.ts`.
-- **STILL OPEN (not a storage question):** the OLAP occupancy model (alarm-checkpoint vs Worker-driven —
-  Axis 1); federate-subgraph's edges-CTE landing (extending `foreignRelation`); and NESTED value
-  transforms (above). None needs a new materialized-relation substrate.
+- **LANDED (2026-08-21) — federate-subgraph, first movement-over-`Ref` slice.** `federate` with
+  `.with("subgraph", true)` over an edge-producing sub-traversal returns a traversable SUBGRAPH: the
+  edges (carrying `src`/`tgt`) plus their incident vertices WITH data, as a mixed `ForeignRow[]`
+  (`withEndpoints` fetches endpoints in a second sibling hop). `lowerForeignResume` splits the mix —
+  edges are the stream, vertices a bound relation — and `detachedTail`'s `inV`/`outV`/`bothV`
+  (`endpointVertices`) join the edge's `src`/`tgt` to the bound vertices for the endpoint's full data,
+  which re-enters as an ordinary landed vertex. No temp table, no new IR node — the bound vertices are
+  a `json_each` relation the movement joins, exactly the substrate-A-extended picture. 2 landing binds
+  (edges + vertices) + the mid-traversal injection bind, O(1) in subgraph size.
+- **STILL OPEN (not a storage question):** `out`/`in`/`both` (vertex→vertex) over a subgraph and
+  `has()`/filters over subgraph vertices (the rest of the vocabulary reading the bound relations); the
+  OLAP occupancy model (alarm-checkpoint vs Worker-driven — Axis 1); and NESTED value transforms
+  (above). None needs a new materialized-relation substrate.

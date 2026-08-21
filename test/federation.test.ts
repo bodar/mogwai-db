@@ -156,3 +156,40 @@ describe('recursive federation + depth guard', () => {
     expect(() => guardFederationDepth(MAX_FEDERATION_DEPTH + 1, 'g')).toThrow(/federation depth exceeded/);
   });
 });
+
+// SUBGRAPH form (movement over a bound edge Ref — docs/2026-08-21-barrier-substrate-design.md §(B)).
+// `.with("subgraph", true)` over an EDGE-producing sub-traversal brings back the edges (which carry
+// src/tgt adjacency) PLUS their incident vertices WITH data. The local tail then WALKS it: inV/outV/
+// bothV join the landed vertices, so the endpoint re-enters detachedTail with full payload and
+// values()/id()/label() compose. A detached element has no live adjacency (TinkerPop) — this is not
+// that; it is a real subgraph, materialised as bound relations and traversed locally.
+describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph locally)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const vals = async (g: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).map((v: any) => v).sort();
+  // The oracle: the SAME endpoint traversal run DIRECTLY on the sibling.
+  const onCrew = async (g: string) =>
+    (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec))).sort();
+
+  test('inV().values(name) — the develops-TARGETS, with their data, from the landed vertices', async () => {
+    expect(await vals(sg('.inV().values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").inV().values("name")'));
+  });
+  test('outV().values(name) — the develops-SOURCES', async () => {
+    expect(await vals(sg('.outV().values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").outV().values("name")'));
+  });
+  test('bothV().values(name) — the UNION of both endpoints (multiset)', async () => {
+    expect(await vals(sg('.bothV().values("name")')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").bothV().values("name")'));
+  });
+  test('inV().id() reads the endpoint id off the landed edge', async () => {
+    expect((await vals(sg('.inV().id()'))).length).toBe(5); // 5 develops edges → 5 targets
+  });
+  test('WITHOUT subgraph:true, movement off a detached edge still fails closed', async () => {
+    await expect(mgr.executor('home').framedAsync(
+      'g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person").outE("develops")).inV().values("name")', {}))
+      .rejects.toThrow(/not supported after a barrier call/);
+  });
+});

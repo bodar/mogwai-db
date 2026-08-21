@@ -40,6 +40,31 @@ function traversalOf(params: CallParams): string {
   throw new Error('mogwai.graph.federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
 }
 
+/** `.with("subgraph", true)` — the sub-traversal is EDGE-producing and the caller wants a traversable
+ *  SUBGRAPH back, not detached edges: the edges (which carry `src`/`tgt` adjacency) PLUS their distinct
+ *  incident vertices, WITH data. The local tail then walks it (`inV`/`outV` join the landed vertices) —
+ *  the movement-over-a-bound-`Ref` substrate (`docs/2026-08-21-barrier-substrate-design.md`). */
+const wantsSubgraph = (params: CallParams): boolean => params.subgraph === true;
+
+/**
+ * A subgraph result: the edges the sub-traversal produced, followed by their DISTINCT incident
+ * vertices (fetched with a second sibling hop, WITH data). The mixed-kind array IS the signal to the
+ * resume that this is a subgraph — a normal federated result is homogeneous (all one element kind).
+ *
+ * The endpoint fetch is `g.V(<ids>)` on the same sibling: bounded by the edge set, one hop. (The ids
+ * inline into the sibling's Gremlin for now; a `json_each`-bound id list is the follow-up when a large
+ * subgraph makes the sibling statement text the cost.)
+ */
+async function withEndpoints(
+  ex: { raw(g: string, p: Record<string, unknown>, d: number): Promise<ForeignRow[]> },
+  edges: readonly ForeignRow[], depth: number,
+): Promise<ForeignRow[]> {
+  const ids = [...new Set(edges.flatMap((e) => (e.kind === 'edge' ? [e.src, e.tgt] : [])))];
+  if (ids.length === 0) return [...edges];
+  const vertices = await ex.raw(`g.V(${ids.join(',')})`, {}, depth + 1);
+  return [...edges, ...vertices];
+}
+
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
  *  already lived; the per-call values (params, this hop's depth) come from the CallSite
@@ -70,7 +95,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       const ex = source.executor(graph);
 
       // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound.
-      if (rows.length === 0) return ex.raw(gremlin, {}, depth + 1);
+      if (rows.length === 0) {
+        const result = await ex.raw(gremlin, {}, depth + 1);
+        return wantsSubgraph(params) ? withEndpoints(ex, result, depth) : result;
+      }
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar
       // (values(k)/id()/label()) — the value the sub-traversal's `T.value` marker operand stands in
@@ -83,7 +111,8 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
       const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
-      return ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+      const result = await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+      return wantsSubgraph(params) ? withEndpoints(ex, result, depth) : result;
     },
   }),
 });

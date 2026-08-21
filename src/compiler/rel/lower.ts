@@ -46,7 +46,7 @@ import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabe
 import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
-import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
+import { endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -4233,13 +4233,23 @@ export function lowerForeignResume(
   // DEMANDS one therefore declines rather than compiling a plan with the column silently missing,
   // which is the same rule the fold applies to a source it cannot seed (§12, order and determinism).
   if (facts.demandsEncounter || facts.tracksPath) return null;
-  const landed = foreignRelation(rows, elem, fresh);
+  // A SUBGRAPH result is MIXED — edges (the graph, carrying `src`/`tgt` adjacency) plus their incident
+  // vertices, WITH data (`mogwai.graph.federate` `.with("subgraph", true)`). A normal federated result
+  // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
+  // stream and the vertices become a bound lookup relation the tail's `inV`/`outV`/`bothV` join for the
+  // endpoint's data — movement over a bound edge `Ref` (`docs/2026-08-21-barrier-substrate-design.md`).
+  const vertexRows = rows.filter((r) => r.kind === 'vertex');
+  const edgeRows = rows.filter((r) => r.kind === 'edge');
+  const subgraph = edgeRows.length > 0 && vertexRows.length > 0;
+  const streamElem: Elem = subgraph ? 'edge' : elem;
+  const subgraphVertices = subgraph ? foreignRelation(vertexRows, 'vertex', fresh) : undefined;
+  const landed = foreignRelation(subgraph ? edgeRows : rows, streamElem, fresh);
   // A MID-traversal barrier's pool is per-CALL, not per-parent: the sibling ran once over the distinct
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
-  const seed = rejoin ? foreignRejoin(landed, elem, rejoin.values, rejoin.injection, fresh) : landed;
-  const chain = detachedTail(seed, elem, steps, from, ctx, fresh);
+  const seed = rejoin ? foreignRejoin(landed, streamElem, rejoin.values, rejoin.injection, fresh) : landed;
+  const chain = detachedTail(seed, streamElem, steps, from, ctx, fresh, subgraphVertices);
   return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
@@ -4538,9 +4548,19 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  */
 function detachedTail(
   seed: Rel, elem: Elem, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+  subgraphVertices?: Rel,
 ): Tail | null {
   const step = steps[from];
   if (!step) return { rel: seed, framing: { kind: 'detached', elem }, bulked: false, aliases: NO_ALIASES };
+  // OVER A LANDED SUBGRAPH, an endpoint hop off a landed EDGE reads the edge's own `src`/`tgt` and joins
+  // the bound vertices relation for the endpoint's DATA — the vertex re-enters detachedTail with full
+  // payload, so `values`/`label`/`id` and a further endpoint hop compose over it. `inV`/`outV`/`bothV`
+  // only; `out`/`in`/`both` (vertex→vertex) is the next slice (they need the edges relation joined the
+  // other way). Absent a subgraph the ordinary decline stands.
+  if (subgraphVertices && elem === 'edge' && (step.name === 'inV' || step.name === 'outV' || step.name === 'bothV')) {
+    const reached = endpointVertices(seed, subgraphVertices, step.name, fresh);
+    return detachedTail(reached, 'vertex', steps, from + 1, ctx, fresh, subgraphVertices);
+  }
   if (step.name === 'id' || step.name === 'label') {
     const value = step.name === 'id' ? col(seed.id, 'id') : foreignLabelValue(seed, elem);
     const rel = make.project({
