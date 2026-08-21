@@ -18,29 +18,50 @@ import type { Plan } from './compiler/segment.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import type { TypeNode } from './gremlin/types.ts';
 
-/** The collaborators the trampoline needs, injected so the SAME loop runs in either runtime.
+/** The two head readers a barrier segment needs, split by the SYNC/ASYNC contract (`compiler/segment.ts`).
  *
- *  - `compile` — a (sub-)traversal to a `Plan` at this federation hop depth. In-process this is
- *    `compilePlan` bound to the app scope; the depth threads so a nested federate hops at depth+1.
- *  - `readHead` — drain a barrier segment's HEAD (an ordinary `Compiled`) into the barrier's input
- *    rows. In-process a synchronous `store.query`; Worker-side (Phase 2) an RPC to the DO. Returns a
- *    Promise-or-value so the Worker impl can be async without changing this loop. */
-export interface SegmentHost {
-  compile(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Plan;
+ *  - `readHead` — an ASYNC barrier's head: in-process a synchronous `store.query`, Worker-side an RPC to
+ *    the DO. Promise-or-value so the Worker impl can be async without changing the loop.
+ *  - `readHeadSync` — a SYNC barrier's head, read WITHOUT any await so the barrier stays atomic (nothing
+ *    interleaves). Always a local `store.query`; a sync barrier is never Worker-driven, so the Worker
+ *    edge supplies a throwing stub (routing a sync segment to the DO's own drive instead). */
+export interface SegmentReaders {
   readHead(head: Compiled): BarrierInput[] | Promise<BarrierInput[]>;
+  readHeadSync(head: Compiled): BarrierInput[];
 }
 
-/** Drive an ALREADY-COMPILED plan to its final synchronous `Executable`, given only a `readHead`. A
- *  non-segmented plan returns immediately; a barrier loops: read+drain the head → await `apply` → land
- *  the foreign rows + `resume` into the next Plan. This is the ONE await boundary of the read/federation
- *  path. Split from the initial compile so a caller that already holds the first Plan (the Worker edge,
- *  which compiles to PEEK residency before deciding to drive) reuses this loop without recompiling. */
-export async function driveSegmentsFrom(readHead: SegmentHost['readHead'], first: Plan): Promise<Executable> {
+/** The collaborators the trampoline needs, injected so the SAME loop runs in either runtime.
+ *  `compile` turns a (sub-)traversal into a `Plan` at this federation hop depth. */
+export interface SegmentHost extends SegmentReaders {
+  compile(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Plan;
+}
+
+/** Drive an ALREADY-COMPILED plan to its final `Executable`. A non-segmented plan returns immediately.
+ *  A SYNC barrier is driven with NO await — head read synchronously, then `resume` — so it interleaves
+ *  with nothing (`compiler/segment.ts`). An ASYNC barrier loops through the one await boundary: read the
+ *  head → await `apply` → `resume`. Split from the initial compile so a caller that already holds the
+ *  first Plan (the Worker edge) reuses this loop without recompiling. */
+export async function driveSegmentsFrom(readers: SegmentReaders, first: Plan): Promise<Executable> {
   let p: Plan = first;
   while (p.kind === 'segment') {
-    const rows = p.head ? await readHead(p.head) : [];
+    if (p.mode === 'sync') { p = p.resume(readers.readHeadSync(p.head)); continue; }
+    const rows = p.head ? await readers.readHead(p.head) : [];
     const foreign = await p.apply(rows);
     p = p.resume(foreign, rows);
+  }
+  return p.compiled;
+}
+
+/** Drive a plan SYNCHRONOUSLY — the `framed()` path. Only SYNC barriers can be resolved here; an ASYNC
+ *  barrier THROWS (there is no await to run its transform). This is what makes a sync barrier's "no async
+ *  bit" a property of the CALL PATH, not just of the transform: regex runs to completion with zero
+ *  suspension, so nothing can mutate the store mid-query. */
+export function driveSegmentsSync(readHeadSync: SegmentReaders['readHeadSync'], first: Plan): Executable {
+  let p: Plan = first;
+  while (p.kind === 'segment') {
+    if (p.mode !== 'sync')
+      throw new Error('this traversal suspends at an async barrier (a federated call(), or io()) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
+    p = p.resume(readHeadSync(p.head));
   }
   return p.compiled;
 }
@@ -53,5 +74,5 @@ export function driveSegments(
   paramTypes: Record<string, TypeNode>,
   federationDepth: number,
 ): Promise<Executable> {
-  return driveSegmentsFrom(host.readHead, host.compile(gremlin, params, paramTypes, federationDepth));
+  return driveSegmentsFrom(host, host.compile(gremlin, params, paramTypes, federationDepth));
 }

@@ -34,19 +34,35 @@ export interface FederationSource {
   executor(id: string): { raw(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, unknown>): Promise<ForeignRow[]> };
 }
 
-/** A compile suspended at a barrier call(). `head` is a COMPLETE, ordinary Compiled — the
- *  barrier's INPUT rows, run and drained like any read — or `null` for a source-form g.call(...) that
- *  has no local input (apply then runs over an empty input). For a mid-traversal call the head is the
- *  prefix ENDING IN THE INJECTION READ, so it projects the injected VALUE and not the parent element:
- *  a barrier reads exactly one field of its input (`BarrierInput` is `{injectedValue?}`), and
- *  materializing each parent's id, label set and property bag to reach it was work whose only consumer
- *  threw it away. `apply` is the service's apply, already closed over this call's
- *  params, its hop depth, and the service's own app-scope dependencies (the FederationSource among
- *  them) — so it takes only the rows. `resume` turns the barrier's
- *  awaited output into the next Plan (synchronously — the only await is `apply`). Nothing here is
- *  federate-specific: any future barrier service returns this shape. */
-export interface SegmentPlan {
+// ---------- a barrier is SYNC or ASYNC, and the distinction is a CORRECTNESS contract ----------
+//
+// `mode` is not ergonomics. An `await` in a barrier's transform is a SUSPENSION POINT: on a Durable
+// Object another request can be delivered and MUTATE the store across it, and the transform pins the
+// single-threaded DO for its whole duration. So the two modes carry two different guarantees, and the
+// drive path honours them (`src/drive.ts`):
+//
+//   - **SYNC** (`regex`): the transform is a plain function with NO await. Head, transform and resume
+//     run as ONE synchronous stretch over ONE consistent snapshot — nothing interleaves, and it cannot
+//     leave the DO. It is drivable from the SYNCHRONOUS `framed()` path (`driveSegmentsSync`), which is
+//     what makes "no async bit" true by construction rather than by reasoning about microtasks. A sync
+//     barrier has no `apply` and no `residency` — it is always local and always atomic.
+//   - **ASYNC** (`federate`, `io`, the planned OLAP barriers): the transform awaits real I/O (a sibling
+//     DO, an object store) or is a long batch that MUST yield so the DO serves other requests. It is
+//     NOT single-snapshot isolated across the boundary (federate says so in its own `describeParams`),
+//     and it needs the async trampoline. `residency` decides whether the Worker may drive it off the DO.
+//
+// Rationale + the two orthogonal axes (this one, and the barrier's OUTPUT shape):
+// `docs/2026-08-21-barrier-substrate-design.md`.
+
+/** An ASYNC barrier. `head` is a COMPLETE, ordinary Compiled — the barrier's INPUT rows, run and
+ *  drained like any read — or `null` for a source-form g.call(...) with no local input. For a
+ *  mid-traversal call the head projects the injected VALUE (`BarrierInput` is `{injectedValue?}`).
+ *  `apply` runs the async transform (the one await); `resume` turns its awaited OUTPUT into the next
+ *  Plan. `headRows` is the drained head input — a mid-traversal rejoin needs the value each parent
+ *  asked with, to scatter the returned pool back by a real SQL JOIN. */
+export interface AsyncSegmentPlan {
   readonly kind: 'segment';
+  readonly mode: 'async';
   readonly head: Compiled | null;
   readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
   readonly params: CallParams;
@@ -54,17 +70,24 @@ export interface SegmentPlan {
    *  (federate); `'do'` — must run beside the store, so the edge falls back to the DO's own drive (io).
    *  Threaded from the resolved `Contribution.residency`; the drive decision (`EdgeExecutor`) reads it. */
   readonly residency: BarrierResidency;
-  /** Turn the barrier's awaited OUTPUT (`foreign`) into the next Plan. `headRows` is the drained
-   *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs the VALUE each parent
-   *  asked with, to scatter the returned pool back over the parents by a real SQL JOIN on that value
-   *  (so N parents sharing a value each get the whole matching set, and a parent matching nothing
-   *  yields no row); a source-form resume ignores it. Nothing else about a parent survives the
-   *  boundary: `path()`/`as()` across a barrier is unsupported, not carried. */
   readonly resume: (foreign: ForeignRow[], headRows: readonly BarrierInput[]) => Plan;
 }
 
-/** A fully-planned traversal: either a single synchronous SQL/write compile (everything in
- *  Phases 1-5 — the zero-segment degenerate case) or a barrier segment awaiting resumption. */
+/** A SYNC barrier. No `apply` (there is no async transform) and no `residency` (always local, always
+ *  atomic). The head is read synchronously, its rows handed straight to `resume`, which does the
+ *  synchronous transform AND builds the next Plan. `head` is never null — a sync barrier reads a head
+ *  to transform (regex's candidate `values(key)`). */
+export interface SyncSegmentPlan {
+  readonly kind: 'segment';
+  readonly mode: 'sync';
+  readonly head: Compiled;
+  readonly resume: (headRows: readonly BarrierInput[]) => Plan;
+}
+
+export type SegmentPlan = AsyncSegmentPlan | SyncSegmentPlan;
+
+/** A fully-planned traversal: either a single synchronous SQL/write compile (the zero-segment
+ *  degenerate case) or a barrier segment awaiting resumption. */
 export type Plan =
   | { readonly kind: 'sql'; readonly compiled: Executable }
   | SegmentPlan;

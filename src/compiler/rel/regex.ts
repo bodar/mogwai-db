@@ -1,6 +1,6 @@
 import type { Step } from '../../gremlin/frontend.ts';
 import { arg, isPred } from '../../gremlin/frontend.ts';
-import type { BarrierInput, ForeignRow } from '../../services/spi/types.ts';
+import type { BarrierInput } from '../../services/spi/types.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
 import { lowerToRel, type Lowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
@@ -128,18 +128,16 @@ export function buildRegexSegment(
   // divergence's honest failure mode rather than a silent different answer.
   const re = new RegExp(barrier.pattern);
 
-  // A regex barrier has NO async transform — its work is pure sync CPU over a batch already resident in
-  // the DO. So `apply` is the genuinely empty boundary (a barrier is not obliged to do async work; the
-  // async-capable slot subsumes a sync one), and the SYNC filter lives in `resume`, which already
-  // receives the drained head rows. Nothing is smuggled through the `ForeignRow` payload — the
-  // survivors are VALUES, re-injected as `within()`, not detached elements landed as foreign rows.
+  // A regex barrier is SYNCHRONOUS (`compiler/segment.ts`) — no `apply`, no `residency`. There is NO
+  // async transform: the head is read synchronously, `resume` filters those rows with the regex and
+  // re-injects the survivors as `within()`, and the whole thing runs as one atomic stretch that cannot
+  // interleave with anything and never leaves the DO. The survivors are VALUES, not detached elements —
+  // no `ForeignRow` payload is involved.
   return {
     kind: 'segment',
+    mode: 'sync',
     head,
-    params: {},
-    residency: 'do',
-    apply: (): Promise<ForeignRow[]> => Promise.resolve([]),
-    resume: (_foreign: ForeignRow[], headRows: readonly BarrierInput[]): Plan =>
+    resume: (headRows: readonly BarrierInput[]): Plan =>
       planOf(reinject(steps, at, barrier.key, survivorsOf(headRows, re, barrier.negated))),
   };
 }

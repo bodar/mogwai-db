@@ -162,6 +162,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
   if (head.kind !== 'read') return null;
   return {
     kind: 'segment',
+    mode: 'async',
     head,
     params: barrier.site.params,
     apply: barrier.apply,
@@ -178,6 +179,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
 function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
   return {
     kind: 'segment',
+    mode: 'async',
     head: null,
     params: barrier.site.params,
     apply: barrier.apply,

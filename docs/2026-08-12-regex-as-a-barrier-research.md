@@ -5,10 +5,11 @@ The SEMANTICS COMMITMENT below (§"The two real costs", item 1) was RESOLVED: co
 semantics (Java `matcher.find()`), divergence on Java-only constructs documented in the code — the corpus
 exercises none of them. The re-injection is the VALUE bound-join (§"The observation"): head projects
 `values(key)` → one JS pass → survivors re-injected as `within(json_each)` (one bind). Everything OUTSIDE
-`has(key, regex)` (`is`/`where`/`match`) stays a fail-closed deferral (§item 2). **Still open:** the
-trigram PREFILTER (§"the trigram prefilter" — a perf follow-up, not correctness) and making the barrier
-explicitly SYNCHRONOUS (`docs/2026-08-21-barrier-substrate-design.md`, Axis 1). The rest of this note is
-the research that produced the landing.
+`has(key, regex)` (`is`/`where`/`match`) stays a fail-closed deferral (§item 2). The barrier is now
+explicitly SYNCHRONOUS — atomic, no interleaving, runs on the sync path too
+(`docs/2026-08-21-barrier-substrate-design.md`, Axis 1, LANDED 2026-08-21). **Still open:** the trigram
+PREFILTER (§"the trigram prefilter" — a perf follow-up, not correctness). The rest of this note is the
+research that produced the landing.
 
 ⚠️ **Reviewed against the single-spine cut.** Everything below held up, and two things got STRONGER —
 see "What the RelIR spine changed". The grammar spelling is `TextP.regex(…)` (`Gremlin.g4:1327`), not

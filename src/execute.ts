@@ -8,7 +8,7 @@ import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runSteps } from './program.ts';
-import { driveSegments, type SegmentHost } from './drive.ts';
+import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -809,9 +809,10 @@ export class Executor implements ExecutorApi {
    *  async path; only the await-loop differs. */
   private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Executable {
     const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0 }, paramTypes);
-    if (plan.kind === 'segment')
-      throw new Error('this traversal suspends at a barrier (a federated call(), or a regex predicate) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
-    return plan.compiled;
+    // A SYNC barrier (regex) IS drivable here — its head read and resume run with no await, so the whole
+    // traversal is one atomic synchronous stretch. Only an ASYNC barrier (federate, io) throws, since
+    // this path has no await to run its transform. (`driveSegmentsSync`.)
+    return driveSegmentsSync((head) => readSegmentHead(this.store, head), plan);
   }
 
   /** This Executor as a `SegmentHost` (src/drive.ts): compile bound to this app scope, and the
@@ -822,6 +823,10 @@ export class Executor implements ExecutorApi {
     compile: (gremlin, params, paramTypes, federationDepth) =>
       compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes),
     readHead: (head) => readSegmentHead(this.store, head),
+    // A sync barrier's head, read WITHOUT an await — same local `store.query`, so it interleaves with
+    // nothing. `readSegmentHead` is already synchronous; the two readers differ only in that the async
+    // one may be an RPC Worker-side, which a sync barrier (always local) never is.
+    readHeadSync: (head) => readSegmentHead(this.store, head),
   };
 
   /** Drive a (possibly segmented) plan to a final synchronous Compiled/Program — the ONE await

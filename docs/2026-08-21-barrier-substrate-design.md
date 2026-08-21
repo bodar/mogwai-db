@@ -72,8 +72,10 @@ want different shapes.
 
 ## What is decided vs deferred
 
-- **NOW:** make Axis 1 explicit — a barrier declares sync/async; the drive loop runs a sync barrier
-  with no `await`; **regex is sync**. This is a correctness property regex needs, and it names the OLAP
-  distinction for free. (This is the sync/async work following the regex-barrier landing.)
+- **LANDED (2026-08-21):** Axis 1 is explicit — `SegmentPlan` is a discriminated union on `mode`
+  (`compiler/segment.ts`); a `SyncSegmentPlan` has no `apply`/`residency` and is driven with NO `await`
+  (`driveSegmentsSync`, reachable from the sync `framed()` path), an `AsyncSegmentPlan` keeps the await
+  trampoline. **regex is sync** — it runs atomically on the sync path (so it now executes in the sync
+  census too), and federate/io are async.
 - **LATER (needs a second concrete consumer + measurement):** substrate (B); moving federate's
   re-injection onto (A); the OLAP occupancy model (alarm-checkpoint vs Worker-driven).

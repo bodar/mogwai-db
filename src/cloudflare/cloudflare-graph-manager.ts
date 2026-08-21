@@ -35,12 +35,18 @@ class EdgeExecutor implements RemoteExecutor {
     // the DO via runFramed; the DO does not recompile.
     if (plan.kind === 'sql') return rpcUnwrap(await this.stub.runFramed(plan.compiled) as RpcResult<Framed[]>);
 
-    // A federation segment. If its barrier may LEAVE the DO (`worker` — federate), the WORKER drives the
+    // A barrier segment. If it is ASYNC and may LEAVE the DO (`worker` — federate), the WORKER drives the
     // loop: `apply` fans out to siblings from here (via this manager's `raw`), and the DO runs only the
-    // brief head read and the final framing (its request closes across the sibling waits). A `do`
-    // barrier (io) needs the store the Worker lacks, so it stays DO-driven via the string fallback.
-    if (plan.residency === 'worker') {
-      const final = await driveSegmentsFrom((head) => this.readHead(head), plan);
+    // brief head read and the final framing (its request closes across the sibling waits). Everything else
+    // stays DO-driven via the string fallback: an async `do` barrier (io) needs the store the Worker
+    // lacks, and a SYNC barrier (regex) is always local and atomic — the DO runs its no-await segment loop.
+    if (plan.mode === 'async' && plan.residency === 'worker') {
+      const final = await driveSegmentsFrom(
+        // A Worker-driven loop reads an async barrier's head by RPC; a sync barrier is never Worker-driven,
+        // so its reader throws rather than pretend the Worker holds a store.
+        { readHead: (head) => this.readHead(head), readHeadSync: () => { throw new Error('a sync barrier cannot be Worker-driven — it runs on the DO'); } },
+        plan,
+      );
       return rpcUnwrap(await this.stub.runFramed(final) as RpcResult<Framed[]>);
     }
     return this.runOnDo(gremlin, params, paramTypes);

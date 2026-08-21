@@ -216,10 +216,10 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
-    // compile() is synchronous and cannot resolve a barrier; the executor (executeFramed) drives
-    // the async segment plan. compilePlan yields a segment instead of throwing.
+    // compile() only produces the plan; a barrier segment must be DRIVEN against a store, which bare
+    // compile() has no access to. compilePlan yields a segment instead of throwing.
     expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: () => reg }))
-      .toThrow(/segment executor/);
+      .toThrow(/must be DRIVEN against a store/);
   });
 
   test('compilePlan() on a barrier source yields a segment plan (head=null for a source)', () => {
