@@ -812,6 +812,23 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     return hasPropertyClause(key, val, element, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
   }
 
+  // `hasId(...)` reads the element's EXTERNAL id (`COALESCE(uid, id)`), the same row `has(T.id, …)`
+  // does — so it is that clause with the id token supplied, and every predicate form composes for
+  // free: `hasId(1)`/`hasId([2,6])`/`hasId(1,2)` are an id-membership set (`HasIdStep` treats several
+  // ids and a collection alike as a `P.within`, the single-`P` form aside), `hasId(P.gt(2))` a range,
+  // `hasId(P.eq(__.V(x).id()))` the nested-operand compare, and `hasId(P.within([]))`/`hasId(null)` the
+  // degenerate sets that fold to their truth value. The front end keeps a collection arg WHOLE (with
+  // `.members`), which is exactly the single-collection operand `predicateExpr`'s `within` spreads.
+  if (step.name === 'hasId') {
+    const idArgs = step.args ?? [];
+    if (!idArgs.length) return null;
+    const single = idArgs.length === 1 ? idArgs[0]! : null;
+    const val: unknown = single && isPred(single.value) ? single.value
+      : { op: 'within', operands: idArgs };
+    return hasTokenClause('id', val, element, fresh, single?.type ?? null, single?.name ?? null,
+      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh));
+  }
+
   return null;
 }
 

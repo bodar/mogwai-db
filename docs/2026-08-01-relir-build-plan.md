@@ -759,6 +759,16 @@ reads), side effects, then `local`, `match`, `where`, the `path` tails.
 
 🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
 pattern this whole stage kept finding:
+- ✅ **`hasId(…)` — LANDED, and it was ENTIRELY unlowered (0 executing, 21 deferrals) despite the algebra
+  existing.** `hasId` reads the element's EXTERNAL id (`COALESCE(uid,id)`), the same row `has(T.id,…)`
+  does — so `sourceFilter` now routes it straight to `hasTokenClause('id',…)` with the id token supplied,
+  and every predicate form composes for free: `hasId(1)`/`hasId([2,6])`/`hasId(1,2)` an id-membership
+  `within` (the front end keeps a collection arg WHOLE with `.members`, exactly the single-collection
+  operand `predicateExpr`'s `within` spreads), `hasId(P.gt(2))` a range, `hasId(P.eq(__.V(x).id()))` the
+  nested-operand compare (composing with the resolveScalar work above), and
+  `hasId(P.within([]))`/`hasId(P.without([]))`/`hasId(null)`/`hasId(P.eq(null))` the degenerate sets that
+  fold to their truth value (`filter/HasId.feature` pins `within[]`→0, `without[]`→6, `null`→empty). Both
+  vertex and edge. The param-bearing forms (`hasId(vid1)`) are the census's "unbound" set; L3 binds them.
 - ✅ **a KEYED `dedup(k1,…,kn)[.by(proj)]` on the ELEMENT stream — LANDED, and it was PURELY a missing
   caller.** `dedupByLabels` (`lower.ts`, `DedupGlobalStep` with `dedupLabels`) was already built and wired
   into the RECORD tail (the post-`select` form); the PRE-`select` form (`g.V().as('a').both().as('b').dedup('a','b').by(T.label).select('a','b')`,
