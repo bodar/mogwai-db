@@ -1,9 +1,10 @@
-import { col, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Arg } from '../../gremlin/frontend.ts';
+import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
-import { and, carriedCols, elementCols, eq, keyMembership, labelIds, meta, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
+import { constLit } from './const.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -56,6 +57,14 @@ export interface GraphSource {
    *  the source owns the ROWS, the vocabulary the framing. `BaseGraph` joins `vertex_properties` /
    *  `edge_properties`; a landed graph explodes the inline `{t,v}` tree. */
   propertyValues(input: Rel, kind: Elem, keys: readonly string[] | null, fresh: Minter): Rel;
+
+  /** `V(…)`/`E(…)` — the element SOURCE: one row per element at bulk 1, narrowed by an id list bounded
+   *  by the QUERY TEXT (`args`). Returns the physical scan plus the id predicate (or none for the whole
+   *  graph); `null` where an id is a shape the source cannot narrow by. `BaseGraph` scans `nodes`/`edges`
+   *  and matches numeric ids on the rowid, string ids on the `uid` (a bound collection as one
+   *  `jsonb(?)` exploded by `json_each`); a landed graph scans its bound CTE and filters its single
+   *  `id` column. The caller derives the element KIND from the step name. */
+  elementScan(kind: Elem, args: readonly Arg[], fresh: Minter): { scan: Rel; pred?: Expr } | null;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -89,5 +98,58 @@ export const BaseGraph: GraphSource = {
       exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
         ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
     });
+  },
+
+  elementScan: (kind, args, fresh) => {
+    // A `r`-prefixed alias, so a RelIR scan can never SHADOW one of the framing layer's (`n`/`e`/`p`/
+    // `s`/`v`/`g`/`j`/`l`). The plan is spliced in as a derived table, so shadowing would be legal SQL
+    // and silently resolve an outer correlation to the inner table.
+    const scan = make.scan({
+      id: fresh('src'), table: kind === 'edge' ? 'edges' : 'nodes', alias: kind === 'edge' ? 're' : 'rn', channels: [],
+      type: typeOf(...(kind === 'edge' ? EDGE_COLS : NODE_COLS)),
+    });
+
+    // Ids span two provenances and two columns. PROVENANCE decides bind-vs-inline: a parsed LITERAL id
+    // is a constant bounded by the QUERY TEXT and INLINES (a rowid `int`, a uid `text`); a wire
+    // PARAMETER (`V($x)`) BINDS, so its value never enters the statement text — a scalar as one `?`, a
+    // bound collection (`V($ids)`) as ONE `jsonb(?)` exploded by `json_each`. COLUMN follows the value's
+    // type: a number matches the rowid `id`, a string the `uid`.
+    const idCol = col(scan.id, 'id');
+    const uidCol = col(scan.id, 'uid');
+    const inlineNums: number[] = [];
+    const inlineStrs: string[] = [];
+    const paramClauses: Expr[] = [];
+    const inlineOne = (v: unknown): boolean => {
+      if (typeof v === 'number') { inlineNums.push(v); return true; }
+      if (typeof v === 'string') { inlineStrs.push(v); return true; }
+      return false; // an id that is neither declines — a hard error, not a value this route can inline
+    };
+    for (const a of args) {
+      if (a.name == null) {
+        // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
+        // grammar forbids a param member, so every member is itself a literal that inlines.
+        const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+        for (const v of members) if (!inlineOne(v)) return null;
+      } else if (Array.isArray(a.value)) {
+        // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
+        // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
+        paramClauses.push({ kind: 'in-query', expr: idCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_NUMERIC_TYPES), negated: false });
+        paramClauses.push({ kind: 'in-query', expr: uidCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_TEXT_TYPES), negated: false });
+      } else if (typeof a.value === 'number') {
+        paramClauses.push(eq(idCol, param(a.value, a.name)));
+      } else if (typeof a.value === 'string') {
+        paramClauses.push(eq(uidCol, param(a.value, a.name, 'text')));
+      } else return null; // a bound id of another shape declines, as its inline sibling does
+    }
+
+    // Inline lists first so a param-free `V(...)` renders byte-for-byte as before; `constLit` never
+    // declines a number/string, so its assertion cannot fire.
+    const clauses: Expr[] = [];
+    if (inlineNums.length) clauses.push({ kind: 'in-list', expr: idCol, values: inlineNums.map((n) => constLit(arg(n, 'long'))!) });
+    if (inlineStrs.length) clauses.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
+    clauses.push(...paramClauses);
+    const pred = clauses.reduce<Expr | undefined>((left, right) =>
+      left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
+    return { scan, pred };
   },
 };

@@ -31,7 +31,7 @@ import { alwaysProduces, MAPPING_TERMINAL } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES,
+    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet,
     jsonMemberByTypeof, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber,
     typeOf, withMergedVtype, type Minter,
 } from './build.ts';
@@ -963,70 +963,6 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fr
 }
 
 /**
- * `V(...)` / `E(...)` — the element source: one row per element at bulk 1, narrowed by an id list
- * bounded by the QUERY TEXT (never by row count, so `InList` is right here and a JSON bind is not).
- *
- * Numeric args match the rowid and string args the user id, because the id-relation carries rowids
- * throughout and a `uid` match still projects the rowid. That asymmetry is the storage schema's,
- * which is why it lives at the one node that names a table.
- */
-function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; elem: Elem } | null {
-  const elem: Elem = step.name === 'E' ? 'edge' : 'vertex';
-  // A `r`-prefixed alias, so a RelIR scan can never SHADOW one of the framing layer's (`n`/`e`/`p`/
-  // `s`/`v`/`g`/`j`/`l`). The plan is spliced in as a derived table, so shadowing would be legal
-  // SQL and silently resolve an outer correlation to the inner table.
-  const scan = make.scan({
-    id: fresh('src'), table: elem === 'edge' ? 'edges' : 'nodes', alias: elem === 'edge' ? 're' : 'rn', channels: [],
-    type: typeOf(...(elem === 'edge' ? EDGE_COLS : NODE_COLS)),
-  });
-
-  // Ids span two provenances and two columns. PROVENANCE decides bind-vs-inline: a parsed LITERAL id
-  // is a constant bounded by the QUERY TEXT and INLINES (a rowid `int`, a uid `text`); a wire
-  // PARAMETER (`V($x)`) BINDS, so its value never enters the statement text — a scalar as one `?`, a
-  // bound collection (`V($ids)`) as ONE `jsonb(?)` exploded by `json_each`, exactly the rule the
-  // `within($list)` set already keeps. COLUMN follows the value's type: a number matches the rowid
-  // `id`, a string the `uid` — for a literal decided here, for a bound member decided per row by
-  // json_each's own type (so a heterogeneous bound id list is faithful without our reading its data).
-  const idCol = col(scan.id, 'id');
-  const uidCol = col(scan.id, 'uid');
-  const inlineNums: number[] = [];
-  const inlineStrs: string[] = [];
-  const paramClauses: Expr[] = [];
-  const inlineOne = (v: unknown): boolean => {
-    if (typeof v === 'number') { inlineNums.push(v); return true; }
-    if (typeof v === 'string') { inlineStrs.push(v); return true; }
-    return false; // an id that is neither declines — a hard error, not a value this route can inline
-  };
-  for (const a of step.args) {
-    if (a.name == null) {
-      // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
-      // grammar forbids a param member, so every member is itself a literal that inlines.
-      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
-      for (const v of members) if (!inlineOne(v)) return null;
-    } else if (Array.isArray(a.value)) {
-      // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
-      // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
-      paramClauses.push({ kind: 'in-query', expr: idCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_NUMERIC_TYPES), negated: false });
-      paramClauses.push({ kind: 'in-query', expr: uidCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_TEXT_TYPES), negated: false });
-    } else if (typeof a.value === 'number') {
-      paramClauses.push(eq(idCol, param(a.value, a.name)));
-    } else if (typeof a.value === 'string') {
-      paramClauses.push(eq(uidCol, param(a.value, a.name, 'text')));
-    } else return null; // a bound id of another shape declines, as its inline sibling does
-  }
-
-  // Inline lists first so a param-free `V(...)` renders byte-for-byte as before; `constLit` never
-  // declines a number/string, so its assertion cannot fire.
-  const clauses: Expr[] = [];
-  if (inlineNums.length) clauses.push({ kind: 'in-list', expr: idCol, values: inlineNums.map((n) => constLit(arg(n, 'long'))!) });
-  if (inlineStrs.length) clauses.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
-  clauses.push(...paramClauses);
-  const pred = clauses.reduce<Expr | undefined>((left, right) =>
-    left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
-  return { scan, pred, elem };
-}
-
-/**
  * A non-start `V()` / `E()` — GraphStep's re-source operation.
  *
  * `GraphStep.processNextStart()` takes one incoming traverser, opens the graph iterator, and emits
@@ -1046,7 +982,8 @@ function reSource(
   if ((step.name !== 'V' && step.name !== 'E') || step.modulators?.length || step.optionArms) return null;
   if (framing.kind === 'path' || input.channels.some((channel) =>
     channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
-  const seeded = elementScan(step, fresh);
+  const elem: Elem = step.name === 'E' ? 'edge' : 'vertex';
+  const seeded = ctx.source.elementScan(elem, step.args, fresh);
   if (!seeded) return null;
   const source = seeded.pred
     ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred })
@@ -1097,7 +1034,7 @@ function reSource(
         ] as const),
       ],
     });
-  if (!arrivingEncounter) return { elem: seeded.elem, rel: project() };
+  if (!arrivingEncounter) return { elem, rel: project() };
   // Parent outer iteration then source rowid is the iterator order GraphStep realizes. `renumber`
   // consumes those temporary keys and leaves a single total encounter column on the result.
   const carried = channels.filter((channel) => channel.role !== 'encounter');
@@ -1111,7 +1048,7 @@ function reSource(
     ],
   });
   return {
-    elem: seeded.elem,
+    elem,
     rel: renumber(staged, [
       { expr: col(staged.id, 'parent_encounter'), dir: 'asc' },
       { expr: col(staged.id, 'source_id'), dir: 'asc' },
@@ -4464,7 +4401,8 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // A modulator or an option arm on the source is not a source argument; decline rather than
   // silently ignore it.
   if (first.modulators?.length || first.optionArms) return null;
-  const seeded = elementScan(first, fresh);
+  const elem0: Elem = first.name === 'E' ? 'edge' : 'vertex';
+  const seeded = ctx.source.elementScan(elem0, first.args, fresh);
   if (!seeded) return null;
 
   // PHASE 1 — the source scan and the filters that fuse into its own WHERE. Kept separate from the
@@ -4473,7 +4411,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // over one scan instead of a CTE-per-filter with its re-join.
   let pred = seeded.pred;
   let at = 1;
-  let elem = seeded.elem;
+  let elem = elem0;
   for (; at < steps.length; at++) {
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
     if (!clause) break;
