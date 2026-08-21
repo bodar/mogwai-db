@@ -1,7 +1,13 @@
 # GraphSource — one traversal vocabulary over two graph shapes (PLAN)
 
-**Status: PLAN, not yet built.** This is the plan of record for the next run. Nothing here is on trunk
-yet. It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
+**Status: IN PROGRESS.** Plan of record. **Naming SETTLED (step 1): `GraphSource` / `BaseGraph` /
+`BoundGraph`** (compiler words for machinery, per root `CLAUDE.md`). **Step 1 LANDED** (`95ad5ba`):
+`GraphSource` + `BaseGraph` defined in `src/compiler/rel/source.ts`, threaded on `ChainCtx.source`
+(default `BaseGraph`), and the `movement` chokepoint's edge scan + label predicate rerouted through
+`adjacencyEdges` / `edgeLabelMatch` — census-invariant. The interface grows ONE method per rerouted
+chokepoint (no speculative/dead methods); step 2 continues with `values`/`has` → labels →
+`elementScan`. It supersedes the piecemeal bound-graph vocabulary that landed in
+`src/compiler/rel/foreign.ts` +
 `detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
 is CORRECT and pinned the semantics, but it is a **second hand-written traversal vocabulary**, and this
 plan retires it in favour of one vocabulary parameterised by a graph source.
