@@ -182,18 +182,31 @@ const existsFilter = (seed: Rel, matched: Rel, fresh: Minter): Rel =>
  * property is MULTI-VALUED (the key holds an array of `{t,v}` nodes), so membership is an `EXISTS` over
  * the exploded array, not a first-value read — the same any-member rule `has` has on a stored element.
  */
-export function boundVertexHas(seed: Rel, key: string, cmp: { op: '=' | '!=' | '<' | '<=' | '>' | '>='; value: unknown } | undefined, fresh: Minter): Rel {
+export type HasMatch =
+  | { readonly op: '=' | '!=' | '<' | '<=' | '>' | '>='; readonly value: unknown }
+  | { readonly within: readonly unknown[] };
+
+export function boundVertexHas(seed: Rel, key: string, match: HasMatch | undefined, fresh: Minter): Rel {
   const exploded = make.explode({
     id: fresh('hx'), channels: [], expr: jsonExtract(col(seed.id, 'props'), jsonKeyPath(key)),
     as: { value: 'hv' }, type: typeOf(meta('hv', 'any', true)),
   });
-  const matched = cmp
-    ? make.filter({
-      id: fresh('hm'), input: exploded, channels: [], type: exploded.type,
-      pred: { kind: 'binary', op: cmp.op, left: jsonExtract(col(exploded.id, 'hv'), '$.v'), right: lit(cmp.value) },
-    })
-    : exploded;
+  const value = jsonExtract(col(exploded.id, 'hv'), '$.v');
+  const pred: Expr | undefined = !match ? undefined
+    : 'within' in match
+      ? { kind: 'in-list', expr: value, values: match.within.map((v) => lit(v)) }
+      : { kind: 'binary', op: match.op, left: value, right: lit(match.value) };
+  const matched = pred ? make.filter({ id: fresh('hm'), input: exploded, channels: [], type: exploded.type, pred }) : exploded;
   return existsFilter(seed, matched, fresh);
+}
+
+/** Filter a landed vertex/edge relation to the given ids — `V(ids)`/`E(ids)` over a subgraph. The
+ *  landed `id` column is `any` (an int rowid or a `uid` string), compared against the literal ids. */
+export function boundById(rel: Rel, ids: readonly unknown[], fresh: Minter): Rel {
+  return make.filter({
+    id: fresh('bid'), input: rel, channels: rel.channels, type: rel.type,
+    pred: { kind: 'in-list', expr: col(rel.id, 'id'), values: ids.map((v) => lit(v)) },
+  });
 }
 
 /** `hasLabel(l…)` over a landed vertex — the label column is a json ARRAY (every label), so membership

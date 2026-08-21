@@ -46,7 +46,7 @@ import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabe
 import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
-import { boundVertexHas, boundVertexHasLabel, boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues, HAS_CMP_OPS } from './foreign.ts';
+import { boundById, boundVertexHas, boundVertexHasLabel, boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues, HAS_CMP_OPS, type HasMatch } from './foreign.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -4553,6 +4553,21 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  * would return a plausible, wrong row set. The traversal that wants those steps pushes them INTO the
  * sub-traversal the barrier runs on the far side, where the elements are attached.
  */
+/** A `has(key, P)` predicate to the `HasMatch` a bound-vertex filter runs, or `undefined` for a
+ *  predicate this filter does not model (`without`, `containing`, a composed `and`/`or`, a bound
+ *  operand). A single-operand comparison maps to its `BinaryOp`; `within(a,b)` / `within([a,b])` to a
+ *  membership set. */
+function hasMatchOf(pred: { readonly op: string; readonly operands: readonly { readonly value: unknown; readonly name?: string | null }[] }): HasMatch | undefined {
+  const op = pred.operands.length === 1 && pred.operands[0]!.name == null ? HAS_CMP_OPS[pred.op] : undefined;
+  if (op) return { op, value: pred.operands[0]!.value };
+  if (pred.op === 'within' && pred.operands.length > 0 && pred.operands.every((o) => o.name == null)) {
+    const within = pred.operands.length === 1 && Array.isArray(pred.operands[0]!.value)
+      ? pred.operands[0]!.value as readonly unknown[] : pred.operands.map((o) => o.value);
+    return { within };
+  }
+  return undefined;
+}
+
 function detachedTail(
   seed: Rel, elem: Elem, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
   subgraph?: { readonly vertices: Rel; readonly edges: Rel },
@@ -4564,10 +4579,13 @@ function detachedTail(
   // of the ordinary `id`/`label`/`values` readers, which already work on any landed element tuple.
   if (subgraph) {
     // `.V()`/`.E()` RE-ROOT a fresh traversal at the subgraph's vertices/edges, discarding the current
-    // stream — exactly `sg.traversal().V()`. `V(ids)`/`E(ids)` over a subgraph is not modelled yet.
-    if ((step.name === 'V' || step.name === 'E') && argValues(step).length === 0) {
+    // stream — exactly `sg.traversal().V()`. `V(ids)`/`E(ids)` filter that source by id (an inline id
+    // list only; a bound id parameter is not modelled here).
+    if (step.name === 'V' || step.name === 'E') {
       const [rel, e]: [Rel, Elem] = step.name === 'V' ? [subgraph.vertices, 'vertex'] : [subgraph.edges, 'edge'];
-      return detachedTail(rel, e, steps, from + 1, ctx, fresh, subgraph);
+      const ids = argValues(step);
+      if (ids.length && (step.args.some((a) => a.name != null) || ids.some((v) => v == null))) return null;
+      return detachedTail(ids.length ? boundById(rel, ids, fresh) : rel, e, steps, from + 1, ctx, fresh, subgraph);
     }
     // An endpoint hop off a landed EDGE reads the edge's own `src`/`tgt` and joins the bound vertices for
     // the endpoint's DATA; the vertex re-enters with full payload.
@@ -4583,6 +4601,14 @@ function detachedTail(
       if (!labels.length || !labels.every((l) => typeof l === 'string')) return null;
       return detachedTail(boundVertexHasLabel(seed, labels as string[], fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
     }
+    // `has(label, key, value)` is `hasLabel(label)` composed with `has(key, value)` — TinkerPop's own
+    // 3-arg desugaring. Apply the label filter, then fall through to the key/value form on the same step.
+    if (elem === 'vertex' && step.name === 'has' && step.args.length === 3
+      && step.args.every((a) => a.name == null && typeof a.value === 'string')) {
+      const labelled = boundVertexHasLabel(seed, [step.args[0]!.value as string], fresh);
+      const keyed = boundVertexHas(labelled, step.args[1]!.value as string, { op: '=', value: step.args[2]!.value }, fresh);
+      return detachedTail(keyed, 'vertex', steps, from + 1, ctx, fresh, subgraph);
+    }
     if (elem === 'vertex' && step.name === 'has' && (step.args.length === 1 || step.args.length === 2) && typeof step.args[0]!.value === 'string') {
       const key = step.args[0]!.value as string;
       const operand = step.args[1];
@@ -4590,9 +4616,8 @@ function detachedTail(
       if (operand.name == null && !isPred(operand.value) && !isNested(operand.value) && !isTokenArg(operand.value)) {
         return detachedTail(boundVertexHas(seed, key, { op: '=', value: operand.value }, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
       }
-      const pred = isPred(operand.value) ? operand.value : null;
-      const op = pred && pred.operands.length === 1 && pred.operands[0]!.name == null ? HAS_CMP_OPS[pred.op] : undefined;
-      if (pred && op) return detachedTail(boundVertexHas(seed, key, { op, value: pred.operands[0]!.value }, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+      const match = isPred(operand.value) ? hasMatchOf(operand.value) : undefined;
+      if (match) return detachedTail(boundVertexHas(seed, key, match, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
       return null;
     }
     // VERTEX→VERTEX movement walks the bound edges to the bound vertices. A movement's args are edge

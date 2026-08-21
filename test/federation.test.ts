@@ -291,3 +291,28 @@ describe('mogwai.graph.federate — count()/dedup() over the landed stream', () 
     expect(crewCount).toBe(direct);
   });
 });
+
+// Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
+// V(ids)/E(ids) filtering the bound source by id.
+describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const vals = async (g: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
+
+  test('has(key, within(varargs)) — membership over the bound value', async () => {
+    expect(await vals(sg('.V().has("name", within("marko","gremlin")).values("name")'))).toEqual(['gremlin', 'marko']);
+  });
+  test('has(key, within([list])) — the array form', async () => {
+    expect(await vals(sg('.V().has("name", within(["marko","stephen"])).values("name")'))).toEqual(['marko', 'stephen']);
+  });
+  test('has(label, key, value) — the 3-arg form (label AND key/value)', async () => {
+    expect(await vals(sg('.V().has("person","name","marko").values("name")'))).toEqual(['marko']);
+    expect(await vals(sg('.V().has("software","name","marko").values("name")'))).toEqual([]);
+  });
+  test('V(id) filters the bound vertices by id', async () => {
+    const ids = (await Promise.all((await mgr.executor('home').framedAsync(sg('.V().id()'), {})).map(dec))).map((x: any) => Number(x)).sort((a, b) => a - b);
+    const first = await vals(sg(`.V(${ids[0]}).values("name")`));
+    expect(first.length).toBe(1);
+  });
+});
