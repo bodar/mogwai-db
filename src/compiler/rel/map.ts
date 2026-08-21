@@ -490,13 +490,21 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
       ? elementNode(col(productive.id, KEY_COL), keyElem, fresh)
       : col(productive.id, KEY_COL),
     val: counting ? typedNode(col(productive.id, VAL_COL), compilerText('long')) : col(productive.id, VAL_COL),
+    // THE VALUE'S TRUE SHAPE (`docs/2026-08-21-map-value-shape-plan.md`): the COLLECTING arm's value is
+    // a `List` (TinkerPop injects `fold()` into every non-reducing value traversal — `GroupStep.java:61`,
+    // `Grouping.java:92-101`), whose members are all self-describing `{t,v}` nodes (a rowid is expanded
+    // to an `elementNode` at the aggregate, so both element and scalar members frame the same way) —
+    // hence `{kind:'list', of: TYPED_MEMBERS}`. A COUNT (`groupCount`) is a scalar `long`; a SINGLE
+    // value (`by(__.tail())`, an anonymous child) is one member, a scalar. The map still frames
+    // byte-identically — only the DESCRIPTOR a consumer (`select(values)`/`select(<key>)`/`unfold`) reads
+    // becomes precise, so those compose over a list value instead of mis-shaping it as a scalar.
     // AN ELEMENT KEY SAYS SO, and that is what keeps the SIDE READS honest. The blob holds a
     // `{t:'vertex', v:{…}}` node, which the typed framer walks correctly at any depth — but a
     // `select(Column.keys).unfold()` would decode it into the SCALAR vocabulary, whose framer cannot
     // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
     // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
     keyOf: keyElem ? { kind: 'elem', elem: keyElem } : { kind: 'scalar' },
-    valOf: { kind: 'scalar' },
+    valOf: counting || recipe.single ? { kind: 'scalar' } : { kind: 'list', of: TYPED_MEMBERS },
   };
   return {
     // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
@@ -1165,14 +1173,18 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  * is a translation rather than a coincidence: both vocabularies describe the same self-describing tree,
  * one from the map's side and one from the list's, so `select(Column.keys)` needs no re-encoding at all.
  *
- * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are — and it is the
- * ONLY side any producer here emits, deliberately: every value side is a self-describing node
- * (`elementValueMap`'s note says why), which is what keeps `valOf` at one arm instead of needing a
- * "mixed" one. An `elem` side is an expanded element node whose decode into the SCALAR vocabulary
- * would be lossy, so it declines. `MapOf`'s remaining `list` arm has no producer on this route; an arm
- * for it here would be one with nothing to reach it.
+ * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are. A `list` VALUE
+ * is a list whose members have shape `of.of` — so `select(Column.values)` over a `Map<K,List>` is a
+ * list-of-lists (`docs/2026-08-21-map-value-shape-plan.md`): the RESULT list's member IS that value
+ * list, so the translation is the identity on the `list` arm (`{kind:'list', of}` describes both the
+ * value and the result member). The members are collected at the ROOT encoding (raw inner arrays — see
+ * `mapSide`), so `unfoldNested`/`listPayloadExpr` serve them unchanged. An `elem` side is an expanded
+ * element node whose decode into the SCALAR vocabulary would be lossy, so it declines.
  */
-const sideList = (of: MapOf): ListOf | null => (of.kind === 'scalar' ? TYPED_MEMBERS : null);
+const sideList = (of: MapOf): ListOf | null =>
+  of.kind === 'scalar' ? TYPED_MEMBERS
+    : of.kind === 'list' ? of
+      : null;
 
 /**
  * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.
@@ -1193,8 +1205,16 @@ export function mapSide(
   if (!items) return null;
   const rel = fenced(input, fresh);
   const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
-  const sides = collectedOf(pairs, jsonOf(pairSide(col(pairs.id, PAIR.value), side)),
-    [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }], LIST_COL, fresh);
+  // THE MEMBER IS THE SIDE'S NODE, except a LIST value collects at the ROOT encoding: its `{t:'list',
+  // v:[…]}` node is UNWRAPPED to its raw inner array (`$.v`), so `select(Column.values)` over a
+  // `Map<K,List>` is a standard root-encoded list-of-lists that `unfoldNested`/`listPayloadExpr` frame
+  // unchanged (`docs/2026-08-21-map-value-shape-plan.md`, the encoding fork). A scalar side keeps its
+  // self-describing `{t,v}` node (`TYPED_MEMBERS`).
+  const node = pairSide(col(pairs.id, PAIR.value), side);
+  const member = of.kind === 'list'
+    ? jsonOf({ kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] })
+    : jsonOf(node);
+  const sides = collectedOf(pairs, member, [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }], LIST_COL, fresh);
   return {
     rel: withPayload(rel, [[LIST_COL, sides]], [meta(LIST_COL, 'json', true)], fresh),
     of: items,
@@ -1264,8 +1284,13 @@ export function entrySide(input: Rel, side: 'keys' | 'values', of: MapOf, fresh:
  * it into the SCALAR vocabulary would be lossy. There is no third side — see `sideList`.
  */
 function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
-  if (of.kind !== 'scalar') return null;
   const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${name}`)] });
+  // A LIST value UNWRAPS its `{t:'list', v:[…]}` node to the raw inner array in `LIST_COL` — the same
+  // root encoding `mapSide` collects — so `select(<key>)`/an entry's value side is a LIST stream the
+  // caller continues with `listTail` (`docs/2026-08-21-map-value-shape-plan.md`). Without this a list
+  // `valOf` would make `select(<key>)` DECLINE where it executes today — a regression, not a gap.
+  if (of.kind === 'list') return withPayload(input, [[LIST_COL, jsonOf(field('v'))]], [meta(LIST_COL, 'json', true)], fresh);
+  if (of.kind !== 'scalar') return null;
   return withPayload(input, [['v', field('v')], ['vtype', field('t')]],
     [meta('v', 'any', true), meta('vtype', 'text', true)], fresh);
 }
@@ -1420,4 +1445,10 @@ export function mapEntryPayload(
 }
 
 /** A side AS THE WIRE sees it — an `elem` side is a typed node here, so it frames like any other. */
-const framed = (of: MapOf): MapOf => (of.kind === 'elem' ? { kind: 'scalar' } : of);
+// A Map.Entry's key and value columns each hold a self-describing `{t,v}` NODE (the in-map encoding),
+// which `mapSideBuffer`'s scalar arm frames by walking its own `t` — so EVERY value shape crosses as
+// `scalar` here, not just `elem`. A `list` valOf (a `Map<K,List>` entry) must collapse too: the value
+// column is the `{t:'list', v}` node, not the root-encoded raw array, so framing it as a list would
+// `items.map` over the node object. The list precision is for CONSUMERS (`select`/`unfold`-then-op),
+// never for the entry's own node framing (`docs/2026-08-21-map-value-shape-plan.md`).
+const framed = (of: MapOf): MapOf => (of.kind === 'scalar' ? of : { kind: 'scalar' });
