@@ -31,15 +31,20 @@ real-workerd `cloudflare.test` 37 green. Residual: the label-scalar cluster belo
 federation-on-real-DO test exists (federation is not in `cloudflare.test`), so DO coverage for the bound SQL
 rests on cf-limits DO-legality + the Program shipping RENDERED (no new RPC-crossing structure).
 
-**Step 2 REMAINING — the label-scalar cluster.** `label()`/`id()`/`by(T.label)`/`by(T.id)`/`labels()`
-(edge arm)/`labelled()` all read through **`byExpr`'s token arm** (`modulator.ts:267-312`) — a correlated
-scalar reader (external id `COALESCE(uid,id)`; first-label side-table pick). Rerouting it means source
-methods `externalId(kind, hostId)` / `labelScalar(kind, hostId)`, but `byExpr` is a pure function called
-from **~22 sites across 6 files** with no `ctx`/`source` in hand — so threading `source` is an API choice
-(param on `byExpr` vs a field on the host). `byExpr` is also BASE-ONLY today (the bound tail uses
-`foreignLabelValue`/`foreignValues` directly), so this reroute is prep with no bound consumer until step
-4. The vertex `labels()` FAN-OUT (`lower.ts:2094-2139`) is a second remaining item; its order-mint
-(`renumber`) is stream vocabulary, only the two-join name fan-out is source.
+**Step 2 label cluster — LANDED.** `byExpr`'s token arm (reached by `by(T.id)`/`by(T.label)`, the
+`label()`/`id()` steps, `labelled()`) now reads through `BaseGraph.externalId`/`labelScalar`, deleting the
+duplicate inline SQL. `byExpr` is base-only today (a bound element reads label through `source.labelScalar`
+in `detachedTail`, never here), so it calls `BaseGraph` directly; threading `ctx.source` through `byExpr`'s
+~22 call sites is the step for when a bound `by()` first reaches it.
+
+**REMAINING (small, deferred):**
+- The vertex `labels()` FAN-OUT (`lower.ts`, the `labels` step) still spells its two-join name fan-out
+  inline. Its order-mint (`renumber` + encounter) is stream vocabulary; only the fan-out is source. A
+  `source.labelNames(input, kind)` would factor it AND unlock bound `labels()` (a `detachedTail` branch)
+  — combinatorial completeness, so worth doing, but the base/bound order-key differs (label-dict id vs
+  JSON-array index) so the vocabulary renumbers by a source-supplied `lord`.
+- Full `byExpr` `ctx.source` threading (above) — no consumer until a bound `by()`/`group()`.
+- Mechanism B for the BASE leaf is already `source.leafPayload` (= `elementPayload`); no further work.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
 `detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
