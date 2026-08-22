@@ -41,11 +41,31 @@ pageRank (`valueMap("name", score)`), landing with it. L3 stays excluded for the
 injects `.withComputer()`, which our grammar has no token for — that is the remaining L3-integration
 problem, separate from execution).
 
-**NEXT — pageRank** reuses the whole decorate substrate: its `apply` runs the host-driven float
-iteration (SQL rounds crossing the score vector as one `json_each` bind each round), returning a
-`(id → score)` relation the SAME decorate resume decorates. It additionally needs `values(key)`/
-`valueMap(key)`/`project().by(values(key))` over a decorated REAL key. Then peerPressure, then
-shortestPath (Template B — recursive-CTE paths, no barrier).
+**✅ LANDED (2026-08-22) — the L3 credit unblock.** `withComputer()` (the @GraphComputerOnly runner
+setup) serializes to `withStrategies(VertexProgramStrategy(...))`; `VertexProgramStrategy` is now a
+`NO_OP_STRATEGIES` entry (the graph-computer execution choice is inert for compile-to-SQL OLAP) and
+`@GraphComputerOnly` left `OUR_EXCLUSIONS`, so the OLAP scenarios run in L3 — landed algorithms pass and
+raise the floor, the rest fail closed.
+
+**✅ LANDED (2026-08-22) — pageRank (default scope).** `mogwai.pageRank` is a DECORATE barrier faithfully
+replaying `PageRankVertexProgram`'s BSP (default `outE`, α=0.85 / `pageRank(α)`, ε=1e-5, ≤20 iters,
+dangling-node teleport redistribution) as a host-driven loop inside `apply`, reusing the decorate
+substrate verbatim. L3 +3 (the three default-scope scenarios: `has`, `order().by(rank,desc).by(name)`,
+`order…limit(2)` — exact reference ranking `lop,ripple,josh,vadas,marko,peter`). `test/L2-sql/pagerank.exec.test.ts`.
+
+**NEXT — the shared substrate the remaining pageRank/peerPressure scenarios need, then those algos:**
+- **Numeric-decorate reads:** `values(key)`/`valueMap(key)`/`project().by(__.values(key).math(…))` over a
+  decorated REAL key (pageRank scenarios 5/6; `DecorateGraph.propertyValues`/`valueMapPairs` currently
+  fail closed on the decorated key).
+- **Edge-config carrying:** a custom edge scope (`~tinkerpop.<algo>.edges`, e.g. `__.bothE("knows")`,
+  `__.inE("created")`) is an ANONYMOUS sub-traversal, which `nestedTraversalToGremlin` refuses (it
+  serializes only source-rooted traversals, for federate). Carrying an anonymous edge traversal as a
+  call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the service — is a
+  shared substrate for pageRank/peerPressure/wcc edge scopes, and a genuine design question (federate
+  refuses anonymous; OLAP needs it). ⚠️ **A DESIGN DECISION** — surface before building.
+- **`times`** (a fixed iteration count) for pageRank (scenarios 2/8).
+- Then **peerPressure** (integer cluster voting, reuses decorate substrate) and **shortestPath**
+  (Template B — recursive-CTE paths, no barrier, its own shape).
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

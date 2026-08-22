@@ -32,7 +32,6 @@ function pendingAlgoService(name: string, type: Service['type']): Service {
   };
 }
 
-export const pageRankService: Service = pendingAlgoService(PAGERANK_SERVICE_NAME, 'barrier');
 export const peerPressureService: Service = pendingAlgoService(PEER_PRESSURE_SERVICE_NAME, 'barrier');
 export const shortestPathService: Service = pendingAlgoService(SHORTEST_PATH_SERVICE_NAME, 'streaming');
 
@@ -129,7 +128,107 @@ export function createWccService(store: GraphStore | undefined): Service {
   };
 }
 
-/** The OLAP services with NO store dependency (pending stubs). `mogwai.wcc` is store-backed, so it is
- *  built with `createWccService(app.store)` at the registry composition root (standard.ts). */
+// ---------- mogwai.pageRank — pageRank(), a DECORATE barrier ----------
+//
+// `g.V().pageRank()` decorates each vertex with its PageRank under
+// `gremlin.pageRankVertexProgram.pageRank` and passes it through. It is a faithful replay of the
+// reference BSP (`vendor/tinkerpop/gremlin-core/.../ranking/pagerank/PageRankVertexProgram.java:162-212`),
+// including dangling-node redistribution via the global teleportation energy — a host-driven iteration
+// inside `apply` (the barrier model), not row-at-a-time interpretation. Default message scope is `outE`
+// (rank flows along out-edges; a sink's rank redistributes through teleport), α=0.85, ε=1e-5, ≤20 iters.
+//
+// This tranche implements the DEFAULT scope only. A custom edge scope
+// (`~tinkerpop.pageRank.edges`), an explicit iteration count (`~tinkerpop.pageRank.times`), and reading
+// the score through values()/valueMap()/math() land with the edge-config + numeric-read substrate;
+// order().by(propertyName)/has(propertyName)/project().by(propertyName-as-string) compose today.
+
+const PR_PAGERANK_KEY = 'gremlin.pageRankVertexProgram.pageRank';
+const PR_PROPERTY_NAME = '~tinkerpop.pageRank.propertyName';
+const PR_EDGES = '~tinkerpop.pageRank.edges';
+const PR_TIMES = '~tinkerpop.pageRank.times';
+const PR_ALPHA_DEFAULT = 0.85;
+const PR_EPSILON = 0.00001;
+const PR_MAX_ITERATIONS = 20;
+
+/** PageRank over the default `outE` scope, a faithful replay of the reference BSP. `alpha` is the
+ *  damping factor (`pageRank(α)`); dangling vertices (out-degree 0) redistribute their rank through the
+ *  global teleportation energy, exactly as `PageRankVertexProgram` does — which is what makes the modern
+ *  graph's sinks (vadas/lop/ripple) rank correctly. Returns one `(rowid → score)` tuple per vertex. */
+export function pageRankScores(
+  nodes: readonly { readonly id: number }[],
+  edges: readonly { readonly src: number; readonly tgt: number }[],
+  alpha: number,
+): BarrierRelation['tuples'] {
+  const ids = nodes.map((n) => n.id);
+  const N = ids.length;
+  if (N === 0) return [];
+  const out = new Map<number, number[]>(ids.map((id) => [id, []]));
+  for (const e of edges) out.get(e.src)?.push(e.tgt);
+  const outdeg = new Map<number, number>(ids.map((id) => [id, out.get(id)!.length]));
+  const pr = new Map<number, number>(ids.map((id) => [id, 0])); // the reported property (orElse 0)
+  let messages = new Map<number, number>(ids.map((id) => [id, 0]));
+  let teleport = 1.0; // TELEPORTATION_ENERGY seed (no initialRankTraversal)
+  for (let k = 1; k <= PR_MAX_ITERATIONS; k++) {
+    const teleportK = teleport;
+    const localTerminal = teleportK > 0 ? teleportK / N : 0;
+    const nextMessages = new Map<number, number>(ids.map((id) => [id, 0]));
+    let nextTeleport = 0; // net of the reference's -localTerminal (×N = -teleportK) + (1-α)pr + dangling
+    let convergence = 0;
+    for (const id of ids) {
+      // iter 1 seeds from teleport only (initial rank 0); later iters sum incoming messages.
+      let rank = (k === 1 ? 0 : messages.get(id)!) + (teleportK > 0 ? localTerminal : 0);
+      convergence += Math.abs(rank - pr.get(id)!);
+      pr.set(id, rank);
+      nextTeleport += (1 - alpha) * rank;
+      const send = alpha * rank;
+      const od = outdeg.get(id)!;
+      if (od > 0) { const share = send / od; for (const t of out.get(id)!) nextMessages.set(t, nextMessages.get(t)! + share); }
+      else nextTeleport += send; // a sink redistributes its rank through teleport (dangling nodes)
+    }
+    teleport = nextTeleport;
+    messages = nextMessages;
+    if (convergence < PR_EPSILON) break;
+  }
+  return ids.map((id) => ({ id, value: pr.get(id)! }));
+}
+
+/** pageRank() over a store: an async DECORATE barrier. The store is captured at construction (app-scope
+ *  DI); `apply` reads the graph and replays the reference BSP. */
+export function createPageRankService(store: GraphStore | undefined): Service {
+  return {
+    name: PAGERANK_SERVICE_NAME,
+    type: 'barrier',
+    internal: true,
+    describeParams: () => ({ propertyName: `the vertex property key to write the rank under (default ${PR_PAGERANK_KEY})` }),
+    resolve: (site) => {
+      const mode = site.params.mode;
+      if (mode !== undefined && mode !== 'decorate')
+        throw new Error(`${PAGERANK_SERVICE_NAME}: only decorate mode (the native pageRank() step) is implemented yet, not "${String(mode)}"`);
+      if (site.params[PR_EDGES] !== undefined)
+        throw new Error(`${PAGERANK_SERVICE_NAME}: a custom edge scope (.with("${PR_EDGES}", …)) is not supported yet — only the default outE message scope`);
+      if (site.params[PR_TIMES] !== undefined)
+        throw new Error(`${PAGERANK_SERVICE_NAME}: a fixed iteration count (.with("${PR_TIMES}", …)) is not supported yet — pageRank runs to convergence (α=${PR_ALPHA_DEFAULT}, ε=${PR_EPSILON}, ≤${PR_MAX_ITERATIONS} iterations)`);
+      const alpha = typeof site.params.dampingFactor === 'number' ? site.params.dampingFactor : PR_ALPHA_DEFAULT;
+      const nameOverride = site.params[PR_PROPERTY_NAME];
+      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PR_PAGERANK_KEY;
+      return {
+        kind: 'barrier',
+        residency: 'do',
+        decorate: { key },
+        apply: async (): Promise<BarrierRelation> => {
+          if (!store)
+            throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
+          const nodes = store.query<{ id: number }>('SELECT id FROM nodes');
+          const edges = store.query<{ src: number; tgt: number }>('SELECT src, tgt FROM edges');
+          return { kind: 'relation-tuples', tuples: pageRankScores(nodes, edges, alpha) };
+        },
+      };
+    },
+  };
+}
+
+/** The OLAP services with NO store dependency (pending stubs). `mogwai.wcc` and `mogwai.pageRank` are
+ *  store-backed, so they are built with their `create*Service(app.store)` factories at the registry
+ *  composition root (standard.ts). */
 export const pendingGraphAlgorithmServices: readonly Service[] =
-  [pageRankService, peerPressureService, shortestPathService];
+  [peerPressureService, shortestPathService];
