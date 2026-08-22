@@ -1,9 +1,9 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
-import type { BarrierInput, BarrierResidency, CallSite, CallSpec, ForeignRow, InjectionKind, Service } from '../../services/spi/types.ts';
+import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
+import { lowerDecorateResume, lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
@@ -35,10 +35,14 @@ interface Barrier {
   readonly at: number;
   readonly site: CallSite;
   readonly spec: CallSpec;
-  readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
+  readonly apply: (rows: readonly BarrierInput[]) => Promise<BarrierOutput>;
   /** WHERE this barrier's `apply` runs (§4·3) — carried through to the `SegmentPlan` so the drive
    *  loop can decide whether the Worker may drive it (`'worker'`) or it must stay DO-side (`'do'`). */
   readonly residency: BarrierResidency;
+  /** Present iff this is a DECORATE barrier (an OLAP algorithm): `apply` returns a `(id → value)`
+   *  relation and the resume keeps the LIVE element stream, reading the value as a synthetic property
+   *  under `decorate.key`. Absent for `federate`/`io` (detached `ForeignRow[]` + `lowerForeignResume`). */
+  readonly decorate?: DecorateSpec;
 }
 
 /** What a segment needs from the enclosing request — the same settled values the RelIR route takes,
@@ -76,7 +80,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, residency: contribution.residency };
+    return { at, site, spec, apply: contribution.apply, residency: contribution.residency, decorate: contribution.decorate };
   }
   return null;
 }
@@ -137,6 +141,9 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   if (earliest === splitAt) return buildSplitSegment(steps, split!.at, split!.separator, request.lowering);
   if (earliest === revAt) return buildReverseSegment(steps, reverseAt!, request.lowering);
   if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
+  // A DECORATE barrier (an OLAP algorithm) keeps the LIVE element stream — it does not land detached
+  // rows — so it takes its own resume, not the source/mid foreign one.
+  if (call!.decorate) return decorateSegment(steps, call!, request);
   return call!.at === 0 ? sourceSegment(steps, call!, request) : midSegment(steps, call!, request);
 }
 
@@ -180,10 +187,45 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     params: barrier.site.params,
     apply: barrier.apply,
     residency: barrier.residency,
-    resume: (foreign: ForeignRow[], headRows: readonly BarrierInput[]): Plan =>
-      resumed(steps, barrier, request, foreign, {
+    resume: (out: BarrierOutput, headRows: readonly BarrierInput[]): Plan =>
+      resumed(steps, barrier, request, out as ForeignRow[], {
         values: headRows.map((row) => row.injectedValue), injection,
       }),
+  };
+}
+
+/** A DECORATE barrier (an OLAP algorithm — `pageRank`/`connectedComponent`/`peerPressure`). The compute
+ *  is GLOBAL and reads the store inside `apply`, so there is no per-parent head — `head` is null and the
+ *  prefix is re-lowered LIVE inside `lowerDecorateResume`, which threads the awaited `(id → value)`
+ *  relation as a synthetic property under `decorate.key` and keeps the element stream flowing. */
+function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
+  const { key } = barrier.decorate!;
+  return {
+    kind: 'segment',
+    mode: 'async',
+    head: null,
+    params: barrier.site.params,
+    apply: barrier.apply,
+    residency: barrier.residency,
+    resume: (out: BarrierOutput): Plan => {
+      // A decorate barrier's own `apply` returns a relation, never `ForeignRow[]` — a foreign result
+      // here is a service-authoring bug, not a user error.
+      if (Array.isArray(out))
+        throw new Error(`call("${barrier.spec.serviceName}"): a decorate barrier must return an (id → value) relation, not detached rows`);
+      const relation = out as BarrierRelation;
+      const lowered = lowerDecorateResume(relation.tuples, key, steps, barrier.at, request.lowering);
+      // A resume CANNOT decline — the rows are computed. An unsupported step after the algorithm RAISES
+      // naming it, rather than a silent different answer (§6·5), exactly as the foreign resume does.
+      if (!lowered) {
+        const next = steps[barrier.at + 1];
+        throw new Error(
+          next
+            ? `${next.name}() is not supported after ${barrier.spec.serviceName} yet`
+            : `${barrier.spec.serviceName} produced a result this route cannot frame`,
+        );
+      }
+      return { kind: 'sql', compiled: finishLowering(lowered) };
+    },
   };
 }
 
@@ -197,7 +239,7 @@ function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: Segm
     params: barrier.site.params,
     apply: barrier.apply,
     residency: barrier.residency,
-    resume: (foreign: ForeignRow[]): Plan => resumed(steps, barrier, request, foreign),
+    resume: (out: BarrierOutput): Plan => resumed(steps, barrier, request, out as ForeignRow[]),
   };
 }
 

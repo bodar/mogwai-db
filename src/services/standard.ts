@@ -6,7 +6,7 @@ import { searchService } from './catalog/search.ts';
 import { createFederateService } from './catalog/federate.ts';
 import { createIoService } from './catalog/io.ts';
 import { schemaService } from './catalog/schema.ts';
-import { graphAlgorithmServices } from './catalog/graph-algorithms.ts';
+import { createWccService, pendingGraphAlgorithmServices } from './catalog/graph-algorithms.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -38,7 +38,7 @@ import { graphAlgorithmServices } from './catalog/graph-algorithms.ts';
  *  are `internal: true` too, so the exact `--list` surface stays unchanged. */
 export const standardRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    ...graphAlgorithmServices]);
+    ...pendingGraphAlgorithmServices, createWccService(app.store)]);
 
 /** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
  *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
@@ -47,4 +47,4 @@ export const standardRegistry: RegistryProvider = (app) =>
  *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */
 export const extendedRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createFederateService(app.source), schemaService, ...graphAlgorithmServices]);
+    createFederateService(app.source), schemaService, ...pendingGraphAlgorithmServices, createWccService(app.store)]);

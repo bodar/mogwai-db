@@ -118,9 +118,37 @@ export type { ForeignRow } from '../../api.ts';
  *  now so a barrier STATES its residency rather than the loop hardcoding which ones leave. */
 export type BarrierResidency = 'do' | 'worker';
 
+/**
+ * A barrier's SECOND output shape (`docs/2026-08-21-barrier-substrate-design.md` Axis 2): a
+ * data-sized `(id → value)` RELATION rather than a set of detached elements. An iterative graph
+ * algorithm's product is a NUMERIC/label relation keyed by element id, not a stream of elements — so
+ * `federate`/`io`'s `ForeignRow[]` is the wrong shape for it. The tuples cross the segment boundary as
+ * ONE `json_each` bind (substrate A, §6·2), and a DECORATE resume reads them per-parent, correlated on
+ * the LIVE element stream's id, keeping the stream element-preserving. `id` is the INTERNAL element
+ * rowid (the correlation key `BaseGraph` uses); `value` is the algorithm's per-element result.
+ */
+export interface BarrierRelation {
+  readonly kind: 'relation-tuples';
+  readonly tuples: readonly { readonly id: number; readonly value: unknown }[];
+}
+
+/** What a barrier's `apply` may return: detached elements (`federate`/`io`) OR a keyed relation (an
+ *  OLAP algorithm). The resume that consumes it is chosen at PLAN time by the presence of `decorate`
+ *  on the barrier contribution, so the two never mismatch. */
+export type BarrierOutput = readonly ForeignRow[] | BarrierRelation;
+
+/** A DECORATE barrier's element-preserving descriptor. When present on a barrier contribution, the
+ *  segment builds a DECORATE resume: it re-lowers the LIVE element prefix and reads the barrier's
+ *  `(id → value)` relation as a synthetic property under `key`, so `has(key)`/`by(key)`/`order().by(key)`
+ *  compose over the passed-through elements. This is the native OLAP steps' contract (pageRank/wcc/
+ *  peerPressure decorate each incoming vertex with its score under a canonical property key). */
+export interface DecorateSpec {
+  readonly key: string;
+}
+
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
-  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; apply(rows: readonly BarrierInput[]): Promise<ForeignRow[]> };
+  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; readonly decorate?: DecorateSpec; apply(rows: readonly BarrierInput[]): Promise<BarrierOutput> };
 
 /**
  * WHAT A MID-TRAVERSAL BARRIER'S HEAD HANDS ITS `apply` — one row per parent traverser, carrying the

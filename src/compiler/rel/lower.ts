@@ -49,6 +49,7 @@ import { edgeEndpoint } from './element.ts';
 import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
+import { decorateBinding, decorateGraph } from './decorate.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -3773,6 +3774,12 @@ export interface Lowering {
    * and the WRONG one for a sub-chain, which is what it silently was.
    */
   readonly collections?: Collections;
+  /** The GRAPH the chain reads through — `BaseGraph` (the SQLite physical schema) by default. A
+   *  DECORATE resume overrides it with a `decorateGraph` wrapper that answers ONE synthetic property
+   *  key (an OLAP score) off the barrier's landed `(id → value)` relation and delegates all else to the
+   *  base, so the algorithm's result composes as an ordinary property over the live element stream. A
+   *  bound-graph resume sets its own source directly (`lowerForeignResume`), not through this. */
+  readonly source?: GraphSource;
 }
 
 /**
@@ -3793,6 +3800,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   sideEffectPolicies: opts.sideEffectPolicies ?? NO_SIDE_EFFECT_POLICIES,
   services: opts.services ?? NO_SERVICES,
   sack: opts.sack ?? null,
+  source: opts.source ?? BaseGraph,
   // A FRESH registry unless a caller hands one down. `rootedRead` is the caller that does, and it
   // must: side effects live on the ROOT traversal (`AggregateStep.java:57`), so a rooted sub-chain
   // shares the outer chain's collections rather than getting an empty map — the isolation that was
@@ -4064,7 +4072,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /**
@@ -4194,6 +4202,40 @@ export function lowerForeignResume(
   return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
+/** The reserved bind a DECORATE barrier's `(id → value)` relation crosses under — one `json_each` bind
+ *  of a data-sized set, underscore-namespaced so it cannot collide with a user parameter. */
+const DECORATE_RESUME_PARAM = '_mogwai_decorate';
+
+/**
+ * THE DECORATE RESUME — the element-preserving tail of an OLAP algorithm (`connectedComponent`,
+ * `pageRank`, `peerPressure`). Unlike `lowerForeignResume`, it does NOT replace the stream with landed
+ * rows: the compute is global (run inside `apply`, reading the store), and its product is an
+ * `(id → value)` relation. So this re-lowers the LIVE element prefix (the chain WITHOUT the algorithm's
+ * own `call()` step) over a `decorateGraph` source that answers the one decorated `key` off that
+ * relation — every element passes through, decorated, and `has(key)`/`order().by(key)`/`project().by(key)`
+ * compose as ordinary property reads.
+ *
+ * The relation is DATA, so it crosses as ONE `json_each` bind (§6·2) and is declared ONCE as a fenced
+ * binding referenced by name — materialize-once, exactly `lowerForeignResume`'s model. One `fresh`
+ * threads the binding AND the re-lowered chain, so their relation ids share one id space (a second
+ * `minter()` would restart at 0 and the emitter would see one id naming two relations).
+ */
+export function lowerDecorateResume(
+  tuples: readonly { readonly id: number; readonly value: unknown }[],
+  key: string, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  // The chain WITHOUT the algorithm's own call() step — the live prefix plus the tail, one ordinary
+  // element traversal differing only in the source it reads through.
+  const chainSteps = [...steps.slice(0, barrierAt), ...steps.slice(barrierAt + 1)];
+  const name = fresh(DECORATE_RESUME_PARAM);
+  const binding: Binding = { name, node: decorateBinding(tuples.map((t) => [t.id, t.value] as const), name, fresh) };
+  const source = decorateGraph(name, key);
+  const chain = lowerChain(chainSteps, { ...opts, source }, fresh);
+  return chain && lowered({ ...chain, effects: [binding, ...(chain.effects ?? [])] }, source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+}
+
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
  *  of a data-sized set, underscore-namespaced so it cannot collide with a user parameter. */
 const VALUE_RESUME_PARAM = '_mogwai_value_resume';
@@ -4278,13 +4320,13 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source } = settle(opts);
   const facts = analyzeChain(steps as IRStep[]);
   return {
     facts,
     ctx: {
       params, correlatedChildren, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
-      labelRegime, source: BaseGraph, sideEffects, sideEffectPolicies, services, sack, collections,
+      labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
     },
   };

@@ -16,12 +16,36 @@ steps and the service registration:
 - **Execution is a clear fail-closed deferral** ("graph algorithm execution is not implemented yet"),
   never a mis-execution or a silent decline. Census re-recorded (OLAP rows now carry that message).
 
-**NEXT — the compute (a genuine design fork, see "the two-front-end architecture" + open research).**
-Template A (pageRank/wcc/peerPressure) needs the host-driven iteration barrier + the retained-binding
-decorate tail (the doc's flagged "one piece of genuinely new plumbing" — the current barrier
-substrate lands DETACHED `ForeignRow[]`, which the decorate contract cannot use). Template B
-(shortestPath) needs only a recursive-CTE path relation over the already-live path channel — no
-barrier, no retained binding, no occupancy question.
+**✅ LANDED (2026-08-22, commit `connectedComponent as a DECORATE barrier`) — the decorate substrate +
+WCC.** The compounding "genuinely new plumbing" the doc flagged is built, and it is reused by
+pageRank/peerPressure next:
+- **The DECORATE barrier output shape.** A barrier's `apply` may now return a `(id → value)`
+  `BarrierRelation` (not just detached `ForeignRow[]`); a `decorate: {key}` on the barrier contribution
+  routes it to a decorate resume (`src/services/spi/types.ts`, `src/compiler/segment.ts`).
+- **`lowerDecorateResume` + `DecorateGraph`** (`src/compiler/rel/lower.ts`, `rel/decorate.ts`). The
+  resume re-lowers the LIVE element prefix over a `GraphSource` wrapper that answers the ONE decorated
+  key off the barrier's `(id → value)` relation (landed ONCE as a fenced `json_each` binding,
+  materialize-once) and delegates everything else to `BaseGraph`. So the element stream stays
+  element-preserving and `has(key)`/`order().by(key)`/`project().by(key)` compose as ordinary property
+  reads. `Lowering.source` threads the wrapper in.
+- **`mogwai.wcc`** (`src/services/catalog/graph-algorithms.ts`): an async DECORATE barrier, residency
+  `'do'`, computing WCC by union-find over the undirected edge list (component id = the
+  lexicographically-smallest external id string in the component — the reference's exact rule). One
+  bulk SQL read + a bounded in-JS computation, the barrier model — not row-at-a-time interpretation.
+  Covered by `test/L2-sql/wcc.exec.test.ts`.
+
+**Scoped out of this WCC commit (fail closed, next commits):** a custom edge scope
+(`.with("~tinkerpop.connectedComponent.edges", __.bothE("knows"))`) — an anonymous edge traversal is
+not yet carried as a call param; `values(key)`/`valueMap(key)` over the decorated key — needed by
+pageRank (`valueMap("name", score)`), landing with it. L3 stays excluded for these (the cucumber runner
+injects `.withComputer()`, which our grammar has no token for — that is the remaining L3-integration
+problem, separate from execution).
+
+**NEXT — pageRank** reuses the whole decorate substrate: its `apply` runs the host-driven float
+iteration (SQL rounds crossing the score vector as one `json_each` bind each round), returning a
+`(id → score)` relation the SAME decorate resume decorates. It additionally needs `values(key)`/
+`valueMap(key)`/`project().by(values(key))` over a decorated REAL key. Then peerPressure, then
+shortestPath (Template B — recursive-CTE paths, no barrier).
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

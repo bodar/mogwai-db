@@ -38,7 +38,7 @@ describe('driveSegments', () => {
       params: {},
       residency: 'worker',
       apply: async (rows) => { seen.applyRows.push(rows); return foreign; },
-      resume: (f, headRows) => { seen.resumeForeign.push(f); expect(headRows).toBe(headRowsRef); return { kind: 'sql', compiled: sql('RESUMED') }; },
+      resume: (f, headRows) => { seen.resumeForeign.push(f as ForeignRow[]); expect(headRows).toBe(headRowsRef); return { kind: 'sql', compiled: sql('RESUMED') }; },
     };
     const headRowsRef: BarrierInput[] = [{ injectedValue: 'marko' }];
     const host: SegmentHost = {

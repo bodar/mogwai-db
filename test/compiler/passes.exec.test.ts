@@ -378,13 +378,14 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
     expect(call.withArgs).toContainEqual(['~tinkerpop.connectedComponent.propertyName', 'cluster']);
   });
 
-  test('execution is a clear fail-closed deferral, not a mis-execution or a silent decline', () => {
-    // The compute is not built yet; the seam is. A native OLAP step must refuse loudly rather than
-    // answer a different question. Under the real (reference) registry the services ARE registered, so
-    // the message is the pending-execution deferral, not "unknown service".
+  test('an unbuilt algorithm is a clear fail-closed deferral, not a mis-execution or a silent decline', () => {
+    // The compute for these is not built yet; the seam is. A native OLAP step must refuse loudly rather
+    // than answer a different question. Under the real (reference) registry the services ARE registered,
+    // so the message is the pending-execution deferral, not "unknown service". connectedComponent is
+    // omitted — its compute IS built (mogwai.wcc), covered by L3/L2.
     const withReg: CompileOptions = { registry: standardRegistry };
     for (const gremlin of ['g.V().pageRank().has("gremlin.pageRankVertexProgram.pageRank")',
-      'g.V().connectedComponent()', 'g.V().peerPressure()', 'g.V().shortestPath()'])
+      'g.V().peerPressure()', 'g.V().shortestPath()'])
       expect(() => compile(gremlin, {}, withReg), gremlin).toThrow('graph algorithm execution is not implemented yet');
   });
 });
