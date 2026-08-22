@@ -13,16 +13,16 @@
 //
 // ── 2. NOT YET — in scope the moment the work lands, so revisit with it ────────────────────────
 //
-//   @GraphComputerOnly (6) — and this is NOT an architectural wall, which is what this file used to
-//     imply. `docs/2026-07-24-graph-algorithms-plan.md` verified that GraphComputer is not removed
-//     in TinkerPop 4, that the v4 LANGUAGE carries the four OLAP step names with no execution
-//     surface, and that "that gap is exactly what we fill" by giving them an OLTP compile-to-SQL
-//     execution. Four of the six ARE those four steps — g_V_pageRank_hasXpageRankX,
-//     g_V_peerPressure_hasXclusterX, g_V_connectedComponent_hasXcomponentX, g_V_shortestPath — and
-//     that doc explicitly expects them back "as a give-back" when item 8 lands. The runner does not
-//     skip this tag (it sets isGraphComputer and calls .withComputer()), so the exclusion is
-//     load-bearing today and should be NARROWED, not deleted, when item 8 lands: the remaining two
-//     are @WithVertexProgramStrategy, which do need a real VertexProgram surface.
+//   @GraphComputerOnly — NO LONGER EXCLUDED (2026-08-22). These scenarios run the four OLAP steps
+//     (pageRank/connectedComponent/peerPressure/shortestPath), which now have an OLTP compile-to-SQL
+//     execution (`docs/2026-07-24-graph-algorithms-plan.md`). The runner sets isGraphComputer and calls
+//     `.withComputer()`, which the JS GLV serializes to `withStrategies(VertexProgramStrategy(...))`;
+//     that parses (withStrategies is grammar) and `VertexProgramStrategy` is now a NO_OP_STRATEGIES
+//     entry (the graph-computer choice is inert for compile-to-SQL OLAP), so the query runs. The
+//     scenarios whose algorithm is LANDED pass and raise the floor (connectedComponent's default-edge
+//     forms today); the rest fail CLOSED (a clear deferral — pageRank/peerPressure/shortestPath compute,
+//     connectedComponent's custom edge scope) and are simply not in the floor, exactly the "in scope,
+//     failing deliberately" stance io()'s source scenarios take. Nothing here is an architectural wall.
 //
 // ── 3. THE HARNESS NEVER ASKS — nothing to do with us ──────────────────────────────────────────
 //
@@ -57,7 +57,7 @@ export const RUNNER_SKIPPED = [
 
 /** Tags we exclude by our own decision — see categories 1 and 2 above. */
 export const OUR_EXCLUSIONS = [
-  '@GraphComputerOnly', '@StepSample', '@StepCoin', '@SingleLabelDefault',
+  '@StepSample', '@StepCoin', '@SingleLabelDefault',
 ] as const;
 
 export const L3_TAGS = [...OUR_EXCLUSIONS, ...RUNNER_SKIPPED].map((t) => `not ${t}`).join(' and ');

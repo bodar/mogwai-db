@@ -94,11 +94,17 @@ export const NO_OP_STRATEGIES = new Set([
   // GValue/requirement planning: subsumed by our q-kernel bound-value model (locked
   // decision #1 — no bytecode) and the absence of a traverser-requirement scheduler.
   'GValueReductionStrategy', 'ProviderGValueReductionStrategy', 'RequirementsStrategy',
-  // OLAP/GraphComputer-only: inert without .withComputer(), which this project never
-  // supports. (VertexProgramStrategy is NOT here — naming it explicitly requests OLAP, so
-  // it must reject; ComputerVerification/VertexProgramRestriction only guard OLAP configs.)
+  // OLAP/GraphComputer strategies. `withComputer()` (the cucumber runner's @GraphComputerOnly setup)
+  // serializes to `withStrategies(VertexProgramStrategy(...))`, and the four OLAP STEPS carry the real
+  // semantics — we compile them to SQL (docs/2026-07-24-graph-algorithms-plan.md). So the EXECUTION-
+  // ENGINE choice a graph computer represents is a genuine no-op for us: the steps run the same whether
+  // or not a computer is named. VertexProgramStrategy USED to reject here ("naming it requests OLAP,
+  // which we don't support"); that rationale flipped when OLAP execution landed — requesting OLAP is now
+  // exactly what the steps honor, and the arg-less `withComputer()` the conformance suite uses carries no
+  // config to lose. (ComputerVerification/VertexProgramRestriction only guard OLAP configs.)
   'GraphFilterStrategy', 'ComputerFinalizationStrategy', 'MessagePassingReductionStrategy',
   'ComputerVerificationStrategy', 'VertexProgramRestrictionStrategy', 'HaltedTraverserStrategy',
+  'VertexProgramStrategy',
   // Lambda ban: our string grammar (locked decision #2/#5) has no lambda production, so the
   // condition this verifies can never occur — a true no-op, not a skipped check.
   'LambdaRestrictionStrategy',
@@ -123,8 +129,9 @@ export const ALWAYS_ON_STRATEGIES = new Set(['ConnectiveStrategy']);
 // NOT no-ops, deliberately absent so they hit the catch-all reject (fail closed): SackStrategy,
 // SideEffectStrategy, EventStrategy (need a Java Supplier/listener — unreachable via string, but
 // never laundered as safe), ElementIdStrategy (changes generated ids), ReferenceElementStrategy
-// (property stripping — harmless only by our framing coincidence, not by contract),
-// VertexProgramStrategy (OLAP). Each would change results if silently ignored.
+// (property stripping — harmless only by our framing coincidence, not by contract). Each would change
+// results if silently ignored. (VertexProgramStrategy moved to NO_OP_STRATEGIES when OLAP execution
+// landed — the graph-computer choice is inert for our compile-to-SQL OLAP steps.)
 export const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
