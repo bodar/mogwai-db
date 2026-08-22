@@ -62,11 +62,23 @@ The `lowerForeign` encounter guard relaxed (a subgraph source-form seed provides
 once the stream carries an encounter (group-by-identity). `federation.test` covers source-order
 `values().fold()`, the group VALUE fold (previously declined), `dedup().count()`.
 
+**BULK over a bound graph — LANDED.** The bound seed and `.V()`/`.E()` re-root carry a `bulk` channel
+(=1) always (encounter only when ordered — mutually exclusive), and `detachedTail`'s movement collapses a
+convergent bound walk with the SAME four conditions `elementTail` uses (fast path on, no live order,
+groupable channels, `bulkObservedFrom` suffix). `coalesce` is the same `SUM(bulk) GROUP BY id` RLE; a
+`bulked` flag threads forward so the terminal leaf re-expands on the wire (`source.leafPayload` carries the
+bulk column) and a reducer reads `SUM(bulk)`. `federation.test` asserts the collapse fires (compact rows <
+the multiset) and `count()` sums bulk.
+
+**The bound graph now flows through the FULL traversal vocabulary AND all traverser channels** (encounter +
+bulk) via `GraphSource` — movement, filters, `values`/`label`/`labels`, `group`/`order`/`by`/`project`,
+order-sensitive `fold`/reducers, and convergent-walk collapse — through the ONE engine.
+
 **REMAINING (deferred, fail-closed):**
-- **BULK over a bound graph** — a convergent walk (`both().both()` reaching a vertex twice) is a faithful
-  MULTISET today; the `movementCollapse` `SUM(bulk)` grouping is a base-only OPTIMISATION, not yet ported
-  to `BoundGraph`. Correctness holds (the multiset is right); only the collapse optimisation is absent.
-  `path` over a bound graph likewise has no channel and declines.
+- **`path` over a bound graph** — the path channel has no landed source; `tracksPath` declines. The only
+  channel not carried.
+- **`properties()` / `valueMap()` over bound** — element-bag reads unrouted; `properties()` also has no
+  landed identity (a genuine wall). **Bound WRITES** — a fetched subgraph is a read-only snapshot.
 - **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
   (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
   identity (a detached VertexProperty has no rowid), so it is a genuine wall.
