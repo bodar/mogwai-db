@@ -414,6 +414,34 @@ describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project vi
 
 // Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
 // V(ids)/E(ids) filtering the bound source by id.
+// valueMap()/elementMap() over a bound subgraph — the per-key value arrays read from the landed {t,v}
+// tree (source.valueMapPairs), the map/token shaping shared with the base graph. Oracled on crew.
+describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
+  // Maps compared as a sorted set of JSON strings — key order in a map is not part of the value.
+  const maps = async (g: string, on: 'home' | 'crew' = 'home') =>
+    (await Promise.all((await mgr.executor(on).framedAsync(g, {})).map((f: any) => decode(f.buf))))
+      .map((m: any) => JSON.stringify(m, (_k, v) => (v instanceof Map ? [...v.entries()].sort() : v))).sort();
+
+  test('valueMap(name) reads the landed property tree', async () => {
+    expect(await maps(sg('.V().order().by("name").valueMap("name")')))
+      .toEqual(await maps(`${crewBoth}.order().by("name").valueMap("name")`, 'crew'));
+  });
+  test('valueMap() over all keys', async () => {
+    expect(await maps(sg('.V().valueMap()'))).toEqual(await maps(`${crewBoth}.valueMap()`, 'crew'));
+  });
+  test('elementMap()/valueMap(true) — tokens over bound fail closed (tokenRow not yet source-routed)', async () => {
+    await expect(mgr.executor('home').framedAsync(sg('.V().elementMap("name")'), {})).rejects.toThrow();
+    await expect(mgr.executor('home').framedAsync(sg('.V().valueMap(true, "name")'), {})).rejects.toThrow();
+  });
+  test('valueMap(name) composes after a movement hop', async () => {
+    expect(await maps(sg('.inV().valueMap("name")')))
+      .toEqual(await maps(`g.V().hasLabel("person").outE("develops").inV().valueMap("name")`, 'crew'));
+  });
+});
+
 describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
   const sg = (tail: string) =>
     `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;

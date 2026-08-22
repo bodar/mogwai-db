@@ -6,7 +6,7 @@ import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
 import { elementPayload } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -118,6 +118,13 @@ export interface GraphSource {
    *  first `{t,v}` node at the key in the landed tree. Reached through `byExpr`'s property arm, so it
    *  composes in `group().by(k)`/`order().by(k)`/`project().by(k)` over either graph. */
   propertyScalar(kind: Elem, id: Expr, key: string, ordering: boolean, fresh: Minter): Expr;
+
+  /** `valueMap(keys…)` / `elementMap()` — one row per property KEY of the element at `id`, carrying the
+   *  key name, the ordered ARRAY of its `{t,v}` value nodes, and a per-key ordinal (`VALUEMAP_PAIR`).
+   *  Correlated on `id`. `BaseGraph` groups `vertex_properties`/`edge_properties` by key; a bound graph
+   *  explodes the landed `{t,v}` tree. The caller (`elementValueMap`) shapes these into the map entries
+   *  (list-vs-flat, tokens), so only the physical read differs by source. */
+  valueMapPairs(kind: Elem, id: Expr, keys: readonly string[] | null, fresh: Minter): Rel;
 
   /** `labels()` — the FAN-OUT of an element's labels, one row per label. Returns a relation carrying `v`
    *  (the label name) and `lord` (the per-element order key the caller renumbers by — the label-dictionary
@@ -372,6 +379,28 @@ export const BaseGraph: GraphSource = {
     });
     const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
     return firstOf(mine, value, col(mine.id, 'id'), fresh);
+  },
+
+  valueMapPairs: (kind, id, keys, fresh) => {
+    const { table, owner } = PROPERTIES[kind];
+    const props = make.scan({
+      id: fresh('vm'), table, alias: fresh('rvm'), channels: [],
+      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    const mine = make.filter({
+      id: fresh('vf'), input: props, channels: [], type: props.type,
+      pred: and(eq(col(props.id, owner), id), keyMembership(col(props.id, 'key'), keys)),
+    });
+    // The key's values as an ordered array of `{t,v}` nodes (insertion order = rowid), and the key's
+    // ordinal as the earliest rowid — the shape `elementValueMap` turns into a list value or takes the
+    // last of for a flat map.
+    const values: Expr = { kind: 'agg', fn: 'json_group_array', args: [jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')))], orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }] };
+    return make.aggregate({
+      id: fresh('vk'), input: mine, channels: [],
+      type: typeOf(meta(VALUEMAP_PAIR.key, 'text'), meta(VALUEMAP_PAIR.values, 'json'), meta(VALUEMAP_PAIR.ord, 'int')),
+      groupBy: [col(mine.id, 'key')],
+      aggs: [[VALUEMAP_PAIR.values, values], [VALUEMAP_PAIR.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }]],
+    });
   },
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),

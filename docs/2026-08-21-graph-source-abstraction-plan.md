@@ -84,9 +84,10 @@ wall, not a missing feature.
 
 **REMAINING (fail-closed today — but mostly UNBUILT features, not walls; the landed `{t,v}` tree + ids
 carry the data):**
-- **`valueMap()` / `elementMap()` over bound — UNBUILT, not a wall.** Every value is in the landed
-  `{t,v}` tree; `elementValueMap` just still scans base tables. Route it through the landed tree (the
-  `foreignValues` shape, kept as a map). Straightforward.
+- **`valueMap(keys…)` over bound — LANDED.** `GraphSource.valueMapPairs` yields the per-key value arrays
+  (base tables, or the landed `{t,v}` tree for a bound graph); `elementValueMap` shapes them into the map.
+  `valueMap(true)` / `elementMap()` (the id/label TOKENS) fail closed over bound — `tokenRow` still reads
+  base tables for the external id + the label gate, not yet source-routed. `valueMap(keys…)` composes.
 - **`path` over bound — UNBUILT, not a wall.** The path channel is a stream fact like encounter/bulk
   (both now carried): seed it at the bound source, extend through bound movement (`extendPath` over the
   bound ids), and rejoin each path step's payload at framing (Mechanism-B per step). Moderate.

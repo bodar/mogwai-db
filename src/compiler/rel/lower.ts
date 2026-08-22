@@ -2005,8 +2005,14 @@ function terminal(
     // `elementMap()` takes no token OPTION: `ElementMapStep.map` puts `T.id` and `T.label`
     // unconditionally, which is why a `true` argument is not even a form it has.
     if (step.name === 'elementMap' && tokens) return null;
+    // The property values route through `GraphSource` (base tables or the landed tree), but the id/label
+    // TOKENS (`tokenRow`) still read base tables for the external id and the label gate — not yet
+    // source-routed. So `valueMap(true)`/`elementMap()` over a BOUND graph fails closed (a foreign id
+    // against this graph's tables would be a wrong answer); `valueMap(keys…)` composes over either graph.
+    const needsTokens = step.name === 'elementMap' || tokens;
+    if (needsTokens && ctx.source !== BaseGraph) return null;
     const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
-      step.name === 'elementMap' || tokens, ctx.labelRegime, ctx.source, fresh,
+      needsTokens, ctx.labelRegime, ctx.source, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
@@ -4588,7 +4594,7 @@ function detachedTail(
  *    id, which over a bound (foreign) id is a wrong answer; they decline UNTIL routed through `GraphSource`.
  *  Both fail closed here rather than reaching a half-present read. */
 const BOUND_HANDOFF_DENY: ReadonlySet<string> = new Set<string>([
-  ...MUTATING_STEPS, 'properties', 'propertyMap', 'valueMap', 'elementMap',
+  ...MUTATING_STEPS, 'properties', 'propertyMap',
 ]);
 
 function elementTail(

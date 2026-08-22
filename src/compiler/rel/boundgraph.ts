@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
-import { and, eq, meta, typeOf, type Minter } from './build.ts';
+import { and, eq, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
 import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
@@ -216,6 +216,39 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       const raw = jsonExtract(node, '$.v');
       const value = ordering ? storedCompareOn(jsonExtract(node, '$.t'))(raw) : raw;
       return { kind: 'scalar', plan: make.project({ id: fresh('bps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
+    },
+
+    // ---- valueMap()/elementMap(): the per-key value arrays, from the landed {t,v} tree ----
+    valueMapPairs(kind, id, keys, fresh) {
+      const row = rowById(cteOf(kind, fresh), id, fresh);
+      // json_each over the props OBJECT yields (key = the property name, value = its {t,v} nodes). A
+      // vertex key holds an ARRAY of nodes; an edge key holds ONE, so wrap it to match the base shape
+      // (`elementValueMap` takes `$[#-1]` of the array for a flat map).
+      const ex = make.explode({
+        id: fresh('bvmx'), input: row, channels: [], expr: col(row.id, 'props'),
+        as: { key: VALUEMAP_PAIR.key, value: VALUEMAP_PAIR.values },
+        type: typeOf(...row.type.cols, meta(VALUEMAP_PAIR.key, 'text', true), meta(VALUEMAP_PAIR.values, 'json', true)),
+      });
+      const wanted = keys && keys.length
+        ? make.filter({ id: fresh('bvmf'), input: ex, channels: [], type: ex.type,
+          pred: { kind: 'in-list', expr: col(ex.id, VALUEMAP_PAIR.key), values: keys.map(compilerText) } })
+        : ex;
+      // A deterministic per-key ordinal — `json_each` over an object gives no numeric index, so rank the
+      // keys (the map is order-independent when compared, and this pins it under perturbation).
+      const ranked = make.window({
+        id: fresh('bvmw'), input: wanted, channels: [], type: typeOf(...wanted.type.cols, meta(VALUEMAP_PAIR.ord, 'int')),
+        specs: [[VALUEMAP_PAIR.ord, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(wanted.id, VALUEMAP_PAIR.key), dir: 'asc' }] } }]],
+      });
+      // `json()` keeps the array's JSON subtype when it is nested into the `{t:'list', v:[…]}` node —
+      // without it json_each's value lands as TEXT and `frameTypedNode` sees a string, not a list.
+      const valuesArray: Expr = kind === 'edge'
+        ? { kind: 'call', fn: 'json_array', args: [col(ranked.id, VALUEMAP_PAIR.values)] }
+        : { kind: 'call', fn: 'json', args: [col(ranked.id, VALUEMAP_PAIR.values)] };
+      return make.project({
+        id: fresh('bvmp'), input: ranked, channels: [],
+        type: typeOf(meta(VALUEMAP_PAIR.key, 'text'), meta(VALUEMAP_PAIR.values, 'json'), meta(VALUEMAP_PAIR.ord, 'int')),
+        exprs: [[VALUEMAP_PAIR.key, col(ranked.id, VALUEMAP_PAIR.key)], [VALUEMAP_PAIR.values, valuesArray], [VALUEMAP_PAIR.ord, col(ranked.id, VALUEMAP_PAIR.ord)]],
+      });
     },
 
     // ---- labels(): fan out the landed label set, rejoined by id ----

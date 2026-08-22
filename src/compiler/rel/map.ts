@@ -7,7 +7,7 @@ import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, keyMembership, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { propertyNode } from './property.ts';
@@ -987,52 +987,26 @@ export function elementValueMap(
   opts: { readonly flat?: boolean; readonly endpoints?: boolean } = {},
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } {
   const rowid = col(input.id, 'id');
-  const table = elem === 'edge' ? PROPERTIES.edge : PROPERTIES.vertex;
-  const props = make.scan({
-    id: fresh('vm'), table: table.table, alias: fresh('rvm'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(table.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  // `keyMembership` (`build.ts`) is the one authority on what a key set MEANS: `null` is every key, a
-  // non-empty set is membership, and an EMPTY set matches nothing — `valueMap(null)` is a map with no
-  // entries, not the whole map.
-  const mine = make.filter({
-    id: fresh('vf'), input: props, channels: [], type: props.type,
-    pred: and(eq(col(props.id, table.owner), rowid), keyMembership(col(props.id, 'key'), keys)),
-  });
-  // A VERTEX collects each key's values into one `{t:'list', v:[…]}` node; an EDGE's key is single by
-  // schema (`UNIQUE(edge, key)`, which is TinkerPop's `Property` being single by spec), so the group is
-  // still needed to carry the order column but the value is the one node.
-  const valued = typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
-  // The collected nodes, in insertion order — the array a `valueMap` list value IS, and the array an
-  // `elementMap` takes its LAST element of. ONE aggregate pass either way, which is why the flat form
-  // is a `json_extract` over it rather than a second `ORDER BY … LIMIT 1` subquery.
-  const values: Expr = {
-    kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)],
-    orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
-  };
-  const grouped = make.aggregate({
-    id: fresh('vk'), input: mine, channels: [],
-    // The GROUP KEY is a declared column — the emitter names `groupBy` exprs before the aggregates —
-    // and the projection below drops it, because what the union and the blob want is the PAIR.
-    type: typeOf(meta('key', 'text'), meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
-    groupBy: [col(mine.id, 'key')],
-    aggs: [
+  // The per-key VALUE ARRAYS come from the GRAPH SOURCE — `vertex_properties`/`edge_properties` over the
+  // base graph, the landed `{t,v}` tree over a bound one (`keyMembership`'s key-set rule lives inside it:
+  // `null` every key, a non-empty set membership, an empty set no entries). The map/flat/token SHAPING
+  // stays here so both sources frame identically.
+  const pairsRel = source.valueMapPairs(elem, rowid, keys, fresh);
+  const perKey = make.project({
+    id: fresh('vp'), input: pairsRel, channels: [],
+    type: typeOf(meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
+    exprs: [
       [PAIR_ROW.pair, pairOf(
-        typedNode(col(mine.id, 'key'), compilerText('string')),
+        typedNode(col(pairsRel.id, VALUEMAP_PAIR.key), compilerText('string')),
         // FLAT (`elementMap`, and a `valueMap` over an EDGE, whose key is single by schema) takes the
         // one node; a `valueMap` VERTEX key wraps the whole array as a `{t:'list', …}` node. `$[#-1]`
         // is LAST-wins, which is what `map.put` per property in insertion order means.
         opts.flat || elem === 'edge'
-          ? { kind: 'call', fn: 'json_extract', args: [values, compilerText('$[#-1]')] }
-          : { kind: 'json-object', entries: [['t', compilerText('list')], ['v', values]], binary: false },
+          ? { kind: 'call', fn: 'json_extract', args: [col(pairsRel.id, VALUEMAP_PAIR.values), compilerText('$[#-1]')] }
+          : { kind: 'json-object', entries: [['t', compilerText('list')], ['v', col(pairsRel.id, VALUEMAP_PAIR.values)]], binary: false },
       )],
-      [PAIR_ROW.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }],
+      [PAIR_ROW.ord, col(pairsRel.id, VALUEMAP_PAIR.ord)],
     ],
-  });
-  const perKey = make.project({
-    id: fresh('vp'), input: grouped, channels: [],
-    type: typeOf(meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
-    exprs: [[PAIR_ROW.pair, col(grouped.id, PAIR_ROW.pair)], [PAIR_ROW.ord, col(grouped.id, PAIR_ROW.ord)]],
   });
   const rows: Rel[] = [];
   // A NEGATIVE ordinal puts the tokens ahead of every property, whose ordinals are rowids and therefore

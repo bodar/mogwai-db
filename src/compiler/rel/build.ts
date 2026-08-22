@@ -150,6 +150,12 @@ export const PROPERTIES = {
   edge: { table: 'edge_properties', owner: 'edge' },
 } as const;
 
+/** The columns `GraphSource.valueMapPairs` yields — one row per property KEY of the element: the key
+ *  name, the ordered ARRAY of its `{t,v}` value nodes, and a per-key emission ordinal. `elementValueMap`
+ *  (map.ts) reads these to build the `valueMap`/`elementMap` entries, so the physical read (base tables
+ *  vs the landed `{t,v}` tree) lives in the source while the map/flat/token shaping stays in one place. */
+export const VALUEMAP_PAIR = { key: 'vmk', values: 'vmv', ord: 'vmo' } as const;
+
 /** `json(x)` / `COALESCE(…)`, as expressions rather than as three transcriptions. Every payload
  *  projection needs both — a JSON value crossing a subquery boundary loses SQLite's json subtype, and
  *  every aggregate over zero rows is NULL. */
