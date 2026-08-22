@@ -5,7 +5,8 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, EDGE_COLS, firstOf, mapNode, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { and, eq, firstOf, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { BaseGraph } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -268,47 +269,17 @@ export function byExpr(
     // `T.key`/`T.value` are a PROPERTY's tokens, not an element's — an element has no key and no value —
     // so they decline here rather than being answered off the wrong row.
     if (PROPERTY_TOKENS.has(key.token)) return null;
-    // `T.id` is the EXTERNAL id — `COALESCE(uid, id)`, the same projection every materialization uses,
-    // so a `by(T.id)` groups on the id a client would see and not on the rowid behind it.
-    const table = host.elem === 'edge' ? 'edges' : 'nodes';
-    const cols = host.elem === 'edge' ? EDGE_COLS : NODE_COLS;
-    if (key.token === 'id') {
-      const scan = make.scan({ id: fresh('ei'), table, alias: fresh('re'), channels: [], type: typeOf(...cols) });
-      const mine = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), host.id) });
-      const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(mine.id, 'uid'), col(mine.id, 'id')] };
-      return firstOf(mine, external, col(mine.id, 'id'), fresh);
-    }
-    // A LABEL is one indirection for an edge (a column into `labels`) and two for a vertex (a side
-    // table, which may hold several — the FK into `labels` names the first, i.e. the order the label
-    // NAME was first interned graph-wide, NOT this vertex's own label-insertion order). Same question,
-    // two physical shapes, which is the asymmetry `Scan` exists to make visible. Picking the first at
-    // all is OUR multi-label extension — TinkerPop's `Element.label()` is single-valued upstream.
-    //
-    // A `Join`'s outputs are addressed through the JOIN, never through its sides — the sides are in
-    // scope inside `on` and nowhere else — so the right side's `id` is declared as `lid`. Two columns
-    // sharing a name in one declared type would shadow each other in the emitter's scope map, which is
-    // the same reason `movement` renames the incoming id to `pid`.
-    const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-    if (host.elem === 'edge') {
-      const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(...EDGE_COLS) });
-      const joined = make.join({
-        id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
-        type: typeOf(...EDGE_COLS, meta('lid', 'int'), meta('name', 'text')),
-        on: and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), host.id)),
-      });
-      return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'lid'), fresh);
-    }
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const joined = make.join({
-      id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
-      type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-      on: and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), host.id)),
-    });
-    // Ordered by the `vertex_labels.label` FK (the labels-dictionary id), not the join's — a vertex
-    // with several labels reports them in that interning order, which is what the element projection's
-    // `json_group_array(… ORDER BY vertex_labels.label)` already does, so `by(T.label)` picks the same
-    // first one a client would see first.
-    return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
+    // `T.id` is the EXTERNAL id (`COALESCE(uid, id)` — the id a client sees, not the rowid); `T.label`
+    // is the element's label (one indirection into `labels` for an edge, the first of the side-table set
+    // for a vertex, in label-interning order — our multi-label extension of TinkerPop's single-valued
+    // `Element.label()`). Both are PHYSICAL reads, so they come from the GRAPH SOURCE — the SAME
+    // `externalId`/`labelScalar` the `label()`/`id()` steps and a bound `by(T.label)` reach. `byExpr` is
+    // base-only today (a bound element reads through `source.labelScalar` in `detachedTail`, never here),
+    // so `BaseGraph` directly is honest; threading `ctx.source` is the step to take when a bound `by()`
+    // first reaches this function.
+    return key.token === 'id'
+      ? BaseGraph.externalId(host.elem, host.id, fresh)
+      : BaseGraph.labelScalar(host.elem, host.id, fresh);
   }
 
   // A property scan declaring `id` as well as the payload: a VERTEX key may hold several values and
