@@ -12,6 +12,7 @@ import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
@@ -129,9 +130,9 @@ export const ORD_COL = 'go';
  * assigns one node. A REDUCING child value is a different group-scoped shape and remains declined here.
  */
 export function groupBarrier(
-  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
+  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): GroupedMap | null {
-  const rows = groupRows(input, host, step, bulked, child, fresh);
+  const rows = groupRows(input, host, step, bulked, child, source, fresh);
   return rows && (rows.done ?? groupMap(rows.rel, rows.recipe, fresh));
 }
 
@@ -239,7 +240,7 @@ const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
     && modulation.key.body[0]!.name === 'fold' && modulation.order === undefined ? undefined : modulation);
 
 export function groupRows(
-  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
+  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): GroupRows | null {
   if (step.optionArms) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
@@ -274,7 +275,7 @@ export function groupRows(
    */
   const keyBy = named(bys[0]);
   const elementKey = !keyBy && host.kind === 'element' ? host : undefined;
-  const key = elementKey ? elementKey.id : byNode(keyBy ?? { key: { kind: 'identity' } }, host, fresh, child);
+  const key = elementKey ? elementKey.id : byNode(keyBy ?? { key: { kind: 'identity' } }, host, source, fresh, child);
   if (!key) return null;
 
   // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
@@ -314,11 +315,11 @@ export function groupRows(
     // and not the per-input collecting arm. A bare `by(__.fold())` is the traverser-collect the by()-less
     // arm already builds, so it is left to fall through (`pre` empty → `groupCollected` declines).
     if (terminal === 'fold') {
-      const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, fresh);
+      const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, source, fresh);
       if (pooled) return { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
     }
     if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
-      const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, fresh);
+      const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, source, fresh);
       // A POOLED value is already a map, and there is no `(key, contribution)` row behind it — see
       // `GroupRows.done`. The `rel`/`recipe` are unreachable and stated only so the shape stays total.
       return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
@@ -340,7 +341,7 @@ export function groupRows(
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
     } else {
-      const node = byNode(valueBy, host, fresh, child);
+      const node = byNode(valueBy, host, source, fresh, child);
       if (!node) return null;
       member = node;
     }
@@ -383,7 +384,7 @@ export function groupRows(
       // not an order: two traversers can share one, and the members would then collect in scan order.
       // analyzeChain demands an encounter for every group(), so the id fallback is unreachable for this
       // collecting arm; it remains only as a defensive fallback if that analysis contract is violated.
-      ...(collecting ? [[MEMBER_COL, member ?? traverserMember(host, fresh)] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
+      ...(collecting ? [[MEMBER_COL, member ?? traverserMember(host, source, fresh)] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
       ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
       ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
     ],
@@ -623,7 +624,7 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: re
  */
 function groupReduced(
   input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
-  bulked: boolean, child: ChildSeam, fresh: Minter,
+  bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   const reducer = body.at(-1)!.name;
   const pre = body.slice(0, -1);
@@ -637,7 +638,7 @@ function groupReduced(
     // `g.V().properties().group().by(__.element()).by(__.count())`, which the algebra could express
     // the whole time.
     if (reducer !== 'count') return null;
-    return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, fresh);
+    return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, source, fresh);
   }
   // THE POOLING ARM needs a rowid to name each child row's parent by, so only an ELEMENT host reaches
   // it — `origin` is typed `int` and a value stream has none (a channels-core change).
@@ -659,7 +660,7 @@ function groupReduced(
   /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own
    *  `id` in the seed arm below. One function, because the two arms must group by the same thing. */
   const keyOf = (rowid: Expr): Expr | null =>
-    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, fresh, child));
+    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, source, fresh, child));
   const key = keyOf(col(rows.rel.id, rows.origin));
   if (!key) return null;
   const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true));
@@ -761,7 +762,7 @@ function groupReduced(
  */
 function groupCollected(
   input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
-  child: ChildSeam, fresh: Minter,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): GroupedMap | null {
   const pre = body.slice(0, -1);
   // A bare `by(__.fold())` is the by()-less collecting arm (`bareFold` already collapsed it); this pool
@@ -782,7 +783,7 @@ function groupCollected(
   /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own `id`
    *  in the seed arm. One function so both arms group by the same thing (`groupReduced`'s rule). */
   const keyOf = (rowid: Expr): Expr | null =>
-    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, fresh, child));
+    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, source, fresh, child));
   const key = keyOf(col(rows.rel.id, rows.origin));
   const seedKey = keyOf(col(input.id, 'id'));
   if (!key || !seedKey) return null;
@@ -828,9 +829,9 @@ const ROWID_HOSTS: ReadonlySet<ChildHost['kind']> = new Set(['element', 'propert
  *  traverser" two ways, and a THROW rather than a decline for a host that has neither: `groupBarrier`
  *  reaches this only after admitting the host, so another kind here is a lowering bug and not a
  *  deferral. */
-function traverserMember(host: ChildHost, fresh: Minter): Expr {
+function traverserMember(host: ChildHost, source: GraphSource, fresh: Minter): Expr {
   if (host.kind === 'element' || host.kind === 'property') return host.id;
-  const node = byNode({ key: { kind: 'identity' } }, host, fresh);
+  const node = byNode({ key: { kind: 'identity' } }, host, source, fresh);
   if (!node) throw new Error(`RelIR lowering: a ${host.kind} host cannot project its own traverser as a group member`);
   return node;
 }
@@ -981,7 +982,8 @@ const NO_LABELS: AliasMap = new Map();
  * `Direction.IN` and `Direction.OUT`, then the properties.
  */
 export function elementValueMap(
-  input: Rel, elem: Elem, keys: readonly string[] | null, tokens: MapTokens, regime: LabelRegime, fresh: Minter,
+  input: Rel, elem: Elem, keys: readonly string[] | null, tokens: MapTokens, regime: LabelRegime,
+  source: GraphSource, fresh: Minter,
   opts: { readonly flat?: boolean; readonly endpoints?: boolean } = {},
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } {
   const rowid = col(input.id, 'id');
@@ -1036,12 +1038,12 @@ export function elementValueMap(
   // A NEGATIVE ordinal puts the tokens ahead of every property, whose ordinals are rowids and therefore
   // positive. Stating it that way rather than sorting a tagged column keeps the whole order in ONE term.
   if (tokens) {
-    rows.push(tokenRow(rowid, elem, 'id', regime, -4, fresh));
-    rows.push(tokenRow(rowid, elem, 'label', regime, -3, fresh));
+    rows.push(tokenRow(rowid, elem, 'id', regime, -4, source, fresh));
+    rows.push(tokenRow(rowid, elem, 'label', regime, -3, source, fresh));
   }
   if (opts.endpoints && elem === 'edge') {
-    rows.push(endpointRow(rowid, 'IN', regime, -2, fresh));
-    rows.push(endpointRow(rowid, 'OUT', regime, -1, fresh));
+    rows.push(endpointRow(rowid, 'IN', regime, -2, source, fresh));
+    rows.push(endpointRow(rowid, 'OUT', regime, -1, source, fresh));
   }
   const pairs = rows.length ? make.union({
     id: fresh('vu'), inputs: [...rows, perKey], all: true, channels: [], type: perKey.type,
@@ -1070,7 +1072,7 @@ export function elementValueMap(
 /** One `T.id`/`T.label` entry, as a pair row correlated to the element. The LABEL follows the
  *  `LabelRegime`: a set of names where a vertex genuinely holds a set, the one first-interned name
  *  otherwise, and an EDGE's label is always the single name TinkerPop fixes its cardinality at. */
-function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelRegime, ord: number, fresh: Minter): Rel {
+function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelRegime, ord: number, source: GraphSource, fresh: Minter): Rel {
   const row = labelled(elementRow(rowid, elem, fresh), token === 'label' && elem !== 'edge' && regime === 'single', fresh);
   const external = coalesce(col(row.id, 'uid'), col(row.id, 'id'));
   const value = token === 'id'
@@ -1082,7 +1084,7 @@ function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelR
       // An edge label is ALWAYS the one name: TinkerPop fixes edge label cardinality at exactly one,
       // so no regime applies to it (`addIncludedOptions` reads `element.labels()` for a Vertex only).
       ? typedNode(edgeLabel(col(row.id, 'label'), fresh), compilerText('string'))
-      : labelNode(col(row.id, 'id'), regime, fresh);
+      : labelNode(col(row.id, 'id'), regime, source, fresh);
   return pairRow(row, pairOf(tokenKey(token), value), compilerInt(ord), fresh);
 }
 
@@ -1108,7 +1110,7 @@ const labelled = (row: Rel, gate: boolean, fresh: Minter): Rel => {
  *  that vertex's own `T.id`/`T.label` and nothing else (`ElementMapStep.getVertexStructure`). `IN` is
  *  the edge's TARGET and `OUT` its source, which is TinkerPop's direction convention and our column
  *  naming's (`tgt`/`src`) meeting point. */
-function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: number, fresh: Minter): Rel {
+function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: number, source: GraphSource, fresh: Minter): Rel {
   const row = elementRow(rowid, 'edge', fresh);
   const endpoint = col(row.id, side === 'IN' ? 'tgt' : 'src');
   const nested: Expr = {
@@ -1117,7 +1119,7 @@ function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: 
       kind: 'json-array', binary: false,
       items: [
         { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('id')), jsonOf(externalIdNode(endpoint, fresh))] },
-        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('label')), jsonOf(labelNode(endpoint, regime, fresh))] },
+        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('label')), jsonOf(labelNode(endpoint, regime, source, fresh))] },
       ],
     }]],
   };
@@ -1138,14 +1140,14 @@ const externalIdNode = (rowid: Expr, fresh: Minter): Expr => {
 /** A vertex rowid's LABEL as a typed node, by regime — the endpoint entries' `T.label` value. A zero-label
  *  endpoint keeps the entry (a nested endpoint map is built unconditionally by `getVertexStructure`, which
  *  applies the same `isEmpty()` test only to the NAME); the value is then a null tag the framer infers. */
-const labelNode = (rowid: Expr, regime: LabelRegime, fresh: Minter): Expr => regime === 'set'
+const labelNode = (rowid: Expr, regime: LabelRegime, source: GraphSource, fresh: Minter): Expr => regime === 'set'
   ? { kind: 'json-object', binary: false, entries: [['t', compilerText('set')], ['v', vertexLabels(rowid, fresh)]] }
-  : typedNode(vertexLabelName(rowid, fresh), compilerText('string'));
+  : typedNode(vertexLabelName(rowid, source, fresh), compilerText('string'));
 
 /** A vertex's SINGLE label — the side table's first-interned name, which is the same deterministic pick
  *  `label()` and `by(T.label)` make. Spelled through `byExpr`'s token arm so a third pick cannot exist. */
-const vertexLabelName = (rowid: Expr, fresh: Minter): Expr => {
-  const projected = byExpr({ key: { kind: 'token', token: 'label' } }, { kind: 'element', id: rowid, elem: 'vertex' }, fresh);
+const vertexLabelName = (rowid: Expr, source: GraphSource, fresh: Minter): Expr => {
+  const projected = byExpr({ key: { kind: 'token', token: 'label' } }, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh);
   // `byExpr`'s token arm is total for `T.label`; a null here would be a lowering bug, not a deferral.
   if (!projected) throw new Error('RelIR lowering: the T.label projection declined for a vertex');
   return projected;

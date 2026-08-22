@@ -14,6 +14,7 @@ import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases } fr
 import type { ChildHost, Subject } from './child.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
+import type { GraphSource } from './source.ts';
 
 /**
  * `match(p1, p2, …)` — the CONJUNCTIVE PATTERN step, lowered as a BINDING TABLE threaded through the
@@ -388,7 +389,7 @@ function producedObject(rel: Rel, framing: RelFraming): { readonly value: Expr; 
  */
 export function lowerMatch(
   step: IRStep, seed: Rel, elem: Elem, aliases: AliasMap,
-  params: Record<string, any>, child: ChildSeam, fresh: Minter,
+  params: Record<string, any>, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): (FramedRel & { readonly aliases: AliasMap }) | null {
   // A modulator/option arm on `match` is a front-end shape this has not seen; decline.
   if (step.modulators?.length || step.optionArms) return null;
@@ -559,6 +560,6 @@ export function lowerMatch(
   // the `{a: …}` one-key map TinkerPop emits (a `project('a').by(select('a'))`, as `gql.ts` builds).
   // Decline rather than emit the bare value — fail closed against a wrong answer; a later phase.
   if (declared.length < 2) return null;
-  const bindings = selectKeys(syn(step, 'select', declared), rel, labels, child, fresh);
+  const bindings = selectKeys(syn(step, 'select', declared), rel, labels, child, source, fresh);
   return bindings && { ...bindings, aliases: labels };
 }

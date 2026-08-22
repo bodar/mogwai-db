@@ -6,7 +6,7 @@ import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
-import { BaseGraph } from './source.ts';
+import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -196,7 +196,7 @@ export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === t
  * row. It goes INSIDE the scalar subquery, where the property row's own `vtype` is in scope.
  */
 export function byExpr(
-  modulation: Modulation, host: ChildHost, fresh: Minter, ordering = false, child?: ChildSeam,
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
 ): Expr | null {
   const { key } = modulation;
 
@@ -273,13 +273,11 @@ export function byExpr(
     // is the element's label (one indirection into `labels` for an edge, the first of the side-table set
     // for a vertex, in label-interning order — our multi-label extension of TinkerPop's single-valued
     // `Element.label()`). Both are PHYSICAL reads, so they come from the GRAPH SOURCE — the SAME
-    // `externalId`/`labelScalar` the `label()`/`id()` steps and a bound `by(T.label)` reach. `byExpr` is
-    // base-only today (a bound element reads through `source.labelScalar` in `detachedTail`, never here),
-    // so `BaseGraph` directly is honest; threading `ctx.source` is the step to take when a bound `by()`
-    // first reaches this function.
+    // `externalId`/`labelScalar` the `label()`/`id()` steps and a bound `by(T.label)` reach, which is
+    // what lets `group().by(T.label)` and friends compose over a bound graph.
     return key.token === 'id'
-      ? BaseGraph.externalId(host.elem, host.id, fresh)
-      : BaseGraph.labelScalar(host.elem, host.id, fresh);
+      ? source.externalId(host.elem, host.id, fresh)
+      : source.labelScalar(host.elem, host.id, fresh);
   }
 
   // A property scan declaring `id` as well as the payload: a VERTEX key may hold several values and
@@ -418,7 +416,7 @@ export function producedMemberNode(value: Expr, framing: RelFraming, fresh: Mint
   };
 }
 
-export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, child?: ChildSeam): Expr | null {
+export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
   if (key.kind === 'child') {
@@ -474,7 +472,7 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     // rather than left to value inference — which is the only thing that keeps a datetime from framing as
     // a long (§6·7: what arrives is CARRIED until something naturally changes it).
     if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
-      const value = byExpr(modulation, host, fresh);
+      const value = byExpr(modulation, host, source, fresh);
       return value && typedNode(value, key.token === 'key'
         ? compilerText('string')
         : propertyReadOf(host.id, host.ownerElem, 'vtype', fresh));
@@ -489,7 +487,7 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
   if (key.kind === 'token') {
     // A LABEL is always a string; an `id` is whatever `COALESCE(uid, id)` yields, so it stays untagged
     // and the framer infers — the same answer the element projection gives for an external id.
-    const value = byExpr(modulation, host, fresh);
+    const value = byExpr(modulation, host, source, fresh);
     return value && typedNode(value, key.token === 'label' ? compilerText('string') : compilerNull('text'));
   }
 
@@ -540,7 +538,7 @@ export interface ByField {
  */
 export function byField(
   step: IRStep, modulation: Modulation, host: ChildHost | null, hostFraming: RelFraming,
-  hostCol: (name: string) => Expr, fresh: Minter, child?: ChildSeam,
+  hostCol: (name: string) => Expr, source: GraphSource, fresh: Minter, child?: ChildSeam,
 ): ByField | null {
   const { key } = modulation;
   // A comparator in a record slot is not a form Gremlin has — `project(…).by(Order.desc)` names no
@@ -620,7 +618,7 @@ export function byField(
   if (host.kind === 'record') return null;
 
   if (key.kind === 'token') {
-    const value = byExpr(modulation, host, fresh);
+    const value = byExpr(modulation, host, source, fresh);
     if (!value) return null;
     // A `T` token is ALWAYS present, so a token field is never absent — `orderProductivity` says the
     // same thing for the same reason. A LABEL and a property KEY are strings; an external id is whatever
@@ -654,7 +652,7 @@ export function byField(
   // shape is a LEFT JOIN carrying both columns, and it is a later optimization rather than this
   // increment's: every other `by()` host already emits the correlated form, so this matches the SQL
   // the spine already produces instead of introducing a second access path for one caller.
-  const value = byExpr(modulation, host, fresh);
+  const value = byExpr(modulation, host, source, fresh);
   const vtype = propertyVtype(key.key, host, fresh);
   if (!value) return null;
   return {

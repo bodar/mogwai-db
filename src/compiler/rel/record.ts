@@ -11,6 +11,7 @@ import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -87,7 +88,7 @@ const qualify = (at: string, name: string): string => (at ? fieldCol(at, name) :
  */
 function recordFields(
   step: IRStep, host: ChildHost | null, hostFraming: RelFraming, hostCol: (name: string) => Expr,
-  child: ChildSeam, fresh: Minter,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly fields: readonly RecordField[]; readonly exprs: ReadonlyMap<string, Expr> } | null {
   if (step.optionArms) return null;
   const keys = (step.args ?? []).map((a) => a.value);
@@ -104,7 +105,7 @@ function recordFields(
   const exprs = new Map<string, Expr>();
   for (const [index, key] of (keys as readonly string[]).entries()) {
     const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
-    const built = byField(step, by, host, hostFraming, hostCol, fresh, child);
+    const built = byField(step, by, host, hostFraming, hostCol, source, fresh, child);
     if (!built) return null;
     const prefix = prefixAt(index);
     for (const [name, expr] of built.exprs) exprs.set(fieldCol(prefix, name), expr);
@@ -143,9 +144,9 @@ function recordFields(
  */
 export function recordNode(
   step: IRStep, host: ChildHost, hostFraming: RelFraming, hostCol: (name: string) => Expr,
-  child: ChildSeam, fresh: Minter,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): Expr | null {
-  const built = recordFields(step, host, hostFraming, hostCol, child, fresh);
+  const built = recordFields(step, host, hostFraming, hostCol, child, source, fresh);
   if (!built) return null;
   return recordPairs((column) => {
     const expr = built.exprs.get(column);
@@ -171,9 +172,9 @@ export function recordNode(
  */
 export function recordOf(
   input: Rel, host: ChildHost | null, hostFraming: RelFraming, step: IRStep,
-  child: ChildSeam, fresh: Minter,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly fields: readonly RecordField[] } | null {
-  const built = recordFields(step, host, hostFraming, (name) => col(input.id, name), child, fresh);
+  const built = recordFields(step, host, hostFraming, (name) => col(input.id, name), child, source, fresh);
   if (!built) return null;
   const { fields, exprs } = built;
 
@@ -428,7 +429,7 @@ export function recordField(
  * host built from the alias payload for exactly that reason.
  */
 export function selectKeys(
-  step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, fresh: Minter,
+  step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, source: GraphSource, fresh: Minter,
   host?: { readonly framing: RelFraming; readonly named: (label: string) => boolean },
 ): FramedRel | null {
   const spec = selectSpec(step);
@@ -474,7 +475,7 @@ export function selectKeys(
     const framing = readFraming(projected.read);
     const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
     const built = byField(step, by, selectedHost(projected.read, payload, rel, aliases), framing,
-      (name) => payload.get(name) ?? compilerNull(), fresh, child);
+      (name) => payload.get(name) ?? compilerNull(), source, fresh, child);
     if (!built) return null;
     const prefix = prefixAt(index);
     const only = spec.labels.length === 1;

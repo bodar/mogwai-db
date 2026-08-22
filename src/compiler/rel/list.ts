@@ -14,6 +14,7 @@ import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import { elementNode, elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -330,7 +331,7 @@ function localStringMemberGuard(step: IRStep, of: ListOf, input: Rel, fresh: Min
  * predicate and pass the list through untouched.
  */
 export function listMemberOp(
-  step: IRStep, input: Rel, of: ListOf, fresh: Minter, child?: ChildSeam,
+  step: IRStep, input: Rel, of: ListOf, source: GraphSource, fresh: Minter, child?: ChildSeam,
 ): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean; readonly guard?: Binding } | null {
   if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms) return null;
   // A GLOBAL string transform over a collection is a permanent type error, WHATEVER the member framing:
@@ -495,7 +496,7 @@ export function listMemberOp(
     // is `bulkSlice`'s rule (`lower.ts`) and the defect it prevents is a plan referencing an alias that is
     // out of scope where it is read.
     const keyOn = (m: Rel): Expr | null => (elemOf
-      ? byExpr(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, fresh, true, child)
+      ? byExpr(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, source, fresh, true, child)
       : only.key.kind === 'identity' ? memberCompareKey(of, m) : null);
     const probe = keyOn(members);
     if (!probe) return null;

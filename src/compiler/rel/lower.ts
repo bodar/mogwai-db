@@ -1527,7 +1527,7 @@ function dedupBy(
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, shape.host, fresh, false, childSeam(ctx, fresh));
+  const key = byExpr(modulation, shape.host, ctx.source, fresh, false, childSeam(ctx, fresh));
   if (!key) return null;
   const productive = productivityFilter(step, key);
   const domain = productive
@@ -1629,7 +1629,7 @@ function dedupByLabels(
       // is a later phase.
       if (proj.read.kind !== 'element') return null;
       const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
-      const key = byExpr(by, host, fresh, false, seam);
+      const key = byExpr(by, host, ctx.source, fresh, false, seam);
       if (!key) return null;
       keyExprs.push(key);
       const prod = productivityFilter(step, key);
@@ -2006,7 +2006,7 @@ function terminal(
     // unconditionally, which is why a `true` argument is not even a form it has.
     if (step.name === 'elementMap' && tokens) return null;
     const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
-      step.name === 'elementMap' || tokens, ctx.labelRegime, fresh,
+      step.name === 'elementMap' || tokens, ctx.labelRegime, ctx.source, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
@@ -2050,7 +2050,7 @@ function terminal(
   if (step.name === 'label' || step.name === 'id') {
     if (args.length) return null;
     const token = step.name === 'label' ? 'label' : 'id';
-    const projected = byExpr({ key: { kind: 'token', token } }, elementHost(input, elem, aliases), fresh);
+    const projected = byExpr({ key: { kind: 'token', token } }, elementHost(input, elem, aliases), ctx.source, fresh);
     if (!projected) return null;
     return {
       rel: make.project({
@@ -2081,7 +2081,7 @@ function terminal(
   if (step.name === 'labels') {
     if (args.length) return null;
     if (elem === 'edge') {
-      const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), fresh);
+      const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), ctx.source, fresh);
       if (!projected) return null;
       return {
         rel: make.project({
@@ -2269,7 +2269,7 @@ function sortTerms(
   // several terms each KEY term owes one, conjoined over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
-    const key = byExpr(modulation, host, fresh, true, childSeam(ctx, fresh));
+    const key = byExpr(modulation, host, ctx.source, fresh, true, childSeam(ctx, fresh));
     if (!key) return null;
     terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
     const drop = orderProductivity(step, modulation, key);
@@ -2478,7 +2478,7 @@ function scalarTail(
     // function: the shape boundary runs both ways and `selectTail` is the one place that decides which
     // loop the label's shape belongs to.
     if (step.name === 'select') {
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh, { framing: out, named: namedElsewhere(ctx) });
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing: out, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -2508,7 +2508,7 @@ function scalarTail(
       // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
       // the reduction happens at the `cap`, which is where a label filled at N positions can be one
       // grouping over the UNION of them.
-      const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
+      const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
       if (!rows) return null;
       // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, exactly
       // as it does over an element stream — so the loop CONTINUES and only the unkeyed form becomes the
@@ -2545,14 +2545,14 @@ function scalarTail(
         out = read.framing;
         continue;
       }
-      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), fresh);
+      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!folded) return null;
       rel = folded;
       continue;
     }
 
     if (step.name === 'project') {
-      const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), fresh);
+      const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), ctx.source, fresh);
       if (!record) return null;
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -2561,7 +2561,7 @@ function scalarTail(
     // One lowering at every host, for `project()`'s reason: a shape works wherever it is legal, not
     // wherever a host was taught it.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), fresh);
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       rel = projected.rel;
       out = projected.framing;
@@ -2780,7 +2780,7 @@ function scalarTail(
       // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
       const deduped = modulations(step, 1, childSeam(ctx, fresh));
-      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, childSeam(ctx, fresh)))) return null;
+      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, ctx.source, fresh, false, childSeam(ctx, fresh)))) return null;
       if (deduped[0]?.order !== undefined) return null;
       const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
@@ -2908,7 +2908,7 @@ function scalarTail(
     // scalar collection are the VALUES, keeping their per-row type.
     if (step.name === 'aggregate') {
       const snapshot = registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectPolicies,
-        childSeam(ctx, fresh), fresh, ctx.mutating);
+        childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
       if (!snapshot) return null;
       // The element tail's rule, at the value tail: a snapshot is an execution step and belongs in
       // the effect sequence at THIS position.
@@ -3266,7 +3266,7 @@ function listTail(
     // shape and `selectTail` decides the loop, so a label holding an element re-enters `elementTail`
     // from here exactly as it does from the scalar tail.
     if (step.name === 'select') {
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
         { framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
@@ -3328,7 +3328,7 @@ function listTail(
     const sliced = sliceOp(step, rel, false, fresh);
     if (sliced) { rel = sliced; continue; }
 
-    const member = listMemberOp(step, rel, items, fresh, seam);
+    const member = listMemberOp(step, rel, items, ctx.source, fresh, seam);
     if (member) {
       rel = member.rel;
       items = member.of;
@@ -4570,7 +4570,7 @@ function elementTail(
     }
     if (step.name === 'select') {
       if (pathCarried(rel)) return null;
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
         { framing: { kind: 'elements', elem }, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
@@ -4581,7 +4581,7 @@ function elementTail(
     // ONE dispatcher exactly like `select`. See `match.ts` and `docs/2026-08-13-match-relir-lowering-plan.md`.
     if (step.name === 'match') {
       if (pathCarried(rel)) return null;
-      const matched = lowerMatch(step, rel, elem, labels, ctx.params, childSeam(ctx, fresh), fresh);
+      const matched = lowerMatch(step, rel, elem, labels, ctx.params, childSeam(ctx, fresh), ctx.source, fresh);
       if (!matched) return null;
       return continueAs(matched.rel, matched.framing, steps, at + 1, false, ctx, fresh, matched.aliases);
     }
@@ -4609,7 +4609,7 @@ function elementTail(
     if (step.name === 'path') {
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
         || step.from !== undefined || step.to !== undefined) return null;
-      const positions = pathPositions(rel, step, childSeam(ctx, fresh), fresh);
+      const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -4645,7 +4645,7 @@ function elementTail(
       // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
       // the reduction happens at the `cap`, which is where a label filled at N positions can be one
       // grouping over the UNION of them.
-      const rows = groupRows(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), fresh);
+      const rows = groupRows(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
       if (!rows) return null;
       // A LABELLED `group("a")`/`groupCount("a")` is a SIDE EFFECT, not a barrier result:
       // `GroupSideEffectStep` fills the named map and passes its incoming traversers ON, which is
@@ -4676,7 +4676,7 @@ function elementTail(
       // A carried PATH declines for `terminal()`'s reason: the value is a new traverser object and
       // nothing here appends it as a path position.
       if (pathCarried(rel)) return null;
-      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
+      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -4685,7 +4685,7 @@ function elementTail(
     if (step.name === 'aggregate') {
       if (pathCarried(rel)) return null;
       const snapshot = registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
-        ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), fresh, ctx.mutating);
+        ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
       if (!snapshot) return null;
       // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the
       // rest of the chain writes, which is the whole point of taking it. Same prepend a write step
@@ -4742,7 +4742,7 @@ function elementTail(
       // nothing here appends it as a path position, so a later `path()` would report a history with a
       // step missing rather than fail.
       if (pathCarried(rel)) return null;
-      const record = recordOf(rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, step, childSeam(ctx, fresh), fresh);
+      const record = recordOf(rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, step, childSeam(ctx, fresh), ctx.source, fresh);
       if (!record) return null;
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -4750,7 +4750,7 @@ function elementTail(
     // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
     // to `terminal()`, which is where every element→value boundary lives.
     if (step.name === 'sack' && sackOperator(step) !== undefined) {
-      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
+      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
       if (!folded) return null;
       rel = folded;
       continue;
@@ -5014,7 +5014,7 @@ function propertyTail(
   // is here before the retypes below rather than after the modulator guard they share.
   if (step.name === 'group' || step.name === 'groupCount') {
     const host: ChildHost = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, row: { rel, aliases: labels } };
-    const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
+    const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
     return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
 
@@ -5166,7 +5166,7 @@ function aliasValueWhere(
   const seam = childSeam(ctx, fresh);
   const hostOf = (proj: NonNullable<ReturnType<typeof aliasProjection>>): ChildHost =>
     ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
-  const lhs = byExpr(ring[0]!, hostOf(startProj), fresh, true, seam);
+  const lhs = byExpr(ring[0]!, hostOf(startProj), ctx.source, fresh, true, seam);
   if (!lhs) return 'decline';
   const lhsProd = productivityFilter(step, lhs);
   if (!lhsProd) return 'decline'; // keep-null (ProductiveByStrategy) not built
@@ -5183,7 +5183,7 @@ function aliasValueWhere(
     const proj = aliasProjection(rel, labels, p.operands[0]!.value, 'last', fresh);
     if (!proj || proj.read.kind !== 'element') return null;
     const by = ring[ringIdx % ring.length]!; ringIdx++;
-    const val = byExpr(by, hostOf(proj), fresh, true, seam);
+    const val = byExpr(by, hostOf(proj), ctx.source, fresh, true, seam);
     if (!val) return null;
     const p2 = productivityFilter(step, val);
     if (!p2) return null; // keep-null not built
@@ -5255,7 +5255,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const hostOf = (proj: NonNullable<typeof projA>): ChildHost =>
           ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
         const seam = childSeam(ctx, fresh);
-        const [aVal, bVal] = [byExpr(bys[0]!, hostOf(projA), fresh, true, seam), byExpr(bys[0]!, hostOf(projB), fresh, true, seam)];
+        const [aVal, bVal] = [byExpr(bys[0]!, hostOf(projA), ctx.source, fresh, true, seam), byExpr(bys[0]!, hostOf(projB), ctx.source, fresh, true, seam)];
         if (!aVal || !bVal) return 'decline';
         // A non-productive `by()` DROPS the row (`productivityFilter` = each value `IS NOT NULL`), which
         // is also what the NULL-propagating compare does — conjoined for belt-and-braces. Under
@@ -5312,7 +5312,7 @@ function recordTail(
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
         { framing: { kind: 'record', fields }, named: namedElsewhere(ctx) });
       return selected && continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -5355,7 +5355,7 @@ function recordTail(
     // against the FIELDS by the same rule `by(__.select('a'))` already followed here. `_` is the whole
     // map, so it declines through the identity guard rather than projecting one.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), fresh);
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -5427,9 +5427,9 @@ function recordTail(
  * `present: ALWAYS_PRODUCTIVE` because a token cannot be absent — which is the claim `chooseOptions`
  * reads to prove the `Pick.unproductive` arm dead rather than emitting a shape the traversal never has.
  */
-function tokenChoice(token: string, subject: Subject, fresh: Minter): ChildValue | null {
+function tokenChoice(token: string, subject: Subject, source: GraphSource, fresh: Minter): ChildValue | null {
   const modulation: Modulation = { key: { kind: 'token', token: token.toLowerCase() as 'id' | 'label' | 'key' | 'value' } };
-  const expr = byExpr(modulation, childHostOf(subject), fresh);
+  const expr = byExpr(modulation, childHostOf(subject), source, fresh);
   if (!expr) return null;
   // A LABEL and a property KEY are strings; an external id is whatever `COALESCE(uid, id)` yields, so it
   // stays UNKNOWN and the framer infers — the same split `byField` draws for the same tokens.
@@ -5940,7 +5940,7 @@ function chooseOptions(
   // (`orderProductivity` says the same thing for the same reason), so the `Pick.unproductive` arm is
   // provably dead and `canBeUnproductive` below reads that off the claim rather than being told.
   const produced = isTokenArg(choiceArg)
-    ? tokenChoice(choiceArg.token, subject, fresh)
+    ? tokenChoice(choiceArg.token, subject, ctx.source, fresh)
     : isNested(choiceArg)
       ? ((body) => (body?.length ? seam.scalar(body, host) : null))(seam.body(choiceArg.nested, 'child'))
       : null;
@@ -7169,7 +7169,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // stream, which is the RECORD relation's business and not a correlated read's.
   if (first.name === 'project' && body.length === 1) {
     const self = hostSelf(host);
-    const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), fresh);
+    const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     // `project()` is a `ScalarMapStep` — one map per traverser, never several.
     return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, yields: 'one' };
   }
@@ -7215,14 +7215,14 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // A property's KEY is always present and always a string; its VALUE carries the stored `vtype` per
     // row, which is `propertyValue`'s channel read through a rowid instead of through the join.
     if (first.name === 'key' && !argValues(first).length)
-      return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, childSeam(ctx, fresh), fresh);
+      return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
     if (first.name === 'value' && !argValues(first).length)
       return valueRun(body, 1, {
         value: propertyReadOf(host.id, host.ownerElem, 'value', fresh), type: UNKNOWN,
         vtype: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh), present: ALWAYS_PRODUCTIVE,
         // A property traverser IS one property, so its key and its value are each exactly one.
         yields: 'one',
-      }, host.row, childSeam(ctx, fresh), fresh);
+      }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
     return null;
   }
 
@@ -7230,7 +7230,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // (`by(__.math('_ * 10'))`, `by(dateAdd(DT.day, 1))`) is well-formed rather than the nonsense it
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
   // way round — the guard exists because an element is not a value, and here there is one.
-  if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), fresh);
+  if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), ctx.source, fresh);
   if (host.kind === 'list') return listHostChild(body, host, ctx, fresh);
   if (host.kind !== 'element') return null;
 
@@ -7281,7 +7281,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   if (leading?.name === 'values') {
     const args = argValues(leading);
     if (args.length !== 1 || typeof args[0] !== 'string') return null;
-    const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, fresh);
+    const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, ctx.source, fresh);
     if (!projected) return null;
     value = projected;
     vtype = propertyVtype(args[0], host, fresh);
@@ -7310,7 +7310,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // A `T` token is ALWAYS present — every element has a label and an id — and saying so is a CLAIM
     // rather than the silence `undefined` means.
     present = ALWAYS_PRODUCTIVE;
-    const projected = byExpr({ key: { kind: 'token', token: leading.name } }, host, fresh);
+    const projected = byExpr({ key: { kind: 'token', token: leading.name } }, host, ctx.source, fresh);
     if (!projected) return null;
     value = projected;
     // A LABEL is always a string; an external `id` is whatever `COALESCE(uid, id)` yields, so it stays
@@ -7322,7 +7322,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // SUBJECT through its own variables, so it leads a body exactly as `values(k)` and `call(…)` do.
     // Its `_` is this host, which is why it needs no arm of its own here and why the whole
     // by()-child matrix gains both at once.
-    const projected = projectorValue(leading!, host, childSeam(ctx, fresh), fresh);
+    const projected = projectorValue(leading!, host, childSeam(ctx, fresh), ctx.source, fresh);
     if (!projected) return null;
     value = projected.value;
     type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
@@ -7372,7 +7372,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), fresh);
+  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
 }
 
 /**
@@ -7394,7 +7394,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
 function valueRun(
   body: readonly IRStep[], from: number,
   seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr; readonly yields: ChildValue['yields'] },
-  row: HostRow | undefined, child: ChildSeam, fresh: Minter,
+  row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): ChildValue | null {
   let value = seed.value;
   let type = seed.type;
@@ -7406,7 +7406,7 @@ function valueRun(
     const step = body[at]!;
     if (REL_PROJECTORS.has(step.name)) {
       const host: ChildHost = { kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}) };
-      const projected = projectorValue(step, host, child, fresh);
+      const projected = projectorValue(step, host, child, source, fresh);
       if (!projected) return null;
       value = projected.value;
       type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
@@ -7438,7 +7438,7 @@ function valueRun(
  * and it is the same fold the element arm uses.
  */
 function scalarHostChild(
-  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, child: ChildSeam, fresh: Minter,
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): ChildValue | null {
   let value: Expr = host.value;
   let type: ScalarType = UNKNOWN;
@@ -7461,7 +7461,7 @@ function scalarHostChild(
   }
   // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
   // replaces it and every transform maps it, neither of which can produce a second.
-  return valueRun(body, at, { value, type, vtype, yields: 'one' }, host.row, child, fresh);
+  return valueRun(body, at, { value, type, vtype, yields: 'one' }, host.row, child, source, fresh);
 }
 
 /**

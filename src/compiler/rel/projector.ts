@@ -11,6 +11,7 @@ import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byExpr, modulations, scopedHost, type Modulation } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import { carriedCols, meta, typeOf, type Minter } from './build.ts';
 
 /**
@@ -97,7 +98,7 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
  * wanted is the VALUE rather than a relation carrying it — `serviceValue`/`midCall`'s split, for
  * the same reason.
  */
-export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, fresh: Minter): Expr | null {
+export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter): Expr | null {
   const [formula, extra] = argValues(step);
   if (typeof formula !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
@@ -121,7 +122,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, fresh
     // An identity projection over an ELEMENT or a RECORD is the traverser itself, which is not a
     // Number — the reference raises rather than coercing, so decline instead of projecting a rowid.
     if (varHost.kind !== 'scalar' && modulation.key.kind === 'identity') return null;
-    const value = byExpr(modulation, varHost, fresh, false, child);
+    const value = byExpr(modulation, varHost, source, fresh, false, child);
     if (!value) return null;
     resolved.set(name, value);
   }
@@ -152,7 +153,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, fresh
  * no filter, which is why `tokens` is reported back.
  */
 function formatValue(
-  step: IRStep, host: ChildHost, child: ChildSeam, fresh: Minter,
+  step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly expr: Expr; readonly tokens: number } | null {
   const [template, extra] = argValues(step);
   if (typeof template !== 'string' || extra !== undefined || step.optionArms) return null;
@@ -170,7 +171,7 @@ function formatValue(
       // A bare `%{_}` over an ELEMENT appends the element's own `toString()` (`v[1]`), which is a
       // Java rendering no SQL expression reproduces — decline rather than emit a rowid.
       if (host.kind !== 'scalar' && modulation.key.kind === 'identity') return null;
-      const value = byExpr(modulation, host, fresh, false, child);
+      const value = byExpr(modulation, host, source, fresh, false, child);
       if (!value) return null;
       pieces.push(value);
       continue;
@@ -179,7 +180,7 @@ function formatValue(
     // A scope key holding an ELEMENT has the same `toString()` problem; only a value concatenates.
     const scopedValue = scoped?.kind === 'scalar' ? scoped.value : null;
     if (host.kind === 'element') {
-      const property = byExpr({ key: { kind: 'property', key: part.name } }, host, fresh, false, child);
+      const property = byExpr({ key: { kind: 'property', key: part.name } }, host, source, fresh, false, child);
       if (!property) return null;
       // The reference falls through only when the property is ABSENT, which is what COALESCE says.
       pieces.push(scopedValue ? { kind: 'call', fn: 'COALESCE', args: [property, scopedValue] } : property);
@@ -216,15 +217,15 @@ export const REL_PROJECTORS: ReadonlySet<string> = new Set(['math', 'format']);
  * the same reason.
  */
 export function projectorValue(
-  step: IRStep, host: ChildHost, child: ChildSeam, fresh: Minter,
+  step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly value: Expr; readonly drop: boolean; readonly sqlType: SqlType; readonly framing: RelFraming } | null {
   if (step.name === 'math') {
-    const value = mathValue(step, host, child, fresh);
+    const value = mathValue(step, host, child, source, fresh);
     // `math()` is ALWAYS a Double (`MathStep extends MapStep<S, Double>`), whatever the leaves held.
     return value && { value, drop: true, sqlType: 'real', framing: { kind: 'scalar', type: STATIC('double') } };
   }
   if (step.name !== 'format') return null;
-  const produced = formatValue(step, host, child, fresh);
+  const produced = formatValue(step, host, child, source, fresh);
   // `format()` is ALWAYS a String (`FormatStep extends MapStep<S, String>`) — the reference's own
   // declared type, and the `CAST(… AS TEXT)` above is what makes the relation agree with it.
   return produced && {
@@ -248,9 +249,9 @@ export function projectorValue(
  * a token at all, so a constant template emits every traverser.
  */
 export function projectorTail(
-  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, fresh: Minter,
+  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): FramedRel | null {
-  const produced = projectorValue(step, host, child, fresh);
+  const produced = projectorValue(step, host, child, source, fresh);
   if (!produced) return null;
   const { value, drop, sqlType, framing } = produced;
   const carried = input.channels;

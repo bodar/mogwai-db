@@ -12,6 +12,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { constLit } from './const.ts';
 import type { FramedRel } from './framing.ts';
 import { byExpr, modulations, productivityFilter } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 
 /**
  * THE SACK — a per-traverser accumulator, as an ordinary carried CHANNEL.
@@ -90,7 +91,7 @@ export function seedSack(rel: Rel, spec: MergePolicy, fresh: Minter): Rel | null
  * does at `order()` and `dedup()`, so the rule is asked for rather than restated.
  */
 export function sackMutate(
-  step: IRStep, rel: Rel, host: ChildHost, child: ChildSeam, fresh: Minter,
+  step: IRStep, rel: Rel, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): Rel | null {
   const operator = sackOperator(step);
   if (!operator || !SACK_OPS.has(operator)) return null;
@@ -104,7 +105,7 @@ export function sackMutate(
   // more is invalid Gremlin the Pass tier raises for, not a shape to pick a slot from.
   const bys = modulations(step, 1, child);
   if (!bys) return null;
-  const value = byExpr(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, false, child);
+  const value = byExpr(bys[0] ?? { key: { kind: 'identity' } }, host, source, fresh, false, child);
   if (!value) return null;
 
   // THREE NODES, and the middle one is why: the by() value has to be FILTERED on before it is folded

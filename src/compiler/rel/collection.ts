@@ -11,6 +11,7 @@ import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import { foldElements, foldScalars, inferredVtype, LIST_COL, NODE_COL } from './list.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
@@ -213,7 +214,7 @@ function labelOf(step: IRStep): string | null {
  */
 export function registerCollection(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming, collections: Collections,
-  policies: ReadonlyMap<string, MergePolicy>, child: ChildSeam, fresh: Minter, mutating: boolean,
+  policies: ReadonlyMap<string, MergePolicy>, child: ChildSeam, source: GraphSource, fresh: Minter, mutating: boolean,
 ): readonly Binding[] | null {
   const label = labelOf(step);
   if (label === null) return null;
@@ -244,7 +245,7 @@ export function registerCollection(
   if (!bys) return null;
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
   const built = bys[0]
-    ? projectedMembers(step, input, host, framing, bys[0], encounter, child, fresh)
+    ? projectedMembers(step, input, host, framing, bys[0], encounter, child, source, fresh)
     : traverserMembers(step, input, framing, encounter);
   if (!built) return null;
   const policied = { ...built, merge };
@@ -498,9 +499,9 @@ function traverserMembers(
 function projectedMembers(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming,
   modulation: import('./modulator.ts').Modulation, encounter: Channel | undefined,
-  child: ChildSeam, fresh: Minter,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): Collection | null {
-  const field = byField(step, modulation, host, framing, (name) => col(input.id, name), fresh, child);
+  const field = byField(step, modulation, host, framing, (name) => col(input.id, name), source, fresh, child);
   if (!field || field.framing.kind !== 'scalar') return null;
   // A numeric reducer's type is the aggregate's runtime `typeof` in `vt`, which `byField` already
   // declines to supply rather than recomputing the aggregate; every other scalar `by()` declares `v`

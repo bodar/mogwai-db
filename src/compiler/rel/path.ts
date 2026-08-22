@@ -10,6 +10,7 @@ import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
+import type { GraphSource } from './source.ts';
 import type { ChildSeam } from './child.ts';
 
 /**
@@ -123,7 +124,7 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Re
  * deep inside a table-valued function argument.
  */
 export function pathPositions(
-  rel: Rel, step: IRStep, child: ChildSeam, fresh: Minter,
+  rel: Rel, step: IRStep, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
   if (!pathCarried(rel)) return null;
   const parsed = modulations(step, step.modulators?.length ?? 0, child);
@@ -156,8 +157,8 @@ export function pathPositions(
   };
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, fresh, child);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, fresh, child);
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, source, fresh, child);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh, child);
     if (!edge || !vertex) return null;
     return {
       kind: 'case',
