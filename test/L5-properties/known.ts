@@ -11,7 +11,7 @@
 // semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
 // beneath both).
 //
-// ****  EMPTY IS THE INTENDED STATE. One entry today (see the footer) — a diagnosed, unfixed bug.  ****
+// ****  EMPTY IS THE INTENDED STATE, and the list is currently empty (see the footer for why).  ****
 //
 // The `propertySeek` entry that sat here was NOT a fast-path defect at all — it was a wrong ANSWER
 // present in BOTH positions the differential compares (this oracle's own blind spot), which `propertySeek` merely masked
@@ -71,34 +71,14 @@ export interface KnownDivergence {
   readonly family?: { readonly detail?: RegExp; readonly query?: RegExp };
 }
 
-// One entry today — an order-sensitive slice inside a branch arm, surfaced by the HEAD-derived seed at
-// commit 459edbf (an unlucky draw: 7 of 7 sampled random seeds do NOT generate the triggering shape).
-// Its one prior entry recorded a defect in the LEGACY generic child-existence lowering — a route that no
-// longer exists, so that divergence went with it. One entry per ROOT CAUSE with its diagnosis, never one
-// per traversal.
+// EMPTY, and that is the state a ratchet is supposed to reach. The order-sensitive-slice-in-a-branch-arm
+// entry that sat here (commit ecc392f) was FIXED, not silenced: `computeDemandsEncounter` now seeds the
+// emission-order encounter when a drop-slice (limit/range/tail) appears inside a branch-merge arm
+// (`analyze.ts` BRANCH_MERGE_STEPS), so the stream feeding the branch is ordered and the arm's slice is
+// deterministic regardless of which scan order a fast path produces. Pinned in
+// `test/L4-addendum/branch-arm-slice-order.feature`. The next per-switch divergence L5 draws belongs
+// here, one entry per ROOT CAUSE with its diagnosis, never one per traversal.
 export const KNOWN: readonly KnownDivergence[] = [
-  {
-    query: "g.V().has('age', P.lte(29)).union(__.has('name').limit(1), __.identity())",
-    fastPath: 'propertySeek',
-    diagnosis:
-      'An order-sensitive SLICE (limit/range/tail) inside a BRANCH arm has no pinned emission order, so ' +
-      'which traverser it keeps depends on the physical scan order — and that is exactly what propertySeek ' +
-      'changes. `has(k)` lowers to a correlated EXISTS in the WHERE, which SQLite scans in rowid order; ' +
-      'propertySeek LIFTS that EXISTS into a JOIN (semijoin.ts), whose scan order differs. So over ' +
-      '`V().has(age,lte 29)` = {marko(1), vadas(2)}, the arm `has(name).limit(1)` keeps marko under the ' +
-      'generic path (rowid order, correct — TinkerPop `limit` takes the first in traversal order) but a ' +
-      'different survivor under propertySeek, and unioned with `identity()` the two configs report ' +
-      'different MULTISETS ({v1x2,v2x1} vs {v2x2,v1x1}). Root cause is not propertySeek itself but that a ' +
-      'branch-arm slice is not given a deterministic take-first order (the encounter channel is not seeded ' +
-      'when no explicit order() is present); propertySeek merely makes the missing order observable. The ' +
-      'fix is the branch/limit emission-order substrate — pin a deterministic slice over the source order ' +
-      'in a branch arm — tracked in docs/2026-08-21-graph-source-abstraction-plan.md; pre-existing, ' +
-      'orthogonal to the GraphSource work, NOT a regression from it (reproduces identically at parent b3cc073).',
-    // The family: an order-sensitive slice inside any branch modulator. A limit/range/tail whose survivor
-    // set is emission-order-dependent, reached through union/choose/coalesce/local/flatMap, is this same
-    // cause dressed in a different chain by the generator — not a new finding.
-    family: { query: /(union|choose|coalesce|local|flatMap)\(.*\.(limit|range|tail)\(/ },
-  },
 ];
 
 /** Normalise the quote style / whitespace the corpus and the generator differ on. */

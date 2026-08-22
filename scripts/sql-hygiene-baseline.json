@@ -85,7 +85,7 @@
   },
   "choose": {
     "binds": 0,
-    "bytes": 4305,
+    "bytes": 4731,
     "compiler": 81,
     "bound": 0
   },
@@ -109,7 +109,7 @@
   },
   "conjoin": {
     "binds": 0,
-    "bytes": 2347,
+    "bytes": 2321,
     "compiler": 47,
     "bound": 0
   },
@@ -295,7 +295,7 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 3166,
+    "bytes": 3140,
     "compiler": 42,
     "bound": 0
   },
@@ -439,7 +439,7 @@
   },
   "path": {
     "binds": 0,
-    "bytes": 5705,
+    "bytes": 5627,
     "compiler": 106,
     "bound": 0
   },
@@ -481,7 +481,7 @@
   },
   "reverse": {
     "binds": 0,
-    "bytes": 2250,
+    "bytes": 2224,
     "compiler": 43,
     "bound": 0
   },
@@ -565,7 +565,7 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 5957,
+    "bytes": 6791,
     "compiler": 78,
     "bound": 0
   },
@@ -583,7 +583,7 @@
   },
   "valueMap": {
     "binds": 0,
-    "bytes": 2244,
+    "bytes": 2238,
     "compiler": 45,
     "bound": 0
   },

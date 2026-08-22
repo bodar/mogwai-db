@@ -78,6 +78,39 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  order observable and it is always at the top level, so it is the one that cannot be missed. */
 const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap', 'group']);
 
+/** Branch-merge steps whose arms each run over the INCOMING stream — so a drop-slice inside an arm
+ *  picks the first N in the incoming emission order and, exactly like a top-level slice, needs the
+ *  encounter seeded and threaded to the branch. The FLAT scan in `computeDemandsEncounter` cannot see a
+ *  nested slice, so `armChains` + `bodyDemandsEncounter` recurse their arm bodies. Without this, a chain
+ *  like `V().has(k).union(__.has(k2).limit(1), __.identity())` seeds no order, and whichever scan order a
+ *  fast path (propertySeek's `has()`→JOIN) happens to produce silently picks the surviving traverser —
+ *  an order-dependent WRONG multiset, the defect `test/L5-properties/known.ts` recorded. */
+const BRANCH_MERGE_STEPS = new Set(['union', 'choose', 'coalesce', 'optional']);
+
+/** The nested arm step-chains of a branch-merge step — union/coalesce's nested args and choose's
+ *  `optionArms`. An unnormalizable arm is skipped: it declines in the lowering, so at worst this
+ *  over- or under-seeds an order column, never mis-answers. */
+function armChains(step: IRStep): IRStep[][] {
+  const trees: unknown[] = [];
+  for (const a of argValues(step)) if (isNested(a)) trees.push((a as { nested: unknown }).nested);
+  for (const opt of step.optionArms ?? []) {
+    const n = argValues(opt as IRStep).find(isNested);
+    if (n) trees.push((n as { nested: unknown }).nested);
+  }
+  const chains: IRStep[][] = [];
+  for (const t of trees) { try { chains.push(stepChain(t, {}) as IRStep[]); } catch { /* unnormalizable — skip */ } }
+  return chains;
+}
+
+/** Does this step chain contain a drop-slice whose survivor depends on the incoming order — at its own
+ *  top level, or inside a nested branch-merge arm (recursively)? `Scope.local` is exempt: it slices a
+ *  value's members, not the stream's rows. */
+function bodyDemandsEncounter(steps: readonly IRStep[]): boolean {
+  return steps.some((s) =>
+    (POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s))
+    || (BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)));
+}
+
 /** Does this `group()` reduce each key's values to an order-insensitive scalar?
  * TinkerPop first makes the structural distinction in `Grouping.hasBarrierInValueTraversal`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java`).
@@ -171,6 +204,10 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     //
     // `Scope.local` is exempt throughout: that form slices a VALUE's members, not the stream's rows.
     if (!ordered && POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)) return true;
+    // …and the same slice INSIDE a branch-merge arm is order-sensitive w.r.t. the incoming stream, but
+    // the flat scan above cannot see it. Seed the encounter so the stream feeding the branch is ordered
+    // and the arm's slice is deterministic. An upstream order() already satisfies it (`ordered`).
+    if (!ordered && BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
     if (sawFanout && s.name === 'dedup' && argValues(s).some((a) => typeof a === 'string')) return true;
