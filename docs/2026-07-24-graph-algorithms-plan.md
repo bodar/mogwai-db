@@ -1,9 +1,27 @@
 # Graph Algorithms — a GDS-competitive, TinkerPop-compatible algorithm layer
 
-**Status: INTENDED future work, not scheduled. Design/research only — nothing built. Reviewed
-2026-08-13 against the RelIR spine.** OLAP is **no longer a locked non-goal**: the intention is to
-implement it. Not in `docs/outstanding-work.md` because no tranche is scheduled, and until one lands
-the four named steps fail closed. Names the open research where it matters.
+**Status: BUILD STARTED 2026-08-22. The two-front-end seam is LANDED; the compute is next.** Reviewed
+2026-08-13 against the RelIR spine. OLAP is **no longer a locked non-goal**: the intention is to
+implement it. Names the open research where it matters.
+
+**✅ LANDED (2026-08-22, commit `desugar the four native OLAP steps`).** The front-end for ALL FOUR
+steps and the service registration:
+- `desugarGraphAlgos` (extract Pass, `ir/strategies.ts`) rewrites `pageRank`/`connectedComponent`/
+  `peerPressure`/`shortestPath` → `call('mogwai.pageRank'|'.wcc'|'.peerPressure'|'.shortestPath', {mode})`
+  — Guardrails #1, tested in `test/compiler/passes.exec.test.ts`. `mode` is `decorate` for the three
+  element-preserving steps, `path` for shortestPath. `pageRank(α)`'s damping rides in the config map;
+  the `~tinkerpop.<algo>.*` config folds onto the minted call via `absorbCallWith`.
+- The four services (`src/services/catalog/graph-algorithms.ts`) register in BOTH registries as
+  `internal: true` (served, absent from `--list` — they back native steps, like `mogwai.io`).
+- **Execution is a clear fail-closed deferral** ("graph algorithm execution is not implemented yet"),
+  never a mis-execution or a silent decline. Census re-recorded (OLAP rows now carry that message).
+
+**NEXT — the compute (a genuine design fork, see "the two-front-end architecture" + open research).**
+Template A (pageRank/wcc/peerPressure) needs the host-driven iteration barrier + the retained-binding
+decorate tail (the doc's flagged "one piece of genuinely new plumbing" — the current barrier
+substrate lands DETACHED `ForeignRow[]`, which the decorate contract cannot use). Template B
+(shortestPath) needs only a recursive-CTE path relation over the already-live path channel — no
+barrier, no retained binding, no occupancy question.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names
