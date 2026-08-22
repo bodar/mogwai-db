@@ -7177,6 +7177,40 @@ function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): ChildHo
  * type, and a bare `label()` is a string. Recomputing any of that from the finished `Expr` is
  * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
  */
+/** Does an expression tree contain a SUBQUERY node (a correlated `scalar`/`exists`/`in-query`)? */
+function exprHasSubquery(e: Expr): boolean {
+  if (e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query') return true;
+  return exprChildren(e).some(exprHasSubquery);
+}
+
+/** Does `rel`'s `name` column bottom out in a correlated SUBQUERY rather than a column off a table the
+ *  relation scans? Follows only the projection chain (project/window/sort/limit/filter/distinct/
+ *  materialize are passthroughs for a column they do not compute); reaching any real relation source
+ *  (scan/join/values/aggregate/…) means the column is table-backed and the answer is false. Used by the
+ *  correlated min/max argmax, whose ORDER BY re-inlines the value and cannot host a second correlation
+ *  level — see its call site. */
+function valueColIsSubquery(rel: Rel, name: string): boolean {
+  let cur: Rel = rel;
+  let column = name;
+  for (;;) {
+    switch (cur.kind) {
+      case 'project': {
+        const entry = cur.exprs.find(([n]) => n === column);
+        if (!entry) return false;
+        if (entry[1].kind === 'col') { column = entry[1].name; cur = cur.input; continue; }
+        return exprHasSubquery(entry[1]);
+      }
+      case 'window':
+        if (cur.specs.some(([n]) => n === column)) return false;
+        cur = cur.input; continue;
+      case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize':
+        cur = cur.input; continue;
+      default:
+        return false;
+    }
+  }
+}
+
 /**
  * A REDUCER OVER A CORRELATED BODY, rooted at `root` — `by(__.inE('created').values('weight').sum())`
  * and `by(__.values('age').max())` are the SAME lowering rooted differently (a movement hop, or a
@@ -7200,6 +7234,17 @@ function correlatedReduce(
     if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
     const probeCol = values?.rel.type.cols[0];
     if (values && !fenced && probeCol && values.framing.kind === 'scalar' && values.framing.result === undefined) {
+      // The argmax is `SELECT … FROM (VALUES (1)) … ORDER BY <value> LIMIT 1` inside a subquery already
+      // correlated to the outer row. `ORDER BY` cannot name a select alias, so the emitter RE-INLINES the
+      // value expression there — and when the VALUE is itself a correlated subquery (a `by(__.id().min())` /
+      // `by(__.label().min())`, whose value is the DETACHED `(SELECT … FROM nodes WHERE id = <outer>)` read
+      // rather than a column off a table the body scans), that read sits TWO subquery levels deep, in the
+      // ORDER BY of a subquery, where SQLite cannot resolve the outer reference (`no such column: rn.id` at
+      // run time). A JOINED value (`by(__.values(k).min())`/`by(__.inE().values(k).min())` read a
+      // `vertex_properties` column) resolves to a local column and is safe. Decline the subquery-valued
+      // case rather than emit SQL that fails only in execution — fail closed, the class `capability.test.ts`
+      // guards.
+      if (valueColIsSubquery(values.rel, 'v')) return null;
       const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
       const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
       const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
