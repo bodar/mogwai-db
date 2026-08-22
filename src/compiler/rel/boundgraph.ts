@@ -5,6 +5,7 @@ import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { and, eq, meta, typeOf, type Minter } from './build.ts';
 import { foreignPayloadCols } from './foreign.ts';
+import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
 
 // ---------- BoundGraph — a GraphSource over an INJECTED graph, id-carry + rejoin ----------
@@ -199,6 +200,16 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       // A vertex's label set is a JSON array — `label()` is its FIRST member; an edge's is the bare name.
       const value: Expr = kind === 'edge' ? col(row.id, 'label') : jsonExtract(col(row.id, 'label'), '$[0]');
       return { kind: 'scalar', plan: make.project({ id: fresh('bls'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
+    },
+
+    // ---- by('key'): the FIRST property value at key, rejoined by id ----
+    propertyScalar(kind, id, key, ordering, fresh) {
+      const row = rowById(cteOf(kind, fresh), id, fresh);
+      // A vertex key holds an ARRAY of `{t,v}` nodes (first = insertion order); an edge key holds one.
+      const node = jsonExtract(col(row.id, 'props'), kind === 'edge' ? jsonKeyPath(key) : `${jsonKeyPath(key)}[0]`);
+      const raw = jsonExtract(node, '$.v');
+      const value = ordering ? storedCompareOn(jsonExtract(node, '$.t'))(raw) : raw;
+      return { kind: 'scalar', plan: make.project({ id: fresh('bps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
     },
 
     // ---- labels(): fan out the landed label set, rejoined by id ----

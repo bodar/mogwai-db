@@ -337,6 +337,48 @@ describe('mogwai.graph.federate — SUBGRAPH labels() fan-out', () => {
   });
 });
 
+// AGGREGATION over a bound subgraph — group()/groupCount()/order()/project()/fold() compose through the
+// MAIN FOLD (detachedTail hands off once the source-position steps are done), with every by()/reducer
+// read routed through the BoundGraph. Oracle is always the same traversal run directly on crew.
+describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project via the main fold)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const one = async (g: string, on: 'home' | 'crew' = 'home') =>
+    dec((await mgr.executor(on).framedAsync(g, {}))[0]!);
+  const list = async (g: string, on: 'home' | 'crew' = 'home') =>
+    (await Promise.all((await mgr.executor(on).framedAsync(g, {})).map(dec)));
+  const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
+
+  test('order().by(name) over the subgraph vertices', async () => {
+    expect(await list(sg('.V().order().by("name").values("name")')))
+      .toEqual(await list(`${crewBoth}.order().by("name").values("name")`, 'crew'));
+  });
+  test('order().by(T.label).by(name) — multi-key order', async () => {
+    expect(await list(sg('.V().order().by(T.label).by("name").values("name")')))
+      .toEqual(await list(`${crewBoth}.order().by(T.label).by("name").values("name")`, 'crew'));
+  });
+  test('groupCount().by(T.label) — a map keyed by the landed label', async () => {
+    expect(await one(sg('.V().groupCount().by(T.label)')))
+      .toEqual(await one(`${crewBoth}.groupCount().by(T.label)`, 'crew'));
+  });
+  test('group().by(T.label).by(count) — group keyed by label, counted', async () => {
+    expect(await one(sg('.V().group().by(T.label).by(__.count())')))
+      .toEqual(await one(`${crewBoth}.group().by(T.label).by(__.count())`, 'crew'));
+  });
+  // NOTE: a group VALUE that FOLDS (`by(__.values("name").fold())`) collects in the SOURCE order the
+  // landed stream cannot provide (no encounter channel over a bound graph — the plan's deferred
+  // channels-over-bound), so it fails closed until that channel is seeded. `by(__.count())` needs no
+  // order and composes.
+  test('project(name,label).by(name).by(T.label) — a record per vertex', async () => {
+    expect(await list(sg('.V().order().by("name").project("n","l").by("name").by(T.label)')))
+      .toEqual(await list(`${crewBoth}.order().by("name").project("n","l").by("name").by(T.label)`, 'crew'));
+  });
+  test('values(name).fold() collects the subgraph names', async () => {
+    expect(await one(sg('.V().order().by("name").values("name").fold()')))
+      .toEqual(await one(`${crewBoth}.order().by("name").values("name").fold()`, 'crew'));
+  });
+});
+
 // Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
 // V(ids)/E(ids) filtering the bound source by id.
 describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {

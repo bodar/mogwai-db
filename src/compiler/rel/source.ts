@@ -5,6 +5,7 @@ import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
 import { elementPayload } from './element.ts';
+import { storedCompareOn } from './predicate.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
@@ -109,6 +110,14 @@ export interface GraphSource {
    *  `group().by(id)` alike. */
   externalId(kind: Elem, id: Expr, fresh: Minter): Expr;
   labelScalar(kind: Elem, id: Expr, fresh: Minter): Expr;
+
+  /** `by('key')` — the FIRST value of a property, as a scalar CORRELATED on the element `id`. A vertex
+   *  key may hold several values; INSERTION ORDER names the first (`PropertyValueStep`). `ordering`
+   *  wraps the value in the vtype-aware compare (`order().by('age')` sorts a decimal-TEXT number
+   *  numerically). `BaseGraph` reads `vertex_properties`/`edge_properties`; a bound graph reads the
+   *  first `{t,v}` node at the key in the landed tree. Reached through `byExpr`'s property arm, so it
+   *  composes in `group().by(k)`/`order().by(k)`/`project().by(k)` over either graph. */
+  propertyScalar(kind: Elem, id: Expr, key: string, ordering: boolean, fresh: Minter): Expr;
 
   /** `labels()` — the FAN-OUT of an element's labels, one row per label. Returns a relation carrying `v`
    *  (the label name) and `lord` (the per-element order key the caller renumbers by — the label-dictionary
@@ -347,6 +356,22 @@ export const BaseGraph: GraphSource = {
       exprs: [['v', col(named.id, 'name')], ['lord', col(named.id, 'label')],
         ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
     });
+  },
+
+  propertyScalar: (kind, id, key, ordering, fresh) => {
+    // A property scan declaring `id` as well as the payload: a VERTEX key may hold several values and
+    // INSERTION ORDER (the rowid) names the first — `PropertyValueStep`'s semantics.
+    const { table, owner } = PROPERTIES[kind];
+    const scan = make.scan({
+      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    const mine = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
+    });
+    const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
+    return firstOf(mine, value, col(mine.id, 'id'), fresh);
   },
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),

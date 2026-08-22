@@ -280,22 +280,11 @@ export function byExpr(
       : source.labelScalar(host.elem, host.id, fresh);
   }
 
-  // A property scan declaring `id` as well as the payload: a VERTEX key may hold several values and
-  // INSERTION ORDER is what names the first, so the rowid is not an implementation detail here — it is
-  // the ordering `PropertyValueStep`'s semantics refer to. (`lower.ts` declares the same table without
-  // `id`, and must: there the scan is JOINED to an element relation that already has an `id`, and two
-  // columns of one name shadow each other in the emitter's scope.)
-  const { table, owner } = PROPERTIES[host.elem];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key.key))),
-  });
-  const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
-  return firstOf(mine, value, col(mine.id, 'id'), fresh);
+  // `by('key')` over an element — the FIRST value of the property, a PHYSICAL read through the GRAPH
+  // SOURCE (the same `propertyScalar` the base tables and a bound `{t,v}` tree both answer), so
+  // `group().by(k)`/`order().by(k)` compose over either graph. INSERTION ORDER names the first value
+  // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare.
+  return source.propertyScalar(host.elem, host.id, key.key, ordering, fresh);
 }
 
 /**

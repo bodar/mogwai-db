@@ -4069,11 +4069,16 @@ export function lowerForeignResume(
   const fresh = minter();
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
-  // A landed relation carries no channels — the rows crossed a segment boundary as detached
-  // references, so nothing survived to seed a bulk, an encounter or a path from. A resumed chain that
-  // DEMANDS one therefore declines rather than compiling a plan with the column silently missing,
-  // which is the same rule the fold applies to a source it cannot seed (§12, order and determinism).
-  if (facts.demandsEncounter || facts.tracksPath) return null;
+  // A landed relation carries no channels — the rows crossed a segment boundary as detached references,
+  // so nothing survived to seed a bulk, an encounter or a path from. A resumed chain that DEMANDS one
+  // therefore declines rather than compiling a plan with the column silently missing (§12, order and
+  // determinism) — UNLESS a subgraph traversal MINTS its own order with an `order()` step, which seeds
+  // the encounter mid-chain exactly as an element `order()` does over the base graph. So a bound
+  // `…order().by(k).…fold()` composes (the fold collects in `order()`'s order), while a bare
+  // `…fold()` — which would demand the SOURCE's order the landed stream cannot provide — still declines.
+  // `tracksPath` has no such mid-chain mint, so it declines outright.
+  const ordersMidChain = steps.slice(from).some((s) => s.name === 'order');
+  if ((facts.demandsEncounter && !ordersMidChain) || facts.tracksPath) return null;
   // A SUBGRAPH result is MIXED — edges (the graph, carrying `src`/`tgt` adjacency) plus their incident
   // vertices, WITH data (`mogwai.graph.federate` `.with("subgraph", true)`). A normal federated result
   // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
@@ -4495,8 +4500,31 @@ function detachedTail(
       [meta('v', 'text'), ...carriedCols(channels)], channels, fresh);
     return scalarTail(ranked, { kind: 'scalar', type: STATIC('string') }, steps, from + 1, false, ctx, fresh);
   }
-  return null;
+  // HAND OFF TO THE MAIN FOLD for everything else — `group()`/`groupCount()`/`order()`/`project()`/
+  // `fold()`/the reducers/… — so a bound element composes the FULL aggregation vocabulary through the
+  // ONE fold with `ctx.source = BoundGraph`. Every physical read those steps make (movement, `by()`
+  // keys via `byExpr` → `source.externalId`/`labelScalar`/`propertyScalar`, the terminal leaf via
+  // `source.leafPayload`) is source-routed, so the answer is the bound graph's.
+  //
+  // FAIL CLOSED on the reads that are NOT yet source-routed: a WRITE, or a `properties()`/`valueMap()`
+  // element-bag read, would run against THIS graph's tables keyed by a FOREIGN id — a plausible WRONG
+  // answer (an id collision returns another graph's row). Those decline until routed. `properties()`
+  // additionally has no landed identity to give (a detached VertexProperty has no rowid), so it is a
+  // genuine wall, not merely unrouted.
+  // Only a SUBGRAPH (adjacency + vertices landed) hands off — a homogeneous detached list has no live
+  // graph to aggregate a `group().by(__.out()…)` over, and its movement must keep failing closed with
+  // the barrier message rather than reaching a half-present `BoundGraph`.
+  if (!subgraph || steps.slice(from).some((s) => BOUND_HANDOFF_DENY.has(s.name))) return null;
+  return continueAs(seed, { kind: 'elements', elem }, steps, from, false, ctx, fresh, NO_ALIASES);
 }
+
+/** Steps a bound element stream may NOT hand off to the main fold with: WRITES (mutate the base graph)
+ *  and element-bag / property reads (`elementValueMap`, `propertyRelation`) that scan the base tables
+ *  by id — over a bound element that is a foreign id, so the read is a wrong answer, not the bound
+ *  graph's. They decline (fail closed) until their physical reads route through `GraphSource`. */
+const BOUND_HANDOFF_DENY: ReadonlySet<string> = new Set<string>([
+  ...MUTATING_STEPS, 'properties', 'propertyMap', 'valueMap', 'elementMap',
+]);
 
 function elementTail(
   seed: Rel, elem0: Elem, steps: readonly IRStep[], from: number, bulked0: boolean,
