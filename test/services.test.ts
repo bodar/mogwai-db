@@ -142,12 +142,14 @@ describe('call/with fold + param resolution', () => {
       .toEqual({ direction: { direction: 'out' } });
   });
 
-  test('an unrooted nested-traversal param value fails closed (must be source-rooted)', () => {
-    // A nested traversal as a param VALUE is a sub-traversal (federate's `traversal`): it
-    // serializes to a rooted Gremlin string. An unrooted body (__.out()…) cannot become a
-    // valid g.-rooted query, so it fails closed — no silent guessed source.
-    expect(() => spec('g.call("mogwai.graph.federate").with("traversal", __.out().values("name"))'))
-      .toThrow(/source-rooted/);
+  test('an unrooted nested-traversal param value is CARRIED verbatim (rooted-check moved to federate)', () => {
+    // A nested traversal as a param VALUE serializes to a Gremlin string: a source-rooted body to
+    // `g.…`, an anonymous body to its `__.…` form verbatim. The source-rooted REQUIREMENT is
+    // federate's alone (it runs the traversal on a sibling), so it lives in federate now, not here —
+    // an OLAP edge scope (`~tinkerpop.<algo>.edges`) carries an anonymous body through this same seam.
+    // federate's own rejection of an unrooted body is federation.test.ts.
+    expect(spec('g.call("mogwai.graph.federate").with("traversal", __.out().values("name"))').params.traversal)
+      .toEqual({ kind: 'traversal', gremlin: '__.out().values("name")' });
   });
 
   test('a rooted nested-traversal param value serializes to a canonical Gremlin string', () => {

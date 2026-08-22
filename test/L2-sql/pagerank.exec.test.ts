@@ -56,7 +56,17 @@ describe('pageRank() — mogwai.pageRank DECORATE barrier', () => {
     for (const r of rows) { expect(r.a?.id ?? r.a).toBe(1); expect(r.b).toBe(15); }
   });
 
-  test('a custom edge scope / fixed times fail closed (not mis-executed) — deferred to a follow-up', async () => {
+  test('a custom edge scope (outE("knows")) restricts rank flow to that label', async () => {
+    const store = seeded(MODERN_SEED);
+    // g_V_pageRank_withXedges_outEXknowsXX_withXpropertyName_friendRankX_project_byXnameX_byXvaluesXfriendRankX_mathX
+    // knows-only: marko sources to vadas/josh; the rest are isolated (base rank only).
+    const rows = (await run(store, `g.V().pageRank().with("~tinkerpop.pageRank.edges",__.outE("knows")).with("~tinkerpop.pageRank.propertyName","friendRank").project("name", "friendRank").by("name").by(__.values("friendRank").math("ceil(_ * 100)"))`))
+      .map((m: any) => m instanceof Map ? Object.fromEntries(m) : m);
+    expect(Object.fromEntries(rows.map((r: any) => [r.name, r.friendRank])))
+      .toEqual({ marko: 15, vadas: 21, lop: 15, josh: 21, ripple: 15, peter: 15 });
+  });
+
+  test('a fixed iteration count (times) still fails closed — deferred to a follow-up', async () => {
     const store = seeded(MODERN_SEED);
     await expect(exec(store).framedAsync(`g.V().pageRank().with("~tinkerpop.pageRank.times", 0).has("${KEY}")`, {}))
       .rejects.toThrow('iteration count');

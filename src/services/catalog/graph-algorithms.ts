@@ -3,6 +3,58 @@ import {
   PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME,
 } from '../spi/types.ts';
 import type { GraphStore } from '../../storage.ts';
+import { isTraversalParam } from '../params/call-params.ts';
+import { parseGremlin, stepChain } from '../../gremlin/frontend.ts';
+
+// ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
+//
+// An algorithm's message scope: which edges relate two vertices, and in which direction rank/labels
+// flow. The reference default is `outE` for pageRank (rank flows along out-edges) and `bothE` for
+// connectedComponent (undirected). A custom scope arrives as an ANONYMOUS edge sub-traversal
+// (`__.outE("knows")`, `__.inE("created")`, `__.bothE()`) carried as a TraversalParam (the serializer
+// no longer refuses anonymous — see services/params/traversal-param.ts). We read it to a
+// `{direction, labels}` descriptor and build the adjacency with ONE store query.
+
+/** `out`: rank/label flows src→tgt. `in`: tgt→src. `both`: both. */
+type EdgeScope = { readonly direction: 'out' | 'in' | 'both'; readonly labels: readonly string[] };
+
+/** Parse an edges-scope param into `{direction, labels}`. `undefined` → the algorithm's default
+ *  direction, all labels. A `Direction` enum token (`{direction:'in'}`) is accepted too. Anything
+ *  richer than a single `outE`/`inE`/`bothE(labels?)` fails closed — never a silent wrong scope. */
+function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], algo: string): EdgeScope {
+  if (value === undefined) return { direction: defaultDir, labels: [] };
+  if (value && typeof value === 'object' && 'direction' in value) {
+    const d = String((value as { direction: unknown }).direction).toLowerCase();
+    if (d === 'out' || d === 'in' || d === 'both') return { direction: d, labels: [] };
+  }
+  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
+  if (gremlin === null)
+    throw new Error(`${algo}: unsupported edges scope ${String(value)}`);
+  // Our parser roots at a source; an anonymous edge body prepends one so the ONE edge step is readable.
+  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
+  let steps;
+  try { steps = stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E'); }
+  catch { throw new Error(`${algo}: could not read the edges scope "${gremlin}"`); }
+  const dir = steps.length === 1
+    ? ({ outE: 'out', inE: 'in', bothE: 'both' } as const)[steps[0].name as 'outE' | 'inE' | 'bothE']
+    : undefined;
+  if (!dir)
+    throw new Error(`${algo}: only a single outE/inE/bothE(labels?) edges scope is supported yet, got "${gremlin}"`);
+  return { direction: dir, labels: steps[0].args.map((a) => a.value).filter((v): v is string => typeof v === 'string') };
+}
+
+/** The directed "flows src→tgt" adjacency for an edge scope, read as ONE store query. A `both` scope
+ *  emits each edge in both directions; the label filter crosses as one `json_each` bind (never a
+ *  row-count-sized IN-list). */
+function scopedEdges(store: GraphStore, scope: EdgeScope): { src: number; tgt: number }[] {
+  const where = scope.labels.length
+    ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
+  const binds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
+  const rows = store.query<{ src: number; tgt: number }>(`SELECT src, tgt FROM edges${where}`, binds);
+  if (scope.direction === 'out') return rows;
+  if (scope.direction === 'in') return rows.map((r) => ({ src: r.tgt, tgt: r.src }));
+  return rows.flatMap((r) => [{ src: r.src, tgt: r.tgt }, { src: r.tgt, tgt: r.src }]);
+}
 
 // ---------- mogwai.pageRank / .wcc / .peerPressure / .shortestPath — the OLAP algorithm layer ----------
 //
@@ -109,8 +161,12 @@ export function createWccService(store: GraphStore | undefined): Service {
       const mode = site.params.mode;
       if (mode !== undefined && mode !== 'decorate')
         throw new Error(`${WCC_SERVICE_NAME}: only decorate mode (the native connectedComponent() step) is implemented yet, not "${String(mode)}"`);
-      if (site.params[CC_EDGES] !== undefined)
-        throw new Error(`${WCC_SERVICE_NAME}: a custom edge scope (.with("${CC_EDGES}", …)) is not supported yet — only the default undirected (bothE) message scope`);
+      // connectedComponent is UNDIRECTED (default bothE); union-find is symmetric, so a `both` scope is
+      // exactly right and a directional (out/in) scope is a different, directional min-propagation we do
+      // not model yet — fail closed rather than answer the undirected question for a directed scope.
+      const scope = edgeScopeOf(site.params[CC_EDGES], 'both', WCC_SERVICE_NAME);
+      if (scope.direction !== 'both')
+        throw new Error(`${WCC_SERVICE_NAME}: only an undirected (bothE) edge scope is supported yet, not ${scope.direction}E`);
       const key = componentKey(site.params);
       return {
         kind: 'barrier',
@@ -120,8 +176,7 @@ export function createWccService(store: GraphStore | undefined): Service {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
           const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          const edges = store.query<{ src: number; tgt: number }>('SELECT src, tgt FROM edges');
-          return { kind: 'relation-tuples', tuples: connectedComponents(nodes, edges) };
+          return { kind: 'relation-tuples', tuples: connectedComponents(nodes, scopedEdges(store, scope)) };
         },
       };
     },
@@ -204,10 +259,10 @@ export function createPageRankService(store: GraphStore | undefined): Service {
       const mode = site.params.mode;
       if (mode !== undefined && mode !== 'decorate')
         throw new Error(`${PAGERANK_SERVICE_NAME}: only decorate mode (the native pageRank() step) is implemented yet, not "${String(mode)}"`);
-      if (site.params[PR_EDGES] !== undefined)
-        throw new Error(`${PAGERANK_SERVICE_NAME}: a custom edge scope (.with("${PR_EDGES}", …)) is not supported yet — only the default outE message scope`);
       if (site.params[PR_TIMES] !== undefined)
         throw new Error(`${PAGERANK_SERVICE_NAME}: a fixed iteration count (.with("${PR_TIMES}", …)) is not supported yet — pageRank runs to convergence (α=${PR_ALPHA_DEFAULT}, ε=${PR_EPSILON}, ≤${PR_MAX_ITERATIONS} iterations)`);
+      // Default message scope is outE (rank flows along out-edges); a custom scope is honoured.
+      const scope = edgeScopeOf(site.params[PR_EDGES], 'out', PAGERANK_SERVICE_NAME);
       const alpha = typeof site.params.dampingFactor === 'number' ? site.params.dampingFactor : PR_ALPHA_DEFAULT;
       const nameOverride = site.params[PR_PROPERTY_NAME];
       const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PR_PAGERANK_KEY;
@@ -219,8 +274,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
           const nodes = store.query<{ id: number }>('SELECT id FROM nodes');
-          const edges = store.query<{ src: number; tgt: number }>('SELECT src, tgt FROM edges');
-          return { kind: 'relation-tuples', tuples: pageRankScores(nodes, edges, alpha) };
+          return { kind: 'relation-tuples', tuples: pageRankScores(nodes, scopedEdges(store, scope), alpha) };
         },
       };
     },

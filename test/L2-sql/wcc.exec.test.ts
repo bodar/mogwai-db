@@ -43,9 +43,17 @@ describe('connectedComponent() — mogwai.wcc DECORATE barrier', () => {
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 
-  test('a custom edge scope fails closed (not mis-executed) — deferred to a follow-up', async () => {
+  test('a custom bothE(knows) edge scope restricts connectivity (knows-only components)', async () => {
     const store = seeded(MODERN_SEED);
-    await expect(exec(store).framedAsync(`g.V().hasLabel("person").connectedComponent().with("~tinkerpop.connectedComponent.edges", __.bothE("knows")).has("${KEY}")`, {}))
-      .rejects.toThrow();
+    // g_V_connectedComponent_withXEDGES_bothEXknowsXX_withXPROPERTY_NAME_clusterX_...
+    // knows-only: {marko,vadas,josh} share component "1"; peter is isolated → its own id "6".
+    const rows = (await run(store, `g.V().hasLabel("person").connectedComponent().with("~tinkerpop.connectedComponent.edges", __.bothE("knows")).with("~tinkerpop.connectedComponent.propertyName", "cluster").project("name","cluster").by("name").by("cluster")`)).map(unmap);
+    expect(Object.fromEntries(rows.map((r: any) => [r.name, r.cluster]))).toEqual({ marko: '1', vadas: '1', josh: '1', peter: '6' });
+  });
+
+  test('a directional (outE/inE) edge scope fails closed — undirected only, for now', async () => {
+    const store = seeded(MODERN_SEED);
+    await expect(exec(store).framedAsync(`g.V().connectedComponent().with("~tinkerpop.connectedComponent.edges", __.outE("knows")).has("${KEY}")`, {}))
+      .rejects.toThrow('undirected');
   });
 });

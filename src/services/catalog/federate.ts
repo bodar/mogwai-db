@@ -31,13 +31,19 @@ function graphOf(params: CallParams): string {
   return g;
 }
 
-/** Read the required `traversal` param — a nested sub-traversal already serialized to a rooted
- *  Gremlin string (a TraversalParam), or a bare rooted Gremlin string. */
+/** Read the required `traversal` param — a nested sub-traversal serialized to a Gremlin string (a
+ *  TraversalParam), or a bare Gremlin string. A federated call runs it as a fresh SOURCE query on a
+ *  sibling, so it MUST be source-rooted (`g.V()…`/`g.E()…`); the serializer no longer enforces that
+ *  (an OLAP edge scope carries an anonymous body through the same seam), so federate enforces its own
+ *  need here — an anonymous `__.…` body fails closed rather than becoming an invalid `g.…` query. */
 function traversalOf(params: CallParams): string {
   const t = params.traversal;
-  if (isTraversalParam(t)) return t.gremlin;
-  if (typeof t === 'string' && t.length > 0) return t;
-  throw new Error('mogwai.graph.federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
+  const gremlin = isTraversalParam(t) ? t.gremlin : typeof t === 'string' && t.length > 0 ? t : null;
+  if (gremlin === null)
+    throw new Error('mogwai.graph.federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
+  if (!gremlin.startsWith('g.V(') && !gremlin.startsWith('g.E('))
+    throw new Error(`mogwai.graph.federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
+  return gremlin;
 }
 
 /** `.with("subgraph", true)` — the sub-traversal is EDGE-producing and the caller wants a traversable

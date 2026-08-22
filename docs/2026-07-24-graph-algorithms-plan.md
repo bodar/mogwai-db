@@ -82,20 +82,21 @@ at the pin:
   failing; matching the executor beats matching a stale corpus number. `GraphFilterStrategy` stays a
   no-op (correct — it does nothing for the in-memory computer).
 
-**NEXT — the one real remaining blocker + the leaf features:**
-- **Edge-config carrying (a DESIGN DECISION).** A custom edge scope (`~tinkerpop.<algo>.edges`, e.g.
-  `__.outE("knows")`, `__.inE("created")`) is an ANONYMOUS sub-traversal; `nestedTraversalToGremlin`
-  refuses it (it serializes only SOURCE-rooted traversals, for federate). Carrying an anonymous edge
-  traversal as a call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the
-  service — is shared substrate for pageRank/peerPressure/wcc edge scopes. Recommended fix: move the
-  source-rooted check into federate, let the shared serializer carry anonymous traversals. **Unlocks
-  scenario 5** (`pageRank().with(edges, outE("knows"))` — my edge-scoped compute already matches its
-  15/21/21 exactly), wcc-knows, peerPressure edges.
+**✅ LANDED (2026-08-22) — edge-config carrying.** The source-rooted check moved OUT of
+`nestedTraversalToGremlin` (it now carries an anonymous body verbatim) and INTO `federate`'s
+`traversalOf` (federate is the one consumer that needs rooted); the OLAP services read a custom scope
+(`~tinkerpop.<algo>.edges`) to a `{direction, labels}` descriptor (`edgeScopeOf`) and build the
+adjacency with ONE store query (`scopedEdges`, label filter via a `json_each` bind). L3 +2 (1719→1721):
+`g_V_pageRank_withXedges_outEXknowsXX_...` (matches 15/21/21 exactly) and the wcc `bothE(knows)` cluster
+scenario. pageRank honours out/in/both; wcc supports the undirected `bothE` scope and fails closed on a
+directional one (a different, directional min-propagation, not the undirected question).
+
+**NEXT — the leaf features:**
 - **`times`** (fixed iteration count) — pageRank 2/8.
 - **peerPressure** (integer cluster voting, reuses the decorate substrate — GLOBAL like the others) and
   **shortestPath** (Template B — recursive-CTE paths, no barrier, its own shape).
-- Scenarios 2/6/8 mix these; 6 is anomalous (above), 2 also carries a `times(0)` edge case, 8 needs
-  edge-config + `times` + α=1.
+- Scenarios 2/6/8: 6 is reference-anomalous (above); 2 carries a `times(0)` edge case + `out("created")`
+  prefix; 8 needs `times` + α=1 (edge-config already done). Land `times` first.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

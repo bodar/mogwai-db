@@ -13,25 +13,31 @@
 // deep RELATIVE import for the same reason io.ts does (the package `exports` map doesn't expose
 // the subpath in a way wrangler/esbuild follows for the Worker bundle; a bare specifier would).
 //
-// The visitor emits an ANONYMOUS traversal (`__.V().out(...)`). A federated call always runs as
-// a fresh SOURCE query on the sibling (a different DO's rowids mean nothing here — see the
-// prior-art doc's "no cross-DO edge traversal"), so we need a ROOTED `g.`-traversal. Swapping
-// the leading `__` for `g` produces exactly that WHEN the sub-traversal is rooted (starts with
-// V()/E()); an unrooted anonymous body (`__.out(...)`) would swap to invalid `g.out(...)`, so we
-// require rootedness and fail closed otherwise (never guess a source to prepend).
+// The visitor emits an ANONYMOUS traversal (`__.V().out(...)`). Two kinds of consumer read the result
+// and they want different shapes, so this renders each faithfully and lets the CONSUMER validate:
+//   · a SOURCE-ROOTED body (`__.V()…`/`__.E()…`) → a rooted `g.V()…` string. `federate` runs it as a
+//     fresh source query on a sibling (a different DO's rowids mean nothing there), so it REQUIRES this
+//     rooted form — and now enforces that itself (`federate.ts` `traversalOf`), the one consumer that
+//     needs it. Swapping the leading `__` for `g` produces the rooted form exactly.
+//   · an ANONYMOUS body (`__.outE("knows")`) → returned verbatim. An OLAP edge scope
+//     (`~tinkerpop.<algo>.edges`) is inherently anonymous (a per-vertex adjacency traversal, never
+//     source-rooted); the algorithm service reads it back to a `{direction, labels}` descriptor. This
+//     is why the rooted check moved OUT of here: it is federate's need, not a property of carrying a
+//     sub-traversal, and refusing anonymous here walled every OLAP edge scope.
 
 // @ts-ignore - deep import, no shipped type declarations for this subpath
 import { Translator } from '../../../node_modules/gremlin/build/esm/language/index.js';
 
-/** Render a parsed nested traversal (an antlr NestedTraversalContext) to a canonical, ROOTED
- *  Gremlin string suitable for the sibling's query(gremlin) seam. Throws a clear deferral if
- *  the sub-traversal is not source-rooted (V()/E()). Returns the string; bound params ride the
- *  caller's own `params` channel (the visitor preserves xxN variable references verbatim). */
+/** Render a parsed nested traversal (an antlr NestedTraversalContext) to a canonical Gremlin string:
+ *  a source-rooted body to `g.V()…`, an anonymous body to its `__.…` form verbatim. Never throws on
+ *  shape — the consumer decides what it accepts (federate requires rooted; an OLAP edge scope reads the
+ *  anonymous form). Bound params ride the caller's own `params` channel (the visitor preserves xxN
+ *  variable references verbatim). */
 export function nestedTraversalToGremlin(nested: any): string {
   const v = Translator.CANONICAL('g');
   v.visit(nested);
-  const anon = v.getTranslated() as string; // e.g. __.V().out("knows")
-  if (!anon.startsWith('__.V(') && !anon.startsWith('__.E('))
-    throw new Error(`federated traversal must be source-rooted (start with V() or E()), got: ${anon.replace(/^__\./, '')}`);
-  return 'g' + anon.slice(2); // __.V()... -> g.V()...
+  const anon = v.getTranslated() as string; // e.g. __.V().out("knows") or __.outE("knows")
+  return anon.startsWith('__.V(') || anon.startsWith('__.E(')
+    ? 'g' + anon.slice(2)  // __.V()… -> g.V()… (the rooted form federate needs)
+    : anon;                // an anonymous body (an OLAP edge scope) travels verbatim
 }
