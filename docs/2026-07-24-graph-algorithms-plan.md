@@ -53,19 +53,44 @@ dangling-node teleport redistribution) as a host-driven loop inside `apply`, reu
 substrate verbatim. L3 +3 (the three default-scope scenarios: `has`, `order().by(rank,desc).by(name)`,
 `order…limit(2)` — exact reference ranking `lop,ripple,josh,vadas,marko,peter`). `test/L2-sql/pagerank.exec.test.ts`.
 
-**NEXT — the shared substrate the remaining pageRank/peerPressure scenarios need, then those algos:**
-- **Numeric-decorate reads:** `values(key)`/`valueMap(key)`/`project().by(__.values(key).math(…))` over a
-  decorated REAL key (pageRank scenarios 5/6; `DecorateGraph.propertyValues`/`valueMapPairs` currently
-  fail closed on the decorated key).
-- **Edge-config carrying:** a custom edge scope (`~tinkerpop.<algo>.edges`, e.g. `__.bothE("knows")`,
-  `__.inE("created")`) is an ANONYMOUS sub-traversal, which `nestedTraversalToGremlin` refuses (it
-  serializes only source-rooted traversals, for federate). Carrying an anonymous edge traversal as a
-  call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the service — is a
-  shared substrate for pageRank/peerPressure/wcc edge scopes, and a genuine design question (federate
-  refuses anonymous; OLAP needs it). ⚠️ **A DESIGN DECISION** — surface before building.
-- **`times`** (a fixed iteration count) for pageRank (scenarios 2/8).
-- Then **peerPressure** (integer cluster voting, reuses decorate substrate) and **shortestPath**
-  (Template B — recursive-CTE paths, no barrier, its own shape).
+**✅ LANDED (2026-08-22) — numeric-decorate `values(key)`.** `DecorateGraph.propertyValues` reads the
+decorated REAL score as a 1:1 join to the landed relation (framed by `DecorateSpec.vtype`), so
+`values(key)`/`project().by(__.values(key).math(…))` compose. L3 +1 (pageRank scenario 7,
+`…as(a).out("knows").values(pageRank).as(b).select(a,b).by().by(math)` — the score reads back through
+movement). `values(name, key)` mixing the decorated key with stored keys, and `valueMap(key)`, stay
+fail-closed (no landed scenario needs them).
+
+**⚠️ TWO BLOCKERS gate the remaining pageRank/peerPressure scenarios — BOTH need a decision/reference
+pass before building (do NOT guess — a wrong OLAP answer violates correct-by-design):**
+
+1. **The OLAP graph-filter semantics (a SEMANTICS question — resolve from the reference).** The prefix
+   before an OLAP step appears to SCOPE the computed graph, and the two landed algorithms disagree in a
+   way I could not reconcile from the scenarios alone:
+   - `g.V().hasLabel("person").pageRank()` (scenario 6) expects marko 0.46 / vadas 0.59 / josh 0.59 /
+     peter 0.46 — the **person-induced subgraph** (knows-only), NOT the global rank (global marko ≈ 0.12,
+     which scenario 7's global `g.V().pageRank()` confirms via vadas/josh ≈ 0.15). So pageRank seems
+     graph-FILTERED by its prefix.
+   - `g.V().hasLabel("software").connectedComponent()` expects lop "1" / ripple "1" — the **GLOBAL**
+     component (min id 1 = marko), NOT the software-induced subgraph (which would give lop "3", ripple
+     "5"). So WCC seems global.
+   The resolution is `GraphFilterStrategy` + how each `VertexProgramStep` derives its graph filter from
+   the preceding traversal (`vendor/tinkerpop/gremlin-core/.../computer/GraphFilter.java`,
+   `.../traversal/step/map/*VertexProgramStep.java`, `.../TraversalVertexProgram.java`) — read these and
+   the `.feature` expected values together before touching the compute. Note: `GraphFilterStrategy` is
+   currently in `NO_OP_STRATEGIES`; if the filter is real, that is wrong. This affects pageRank 6/8 and
+   peerPressure, and would change the barrier from a global compute (`head: null`) to one whose `apply`
+   is scoped to the prefix's vertex/edge set (`head` = the prefix ids, `apply` over the induced subgraph).
+2. **Edge-config carrying (a DESIGN DECISION).** A custom edge scope (`~tinkerpop.<algo>.edges`, e.g.
+   `__.bothE("knows")`, `__.inE("created")`) is an ANONYMOUS sub-traversal; `nestedTraversalToGremlin`
+   refuses it (it serializes only SOURCE-rooted traversals, for federate). Carrying an anonymous edge
+   traversal as a call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the
+   service — is shared substrate for pageRank/peerPressure/wcc edge scopes, and a genuine fork (federate
+   refuses anonymous; OLAP needs it). Surface before building. Blocks pageRank 2/5/8, wcc-knows,
+   peerPressure edges.
+
+Also pending: **`times`** (fixed iteration count, pageRank 2/8 — small once #1 is settled), then
+**peerPressure** (integer cluster voting, reuses the decorate substrate + #1's graph filter) and
+**shortestPath** (Template B — recursive-CTE paths, no barrier, its own shape).
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

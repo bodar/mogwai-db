@@ -46,6 +46,16 @@ describe('pageRank() — mogwai.pageRank DECORATE barrier', () => {
     expect(byName.lop).toBeGreaterThan(byName.josh);
   });
 
+  test('values(key) over the decorated REAL score composes — the score reads back through movement', async () => {
+    const store = seeded(MODERN_SEED);
+    // g_V_pageRank_withXpropertyName_pageRankX_asXaX_outXknowsX_pageRank_asXbX_selectXa_bX_by_byXmathX
+    const rows = (await run(store, `g.V().pageRank().with("~tinkerpop.pageRank.propertyName","pageRank").as("a").out("knows").values("pageRank").as("b").select("a", "b").by().by(__.math("ceil(_ * 100)"))`))
+      .map((m: any) => m instanceof Map ? Object.fromEntries(m) : m);
+    // marko is the only person with out("knows") (→ vadas, josh); both targets ceil to 15.
+    expect(rows.length).toBe(2);
+    for (const r of rows) { expect(r.a?.id ?? r.a).toBe(1); expect(r.b).toBe(15); }
+  });
+
   test('a custom edge scope / fixed times fail closed (not mis-executed) — deferred to a follow-up', async () => {
     const store = seeded(MODERN_SEED);
     await expect(exec(store).framedAsync(`g.V().pageRank().with("~tinkerpop.pageRank.times", 0).has("${KEY}")`, {}))

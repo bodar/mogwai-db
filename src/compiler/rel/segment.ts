@@ -199,7 +199,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
  *  prefix is re-lowered LIVE inside `lowerDecorateResume`, which threads the awaited `(id → value)`
  *  relation as a synthetic property under `decorate.key` and keeps the element stream flowing. */
 function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
-  const { key } = barrier.decorate!;
+  const { key, vtype } = barrier.decorate!;
   return {
     kind: 'segment',
     mode: 'async',
@@ -213,7 +213,7 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
       if (Array.isArray(out))
         throw new Error(`call("${barrier.spec.serviceName}"): a decorate barrier must return an (id → value) relation, not detached rows`);
       const relation = out as BarrierRelation;
-      const lowered = lowerDecorateResume(relation.tuples, key, steps, barrier.at, request.lowering);
+      const lowered = lowerDecorateResume(relation.tuples, key, vtype, steps, barrier.at, request.lowering);
       // A resume CANNOT decline — the rows are computed. An unsupported step after the algorithm RAISES
       // naming it, rather than a silent different answer (§6·5), exactly as the foreign resume does.
       if (!lowered) {

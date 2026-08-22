@@ -144,6 +144,11 @@ export type BarrierOutput = readonly ForeignRow[] | BarrierRelation;
  *  peerPressure decorate each incoming vertex with its score under a canonical property key). */
 export interface DecorateSpec {
   readonly key: string;
+  /** The canonical Gremlin type of the decorated value (`src/gremlin/types.ts` vocabulary — e.g.
+   *  `'double'` for a pageRank score, `'string'` for a connectedComponent id). It is what
+   *  `values(key)`/`valueMap(key)` need to FRAME the value on the wire (a REAL score as a Double, not a
+   *  Long); `order().by(key)`/`has(key)` read it raw and do not consult it. */
+  readonly vtype: string;
 }
 
 export type Contribution =

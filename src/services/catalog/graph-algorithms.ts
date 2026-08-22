@@ -115,7 +115,7 @@ export function createWccService(store: GraphStore | undefined): Service {
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key },
+        decorate: { key, vtype: 'string' }, // a component id is the min external-id STRING
         apply: async (): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
@@ -214,7 +214,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key },
+        decorate: { key, vtype: 'double' }, // a PageRank score is a double
         apply: async (): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);

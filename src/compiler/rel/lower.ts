@@ -4222,7 +4222,7 @@ const DECORATE_RESUME_PARAM = '_mogwai_decorate';
  */
 export function lowerDecorateResume(
   tuples: readonly { readonly id: number; readonly value: unknown }[],
-  key: string, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+  key: string, vtype: string, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -4231,7 +4231,7 @@ export function lowerDecorateResume(
   const chainSteps = [...steps.slice(0, barrierAt), ...steps.slice(barrierAt + 1)];
   const name = fresh(DECORATE_RESUME_PARAM);
   const binding: Binding = { name, node: decorateBinding(tuples.map((t) => [t.id, t.value] as const), name, fresh) };
-  const source = decorateGraph(name, key);
+  const source = decorateGraph(name, key, vtype);
   const chain = lowerChain(chainSteps, { ...opts, source }, fresh);
   return chain && lowered({ ...chain, effects: [binding, ...(chain.effects ?? [])] }, source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }

@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { eq, meta, typeOf, type Minter } from './build.ts';
+import { carriedCols, elementCols, eq, meta, typeOf, type Minter } from './build.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
@@ -42,8 +42,9 @@ export function decorateBinding(pairs: readonly (readonly [number, unknown])[], 
 }
 
 /** A GraphSource wrapping `BaseGraph`, answering the ONE decorated `key` off the landed relation named
- *  `bindingName` and delegating everything else (and every other key) to the base. */
-export function decorateGraph(bindingName: string, key: string): GraphSource {
+ *  `bindingName` and delegating everything else (and every other key) to the base. `vtype` is the
+ *  decorated value's canonical Gremlin type, used only to frame a `values(key)` read. */
+export function decorateGraph(bindingName: string, key: string, vtype: string): GraphSource {
   const ref = (fresh: Minter): Rel =>
     make.ref({ id: fresh('dref'), name: bindingName, channels: [], type: typeOf(...DECORATE_COLS) });
   const rowById = (id: Expr, fresh: Minter): Rel => {
@@ -73,13 +74,29 @@ export function decorateGraph(bindingName: string, key: string): GraphSource {
       return existsOf(rowById(id, fresh), fresh);
     },
 
-    // A decorated key read through values()/valueMap()/properties() lands with the pageRank tranche
-    // (which needs valueMap("name", score) and project().by(values(score))). For WCC's scenarios the
-    // decorated key is only ever read by by()/order()/project()-by-string and has(), above. An explicit
-    // read of the decorated key through these fails closed rather than silently omitting it.
+    // values(key) — one traverser per matching value; the decorated property is single-cardinality, so
+    // it is a 1:1 JOIN of the stream to the landed relation on id, projected to the base `(v, vtype,
+    // pord, channels)` shape so the value tail frames it like any property. `values(name, key)` mixing
+    // the decorated key with stored keys is a UNION shape that is not built yet (no scenario needs it).
     propertyValues(input, kind, keys, fresh) {
-      if (keys?.includes(key)) throw new Error(`values("${key}") over a decorated OLAP property is not supported yet`);
-      return BaseGraph.propertyValues(input, kind, keys, fresh);
+      if (!keys?.includes(key)) return BaseGraph.propertyValues(input, kind, keys, fresh);
+      if (keys.length !== 1)
+        throw new Error(`values() mixing the decorated key "${key}" with stored keys is not supported yet`);
+      const r = ref(fresh);
+      const rp = make.project({ id: fresh('dvr'), input: r, channels: [], type: typeOf(meta('rid', 'int'), meta('rv', 'any', true)),
+        exprs: [['rid', col(r.id, 'id')], ['rv', col(r.id, 'cval')]] });
+      const joined = make.join({
+        id: fresh('dvj'), left: input, right: rp, join: 'inner', ordered: true, channels: input.channels,
+        type: typeOf(...elementCols(input.channels), meta('rid', 'int'), meta('rv', 'any', true)),
+        on: eq(col(rp.id, 'rid'), col(input.id, 'id')),
+      });
+      return make.project({
+        id: fresh('dvp'), input: joined, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('pord', 'int'), ...carriedCols(input.channels)),
+        // A single value per element — `pord` (the multi-value fan-out order) is a constant.
+        exprs: [['v', col(joined.id, 'rv')], ['vtype', compilerText(vtype)], ['pord', compilerInt(0)],
+          ...input.channels.map((ch) => [ch.col, col(joined.id, ch.col)] as const)],
+      });
     },
     valueMapPairs(kind, id, keys, fresh) {
       if (keys?.includes(key)) throw new Error(`valueMap("${key}") over a decorated OLAP property is not supported yet`);
