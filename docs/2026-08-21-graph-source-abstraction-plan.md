@@ -91,14 +91,21 @@ carry the data):**
 - **`path` over bound — UNBUILT, not a wall.** The path channel is a stream fact like encounter/bulk
   (both now carried): seed it at the bound source, extend through bound movement (`extendPath` over the
   bound ids), and rejoin each path step's payload at framing (Mechanism-B per step). Moderate.
-- **`properties()` over bound — LANDED (stream + value/key/element).** `GraphSource.propertyStream`
-  explodes the landed `{t,v}` tree into the `PROP`-row shape (base tables over the base graph); `.value()`,
-  `.key()`, `.element()`, and terminal VertexProperty framing (synthetic `owner:pk`) all compose. `.id()`
-  (no landed `vpid`) and meta-properties fail closed — landed-DATA gaps the federate service closes by
-  landing more (`vpid`/`meta`), NOT engine walls.
-- **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
-  (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
-  identity (a detached VertexProperty has no rowid), so it is a genuine wall.
+- **`properties()` over bound — LANDED (stream + value/key/element/id/meta).** `GraphSource.propertyStream`
+  explodes the landed tree into the `PROP`-row shape (base tables over the base graph); `.value()`,
+  `.key()`, `.element()`, and terminal VertexProperty framing all compose. **`.id()` and meta-properties
+  now compose too** (commit `8eebe71`): a federated fetch (`raw()`) compiles in a **detached mode** that
+  emits fuller member nodes `{t, v, vpid, meta}` instead of `{t, v}`, so the landed subgraph carries each
+  VertexProperty's own id (its `vertex_properties` rowid) and its meta-properties. `boundPropertyRelation`
+  reads them off the node (`$.vpid`/`$.meta`) into `p_id`/`p_meta`; a lossy landing without them extracts
+  NULL — the pre-detached synthetic-`owner:pk` behaviour. The `detached` flag threads
+  `CompileOptions → RelRequest → Lowering` and out through `raw → drive → driveSegments →
+  SegmentHost.compile`, so ONLY the federation landing path pays for it; an ordinary read stays `{t, v}`
+  and is byte-invariant (sql-hygiene: 0 spine diffs). This was the last landed-DATA gap; it was never an
+  engine wall.
+- **`valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
+  (`elementValueMap` scans base tables); `valueMap(keys…)` composes off the landed tree, `valueMap(true)`/
+  `elementMap()` (the id/label TOKENS) still fail closed until `tokenRow` is source-routed.
 - **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline.
 - Mechanism B for the BASE leaf is already `source.leafPayload` (= `elementPayload`); no further work.
 
