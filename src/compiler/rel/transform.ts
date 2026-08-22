@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { JAVA_WHITESPACE } from '../plan/plan.ts';
 import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
@@ -135,7 +135,11 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     // still yields NULL for a null traverser, because it is computed over the remaining parts.
     args = args.filter((a) => a !== null);
     if (!args.length) return v;
-    const operands = args.map((a) => (typeof a === 'string' ? text(a) : typeof a === 'number' ? lit(a, 'real') : null));
+    // A concat argument is a PARSED LITERAL from the Gremlin string, so it INLINES as a typed SQL
+    // literal — it is a constant the compiler holds, never a user parameter, so it must not spend a bind
+    // (the root `CLAUDE.md` bind rule). Left as a `'bound'` `lit()` it did, and a `select(Pop.all)` that
+    // re-projects the concatenation then paid for each copy — 6 binds for two literals.
+    const operands = args.map((a) => (typeof a === 'string' ? compilerText(a) : typeof a === 'number' ? compilerReal(a) : null));
     if (operands.some((o) => !o)) return null;
     const parts = [v, ...operands as Expr[]];
     const body = call('concat_ws', held(''), ...parts);

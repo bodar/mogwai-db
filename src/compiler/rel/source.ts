@@ -7,7 +7,7 @@ import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -202,24 +202,50 @@ export const BaseGraph: GraphSource = {
 
   propertyValues: (input, kind, keys, fresh) => {
     const { table, owner } = PROPERTIES[kind];
+    // The property ROW id (`vertex_properties.id` — an INTEGER PRIMARY KEY assigned at write time) is
+    // the multi-valued FAN-OUT's insertion order, which is the order a Vertex `PropertyValueStep`
+    // iterates (TinkerPop stores a key's values in an insertion-ordered set). Carried as `pord` so the
+    // `values` step can refine the arriving `encounter` by it — see `lower.ts`. When no encounter is
+    // arriving the assembler fuses this projection away, so an ordinary `values()` is byte-unchanged.
     const props = make.scan({
       id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('id', 'int')),
     });
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying the
     // row is the answer. `ordered` so the stream drives and `vp_node_key(node,key)` is probed rather
-    // than the planner leading with a whole-graph `key=?` scan.
+    // than the planner leading with a whole-graph `key=?` scan. `pord` maps positionally to the props
+    // scan's last column (`id`) — the emitter's join select is `[left…, right…]` by position.
     const joined = make.join({
       id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
-      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('pord', 'int')),
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keyMembership(col(props.id, 'key'), keys)),
     });
-    return make.project({
+    const base = make.project({
       id: fresh('sv'), input: joined, channels: input.channels,
-      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
-      exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
+      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('pord', 'int'), ...carriedCols(input.channels)),
+      exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')], ['pord', col(joined.id, 'pord')],
         ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
     });
+    // REFINE the emission order: within one parent (its arriving `encounter`) the fan-out is ordered by
+    // `pord` (property insertion order). Without this, a multi-valued `values(k).fold()` collects in the
+    // scan's order — right by luck, reversed under `mise run test:perturbed`. Only where an encounter is
+    // ALREADY live (the chain demands one): a bare `values()` with no order demand keeps `pord` unread
+    // and the fusion drops it, so its SQL does not change.
+    const arriving = input.channels.find((channel) => channel.role === 'encounter');
+    if (!arriving) {
+      return make.project({
+        id: fresh('sv'), input: base, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
+        exprs: [['v', col(base.id, 'v')], ['vtype', col(base.id, 'vtype')],
+          ...input.channels.map((channel) => [channel.col, col(base.id, channel.col)] as const)],
+      });
+    }
+    return renumber(
+      base,
+      [{ expr: col(base.id, arriving.col), dir: 'asc' }, { expr: col(base.id, 'pord'), dir: 'asc' }],
+      [meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)],
+      input.channels, fresh,
+    );
   },
 
   elementScan: (kind, args, fresh) => {

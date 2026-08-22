@@ -146,14 +146,24 @@ It is an **instrument, not a gate** (the `orphans` standing) and is absent from 
 still red. At first run: 20 failures, **13 of them L3 conformance scenarios** — ~0.8% of the
 conformance floor passing by luck, all one defect (`order().fold()`). Three rounds of fixes have
 taken the corpus view — the perturbed CENSUS, which names every order-fragile traversal in one place
-and is both the best worklist and the only fixed denominator — from 41 to 8. **The suite total is 10**
-(measured 2026-08-09; it was 4 on 2026-08-03 and the number DRIFTS, so re-measure rather than trusting
-this line): the census's own answer-change gate, a `group().by(T.id)` keying, two child-scope
-per-origin reducer assertions, and six that arrived since — four L2 SQL assertions (`select()` at
-every arity, `valueMap()`'s map loop, `select(<key>)` over a map, the sack channel), a second sack
-coexistence assertion and the element-fold byte differential. A failure here is a real under-specification, never a
-flake — the remainder are item 20 in `docs/outstanding-work.md`, and this becomes a gate when they
-are cleared. **Baseline it before blaming a diff**: re-run the instrument with the change set aside,
+and is both the best worklist and the only fixed denominator — from 41 to 8. **The suite total is 2**
+(measured 2026-08-22; it was 15 before the terminal-emission lever below and the number DRIFTS, so
+re-measure rather than trusting this line). The lever that took it 15→2: a chain whose TERMINAL is a
+per-traverser map/retype (`values`/`valueMap`/`project`/`select`/`id`/`sack`) emits one row per
+traverser whose only order was the scan's, so `computeDemandsEncounter` (`src/compiler/ir/analyze.ts`)
+now seeds+threads the emission encounter for exactly those — the complement of `bulkObservedFrom`
+(`src/compiler/ir/bulk.ts`), which is what `movementCollapse` gates on, so the encounter demand and the
+collapse are mutually exclusive by construction and never both live. Multi-valued `values()` also refines
+that encounter by the property row's insertion id (`pord`, `source.ts`); `concat` inlines its parsed
+literals (they were `'bound'` binds, doubling a `select(Pop.all)` re-projection's cost). The 2 that
+remain are branch-order/federation-order substrate residue, both fail-loud-under-perturbation only: a
+bare `coalesce()`-over-record-arms emission (needs the TRAVERSER-MAJOR branch mint — `withFanoutOrder`'s
+content sort is a wrong order for an observable stream, right only for a fold; a branch-merge chain is
+excluded from the lever until that mint exists) and a federated `group().by(T.label).by(name-fold)` whose
+bound-graph member fold is not yet order-pinned (Fix was base-graph `pord` only). A failure here is a real
+under-specification, never a flake — the remainder are the "Encounter and order" item in
+`docs/outstanding-work.md`, and this becomes a gate when they are cleared. **Baseline it before blaming a
+diff**: re-run the instrument with the change set aside,
 because a pre-existing failure here reads exactly like one the diff caused. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
 rather than a parameter precisely so the suite under test cannot know it is being perturbed.
 

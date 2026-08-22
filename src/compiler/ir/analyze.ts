@@ -1,7 +1,7 @@
-import { type IRStep } from './strategies.ts';
+import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
-import { bulkGroupCollapseTerminal, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
+import { bulkGroupCollapseTerminal, bulkObservedFrom, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -213,7 +213,61 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     if (sawFanout && s.name === 'dedup' && argValues(s).some((a) => typeof a === 'string')) return true;
     if (FANOUT_STEPS.has(s.name)) { sawFanout = true; ordered = false; }
   }
-  return false;
+  // THE TERMINAL EMISSION ORDER. Everything above answers "does a SLICE or COLLECT downstream read the
+  // order" — a mid-chain consumer. But the FINAL result rows are themselves emitted in an order, and a
+  // chain that ends in a per-traverser MAP/RETYPE (`values`/`valueMap`/`project`/`select`/`id`/a `sack`
+  // read/a branch merge over any of them) has one row per traverser whose ONLY order was the scan's.
+  // Left unseeded that order is SQLite's scan choice — flattering by luck on a six-vertex fixture,
+  // reversed under `PRAGMA reverse_unordered_selects` (`mise run test:perturbed`), and it is what a
+  // downstream `by()` fold or a federation stream/fold oracle observes.
+  //
+  // The line between "seed it" and "leave it" is EXACTLY `ir/bulk.ts`'s: a terminal that OBSERVES the
+  // bulk multiplicity — a global reducer (`count`/`sum`/…), a `groupCount`, or a raw `elements` stream
+  // reaching the wire — is the collapse's territory, where an emission order is both moot and mutually
+  // exclusive with the `SUM(bulk)` merge. A terminal that does NOT observe bulk is one the collapse was
+  // already declining (`movementCollapse` gates on this same `bulkObservedFrom`), so seeding an encounter
+  // there conflicts with nothing: the two are complementary by construction, never both live. `repeat`/
+  // `match` cannot carry an encounter (`canCarryEncounter`), and returned false at the top of the loop.
+  //
+  // `bulkObservedFrom` walks the SUFFIX (it assumes an element stream at its start — the source step's
+  // own verdict is `reads-rows`), so it is asked from index 1, past the `V`/`E`/`inject` source. A
+  // scalar source (`inject`) with an empty suffix reads as bulk-observed and stays unseeded, which is
+  // both its prior behaviour and correct: its VALUES order is textual, not a scan.
+  //
+  // Terminals whose order is NOT an observable per-traverser emission are excluded, each because a rule
+  // above already governs it or because the order is moot:
+  //   - a MUTATING terminal: an id-assigning write (`addV`/`addE`/`property`/`drop`) already demanded
+  //     the encounter above (`WRITE_STEPS`); a pure label delete (`dropLabel`/`dropLabels`/`addLabel`)
+  //     emits no order-observable result — seeding one is a needless carried column (and, on the write
+  //     path, a needless bind).
+  //   - `group`/`groupCount`: a member-COLLECTING group already returned true (`collectsInOrder`); a
+  //     REDUCING-value group is order-moot. `bulkObservedFrom` is the wrong oracle here — it answers
+  //     "can this group bulk-COLLAPSE", which is false for a fan-out reducing value that is still
+  //     order-insensitive (`group().by(k).by(__.out().count())`).
+  //   - a bare global REDUCER (`count`/`sum`/…): one row out, order moot (this is also what
+  //     `bulkObservedFrom` says, stated directly so it does not depend on that agreement).
+  //   - a PATH chain: `path()` carries its own positional order, and an encounter alongside a path is a
+  //     combination the seed does not build (`tracksPath && demandsEncounter` declines) — so leave it as
+  //     it was rather than force the decline.
+  //   - a BRANCH-MERGE chain (`union`/`choose`/`coalesce`/`optional`): under `ctx.ordered` a merge mints
+  //     the COLLECT realization (`withFanoutOrder` — a whole-row content sort, "any deterministic order
+  //     is legal for a fold"), which is a WRONG order for a bare per-traverser emission that observes
+  //     SOURCE order. The traverser-major mint that would serve emission is the branch-order substrate's
+  //     unbuilt residue (`branch-traverser-major.feature`, SLICE half only), so a branch chain keeps its
+  //     positionless emission rather than force the collect realization onto an observable stream.
+  const terminal = steps.at(-1);
+  if (terminal
+    && (MUTATING_STEPS.has(terminal.name)
+      || terminal.name === 'group' || terminal.name === 'groupCount'
+      || (REDUCERS.has(terminal.name) && (terminal.args?.length ?? 0) === 0)))
+    return false;
+  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name))) return false;
+  // A trailing `order()` (the loop's `ordered`, not cleared by a later fan-out) has ALREADY pinned the
+  // emission order as an `ORDER BY` in the SQL, so no encounter is owed — and forcing one changes how a
+  // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value, an L3
+  // regression). The order the chain does specify survives a plan change on its own.
+  if (ordered) return false;
+  return steps.length > 1 && canCarryEncounter(steps) && !bulkObservedFrom(steps, 1);
 }
 
 // ---------- chainCollapseSafe — THE CHAIN-GLOBAL collapse question, no longer a ChainFacts field ----------
