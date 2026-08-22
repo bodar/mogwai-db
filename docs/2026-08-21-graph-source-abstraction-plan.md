@@ -82,12 +82,19 @@ federate command that pushes a mutation to the sibling), not a write threaded th
 traversal. So `MUTATING_STEPS` are in `BOUND_HANDOFF_DENY` and decline permanently — this is a semantic
 wall, not a missing feature.
 
-**REMAINING (deferred, fail-closed):**
-- **`path` over a bound graph** — the path channel has no landed source; `tracksPath` declines. The only
-  traverser channel not carried.
-- **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
-  (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
-  identity to give (a detached VertexProperty has no rowid), so it is a genuine wall, not merely unrouted.
+**REMAINING (fail-closed today — but mostly UNBUILT features, not walls; the landed `{t,v}` tree + ids
+carry the data):**
+- **`valueMap()` / `elementMap()` over bound — UNBUILT, not a wall.** Every value is in the landed
+  `{t,v}` tree; `elementValueMap` just still scans base tables. Route it through the landed tree (the
+  `foreignValues` shape, kept as a map). Straightforward.
+- **`path` over bound — UNBUILT, not a wall.** The path channel is a stream fact like encounter/bulk
+  (both now carried): seed it at the bound source, extend through bound movement (`extendPath` over the
+  bound ids), and rejoin each path step's payload at framing (Mechanism-B per step). Moderate.
+- **`properties()` over bound — MOSTLY buildable.** The property stream (explode the landed tree),
+  `.value()`, `.key()`, and terminal VertexProperty framing (the framer synthesises `owner:pk` for a null
+  `vpid`) all work from landed data. TWO narrow GENUINE gaps, and both are landed-DATA gaps the federate
+  service closes by landing more, NOT engine walls: the VertexProperty's own id (`vpid`) and
+  meta-properties are not in the `{t,v}` snapshot today.
 - **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
   (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
   identity (a detached VertexProperty has no rowid), so it is a genuine wall.
