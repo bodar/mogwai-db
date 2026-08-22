@@ -7,8 +7,9 @@ import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
 import { canonicalizeConnectives } from '../../src/compiler/ir/strategies.ts';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
-import { compile } from '../../src/compiler/compiler.ts';
+import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { runPasses, EMPTY_STRATEGY_USE, childSteps } from '../../src/compiler/ir/passes.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 
 const names = PASSES.map((p) => p.name);
 const ord = (name: string) => names.indexOf(name);
@@ -330,5 +331,60 @@ describe('labelMutationTarget — a specified refusal, raised ABOVE the lowering
       try { compile(gremlin, {}, undefined); } catch (e: any) { message = e.message; }
       expect(message, gremlin).not.toContain('Label mutation is not supported');
     }
+  });
+});
+
+describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on a mogwai.* service', () => {
+  // The "named steps never lower directly" invariant (plan doc Guardrails #1): each native step is a
+  // desugar to the ONE call() service, never a second lowering. Asserted at the Pass level (runPasses,
+  // no compile) so it sees the rewrite before the service's fail-closed deferral fires.
+  const chainOf = (gremlin: string) =>
+    runPasses(stepChain(parseGremlin(gremlin), {}), EMPTY_STRATEGY_USE, {}, undefined, false).steps;
+  const callOf = (gremlin: string) => {
+    const chain = chainOf(gremlin);
+    const call = chain.find((s) => s.name === 'call');
+    expect(call, gremlin).toBeDefined();
+    return call!;
+  };
+  const serviceName = (c: any) => c.args[0].value;
+  const config = (c: any) => c.args[1].value as Map<string, any>;
+
+  test('each step names its canonical service and its native-step mode', () => {
+    const cases: Array<[string, string, string]> = [
+      ['g.V().pageRank()', 'mogwai.pageRank', 'decorate'],
+      ['g.V().connectedComponent()', 'mogwai.wcc', 'decorate'],
+      ['g.V().peerPressure()', 'mogwai.peerPressure', 'decorate'],
+      ['g.V().shortestPath()', 'mogwai.shortestPath', 'path'],
+    ];
+    for (const [gremlin, name, mode] of cases) {
+      const call = callOf(gremlin);
+      expect(serviceName(call), gremlin).toBe(name);
+      expect(config(call).get('mode'), gremlin).toBe(mode);
+      // The original step name is gone — the desugar is a rewrite, not an annotation beside it.
+      expect(chainOf(gremlin).some((s) => s.name === 'pageRank' || s.name === 'connectedComponent'
+        || s.name === 'peerPressure' || s.name === 'shortestPath'), gremlin).toBe(false);
+    }
+  });
+
+  test('pageRank(α) carries the damping factor; a non-numeric arg is refused', () => {
+    expect(config(callOf('g.V().pageRank(0.9)')).get('dampingFactor')).toBe(0.9);
+    expect(config(callOf('g.V().pageRank()')).has('dampingFactor')).toBe(false);
+  });
+
+  test('the ~tinkerpop.<algo>.* config folds onto the minted call via absorbCallWith', () => {
+    // with() config rides through extract and is folded onto the call in canonicalize, exactly as a
+    // hand-written call().with() is — so the service reads one params map however the query spelled it.
+    const call = callOf('g.V().connectedComponent().with("~tinkerpop.connectedComponent.propertyName","cluster")');
+    expect(call.withArgs).toContainEqual(['~tinkerpop.connectedComponent.propertyName', 'cluster']);
+  });
+
+  test('execution is a clear fail-closed deferral, not a mis-execution or a silent decline', () => {
+    // The compute is not built yet; the seam is. A native OLAP step must refuse loudly rather than
+    // answer a different question. Under the real (reference) registry the services ARE registered, so
+    // the message is the pending-execution deferral, not "unknown service".
+    const withReg: CompileOptions = { registry: standardRegistry };
+    for (const gremlin of ['g.V().pageRank().has("gremlin.pageRankVertexProgram.pageRank")',
+      'g.V().connectedComponent()', 'g.V().peerPressure()', 'g.V().shortestPath()'])
+      expect(() => compile(gremlin, {}, withReg), gremlin).toThrow('graph algorithm execution is not implemented yet');
   });
 });

@@ -224,3 +224,16 @@ export const IO_SERVICE_NAME = 'mogwai.io';
  *  excluded from its own list() (TinkerPop's rule — expressed as `internal: true`). Lives here
  *  (a dependency-free leaf) so both call-params.ts and directory.ts import it without a cycle. */
 export const DIRECTORY_SERVICE_NAME = '--list';
+
+/** The canonical service names the four native OLAP steps desugar to (ir/strategies.ts
+ *  `desugarGraphAlgos`). Live here (the dependency-free leaf) for the same reason IO_SERVICE_NAME
+ *  does: the desugaring Pass is compiler core, and must reach the name without importing a service
+ *  module. `wcc` (weakly-connected components) is `connectedComponent`'s canonical algorithm name —
+ *  the STEP keeps TinkerPop's word, the SERVICE takes the algorithm's (root CLAUDE.md, Naming).
+ *  All four are `internal: true` services: they back native TinkerPop steps rather than extending the
+ *  reference provider surface, so they are served by both registries yet absent from `--list`, exactly
+ *  as `mogwai.io` is. See `docs/2026-07-24-graph-algorithms-plan.md`. */
+export const PAGERANK_SERVICE_NAME = 'mogwai.pageRank';
+export const WCC_SERVICE_NAME = 'mogwai.wcc';
+export const PEER_PRESSURE_SERVICE_NAME = 'mogwai.peerPressure';
+export const SHORTEST_PATH_SERVICE_NAME = 'mogwai.shortestPath';

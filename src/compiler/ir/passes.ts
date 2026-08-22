@@ -1,7 +1,7 @@
 import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, desugarPropertyMap, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels, substituteInjectionMarker,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -75,6 +75,14 @@ const EXTRACT: Pass[] = group('extract', [
   // the Subgraph/Partition injectors recurse into `{nested}` ARGS rather than into a Map's values.
   // Independent of desugarMatchString (disjoint step names), so the order between them is free.
   { name: 'desugarPropertyMap', applies: (steps) => steps.some((s) => s.name === 'property'), run: desugarPropertyMap },
+  // The four native OLAP steps → call() on a mogwai.* service. In `extract` (before absorbCallWith,
+  // canonicalize) so the minted call's `~tinkerpop.<algo>.*` with() steps fold onto it like any
+  // call()'s. Order within extract is free — disjoint step names from the desugars above.
+  {
+    name: 'desugarGraphAlgos',
+    applies: (steps) => steps.some((s) => s.name === 'pageRank' || s.name === 'connectedComponent' || s.name === 'peerPressure' || s.name === 'shortestPath'),
+    run: desugarGraphAlgos,
+  },
   // Also before decoration and before the folds, and the SECOND half is what places it: the body it
   // splices in may HOST a `by()` (`local(aggregate("a").by("name"))`), so it has to arrive before
   // `absorbModulators` for the modulator to land on the spliced step rather than on nothing.

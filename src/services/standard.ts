@@ -6,6 +6,7 @@ import { searchService } from './catalog/search.ts';
 import { createFederateService } from './catalog/federate.ts';
 import { createIoService } from './catalog/io.ts';
 import { schemaService } from './catalog/schema.ts';
+import { graphAlgorithmServices } from './catalog/graph-algorithms.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -30,11 +31,14 @@ import { schemaService } from './catalog/schema.ts';
 //     scenarios, which assert the exact reference set, stay green there).
 
 /** The reference provider surface — the three canonical TinkerPop services, plus the INTERNAL
- *  service `io()` desugars to. `mogwai.io` is in the REFERENCE registry deliberately: `io()` is
+ *  services native steps desugar to. `mogwai.io` is in the REFERENCE registry deliberately: `io()` is
  *  TinkerPop's own step, so a reference-exact context must serve it, and `internal: true` keeps it
- *  out of `--list` so the exact provider surface the official scenarios assert is unchanged. */
+ *  out of `--list` so the exact provider surface the official scenarios assert is unchanged. The four
+ *  OLAP services (pageRank/wcc/peerPressure/shortestPath) back native steps for the same reason and
+ *  are `internal: true` too, so the exact `--list` surface stays unchanged. */
 export const standardRegistry: RegistryProvider = (app) =>
-  createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store)]);
+  createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
+    ...graphAlgorithmServices]);
 
 /** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
  *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
@@ -43,4 +47,4 @@ export const standardRegistry: RegistryProvider = (app) =>
  *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */
 export const extendedRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createFederateService(app.source), schemaService]);
+    createFederateService(app.source), schemaService, ...graphAlgorithmServices]);

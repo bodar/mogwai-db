@@ -4,7 +4,7 @@ import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, m
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
-import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
+import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { INJECT_VALUES_KEY, injectedValues, isInjectionMarker } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
@@ -513,6 +513,53 @@ export function desugarIo(steps: IRStep[]): IRStep[] {
     i = j;
   }
   return out;
+}
+
+// ---------- the four native OLAP steps → call() on a mogwai.* service ----------
+//
+// `g.V().pageRank()`, `.connectedComponent()`, `.peerPressure()`, `.shortestPath()` are TinkerPop's
+// four canonical OLAP step names. The v4 grammar carries them but no execution surface; we give them
+// an OLTP compile-to-SQL execution by desugaring EACH to a `call()` on a `mogwai.*` service — the one
+// implementation, two front-ends bet (`docs/2026-07-24-graph-algorithms-plan.md`, principle #2). A
+// desugar Pass and NOT a step lowering, for the reason `desugarIo` is: the pipeline already does
+// Step[]→Step[] rewrites, and desugaring means the compiler learns no second OLAP step kind — the rest
+// of the pipeline (and every verify Pass, which asserts against ctx.originalChain) sees the canonical
+// call() form while error messages still reference what the user wrote.
+//
+// `mode` distinguishes the NATIVE step's contract from a raw `g.call(serviceName)`: `decorate` is
+// element-preserving (run the global compute, decorate each incoming vertex with its score under the
+// canonical property key, pass the vertex through); `path` emits paths. A GDS-style call chooses
+// `stream`/`mutate`/`stats` instead — same service, different tail. The per-algorithm config
+// (`~tinkerpop.<algo>.*`) rides through as `.with()` steps, folded onto the minted call by
+// absorbCallWith (canonicalize, after this) exactly as a hand-written call()'s would be.
+const GRAPH_ALGO_SERVICE: Readonly<Record<string, string>> = {
+  pageRank: PAGERANK_SERVICE_NAME,
+  connectedComponent: WCC_SERVICE_NAME,
+  peerPressure: PEER_PRESSURE_SERVICE_NAME,
+  shortestPath: SHORTEST_PATH_SERVICE_NAME,
+};
+
+export function desugarGraphAlgos(steps: IRStep[]): IRStep[] {
+  if (!steps.some((s) => GRAPH_ALGO_SERVICE[s.name])) return steps;
+  return steps.map((s) => {
+    const serviceName = GRAPH_ALGO_SERVICE[s.name];
+    if (!serviceName) return s;
+    const config = new Map<string, any>();
+    if (s.name === 'pageRank') {
+      // The `_double` overload: pageRank(α) sets the damping factor; pageRank() takes the default.
+      if (s.args.length > 0) {
+        const damping = s.args[0]?.value;
+        if (typeof damping !== 'number')
+          throw new Error('pageRank(α) takes a numeric damping factor');
+        config.set('dampingFactor', damping);
+      }
+    } else if (s.args.length > 0) {
+      // connectedComponent/peerPressure/shortestPath are `_Empty` overloads — all config is via with().
+      throw new Error(`${s.name}() takes no positional arguments; configure it with .with("~tinkerpop.${s.name}.<key>", …)`);
+    }
+    config.set('mode', s.name === 'shortestPath' ? 'path' : 'decorate');
+    return { ...s, name: 'call', args: [arg(serviceName), arg(config)] };
+  });
 }
 
 export function absorbCallWith(steps: IRStep[]): IRStep[] {
