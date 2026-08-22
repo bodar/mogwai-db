@@ -14,6 +14,23 @@ ONE method per rerouted chokepoint (no speculative/dead methods).
   callback handed the graph's value+vtype exprs; the indexSeek/trigramSeek EXISTS shape preserved) (`3a0b845`)
 - `has(T.id/T.label)` → `hasTokenPredicate` (`5c79e55`)
 
+**Steps 3 + 4 LANDED — the bound graph flows through the ONE vocabulary.** `BoundGraph`
+(`src/compiler/rel/boundgraph.ts`) is a `GraphSource` over a landed subgraph, **id-carry + rejoin**: a
+bound element travels as an ID, and `movement`/`sourceFilter`/`propertyValues`/`externalId`/
+`labelScalar`/`leafPayload` are the SAME shared builders the base graph uses, reached through `ctx.source`.
+`detachedTail` is now a thin ORCHESTRATOR (it keeps only the bound `.V()`/`.E()` RE-ROOT and routes every
+other step through the shared builders); the `foreign.ts` twins (`boundVertexMove`, `boundVertexHas`,
+`boundVertexHasLabel`, `boundById`, `endpointVertices`, `foreignValues`) are DELETED. The leaf framing
+(Mechanism B) rejoins the landed CTE for the wire payload (`source.leafPayload`, the `elements`/`detached`
+framing arms). **Materialize-once is done as a `fenced` (`AS MATERIALIZED`) CTE Plan binding** declared once
+in `lowerForeign`, referenced by every read via a `Ref` — Calcite's `RelOptMaterialization`, which also
+keeps the landing at ONE `json_each` bind (the cf-limits DO-legality invariant). A bonus of routing through
+the shared `sourceFilter`: bound `has(...)` now composes EVERY predicate form (was a fixed handful).
+Net: `test/federation.test` 43 green (incl. the new element-terminal cases), `test:cf-limits` 2091 green,
+real-workerd `cloudflare.test` 37 green. Residual: the label-scalar cluster below; and no end-to-end
+federation-on-real-DO test exists (federation is not in `cloudflare.test`), so DO coverage for the bound SQL
+rests on cf-limits DO-legality + the Program shipping RENDERED (no new RPC-crossing structure).
+
 **Step 2 REMAINING — the label-scalar cluster.** `label()`/`id()`/`by(T.label)`/`by(T.id)`/`labels()`
 (edge arm)/`labelled()` all read through **`byExpr`'s token arm** (`modulator.ts:267-312`) — a correlated
 scalar reader (external id `COALESCE(uid,id)`; first-label side-table pick). Rerouting it means source
@@ -189,6 +206,16 @@ on `id`, `propertyValues` takes an id-bearing input — so payload-carry never f
 the landed CTE for id/label/props (**Mechanism B**) — under pure id-carry it can NOT stay deferred. Net for
 the rewrite = the element-terminal subgraph tests in `test/federation.test.ts` (added 2026-08-22) +
 `test/cloudflare*.test.ts` (green Bun ci is not sufficient for this DO-boundary path).
+
+**`detachedTail` stays as a thin bound ORCHESTRATOR — it is NOT replaced by `elementTail`.** A real
+semantic difference forces this: the federate-subgraph `.V()`/`.E()` **RE-ROOT** a fresh traversal at the
+injected graph (`sg.traversal().V()` — discards the incoming stream; `federation.test` `.V().values(name)`
+== the DISTINCT subgraph vertices), whereas base mid-traversal `.V()` is `GraphStep` (a cross-join that
+KEEPS the stream). So `elementTail`/`reSource` semantics are wrong for a bound `.V()`. `detachedTail` keeps
+the re-root + terminal-leaf logic and routes every OTHER step (movement, `has`/`hasLabel`, `values`,
+`id`/`label`) through the SHARED builders with `ctx.source = BoundGraph` — which is what deletes the
+`foreign.ts` twins. The "one vocabulary" is the shared builders reached through the source; the bound
+orchestrator loop remains because its source-position semantics genuinely differ from base.
 
 - **The label-id remapping for a bound graph** — `BoundGraph.edgeLabelMatch` is `label IN (names)` (no id
   table), so there is nothing to remap; the base keeps its id-set. This is why the boundary is a predicate,

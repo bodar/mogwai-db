@@ -4,7 +4,8 @@ import type { Rel } from '../../rel/rel.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
+import { elementPayload } from './element.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typeOf, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -99,6 +100,22 @@ export interface GraphSource {
     kind: Elem, id: Expr, token: 'id' | 'label',
     valuePred: (tokenExpr: Expr) => Expr | null, fresh: Minter,
   ): Expr | null;
+
+  /** `id()` / `label()` as SCALAR reads over an element relation. `externalId` is `COALESCE(uid, id)`
+   *  for `BaseGraph` (the id a client sees) and the landed id for a bound graph (already external);
+   *  `labelScalar` is the element's label — one indirection into the `labels` side tables for the base,
+   *  a rejoin of the landed label array/name for a bound graph. Both are CORRELATED on the element `id`.
+   *  Reached through the shared `by()` token machinery, so they compose in `label()`/`by(T.label)`/
+   *  `group().by(id)` alike. */
+  externalId(kind: Elem, id: Expr, fresh: Minter): Expr;
+  labelScalar(kind: Elem, id: Expr, fresh: Minter): Expr;
+
+  /** THE LEAF FRAMING — a terminal element relation → the wire PAYLOAD tuple (id, label, props[, src,
+   *  tgt]). `BaseGraph` reads `nodes`/`edges`/`vertex_properties`/`labels` by id (`elementPayload`); a
+   *  bound graph REJOINS the landed relation by id to reconstitute the detached payload (Mechanism B).
+   *  The `bulk` option carries a surviving multiplicity column for a collapsed base stream (a bound
+   *  stream carries none). */
+  leafPayload(input: Rel, kind: Elem, opts: { readonly bulk: boolean }, fresh: Minter): Rel;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
@@ -258,4 +275,34 @@ export const BaseGraph: GraphSource = {
     const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
+
+  externalId: (kind, id, fresh) => {
+    const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
+    const scan = make.scan({ id: fresh('ei'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('re'), channels: [], type: typeOf(...cols) });
+    const mine = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), id) });
+    const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(mine.id, 'uid'), col(mine.id, 'id')] };
+    return firstOf(mine, external, col(mine.id, 'id'), fresh);
+  },
+
+  labelScalar: (kind, id, fresh) => {
+    const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+    if (kind === 'edge') {
+      const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(...EDGE_COLS) });
+      const joined = make.join({
+        id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
+        type: typeOf(...EDGE_COLS, meta('lid', 'int'), meta('name', 'text')),
+        on: and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), id)),
+      });
+      return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'lid'), fresh);
+    }
+    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const joined = make.join({
+      id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
+      type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+      on: and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), id)),
+    });
+    return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
+  },
+
+  leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),
 };

@@ -45,9 +45,10 @@ import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
-import { edgeEndpoint, elementPayload } from './element.ts';
-import { boundById, boundVertexHas, boundVertexHasLabel, boundVertexMove, endpointVertices, foreignLabelValue, foreignRejoin, foreignRelation, foreignValues, HAS_CMP_OPS, type HasMatch } from './foreign.ts';
+import { edgeEndpoint } from './element.ts';
+import { foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
+import { boundGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -3887,7 +3888,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
 const carriesMultiplicity = (chain: Tail): boolean =>
   chain.bulked && chain.rel.channels.some((channel) => channel.role === 'bulk');
 
-const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
+const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
   // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
   // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
@@ -3899,15 +3900,16 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
   if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard') return null;
   switch (framing.kind) {
     case 'elements': return {
-      rel: elementPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
+      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
-    // A DETACHED element is already ITS OWN payload (`foreign.ts` lands the tuple), so the projection is
-    // the identity and the `Shape` is the ordinary one — the byte framers cannot tell a federated vertex
-    // from a local one and must not, since the wire has no such distinction. Building the payload the
-    // `elements` way would join THIS graph's `nodes` on an id that belongs to another one.
+    // A BOUND (detached) element travels as an ID under id-carry, so its wire payload is REJOINED from
+    // the landed relation — `BoundGraph.leafPayload` (Mechanism B) reconstitutes the (id, label, props
+    // [, src, tgt]) tuple `foreign.ts` used to carry. The `Shape` is the ordinary one: the byte framers
+    // cannot tell a federated vertex from a local one and must not, since the wire has no such
+    // distinction. (`source` is the bound graph here — a base chain never emits `detached`.)
     case 'detached': return {
-      rel: chain.rel,
+      rel: source.leafPayload(chain.rel, framing.elem, { bulk: false }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -4007,8 +4009,8 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, propertySeek: boolean, ftsSubstringPredicate: boolean, fresh: Minter): RelLowering | null => {
-  const wire = framed(chain, fresh);
+const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, fresh: Minter): RelLowering | null => {
+  const wire = framed(chain, source, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
@@ -4069,7 +4071,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /**
@@ -4107,22 +4109,45 @@ export function lowerForeignResume(
   const edgeRows = rows.filter((r) => r.kind === 'edge');
   const isSubgraph = edgeRows.length > 0 && vertexRows.length > 0;
   const streamElem: Elem = isSubgraph ? 'edge' : elem;
-  // A SUBGRAPH lands TWO relations that both outlive the initial stream: the edges (also the stream
-  // seed) and the vertices. Bound together as the `subgraph` context, they let `.V()`/`.E()` re-root a
-  // fresh traversal (TinkerPop's `sg.traversal()`) and `out`/`in`/`both` walk the graph. The edges
-  // relation is landed ONCE and shared — as the initial edge stream and as the movement source — so it
-  // renders as one CTE and one bind.
-  const edgesRel = isSubgraph ? foreignRelation(edgeRows, 'edge', fresh) : undefined;
-  const subgraph = isSubgraph && edgesRel
-    ? { vertices: foreignRelation(vertexRows, 'vertex', fresh), edges: edgesRel } : undefined;
-  const landed = edgesRel ?? foreignRelation(rows, streamElem, fresh);
+  // The landed graph is the SOURCE a `BoundGraph` reads through. Each landed relation is declared ONCE
+  // as a `fenced` (`AS MATERIALIZED`) CTE Plan binding over its rows, and every read — the stream seed,
+  // each rejoin, the leaf — REFERENCES it by name (a `Ref`). That is Calcite's materialize-once
+  // (`RelOptMaterialization`): N reads share one CTE and its ONE `json_each` bind, computed once, rather
+  // than re-exploding the JSON literal per read (which also doubled the DO bind count). A binding is used
+  // rather than a structurally shared node because a shared node is duplicated by a tree-rebuild pass —
+  // the RelIR scope check refuses it — whereas a `Ref` is a named leaf. `null` binding = the KIND is
+  // absent from this result (a vertex list has no edges), which fails a hop closed; an EMPTY same-kind
+  // relation is still declared (a zero-row CTE), so an empty federated vertex list frames, not throws.
+  const bindings: Binding[] = [];
+  const declare = (landedRows: readonly ForeignRow[], kind: Elem): string => {
+    const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
+    const materialized = make.materialize({ id: fresh('bgm'), input: foreignRelation(landedRows, kind, fresh), channels: [], type: typeOf(...foreignPayloadCols(kind)), name, fenced: true });
+    bindings.push({ name, node: materialized });
+    return name;
+  };
+  const vertexBinding = isSubgraph || elem === 'vertex' ? declare(vertexRows, 'vertex') : null;
+  const edgeBinding = isSubgraph || elem === 'edge' ? declare(edgeRows, 'edge') : null;
+  const boundSource = boundGraph(vertexBinding, edgeBinding);
+  const boundCtx: ChainCtx = { ...ctx, source: boundSource };
+  // The initial stream references the landed relation (the edges for a subgraph, else the one matching
+  // `elem`) by name, exactly as every downstream read does.
+  const streamBinding = isSubgraph || streamElem === 'edge' ? edgeBinding! : vertexBinding!;
+  const landed: Rel = make.ref({ id: fresh('bref'), name: streamBinding, channels: [], type: typeOf(...foreignPayloadCols(streamElem)) });
   // A MID-traversal barrier's pool is per-CALL, not per-parent: the sibling ran once over the distinct
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
-  const seed = rejoin ? foreignRejoin(landed, streamElem, rejoin.values, rejoin.injection, fresh) : landed;
-  const chain = detachedTail(seed, streamElem, steps, from, ctx, fresh, subgraph);
-  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  const rejoined = rejoin ? foreignRejoin(landed, streamElem, rejoin.values, rejoin.injection, fresh) : landed;
+  // ID-CARRY: the stream carries only the element ID — the payload is REJOINED at each read through the
+  // `BoundGraph`. So the landed payload columns are projected AWAY here; the shared movement/leaf builders
+  // assume an id-carrying stream (`id` + channels), and a stream still holding the landed payload would
+  // widen every downstream join past its declared type.
+  const seed = make.project({
+    id: fresh('bsd'), input: rejoined, channels: [], type: typeOf(meta('id', 'any', true)),
+    exprs: [['id', col(rejoined.id, 'id')]],
+  });
+  const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
+  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
@@ -4152,7 +4177,7 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
     exprs: [['v', col(exploded.id, 'sv')]],
   });
   const chain = scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh);
-  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /**
@@ -4177,7 +4202,7 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
     exprs: [[LIST_COL, col(exploded.id, 'sv')]],
   });
   const chain = continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES);
-  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /**
@@ -4419,91 +4444,49 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  * would return a plausible, wrong row set. The traversal that wants those steps pushes them INTO the
  * sub-traversal the barrier runs on the far side, where the elements are attached.
  */
-/** A `has(key, P)` predicate to the `HasMatch` a bound-vertex filter runs, or `undefined` for a
- *  predicate this filter does not model (`without`, `containing`, a composed `and`/`or`, a bound
- *  operand). A single-operand comparison maps to its `BinaryOp`; `within(a,b)` / `within([a,b])` to a
- *  membership set. */
-function hasMatchOf(pred: { readonly op: string; readonly operands: readonly { readonly value: unknown; readonly name?: string | null }[] }): HasMatch | undefined {
-  const op = pred.operands.length === 1 && pred.operands[0]!.name == null ? HAS_CMP_OPS[pred.op] : undefined;
-  if (op) return { op, value: pred.operands[0]!.value };
-  if (pred.op === 'within' && pred.operands.length > 0 && pred.operands.every((o) => o.name == null)) {
-    const within = pred.operands.length === 1 && Array.isArray(pred.operands[0]!.value)
-      ? pred.operands[0]!.value as readonly unknown[] : pred.operands.map((o) => o.value);
-    return { within };
-  }
-  return undefined;
-}
-
 function detachedTail(
   seed: Rel, elem: Elem, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
-  subgraph?: { readonly vertices: Rel; readonly edges: Rel },
+  subgraph = false,
 ): Tail | null {
   const step = steps[from];
   if (!step) return { rel: seed, framing: { kind: 'detached', elem }, bulked: false, aliases: NO_ALIASES };
-  // OVER A LANDED SUBGRAPH the detached tail becomes a TRAVERSAL over the two bound relations — a local
-  // `sg.traversal()` (docs/2026-08-21-barrier-substrate-design.md §B). Everything below composes on top
-  // of the ordinary `id`/`label`/`values` readers, which already work on any landed element tuple.
+  const source = ctx.source;
+
   if (subgraph) {
-    // `.V()`/`.E()` RE-ROOT a fresh traversal at the subgraph's vertices/edges, discarding the current
-    // stream — exactly `sg.traversal().V()`. `V(ids)`/`E(ids)` filter that source by id (an inline id
-    // list only; a bound id parameter is not modelled here).
+    // `.V()`/`.E()` RE-ROOT at the landed relation, discarding the stream (`sg.traversal().V()`).
+    // `V(ids)`/`E(ids)` narrow by an inline id list (a bound id parameter is not modelled).
     if (step.name === 'V' || step.name === 'E') {
-      const [rel, e]: [Rel, Elem] = step.name === 'V' ? [subgraph.vertices, 'vertex'] : [subgraph.edges, 'edge'];
-      const ids = argValues(step);
-      if (ids.length && (step.args.some((a) => a.name != null) || ids.some((v) => v == null))) return null;
-      return detachedTail(ids.length ? boundById(rel, ids, fresh) : rel, e, steps, from + 1, ctx, fresh, subgraph);
+      const kind: Elem = step.name === 'V' ? 'vertex' : 'edge';
+      const seeded = source.elementScan(kind, step.args, fresh);
+      if (!seeded) return null;
+      const filtered = seeded.pred ? make.filter({ id: fresh('bvf'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred }) : seeded.scan;
+      // ID-CARRY: the re-rooted stream carries only the id; the landed payload is rejoined at each read.
+      const rel = make.project({ id: fresh('bvi'), input: filtered, channels: [], type: typeOf(meta('id', 'any', true)), exprs: [['id', col(filtered.id, 'id')]] });
+      return detachedTail(rel, kind, steps, from + 1, ctx, fresh, subgraph);
     }
-    // An endpoint hop off a landed EDGE reads the edge's own `src`/`tgt` and joins the bound vertices for
-    // the endpoint's DATA; the vertex re-enters with full payload.
-    if (elem === 'edge' && (step.name === 'inV' || step.name === 'outV' || step.name === 'bothV')) {
-      return detachedTail(endpointVertices(seed, subgraph.vertices, step.name, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
-    }
-    // `has`/`hasLabel` FILTER a bound vertex against its landed `{t,v}` property tree / label array — an
-    // `EXISTS` over the exploded json (multi-valued membership). `has(key)`, `has(key, value)` and
-    // `has(key, P)` for the six comparison predicates; `hasLabel(l…)`. A composed/`within`/text predicate,
-    // `has(label, key, value)`, or a bound-parameter operand DECLINE (fail closed) rather than guess.
-    if (elem === 'vertex' && step.name === 'hasLabel') {
-      const labels = argValues(step);
-      if (!labels.length || !labels.every((l) => typeof l === 'string')) return null;
-      return detachedTail(boundVertexHasLabel(seed, labels as string[], fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
-    }
-    // `has(label, key, value)` is `hasLabel(label)` composed with `has(key, value)` — TinkerPop's own
-    // 3-arg desugaring. Apply the label filter, then fall through to the key/value form on the same step.
-    if (elem === 'vertex' && step.name === 'has' && step.args.length === 3
-      && step.args.every((a) => a.name == null && typeof a.value === 'string')) {
-      const labelled = boundVertexHasLabel(seed, [step.args[0]!.value as string], fresh);
-      const keyed = boundVertexHas(labelled, step.args[1]!.value as string, { op: '=', value: step.args[2]!.value }, fresh);
-      return detachedTail(keyed, 'vertex', steps, from + 1, ctx, fresh, subgraph);
-    }
-    if (elem === 'vertex' && step.name === 'has' && (step.args.length === 1 || step.args.length === 2) && typeof step.args[0]!.value === 'string') {
-      const key = step.args[0]!.value as string;
-      const operand = step.args[1];
-      if (!operand) return detachedTail(boundVertexHas(seed, key, undefined, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
-      if (operand.name == null && !isPred(operand.value) && !isNested(operand.value) && !isTokenArg(operand.value)) {
-        return detachedTail(boundVertexHas(seed, key, { op: '=', value: operand.value }, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
-      }
-      const match = isPred(operand.value) ? hasMatchOf(operand.value) : undefined;
-      if (match) return detachedTail(boundVertexHas(seed, key, match, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
-      return null;
-    }
-    // VERTEX→VERTEX movement walks the bound edges to the bound vertices. A movement's args are edge
-    // labels; only INLINE string labels are modelled here (the landed edge's `label` is a string column,
-    // filtered by a plain `IN`). A bound label PARAMETER (the `labelIds` bind path) and the `out(null)`
-    // form (a named label that matches nothing) both DECLINE rather than guess.
-    if (elem === 'vertex' && (step.name === 'out' || step.name === 'in' || step.name === 'both')) {
+    // MOVEMENT (out/in/both AND the endpoint reads inV/outV/bothV) through the SHARED `movement` builder,
+    // sourced from the landed edges. Only INLINE string labels are modelled (the landed edge label is a
+    // TEXT column filtered by IN); a bound label PARAMETER and the out(null) form both decline.
+    if (HOPS[step.name]) {
       const asked = labelSetArgs(step.args);
-      if (!asked || (asked.given && asked.labels.length === 0)) return null;
+      if (!asked || (asked.given && !asked.labels.length)) return null;
       if (!asked.labels.every((a) => a.name == null && typeof a.value === 'string')) return null;
-      const labels = asked.labels.map((a) => a.value as string);
-      return detachedTail(boundVertexMove(seed, subgraph.edges, subgraph.vertices, step.name, labels, fresh), 'vertex', steps, from + 1, ctx, fresh, subgraph);
+      const moved = movement(step, { rel: seed }, elem, source, fresh);
+      return moved && detachedTail(moved.rel, moved.elem, steps, from + 1, ctx, fresh, subgraph);
+    }
+    // FILTERS (hasLabel / has(...) / hasId / is) through the SHARED `sourceFilter`, whose physical reads
+    // route through `ctx.source`. Strictly MORE than the deleted twin covered (every predicate form
+    // composes, plus the 3-arg has(label,key,value) desugaring) at no extra cost: one clause over the
+    // id-carrying stream.
+    const subject: Subject = { kind: 'element', id: col(seed.id, 'id'), elem, rel: seed };
+    const clause = sourceFilter(step, subject, fresh, ctx);
+    if (clause) {
+      const filtered = make.filter({ id: fresh('bff'), input: seed, channels: seed.channels, type: seed.type, pred: clause });
+      return detachedTail(filtered, elem, steps, from + 1, ctx, fresh, subgraph);
     }
   }
-  // SHAPE-AGNOSTIC row ops over ANY landed element stream (a detached federated result or a bound
-  // subgraph): `count()` reads the stream's cardinality (`countExpr` falls to `COUNT(*)` with no bulk
-  // channel — a landed row IS one traverser) and `dedup()` collapses by element identity (`id` is a
-  // column and functionally determines the rest of the tuple, so `Distinct` over the landed relation IS
-  // dedup-by-id). Neither reads the base tables, so both are correct on a detached stream — the honest
-  // decline the rest of this tail keeps was overbroad for them.
+  // SHAPE-AGNOSTIC row ops over ANY landed element stream — `count()` reads cardinality (a landed row IS
+  // one traverser) and `dedup()` collapses by element identity (`id` functionally determines the tuple).
   if (step.name === 'count' && argValues(step).length === 0 && !isLocalScope(step)) {
     const counted = countTail(seed, fresh);
     return continueAs(counted.rel, counted.framing, steps, from + 1, false, ctx, fresh, NO_ALIASES);
@@ -4512,21 +4495,19 @@ function detachedTail(
     const deduped = make.distinct({ id: fresh('dtd'), input: seed, channels: seed.channels, type: seed.type });
     return detachedTail(deduped, elem, steps, from + 1, ctx, fresh, subgraph);
   }
+  // id() / label() — the element's tokens, REJOINED from the landed relation by id via `ctx.source`.
   if (step.name === 'id' || step.name === 'label') {
-    const value = step.name === 'id' ? col(seed.id, 'id') : foreignLabelValue(seed, elem);
-    const rel = make.project({
-      id: fresh('fgs'), input: seed, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]],
-    });
-    // An id frames as whatever it was STORED as (a `uid` string or a rowid int), so it carries no static
-    // tag and infers per value; a label is always a string.
+    if (argValues(step).length) return null;
+    const value = step.name === 'id' ? source.externalId(elem, col(seed.id, 'id'), fresh) : source.labelScalar(elem, col(seed.id, 'id'), fresh);
+    const rel = make.project({ id: fresh('fgs'), input: seed, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] });
+    // An id frames as whatever it was STORED as (uid string or rowid int) — no static tag; a label is a string.
     return scalarTail(rel, { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, steps, from + 1, false, ctx, fresh);
   }
+  // values(k…) — one scalar per matching property VALUE, rejoined from the landed `{t,v}` tree.
   if (step.name === 'values') {
     const keys = argValues(step).filter((key): key is string => typeof key === 'string');
     if (keys.length !== step.args.length) return null;
-    return scalarTail(
-      foreignValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh,
-    );
+    return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh);
   }
   return null;
 }
