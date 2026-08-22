@@ -249,22 +249,28 @@ provision() {
 # semantics claims cite. Without it those citations point at a clone outside the repo, at a
 # different SHA than the gitlink, so nobody else and no CI run can check them (see
 # docs/2026-07-29-tinkerpop-core-engine-alignment.md). +9.8MB against ~400MB already checked out.
+# tinkergraph-gremlin: READ-ONLY reference, same footing — the in-memory GraphComputer EXECUTOR
+# (`TinkerGraphComputer`, `TinkerWorkerPool`, the messenger/graph-filter execution) that gremlin-core
+# only DECLARES (it holds the VertexProgram + Messenger/GraphComputer interfaces, not the engine that
+# runs them). It is where the OLAP graph algorithms' exact execution semantics live — multi-program
+# chains, graph-filter message delivery, halted-traverser mass accounting — which the compile-to-SQL
+# OLAP layer (`docs/2026-07-24-graph-algorithms-plan.md`) must match. Cited, never built or imported.
 #
 # `full`, not `shallow`: we read this history — a pin bump is diffed against the previous pin.
 #
-# `gremlin-core` and the whole of `vendor/calcite` are dropped when MOGWAI_SKIP_REFERENCE is set —
-# see the block below for what that costs and who may set it.
+# `gremlin-core`/`tinkergraph-gremlin` and the whole of `vendor/calcite` are dropped when
+# MOGWAI_SKIP_REFERENCE is set — see the block below for what that costs and who may set it.
 TINKERPOP_SPARSE=(gremlin-language gremlin-js gremlin-test)
-[ -z "${MOGWAI_SKIP_REFERENCE:-}" ] && TINKERPOP_SPARSE+=(gremlin-core)
+[ -z "${MOGWAI_SKIP_REFERENCE:-}" ] && TINKERPOP_SPARSE+=(gremlin-core tinkergraph-gremlin)
 provision vendor/tinkerpop https://github.com/apache/tinkerpop.git full "${TINKERPOP_SPARSE[@]}"
 SM=vendor/tinkerpop
 PINNED="$PROVISIONED_SHA"
 
 # ── MOGWAI_SKIP_REFERENCE: provision only what is EXECUTED ─────────────────────────────────────
 #
-# Two of our checkouts are cited, never executed: `gremlin-core` (Java engine) and all of
-# `vendor/calcite`. Nothing under `src/`, `test/`, `parser/` or `scripts/` imports either — every hit
-# is a comment naming a path and a line (verified: 16 citations, all in prose). So a run that only
+# Two of our checkouts are cited, never executed: the tinkerpop Java engine (`gremlin-core` +
+# `tinkergraph-gremlin`) and all of `vendor/calcite`. Nothing under `src/`, `test/`, `parser/` or
+# `scripts/` imports any — every hit is a comment naming a path and a line. So a run that only
 # COMPILES AND TESTS this repo needs neither, and CI is exactly that run: it never opens a citation.
 #
 # What it costs, stated plainly: in a checkout provisioned this way a `vendor/…` citation does not
@@ -276,7 +282,7 @@ PINNED="$PROVISIONED_SHA"
 # Self-healing: `provision` re-asserts the sparse set every run, so unsetting the variable restores
 # gremlin-core on the next run and re-provisions calcite from scratch.
 if [ -n "${MOGWAI_SKIP_REFERENCE:-}" ]; then
-  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, vendor/calcite)"
+  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, tinkergraph-gremlin, vendor/calcite)"
 fi
 
 # ── calcite: READ-ONLY prior art for the RelIR ────────────────────────────────────────────────

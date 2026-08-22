@@ -60,37 +60,42 @@ decorated REAL score as a 1:1 join to the landed relation (framed by `DecorateSp
 movement). `values(name, key)` mixing the decorated key with stored keys, and `valueMap(key)`, stay
 fail-closed (no landed scenario needs them).
 
-**⚠️ TWO BLOCKERS gate the remaining pageRank/peerPressure scenarios — BOTH need a decision/reference
-pass before building (do NOT guess — a wrong OLAP answer violates correct-by-design):**
+**✅ RESOLVED (2026-08-22) — the "OLAP graph-filter" question, by reading `tinkergraph-gremlin`
+(now vendored).** There is **no graph-filter / vertex-scoping** for OLAP steps, and the earlier
+"pageRank subgraph vs WCC global" contradiction was a RED HERRING — **both are GLOBAL**. The evidence,
+at the pin:
+- `TinkerGraphComputer.submit` hands each chained vertex program a result graph built by
+  `processResultGraphPersist(NEW, EDGES)`, which **copies ALL vertices and ALL edges**
+  (`TinkerGraphComputerView.java:184-191`) — a full copy, not a filtered one. And `GraphFilterStrategy`
+  is **removed** for the in-memory computer (`TinkerGraphComputer.java:62-64`). So the OLTP prefix
+  (`hasLabel("person")`) runs as program 1 producing halted traversers, then pageRank (program 2) runs
+  GLOBAL over the full graph; the prefix filters the OUTPUT (halted set) only.
+- My global pageRank matches `PageRankVertexProgramTest.java` EXACTLY (marko 0.1138, vadas 0.1460, lop
+  0.3047, ripple 0.1758 — dead-on its asserted ranges). WCC's `hasLabel("software").connectedComponent()`
+  → global "1"/"1" ✓. Both landed algorithms are already reference-faithful; the prefix-as-output-filter
+  is exactly what the decorate resume does. **No correct-by-design bug, no guard, no subgraph compute.**
+- **Scenario 6 (`hasLabel("person").pageRank()` → marko 0.46) is REFERENCE-ANOMALOUS.** The pinned
+  executor yields the GLOBAL 0.1138 (which my impl produces), NOT 0.46. `0.46` is not reproducible from
+  ANY behavior in the pinned code (global 0.1138; a 3.x-style edge-filter would give uniform 0.167;
+  person-subgraph 0.219) — a frozen value, never revalidated (v4 has no remote OLAP execution surface, so
+  `@GraphComputerOnly` scenarios are not run by the JS/HTTP suite). **Do NOT fit it** — leave scenario 6
+  failing; matching the executor beats matching a stale corpus number. `GraphFilterStrategy` stays a
+  no-op (correct — it does nothing for the in-memory computer).
 
-1. **The OLAP graph-filter semantics (a SEMANTICS question — resolve from the reference).** The prefix
-   before an OLAP step appears to SCOPE the computed graph, and the two landed algorithms disagree in a
-   way I could not reconcile from the scenarios alone:
-   - `g.V().hasLabel("person").pageRank()` (scenario 6) expects marko 0.46 / vadas 0.59 / josh 0.59 /
-     peter 0.46 — the **person-induced subgraph** (knows-only), NOT the global rank (global marko ≈ 0.12,
-     which scenario 7's global `g.V().pageRank()` confirms via vadas/josh ≈ 0.15). So pageRank seems
-     graph-FILTERED by its prefix.
-   - `g.V().hasLabel("software").connectedComponent()` expects lop "1" / ripple "1" — the **GLOBAL**
-     component (min id 1 = marko), NOT the software-induced subgraph (which would give lop "3", ripple
-     "5"). So WCC seems global.
-   The resolution is `GraphFilterStrategy` + how each `VertexProgramStep` derives its graph filter from
-   the preceding traversal (`vendor/tinkerpop/gremlin-core/.../computer/GraphFilter.java`,
-   `.../traversal/step/map/*VertexProgramStep.java`, `.../TraversalVertexProgram.java`) — read these and
-   the `.feature` expected values together before touching the compute. Note: `GraphFilterStrategy` is
-   currently in `NO_OP_STRATEGIES`; if the filter is real, that is wrong. This affects pageRank 6/8 and
-   peerPressure, and would change the barrier from a global compute (`head: null`) to one whose `apply`
-   is scoped to the prefix's vertex/edge set (`head` = the prefix ids, `apply` over the induced subgraph).
-2. **Edge-config carrying (a DESIGN DECISION).** A custom edge scope (`~tinkerpop.<algo>.edges`, e.g.
-   `__.bothE("knows")`, `__.inE("created")`) is an ANONYMOUS sub-traversal; `nestedTraversalToGremlin`
-   refuses it (it serializes only SOURCE-rooted traversals, for federate). Carrying an anonymous edge
-   traversal as a call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the
-   service — is shared substrate for pageRank/peerPressure/wcc edge scopes, and a genuine fork (federate
-   refuses anonymous; OLAP needs it). Surface before building. Blocks pageRank 2/5/8, wcc-knows,
-   peerPressure edges.
-
-Also pending: **`times`** (fixed iteration count, pageRank 2/8 — small once #1 is settled), then
-**peerPressure** (integer cluster voting, reuses the decorate substrate + #1's graph filter) and
-**shortestPath** (Template B — recursive-CTE paths, no barrier, its own shape).
+**NEXT — the one real remaining blocker + the leaf features:**
+- **Edge-config carrying (a DESIGN DECISION).** A custom edge scope (`~tinkerpop.<algo>.edges`, e.g.
+  `__.outE("knows")`, `__.inE("created")`) is an ANONYMOUS sub-traversal; `nestedTraversalToGremlin`
+  refuses it (it serializes only SOURCE-rooted traversals, for federate). Carrying an anonymous edge
+  traversal as a call param — and interpreting it to a `{direction, labels}` adjacency descriptor in the
+  service — is shared substrate for pageRank/peerPressure/wcc edge scopes. Recommended fix: move the
+  source-rooted check into federate, let the shared serializer carry anonymous traversals. **Unlocks
+  scenario 5** (`pageRank().with(edges, outE("knows"))` — my edge-scoped compute already matches its
+  15/21/21 exactly), wcc-knows, peerPressure edges.
+- **`times`** (fixed iteration count) — pageRank 2/8.
+- **peerPressure** (integer cluster voting, reuses the decorate substrate — GLOBAL like the others) and
+  **shortestPath** (Template B — recursive-CTE paths, no barrier, its own shape).
+- Scenarios 2/6/8 mix these; 6 is anomalous (above), 2 also carries a `times(0)` edge case, 8 needs
+  edge-config + `times` + α=1.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names
