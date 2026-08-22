@@ -6,6 +6,7 @@ import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
 import { elementPayload } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
+import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
@@ -125,6 +126,13 @@ export interface GraphSource {
    *  explodes the landed `{t,v}` tree. The caller (`elementValueMap`) shapes these into the map entries
    *  (list-vs-flat, tokens), so only the physical read differs by source. */
   valueMapPairs(kind: Elem, id: Expr, keys: readonly string[] | null, fresh: Minter): Rel;
+
+  /** `properties(keys…)` — the PROPERTY-ROW stream off an element relation (one traverser per matching
+   *  property), in the `PROP`-prefixed shape `propertyPayload`/`propertyValue`/`propertyKey` read.
+   *  `BaseGraph` joins `vertex_properties`/`edge_properties`; a bound graph explodes the landed `{t,v}`
+   *  tree (with a NULL `p_id`/`p_meta` — no landed VertexProperty identity, so the caller declines
+   *  `properties().id()` and meta reads over a bound element). */
+  propertyStream(input: Rel, kind: Elem, keys: readonly string[] | null, fresh: Minter): Rel;
 
   /** `labels()` — the FAN-OUT of an element's labels, one row per label. Returns a relation carrying `v`
    *  (the label name) and `lord` (the per-element order key the caller renumbers by — the label-dictionary
@@ -402,6 +410,8 @@ export const BaseGraph: GraphSource = {
       aggs: [[VALUEMAP_PAIR.values, values], [VALUEMAP_PAIR.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }]],
     });
   },
+
+  propertyStream: (input, kind, keys, fresh) => propertyRelation(input, kind, keys, fresh),
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),
 };

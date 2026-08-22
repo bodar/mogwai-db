@@ -85,6 +85,61 @@ export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[]
 }
 
 /**
+ * `properties(keys…)` over a BOUND (landed) element — the property stream read from the landed `{t,v}`
+ * tree instead of the base tables, in the SAME `PROP`-prefixed row shape, so `value()`/`key()`/the
+ * payload framing compose unchanged.
+ *
+ * The landed snapshot carries only `{t,v}` per key, so `p_id` (the VertexProperty's own rowid) and
+ * `p_meta` are NULL — the framer synthesises `owner:pk` for a null vpid, and the caller declines
+ * `properties().id()` and meta-property reads over a bound element (a detached VertexProperty has no
+ * landed identity). `cte` is the landed vertices/edges relation the id rejoins.
+ */
+export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: readonly string[] | null, fresh: Minter): Rel {
+  const { owner } = PROPERTIES[elem];
+  const jx = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+  const B = { id: 'bp_id', props: 'bp_props', key: 'bp_key', value: 'bp_value', node: 'bp_node' } as const;
+  const pref = make.project({
+    id: fresh('bpp'), input: cte, channels: [], type: typeOf(meta(B.id, 'any', true), meta(B.props, 'json', true)),
+    exprs: [[B.id, col(cte.id, 'id')], [B.props, col(cte.id, 'props')]],
+  });
+  const j = make.join({
+    id: fresh('bpj'), left: input, right: pref, join: 'inner', ordered: true, channels: input.channels,
+    type: typeOf(...input.type.cols, meta(B.id, 'any', true), meta(B.props, 'json', true)),
+    on: eq(col(pref.id, B.id), col(input.id, 'id')),
+  });
+  const perKey = make.explode({
+    id: fresh('bpk'), input: j, channels: input.channels, expr: col(j.id, B.props), as: { key: B.key, value: B.value },
+    type: typeOf(...j.type.cols, meta(B.key, 'text', true), meta(B.value, 'any', true)),
+  });
+  const membership = keyMembership(col(perKey.id, B.key), keys);
+  const wanted = membership
+    ? make.filter({ id: fresh('bpf'), input: perKey, channels: input.channels, type: perKey.type, pred: membership })
+    : perKey;
+  // A vertex key holds an ARRAY of `{t,v}` nodes (one property traverser each); an edge key holds one.
+  const nodes = elem === 'edge' ? wanted : make.explode({
+    id: fresh('bpn'), input: wanted, channels: input.channels, expr: col(wanted.id, B.value), as: { value: B.node },
+    type: typeOf(...wanted.type.cols, meta(B.node, 'any', true)),
+  });
+  const node = elem === 'edge' ? col(wanted.id, B.value) : col(nodes.id, B.node);
+  const cols = propCols(owner, elem === 'vertex');
+  return make.project({
+    id: fresh('bpr'), input: nodes, channels: input.channels,
+    type: typeOf(...cols.map((c) => meta(PROP(c.name), c.type, c.nullable)), ...carriedCols(input.channels)),
+    exprs: [
+      [PROP('id'), compilerNull()],
+      // The element id is carried THROUGH the join/explodes (the join keeps `input`'s columns), so it is
+      // read off `nodes` here — `input` itself is not in scope at this projection.
+      [PROP(owner), col(nodes.id, 'id')],
+      [PROP('key'), col(nodes.id, B.key)],
+      [PROP('value'), jx(node, '$.v')],
+      [PROP('vtype'), jx(node, '$.t')],
+      ...(elem === 'vertex' ? [[PROP('meta'), compilerNull()] as const] : []),
+      ...input.channels.map((channel) => [channel.col, col(nodes.id, channel.col)] as const),
+    ],
+  });
+}
+
+/**
  * THE WIRE PROJECTION for a property stream — the columns `framePropertyRow` reads, in that order.
  *
  * Deliberately SIX columns and not the seven `PROPERTY_PAYLOAD` names: the framer reads

@@ -18,7 +18,7 @@ import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
-import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
+import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
@@ -2030,7 +2030,7 @@ function terminal(
     const asked = propertyKeyArgs(args);
     if (!asked) return null;
     return {
-      rel: propertyRelation(input, elem, asked.all ? null : asked.keys, fresh),
+      rel: ctx.source.propertyStream(input, elem, asked.all ? null : asked.keys, fresh),
       framing: { kind: 'property', ownerElem: elem },
     };
   }
@@ -4594,7 +4594,7 @@ function detachedTail(
  *    id, which over a bound (foreign) id is a wrong answer; they decline UNTIL routed through `GraphSource`.
  *  Both fail closed here rather than reaching a half-present read. */
 const BOUND_HANDOFF_DENY: ReadonlySet<string> = new Set<string>([
-  ...MUTATING_STEPS, 'properties', 'propertyMap',
+  ...MUTATING_STEPS, 'propertyMap',
 ]);
 
 function elementTail(
@@ -5156,6 +5156,10 @@ function propertyTail(
     const dropped = propertyDrop(rel, elem, fresh);
     return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
   }
+  // A bound VertexProperty has no landed identity (`p_id` is NULL — only `{t,v}` was landed), so
+  // `properties().id()` fails closed over a bound element rather than framing a null id. `value()`/
+  // `key()`/`element()` read the tree / the carried owner and compose.
+  if (step.name === 'id' && ctx.source !== BaseGraph) return null;
   const retyped = step.name === 'key' ? propertyKey(rel, fresh)
     // `VertexProperty.label()` IS its key — `return this.key();`
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/VertexProperty.java:79-81`)

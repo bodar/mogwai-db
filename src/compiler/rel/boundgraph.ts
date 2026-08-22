@@ -5,6 +5,7 @@ import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { and, eq, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
+import { boundPropertyRelation } from './property.ts';
 import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
 
@@ -216,6 +217,11 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       const raw = jsonExtract(node, '$.v');
       const value = ordering ? storedCompareOn(jsonExtract(node, '$.t'))(raw) : raw;
       return { kind: 'scalar', plan: make.project({ id: fresh('bps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
+    },
+
+    // ---- properties(): the property-row stream, exploded from the landed {t,v} tree ----
+    propertyStream(input, kind, keys, fresh) {
+      return boundPropertyRelation(input, cteOf(kind, fresh), kind, keys, fresh);
     },
 
     // ---- valueMap()/elementMap(): the per-key value arrays, from the landed {t,v} tree ----

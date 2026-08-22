@@ -91,11 +91,11 @@ carry the data):**
 - **`path` over bound — UNBUILT, not a wall.** The path channel is a stream fact like encounter/bulk
   (both now carried): seed it at the bound source, extend through bound movement (`extendPath` over the
   bound ids), and rejoin each path step's payload at framing (Mechanism-B per step). Moderate.
-- **`properties()` over bound — MOSTLY buildable.** The property stream (explode the landed tree),
-  `.value()`, `.key()`, and terminal VertexProperty framing (the framer synthesises `owner:pk` for a null
-  `vpid`) all work from landed data. TWO narrow GENUINE gaps, and both are landed-DATA gaps the federate
-  service closes by landing more, NOT engine walls: the VertexProperty's own id (`vpid`) and
-  meta-properties are not in the `{t,v}` snapshot today.
+- **`properties()` over bound — LANDED (stream + value/key/element).** `GraphSource.propertyStream`
+  explodes the landed `{t,v}` tree into the `PROP`-row shape (base tables over the base graph); `.value()`,
+  `.key()`, `.element()`, and terminal VertexProperty framing (synthetic `owner:pk`) all compose. `.id()`
+  (no landed `vpid`) and meta-properties fail closed — landed-DATA gaps the federate service closes by
+  landing more (`vpid`/`meta`), NOT engine walls.
 - **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
   (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
   identity (a detached VertexProperty has no rowid), so it is a genuine wall.

@@ -442,6 +442,37 @@ describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
   });
 });
 
+// properties() over a bound subgraph — the property STREAM exploded from the landed {t,v} tree
+// (source.propertyStream), with value()/key()/terminal framing. .id() (no landed vpid) and meta
+// (not landed) fail closed. Oracled on crew.
+describe('mogwai.graph.federate — SUBGRAPH properties() stream', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
+  const vals = async (g: string, on: 'home' | 'crew' = 'home') =>
+    (await Promise.all((await mgr.executor(on).framedAsync(g, {})).map((f: any) => decode(f.buf)))).sort();
+
+  test('properties(name).value() reads the landed tree', async () => {
+    expect(await vals(sg('.V().properties("name").value()')))
+      .toEqual(await vals(`${crewBoth}.properties("name").value()`, 'crew'));
+  });
+  test('properties(name).key() reads the property key', async () => {
+    expect(await vals(sg('.V().properties("name").key()')))
+      .toEqual(await vals(`${crewBoth}.properties("name").key()`, 'crew'));
+  });
+  test('properties().value() over all keys', async () => {
+    expect(await vals(sg('.V().properties().value()')))
+      .toEqual(await vals(`${crewBoth}.properties().value()`, 'crew'));
+  });
+  test('properties(name).element().values(name) rebuilds the owner', async () => {
+    expect(await vals(sg('.V().properties("name").element().values("name")')))
+      .toEqual(await vals(`${crewBoth}.properties("name").element().values("name")`, 'crew'));
+  });
+  test('properties().id() fails closed (no landed VertexProperty identity)', async () => {
+    await expect(mgr.executor('home').framedAsync(sg('.V().properties("name").id()'), {})).rejects.toThrow();
+  });
+});
+
 describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
   const sg = (tail: string) =>
     `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
