@@ -254,7 +254,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
     },
 
     // ---- leaf (Mechanism B): rejoin to reconstitute the wire payload for a terminal bound element ----
-    leafPayload(input, kind, _opts, fresh) {
+    leafPayload(input, kind, opts, fresh) {
       const cte = cteOf(kind, fresh);
       const payload = foreignPayloadCols(kind);
       // Prefix the landed columns before the join so they cannot collide with the id-stream's own `id`.
@@ -269,9 +269,16 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
         type: typeOf(...input.type.cols, ...pref.type.cols),
         on: eq(col(pref.id, B('id')), col(input.id, 'id')),
       });
+      // A COLLAPSED bound element carries the surviving `bulk` (`SUM(bulk)`), which the wire framer reads
+      // to re-emit the row that many times — exactly as `elementPayload` carries it over the base graph.
+      // Without it a `…out()` element-terminal after a collapse would answer N traversers as one row.
+      const bulk = opts.bulk ? input.channels.find((channel) => channel.role === 'bulk') : undefined;
       return make.project({
-        id: fresh('blr'), input: j, channels: [], type: typeOf(...payload),
-        exprs: payload.map((c) => [c.name, col(j.id, B(c.name))] as const),
+        id: fresh('blr'), input: j, channels: [], type: typeOf(...payload, ...(bulk ? [meta('bulk', 'int')] : [])),
+        exprs: [
+          ...payload.map((c) => [c.name, col(j.id, B(c.name))] as const),
+          ...(bulk ? [['bulk', col(j.id, bulk.col)] as const] : []),
+        ],
       });
     },
   };

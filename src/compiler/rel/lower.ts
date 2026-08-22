@@ -3871,7 +3871,10 @@ const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel
   // drop N−1 traversers per row, which is the one failure class no
   // instrument here catches (a plausible row set, short). This is the guard that makes the completeness
   // of `inBody`'s call sites a tractability question rather than a correctness one.
-  if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard') return null;
+  // `detached` joins `elements`/`discard` as a framing that CAN carry a multiplicity: a collapsed bound
+  // element re-expands on the wire through `source.leafPayload`'s `bulk` column, exactly as `elements`
+  // does over the base graph.
+  if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard' && framing.kind !== 'detached') return null;
   switch (framing.kind) {
     case 'elements': return {
       rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
@@ -3883,7 +3886,7 @@ const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel
     // cannot tell a federated vertex from a local one and must not, since the wire has no such
     // distinction. (`source` is the bound graph here — a base chain never emits `detached`.)
     case 'detached': return {
-      rel: source.leafPayload(chain.rel, framing.elem, { bulk: false }, fresh),
+      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -4124,14 +4127,27 @@ export function lowerForeignResume(
   // builders assume an id-carrying stream, and a stream still holding the landed payload would widen
   // every downstream join past its declared type.
   //
-  // CHANNELS OVER A BOUND GRAPH: a source-form subgraph seed mints an `encounter` from the landed array
-  // order (`foreignRelation(withOrder)` exposes the json_each index — the order the sibling EMITTED the
-  // rows), so a bound `fold()`/`order()`/reducer collects in the sibling's own order rather than an
-  // arbitrary scan order. Elsewhere (a rejoin's per-parent pool, a homogeneous list) the seed stays
-  // id-only and an encounter demand declines upstream.
+  // CHANNELS OVER A BOUND GRAPH: a source-form subgraph seed carries the traverser channels a base
+  // source does, seeded off the landed relation. `bulk` (=1) is carried ALWAYS, so a convergent bound
+  // walk can collapse (`SUM(bulk)`); `encounter` is minted from the landed array order
+  // (`foreignRelation(withOrder)` — the order the sibling EMITTED the rows) only when the chain DEMANDS
+  // one, because a collapse and an emission order are mutually exclusive (the base source seeds channels
+  // by the same rule). A rejoin's per-parent pool / a homogeneous list stays id-only.
   const seed = seedsEncounter
-    ? renumber(rejoined, [{ expr: col(rejoined.id, FOREIGN_ORD), dir: 'asc' }],
-      [meta('id', 'any', true), ...carriedCols(withChannel([], ENCOUNTER))], withChannel([], ENCOUNTER), fresh)
+    ? (() => {
+      const withBulk = make.project({
+        id: fresh('bsb'), input: rejoined, channels: BULK,
+        type: typeOf(meta('id', 'any', true), meta(FOREIGN_ORD, 'int'), meta('bulk', 'int')),
+        exprs: [['id', col(rejoined.id, 'id')], [FOREIGN_ORD, col(rejoined.id, FOREIGN_ORD)], ['bulk', compilerInt(1)]],
+      });
+      if (!facts.demandsEncounter) return make.project({
+        id: fresh('bsd'), input: withBulk, channels: BULK, type: typeOf(meta('id', 'any', true), meta('bulk', 'int')),
+        exprs: [['id', col(withBulk.id, 'id')], ['bulk', col(withBulk.id, 'bulk')]],
+      });
+      const channels = withChannel(BULK, ENCOUNTER);
+      return renumber(withBulk, [{ expr: col(withBulk.id, FOREIGN_ORD), dir: 'asc' }],
+        [meta('id', 'any', true), ...carriedCols(channels)], channels, fresh);
+    })()
     : make.project({
       id: fresh('bsd'), input: rejoined, channels: [], type: typeOf(meta('id', 'any', true)),
       exprs: [['id', col(rejoined.id, 'id')]],
@@ -4436,10 +4452,12 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  */
 function detachedTail(
   seed: Rel, elem: Elem, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
-  subgraph = false,
+  subgraph = false, bulked = false,
 ): Tail | null {
   const step = steps[from];
-  if (!step) return { rel: seed, framing: { kind: 'detached', elem }, bulked: false, aliases: NO_ALIASES };
+  // `bulked` rides forward from a movement collapse: at the terminal the leaf reads it to RE-EXPAND the
+  // collapsed rows on the wire, and a reducer reads `SUM(bulk)` — the same flag the base fold threads.
+  if (!step) return { rel: seed, framing: { kind: 'detached', elem }, bulked, aliases: NO_ALIASES };
   const source = ctx.source;
 
   if (subgraph) {
@@ -4450,12 +4468,22 @@ function detachedTail(
       const seeded = source.elementScan(kind, step.args, fresh);
       if (!seeded) return null;
       const filtered = seeded.pred ? make.filter({ id: fresh('bvf'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred }) : seeded.scan;
-      // ID-CARRY + channels: the re-rooted stream carries the id and MINTS an `encounter` from the landed
-      // order (`FOREIGN_ORD` — the sibling's emission order the binding carries), so `.V().…fold()`
-      // collects deterministically in that order; the landed payload is rejoined at each read.
-      const channels = withChannel([], ENCOUNTER);
-      const rel = renumber(filtered, [{ expr: col(filtered.id, FOREIGN_ORD), dir: 'asc' }],
-        [meta('id', 'any', true), ...carriedCols(channels)], channels, fresh);
+      // ID-CARRY + channels: the re-rooted stream carries the id and the traverser channels a base source
+      // does — `bulk` (=1) ALWAYS so a convergent walk can collapse, `encounter` minted from the landed
+      // order (`FOREIGN_ORD`) only when the chain DEMANDS one (collapse and an order are mutually
+      // exclusive). The landed payload is rejoined at each read.
+      const withBulk = make.project({
+        id: fresh('bvb'), input: filtered, channels: BULK,
+        type: typeOf(meta('id', 'any', true), meta(FOREIGN_ORD, 'int'), meta('bulk', 'int')),
+        exprs: [['id', col(filtered.id, 'id')], [FOREIGN_ORD, col(filtered.id, FOREIGN_ORD)], ['bulk', compilerInt(1)]],
+      });
+      const rel = ctx.ordered
+        ? renumber(withBulk, [{ expr: col(withBulk.id, FOREIGN_ORD), dir: 'asc' }],
+          [meta('id', 'any', true), ...carriedCols(withChannel(BULK, ENCOUNTER))], withChannel(BULK, ENCOUNTER), fresh)
+        : make.project({
+          id: fresh('bvi'), input: withBulk, channels: BULK, type: typeOf(meta('id', 'any', true), meta('bulk', 'int')),
+          exprs: [['id', col(withBulk.id, 'id')], ['bulk', col(withBulk.id, 'bulk')]],
+        });
       return detachedTail(rel, kind, steps, from + 1, ctx, fresh, subgraph);
     }
     // MOVEMENT (out/in/both AND the endpoint reads inV/outV/bothV) through the SHARED `movement` builder,
@@ -4466,7 +4494,17 @@ function detachedTail(
       if (!asked || (asked.given && !asked.labels.length)) return null;
       if (!asked.labels.every((a) => a.name == null && typeof a.value === 'string')) return null;
       const moved = movement(step, { rel: seed }, elem, source, fresh);
-      return moved && detachedTail(moved.rel, moved.elem, steps, from + 1, ctx, fresh, subgraph);
+      if (!moved) return null;
+      // COLLAPSE a convergent bound walk exactly as `elementTail` does over the base graph — the SAME
+      // four conditions: the fast path is on, no emission order is live, every carried channel has a
+      // group policy, AND the SUFFIX observes the multiplicity (`bulkObservedFrom` — a reducer consumes
+      // the `SUM(bulk)`, or the `elements` framing carries it to the wire). Without the last, a chain
+      // that retypes to a scalar (`…out().values()`) would answer N traversers as one row. The bound
+      // movement already carries `bulk` (the seed mints it), so `coalesce` is the same
+      // `SUM(bulk) GROUP BY id` RLE the base uses.
+      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels)
+        && bulkObservedFrom(steps, from + 1);
+      return detachedTail(collapsing ? coalesce(moved.rel, fresh) : moved.rel, moved.elem, steps, from + 1, ctx, fresh, subgraph, collapsing || bulked);
     }
     // FILTERS (hasLabel / has(...) / hasId / is) through the SHARED `sourceFilter`, whose physical reads
     // route through `ctx.source`. Strictly MORE than the deleted twin covered (every predicate form
@@ -4476,7 +4514,7 @@ function detachedTail(
     const clause = sourceFilter(step, subject, fresh, ctx);
     if (clause) {
       const filtered = make.filter({ id: fresh('bff'), input: seed, channels: seed.channels, type: seed.type, pred: clause });
-      return detachedTail(filtered, elem, steps, from + 1, ctx, fresh, subgraph);
+      return detachedTail(filtered, elem, steps, from + 1, ctx, fresh, subgraph, bulked);
     }
   }
   // SHAPE-AGNOSTIC row ops over ANY landed element stream — `count()` reads cardinality (a landed row IS
@@ -4486,12 +4524,12 @@ function detachedTail(
     return continueAs(counted.rel, counted.framing, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
   // `dedup()` collapses by element identity (`id` functionally determines the tuple). A whole-row
-  // `Distinct` IS dedup-by-id only when the row carries no row-unique channel; once the stream carries an
-  // `encounter` (a subgraph seed mints one) every row differs there, so dedup must group by identity —
-  // which the MAIN FOLD does. So the shortcut is taken only for a channel-less stream; otherwise it falls
-  // through to the handoff.
+  // `Distinct` IS dedup-by-id only when the row carries NO channel: an `encounter` makes every row unique
+  // (Distinct collapses nothing) and a `bulk` must be RESET to 1 by the survivor (a Distinct would keep
+  // the collapsed multiplicity). Both are what the MAIN FOLD's dedup does, so the shortcut is taken only
+  // for a channel-less stream (a homogeneous list); otherwise dedup falls through to the handoff.
   if (step.name === 'dedup' && argValues(step).length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms
-    && !seed.channels.some((channel) => channel.role === 'encounter')) {
+    && seed.channels.length === 0) {
     const deduped = make.distinct({ id: fresh('dtd'), input: seed, channels: seed.channels, type: seed.type });
     return detachedTail(deduped, elem, steps, from + 1, ctx, fresh, subgraph);
   }
@@ -4501,13 +4539,13 @@ function detachedTail(
     const value = step.name === 'id' ? source.externalId(elem, col(seed.id, 'id'), fresh) : source.labelScalar(elem, col(seed.id, 'id'), fresh);
     const rel = make.project({ id: fresh('fgs'), input: seed, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] });
     // An id frames as whatever it was STORED as (uid string or rowid int) — no static tag; a label is a string.
-    return scalarTail(rel, { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, steps, from + 1, false, ctx, fresh);
+    return scalarTail(rel, { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, steps, from + 1, bulked, ctx, fresh);
   }
   // values(k…) — one scalar per matching property VALUE, rejoined from the landed `{t,v}` tree.
   if (step.name === 'values') {
     const keys = argValues(step).filter((key): key is string => typeof key === 'string');
     if (keys.length !== step.args.length) return null;
-    return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh);
+    return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, bulked, ctx, fresh);
   }
   // labels() — the label FAN-OUT, rejoined from the landed relation and order-minted exactly as the base
   // `labels()` is: `source.labelNames` supplies (name, `lord`) rows, this mints the emission order. Where
@@ -4521,7 +4559,7 @@ function detachedTail(
     const ranked = renumber(named,
       [{ expr: col(named.id, arriving ? arriving.col : 'lord'), dir: 'asc' }, { expr: col(named.id, 'lord'), dir: 'asc' }],
       [meta('v', 'text'), ...carriedCols(channels)], channels, fresh);
-    return scalarTail(ranked, { kind: 'scalar', type: STATIC('string') }, steps, from + 1, false, ctx, fresh);
+    return scalarTail(ranked, { kind: 'scalar', type: STATIC('string') }, steps, from + 1, bulked, ctx, fresh);
   }
   // HAND OFF TO THE MAIN FOLD for everything else — `group()`/`groupCount()`/`order()`/`project()`/
   // `fold()`/the reducers/… — so a bound element composes the FULL aggregation vocabulary through the
@@ -4538,7 +4576,7 @@ function detachedTail(
   // graph to aggregate a `group().by(__.out()…)` over, and its movement must keep failing closed with
   // the barrier message rather than reaching a half-present `BoundGraph`.
   if (!subgraph || steps.slice(from).some((s) => BOUND_HANDOFF_DENY.has(s.name))) return null;
-  return continueAs(seed, { kind: 'elements', elem }, steps, from, false, ctx, fresh, NO_ALIASES);
+  return continueAs(seed, { kind: 'elements', elem }, steps, from, bulked, ctx, fresh, NO_ALIASES);
 }
 
 /** Steps a bound element stream may NOT hand off to the main fold with: WRITES (mutate the base graph)

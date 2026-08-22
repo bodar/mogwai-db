@@ -300,7 +300,13 @@ describe('mogwai.graph.federate — count()/dedup() over the landed stream', () 
 describe('mogwai.graph.federate — SUBGRAPH element-terminal (whole vertices to the wire)', () => {
   const sg = (tail: string) =>
     `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
-  const elems = async (g: string) => (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec)));
+  // Expand each framed element by its `bulk` (a convergent bound walk collapses to compact (vertex, N)
+  // pairs on the wire — the RLE the client expands — so the test expands too to see the full multiset).
+  const elems = async (g: string) => {
+    const framed = await mgr.executor('home').framedAsync(g, {});
+    const decoded = await Promise.all(framed.map(async (f: any) => ({ v: await decode(f.buf), bulk: Number(f.bulk) })));
+    return decoded.flatMap(({ v, bulk }) => Array(bulk).fill(v));
+  };
   const vlabels = (vs: any[]) => vs.map((v: any) => v.label).sort();
   // The oracle is the SAME traversal read one step SHORTER — its `.values("name")` / `.label()` are
   // validated against the crew sibling above. So an element-terminal result frames correctly iff the
@@ -381,6 +387,21 @@ describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project vi
     expect(await one(sg('.inV().values("name").fold()')))
       .toEqual(await list(sg('.inV().values("name")')));
   });
+
+  // BULK over a bound graph: a convergent walk collapses to compact (vertex, SUM(bulk)) pairs — the RLE
+  // the base graph uses. Correctness is a multiset either way; these assert the collapse actually FIRES
+  // (fewer framed rows than traversers) and the reducer reads SUM(bulk).
+  test('.V().out(develops).count() sums bulk over the convergent walk', async () => {
+    expect(await one(sg('.V().out("develops").count()')))
+      .toEqual(await one(`${crewBoth}.out("develops").count()`, 'crew'));
+  });
+  test('.V().out(develops) element-terminal collapses to compact (vertex, bulk) pairs', async () => {
+    const framed = await mgr.executor('home').framedAsync(sg('.V().out("develops")'), {});
+    const traversers = framed.reduce((n, f: any) => n + Number(f.bulk), 0);
+    expect(framed.length).toBeLessThan(traversers); // collapse fired: compact rows < the multiset they stand for
+    expect(traversers).toBe((await list(sg('.V().out("develops").values("name")'))).length);
+  });
+
   test('project(name,label).by(name).by(T.label) — a record per vertex', async () => {
     expect(await list(sg('.V().order().by("name").project("n","l").by("name").by(T.label)')))
       .toEqual(await list(`${crewBoth}.order().by("name").project("n","l").by("name").by(T.label)`, 'crew'));
