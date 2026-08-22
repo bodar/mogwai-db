@@ -147,7 +147,7 @@ export interface GraphSource {
    *  bound graph REJOINS the landed relation by id to reconstitute the detached payload (Mechanism B).
    *  The `bulk` option carries a surviving multiplicity column for a collapsed base stream (a bound
    *  stream carries none). */
-  leafPayload(input: Rel, kind: Elem, opts: { readonly bulk: boolean }, fresh: Minter): Rel;
+  leafPayload(input: Rel, kind: Elem, opts: { readonly bulk: boolean; readonly detached: boolean }, fresh: Minter): Rel;
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal

@@ -442,9 +442,10 @@ describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
   });
 });
 
-// properties() over a bound subgraph — the property STREAM exploded from the landed {t,v} tree
-// (source.propertyStream), with value()/key()/terminal framing. .id() (no landed vpid) and meta
-// (not landed) fail closed. Oracled on crew.
+// properties() over a bound subgraph — the property STREAM exploded from the landed {t,v,vpid,meta}
+// tree (source.propertyStream), with value()/key()/id()/terminal framing. The DETACHED compile lands
+// each property's own id (vpid) and its meta-properties, so .id() and meta-property framing now match
+// the source graph rather than failing closed. Oracled on crew.
 describe('mogwai.graph.federate — SUBGRAPH properties() stream', () => {
   const sg = (tail: string) =>
     `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
@@ -468,8 +469,17 @@ describe('mogwai.graph.federate — SUBGRAPH properties() stream', () => {
     expect(await vals(sg('.V().properties("name").element().values("name")')))
       .toEqual(await vals(`${crewBoth}.properties("name").element().values("name")`, 'crew'));
   });
-  test('properties().id() fails closed (no landed VertexProperty identity)', async () => {
-    await expect(mgr.executor('home').framedAsync(sg('.V().properties("name").id()'), {})).rejects.toThrow();
+  test('properties(name).id() reads the landed VertexProperty id (vpid)', async () => {
+    expect(await vals(sg('.V().properties("name").id()')))
+      .toEqual(await vals(`${crewBoth}.properties("name").id()`, 'crew'));
+  });
+  test('properties(location) carries meta-properties (startTime/endTime) through the landed tree', async () => {
+    // `location` is the crew's meta-property showcase; the landed node carries `meta`, so the bound
+    // VertexProperty stream frames the same values AND meta-properties as the source graph.
+    expect(await vals(sg('.V().properties("location").value()')))
+      .toEqual(await vals(`${crewBoth}.properties("location").value()`, 'crew'));
+    expect(await vals(sg('.V().properties("location")')))
+      .toEqual(await vals(`${crewBoth}.properties("location")`, 'crew'));
   });
 });
 

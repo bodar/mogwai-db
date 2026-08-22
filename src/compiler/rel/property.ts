@@ -89,10 +89,11 @@ export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[]
  * tree instead of the base tables, in the SAME `PROP`-prefixed row shape, so `value()`/`key()`/the
  * payload framing compose unchanged.
  *
- * The landed snapshot carries only `{t,v}` per key, so `p_id` (the VertexProperty's own rowid) and
- * `p_meta` are NULL — the framer synthesises `owner:pk` for a null vpid, and the caller declines
- * `properties().id()` and meta-property reads over a bound element (a detached VertexProperty has no
- * landed identity). `cte` is the landed vertices/edges relation the id rejoins.
+ * The landed snapshot is landed by the DETACHED compile (`raw()`), so each `{t,v}` node also carries
+ * `vpid` (the VertexProperty's own rowid) and `meta` (its meta-properties) — read here as `$.vpid`/
+ * `$.meta`. A node landed by an older/lossy path without them extracts NULL, which is exactly the
+ * pre-detached behaviour: the framer synthesises `owner:pk` for a null vpid. `cte` is the landed
+ * vertices/edges relation the id rejoins.
  */
 export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: readonly string[] | null, fresh: Minter): Rel {
   const { owner } = PROPERTIES[elem];
@@ -126,14 +127,16 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
     id: fresh('bpr'), input: nodes, channels: input.channels,
     type: typeOf(...cols.map((c) => meta(PROP(c.name), c.type, c.nullable)), ...carriedCols(input.channels)),
     exprs: [
-      [PROP('id'), compilerNull()],
+      // vpid/meta ride on the landed node (the detached compile emits `{t,v,vpid,meta}`); a lossy
+      // landing without them extracts NULL — the framer then synthesises `owner:pk`, the old behaviour.
+      [PROP('id'), elem === 'vertex' ? jx(node, '$.vpid') : compilerNull()],
       // The element id is carried THROUGH the join/explodes (the join keeps `input`'s columns), so it is
       // read off `nodes` here — `input` itself is not in scope at this projection.
       [PROP(owner), col(nodes.id, 'id')],
       [PROP('key'), col(nodes.id, B.key)],
       [PROP('value'), jx(node, '$.v')],
       [PROP('vtype'), jx(node, '$.t')],
-      ...(elem === 'vertex' ? [[PROP('meta'), compilerNull()] as const] : []),
+      ...(elem === 'vertex' ? [[PROP('meta'), jx(node, '$.meta')] as const] : []),
       ...input.channels.map((channel) => [channel.col, col(nodes.id, channel.col)] as const),
     ],
   });

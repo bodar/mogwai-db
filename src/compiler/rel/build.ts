@@ -493,6 +493,21 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
 });
 
 /**
+ * The DETACHED-transfer member node — `{t, v, vpid, meta}`, the `{t,v}` node plus the two facts a
+ * landed subgraph needs to reconstruct a full `DetachedVertexProperty`: the property's own id (`vpid`
+ * = the `vertex_properties` rowid, TinkerPop's `Property` handle) and its meta-properties (`meta`).
+ *
+ * Emitted ONLY on the `detached` compile path (`raw()`), so an ordinary read's property stays `{t,v}`.
+ * `meta` rides as `json(...)` — a BLOB cannot cross the JSON transport (root `CLAUDE.md`), and a null
+ * meta column becomes JSON null, which the decoder reads as no meta-properties.
+ */
+export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson: Expr): Expr => ({
+  kind: 'json-object',
+  entries: [['t', vtype], ['v', jsonMember(value, vtype)], ['vpid', vpid], ['meta', metaJson]],
+  binary: false,
+});
+
+/**
  * A SCALAR RELATION RE-PROJECTED ONTO THE MET TYPE's per-row column — its own per-row tag where it
  * has one, its static tag as a literal where it has one, and SQL NULL where it genuinely cannot say.
  *

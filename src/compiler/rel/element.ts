@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
 import {
-    and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode,
+    and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
 
@@ -144,19 +144,24 @@ function nodeExternalId(rowid: Expr, fresh: Minter): Expr {
  * first written). `vertexPropsAgg` is the same two levels; the difference is only where the outer order
  * is stated (see the module note).
  */
-function vertexProps(node: Expr, fresh: Minter): Expr {
+function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
   const vp = make.scan({
     id: fresh('wvp'), table: 'vertex_properties', alias: fresh('rwp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    type: typeOf(meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true)),
   });
   const mine = make.filter({ id: fresh('wpf'), input: vp, channels: [], type: vp.type, pred: eq(col(vp.id, 'node'), node) });
+  // The DETACHED path emits `{t,v,vpid,meta}` so a landed subgraph reconstructs a full
+  // `DetachedVertexProperty` (its id + meta-properties); an ordinary read stays `{t,v}`.
+  const memberNode = detached
+    ? typedNodeDetached(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'id'), jsonOf(col(mine.id, 'meta')))
+    : typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
   const perKey = make.aggregate({
     id: fresh('wpk'), input: mine, channels: [],
     type: typeOf(meta('key', 'text'), meta('vs', 'json'), meta('ord', 'int')),
     groupBy: [col(mine.id, 'key')],
     aggs: [
       ['vs', {
-        kind: 'agg', fn: 'json_group_array', args: [typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'))],
+        kind: 'agg', fn: 'json_group_array', args: [memberNode],
         orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
       }],
       ['ord', { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }],
@@ -293,7 +298,7 @@ const ROW = (name: string): string => `w_${name}`;
  * it. `opts.bulk` is the caller's collapse switch, asked once, so an uncollapsed compile's projection is
  * unchanged.
  */
-export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: boolean }, fresh: Minter): Rel {
+export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: boolean; readonly detached: boolean }, fresh: Minter): Rel {
   const rowCols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
   const row = make.scan({
     id: fresh('wel'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rwx'), channels: [],
@@ -321,7 +326,7 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
           [meta('tgt', 'any', true), nodeExternalId(col(ordered.id, ROW('tgt')), fresh)] as const,
         ]
       : []),
-    [meta('props', 'json'), elem === 'edge' ? edgeProps(rowid, fresh) : vertexProps(rowid, fresh)],
+    [meta('props', 'json'), elem === 'edge' ? edgeProps(rowid, fresh) : vertexProps(rowid, fresh, opts.detached)],
     ...(bulk ? [[meta('bulk', 'int'), col(ordered.id, bulk.col)] as const] : []),
   ];
   return make.project({

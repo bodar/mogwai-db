@@ -791,7 +791,9 @@ export class Executor implements ExecutorApi {
    *  other terminal fails closed, not a silent different answer. props/src/tgt arrive in the shape
    *  rowVertex/rowEdge read; propsOf parses the JSON props into the {t,v}-node object. */
   async raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}): Promise<ForeignRow[]> {
-    const plan = await this.drive(gremlin, params, paramTypes, depth);
+    // DETACHED compile: a federated fetch lands the subgraph, so its element props carry the extra
+    // facts a landed element needs to reconstruct a full detached form — property ids and meta-properties.
+    const plan = await this.drive(gremlin, params, paramTypes, depth, true);
     if (plan.kind !== 'read')
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
@@ -820,8 +822,8 @@ export class Executor implements ExecutorApi {
    *  SAME loop runs in-process here and Worker-side in Phase 2; the Executor is only the in-process
    *  host. `federationDepth` threads through `compile` so a recursive federate hops at depth+1. */
   private readonly segmentHost: SegmentHost = {
-    compile: (gremlin, params, paramTypes, federationDepth) =>
-      compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes),
+    compile: (gremlin, params, paramTypes, federationDepth, detached) =>
+      compilePlan(gremlin, params, { app: this.app, federationDepth, detached }, paramTypes),
     readHead: (head) => readSegmentHead(this.store, head),
     // A sync barrier's head, read WITHOUT an await — same local `store.query`, so it interleaves with
     // nothing. `readSegmentHead` is already synchronous; the two readers differ only in that the async
@@ -834,8 +836,8 @@ export class Executor implements ExecutorApi {
    *  traversal (all of Phases 1-5) returns immediately, zero async overhead. A barrier (federate)
    *  loops: read+drain head → await apply() → land + resume. The loop itself is `driveSegments`;
    *  this method only supplies the in-process host. */
-  private drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Executable> {
-    return driveSegments(this.segmentHost, gremlin, params, paramTypes, federationDepth);
+  private drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number, detached = false): Promise<Executable> {
+    return driveSegments(this.segmentHost, gremlin, params, paramTypes, federationDepth, detached);
   }
 
 }

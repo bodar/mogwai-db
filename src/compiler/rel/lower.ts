@@ -3704,6 +3704,9 @@ export interface Lowering {
   readonly propertySeek?: boolean;
   /** May the physical TextP FTS rewrite drive a bare element scan (`semijoin.ts`, `trigramSeek`)? */
   readonly ftsSubstringPredicate?: boolean;
+  /** DETACHED-transfer compile (set only by `raw()`): the element leaf emits a fuller property node
+   *  `{t, v, vpid, meta?}`. Off for ordinary framing, so base props stay `{t, v}`. */
+  readonly detached?: boolean;
   /**
    * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
    * here rather than being read from a store at lowering time.
@@ -3786,6 +3789,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
+  detached: opts.detached ?? false,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   sideEffectPolicies: opts.sideEffectPolicies ?? NO_SIDE_EFFECT_POLICIES,
@@ -3876,7 +3880,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
 const carriesMultiplicity = (chain: Tail): boolean =>
   chain.bulked && chain.rel.channels.some((channel) => channel.role === 'bulk');
 
-const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
+const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
   // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
   // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
@@ -3891,7 +3895,7 @@ const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel
   if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard' && framing.kind !== 'detached') return null;
   switch (framing.kind) {
     case 'elements': return {
-      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
+      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain), detached }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     // A BOUND (detached) element travels as an ID under id-carry, so its wire payload is REJOINED from
@@ -3900,7 +3904,7 @@ const framed = (chain: Tail, source: GraphSource, fresh: Minter): { readonly rel
     // cannot tell a federated vertex from a local one and must not, since the wire has no such
     // distinction. (`source` is the bound graph here — a base chain never emits `detached`.)
     case 'detached': return {
-      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
+      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain), detached }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -4000,8 +4004,8 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, fresh: Minter): RelLowering | null => {
-  const wire = framed(chain, source, fresh);
+const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter): RelLowering | null => {
+  const wire = framed(chain, source, detached, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
@@ -4062,7 +4066,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /**
@@ -4167,7 +4171,7 @@ export function lowerForeignResume(
       exprs: [['id', col(rejoined.id, 'id')]],
     });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
-  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
@@ -4197,7 +4201,7 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
     exprs: [['v', col(exploded.id, 'sv')]],
   });
   const chain = scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /**
@@ -4222,7 +4226,7 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
     exprs: [[LIST_COL, col(exploded.id, 'sv')]],
   });
   const chain = continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /**
@@ -5164,10 +5168,10 @@ function propertyTail(
     const dropped = propertyDrop(rel, elem, fresh);
     return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
   }
-  // A bound VertexProperty has no landed identity (`p_id` is NULL — only `{t,v}` was landed), so
-  // `properties().id()` fails closed over a bound element rather than framing a null id. `value()`/
-  // `key()`/`element()` read the tree / the carried owner and compose.
-  if (step.name === 'id' && ctx.source !== BaseGraph) return null;
+  // A bound VertexProperty NOW carries its landed identity: the detached compile lands `vpid`, which
+  // `boundPropertyRelation` reads into `p_id`, so `properties().id()` over a bound vertex frames the
+  // real property id through `propertyId` below (a lossy landing without `vpid` frames null, the
+  // pre-detached behaviour). An edge `Property` still has no id and declines via the vertex-only arm.
   const retyped = step.name === 'key' ? propertyKey(rel, fresh)
     // `VertexProperty.label()` IS its key — `return this.key();`
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/VertexProperty.java:79-81`)

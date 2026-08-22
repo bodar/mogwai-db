@@ -29,6 +29,10 @@ export interface RelRequest {
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
   readonly ftsSubstringPredicate: boolean;
+  /** DETACHED-transfer compile mode (set only by `raw()`): the leaf emits a fuller property node
+   *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
+   *  wire framing, so the base plan is unchanged. */
+  readonly detached: boolean;
   /** How a `T.label` ENTRY renders (`valueMap(true)`, `elementMap()`) — decided ONLY by an explicit
    *  `with("multilabel")`/`with("singlelabel")`, since storage no longer has a regime to inherit
    *  from (§api.ts). It crosses as its own settled value rather than being re-derived inside the
@@ -133,6 +137,7 @@ export function loweringOptions(
     labelRegime: request.labelRegime,
     propertySeek: request.propertySeek,
     ftsSubstringPredicate: request.ftsSubstringPredicate,
+    detached: request.detached,
     services: request.services,
     sack: request.sack,
     sideEffectPolicies: request.sideEffectPolicies,

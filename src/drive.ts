@@ -33,7 +33,7 @@ export interface SegmentReaders {
 /** The collaborators the trampoline needs, injected so the SAME loop runs in either runtime.
  *  `compile` turns a (sub-)traversal into a `Plan` at this federation hop depth. */
 export interface SegmentHost extends SegmentReaders {
-  compile(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Plan;
+  compile(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number, detached: boolean): Plan;
 }
 
 /** Drive an ALREADY-COMPILED plan to its final `Executable`. A non-segmented plan returns immediately.
@@ -73,6 +73,7 @@ export function driveSegments(
   params: Record<string, any>,
   paramTypes: Record<string, TypeNode>,
   federationDepth: number,
+  detached = false,
 ): Promise<Executable> {
-  return driveSegmentsFrom(host, host.compile(gremlin, params, paramTypes, federationDepth));
+  return driveSegmentsFrom(host, host.compile(gremlin, params, paramTypes, federationDepth, detached));
 }
