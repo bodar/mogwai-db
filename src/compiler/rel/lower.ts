@@ -2180,7 +2180,15 @@ function midCall(
  */
 function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const spec = parseCallSpec(step, ctx.params);
+  // A BARRIER call() in a child body (`where(__.call(federate…))`, `group().by(__.call(federate…))`) is
+  // not a child VALUE — a barrier is a segment-level async op, driven at the top level, never inside a
+  // correlated child. Its spec cannot even resolve here (a federate's nested `traversal` param is not a
+  // translatable tree in this position), so `parseCallSpec` THROWS. That is a "not lowerable as a child
+  // value" signal, not an incident: catch it and DECLINE (→ a clean `UnsupportedTraversal`) rather than
+  // letting a raw `TypeError` escape. The service's OWN throw (`buildRel`, below) is still not caught —
+  // §6·5 — because that one the user must see; this catch is only around the compile-time spec parse.
+  let spec: ReturnType<typeof parseCallSpec>;
+  try { spec = parseCallSpec(step, ctx.params); } catch { return null; }
   // An INJECTION traversal is the federated per-parent value read (`fprops`/`fid`/`flabel` rejoin),
   // which belongs to a `barrier` contribution and not to this arm at all. Declining on its presence
   // keeps the two apart rather than silently ignoring the argument.
