@@ -4579,10 +4579,14 @@ function detachedTail(
   return continueAs(seed, { kind: 'elements', elem }, steps, from, bulked, ctx, fresh, NO_ALIASES);
 }
 
-/** Steps a bound element stream may NOT hand off to the main fold with: WRITES (mutate the base graph)
- *  and element-bag / property reads (`elementValueMap`, `propertyRelation`) that scan the base tables
- *  by id — over a bound element that is a foreign id, so the read is a wrong answer, not the bound
- *  graph's. They decline (fail closed) until their physical reads route through `GraphSource`. */
+/** Steps a bound element stream may NOT hand off to the main fold with, for two DIFFERENT reasons:
+ *  - **WRITES** (`MUTATING_STEPS`) — OUT OF SCOPE by design, not merely unrouted. A landed subgraph is a
+ *    DETACHED snapshot, and a detached element is immutable (TinkerPop's `DetachedVertex` is "not
+ *    traversable or mutable"); a write through it would mutate a local ephemeral copy that reaches
+ *    nothing. Mutating the source graph is a separate federate command, not a write on this stream.
+ *  - **element-bag / property reads** (`elementValueMap`, `propertyRelation`) — scan the base tables by
+ *    id, which over a bound (foreign) id is a wrong answer; they decline UNTIL routed through `GraphSource`.
+ *  Both fail closed here rather than reaching a half-present read. */
 const BOUND_HANDOFF_DENY: ReadonlySet<string> = new Set<string>([
   ...MUTATING_STEPS, 'properties', 'propertyMap', 'valueMap', 'elementMap',
 ]);

@@ -74,11 +74,20 @@ the multiset) and `count()` sums bulk.
 bulk) via `GraphSource` — movement, filters, `values`/`label`/`labels`, `group`/`order`/`by`/`project`,
 order-sensitive `fold`/reducers, and convergent-walk collapse — through the ONE engine.
 
+**OUT OF SCOPE — bound WRITES, by design (not deferred).** A landed subgraph is a DETACHED snapshot, and
+a detached element is not mutable — TinkerPop says so outright (`DetachedVertex`: *"not traversable or
+mutable"*). A write through the bound stream would mutate a local, ephemeral copy that is discarded when
+the query ends — it would reach nothing. Mutating the SOURCE graph is a different operation entirely (a
+federate command that pushes a mutation to the sibling), not a write threaded through the detached
+traversal. So `MUTATING_STEPS` are in `BOUND_HANDOFF_DENY` and decline permanently — this is a semantic
+wall, not a missing feature.
+
 **REMAINING (deferred, fail-closed):**
 - **`path` over a bound graph** — the path channel has no landed source; `tracksPath` declines. The only
-  channel not carried.
-- **`properties()` / `valueMap()` over bound** — element-bag reads unrouted; `properties()` also has no
-  landed identity (a genuine wall). **Bound WRITES** — a fetched subgraph is a read-only snapshot.
+  traverser channel not carried.
+- **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
+  (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
+  identity to give (a detached VertexProperty has no rowid), so it is a genuine wall, not merely unrouted.
 - **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
   (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
   identity (a detached VertexProperty has no rowid), so it is a genuine wall.
