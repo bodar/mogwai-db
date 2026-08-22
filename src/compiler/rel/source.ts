@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
-import { elementNode, elementPayload } from './element.ts';
+import { edgeLabel, elementNode, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
@@ -141,6 +141,37 @@ export interface GraphSource {
    *  physical rows and their per-element order key. `BaseGraph` joins the `vertex_labels`/`labels` (or
    *  `edges`/`labels`) side tables; a bound graph explodes the landed JSON label array. */
   labelNames(input: Rel, kind: Elem, fresh: Minter): Rel;
+
+  /** The external id read DIRECTLY off an anchor row (`elementRow`), reusing its own columns rather than
+   *  re-correlating on an id — the element's own `T.id` token value, kept off the shared scan so
+   *  `valueMap(true)`/`elementMap()` do not re-scan the element once per token. `BaseGraph` is
+   *  `COALESCE(uid, id)`; a bound row's `id` is already the external id. (An ENDPOINT id, which arrives as
+   *  a bare `tgt`/`src` column and not a row, still uses the correlated `externalId`.) */
+  externalIdOf(row: Rel): Expr;
+
+  /** An edge's label read DIRECTLY off an anchor row — the edge's `T.label` token, off the row's own
+   *  `label` column rather than a re-scan. `BaseGraph` resolves the FK through `labels`; a bound row
+   *  carries the bare name. */
+  edgeLabelOf(row: Rel, fresh: Minter): Expr;
+
+  /** THE ONE CORRELATED ROW an element id names — the single-row anchor `valueMap(true)`/`elementMap()`
+   *  project their `T.id`/`T.label`/endpoint token pairs off (`tokenRow`/`endpointRow`). `BaseGraph`
+   *  scans `nodes`/`edges` filtered by rowid; a bound graph rejoins the landed relation by id. The token
+   *  VALUES themselves come from `externalId`/`labelScalar`/`labelArray` (self-correlated), so the only
+   *  columns a caller reads off this row are an edge's `src`/`tgt` endpoints — present on both graphs. */
+  elementRow(kind: Elem, id: Expr, fresh: Minter): Rel;
+
+  /** Does this element have AT LEAST ONE label — the zero-label gate that omits a `single`-regime
+   *  `T.label` entry for a label-less vertex. Cheap BY DESIGN (an EXISTS probe / an array-length test),
+   *  NOT the whole label array: it is a filter, not a value. `BaseGraph` probes the `vertex_labels` side
+   *  table; a bound graph tests the landed array's length. */
+  hasAnyLabel(kind: Elem, id: Expr, fresh: Minter): Expr;
+
+  /** AN ELEMENT'S LABELS as a JSON ARRAY of names, correlated on `id` — the `set`-regime `T.label` token
+   *  value, and (via `json_array_length`) the zero-label gate that omits the token for a label-less vertex
+   *  in the `single` regime. `BaseGraph` groups the `vertex_labels`/`labels` side tables (or wraps the one
+   *  edge name); a bound graph reads the landed JSON label array (or wraps the one landed edge name). */
+  labelArray(kind: Elem, id: Expr, fresh: Minter): Expr;
 
   /** A PATH POSITION — one element in a `path()` array, as the self-describing `{t, v: payload}` node
    *  `pathPositions` appends, a SCALAR correlated on the position's id. `BaseGraph` reads the base tables
@@ -316,13 +347,9 @@ export const BaseGraph: GraphSource = {
     return { kind: 'exists', plan: probe, negated: false };
   },
 
-  externalId: (kind, id, fresh) => {
-    const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
-    const scan = make.scan({ id: fresh('ei'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('re'), channels: [], type: typeOf(...cols) });
-    const mine = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), id) });
-    const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(mine.id, 'uid'), col(mine.id, 'id')] };
-    return firstOf(mine, external, col(mine.id, 'id'), fresh);
-  },
+  // The COMPACT correlated external id (`nodeExternalId`/the edge scalar) — an id is unique, so the
+  // `firstOf` order/limit would be a no-op. Shared with the endpoint token reads through the interface.
+  externalId: (kind, id, fresh) => elementExternalId(id, kind, fresh),
 
   labelScalar: (kind, id, fresh) => {
     const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
@@ -420,6 +447,30 @@ export const BaseGraph: GraphSource = {
   },
 
   propertyStream: (input, kind, keys, fresh) => propertyRelation(input, kind, keys, fresh),
+
+  externalIdOf: (row) => ({ kind: 'call', fn: 'COALESCE', args: [col(row.id, 'uid'), col(row.id, 'id')] }),
+
+  edgeLabelOf: (row, fresh) => edgeLabel(col(row.id, 'label'), fresh),
+
+  elementRow: (kind, id, fresh) => {
+    const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
+    const scan = make.scan({ id: fresh('er'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('rer'), channels: [], type: typeOf(...cols) });
+    return make.filter({ id: fresh('ef'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), id) });
+  },
+
+  hasAnyLabel: (_kind, id, fresh) => {
+    // vertex only in practice; mirror the old `labelled` EXISTS probe exactly so the gate stays cheap.
+    const vl = make.scan({ id: fresh('lx'), table: 'vertex_labels', alias: fresh('rlx'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const mine = make.filter({ id: fresh('lf'), input: vl, channels: [], type: vl.type, pred: eq(col(vl.id, 'node'), id) });
+    const probe = make.project({ id: fresh('lp'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return { kind: 'exists', plan: probe, negated: false };
+  },
+
+  // Always called for a VERTEX (a set-regime `T.label`, or the zero-label gate); the edge arm is for
+  // totality — an edge is single-label, so its "array" is the one name.
+  labelArray: (kind, id, fresh) => kind === 'vertex'
+    ? vertexLabels(id, fresh)
+    : { kind: 'call', fn: 'json_array', args: [BaseGraph.labelScalar('edge', id, fresh)] },
 
   // A path position IS the base element node — `elementNode` already builds the `{t,v}` scalar over the
   // physical tables, so the source method is that call with the vocabulary's argument order.

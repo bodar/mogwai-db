@@ -2005,12 +2005,10 @@ function terminal(
     // `elementMap()` takes no token OPTION: `ElementMapStep.map` puts `T.id` and `T.label`
     // unconditionally, which is why a `true` argument is not even a form it has.
     if (step.name === 'elementMap' && tokens) return null;
-    // The property values route through `GraphSource` (base tables or the landed tree), but the id/label
-    // TOKENS (`tokenRow`) still read base tables for the external id and the label gate — not yet
-    // source-routed. So `valueMap(true)`/`elementMap()` over a BOUND graph fails closed (a foreign id
-    // against this graph's tables would be a wrong answer); `valueMap(keys…)` composes over either graph.
+    // The property values AND the id/label/endpoint TOKENS both route through `GraphSource` now
+    // (`tokenRow`/`endpointRow` read `externalId`/`labelScalar`/`labelArray`/`elementRow`), so
+    // `valueMap(true)`/`elementMap()` compose over a bound graph exactly as `valueMap(keys…)` does.
     const needsTokens = step.name === 'elementMap' || tokens;
-    if (needsTokens && ctx.source !== BaseGraph) return null;
     const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
       needsTokens, ctx.labelRegime, ctx.source, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});

@@ -459,9 +459,21 @@ describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
   test('valueMap() over all keys', async () => {
     expect(await maps(sg('.V().valueMap()'))).toEqual(await maps(`${crewBoth}.valueMap()`, 'crew'));
   });
-  test('elementMap()/valueMap(true) — tokens over bound fail closed (tokenRow not yet source-routed)', async () => {
-    await expect(mgr.executor('home').framedAsync(sg('.V().elementMap("name")'), {})).rejects.toThrow();
-    await expect(mgr.executor('home').framedAsync(sg('.V().valueMap(true, "name")'), {})).rejects.toThrow();
+  // The id/label TOKENS (and an edge's IN/OUT endpoint entries) route through GraphSource now
+  // (externalId/labelScalar/labelArray/elementRow), so valueMap(true)/elementMap() compose over the
+  // landed relation exactly as valueMap(keys…) does. The landed id IS the crew id, so maps match.
+  test('valueMap(true, name) — id/label tokens beside the property array, rejoined', async () => {
+    const got = await maps(sg('.V().order().by("name").valueMap(true, "name")'));
+    expect(got).toEqual(await maps(`${crewBoth}.order().by("name").valueMap(true, "name")`, 'crew'));
+    expect(got.length).toBeGreaterThan(0);
+  });
+  test('elementMap(name) — flat map with id/label tokens over bound vertices', async () => {
+    expect(await maps(sg('.V().order().by("name").elementMap("name")')))
+      .toEqual(await maps(`${crewBoth}.order().by("name").elementMap("name")`, 'crew'));
+  });
+  test('elementMap() on the bound EDGES — IN/OUT endpoint entries rejoin the landed vertices', async () => {
+    expect(await maps(sg('.elementMap()')))
+      .toEqual(await maps('g.V().hasLabel("person").outE("develops").elementMap()', 'crew'));
   });
   test('valueMap(name) composes after a movement hop', async () => {
     expect(await maps(sg('.inV().valueMap("name")')))

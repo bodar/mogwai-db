@@ -7,9 +7,9 @@ import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, eq, fenced, firstOf, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
-import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
+import { elementNode } from './element.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -930,17 +930,6 @@ const pairOf = (key: Expr, val: Expr): Expr =>
 const tokenKey = (name: 'id' | 'label'): Expr =>
   ({ kind: 'json-object', entries: [['t', compilerText('T')], ['v', compilerText(name)]], binary: false });
 
-/** The one ROW an element rowid names, as a relation — the correlated scan every token pair projects
- *  off. `elementRow`'s columns are the physical ones, so `uid`/`id` and an edge's `label` FK are all in
- *  reach without a second subquery each. */
-const elementRow = (rowid: Expr, elem: Elem, fresh: Minter): Rel => {
-  const scan = make.scan({
-    id: fresh('er'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rer'), channels: [],
-    type: typeOf(...(elem === 'edge' ? EDGE_COLS : NODE_COLS)),
-  });
-  return make.filter({ id: fresh('ef'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) });
-};
-
 /**
  * DOES THIS MAP CARRY THE `T` TOKENS — a BOOLEAN, because all-or-nothing is the whole of what can
  * reach here today.
@@ -1047,18 +1036,24 @@ export function elementValueMap(
  *  `LabelRegime`: a set of names where a vertex genuinely holds a set, the one first-interned name
  *  otherwise, and an EDGE's label is always the single name TinkerPop fixes its cardinality at. */
 function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelRegime, ord: number, source: GraphSource, fresh: Minter): Rel {
-  const row = labelled(elementRow(rowid, elem, fresh), token === 'label' && elem !== 'edge' && regime === 'single', fresh);
-  const external = coalesce(col(row.id, 'uid'), col(row.id, 'id'));
+  const gate = token === 'label' && elem !== 'edge' && regime === 'single';
+  // The token VALUES are self-correlated source reads (`externalId`/`labelScalar`/`labelArray`), so the
+  // anchor supplies only the ONE row per element the pair projects off — a base scan, or a landed rejoin.
+  const anchor = source.elementRow(elem, rowid, fresh);
+  // A zero-label vertex OMITS its single-regime `T.label` entry (`getVertexStructure`'s `isEmpty()`
+  // gate) — a cheap EXISTS probe / array-length test from the source, holding over either graph.
+  const row = gate
+    ? make.filter({ id: fresh('lg'), input: anchor, channels: [], type: anchor.type, pred: source.hasAnyLabel('vertex', rowid, fresh) })
+    : anchor;
+  // The element's OWN id/label read off the anchor row (no re-scan); a vertex's label set is a side/tree
+  // read that self-correlates. (An endpoint's id/label, which has no anchor row, self-correlates too.)
   const value = token === 'id'
-    // NOT `typedNode`, and the difference is plan size rather than taste: that helper re-tests the tag
-    // for collection-ness (`storedValueOn`), which would spell this whole inference CASE twice. An
-    // external id is a rowid or a uid — never a collection — so the node is built directly.
-    ? { kind: 'json-object' as const, binary: false, entries: [['t', inferredVtype(external)] as const, ['v', external] as const] }
+    ? idNode(source.externalIdOf(anchor))
     : elem === 'edge'
       // An edge label is ALWAYS the one name: TinkerPop fixes edge label cardinality at exactly one,
       // so no regime applies to it (`addIncludedOptions` reads `element.labels()` for a Vertex only).
-      ? typedNode(edgeLabel(col(row.id, 'label'), fresh), compilerText('string'))
-      : labelNode(col(row.id, 'id'), regime, source, fresh);
+      ? typedNode(source.edgeLabelOf(anchor, fresh), compilerText('string'))
+      : labelNode(rowid, regime, source, fresh);
   return pairRow(row, pairOf(tokenKey(token), value), compilerInt(ord), fresh);
 }
 
@@ -1072,27 +1067,21 @@ function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelR
  * reports `DEFAULT_VERTEX_LABEL` for such a vertex, which is right for the scalar step and would be a
  * WRONG entry here — the same value answering two different questions.
  */
-const labelled = (row: Rel, gate: boolean, fresh: Minter): Rel => {
-  if (!gate) return row;
-  const vl = make.scan({ id: fresh('lx'), table: 'vertex_labels', alias: fresh('rlx'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-  const mine = make.filter({ id: fresh('lf'), input: vl, channels: [], type: vl.type, pred: eq(col(vl.id, 'node'), col(row.id, 'id')) });
-  const probe = make.project({ id: fresh('lp'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  return make.filter({ id: fresh('lg'), input: row, channels: [], type: row.type, pred: { kind: 'exists', plan: probe, negated: false } });
-};
-
 /** An EDGE ENDPOINT as an `elementMap` entry — `Direction.IN`/`Direction.OUT` keyed at a nested map of
  *  that vertex's own `T.id`/`T.label` and nothing else (`ElementMapStep.getVertexStructure`). `IN` is
  *  the edge's TARGET and `OUT` its source, which is TinkerPop's direction convention and our column
  *  naming's (`tgt`/`src`) meeting point. */
 function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: number, source: GraphSource, fresh: Minter): Rel {
-  const row = elementRow(rowid, 'edge', fresh);
+  const row = source.elementRow('edge', rowid, fresh);
+  // The endpoint id (`tgt`/`src`) is on the edge row for either graph; its own id/label then read the
+  // VERTEX source (base tables, or the landed vertex relation for a bound endpoint).
   const endpoint = col(row.id, side === 'IN' ? 'tgt' : 'src');
   const nested: Expr = {
     kind: 'json-object', binary: false,
     entries: [['t', compilerText('map')], ['v', {
       kind: 'json-array', binary: false,
       items: [
-        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('id')), jsonOf(externalIdNode(endpoint, fresh))] },
+        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('id')), jsonOf(idNode(source.externalId('vertex', endpoint, fresh)))] },
         { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('label')), jsonOf(labelNode(endpoint, regime, source, fresh))] },
       ],
     }]],
@@ -1104,18 +1093,17 @@ function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: 
 const directionKey = (side: 'IN' | 'OUT'): Expr =>
   ({ kind: 'json-object', entries: [['t', compilerText('D')], ['v', compilerText(side)]], binary: false });
 
-/** A vertex rowid's PUBLIC id as a typed node — the endpoint entries' `T.id` value. Correlated,
- *  because an endpoint arrives as a rowid COLUMN and not as a relation to join against. */
-const externalIdNode = (rowid: Expr, fresh: Minter): Expr => {
-  const external = externalId(rowid, 'vertex', fresh);
-  return { kind: 'json-object', binary: false, entries: [['t', inferredVtype(external)], ['v', external]] };
-};
+/** An element's external id, from the source, as a typed `T.id` node. NOT `typedNode`: that helper
+ *  re-tests the tag for collection-ness (`storedValueOn`), which would spell the inference CASE twice —
+ *  an external id is a rowid or a uid, never a collection, so the node is built directly. */
+const idNode = (external: Expr): Expr =>
+  ({ kind: 'json-object', binary: false, entries: [['t', inferredVtype(external)], ['v', external]] });
 
 /** A vertex rowid's LABEL as a typed node, by regime — the endpoint entries' `T.label` value. A zero-label
  *  endpoint keeps the entry (a nested endpoint map is built unconditionally by `getVertexStructure`, which
  *  applies the same `isEmpty()` test only to the NAME); the value is then a null tag the framer infers. */
 const labelNode = (rowid: Expr, regime: LabelRegime, source: GraphSource, fresh: Minter): Expr => regime === 'set'
-  ? { kind: 'json-object', binary: false, entries: [['t', compilerText('set')], ['v', vertexLabels(rowid, fresh)]] }
+  ? { kind: 'json-object', binary: false, entries: [['t', compilerText('set')], ['v', source.labelArray('vertex', rowid, fresh)]] }
   : typedNode(vertexLabelName(rowid, source, fresh), compilerText('string'));
 
 /** A vertex's SINGLE label — the side table's first-interned name, which is the same deterministic pick

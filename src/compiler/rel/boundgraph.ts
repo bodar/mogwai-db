@@ -292,6 +292,39 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       });
     },
 
+    // ---- the zero-label gate: the landed label array (vertex) / bare name (edge) is non-empty ----
+    hasAnyLabel(kind, id, fresh) {
+      const row = rowById(cteOf(kind, fresh), id, fresh);
+      const nonEmpty: Expr = kind === 'edge'
+        ? { kind: 'binary', op: '!=', left: col(row.id, 'label'), right: lit(null) }
+        : { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [col(row.id, 'label')] }, right: compilerInt(0) };
+      return existsOf(make.filter({ id: fresh('bha'), input: row, channels: [], type: row.type, pred: nonEmpty }), fresh);
+    },
+
+    // ---- id/edge-label read off an anchor row — the landed id IS external; the landed edge label the
+    //      bare name ----
+    externalIdOf(row) {
+      return col(row.id, 'id');
+    },
+    edgeLabelOf(row) {
+      return col(row.id, 'label');
+    },
+
+    // ---- the single correlated row an id names (token/endpoint anchor) — the landed row rejoined ----
+    elementRow(kind, id, fresh) {
+      return rowById(cteOf(kind, fresh), id, fresh);
+    },
+
+    // ---- an element's labels as a JSON array — a landed vertex label IS already an array; an edge's is
+    //      the one bare name wrapped as a single-element array (edges are single-label) ----
+    labelArray(kind, id, fresh) {
+      const row = rowById(cteOf(kind, fresh), id, fresh);
+      const value: Expr = kind === 'edge'
+        ? { kind: 'call', fn: 'json_array', args: [col(row.id, 'label')] }
+        : { kind: 'call', fn: 'json', args: [col(row.id, 'label')] };
+      return { kind: 'scalar', plan: make.project({ id: fresh('bla'), input: row, channels: [], type: typeOf(meta('v', 'json', true)), exprs: [['v', value]] }) };
+    },
+
     // ---- a path position: rejoin by id, rebuild the {t,v} node from the landed columns ----
     elementNode(kind, id, fresh) {
       const row = rowById(cteOf(kind, fresh), id, fresh);
