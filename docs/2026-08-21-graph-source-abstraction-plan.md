@@ -53,11 +53,20 @@ foreign id) and the encounter guard (a chain demanding a SOURCE order the landed
 declines unless an `order()` mints it). `federation.test` covers order/groupCount/group.by(count)/
 project/order.fold, oracled on crew; `test:cf-limits` 2099 green (DO-legal).
 
+**ENCOUNTER over a bound graph — LANDED.** The landed relation carries its emission order (`foreignRelation`
+`withOrder` exposes the json_each array index as `ord` on the materialized binding + every `Ref`), and the
+source-form seed AND the `.V()`/`.E()` re-root mint the `encounter` channel from it. So a bound
+`fold()`/`order()`/reducer collects in the sibling's own order — the id-carry model "gains order for free."
+The `lowerForeign` encounter guard relaxed (a subgraph source-form seed provides the encounter);
+`detachedTail`'s `labels()` honours an arriving encounter; its `dedup()` shortcut yields to the main fold
+once the stream carries an encounter (group-by-identity). `federation.test` covers source-order
+`values().fold()`, the group VALUE fold (previously declined), `dedup().count()`.
+
 **REMAINING (deferred, fail-closed):**
-- **Channels over a bound graph** — the landed seed carries no `encounter`/`bulk`/`path`, so a
-  SOURCE-order collect (`…values().fold()` with no `order()`, a group VALUE that folds) and convergent-
-  walk collapse over a bound graph decline. Seeding an `encounter` from the landed array order (the
-  sibling's emission order) is the "gains order/collapse for free" the plan foresaw — the next increment.
+- **BULK over a bound graph** — a convergent walk (`both().both()` reaching a vertex twice) is a faithful
+  MULTISET today; the `movementCollapse` `SUM(bulk)` grouping is a base-only OPTIMISATION, not yet ported
+  to `BoundGraph`. Correctness holds (the multiset is right); only the collapse optimisation is absent.
+  `path` over a bound graph likewise has no channel and declines.
 - **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
   (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
   identity (a detached VertexProperty has no rowid), so it is a genuine wall.
