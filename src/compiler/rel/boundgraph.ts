@@ -201,6 +201,41 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       return { kind: 'scalar', plan: make.project({ id: fresh('bls'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
     },
 
+    // ---- labels(): fan out the landed label set, rejoined by id ----
+    labelNames(input, kind, fresh) {
+      const cte = cteOf(kind, fresh);
+      const P = { id: 'blnid', label: 'blnl' } as const;
+      const pref = make.project({
+        id: fresh('blnp'), input: cte, channels: [],
+        type: typeOf(meta(P.id, 'any', true), meta(P.label, kind === 'edge' ? 'text' : 'json', true)),
+        exprs: [[P.id, col(cte.id, 'id')], [P.label, col(cte.id, 'label')]],
+      });
+      const j = make.join({
+        id: fresh('blnj'), left: input, right: pref, join: 'inner', ordered: true, channels: input.channels,
+        type: typeOf(...input.type.cols, meta(P.id, 'any', true), meta(P.label, kind === 'edge' ? 'text' : 'json', true)),
+        on: eq(col(pref.id, P.id), col(input.id, 'id')),
+      });
+      const carried = input.channels.map((c) => [c.col, meta(c.col, 'int')] as const);
+      // An edge's landed label is a bare name — one row, order key 0. A vertex's is a JSON array — explode
+      // it, and json_each's KEY (the array index) IS the emission order the landing preserved.
+      if (kind === 'edge') {
+        return make.project({
+          id: fresh('blnv'), input: j, channels: input.channels,
+          type: typeOf(meta('v', 'any', true), meta('lord', 'int'), ...carried.map(([, m]) => m)),
+          exprs: [['v', col(j.id, P.label)], ['lord', compilerInt(0)], ...input.channels.map((c) => [c.col, col(j.id, c.col)] as const)],
+        });
+      }
+      const ex = make.explode({
+        id: fresh('blnx'), input: j, channels: input.channels, expr: col(j.id, P.label), as: { value: 'blnv', ord: 'blno' },
+        type: typeOf(...j.type.cols, meta('blnv', 'any', true), meta('blno', 'int')),
+      });
+      return make.project({
+        id: fresh('blnr'), input: ex, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), meta('lord', 'int'), ...carried.map(([, m]) => m)),
+        exprs: [['v', col(ex.id, 'blnv')], ['lord', col(ex.id, 'blno')], ...input.channels.map((c) => [c.col, col(ex.id, c.col)] as const)],
+      });
+    },
+
     // ---- leaf (Mechanism B): rejoin to reconstitute the wire payload for a terminal bound element ----
     leafPayload(input, kind, _opts, fresh) {
       const cte = cteOf(kind, fresh);

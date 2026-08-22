@@ -320,6 +320,23 @@ describe('mogwai.graph.federate — SUBGRAPH element-terminal (whole vertices to
   }
 });
 
+// labels() over a bound vertex — the label FAN-OUT (one row per label), rejoined from the landed relation
+// through the ONE vocabulary (source.labelNames + the shared order-mint), oracled on the crew sibling.
+describe('mogwai.graph.federate — SUBGRAPH labels() fan-out', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const vals = async (g: string) => (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
+  const onCrew = async (g: string) => (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec))).sort();
+  test('.V().labels() fans out each subgraph vertex\'s labels', async () => {
+    expect(await vals(sg('.V().labels()')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").bothV().dedup().labels()'));
+  });
+  test('.inV().labels() composes after a movement hop', async () => {
+    expect(await vals(sg('.inV().labels()')))
+      .toEqual(await onCrew('g.V().hasLabel("person").outE("develops").inV().labels()'));
+  });
+});
+
 // Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
 // V(ids)/E(ids) filtering the bound source by id.
 describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {

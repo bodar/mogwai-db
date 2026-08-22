@@ -2092,47 +2092,21 @@ function terminal(
         framing: { kind: 'scalar', type: STATIC('string') },
       };
     }
-    const vl = make.scan({
-      id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [],
-      type: typeOf(meta('node', 'int'), meta('label', 'int')),
-    });
-    const owned = make.join({
-      id: fresh('j'), left: input, right: vl, join: 'inner', ordered: true, channels: input.channels,
-      type: typeOf(...elementCols(input.channels), meta('node', 'int'), meta('label', 'int')),
-      on: eq(col(vl.id, 'node'), col(input.id, 'id')),
-    });
-    const names = make.scan({
-      id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [],
-      type: typeOf(meta('id', 'int'), meta('name', 'text')),
-    });
-    const named = make.join({
-      id: fresh('j'), left: owned, right: names, join: 'inner', ordered: true, channels: owned.channels,
-      // `lid` and not a second `id`: a Join's declared names are POSITIONAL and must be unique, and
-      // the element's own `id` is already the first of them.
-      type: typeOf(...elementCols(owned.channels), meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-      on: eq(col(names.id, 'id'), col(owned.id, 'label')),
-    });
-    // A vertex may carry SEVERAL labels, so `labels()` fans one traverser out into one row per label,
-    // and their emission order is THIS step's to pin. Left unpinned, a downstream `fold()` collects
-    // them in whatever order SQLite scanned `vertex_labels` — reversed under `reverse_unordered_selects`
-    // — so a deterministic-looking result passes only by luck (`mise run test:perturbed`). Establish it
-    // canonically, by the `label` dictionary id: the SAME order the element payload's
-    // `json_group_array(name ORDER BY lid)` (element.ts) and `by(T.label)`'s first-label pick already
-    // use, so a vertex's labels read identically wherever they are read. Across origins the order is the
-    // arriving emission order where the stream has one, else the origin rowid — total either way, which
-    // the `encounter` channel requires.
+    // The physical FAN-OUT (one name row per label, plus its per-element order key `lord`) is the graph
+    // SOURCE's; the emission ORDER is this step's to MINT, because it is a STREAM fact. A vertex may carry
+    // SEVERAL labels; left unpinned a downstream `fold()` collects them in whatever order the scan chose
+    // (reversed under `reverse_unordered_selects` — `mise run test:perturbed`). Pin it canonically by
+    // `lord` (the label-dictionary id, base; the JSON-array index, bound) — the SAME order the element
+    // payload's `json_group_array(name ORDER BY lid)` and `by(T.label)`'s first-label pick use. Across
+    // origins the order is the arriving emission order where the stream has one, else `lord` — total
+    // either way, which the `encounter` channel requires.
+    const named = ctx.source.labelNames(input, elem, fresh);
     const arriving = encounterOf(input.channels);
-    const staged = make.project({
-      id: fresh('lv'), input: named, channels: named.channels,
-      type: typeOf(meta('v', 'text'), meta('id', 'int'), meta('label', 'int'), ...carriedCols(named.channels)),
-      exprs: [['v', col(named.id, 'name')], ['id', col(named.id, 'id')], ['label', col(named.id, 'label')],
-        ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
-    });
-    const channels = arriving ? staged.channels : withChannel(staged.channels, ENCOUNTER);
+    const channels = arriving ? named.channels : withChannel(named.channels, ENCOUNTER);
     return {
       rel: renumber(
-        staged,
-        [{ expr: col(staged.id, arriving ? arriving.col : 'id'), dir: 'asc' }, { expr: col(staged.id, 'label'), dir: 'asc' }],
+        named,
+        [{ expr: col(named.id, arriving ? arriving.col : 'lord'), dir: 'asc' }, { expr: col(named.id, 'lord'), dir: 'asc' }],
         [meta('v', 'text'), ...carriedCols(channels)],
         channels, fresh,
       ),
@@ -4508,6 +4482,18 @@ function detachedTail(
     const keys = argValues(step).filter((key): key is string => typeof key === 'string');
     if (keys.length !== step.args.length) return null;
     return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh);
+  }
+  // labels() — the label FAN-OUT, rejoined from the landed relation and order-minted exactly as the base
+  // `labels()` is: `source.labelNames` supplies (name, `lord`) rows, this mints the emission order. A
+  // bound stream carries no arriving encounter (a resume that demanded one declined at `lowerForeign`),
+  // so the order is `lord` alone (label-dictionary order, base; JSON-array order, bound).
+  if (step.name === 'labels' && !argValues(step).length && !step.modulators?.length && !step.optionArms) {
+    const named = source.labelNames(seed, elem, fresh);
+    const channels = withChannel(named.channels, ENCOUNTER);
+    const ranked = renumber(named,
+      [{ expr: col(named.id, 'lord'), dir: 'asc' }, { expr: col(named.id, 'lord'), dir: 'asc' }],
+      [meta('v', 'text'), ...carriedCols(channels)], channels, fresh);
+    return scalarTail(ranked, { kind: 'scalar', type: STATIC('string') }, steps, from + 1, false, ctx, fresh);
   }
   return null;
 }

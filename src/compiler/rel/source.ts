@@ -110,6 +110,14 @@ export interface GraphSource {
   externalId(kind: Elem, id: Expr, fresh: Minter): Expr;
   labelScalar(kind: Elem, id: Expr, fresh: Minter): Expr;
 
+  /** `labels()` — the FAN-OUT of an element's labels, one row per label. Returns a relation carrying `v`
+   *  (the label name) and `lord` (the per-element order key the caller renumbers by — the label-dictionary
+   *  id for `BaseGraph`, the JSON-array index for a bound graph) plus the input's channels. The emission
+   *  ORDER (the `encounter` mint) is the caller's, since it is a STREAM fact; the source owns only the
+   *  physical rows and their per-element order key. `BaseGraph` joins the `vertex_labels`/`labels` (or
+   *  `edges`/`labels`) side tables; a bound graph explodes the landed JSON label array. */
+  labelNames(input: Rel, kind: Elem, fresh: Minter): Rel;
+
   /** THE LEAF FRAMING — a terminal element relation → the wire PAYLOAD tuple (id, label, props[, src,
    *  tgt]). `BaseGraph` reads `nodes`/`edges`/`vertex_properties`/`labels` by id (`elementPayload`); a
    *  bound graph REJOINS the landed relation by id to reconstitute the detached payload (Mechanism B).
@@ -302,6 +310,43 @@ export const BaseGraph: GraphSource = {
       on: and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), id)),
     });
     return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
+  },
+
+  labelNames: (input, kind, fresh) => {
+    const names = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+    // A vertex holds its labels in the `vertex_labels` side table; an edge inlines the FK on the row.
+    const owned = kind === 'edge'
+      ? (() => {
+        const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+        return make.join({
+          id: fresh('j'), left: input, right: e, join: 'inner', ordered: true, channels: input.channels,
+          type: typeOf(...elementCols(input.channels), meta('eid', 'int'), meta('label', 'int')),
+          on: eq(col(e.id, 'id'), col(input.id, 'id')),
+        });
+      })()
+      : (() => {
+        const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+        return make.join({
+          id: fresh('j'), left: input, right: vl, join: 'inner', ordered: true, channels: input.channels,
+          type: typeOf(...elementCols(input.channels), meta('node', 'int'), meta('label', 'int')),
+          on: eq(col(vl.id, 'node'), col(input.id, 'id')),
+        });
+      })();
+    // `lid` and not a second `id`: a Join's declared names are POSITIONAL and must be unique.
+    const named = make.join({
+      id: fresh('j'), left: owned, right: names, join: 'inner', ordered: true, channels: owned.channels,
+      type: typeOf(...owned.type.cols, meta('lid', 'int'), meta('name', 'text')),
+      on: eq(col(names.id, 'id'), col(owned.id, 'label')),
+    });
+    // `lord` is the label-dictionary id (`vertex_labels.label` / `edges.label`), the interning order the
+    // element payload's `json_group_array(name ORDER BY lid)` and `by(T.label)`'s first-label pick use —
+    // so a vertex's labels read identically wherever they are read. The caller mints the emission order.
+    return make.project({
+      id: fresh('lv'), input: named, channels: named.channels,
+      type: typeOf(meta('v', 'text'), meta('lord', 'int'), ...carriedCols(named.channels)),
+      exprs: [['v', col(named.id, 'name')], ['lord', col(named.id, 'label')],
+        ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
+    });
   },
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),
