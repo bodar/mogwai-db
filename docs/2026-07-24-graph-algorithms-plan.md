@@ -91,12 +91,22 @@ adjacency with ONE store query (`scopedEdges`, label filter via a `json_each` bi
 scenario. pageRank honours out/in/both; wcc supports the undirected `bothE` scope and fails closed on a
 directional one (a different, directional min-propagation, not the undirected question).
 
-**NEXT — the leaf features:**
-- **`times`** (fixed iteration count) — pageRank 2/8.
-- **peerPressure** (integer cluster voting, reuses the decorate substrate — GLOBAL like the others) and
-  **shortestPath** (Template B — recursive-CTE paths, no barrier, its own shape).
-- Scenarios 2/6/8: 6 is reference-anomalous (above); 2 carries a `times(0)` edge case + `out("created")`
-  prefix; 8 needs `times` + α=1 (edge-config already done). Land `times` first.
+**✅ LANDED (2026-08-22) — peerPressure.** `mogwai.peerPressure` is a DECORATE barrier reusing the
+substrate verbatim: peer-pressure label propagation (each vertex adopts the max-vote cluster among
+{itself} ∪ {in-neighbours}, default outE, ties to the smallest id-string, to a fixpoint;
+`PeerPressureVertexProgram.java:150-172`). L3 +1 (`g_V_peerPressure_hasXclusterX`). All THREE Template-A
+decorate algorithms (wcc/pageRank/peerPressure) are now landed and reference-faithful — the decorate
+substrate generalized cleanly to each.
+
+**NEXT — the remaining leaves:**
+- **`times`** (fixed iteration count, `~tinkerpop.pageRank.times`) — pageRank 2/8. Entangled edge cases:
+  scenario 2 is `times(0)` + `out("created")` prefix + bothE (its projectRank looks like the edge count,
+  not a rank — verify against the reference; possibly anomalous like 6); scenario 8 is `times(1)` + α=1 +
+  inE(created), then movement + valueMap. Nail times=0/times=1 against the reference before building.
+- **shortestPath** (Template B — recursive-CTE all-pairs paths over the path channel, no barrier, its
+  own shape; 15 scenarios: unweighted + weighted/target/maxDistance/includeEdges).
+- **valueMap over a decorated key** (`DecorateGraph.valueMapPairs`) — needed by peerPressure scenario 3's
+  `valueMap(name, cluster)` and any `valueMap` including an algorithm key.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

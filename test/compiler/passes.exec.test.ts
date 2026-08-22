@@ -381,10 +381,11 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
   test('an unbuilt algorithm is a clear fail-closed deferral, not a mis-execution or a silent decline', () => {
     // The compute for these is not built yet; the seam is. A native OLAP step must refuse loudly rather
     // than answer a different question. Under the real (reference) registry the services ARE registered,
-    // so the message is the pending-execution deferral, not "unknown service". connectedComponent and
-    // pageRank are omitted — their compute IS built (mogwai.wcc / mogwai.pageRank), covered by L3/L2.
+    // so the message is the pending-execution deferral, not "unknown service". connectedComponent,
+    // pageRank and peerPressure are omitted — their compute IS built (mogwai.wcc/.pageRank/.peerPressure),
+    // covered by L3/L2. Only shortestPath (Template B) is still pending.
     const withReg: CompileOptions = { registry: standardRegistry };
-    for (const gremlin of ['g.V().peerPressure()', 'g.V().shortestPath()'])
+    for (const gremlin of ['g.V().shortestPath()'])
       expect(() => compile(gremlin, {}, withReg), gremlin).toThrow('graph algorithm execution is not implemented yet');
   });
 });

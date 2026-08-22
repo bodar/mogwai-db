@@ -84,7 +84,6 @@ function pendingAlgoService(name: string, type: Service['type']): Service {
   };
 }
 
-export const peerPressureService: Service = pendingAlgoService(PEER_PRESSURE_SERVICE_NAME, 'barrier');
 export const shortestPathService: Service = pendingAlgoService(SHORTEST_PATH_SERVICE_NAME, 'streaming');
 
 // ---------- mogwai.wcc — connectedComponent(), a DECORATE barrier ----------
@@ -281,8 +280,90 @@ export function createPageRankService(store: GraphStore | undefined): Service {
   };
 }
 
-/** The OLAP services with NO store dependency (pending stubs). `mogwai.wcc` and `mogwai.pageRank` are
- *  store-backed, so they are built with their `create*Service(app.store)` factories at the registry
- *  composition root (standard.ts). */
+// ---------- mogwai.peerPressure — peerPressure(), a DECORATE barrier ----------
+//
+// `g.V().peerPressure()` decorates each vertex with its cluster id under
+// `gremlin.peerPressureVertexProgram.cluster` and passes it through. The cluster is a vertex id,
+// assigned by peer-pressure label propagation: each vertex adopts the cluster held by the greatest
+// total vote among itself + its in-neighbours (default `outE` scope, vote strength 1.0), ties broken by
+// the lexicographically-smallest cluster-id STRING, iterated to a fixpoint (≤30 rounds). See
+// `vendor/tinkerpop/gremlin-core/.../clustering/peerpressure/PeerPressureVertexProgram.java:150-172`
+// (`vertex.id()` seed; `largestCount` majority with a `.toString().compareTo` tie-break).
+
+const PP_CLUSTER_KEY = 'gremlin.peerPressureVertexProgram.cluster';
+const PP_PROPERTY_NAME = '~tinkerpop.peerPressure.propertyName';
+const PP_EDGES = '~tinkerpop.peerPressure.edges';
+const PP_MAX_ITERATIONS = 30;
+
+/** Peer-pressure clustering: each vertex adopts the max-vote cluster among {itself} ∪ {voters}, ties to
+ *  the smallest id string, to a fixpoint. `edges` are directed voter→receiver pairs (the scope); a
+ *  vertex's voters are the sources that point AT it. Returns one `(rowid → cluster)` tuple per vertex;
+ *  the cluster VALUE is the vertex's external id. */
+export function peerPressureClusters(
+  nodes: readonly { readonly id: number; readonly ext: string | number }[],
+  edges: readonly { readonly src: number; readonly tgt: number }[],
+): BarrierRelation['tuples'] {
+  const ids = nodes.map((n) => n.id);
+  const ext = new Map<number, string | number>(nodes.map((n) => [n.id, n.ext]));
+  const voters = new Map<number, number[]>(ids.map((id) => [id, []])); // receiver -> [voter…]
+  for (const e of edges) voters.get(e.tgt)?.push(e.src);
+  let cluster = new Map<number, string | number>(ids.map((id) => [id, ext.get(id)!])); // seed: own external id
+  for (let round = 0; round < PP_MAX_ITERATIONS; round++) {
+    const next = new Map<number, string | number>();
+    let changed = false;
+    for (const id of ids) {
+      const votes = new Map<string | number, number>();
+      votes.set(cluster.get(id)!, 1); // the vertex's own vote (strength 1.0)
+      for (const u of voters.get(id)!) {
+        const c = cluster.get(u)!;
+        votes.set(c, (votes.get(c) ?? 0) + 1);
+      }
+      // largestCount: max total vote; on a TIE, the lexicographically-smallest cluster-id string.
+      let best: string | number = cluster.get(id)!;
+      let bestVote = -1;
+      for (const [c, v] of votes) {
+        if (v > bestVote || (v === bestVote && String(c) < String(best))) { best = c; bestVote = v; }
+      }
+      next.set(id, best);
+      if (best !== cluster.get(id)) changed = true;
+    }
+    cluster = next;
+    if (!changed) break;
+  }
+  return ids.map((id) => ({ id, value: cluster.get(id)! }));
+}
+
+/** peerPressure() over a store: an async DECORATE barrier. */
+export function createPeerPressureService(store: GraphStore | undefined): Service {
+  return {
+    name: PEER_PRESSURE_SERVICE_NAME,
+    type: 'barrier',
+    internal: true,
+    describeParams: () => ({ propertyName: `the vertex property key to write the cluster id under (default ${PP_CLUSTER_KEY})` }),
+    resolve: (site) => {
+      const mode = site.params.mode;
+      if (mode !== undefined && mode !== 'decorate')
+        throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: only decorate mode (the native peerPressure() step) is implemented yet, not "${String(mode)}"`);
+      const scope = edgeScopeOf(site.params[PP_EDGES], 'out', PEER_PRESSURE_SERVICE_NAME);
+      const nameOverride = site.params[PP_PROPERTY_NAME];
+      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PP_CLUSTER_KEY;
+      return {
+        kind: 'barrier',
+        residency: 'do',
+        decorate: { key, vtype: 'int' }, // a cluster id is a vertex id (integer rowid, modern graph)
+        apply: async (): Promise<BarrierRelation> => {
+          if (!store)
+            throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
+          const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
+          return { kind: 'relation-tuples', tuples: peerPressureClusters(nodes, scopedEdges(store, scope)) };
+        },
+      };
+    },
+  };
+}
+
+/** The OLAP services with NO store dependency (pending stubs). `mogwai.wcc`, `mogwai.pageRank` and
+ *  `mogwai.peerPressure` are store-backed, so they are built with their `create*Service(app.store)`
+ *  factories at the registry composition root (standard.ts). */
 export const pendingGraphAlgorithmServices: readonly Service[] =
-  [peerPressureService, shortestPathService];
+  [shortestPathService];
