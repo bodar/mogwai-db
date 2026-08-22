@@ -91,6 +91,18 @@ adjacency with ONE store query (`scopedEdges`, label filter via a `json_each` bi
 scenario. pageRank honours out/in/both; wcc supports the undirected `bothE` scope and fails closed on a
 directional one (a different, directional min-propagation, not the undirected question).
 
+**✅ LANDED (2026-08-22) — the OLAP computes are substrate-A-iterated (compile-to-SQL).** All three
+decorate barriers now run the reference relaxation as ONE SQL statement per round: the current `(id → v)`
+vector crosses as ONE `json_each` bind into a relaxation that JOINS the real `nodes`/`edges` tables, and
+a loop drives to a fixpoint (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2 / probe D). The graph
+stays in SQLite — only the O(V) vector enters JS per round — honouring locked decision #3 (compile to
+SQL, never interpret). WCC = a bothE min-label MIN; pageRank = the probe-D `α·pr/outdeg` join plus an
+O(V) teleport scalar (dangling redistribution) and ε-convergence; peerPressure = an argmax tally with a
+`ROW_NUMBER` tie-break on `CAST(c AS TEXT)`. The pure-JS computes are kept as differential ORACLES
+(`test/L2-sql/olap-differential.test.ts` asserts the SQL rounds agree over the whole vector). Results
+unchanged — L3 held at 1722, all conformance values identical. (The occupancy/yielding axis — alarm vs
+Worker-driven — remains the doc's open question, unchanged by this.)
+
 **✅ LANDED (2026-08-22) — peerPressure.** `mogwai.peerPressure` is a DECORATE barrier reusing the
 substrate verbatim: peer-pressure label propagation (each vertex adopts the max-vote cluster among
 {itself} ∪ {in-neighbours}, default outE, ties to the smallest id-string, to a fixpoint;

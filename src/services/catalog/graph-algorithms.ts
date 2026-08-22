@@ -43,18 +43,59 @@ function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], algo: s
   return { direction: dir, labels: steps[0].args.map((a) => a.value).filter((v): v is string => typeof v === 'string') };
 }
 
-/** The directed "flows src→tgt" adjacency for an edge scope, read as ONE store query. A `both` scope
- *  emits each edge in both directions; the label filter crosses as one `json_each` bind (never a
- *  row-count-sized IN-list). */
-function scopedEdges(store: GraphStore, scope: EdgeScope): { src: number; tgt: number }[] {
-  const where = scope.labels.length
+// ---------- substrate-A-iterated: an OLAP relaxation as ONE SQL statement per round ----------
+//
+// The compute stays in SQLite (locked decision #3): each round crosses the current `(id → v)` vector as
+// ONE `json_each` bind into a relaxation that JOINS the real `nodes`/`edges` tables, reads the new
+// vector, and repeats to a fixpoint. Only the O(V) vector crosses per round — the graph never enters JS
+// (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2, "OLAP iteration → substrate (A) ITERATED").
+//
+// The pure-JS `connectedComponents`/`pageRankScores`/`peerPressureClusters` below are kept as
+// differential ORACLES (a test asserts the SQL rounds agree with them), not the execution path.
+
+type Vec = ReadonlyMap<number, string | number>;
+
+/** The current vector as the ONE json bind a round reads (`[{id, v}]`). */
+const vecJson = (vec: Vec): string => JSON.stringify([...vec].map(([id, v]) => ({ id, v })));
+
+/** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". `out` reads
+ *  edges as-is, `in` swaps, `both` unions both directions. The label filter (if any) is ONE json_each
+ *  bind; the returned `labelBinds` are prepended to the round's binds (before the vector bind). */
+function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
+  const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
+  const filter = scope.labels.length
     ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
-  const binds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
-  const rows = store.query<{ src: number; tgt: number }>(`SELECT src, tgt FROM edges${where}`, binds);
-  if (scope.direction === 'out') return rows;
-  if (scope.direction === 'in') return rows.map((r) => ({ src: r.tgt, tgt: r.src }));
-  return rows.flatMap((r) => [{ src: r.src, tgt: r.tgt }, { src: r.tgt, tgt: r.src }]);
+  const base = `SELECT src, tgt FROM edges${filter}`;
+  const body = scope.direction === 'out' ? base
+    : scope.direction === 'in' ? `SELECT tgt AS src, src AS tgt FROM edges${filter}`
+    : `${base} UNION ALL SELECT tgt AS src, src AS tgt FROM edges${filter}`;
+  // `both`/directional forms repeat the filter, so its bind repeats too (positional `?`).
+  const binds = scope.direction === 'both' ? [...labelBinds, ...labelBinds] : labelBinds;
+  return { cte: `e(src, tgt) AS (${body})`, labelBinds: binds };
 }
+
+/** Drive a relaxation to a fixpoint. `round(prev)` runs ONE SQL statement (crossing `prev` as a json
+ *  bind) and returns the new vector; iteration stops when `converged(prev, next)` holds or at `maxIter`.
+ *  Default convergence is exact equality (label algorithms stabilise exactly); pageRank passes an
+ *  ε-threshold (floats never settle to bit-equality). */
+function iterateToFixpoint(
+  seed: Vec, round: (prev: Vec) => Map<number, string | number>, maxIter: number,
+  converged: (prev: Vec, next: Vec) => boolean = exactlyEqual,
+): Map<number, string | number> {
+  let cur: Map<number, string | number> = new Map(seed);
+  for (let i = 0; i < maxIter; i++) {
+    const next = round(cur);
+    if (converged(cur, next)) return next;
+    cur = next;
+  }
+  return cur;
+}
+
+const exactlyEqual = (prev: Vec, next: Vec): boolean => {
+  if (prev.size !== next.size) return false;
+  for (const [k, v] of next) if (prev.get(k) !== v) return false;
+  return true;
+};
 
 // ---------- mogwai.pageRank / .wcc / .peerPressure / .shortestPath — the OLAP algorithm layer ----------
 //
@@ -175,7 +216,20 @@ export function createWccService(store: GraphStore | undefined): Service {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
           const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          return { kind: 'relation-tuples', tuples: connectedComponents(nodes, scopedEdges(store, scope)) };
+          // Seed each component to the vertex's external-id STRING; each round takes the lexicographic
+          // MIN over {self} ∪ {neighbours} (the `e` CTE carries both directions for bothE). Fixpoint in
+          // ≤ diameter rounds; |V| is the safe backstop.
+          const seed: Vec = new Map(nodes.map((n) => [n.id, String(n.ext)]));
+          const { cte, labelBinds } = adjacencyCte(scope);
+          const sql = `WITH ${cte},
+            vec AS (SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.v') AS v FROM json_each(?)),
+            adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src
+                    UNION ALL SELECT id, v FROM vec)
+            SELECT n.id AS id, MIN(adj.v) AS v FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`;
+          const final = iterateToFixpoint(seed, (prev) =>
+            new Map(store.query<{ id: number; v: string }>(sql, [...labelBinds, vecJson(prev)]).map((r) => [r.id, r.v])),
+            nodes.length + 1);
+          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
         },
       };
     },
@@ -272,8 +326,38 @@ export function createPageRankService(store: GraphStore | undefined): Service {
         apply: async (): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
-          const nodes = store.query<{ id: number }>('SELECT id FROM nodes');
-          return { kind: 'relation-tuples', tuples: pageRankScores(nodes, scopedEdges(store, scope), alpha) };
+          const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+          const N = ids.length;
+          if (N === 0) return { kind: 'relation-tuples', tuples: [] };
+          const { cte, labelBinds } = adjacencyCte(scope);
+          // Out-degree per vertex over the scope (rank flows src→tgt); computed ONCE in SQL, read as an
+          // O(V) map. Sinks (no out-edge) redistribute their rank through the global teleport.
+          const outdeg = new Map<number, number>(
+            store.query<{ id: number; c: number }>(`WITH ${cte} SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src`, labelBinds).map((r) => [r.id, r.c]));
+          // The reported rank after the reference's first real iteration is 1/N for every vertex; the
+          // teleport for the NEXT round is derived from the current vector (PageRankVertexProgram:189-203).
+          const seed: Vec = new Map(ids.map((id) => [id, 1 / N]));
+          // Each round: messages[v] = Σ_{u→v} α·pr[u]/outdeg[u] (in SQL, joining the real edges), plus a
+          // teleport share localTerminal = teleport_k/N (teleport_k an O(V) scalar off the prev vector).
+          const sql = `WITH ${cte},
+            vec AS (SELECT json_extract(value,'$.id') AS id, CAST(json_extract(value,'$.v') AS REAL) AS v FROM json_each(?)),
+            od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
+            msg AS (SELECT e.tgt AS id, SUM(? * vec.v / od.c) AS m FROM e JOIN vec ON vec.id = e.src JOIN od ON od.id = e.src GROUP BY e.tgt)
+            SELECT n.id AS id, COALESCE(msg.m, 0) + ? AS v FROM nodes n LEFT JOIN msg ON msg.id = n.id`;
+          const teleportOf = (prev: Vec): number => {
+            let t = 0;
+            for (const [id, v] of prev) t += (1 - alpha) * (v as number) + ((outdeg.get(id) ?? 0) === 0 ? alpha * (v as number) : 0);
+            return t;
+          };
+          const converged = (prev: Vec, next: Vec): boolean => {
+            let delta = 0;
+            for (const [id, v] of next) delta += Math.abs((v as number) - (prev.get(id) as number));
+            return delta < PR_EPSILON;
+          };
+          const final = iterateToFixpoint(seed, (prev) =>
+            new Map(store.query<{ id: number; v: number }>(sql, [...labelBinds, vecJson(prev), alpha, teleportOf(prev) / N]).map((r) => [r.id, r.v])),
+            PR_MAX_ITERATIONS, converged);
+          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
         },
       };
     },
@@ -355,7 +439,23 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
           if (!store)
             throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
           const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          return { kind: 'relation-tuples', tuples: peerPressureClusters(nodes, scopedEdges(store, scope)) };
+          // Seed each cluster to the vertex's external id. Each round: every vertex tallies the votes of
+          // {itself} ∪ {its voters} (strength 1 each; `e` is voter→receiver) and adopts the max-total
+          // cluster, ties to the smallest cluster-id STRING (CAST … AS TEXT, matching the reference's
+          // .toString().compareTo). ROW_NUMBER picks the winner per vertex.
+          const seed: Vec = new Map(nodes.map((n) => [n.id, n.ext]));
+          const { cte, labelBinds } = adjacencyCte(scope);
+          const sql = `WITH ${cte},
+            vec AS (SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.v') AS v FROM json_each(?)),
+            votes AS (SELECT id, v AS c FROM vec
+                      UNION ALL SELECT e.tgt AS id, voter.v AS c FROM e JOIN vec voter ON voter.id = e.src),
+            tally AS (SELECT id, c, COUNT(*) AS total FROM votes GROUP BY id, c),
+            ranked AS (SELECT id, c, ROW_NUMBER() OVER (PARTITION BY id ORDER BY total DESC, CAST(c AS TEXT) ASC) AS rn FROM tally)
+            SELECT id, c AS v FROM ranked WHERE rn = 1`;
+          const final = iterateToFixpoint(seed, (prev) =>
+            new Map(store.query<{ id: number; v: string | number }>(sql, [...labelBinds, vecJson(prev)]).map((r) => [r.id, r.v])),
+            PP_MAX_ITERATIONS);
+          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
         },
       };
     },
