@@ -292,6 +292,30 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       });
     },
 
+    // ---- a path position: rejoin by id, rebuild the {t,v} node from the landed columns ----
+    elementNode(kind, id, fresh) {
+      const row = rowById(cteOf(kind, fresh), id, fresh);
+      // The landed columns ARE the wire payload — a vertex's `label` is a JSON name array and its
+      // `props` the {t,v} tree; wrap those in json() so they NEST as JSON rather than a quoted TEXT
+      // string (frameTypedNode reads a string otherwise), exactly as valueMapPairs does. An edge's
+      // label is a bare name and needs no wrap.
+      const asJson = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+      const payload: Expr = {
+        kind: 'json-object',
+        entries: [
+          ['id', col(row.id, 'id')],
+          ['label', kind === 'edge' ? col(row.id, 'label') : asJson(col(row.id, 'label'))],
+          ...(kind === 'edge'
+            ? [['src', col(row.id, 'src')] as const, ['tgt', col(row.id, 'tgt')] as const]
+            : []),
+          ['props', asJson(col(row.id, 'props'))],
+        ],
+        binary: false,
+      };
+      const node: Expr = { kind: 'json-object', entries: [['t', compilerText(kind)], ['v', payload]], binary: false };
+      return { kind: 'scalar', plan: make.project({ id: fresh('ben'), input: row, channels: [], type: typeOf(meta('n', 'json', true)), exprs: [['n', node]] }) };
+    },
+
     // ---- leaf (Mechanism B): rejoin to reconstitute the wire payload for a terminal bound element ----
     leafPayload(input, kind, opts, fresh) {
       const cte = cteOf(kind, fresh);

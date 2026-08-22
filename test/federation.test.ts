@@ -226,6 +226,33 @@ describe('mogwai.graph.federate — SUBGRAPH re-source and vertex→vertex movem
   });
 });
 
+// path() over a bound subgraph: the PATH channel is seeded at the bound source (position 0 = the
+// re-source vertex), EXTENDED at each hop (shared `movement`), and each position is REJOINED by id
+// through `source.elementNode` (Mechanism B, the leaf's per-position twin) — no base-table read. A
+// re-source `.V()` starts a FRESH path (`sg.traversal().V()` discards the stream), so a multi-hop walk
+// over the subgraph is structurally identical to the same walk run directly on the sibling.
+describe('mogwai.graph.federate — SUBGRAPH path() (id-carry positions rejoined)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const nameOf = (o: any) => o?.properties?.find((p: any) => p.label === 'name')?.value;
+  const pathNames = (p: any) => (p.objects ?? []).map(nameOf);
+  const paths = async (g: string, exec = 'home') =>
+    (await Promise.all((await mgr.executor(exec).framedAsync(g, {})).map(dec)))
+      .map(pathNames)
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+  test('.V().out("develops").path() — [developer, software] per develops edge, rejoined', async () => {
+    const got = await paths(sg('.V().out("develops").path()'));
+    expect(got).toEqual(await paths('g.V().out("develops").path()', 'crew'));
+    expect(got.length).toBeGreaterThan(0);
+    expect(got.every((p) => p.length === 2)).toBe(true); // two rejoined positions per path
+  });
+  test('.V().out("develops").in("develops").path() — 3 rejoined positions over multi-hop', async () => {
+    expect(await paths(sg('.V().out("develops").in("develops").path()')))
+      .toEqual(await paths('g.V().out("develops").in("develops").path()', 'crew'));
+  });
+});
+
 // has()/hasLabel() FILTER subgraph vertices against their landed {t,v} property tree / label array —
 // an EXISTS over the exploded json (multi-valued membership), so they compose anywhere a vertex is on
 // the bound stream: after .V() and after a movement hop alike.

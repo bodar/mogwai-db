@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
-import { elementPayload } from './element.ts';
+import { elementNode, elementPayload } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
@@ -141,6 +141,14 @@ export interface GraphSource {
    *  physical rows and their per-element order key. `BaseGraph` joins the `vertex_labels`/`labels` (or
    *  `edges`/`labels`) side tables; a bound graph explodes the landed JSON label array. */
   labelNames(input: Rel, kind: Elem, fresh: Minter): Rel;
+
+  /** A PATH POSITION — one element in a `path()` array, as the self-describing `{t, v: payload}` node
+   *  `pathPositions` appends, a SCALAR correlated on the position's id. `BaseGraph` reads the base tables
+   *  by rowid (`elementNode`); a bound graph REJOINS the landed relation by id to reconstitute the same
+   *  node (Mechanism B, the leaf's per-position twin). The id arrives as the raw `json_extract($.v)` off
+   *  the stored path entry — an INT rowid for the base, a possibly-string external id for a bound graph —
+   *  so neither side casts it. */
+  elementNode(kind: Elem, id: Expr, fresh: Minter): Expr;
 
   /** THE LEAF FRAMING — a terminal element relation → the wire PAYLOAD tuple (id, label, props[, src,
    *  tgt]). `BaseGraph` reads `nodes`/`edges`/`vertex_properties`/`labels` by id (`elementPayload`); a
@@ -412,6 +420,10 @@ export const BaseGraph: GraphSource = {
   },
 
   propertyStream: (input, kind, keys, fresh) => propertyRelation(input, kind, keys, fresh),
+
+  // A path position IS the base element node — `elementNode` already builds the `{t,v}` scalar over the
+  // physical tables, so the source method is that call with the vocabulary's argument order.
+  elementNode: (kind, id, fresh) => elementNode(id, kind, fresh),
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),
 };

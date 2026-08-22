@@ -6,7 +6,6 @@ import { TYPED_MEMBERS, type ListOf, type Shape } from '../../sql/kernel/render.
 import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../plan/alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
-import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
@@ -138,11 +137,11 @@ export function pathPositions(
     type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
   });
   const entry = col(members.id, 'pv');
-  const rowid: Expr = {
-    kind: 'cast',
-    arg: { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] },
-    to: 'int',
-  };
+  // The stored id, RAW — an INT rowid over the base graph, a possibly-string external id over a bound
+  // graph. `source.elementNode` rejoins by it (base: `nodes`/`edges`; bound: the landed relation), and
+  // neither side casts: a cast to int would corrupt a bound string uid, and json_extract already yields
+  // an integer for a base rowid, so the old cast was redundant there (census-invariant to drop).
+  const rowid: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] };
   const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
   // ONE `case` over the entry's own tag, whatever the path's length — which is the whole reason the entry
   // carries a tag at all. Two arms because only element objects reach the append today; a VALUE position
@@ -151,9 +150,9 @@ export function pathPositions(
     kind: 'case',
     whens: [[
       { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) },
-      elementNode(rowid, 'edge', fresh),
+      source.elementNode('edge', rowid, fresh),
     ]],
-    else: elementNode(rowid, 'vertex', fresh),
+    else: source.elementNode('vertex', rowid, fresh),
   };
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;

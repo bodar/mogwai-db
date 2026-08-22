@@ -4104,11 +4104,17 @@ export function lowerForeignResume(
   // order (the sibling's emission order — see the seed below), so a chain that DEMANDS an encounter
   // composes there. Elsewhere the demand declines unless an `order()` mints the encounter mid-chain
   // (exactly as an element `order()` does over the base graph). A bare homogeneous `…fold()` — which
-  // would demand the SOURCE's order the landed stream does not seed — still declines. `tracksPath` has
-  // no mid-chain mint at all, so it declines outright.
+  // would demand the SOURCE's order the landed stream does not seed — still declines.
   const seedsEncounter = isSubgraph && !rejoin;
   const ordersMidChain = steps.slice(from).some((s) => s.name === 'order');
-  if ((facts.demandsEncounter && !seedsEncounter && !ordersMidChain) || facts.tracksPath) return null;
+  // `tracksPath` DOES have a source seed over a bound graph: the PATH channel is seeded at position 0
+  // off the landed id (`seedPath` below, exactly as the base source seeds it), each hop EXTENDS it
+  // through the shared `movement`, and `path()` rejoins each position through `source.elementNode`. What
+  // is NOT built yet is a path chain that ALSO demands an encounter (the seed would have to carry both
+  // the path append and the order renumber), so that combination declines rather than seed a path
+  // without its order.
+  if (facts.tracksPath && facts.demandsEncounter) return null;
+  if (facts.demandsEncounter && !seedsEncounter && !ordersMidChain) return null;
   // The landed graph is the SOURCE a `BoundGraph` reads through. Each landed relation is declared ONCE
   // as a `fenced` (`AS MATERIALIZED`) CTE Plan binding over its rows, and every read — the stream seed,
   // each rejoin, the leaf — REFERENCES it by name (a `Ref`). That is Calcite's materialize-once
@@ -4151,7 +4157,23 @@ export function lowerForeignResume(
   // (`foreignRelation(withOrder)` — the order the sibling EMITTED the rows) only when the chain DEMANDS
   // one, because a collapse and an emission order are mutually exclusive (the base source seeds channels
   // by the same rule). A rejoin's per-parent pool / a homogeneous list stays id-only.
-  const seed = seedsEncounter
+  const seed = facts.tracksPath
+    ? (() => {
+      // The PATH channel seeded at position 0 (the source element), beside an inert `bulk` (=1) — a
+      // path-tracking traverser never collapses (`pathCarried` blocks every collapse), so bulk is
+      // carried only to match the shape the shared movement/leaf builders assume. Each hop appends to
+      // the path (`extendPath` in `movement`); `path()` frames it (`pathPositions`).
+      const channels = withChannel(BULK, PATH_CHANNEL);
+      return make.project({
+        id: fresh('bsp'), input: rejoined, channels,
+        type: typeOf(meta('id', 'any', true), ...carriedCols(channels)),
+        exprs: [['id', col(rejoined.id, 'id')],
+          ...channels.map((channel) => [channel.col,
+            channel.role === 'bulk' ? compilerInt(1)
+              : seedPath({ kind: 'element', elem: streamElem, id: col(rejoined.id, 'id') })] as const)],
+      });
+    })()
+    : seedsEncounter
     ? (() => {
       const withBulk = make.project({
         id: fresh('bsb'), input: rejoined, channels: BULK,
@@ -4495,7 +4517,23 @@ function detachedTail(
         type: typeOf(meta('id', 'any', true), meta(FOREIGN_ORD, 'int'), meta('bulk', 'int')),
         exprs: [['id', col(filtered.id, 'id')], [FOREIGN_ORD, col(filtered.id, FOREIGN_ORD)], ['bulk', compilerInt(1)]],
       });
-      const rel = ctx.ordered
+      // A re-root starts a FRESH path (`sg.traversal().V()` — TinkerPop's re-source discards the prior
+      // stream), so when the chain tracks a path the re-rooted element is position 0, seeded exactly as
+      // the bound source seed does. `tracksPath && demandsEncounter` declined at the resume, so an ordered
+      // encounter and a path never coexist on this stream — the branches stay disjoint.
+      const rel = ctx.tracksPath
+        ? (() => {
+          const channels = withChannel(BULK, PATH_CHANNEL);
+          return make.project({
+            id: fresh('bvp'), input: withBulk, channels,
+            type: typeOf(meta('id', 'any', true), ...carriedCols(channels)),
+            exprs: [['id', col(withBulk.id, 'id')],
+              ...channels.map((channel) => [channel.col,
+                channel.role === 'bulk' ? col(withBulk.id, 'bulk')
+                  : seedPath({ kind: 'element', elem: kind, id: col(withBulk.id, 'id') })] as const)],
+          });
+        })()
+        : ctx.ordered
         ? renumber(withBulk, [{ expr: col(withBulk.id, FOREIGN_ORD), dir: 'asc' }],
           [meta('id', 'any', true), ...carriedCols(withChannel(BULK, ENCOUNTER))], withChannel(BULK, ENCOUNTER), fresh)
         : make.project({
