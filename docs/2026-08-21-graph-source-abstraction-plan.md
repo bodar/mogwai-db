@@ -82,12 +82,21 @@ federate command that pushes a mutation to the sibling), not a write threaded th
 traversal. So `MUTATING_STEPS` are in `BOUND_HANDOFF_DENY` and decline permanently — this is a semantic
 wall, not a missing feature.
 
-**REMAINING (fail-closed today — but mostly UNBUILT features, not walls; the landed `{t,v}` tree + ids
-carry the data):**
-- **`valueMap(keys…)` over bound — LANDED.** `GraphSource.valueMapPairs` yields the per-key value arrays
-  (base tables, or the landed `{t,v}` tree for a bound graph); `elementValueMap` shapes them into the map.
-  `valueMap(true)` / `elementMap()` (the id/label TOKENS) fail closed over bound — `tokenRow` still reads
-  base tables for the external id + the label gate, not yet source-routed. `valueMap(keys…)` composes.
+**BOUND READ VOCABULARY — COMPLETE.** Every read composes over a landed subgraph through the ONE
+`GraphSource`-parameterised vocabulary: movement, `values`, `has`/`hasLabel`/`has(T.*)`, `label`/`id`,
+`labels`, `properties()` (+ `.value`/`.key`/`.element`/`.id`/meta), `valueMap()`/`valueMap(true)`/
+`elementMap()`, `path()`, plus the channels (`encounter`/`bulk`/`path`) and bound aggregation/order/group.
+What follows are the by-design exclusions and staged residue, not unbuilt reads:
+- **`valueMap()` / `valueMap(true)` / `elementMap()` over bound — LANDED (commit `1e49450`).**
+  `GraphSource.valueMapPairs` yields the per-key value arrays (base tables, or the landed `{t,v}` tree);
+  `elementValueMap` shapes them into the map. The id/label/endpoint TOKENS are source-routed too now:
+  `tokenRow`/`endpointRow` read `externalIdOf(row)`/`edgeLabelOf(row)` (the element's OWN id/label off the
+  anchor row, no re-scan), `hasAnyLabel` (the cheap zero-label gate), `labelArray` (the set-regime label),
+  and `externalId`/`labelNode` for the endpoints (which, over a bound edge, rejoin the landed VERTEX
+  relation — so an edge `elementMap()`'s IN/OUT entries carry the landed endpoints). Base efficiency held
+  (sql-hygiene baseline unchanged): the on-row reads stay direct, and `BaseGraph.externalId` delegates to
+  the compact `element.ts` form (an id is unique, so `firstOf`'s order/limit was a no-op). Answer-invariant
+  (census `{ran:1531}`, L3 1710 unchanged).
 - **`path` over bound — LANDED (commit `efb9245`).** Option A, as planned: the path channel is a stream
   fact like encounter/bulk (both already carried). Seeded at the bound source and the `.V()`/`.E()`
   re-root off the landed id (`seedPath`, exactly as the base source seeds it), EXTENDED per hop through
@@ -111,10 +120,11 @@ carry the data):**
   SegmentHost.compile`, so ONLY the federation landing path pays for it; an ordinary read stays `{t, v}`
   and is byte-invariant (sql-hygiene: 0 spine diffs). This was the last landed-DATA gap; it was never an
   engine wall.
-- **`valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
-  (`elementValueMap` scans base tables); `valueMap(keys…)` composes off the landed tree, `valueMap(true)`/
-  `elementMap()` (the id/label TOKENS) still fail closed until `tokenRow` is source-routed.
-- **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline.
+- **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline (out of scope by design).
+- **FTS / `trigramSeek` over bound** — no landed FTS index; `has(containing…)` would be a linear JSON scan
+  or a decline. Decide when reached.
+- **Mechanism-B leaf UNIFICATION** (step 5) — the detached framing still covers the bound leaf; folding it
+  into `source.leafPayload` everywhere is staged, not required for flow-through.
 - Mechanism B for the BASE leaf is already `source.leafPayload` (= `elementPayload`); no further work.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
