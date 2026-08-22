@@ -4,9 +4,15 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { and, eq, meta, typeOf, type Minter } from './build.ts';
-import { foreignPayloadCols } from './foreign.ts';
+import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
 import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
+
+/** The columns a landed relation's Plan binding (and every `Ref` to it) declares: the wire payload plus
+ *  the `ord` emission-order column (`foreignRelation(withOrder)`), from which the seed and `.V()`/`.E()`
+ *  re-root mint the `encounter` channel. Every read projects the subset it needs and ignores `ord`. */
+export const landedCols = (kind: Elem): readonly import('../../rel/types.ts').ColMeta[] =>
+  [...foreignPayloadCols(kind), meta(FOREIGN_ORD, 'int')];
 
 // ---------- BoundGraph — a GraphSource over an INJECTED graph, id-carry + rejoin ----------
 //
@@ -65,7 +71,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
   const cteOf = (kind: Elem, fresh: Minter): Rel => {
     const name = kind === 'edge' ? edgeBinding : vertexBinding;
     if (!name) throw new Error(`boundGraph: no landed ${kind} relation to traverse`); // detachedTail pre-checks; a throw is a clear query failure, not a silent wrong answer
-    return make.ref({ id: fresh('bref'), name, channels: [], type: typeOf(...foreignPayloadCols(kind)) });
+    return make.ref({ id: fresh('bref'), name, channels: [], type: typeOf(...landedCols(kind)) });
   };
 
   return {

@@ -46,9 +46,9 @@ import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabe
 import { BARE_LIST, collectionRetype, correlatedListMembers, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint } from './element.ts';
-import { foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
+import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
-import { boundGraph } from './boundgraph.ts';
+import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -4069,16 +4069,6 @@ export function lowerForeignResume(
   const fresh = minter();
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
-  // A landed relation carries no channels — the rows crossed a segment boundary as detached references,
-  // so nothing survived to seed a bulk, an encounter or a path from. A resumed chain that DEMANDS one
-  // therefore declines rather than compiling a plan with the column silently missing (§12, order and
-  // determinism) — UNLESS a subgraph traversal MINTS its own order with an `order()` step, which seeds
-  // the encounter mid-chain exactly as an element `order()` does over the base graph. So a bound
-  // `…order().by(k).…fold()` composes (the fold collects in `order()`'s order), while a bare
-  // `…fold()` — which would demand the SOURCE's order the landed stream cannot provide — still declines.
-  // `tracksPath` has no such mid-chain mint, so it declines outright.
-  const ordersMidChain = steps.slice(from).some((s) => s.name === 'order');
-  if ((facts.demandsEncounter && !ordersMidChain) || facts.tracksPath) return null;
   // A SUBGRAPH result is MIXED — edges (the graph, carrying `src`/`tgt` adjacency) plus their incident
   // vertices, WITH data (`mogwai.graph.federate` `.with("subgraph", true)`). A normal federated result
   // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
@@ -4088,6 +4078,16 @@ export function lowerForeignResume(
   const edgeRows = rows.filter((r) => r.kind === 'edge');
   const isSubgraph = edgeRows.length > 0 && vertexRows.length > 0;
   const streamElem: Elem = isSubgraph ? 'edge' : elem;
+  // A landed relation carries no channels by default — the rows crossed a segment boundary as detached
+  // references. But a SUBGRAPH source-form seed CAN carry an `encounter` minted from the landed array
+  // order (the sibling's emission order — see the seed below), so a chain that DEMANDS an encounter
+  // composes there. Elsewhere the demand declines unless an `order()` mints the encounter mid-chain
+  // (exactly as an element `order()` does over the base graph). A bare homogeneous `…fold()` — which
+  // would demand the SOURCE's order the landed stream does not seed — still declines. `tracksPath` has
+  // no mid-chain mint at all, so it declines outright.
+  const seedsEncounter = isSubgraph && !rejoin;
+  const ordersMidChain = steps.slice(from).some((s) => s.name === 'order');
+  if ((facts.demandsEncounter && !seedsEncounter && !ordersMidChain) || facts.tracksPath) return null;
   // The landed graph is the SOURCE a `BoundGraph` reads through. Each landed relation is declared ONCE
   // as a `fenced` (`AS MATERIALIZED`) CTE Plan binding over its rows, and every read — the stream seed,
   // each rejoin, the leaf — REFERENCES it by name (a `Ref`). That is Calcite's materialize-once
@@ -4100,7 +4100,9 @@ export function lowerForeignResume(
   const bindings: Binding[] = [];
   const declare = (landedRows: readonly ForeignRow[], kind: Elem): string => {
     const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
-    const materialized = make.materialize({ id: fresh('bgm'), input: foreignRelation(landedRows, kind, fresh), channels: [], type: typeOf(...foreignPayloadCols(kind)), name, fenced: true });
+    // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
+    // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
+    const materialized = make.materialize({ id: fresh('bgm'), input: foreignRelation(landedRows, kind, fresh, [], undefined, true), channels: [], type: typeOf(...landedCols(kind)), name, fenced: true });
     bindings.push({ name, node: materialized });
     return name;
   };
@@ -4111,20 +4113,29 @@ export function lowerForeignResume(
   // The initial stream references the landed relation (the edges for a subgraph, else the one matching
   // `elem`) by name, exactly as every downstream read does.
   const streamBinding = isSubgraph || streamElem === 'edge' ? edgeBinding! : vertexBinding!;
-  const landed: Rel = make.ref({ id: fresh('bref'), name: streamBinding, channels: [], type: typeOf(...foreignPayloadCols(streamElem)) });
+  const landed: Rel = make.ref({ id: fresh('bref'), name: streamBinding, channels: [], type: typeOf(...landedCols(streamElem)) });
   // A MID-traversal barrier's pool is per-CALL, not per-parent: the sibling ran once over the distinct
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
   const rejoined = rejoin ? foreignRejoin(landed, streamElem, rejoin.values, rejoin.injection, fresh) : landed;
-  // ID-CARRY: the stream carries only the element ID — the payload is REJOINED at each read through the
-  // `BoundGraph`. So the landed payload columns are projected AWAY here; the shared movement/leaf builders
-  // assume an id-carrying stream (`id` + channels), and a stream still holding the landed payload would
-  // widen every downstream join past its declared type.
-  const seed = make.project({
-    id: fresh('bsd'), input: rejoined, channels: [], type: typeOf(meta('id', 'any', true)),
-    exprs: [['id', col(rejoined.id, 'id')]],
-  });
+  // ID-CARRY: the stream carries the element ID (+ channels) — the payload is REJOINED at each read
+  // through the `BoundGraph`. The landed payload columns are projected AWAY; the shared movement/leaf
+  // builders assume an id-carrying stream, and a stream still holding the landed payload would widen
+  // every downstream join past its declared type.
+  //
+  // CHANNELS OVER A BOUND GRAPH: a source-form subgraph seed mints an `encounter` from the landed array
+  // order (`foreignRelation(withOrder)` exposes the json_each index — the order the sibling EMITTED the
+  // rows), so a bound `fold()`/`order()`/reducer collects in the sibling's own order rather than an
+  // arbitrary scan order. Elsewhere (a rejoin's per-parent pool, a homogeneous list) the seed stays
+  // id-only and an encounter demand declines upstream.
+  const seed = seedsEncounter
+    ? renumber(rejoined, [{ expr: col(rejoined.id, FOREIGN_ORD), dir: 'asc' }],
+      [meta('id', 'any', true), ...carriedCols(withChannel([], ENCOUNTER))], withChannel([], ENCOUNTER), fresh)
+    : make.project({
+      id: fresh('bsd'), input: rejoined, channels: [], type: typeOf(meta('id', 'any', true)),
+      exprs: [['id', col(rejoined.id, 'id')]],
+    });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
   return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
@@ -4439,8 +4450,12 @@ function detachedTail(
       const seeded = source.elementScan(kind, step.args, fresh);
       if (!seeded) return null;
       const filtered = seeded.pred ? make.filter({ id: fresh('bvf'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred }) : seeded.scan;
-      // ID-CARRY: the re-rooted stream carries only the id; the landed payload is rejoined at each read.
-      const rel = make.project({ id: fresh('bvi'), input: filtered, channels: [], type: typeOf(meta('id', 'any', true)), exprs: [['id', col(filtered.id, 'id')]] });
+      // ID-CARRY + channels: the re-rooted stream carries the id and MINTS an `encounter` from the landed
+      // order (`FOREIGN_ORD` — the sibling's emission order the binding carries), so `.V().…fold()`
+      // collects deterministically in that order; the landed payload is rejoined at each read.
+      const channels = withChannel([], ENCOUNTER);
+      const rel = renumber(filtered, [{ expr: col(filtered.id, FOREIGN_ORD), dir: 'asc' }],
+        [meta('id', 'any', true), ...carriedCols(channels)], channels, fresh);
       return detachedTail(rel, kind, steps, from + 1, ctx, fresh, subgraph);
     }
     // MOVEMENT (out/in/both AND the endpoint reads inV/outV/bothV) through the SHARED `movement` builder,
@@ -4470,7 +4485,13 @@ function detachedTail(
     const counted = countTail(seed, fresh);
     return continueAs(counted.rel, counted.framing, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
-  if (step.name === 'dedup' && argValues(step).length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms) {
+  // `dedup()` collapses by element identity (`id` functionally determines the tuple). A whole-row
+  // `Distinct` IS dedup-by-id only when the row carries no row-unique channel; once the stream carries an
+  // `encounter` (a subgraph seed mints one) every row differs there, so dedup must group by identity —
+  // which the MAIN FOLD does. So the shortcut is taken only for a channel-less stream; otherwise it falls
+  // through to the handoff.
+  if (step.name === 'dedup' && argValues(step).length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms
+    && !seed.channels.some((channel) => channel.role === 'encounter')) {
     const deduped = make.distinct({ id: fresh('dtd'), input: seed, channels: seed.channels, type: seed.type });
     return detachedTail(deduped, elem, steps, from + 1, ctx, fresh, subgraph);
   }
@@ -4489,14 +4510,16 @@ function detachedTail(
     return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh);
   }
   // labels() — the label FAN-OUT, rejoined from the landed relation and order-minted exactly as the base
-  // `labels()` is: `source.labelNames` supplies (name, `lord`) rows, this mints the emission order. A
-  // bound stream carries no arriving encounter (a resume that demanded one declined at `lowerForeign`),
-  // so the order is `lord` alone (label-dictionary order, base; JSON-array order, bound).
+  // `labels()` is: `source.labelNames` supplies (name, `lord`) rows, this mints the emission order. Where
+  // the bound stream ARRIVES with an encounter (a subgraph seed now seeds one), that is the cross-origin
+  // order and `lord` is the within-vertex tiebreak; with none, `lord` alone (label-dictionary order,
+  // base; JSON-array order, bound) — the same two-key rule the base `labels()` uses.
   if (step.name === 'labels' && !argValues(step).length && !step.modulators?.length && !step.optionArms) {
     const named = source.labelNames(seed, elem, fresh);
-    const channels = withChannel(named.channels, ENCOUNTER);
+    const arriving = encounterOf(named.channels);
+    const channels = arriving ? named.channels : withChannel(named.channels, ENCOUNTER);
     const ranked = renumber(named,
-      [{ expr: col(named.id, 'lord'), dir: 'asc' }, { expr: col(named.id, 'lord'), dir: 'asc' }],
+      [{ expr: col(named.id, arriving ? arriving.col : 'lord'), dir: 'asc' }, { expr: col(named.id, 'lord'), dir: 'asc' }],
       [meta('v', 'text'), ...carriedCols(channels)], channels, fresh);
     return scalarTail(ranked, { kind: 'scalar', type: STATIC('string') }, steps, from + 1, false, ctx, fresh);
   }

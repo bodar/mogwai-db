@@ -63,6 +63,7 @@ export function foreignRelation(
   fresh: Minter,
   extra: readonly ColMeta[] = [],
   extraOf: (row: ForeignRow) => readonly unknown[] = () => [],
+  withOrder = false,
 ): Rel {
   const cols = [...foreignPayloadCols(elem), ...extra];
   const payload = JSON.stringify(rows.map((row) => cellsOf(row, extraOf(row))));
@@ -70,11 +71,21 @@ export function foreignRelation(
     id: fresh('fgx'), channels: [], expr: lit(payload, 'text'), as: { value: CELL.value, ord: CELL.ord },
     type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
   });
+  // `withOrder` keeps the json_each KEY (the array index) as an `ord` column — the order the sibling
+  // EMITTED these rows, which is the only order a landed stream can carry. The seed renumbers by it to
+  // mint the `encounter` channel, so a bound `fold()`/`order()` collects in the sibling's own order.
+  const ordCol = withOrder ? [meta(CELL.ord, 'int')] as const : [];
   return make.project({
-    id: fresh('fgp'), input: exploded, channels: [], type: typeOf(...cols),
-    exprs: cols.map((column, at) => [column.name, cellAt(col(exploded.id, CELL.value), at)] as const),
+    id: fresh('fgp'), input: exploded, channels: [], type: typeOf(...cols, ...ordCol),
+    exprs: [
+      ...cols.map((column, at) => [column.name, cellAt(col(exploded.id, CELL.value), at)] as const),
+      ...(withOrder ? [[CELL.ord, col(exploded.id, CELL.ord)] as const] : []),
+    ],
   });
 }
+
+/** The name of the emission-order column `foreignRelation(…, withOrder=true)` carries. */
+export const FOREIGN_ORD = CELL.ord;
 
 /** `json_extract(<row>, '$[i]')` — a landed row's cell by position. The path is a compiler constant,
  *  so it splices literally and the statement text stays fixed however many rows landed. */

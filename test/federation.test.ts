@@ -365,10 +365,22 @@ describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project vi
     expect(await one(sg('.V().group().by(T.label).by(__.count())')))
       .toEqual(await one(`${crewBoth}.group().by(T.label).by(__.count())`, 'crew'));
   });
-  // NOTE: a group VALUE that FOLDS (`by(__.values("name").fold())`) collects in the SOURCE order the
-  // landed stream cannot provide (no encounter channel over a bound graph — the plan's deferred
-  // channels-over-bound), so it fails closed until that channel is seeded. `by(__.count())` needs no
-  // order and composes.
+  test('group().by(T.label).by(name-fold) — group value folds in the landed order', async () => {
+    expect(await one(sg('.V().group().by(T.label).by(__.values("name").fold())')))
+      .toEqual(await one(`${crewBoth}.group().by(T.label).by(__.values("name").fold())`, 'crew'));
+  });
+
+  // CHANNELS OVER A BOUND GRAPH: a source-form subgraph seed mints an `encounter` from the landed
+  // array order, so a SOURCE-order fold() (no order() step) is deterministic and preserves the stream
+  // order. Self-consistent oracle: fold(stream) == the same stream collected, both in landed order.
+  test('.V().values(name).fold() collects in the seed (landed) order', async () => {
+    expect(await one(sg('.V().values("name").fold()')))
+      .toEqual(await list(sg('.V().values("name")')));
+  });
+  test('.inV().values(name).fold() preserves order after a movement hop', async () => {
+    expect(await one(sg('.inV().values("name").fold()')))
+      .toEqual(await list(sg('.inV().values("name")')));
+  });
   test('project(name,label).by(name).by(T.label) — a record per vertex', async () => {
     expect(await list(sg('.V().order().by("name").project("n","l").by("name").by(T.label)')))
       .toEqual(await list(`${crewBoth}.order().by("name").project("n","l").by("name").by(T.label)`, 'crew'));
