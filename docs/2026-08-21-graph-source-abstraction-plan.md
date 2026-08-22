@@ -37,13 +37,31 @@ duplicate inline SQL. `byExpr` is base-only today (a bound element reads label t
 in `detachedTail`, never here), so it calls `BaseGraph` directly; threading `ctx.source` through `byExpr`'s
 ~22 call sites is the step for when a bound `by()` first reaches it.
 
-**REMAINING (small, deferred):**
-- The vertex `labels()` FAN-OUT (`lower.ts`, the `labels` step) still spells its two-join name fan-out
-  inline. Its order-mint (`renumber` + encounter) is stream vocabulary; only the fan-out is source. A
-  `source.labelNames(input, kind)` would factor it AND unlock bound `labels()` (a `detachedTail` branch)
-  — combinatorial completeness, so worth doing, but the base/bound order-key differs (label-dict id vs
-  JSON-array index) so the vocabulary renumbers by a source-supplied `lord`.
-- Full `byExpr` `ctx.source` threading (above) — no consumer until a bound `by()`/`group()`.
+**Step 2 label cluster — FULLY LANDED.** `labels()` fan-out routes through `source.labelNames`
+(BaseGraph joins the side tables; BoundGraph explodes the landed array), and bound `labels()` composes
+(a `detachedTail` branch). `byExpr`'s token AND property arms route through `source` (`externalId`/
+`labelScalar`/`propertyScalar`).
+
+**BOUND AGGREGATION — LANDED.** `source: GraphSource` is threaded as an explicit parameter (like
+`fresh`) through the entire `by()`/projection cascade — byExpr, byNode/byField, math/format, sack,
+list, the group + record + path + collection machinery, lowerMatch — NOT shoehorned onto a carry
+object. Once a bound subgraph's source-position steps are done, `detachedTail` HANDS OFF to the main
+fold (`continueAs`) with `ctx.source = BoundGraph`, so `group()`/`groupCount()`/`order()`/`project()`/
+the reducers compose over the injected graph through the ONE vocabulary. Fail-closed via
+`BOUND_HANDOFF_DENY` (writes + `properties()`/`valueMap()` element-bag reads that scan base tables by a
+foreign id) and the encounter guard (a chain demanding a SOURCE order the landed stream cannot provide
+declines unless an `order()` mints it). `federation.test` covers order/groupCount/group.by(count)/
+project/order.fold, oracled on crew; `test:cf-limits` 2099 green (DO-legal).
+
+**REMAINING (deferred, fail-closed):**
+- **Channels over a bound graph** — the landed seed carries no `encounter`/`bulk`/`path`, so a
+  SOURCE-order collect (`…values().fold()` with no `order()`, a group VALUE that folds) and convergent-
+  walk collapse over a bound graph decline. Seeding an `encounter` from the landed array order (the
+  sibling's emission order) is the "gains order/collapse for free" the plan foresaw — the next increment.
+- **`properties()` / `valueMap()` over bound** — element-bag reads not yet routed through `GraphSource`
+  (`propertyRelation`/`elementValueMap` scan base tables); `properties()` additionally has no landed
+  identity (a detached VertexProperty has no rowid), so it is a genuine wall.
+- **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline.
 - Mechanism B for the BASE leaf is already `source.leafPayload` (= `elementPayload`); no further work.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
