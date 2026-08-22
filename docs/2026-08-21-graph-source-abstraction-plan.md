@@ -88,9 +88,17 @@ carry the data):**
   (base tables, or the landed `{t,v}` tree for a bound graph); `elementValueMap` shapes them into the map.
   `valueMap(true)` / `elementMap()` (the id/label TOKENS) fail closed over bound — `tokenRow` still reads
   base tables for the external id + the label gate, not yet source-routed. `valueMap(keys…)` composes.
-- **`path` over bound — UNBUILT, not a wall.** The path channel is a stream fact like encounter/bulk
-  (both now carried): seed it at the bound source, extend through bound movement (`extendPath` over the
-  bound ids), and rejoin each path step's payload at framing (Mechanism-B per step). Moderate.
+- **`path` over bound — LANDED (commit `efb9245`).** Option A, as planned: the path channel is a stream
+  fact like encounter/bulk (both already carried). Seeded at the bound source and the `.V()`/`.E()`
+  re-root off the landed id (`seedPath`, exactly as the base source seeds it), EXTENDED per hop through
+  the shared `movement` (`extendPath` over the bound ids), and each position REJOINED by id at framing
+  through the new `GraphSource.elementNode` — Mechanism B, the leaf's per-position twin (base: the
+  physical tables; bound: rebuild the `{t,v}` node from the landed relation's columns). `pathPositions`
+  routes its identity element arm through `source.elementNode` and DROPS the cast-to-int on the extracted
+  id (redundant over the base — json_extract already yields an integer, census-invariant; corrupting over
+  a bound string uid otherwise). `tracksPath` no longer declines outright. **One combination still fails
+  closed:** a path chain that ALSO demands an encounter (the seed would have to carry both the path append
+  and the order renumber) — not built, refuses rather than seed a path without its order.
 - **`properties()` over bound — LANDED (stream + value/key/element/id/meta).** `GraphSource.propertyStream`
   explodes the landed tree into the `PROP`-row shape (base tables over the base graph); `.value()`,
   `.key()`, `.element()`, and terminal VertexProperty framing all compose. **`.id()` and meta-properties
