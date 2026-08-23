@@ -170,8 +170,17 @@ this target and the pair-keyed reshape are one build, not two.
    unchanged. `barrier_relation` renamed to `barrier_state`; the shape centralised into `STATE_INSERT`
    + `VEC` (`graph-algorithms.ts`) so the Tier-2 consumers extend one place; delta helpers join on the
    full `(id,scope,channel)` key. One authority, no `SingleNodeValue` fork.
-2. **Multi-channel decorate** (`DecorateSpec` plural). No new algorithm yet — a differential that a
-   two-channel decorate reads back both channels.
+2. ✅ **LANDED (`48c1470` substrate, `3c520d0` consumer) — multi-channel decorate + `mogwai.hits`.**
+   `DecorateSpec` is now `{ channels: {key, channel, vtype}[], seedFromInput? }`; `decorateGraph`/
+   `decorateBinding` take a `channel` (name `_mogwai_decorate_r<run>_c<channel>`, filter pinned
+   `scope=0 AND channel=<channel>`) and the decorate resume STACKS one layer per channel (reusing item
+   4's stacking). The consumer that makes it real is **HITS** (`mogwai.hits`, call-only, GDS-style):
+   hub=channel 0, auth=channel 1, a faithful SQL replay of the Wikipedia iteration GDS's own test
+   asserts against (`vendor/gds/.../hits/HitsTest.java` `PseudoCodeHits`, GPLv3 — re-expressed). L2 norm
+   in JS (no `sqrt` SQL fn assumed). Oracle test ports GDS's 8-node graph + pseudocode, matches to 10
+   digits at 30 iters; validated on real workerd (olapContract — the two-channel read + in-place UPDATE
+   normalise). **Corpus absence is NOT a skip** (root SCOPE.md): `call()` is the extension surface, GDS
+   the reference + test source. This is the workflow for the rest of the Tier-2 family.
 3. **Weighted shortestPath (§5)** — the relaxation barrier + reconstruction, un-defers `9b77dd5`. **L3 +3.**
    - ✅ **3a LANDED (`2b48641`) — the relaxation core.** `relaxWeighted` (Bellman-Ford dist, scope=source,
      channel 0) on `barrier_state` — the first scope+channel consumer, reusing `iterateInSql`. Design
@@ -252,13 +261,13 @@ this target and the pair-keyed reshape are one build, not two.
    Foreign→barrier (`federate().pageRank()`) is deliberately NOT done — pageRank's `apply` is a global
    store compute that ignores the detached landed stream, so the composition is semantically murky;
    it stays fail-closed (`resumed`'s named-step error) until a real consumer appears.
-5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness or node-similarity is
-   simplest; Brandes adds the reverse-pass retention policy). ⚠️ **Genuinely ahead of demand** —
-   closeness/betweenness/node-similarity/Brandes are NOT in the corpus and none is registered as a
-   service, so this builds the substrate AND a brand-new algorithm nobody has asked for. Unlike items 4
-   and 6 (which compose EXISTING working features — combinatorial completeness, the job), item 5's
-   consumers are net-new features. Weigh it against 6 accordingly; the `scope` KEY it needs is shared
-   with 6, so 6 can carry the scope-dimension work and 5 can follow when a consumer is wanted.
+5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness/harmonic per-(source,node),
+   node-similarity per-(u,v); Brandes adds the reverse-pass retention policy). These are the GDS
+   centrality family, built the way HITS was: `call()` is the extension surface, GDS the reference +
+   test-oracle source — corpus absence is NOT a reason to skip (root SCOPE.md; the earlier "ahead of
+   demand / new surface" framing was WRONG). The `scope` KEY it needs is shared with item 6, so whichever
+   lands first carries the scope-dimension work. GDS refs at the pin: `vendor/gds/algo/.../closeness/`,
+   `.../betweenness/` (Brandes), `.../similarity/`; each has a test to port like HITS's.
 6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
    so a barrier inside one must too. Two regimes, split by whether the body flattens:
    - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded
