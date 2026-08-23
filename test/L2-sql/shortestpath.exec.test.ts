@@ -106,16 +106,19 @@ describe('shortestPath() — mogwai.shortestPath recursive-CTE (unweighted)', ()
       .toEqual(['daniel,gremlin,stephen', 'daniel,tinkergraph,stephen'].sort());
   });
 
-  test('g_V_hasXname_markoX_..._targetXhasXname_joshXX_distanceXweightX — least-weight path', async () => {
+  // WEIGHTED distance is DEFERRED to the BSP relaxation substrate (Tier 2 — Bellman-Ford, a barrier like
+  // pageRank/wcc/peerPressure). The recursive-CTE walk enumerates every simple path and cannot prune by
+  // distance inside the term (P3 / repeat-two-regimes §1a), so it is exponential and hangs on a dense
+  // graph. These pin the FAIL-CLOSED deferral; Phase 2 (BSP shortestPath) restores them as real answers.
+  test('weighted distance fails closed — deferred to the BSP relaxation substrate', async () => {
     const store = seeded(MODERN_SEED);
-    // marko->lop->josh (0.4+0.4=0.8) beats the direct marko-knows->josh (1.0).
-    expect(seqs(await run(store, `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","josh")).with("~tinkerpop.shortestPath.distance", "weight")`)))
-      .toEqual(['marko,lop,josh']);
+    expect(run(store, `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","josh")).with("~tinkerpop.shortestPath.distance", "weight")`))
+      .rejects.toThrow(/weighted distance .* deferred to the BSP relaxation substrate/);
   });
 
-  test('g_V_hasXname_vadasX_shortestPath_distanceXweightX_maxDistanceX1_3X — weighted cap', async () => {
+  test('weighted maxDistance (non-integer cap) fails closed', async () => {
     const store = seeded(MODERN_SEED);
-    expect(seqs(await run(store, `g.V().has("name","vadas").shortestPath().with("~tinkerpop.shortestPath.distance", "weight").with("~tinkerpop.shortestPath.maxDistance", 1.3)`)))
-      .toEqual(['vadas', 'vadas,marko', 'vadas,marko,lop', 'vadas,marko,lop,josh', 'vadas,marko,lop,peter'].sort());
+    expect(run(store, `g.V().has("name","vadas").shortestPath().with("~tinkerpop.shortestPath.distance", "weight").with("~tinkerpop.shortestPath.maxDistance", 1.3)`))
+      .rejects.toThrow(/weighted distance .* deferred to the BSP relaxation substrate/);
   });
 });

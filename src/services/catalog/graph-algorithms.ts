@@ -159,15 +159,6 @@ const SP_TARGET = '~tinkerpop.shortestPath.target';
 const SP_DISTANCE = '~tinkerpop.shortestPath.distance';
 const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
 
-/** The `~tinkerpop.shortestPath.distance` weight-property key, or `undefined` when unweighted. The
- *  reference takes a property NAME (`distanceProperty` → `__.values(name)`); a non-string is refused. */
-function distanceKeyOf(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string')
-    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(value)}`);
-  return value;
-}
-
 /** Parse a `~tinkerpop.shortestPath.target` value — an anonymous vertex traversal used as an ENDPOINT
  *  predicate — to its body IR (the steps after the source root), or `undefined` when no target is set.
  *  Same read as `edgeScopeOf`: a `TraversalParam` carries the serialized gremlin; our parser roots at a
@@ -202,25 +193,29 @@ export const shortestPathService: Service = {
         throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
 
       const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
-      // A distance PROPERTY key makes the search weighted (least edge-weight sum, not fewest hops).
-      const distanceKey = distanceKeyOf(site.params[SP_DISTANCE]);
-      // maxDistance is a HOP cap when unweighted (prunes the walk) and a WEIGHT cap when weighted
-      // (filters the final shortest distance) — the reference's `distanceEqualsNumberOfHops` split.
+      // WEIGHTED shortestPath (a `~tinkerpop.shortestPath.distance` weight key) is DEFERRED to the BSP
+      // relaxation substrate. The recursive-CTE walk below enumerates every SIMPLE path; a min-distance
+      // relaxation cannot prune INSIDE a recursive term (P3 / repeat-two-regimes §1a — no aggregate over
+      // the accumulation), so on a dense graph (grateful `followedBy`) it is exponential and reads as a
+      // hang (the §7.1 cost wall — measured: L3 timeout, bun at 100% CPU). Weighted paths are Tier 2 =
+      // Bellman-Ford iterative relaxation, a barrier like pageRank/wcc/peerPressure — see
+      // docs/2026-07-24-graph-algorithms-plan.md. Fail closed until that lands, never mis-execute.
+      if (SP_DISTANCE in site.params)
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a weighted distance (~tinkerpop.shortestPath.distance) is deferred to the BSP relaxation substrate — the recursive-CTE walk cannot prune by distance and is exponential on dense graphs`);
+      // maxDistance is a HOP cap (unweighted) that PRUNES the walk. A non-integer value is a weighted cap,
+      // which only the deferred weighted path uses.
       let maxHops: number | undefined;
-      let maxWeight: number | undefined;
       if (SP_MAX_DISTANCE in site.params) {
         const md = site.params[SP_MAX_DISTANCE];
-        if (typeof md !== 'number')
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
-        if (distanceKey !== undefined) maxWeight = md;
-        else if (Number.isInteger(md)) maxHops = md;
-        else throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: an unweighted maxDistance must be an integer hop count`);
+        if (typeof md !== 'number' || !Number.isInteger(md))
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is a weighted cap, deferred with weighted distance`);
+        maxHops = md;
       }
       const includeEdges = SP_INCLUDE_EDGES in site.params;
       const target = targetBody(site.params[SP_TARGET]);
 
       const { input, elem, source } = site.stream;
-      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, distanceKey, maxWeight, target }, site.child!, site.fresh);
+      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, site.child!, site.fresh);
       return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
     },
   }),
