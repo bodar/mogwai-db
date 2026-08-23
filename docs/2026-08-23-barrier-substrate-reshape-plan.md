@@ -259,10 +259,20 @@ this target and the pair-keyed reshape are one build, not two.
    and 6 (which compose EXISTING working features — combinatorial completeness, the job), item 5's
    consumers are net-new features. Weigh it against 6 accordingly; the `scope` KEY it needs is shared
    with 6, so 6 can carry the scope-dimension work and 5 can follow when a consumer is wanted.
-6. **Barrier-in-body by promotion (§6)** — tree Plan + batch promotion, reusing §5's `scope`.
-   Unbounded-repeat stays fail-closed. This is a COMPOSITION target (`group().by(__.call(pageRank))`,
-   `local(__.…pageRank())` — pageRank works, group/local work, so nesting must), and item 4's
-   `planOf` re-entry is its prerequisite (now landed). The big one.
+6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
+   so a barrier inside one must too. Two regimes, split by whether the body flattens:
+   - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded
+     `repeat(body).times(n)` already unrolls to a FLAT sequence of phases (`unrollFixedRepeat`), so a
+     barrier `call()` there becomes n SEQUENTIAL top-level calls that item 4's chaining drives — ZERO
+     tree-Plan machinery. Admitted `call` to `unrollableBodyStep` (non-emit only; emit = union arm =
+     the promotion case); a `call` this route can't chain fails closed at its resume; the widening is
+     not suppressed by `withoutStrategies(RepeatUnrollStrategy)`. L3 1739, census flat.
+   - **Slice 2 (the big one) — per-parent nesting by PROMOTION** (`local`, `union` arm, `by`-child,
+     and the UNBOUNDED-repeat body which cannot unroll). Needs the tree Plan + drive-as-stack + a
+     tree-aware finder + the `scope=parent` key (§4·1, shared with item 5). ⚠️ For the OLAP barriers
+     this also hits the **graph-filter blocker** ([[olap-decorate-substrate]] — per-group pageRank is a
+     subgraph-scoped compute, unresolved), so its clean consumer is not yet obvious; unbounded-repeat
+     bodies stay P3 fail-closed forever regardless. Weigh against resolving graph-filter first.
 
 Items 1–4 are the shortestPath Phase 2 rebuild in general clothing plus its chaining; 5–6 are the
 nesting + Tier-2 centrality reach. Each is an independently green push.
