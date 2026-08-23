@@ -179,10 +179,31 @@ this target and the pair-keyed reshape are one build, not two.
      `dist[s][v] = dist[s][u] + w`, so reconstruction derives from dist alone. New `changedOrNew`
      fixpoint (LEFT JOIN) for the sparse frontier. Tested: correct on modern, TERMINATES on grateful
      (367ms) where the walk hangs. Not yet wired (weighted still fails closed).
-   - **3b (next) — wire it: `pathSegment` barrier + `lowerPathResume`.** Head projects the source ids;
-     `apply` runs `relaxWeighted`; the resume reconstructs paths via a `Recursive` rel reusing
-     `pathPositions`, the guard swapped from simple-path to the dist-equality gate (simple-path kept as a
-     zero/negative-weight backstop). Route weighted here; unweighted stays the walk until 3c.
+   - ✅ **Reconstruction ALGORITHM proven** (`test/L2-sql/shortestpath-bsp.exec.test.ts`): a dist-gated
+     recursive CTE over `barrier_state` rebuilds `marko→josh = [marko,lop,josh]` exactly. This raw SQL is
+     the executable SPEC the rel port must reproduce (seed from `DISTINCT scope`; step joins the weighted
+     adjacency + `barrier_state du`(=dist[s][u]) + `dv`(=dist[s][v]), gate `dv.cval = du.cval + w`, plus a
+     `json_each` simple-path backstop for zero/negative weights; append via `json_insert($[#])`).
+   - **3b (next) — the COMPILER PORT + wiring, ~5 files:**
+     1. `graph-algorithms.ts`: `shortestPathService` → `createShortestPathService(store)` (store-capturing,
+        like wcc — the barrier `apply` needs the store); DUAL resolve — weighted (`SP_DISTANCE` set) →
+        `{kind:'barrier', apply, path: PathSpec, residency:'do'}`, unweighted → the existing `{kind:'rel'}`
+        walk. `apply(rows)`: dedup source ids from `BarrierInput`, `relaxWeighted(...)`, return
+        `{kind:'relation-ref', run, round}`.
+     2. `spi/types.ts`: add `path?: PathSpec` to the barrier Contribution; `PathSpec` carries the config
+        the resume needs (scope {direction,labels}, distanceKey, includeEdges, target IR, maxWeight).
+     3. `segment.ts`: `Barrier.path`; `barrierIn` carries it; `segmentPlan` dispatch `if (call.path) →
+        pathSegment`; `pathSegment` mirrors `decorateSegment` (head = prefix `.id()` sources) but
+        `resume → lowerPathResume`.
+     4. `shortestpath.ts` / `lower.ts`: `shortestPathReconstruct(run, round, cfg, source, child, fresh)` —
+        adapt `shortestPathWalk`: seed from `barrier_state` DISTINCT scopes; carry `dist` (seed 0, bump w);
+        guard = `notInPath` AND the dist-gate (`dv` a `{kind:'scalar'}` subquery over `barrier_state`,
+        run/round inlined like `decorateBinding`); DROP the final `MIN` window (the gate makes every path
+        shortest); keep target/includeEdges; `maxWeight` a final `dist <= cap` filter; then `pathPositions`.
+     5. `standard.ts`: register `createShortestPathService(app.store)`; drop the const from
+        `pendingGraphAlgorithmServices`.
+     Then un-defer: restore the two L2 weighted tests as real answers; **L3 +3** (incl. the grateful hang
+     scenario, now terminating).
 4. **Sequential barrier chaining** — decorate/foreign resumes call `planOf` (`pageRank().wcc()`).
 5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness or node-similarity is
    simplest; Brandes adds the reverse-pass retention policy).

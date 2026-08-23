@@ -32,6 +32,35 @@ describe('weighted shortest distance — Bellman-Ford relaxation (barrier_state,
     store.dropBarrierRun(run);
   });
 
+  test('reconstruction: dist-gated recursive CTE rebuilds the shortest path marko→josh = [marko,lop,josh]', () => {
+    const store = seeded(MODERN_SEED);
+    const marko = idByName(store, 'marko');
+    const josh = idByName(store, 'josh');
+    const run = store.allocBarrierRun();
+    const slot = relaxWeighted(store, run, [marko], { direction: 'both', labels: [] }, 'weight');
+    // An edge (u,v) is on a shortest path from s iff dist[s][v] = dist[s][u] + w(u,v). Walk only those.
+    const rows = store.query<{ endpoint: number; path: string }>(
+      `WITH RECURSIVE
+         wadj(src, tgt, w) AS (
+           SELECT src, tgt, COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = 'weight'), 0) FROM edges
+           UNION ALL SELECT tgt, src, COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = 'weight'), 0) FROM edges),
+         paths(scope, endpoint, path) AS (
+           SELECT DISTINCT scope, scope, json_array(scope) FROM barrier_state WHERE run = ? AND round = ? AND channel = 0
+           UNION ALL
+           SELECT p.scope, wadj.tgt, json_insert(p.path, '$[#]', wadj.tgt)
+             FROM paths p JOIN wadj ON wadj.src = p.endpoint
+             JOIN barrier_state du ON du.run = ? AND du.round = ? AND du.channel = 0 AND du.scope = p.scope AND du.id = p.endpoint
+             JOIN barrier_state dv ON dv.run = ? AND dv.round = ? AND dv.channel = 0 AND dv.scope = p.scope AND dv.id = wadj.tgt
+            WHERE dv.cval = du.cval + wadj.w
+              AND (SELECT COUNT(*) FROM json_each(p.path) WHERE value = wadj.tgt) = 0)
+       SELECT endpoint, path FROM paths WHERE scope = ? AND endpoint = ?`,
+      [run, slot, run, slot, run, slot, marko, josh]);
+    const names = (path: string): string => JSON.parse(path).map((id: number) =>
+      store.query<{ value: string }>(`SELECT value FROM vertex_properties WHERE node = ? AND key = 'name'`, [id])[0].value).join(',');
+    expect(rows.map((r) => names(r.path)).sort()).toEqual(['marko,lop,josh']);
+    store.dropBarrierRun(run);
+  });
+
   test('grateful weighted followedBy TERMINATES (the walk hangs here) and reaches the target', () => {
     const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphson';
     const store = new GraphStore(new BunSqlite(':memory:'));
