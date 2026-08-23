@@ -17,6 +17,7 @@ import { createKCoreService } from './catalog/olap/kcore.ts';
 import { createBetweennessService } from './catalog/olap/betweenness.ts';
 import { createNodeSimilarityService } from './catalog/olap/node-similarity.ts';
 import { createSccService } from './catalog/olap/scc.ts';
+import { createArticleRankService } from './catalog/olap/articlerank.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -48,7 +49,7 @@ import { createSccService } from './catalog/olap/scc.ts';
  *  are `internal: true` too, so the exact `--list` surface stays unchanged. */
 export const standardRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store), createKCoreService(app.store), createBetweennessService(app.store), createNodeSimilarityService(app.store), createSccService(app.store)]);
+    createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store), createKCoreService(app.store), createBetweennessService(app.store), createNodeSimilarityService(app.store), createSccService(app.store), createArticleRankService(app.store)]);
 
 /** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
  *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
@@ -57,4 +58,4 @@ export const standardRegistry: RegistryProvider = (app) =>
  *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */
 export const extendedRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createFederateService(app.source), schemaService, createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store), createKCoreService(app.store), createBetweennessService(app.store), createNodeSimilarityService(app.store), createSccService(app.store)]);
+    createFederateService(app.source), schemaService, createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store), createKCoreService(app.store), createBetweennessService(app.store), createNodeSimilarityService(app.store), createSccService(app.store), createArticleRankService(app.store)]);

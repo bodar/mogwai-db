@@ -126,6 +126,15 @@ function olapContract(getOrigin: () => string) {
         expect((await g.V().call('mogwai.scc').has('componentId').count().next()).value).toBe(3);
         const scc = await g.V().call('mogwai.scc').values('componentId').toList();
         expect(new Set(scc.map((c) => String(c))).size).toBe(3);
+
+        // mogwai.articleRank — the SECOND multi-channel barrier (rank=channel 0, delta=channel 1). lop is
+        // the only sink (fed by marko+josh), so it ranks highest; every vertex is decorated with a positive
+        // rank. Proves the two-channel delta-accumulation loop runs end to end on the real DO store.
+        expect((await g.V().call('mogwai.articleRank').has('articleRank').count().next()).value).toBe(3);
+        const arRanks = await g.V().call('mogwai.articleRank').values('articleRank').toList() as number[];
+        expect(arRanks.every((r) => typeof r === 'number' && r > 0)).toBe(true);
+        expect((await g.V().call('mogwai.articleRank').order().by('articleRank', gremlin.process.order.desc).by('name').values('name').next()).value)
+          .toBe('lop');
       } finally { await conn.close(); }
     }, 40_000);
   });

@@ -383,3 +383,8 @@ export const NODE_SIMILARITY_SERVICE_NAME = 'mogwai.nodeSimilarity';
  *  share a component iff they are mutually reachable, computed as a directed transitive-closure CTE.
  *  Call-only, `internal: true` (no native TinkerPop step; connectedComponent() is the UNDIRECTED wcc). */
 export const SCC_SERVICE_NAME = 'mogwai.scc';
+/** ArticleRank — a PageRank variant that damps a node's influence by (out-degree + average degree),
+ *  so a high-degree node spreads less rank per neighbour. A MULTI-CHANNEL BSP decorate barrier (rank =
+ *  channel 0, the per-round delta = channel 1, GDS's delta-accumulation formulation). Call-only,
+ *  `internal: true` (no native TinkerPop step). */
+export const ARTICLE_RANK_SERVICE_NAME = 'mogwai.articleRank';
