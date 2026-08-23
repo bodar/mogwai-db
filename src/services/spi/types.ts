@@ -354,3 +354,6 @@ export const HARMONIC_SERVICE_NAME = 'mogwai.harmonic';
  *  undirected self-join), call-only, `internal: true`. */
 export const TRIANGLE_COUNT_SERVICE_NAME = 'mogwai.triangleCount';
 export const LCC_SERVICE_NAME = 'mogwai.localClusteringCoefficient';
+/** k-core decomposition — each vertex's coreness, a BSP fixpoint (the Montresor h-index update).
+ *  Call-only, `internal: true`. */
+export const KCORE_SERVICE_NAME = 'mogwai.kcore';
