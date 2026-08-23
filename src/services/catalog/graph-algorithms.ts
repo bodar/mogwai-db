@@ -133,6 +133,18 @@ const sumAbsDelta = (store: GraphStore, run: number, prev: Slot, next: Slot): nu
       WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ?`,
     [run, next, run, prev])[0].d;
 
+/** Count of rows in the NEXT slot that are new (absent in prev) OR changed — the fixpoint test for a
+ *  SPARSE frontier (shortest path reaches nodes incrementally, so `changedCount`'s INNER JOIN would miss
+ *  a newly-reached node and stop early). Bellman-Ford is monotone (the reached set only grows, dist only
+ *  falls, rows are never removed), so `next ⊇ prev` always and this being 0 means `next ≡ prev`. One
+ *  scalar; a LEFT JOIN from the next slot. */
+const changedOrNew = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
+  store.query<{ d: number }>(
+    `SELECT COUNT(*) AS d FROM barrier_state nx
+       LEFT JOIN barrier_state pv ON pv.run = ? AND pv.round = ? AND pv.scope = nx.scope AND pv.id = nx.id AND pv.channel = nx.channel
+      WHERE nx.run = ? AND nx.round = ? AND nx.channel = 0 AND (pv.cval IS NULL OR pv.cval IS NOT nx.cval)`,
+    [run, prev, run, next])[0].d;
+
 /** Count of ids whose value changed between the slots — the label algorithms' "no change" fixpoint
  *  test (`IS NOT` is null-safe distinctness). One scalar. */
 const changedCount = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
@@ -140,6 +152,59 @@ const changedCount = (store: GraphStore, run: number, prev: Slot, next: Slot): n
     `SELECT COUNT(*) AS d FROM barrier_state a JOIN barrier_state b ON a.id = b.id AND a.scope = b.scope AND a.channel = b.channel
       WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ? AND a.cval IS NOT b.cval`,
     [run, next, run, prev])[0].d;
+
+// ---------- weighted shortest DISTANCE — Bellman-Ford relaxation, PAIR-KEYED by source ----------
+//
+// The BSP half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5). Unlike
+// the three node-keyed fixpoints above, shortest path runs from EACH source traverser, so its state is
+// per (source, node) — `scope` = the source vertex, `channel` 0 = the tentative distance (a REAL). This
+// is the first consumer of the general `barrier_state`'s scope + channel dims. Reconstruction is NOT
+// here: an edge (u,v) is on a shortest path iff dist[s][v] = dist[s][u] + w(u,v), so the path-resume
+// derives the paths from this dist relation with a recursive CTE gated by that equality — no predecessor
+// channel needed. Negative/custom weights are legal (the reference's `distanceEqualsNumberOfHops` split;
+// GDS `BellmanFord`), so the bound is |V|-1 rounds with no Dijkstra prune.
+
+/** A weighted adjacency CTE `e(src, tgt, w)` — like `adjacencyCte` but carrying each edge's weight
+ *  (the `distanceKey` property, COALESCE 0). `distanceKey` is a parsed literal (the user's Gremlin), so
+ *  it inlines as a typed SQL literal — no bind (the bind rule, root CLAUDE.md). The label filter stays a
+ *  `json_each` bind, prepended like `adjacencyCte`'s. */
+function weightedAdjacencyCte(scope: EdgeScope, distanceKey: string): { cte: string; labelBinds: string[] } {
+  const w = `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${distanceKey.replace(/'/g, "''")}'), 0)`;
+  const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
+  const filter = scope.labels.length
+    ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
+  const fwd = `SELECT src, tgt, ${w} AS w FROM edges${filter}`;
+  const rev = `SELECT tgt AS src, src AS tgt, ${w} AS w FROM edges${filter}`;
+  const body = scope.direction === 'out' ? fwd : scope.direction === 'in' ? rev : `${fwd} UNION ALL ${rev}`;
+  const binds = scope.direction === 'both' ? [...labelBinds, ...labelBinds] : labelBinds;
+  return { cte: `e(src, tgt, w) AS (${body})`, labelBinds: binds };
+}
+
+/** Relax weighted shortest DISTANCE from a set of source vertices into `barrier_state` (scope = source,
+ *  channel 0 = dist REAL), Bellman-Ford, entirely in SQL — reusing the two-slot `iterateInSql` driver and
+ *  `changedCount` fixpoint from the node-keyed algorithms. Seeds dist 0 at each source; each round writes
+ *  the next slot with dist[s][v] = MIN(current, MIN over u→v of dist[s][u] + w(u,v)). Only REACHABLE
+ *  (source, node) pairs get rows (an absent row is +∞). Returns the final slot; the dist relation stays
+ *  SQL-resident for the path-reconstruction resume. Backstop |V| rounds (Bellman-Ford). */
+export function relaxWeighted(
+  store: GraphStore, run: number, sourceIds: readonly number[], scope: EdgeScope, distanceKey: string,
+): Slot {
+  const { cte, labelBinds } = weightedAdjacencyCte(scope, distanceKey);
+  const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
+  const seed = () => store.query(
+    `${STATE_INSERT} SELECT ?, 0, s.value, s.value, 0, 0.0 FROM json_each(?) s`,
+    [run, JSON.stringify(sourceIds)]);
+  const step = (prev: Slot, next: Slot) => store.query(
+    `WITH ${cte},
+       prev AS (SELECT scope, id, cval AS d FROM barrier_state WHERE run = ? AND round = ? AND channel = 0),
+       relaxed AS (SELECT scope, id, d FROM prev
+                   UNION ALL SELECT prev.scope, e.tgt AS id, prev.d + e.w AS d FROM prev JOIN e ON e.src = prev.id)
+     ${STATE_INSERT}
+       SELECT ?, ?, scope, id, 0, MIN(d) FROM relaxed GROUP BY scope, id`,
+    [...labelBinds, run, prev, run, next]);
+  return iterateInSql(store, run, seed, step,
+    (p, n) => changedOrNew(store, run, p, n), backstop, (d) => d === 0);
+}
 
 // ---------- mogwai.pageRank / .wcc / .peerPressure / .shortestPath — the OLAP algorithm layer ----------
 //
