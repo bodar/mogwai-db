@@ -43,7 +43,7 @@ export interface SegmentHost extends SegmentReaders {
  *  first Plan (the Worker edge) reuses this loop without recompiling. */
 export async function driveSegmentsFrom(readers: SegmentReaders, first: Plan): Promise<Executable> {
   let p: Plan = first;
-  // OLAP DECORATE barriers leave their `(id → value)` result in the `barrier_relation` scratch table,
+  // OLAP DECORATE barriers leave their `(id → value)` result in the `barrier_state` scratch table,
   // keyed by a per-query `run` token; the FINAL plan's SQL reads those rows. Collect every such token
   // across the (possibly compounding) chain and hand them to the framer, which drops them once it has
   // produced the rows — precise post-frame GC. A non-relation barrier (federate/io) contributes none.

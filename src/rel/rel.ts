@@ -5,7 +5,7 @@ import type { RelBase, RelId, SortTerm } from './types.ts';
  * so a table absent here is a shape the algebra cannot express at all — `vertex_labels` was, which
  * is `hasLabel()`, and the Phase-1 gate over real L2 families is what found it. */
 export type Table = 'nodes' | 'edges' | 'vertex_labels' | 'vertex_properties' | 'edge_properties'
-  | 'vertex_property_cardinality' | 'property_fts' | 'labels' | 'barrier_relation';
+  | 'vertex_property_cardinality' | 'property_fts' | 'labels' | 'barrier_state';
 
 type RawRel =
   | (RelBase & { readonly kind: 'scan'; readonly id: RelId; readonly table: Table; readonly alias: string })

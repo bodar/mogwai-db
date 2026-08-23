@@ -393,7 +393,7 @@ export interface Compiled {
   sql: string;
   binds: any[];
   shape: Shape;
-  /** OLAP-barrier run tokens whose `barrier_relation` scratch this plan reads (a decorate tail). The
+  /** OLAP-barrier run tokens whose `barrier_state` scratch this plan reads (a decorate tail). The
    *  framer drops them once it has produced the rows — precise post-frame GC (`frameResolved`). */
   cleanup?: readonly number[];
 }

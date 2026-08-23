@@ -45,11 +45,11 @@ describe('OLAP SQL-per-round ≡ JS oracle (whole-vector differential)', () => {
   });
 });
 
-// The OLAP vector is SQL-RESIDENT (`barrier_relation`, keyed by a per-query run token). Two invariants
+// The OLAP vector is SQL-RESIDENT (`barrier_state`, keyed by a per-query run token). Two invariants
 // follow: the scratch is reclaimed once the tail is framed (precise post-frame GC), and concurrent
 // queries in one store never collide because each holds its own run token across the apply→resume await.
 describe('OLAP barrier scratch — SQL-resident vector', () => {
-  const scratch = (s: ReturnType<typeof store>) => s.query<{ c: number }>('SELECT COUNT(*) AS c FROM barrier_relation')[0].c;
+  const scratch = (s: ReturnType<typeof store>) => s.query<{ c: number }>('SELECT COUNT(*) AS c FROM barrier_state')[0].c;
 
   test('scratch is empty after a decorate query is framed (precise GC)', async () => {
     const s = store();

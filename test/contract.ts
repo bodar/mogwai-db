@@ -43,7 +43,7 @@ export function graphContract(name: string, harness: Harness) {
 
 /**
  * OLAP DECORATE barriers (pageRank/connectedComponent/peerPressure) on the REAL runtime. Their
- * `(id → value)` vector is SQL-RESIDENT — computed into the `barrier_relation` scratch table and read
+ * `(id → value)` vector is SQL-RESIDENT — computed into the `barrier_state` scratch table and read
  * back by the decorate tail — so this is the ONLY place that new SQL is exercised on real **DO SQLite**:
  * `WITHOUT ROWID` + `INSERT … RETURNING` (the run-token allocation), `WITH … INSERT` per round, a
  * `ROW_NUMBER()` window (peerPressure), `IS NOT` convergence, and the post-frame GC `DELETE`. The
@@ -55,7 +55,7 @@ function olapContract(getOrigin: () => string) {
   const PR_KEY = 'gremlin.pageRankVertexProgram.pageRank';
   const CC_KEY = 'gremlin.connectedComponentVertexProgram.component';
   const PP_KEY = 'gremlin.peerPressureVertexProgram.cluster';
-  describe('olap (decorate barriers — barrier_relation SQL on the real store)', () => {
+  describe('olap (decorate barriers — barrier_state SQL on the real store)', () => {
     const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
 
     test('pageRank/connectedComponent/peerPressure decorate the live stream and reclaim their scratch', async () => {

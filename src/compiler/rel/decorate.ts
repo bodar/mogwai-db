@@ -14,7 +14,7 @@ import { BaseGraph, type GraphSource } from './source.ts';
 // correlated on the element id — exactly as `BoundGraph` rejoins a landed graph, but wrapping the base
 // graph and intercepting ONE key rather than replacing the whole source.
 //
-// The relation lives in SQL — the algorithm's `apply` computed it into `barrier_relation` under a
+// The relation lives in SQL — the algorithm's `apply` computed it into `barrier_state` under a
 // per-query `run` token (`src/storage.ts`), so `decorateBinding` READS it there rather than crossing the
 // vector as a bind. It is declared ONCE as a fenced binding; every read references it by name (a `Ref`),
 // so it is materialized once (materialize-once, exactly `lowerForeignResume`'s model). `id` is the
@@ -25,14 +25,14 @@ import { BaseGraph, type GraphSource } from './source.ts';
  *  score for pageRank). */
 const DECORATE_COLS = [meta('id', 'int'), meta('cval', 'any', true)] as const;
 
-/** Land the barrier's `(id → value)` relation as a fenced Plan binding: a SCAN of `barrier_relation`
+/** Land the barrier's `(id → value)` relation as a fenced Plan binding: a SCAN of `barrier_state`
  *  (the OLAP scratch table — `src/storage.ts`) filtered to this query's `run` and its final `round`
  *  slot, projected to `(id, cval)`. `run`/`round` are compiler-held constants, inlined as SQL literals
  *  (never binds), so the plan's bind count and text size are O(1) regardless of |V| — the whole point of
  *  keeping the vector SQL-resident. Returned as the binding NODE; the caller pairs it with `name`. */
 export function decorateBinding(run: number, round: number, name: string, fresh: Minter): Rel {
   const scan = make.scan({
-    id: fresh('decs'), table: 'barrier_relation', alias: fresh('rbr'), channels: [],
+    id: fresh('decs'), table: 'barrier_state', alias: fresh('rbr'), channels: [],
     type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('id', 'int'), meta('cval', 'any', true)),
   });
   const filtered = make.filter({

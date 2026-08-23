@@ -4252,7 +4252,7 @@ const DECORATE_RESUME_PARAM = '_mogwai_decorate';
  * relation — every element passes through, decorated, and `has(key)`/`order().by(key)`/`project().by(key)`
  * compose as ordinary property reads.
  *
- * The relation lives in SQL — the algorithm's `apply` computed it into `barrier_relation` under a
+ * The relation lives in SQL — the algorithm's `apply` computed it into `barrier_state` under a
  * per-query `run` token (`src/services/spi/types.ts` `BarrierRelation`), so this reads it straight off
  * that table by (run, round) rather than crossing the vector as a bind. It is declared ONCE as a fenced
  * binding referenced by name — materialize-once, exactly `lowerForeignResume`'s model. One `fresh`

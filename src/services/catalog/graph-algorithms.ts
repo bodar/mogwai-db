@@ -48,7 +48,7 @@ function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], algo: s
 // ---------- substrate-A-iterated: an OLAP relaxation as ONE SQL statement per round, SQL-RESIDENT ----------
 //
 // The compute stays in SQLite (locked decision #3), AND so does its state. The `(id → value)` vector
-// lives in `barrier_relation` (`src/storage.ts`) — a scratch table keyed by a per-query `run` token —
+// lives in `barrier_state` (`src/storage.ts`) — a scratch table keyed by a per-query `run` token —
 // never in a JS Map. Each round is one INSERT..SELECT that reads the prior round's slot and writes the
 // next, joining the real `nodes`/`edges` tables; the ONLY things that cross to the host per round are
 // O(1) SCALARS (pageRank's teleport energy, the convergence delta). So a graph of millions of vertices
@@ -61,7 +61,7 @@ function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], algo: s
 // differential ORACLES (a test asserts the SQL rounds agree with them), not the execution path.
 
 /** One `(id → value)` tuple — the shape the JS oracles return (the SQL path keeps the vector in the
- *  `barrier_relation` table and never builds this array). */
+ *  `barrier_state` table and never builds this array). */
 export type IdValue = { readonly id: number; readonly value: unknown };
 
 /** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". `out` reads
@@ -81,11 +81,25 @@ function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
   return { cte: `e(src, tgt) AS (${body})`, labelBinds: binds };
 }
 
-/** A round `slot` in `barrier_relation` — the vector alternates between two slots so a run holds at
+// The barrier scratch is the general `barrier_state(run, round, scope, id, channel, cval)` — one row per
+// (run, round, scope, id, channel) (`src/storage.ts`, `docs/2026-08-23-barrier-substrate-reshape-plan.md`).
+// A NODE-KEYED, SINGLE-CHANNEL fixpoint (wcc/pageRank/peerPressure) uses `scope` 0 and `channel` 0; the
+// two extra key dims stay literal 0 here and become live for the pair-keyed (Brandes/similarity) and
+// multi-channel (shortest-path dist + predecessor) consumers. Centralised so those consumers extend ONE
+// pair of fragments, not three copies of the SQL.
+
+/** The INSERT column list for the scratch. A single-channel writer supplies `scope`/`channel` as the
+ *  literal `0`s in its SELECT (`?, <round>, 0, <id>, 0, <cval>`). */
+const STATE_INSERT = 'INSERT INTO barrier_state(run, round, scope, id, channel, cval)';
+/** The prior-slot vector, node-keyed single channel — the read half all three algorithms share. Binds:
+ *  `run, round`. Pins `scope = 0 AND channel = 0` so it stays correct once a run holds other channels. */
+const VEC = 'vec AS (SELECT id, cval AS v FROM barrier_state WHERE run = ? AND round = ? AND scope = 0 AND channel = 0)';
+
+/** A round `slot` in `barrier_state` — the vector alternates between two slots so a run holds at
  *  most two vectors, cur and next. */
 type Slot = 0 | 1;
 
-/** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_relation`
+/** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_state`
  *  under `run`, in alternating slots (0/1) — it never enters JS. `seed()` writes slot 0; `step(prev,
  *  next)` runs ONE INSERT..SELECT reading slot `prev` and writing slot `next`; `delta(prev, next)`
  *  returns ONE scalar measuring change between the slots (the ONLY thing that crosses per round).
@@ -101,7 +115,7 @@ function iterateInSql(
   for (let i = 0; i < maxRounds; i++) {
     const next: Slot = cur === 0 ? 1 : 0;
     // Overwrite the slot we are about to fill (a prior iteration left the old cur there).
-    store.query('DELETE FROM barrier_relation WHERE run = ? AND round = ?', [run, next]);
+    store.query('DELETE FROM barrier_state WHERE run = ? AND round = ?', [run, next]);
     step(cur, next);
     const d = delta(cur, next);
     cur = next;
@@ -115,7 +129,7 @@ function iterateInSql(
 const sumAbsDelta = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
   store.query<{ d: number }>(
     `SELECT COALESCE(SUM(ABS(a.cval - b.cval)), 0) AS d
-       FROM barrier_relation a JOIN barrier_relation b ON a.id = b.id
+       FROM barrier_state a JOIN barrier_state b ON a.id = b.id AND a.scope = b.scope AND a.channel = b.channel
       WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ?`,
     [run, next, run, prev])[0].d;
 
@@ -123,7 +137,7 @@ const sumAbsDelta = (store: GraphStore, run: number, prev: Slot, next: Slot): nu
  *  test (`IS NOT` is null-safe distinctness). One scalar. */
 const changedCount = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
   store.query<{ d: number }>(
-    `SELECT COUNT(*) AS d FROM barrier_relation a JOIN barrier_relation b ON a.id = b.id
+    `SELECT COUNT(*) AS d FROM barrier_state a JOIN barrier_state b ON a.id = b.id AND a.scope = b.scope AND a.channel = b.channel
       WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ? AND a.cval IS NOT b.cval`,
     [run, next, run, prev])[0].d;
 
@@ -317,15 +331,15 @@ export function createWccService(store: GraphStore | undefined): Service {
           // safe backstop — one scalar COUNT, not the vertex vector.
           const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c + 1;
           const seed = () => store.query(
-            'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, CAST(COALESCE(uid, id) AS TEXT) FROM nodes',
+            `${STATE_INSERT} SELECT ?, 0, 0, id, 0, CAST(COALESCE(uid, id) AS TEXT) FROM nodes`,
             [run]);
           const step = (prev: Slot, next: Slot) => store.query(
             `WITH ${cte},
-               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+               ${VEC},
                adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src
                        UNION ALL SELECT id, v FROM vec)
-             INSERT INTO barrier_relation(run, round, id, cval)
-               SELECT ?, ?, n.id, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
+             ${STATE_INSERT}
+               SELECT ?, ?, 0, n.id, 0, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
             [...labelBinds, run, prev, run, next]);
           const round = iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
@@ -440,13 +454,13 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           // Both then iterate the SAME relaxation; only the seed differs (PageRankVertexProgram:164,181-183).
           const seed = rows.length > 0
             ? () => store.query(
-                `INSERT INTO barrier_relation(run, round, id, cval)
-                   SELECT ?, 0, n.id, COUNT(j.value) FROM nodes n
+                `${STATE_INSERT}
+                   SELECT ?, 0, 0, n.id, 0, COUNT(j.value) FROM nodes n
                      LEFT JOIN json_each(?) j ON CAST(COALESCE(n.uid, n.id) AS TEXT) = CAST(j.value AS TEXT)
                    GROUP BY n.id`,
                 [run, JSON.stringify(rows.map((r) => r.injectedValue))])
             : () => store.query(
-                'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, 1.0 / ? FROM nodes',
+                `${STATE_INSERT} SELECT ?, 0, 0, id, 0, 1.0 / ? FROM nodes`,
                 [run, N]);
           // TELEPORTATION ENERGY off the prev slot — one scalar: Σ (1−α)·rank over all vertices, plus
           // α·rank for the DANGLING ones (out-degree 0 sinks redistribute their whole rank). Then each
@@ -454,7 +468,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           // teleport share localTerminal = teleport/N, written to the next slot.
           const teleportOf = (prev: Slot): number => store.query<{ t: number }>(
             `WITH ${cte}, od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
-               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?)
+               ${VEC}
              SELECT COALESCE(SUM((1 - ?) * vec.v + CASE WHEN od.c IS NULL THEN ? * vec.v ELSE 0 END), 0) AS t
                FROM vec LEFT JOIN od ON od.id = vec.id`,
             [...labelBinds, run, prev, alpha, alpha])[0].t;
@@ -462,11 +476,11 @@ export function createPageRankService(store: GraphStore | undefined): Service {
             const localTerminal = teleportOf(prev) / N;
             store.query(
               `WITH ${cte}, od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
-                 vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+                 ${VEC},
                  msg AS (SELECT e.tgt AS id, SUM(? * vec.v / od.c) AS m
                            FROM e JOIN vec ON vec.id = e.src JOIN od ON od.id = e.src GROUP BY e.tgt)
-               INSERT INTO barrier_relation(run, round, id, cval)
-                 SELECT ?, ?, n.id, COALESCE(msg.m, 0) + ? FROM nodes n LEFT JOIN msg ON msg.id = n.id`,
+               ${STATE_INSERT}
+                 SELECT ?, ?, 0, n.id, 0, COALESCE(msg.m, 0) + ? FROM nodes n LEFT JOIN msg ON msg.id = n.id`,
               [...labelBinds, run, prev, alpha, run, next, localTerminal]);
           };
           // `times` caps propagation rounds exactly (no ε short-circuit — times=0 means output the seed
@@ -564,17 +578,17 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
           // matching the reference's .toString().compareTo). ROW_NUMBER picks the winner per vertex,
           // written to the next slot.
           const seed = () => store.query(
-            'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, COALESCE(uid, id) FROM nodes',
+            `${STATE_INSERT} SELECT ?, 0, 0, id, 0, COALESCE(uid, id) FROM nodes`,
             [run]);
           const step = (prev: Slot, next: Slot) => store.query(
             `WITH ${cte},
-               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+               ${VEC},
                votes AS (SELECT id, v AS c FROM vec
                          UNION ALL SELECT e.tgt AS id, voter.v AS c FROM e JOIN vec voter ON voter.id = e.src),
                tally AS (SELECT id, c, COUNT(*) AS total FROM votes GROUP BY id, c),
                ranked AS (SELECT id, c, ROW_NUMBER() OVER (PARTITION BY id ORDER BY total DESC, CAST(c AS TEXT) ASC) AS rn FROM tally)
-             INSERT INTO barrier_relation(run, round, id, cval)
-               SELECT ?, ?, id, c FROM ranked WHERE rn = 1`,
+             ${STATE_INSERT}
+               SELECT ?, ?, 0, id, 0, c FROM ranked WHERE rn = 1`,
             [...labelBinds, run, prev, run, next]);
           const round = iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), PP_MAX_ITERATIONS, (d) => d === 0);

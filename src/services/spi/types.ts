@@ -127,7 +127,7 @@ export type BarrierResidency = 'do' | 'worker';
  * algorithm's product is a NUMERIC/label relation keyed by element id, not a stream of elements — so
  * `federate`/`io`'s `ForeignRow[]` is the wrong shape for it.
  *
- * **The relation lives in SQL, never in JS.** `apply` computes it into `barrier_relation` (a scratch
+ * **The relation lives in SQL, never in JS.** `apply` computes it into `barrier_state` (a scratch
  * table keyed by a per-query `run` token — `src/storage.ts`) and returns only the HANDLE: the run
  * token plus the `round` slot that holds the final vector. The DECORATE resume then reads it straight
  * off that table, correlated on the LIVE element stream's id, keeping the stream element-preserving —
@@ -138,7 +138,7 @@ export type BarrierResidency = 'do' | 'worker';
  */
 export interface BarrierRelation {
   readonly kind: 'relation-ref';
-  /** The run token whose rows in `barrier_relation` hold this `(id → value)` result. */
+  /** The run token whose rows in `barrier_state` hold this `(id → value)` result. */
   readonly run: number;
   /** The `round` slot (0/1) holding the FINAL vector for this run. */
   readonly round: number;

@@ -109,18 +109,26 @@ const SCHEMA = [
   `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
      owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED, kind UNINDEXED,
      text, tokenize="trigram case_sensitive 0")`,
-  // OLAP barrier scratch (pageRank/wcc/peerPressure). An iterative algorithm's (id → value) vector
-  // lives HERE, in SQL, never in JS — each round is one INSERT..SELECT that reads the prior round and
-  // writes the next, so only O(1) scalars (teleport, convergence delta) ever cross to the host. Keyed
-  // by a per-query `run` token so concurrent queries in ONE Durable Object never collide across the
+  // OLAP barrier scratch — the SQL-resident per-node iteration state for the graph-algorithm barriers
+  // (pageRank/wcc/peerPressure, and the Tier-2 families landing on the reshape). The vector lives HERE,
+  // in SQL, never in JS — each round is one INSERT..SELECT that reads the prior round and writes the
+  // next, so only O(1) scalars (teleport, convergence delta) ever cross to the host. Keyed by a
+  // per-query `run` token so concurrent queries in ONE Durable Object never collide across the
   // apply→resume await gap; `round` (0/1) holds the alternating cur/next slots. Rows are deleted after
-  // the query's decorate tail is framed (precise post-frame GC — `frameResolved`). `cval` is untyped
-  // (BLOB affinity) so it preserves the value's storage class (a REAL score, a TEXT component id),
-  // exactly as `vertex_properties.value` does.
+  // the query's decorate tail is framed (precise post-frame GC — `frameResolved`).
+  //   `scope`   — the pair/anchor key dimension (GDS: none; ours unifies Brandes source, similarity
+  //               pair anchor AND a nested barrier's enclosing-parent id). 0 for a node-keyed algorithm.
+  //   `channel` — the named per-node property (GDS Pregel's PregelSchema element): a single-scalar
+  //               fixpoint uses channel 0; a multi-channel algorithm (shortest-path dist + predecessor)
+  //               declares several. This is GDS's CompositeNodeValue; the single-channel case is its
+  //               SingleNodeValue. See docs/2026-08-23-barrier-substrate-reshape-plan.md.
+  //   `cval`    — untyped (BLOB affinity), preserving the value's storage class (a REAL score, a TEXT
+  //               component id, a JSON array for a set-valued channel), exactly as vertex_properties.value.
   `CREATE TABLE IF NOT EXISTS barrier_run_seq(id INTEGER PRIMARY KEY AUTOINCREMENT)`,
-  `CREATE TABLE IF NOT EXISTS barrier_relation(
-     run INTEGER NOT NULL, round INTEGER NOT NULL, id INTEGER NOT NULL, cval,
-     PRIMARY KEY (run, round, id)) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS barrier_state(
+     run INTEGER NOT NULL, round INTEGER NOT NULL, scope INTEGER NOT NULL,
+     id INTEGER NOT NULL, channel INTEGER NOT NULL, cval,
+     PRIMARY KEY (run, round, scope, id, channel)) WITHOUT ROWID`,
 ];
 
 export class GraphStore {
@@ -146,7 +154,7 @@ export class GraphStore {
     return this.sql.query<T>(sql, binds.map(coerceBindValue));
   }
 
-  /** Allocate a fresh OLAP-barrier run token (see the `barrier_relation` schema note). Atomic per
+  /** Allocate a fresh OLAP-barrier run token (see the `barrier_state` schema note). Atomic per
    *  allocation, and safe under the DO's run-to-completion `apply` because the whole compute — alloc,
    *  seed, every round — is one synchronous span that nothing interleaves. */
   allocBarrierRun(): number {
@@ -156,7 +164,7 @@ export class GraphStore {
   /** Drop a finished barrier run's scratch rows — precise post-frame GC, fired once the decorate tail
    *  has been framed (`frameResolved`). Idempotent: a run with no rows is a no-op. */
   dropBarrierRun(run: number): void {
-    this.query('DELETE FROM barrier_relation WHERE run = ?', [run]);
+    this.query('DELETE FROM barrier_state WHERE run = ?', [run]);
   }
 
   labelId(name: string): number {
