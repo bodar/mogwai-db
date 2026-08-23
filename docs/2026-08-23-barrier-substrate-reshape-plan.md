@@ -261,13 +261,18 @@ this target and the pair-keyed reshape are one build, not two.
    Foreign→barrier (`federate().pageRank()`) is deliberately NOT done — pageRank's `apply` is a global
    store compute that ignores the detached landed stream, so the composition is semantically murky;
    it stays fail-closed (`resumed`'s named-step error) until a real consumer appears.
-5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness/harmonic per-(source,node),
-   node-similarity per-(u,v); Brandes adds the reverse-pass retention policy). These are the GDS
-   centrality family, built the way HITS was: `call()` is the extension surface, GDS the reference +
-   test-oracle source — corpus absence is NOT a reason to skip (root SCOPE.md; the earlier "ahead of
-   demand / new surface" framing was WRONG). The `scope` KEY it needs is shared with item 6, so whichever
-   lands first carries the scope-dimension work. GDS refs at the pin: `vendor/gds/algo/.../closeness/`,
-   `.../betweenness/` (Brandes), `.../similarity/`; each has a test to port like HITS's.
+5. **`scope`-keyed working state** — the GDS centrality family, built the way HITS was (`call()` is the
+   extension surface, GDS the reference + test-oracle source; corpus absence is NOT a reason to skip).
+   - ✅ **`mogwai.closeness` LANDED (`4bb6d10`)** — the first scope-keyed consumer beyond shortestPath.
+     closeness = reached/farness (GDS DefaultCentralityComputer), reusing `relaxShortestPath`'s per-source
+     distances directly (scope = source): relax from every vertex over REVERSED edges (`direction:'in'` —
+     proven by GDS's directed test), then aggregate each scope into one score at (scope 0, channel 0).
+     Both GDS test graphs ported + matched; validated on real workerd. NO new substrate needed — the
+     scope key already existed. `docs/.../closeness/` (GPLv3, re-expressed).
+   - **Next in this family:** harmonic (Σ 1/dist, a trivial variant of closeness's aggregation),
+     node-similarity (per-(u,v) — `scope=u, id=v`, a genuinely new pair-keyed shape), Brandes betweenness
+     (the reverse-pass retention policy — needs keep-all rounds). GDS refs at the pin:
+     `vendor/gds/algo/.../{harmonic,similarity,betweenness}/`.
 6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
    so a barrier inside one must too. Two regimes, split by whether the body flattens:
    - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded
