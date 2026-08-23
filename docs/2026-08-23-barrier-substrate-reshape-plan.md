@@ -238,14 +238,34 @@ this target and the pair-keyed reshape are one build, not two.
         `pendingGraphAlgorithmServices`.
      Then un-defer: restore the two L2 weighted tests as real answers; **L3 +3** (incl. the grateful hang
      scenario, now terminating).
-4. **Sequential barrier chaining** — decorate/foreign resumes call `planOf` (`pageRank().wcc()`).
+4. ✅ **LANDED (`44fc8f8`) — sequential barrier chaining, `pageRank().connectedComponent()`.** The
+   DECORATE resume no longer lowers its whole tail straight to SQL; it re-enters `planOf` on the tail,
+   so a SECOND barrier there becomes its own segment. The substrate move that made it a net
+   simplification (deleted `lowerDecorateResume`): a `decorateGraph` source is now **stackable** (wraps
+   an arbitrary base, not hard-wired `BaseGraph`) and **self-declaring** — a new optional
+   `GraphSource.bindings?(fresh)` returns the whole stack's landed `barrier_state` CTEs under
+   `run`-derived names, collected at the ONE `lowered()` point, so a downstream barrier's head and the
+   final resume agree on each layer's CTE name and a stack's several CTEs coexist. The trampoline was
+   already chain-capable (loops on segment resumes, GCs every run token), so nothing there changed.
+   **No L3 forcing function** (no corpus scenario chains OLAP) — held 1739; safety net is our own
+   `test/L2-sql/olap-chain.exec.test.ts` (both scores land, either order, no corruption vs standalone).
+   Foreign→barrier (`federate().pageRank()`) is deliberately NOT done — pageRank's `apply` is a global
+   store compute that ignores the detached landed stream, so the composition is semantically murky;
+   it stays fail-closed (`resumed`'s named-step error) until a real consumer appears.
 5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness or node-similarity is
-   simplest; Brandes adds the reverse-pass retention policy).
+   simplest; Brandes adds the reverse-pass retention policy). ⚠️ **Genuinely ahead of demand** —
+   closeness/betweenness/node-similarity/Brandes are NOT in the corpus and none is registered as a
+   service, so this builds the substrate AND a brand-new algorithm nobody has asked for. Unlike items 4
+   and 6 (which compose EXISTING working features — combinatorial completeness, the job), item 5's
+   consumers are net-new features. Weigh it against 6 accordingly; the `scope` KEY it needs is shared
+   with 6, so 6 can carry the scope-dimension work and 5 can follow when a consumer is wanted.
 6. **Barrier-in-body by promotion (§6)** — tree Plan + batch promotion, reusing §5's `scope`.
-   Unbounded-repeat stays fail-closed.
+   Unbounded-repeat stays fail-closed. This is a COMPOSITION target (`group().by(__.call(pageRank))`,
+   `local(__.…pageRank())` — pageRank works, group/local work, so nesting must), and item 4's
+   `planOf` re-entry is its prerequisite (now landed). The big one.
 
-Items 1–3 are the shortestPath Phase 2 rebuild in general clothing; 4–6 are the nesting + Tier-2
-centrality reach. Each is an independently green push.
+Items 1–4 are the shortestPath Phase 2 rebuild in general clothing plus its chaining; 5–6 are the
+nesting + Tier-2 centrality reach. Each is an independently green push.
 
 ## 8. Robustness — the resident-table hazard the 2026-08-21 doc flagged
 
