@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,724<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,732<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|

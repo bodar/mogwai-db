@@ -1,10 +1,11 @@
-import type { BarrierRelation, CallParams, Service } from '../spi/types.ts';
+import type { BarrierRelation, CallParams, RelCallSite, RelContribution, Service } from '../spi/types.ts';
 import {
   PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME,
 } from '../spi/types.ts';
 import type { GraphStore } from '../../storage.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { parseGremlin, stepChain } from '../../gremlin/frontend.ts';
+import { shortestPathWalk } from '../../compiler/rel/shortestpath.ts';
 
 // ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
 //
@@ -109,23 +110,69 @@ const exactlyEqual = (prev: Vec, next: Vec): boolean => {
 // official `--list`/`g_call` scenarios assert — so they are registered in BOTH registries and
 // enumerated by neither, exactly as `mogwai.io` is (services/catalog/io.ts, standard.ts).
 
-/** A not-yet-implemented OLAP service: resolvable by name, desugared into by its native step, but
- *  fails closed with a clear deferral until its compute lands. NOT a silent decline (`null`) — that
- *  would hand the traversal on as merely uncovered; this states that the service exists and its
- *  execution is pending. `type` declares the eventual contribution shape. */
-function pendingAlgoService(name: string, type: Service['type']): Service {
-  return {
-    name,
-    type,
-    internal: true,
-    describeParams: () => ({}),
-    resolve: () => {
-      throw new Error(`${name}: graph algorithm execution is not implemented yet`);
-    },
-  };
-}
+// ---------- mogwai.shortestPath — shortestPath(), a recursive-CTE path walk (Template B) ----------
+//
+// `g.V().shortestPath()` emits, from each incoming source vertex, its shortest path(s) to every
+// reachable target. Unlike the three DECORATE algorithms it is NOT a barrier: an unweighted all-pairs
+// shortest path is one recursive `Recursive` term (P1/P2), so it is a PURE `rel` contribution lowered
+// inline (`src/compiler/rel/shortestpath.ts`, `docs/2026-07-24-graph-algorithms-plan.md` Template B).
+// This service parses the `~tinkerpop.shortestPath.*` config and hands the compiler builder the incoming
+// element relation via `site.stream`; the builder produces the PATH-framed result.
+//
+// This tranche implements the UNWEIGHTED family: the default `bothE` scope and the `.edges` direction
+// override (`Direction.IN`/`__.outE()`/`__.bothE()`), `.includeEdges`, and the unweighted `.maxDistance`
+// hop cap. A label-scoped `.edges`, a `.target` filter and a weighted `.distance` fail CLOSED with a
+// clear deferral until their increments land — never a mis-execution.
 
-export const shortestPathService: Service = pendingAlgoService(SHORTEST_PATH_SERVICE_NAME, 'streaming');
+const SP_EDGES = '~tinkerpop.shortestPath.edges';
+const SP_INCLUDE_EDGES = '~tinkerpop.shortestPath.includeEdges';
+const SP_TARGET = '~tinkerpop.shortestPath.target';
+const SP_DISTANCE = '~tinkerpop.shortestPath.distance';
+const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
+
+export const shortestPathService: Service = {
+  name: SHORTEST_PATH_SERVICE_NAME,
+  type: 'streaming',
+  internal: true,
+  describeParams: () => ({
+    edges: 'the message scope — a Direction or an anonymous edge traversal (default bothE)',
+    includeEdges: 'interleave the traversed edges in the path',
+    maxDistance: 'a hop cap (unweighted)',
+  }),
+  resolve: () => ({
+    kind: 'rel',
+    buildRel: (site: RelCallSite): RelContribution | null => {
+      const mode = site.params.mode;
+      if (mode !== undefined && mode !== 'path')
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: only the native shortestPath() (path mode) is implemented yet, not "${String(mode)}"`);
+      // A `start` position for this streaming step is invalid Gremlin (§6·5 — a THROW, not a decline).
+      if (!site.stream)
+        throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
+
+      const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
+      // Fail closed on the config not yet built — a clear deferral, never a wrong answer.
+      if (scope.labels.length > 0)
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a label-scoped edges traversal is not supported yet`);
+      if (SP_TARGET in site.params)
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a target filter (~tinkerpop.shortestPath.target) is not supported yet`);
+      if (SP_DISTANCE in site.params)
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a weighted distance (~tinkerpop.shortestPath.distance) is not supported yet`);
+
+      let maxHops: number | undefined;
+      if (SP_MAX_DISTANCE in site.params) {
+        const md = site.params[SP_MAX_DISTANCE];
+        if (typeof md !== 'number' || !Number.isInteger(md))
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is weighted and not supported yet`);
+        maxHops = md;
+      }
+      const includeEdges = SP_INCLUDE_EDGES in site.params;
+
+      const { input, elem, source } = site.stream;
+      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, includeEdges, maxHops }, site.child!, site.fresh);
+      return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
+    },
+  }),
+};
 
 // ---------- mogwai.wcc — connectedComponent(), a DECORATE barrier ----------
 //

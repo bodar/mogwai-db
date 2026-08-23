@@ -7,7 +7,7 @@ import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
 import { canonicalizeConnectives } from '../../src/compiler/ir/strategies.ts';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
-import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { compile } from '../../src/compiler/compiler.ts';
 import { runPasses, EMPTY_STRATEGY_USE, childSteps } from '../../src/compiler/ir/passes.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 
@@ -378,14 +378,12 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
     expect(call.withArgs).toContainEqual(['~tinkerpop.connectedComponent.propertyName', 'cluster']);
   });
 
-  test('an unbuilt algorithm is a clear fail-closed deferral, not a mis-execution or a silent decline', () => {
-    // The compute for these is not built yet; the seam is. A native OLAP step must refuse loudly rather
-    // than answer a different question. Under the real (reference) registry the services ARE registered,
-    // so the message is the pending-execution deferral, not "unknown service". connectedComponent,
-    // pageRank and peerPressure are omitted — their compute IS built (mogwai.wcc/.pageRank/.peerPressure),
-    // covered by L3/L2. Only shortestPath (Template B) is still pending.
-    const withReg: CompileOptions = { registry: standardRegistry };
-    for (const gremlin of ['g.V().shortestPath()'])
-      expect(() => compile(gremlin, {}, withReg), gremlin).toThrow('graph algorithm execution is not implemented yet');
+  test('all four native OLAP steps are built — shortestPath compiles to a recursive-CTE read', () => {
+    // The compute for every native OLAP step is now built (mogwai.pageRank/.wcc/.peerPressure are
+    // DECORATE barriers; mogwai.shortestPath is a pure recursive-CTE `rel`). shortestPath compiles
+    // SYNCHRONOUSLY to a single read plan — no barrier, no pending-execution deferral. L2/L3 cover the
+    // values.
+    const compiled = compile('g.V().shortestPath()', {}, { registry: standardRegistry });
+    expect(compiled.kind).toBe('read');
   });
 });

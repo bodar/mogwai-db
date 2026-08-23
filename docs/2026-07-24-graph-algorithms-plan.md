@@ -130,10 +130,40 @@ noise in the .feature's expected values); our engine produces clean/correct valu
 now EXCLUDED from L3 (`IGNORED_SCENARIOS`, parsed from feature-steps.js — auto-tracked, category 3 like
 the runner-skipped tags), not counted as our failures. L3 denominator 2293 → 2286 (7 unadjudicable out).
 
-**NEXT — the one major remaining step:**
-- **shortestPath** (Template B — recursive-CTE all-pairs paths over the path channel, no barrier; ~15
-  scenarios: unweighted + weighted/target/maxDistance/includeEdges). The other three OLAP algorithms
-  (pageRank/wcc/peerPressure) are complete and reference-faithful.
+**✅ LANDED (2026-08-23) — shortestPath, the UNWEIGHTED family (Template B).** `mogwai.shortestPath` is
+now a PURE `rel` contribution (NOT a barrier): one `Recursive` term enumerates every SIMPLE path
+(cycle-free via a `NOT EXISTS` membership over the carried path array, P2-legal), carrying `id`
+(endpoint), `src` (source) and `dist` (hops) beside the path channel; a `MIN(dist) OVER (PARTITION BY
+src, id)` window outside the walk keeps the shortest per (source, target) with ALL ties, then
+`pathPositions` (`path.ts`) frames it — the SAME wire form `path()` produces, so no path-specific
+framing. `src/compiler/rel/shortestpath.ts`. The reshape reaches the compiler through a new
+`RelCallSite.stream` (the incoming element relation + `GraphSource`), dispatched by `midCall`'s
+`serviceRelation` arm — the mid-traversal `relation` contribution, distinct from the per-parent `value`
+arm. Covers the default `bothE` scope, the `~tinkerpop.shortestPath.edges` DIRECTION override
+(`Direction.IN`/`__.outE()`/`__.bothE()`), `.includeEdges` (edges interleave the path), and the
+unweighted `.maxDistance` hop cap (prunes the walk). **L3 +8 (1724→1732)**: `g_V_shortestPath`,
+`g_V_both_dedup_shortestPath`, `g_V_hasXname_markoX_shortestPath`, `g_V_shortestPath_directionXINX`,
+`g_V_shortestPath_edgesXoutEX`, `g_V_shortestPath_edgesIncluded`,
+`g_V_shortestPath_edgesIncluded_edgesXoutEX`, `g_V_hasXname_markoX_shortestPath_maxDistanceX1X`.
+`test/L2-sql/shortestpath.exec.test.ts`.
+
+Why it cannot be `repeatWalk` (`walk.ts`): that regime DECLINES a path channel — its per-arm counter
+bump distributes over the movement union while `extendPath` sits above it. This builder distributes the
+append, the distance bump and the simple-path filter INTO each arm, so each references the walk once (P1)
+and a `both` scope is two arms `UNION ALL`, exactly as `both()` is.
+
+**NEXT — the remaining shortestPath config (all fail CLOSED today, clear deferral):**
+- **target filter** (`~tinkerpop.shortestPath.target`, an anonymous vertex predicate) — 4 scenarios
+  (`targetXhasXname_markoXX`, `targetXvaluesXnameX_isXmarkoXX`, `hasXname_markoX_..._targetXhasLabelXsoftwareXX`,
+  and the crew `edgesXbothEXusesXX` which also needs a LABEL-scoped edges traversal). Filter the emitted
+  paths by the endpoint passing the target predicate (a `child.predicate` over the endpoint element),
+  and the trivial `p[v[X]]` is emitted iff the source passes the target.
+- **label-scoped edges** (`__.bothE("uses")`, `__.outE("followedBy")`) — the `edgeLabelMatch` join
+  condition (already used by the decorate edge scope); the builder currently declines any scope labels.
+- **weighted distance** (`~tinkerpop.shortestPath.distance`, a weight property) — Tier-2: the recursive
+  term sums the edge's weight property instead of 1 (P3 forbids the min INSIDE the term, so the
+  MIN-over-partition outside the walk still does the selection); the weighted `.maxDistance` filters the
+  final shortest distance at collection, not by pruning. 3 scenarios (all weighted).
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

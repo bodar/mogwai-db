@@ -2154,6 +2154,14 @@ function terminal(
 function midCall(
   step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
 ): FramedRel | null {
+  // A RESHAPING service (shortestPath → paths) rebuilds the WHOLE stream, not a per-parent value — its
+  // `rel` contribution is a `relation` arm handed the incoming element relation via `site.stream`. This
+  // is resolved before the per-parent `value` arm because the two are distinct `Service.Type`s and the
+  // relation arm consumes an input the value arm never sees. A service's own `buildRel` THROW propagates
+  // (§6·5 — fail-closed config the user must see); only a compile-time spec-parse failure declines.
+  const reshaped = serviceRelation(step, input, elem, ctx, fresh, aliases);
+  if (reshaped) return reshaped;
+
   const produced = serviceValue(step, elementHost(input, elem, aliases), ctx, fresh);
   if (!produced) return null;
   const { expr, framing, vtype } = produced;
@@ -2167,6 +2175,35 @@ function midCall(
     }),
     framing,
   };
+}
+
+/**
+ * A `rel` service's RELATION contribution at a mid position — a service reshaping the whole element
+ * stream (shortestPath). It is handed `site.stream` (the incoming relation, its element kind and the
+ * `GraphSource`) plus the child seam, and returns a `FramedRel`.
+ *
+ * Declines (→ the per-parent `value` arm) when the spec does not parse, the step carries an injection
+ * traversal (a federate barrier form), or the contribution is not a `relation`. The service's own
+ * `buildRel` throw is NOT caught — that is the user's fail-closed answer.
+ */
+function serviceRelation(
+  step: IRStep, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+): FramedRel | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  let spec: ReturnType<typeof parseCallSpec>;
+  try { spec = parseCallSpec(step, ctx.params); } catch { return null; }
+  if (spec.injectionTraversal !== undefined) return null;
+  const service = ctx.services.get(spec.serviceName);
+  if (!service) return null;
+  const site: RelCallSite = {
+    params: spec.params, boundParams: ctx.params, federationDepth: 0, fresh,
+    host: elementHost(input, elem, aliases), child: childSeam(ctx, fresh),
+    stream: { input, elem, source: ctx.source },
+  };
+  const contribution = service.resolve(site);
+  if (contribution.kind !== 'rel') return null;
+  const contributed = contribution.buildRel(site);
+  return contributed && contributed.kind === 'relation' ? { rel: contributed.rel, framing: contributed.framing } : null;
 }
 
 /**

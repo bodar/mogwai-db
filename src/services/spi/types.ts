@@ -2,6 +2,9 @@ import type { ForeignRow } from '../../api.ts';
 import type { Minter } from '../../compiler/rel/build.ts';
 import type { FramedRel } from '../../compiler/rel/framing.ts';
 import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.ts';
+import type { Rel } from '../../rel/rel.ts';
+import type { Elem } from '../../compiler/plan/plan.ts';
+import type { GraphSource } from '../../compiler/rel/source.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -231,6 +234,15 @@ export interface RelCallSite extends CallSite {
    */
   readonly host?: ChildHost;
   readonly child?: ChildSeam;
+  /**
+   * THE MID-STREAM CONTEXT — the whole incoming element RELATION, present only for a mid-traversal
+   * `call()` over an element stream. A per-parent value service (`tinker.degree.centrality`) ignores
+   * it and reads `host`/`child`; a service that RESHAPES the whole stream reads it instead —
+   * `shortestPath` seeds a recursive walk from every incoming source vertex at once, which a
+   * per-parent child body cannot express. `source` is the `GraphSource` the walk joins against
+   * (base or bound graph).
+   */
+  readonly stream?: { readonly input: Rel; readonly elem: Elem; readonly source: GraphSource };
 }
 
 export interface Service {
