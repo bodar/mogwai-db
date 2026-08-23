@@ -5,7 +5,7 @@ import { injectionKindOf, parseCallSpec } from '../../services/params/call-param
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
-import { BaseGraph } from './source.ts';
+import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
@@ -223,7 +223,7 @@ const bareSource = (prefix: readonly IRStep[]): boolean =>
  *  incoming element id per traverser (uncollapsed, so multiplicity survives as row count) — the barrier's
  *  view of its input, which pageRank reads as its initial rank. A bare source keeps `head` null. */
 function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
-  const { key, vtype, seedFromInput } = barrier.decorate!;
+  const { channels, seedFromInput } = barrier.decorate!;
   const prefix = steps.slice(0, barrier.at);
   // The input head: `<prefix>.id()` with collapse OFF, so each incoming traverser is one row (a
   // collapsed `SUM(bulk)` would hide the multiplicity the initial rank needs). A `read` (value) head —
@@ -258,7 +258,13 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
       // its landed CTE (`decorateGraph.bindings`, collected at `lowered()`), so nothing threads a binding
       // by hand and a stack's several CTEs coexist under their `run`-derived names.
       const chainSteps = [...steps.slice(0, barrier.at), ...steps.slice(barrier.at + 1)];
-      const source = decorateGraph(request.lowering.source ?? BaseGraph, relation.run, relation.round, key, vtype);
+      // One decorateGraph LAYER per channel the algorithm wrote (GDS CompositeNodeValue): a single-scalar
+      // barrier stacks one, HITS stacks hub over auth. Each layer reads its own `(run, round, channel)`
+      // cell and delegates other keys down the stack, so every decorated key composes on the live stream.
+      const source = channels.reduce<GraphSource>(
+        (base, ch) => decorateGraph(base, relation.run, relation.round, ch.channel, ch.key, ch.vtype),
+        request.lowering.source ?? BaseGraph,
+      );
       return planOf(chainSteps, { ...request, lowering: { ...request.lowering, source } });
     },
   };

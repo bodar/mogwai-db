@@ -31,7 +31,7 @@ const DECORATE_COLS = [meta('id', 'int'), meta('cval', 'any', true)] as const;
  *  lets TWO independent statements (a second barrier's head and the final resume) each declare the SAME
  *  layer's binding and have `decorateGraph`'s `Ref`s resolve to it, and what keeps two STACKED layers'
  *  names distinct (their runs differ) so both CTEs coexist in one statement. */
-const decorateName = (run: number): string => `_mogwai_decorate_r${run}`;
+const decorateName = (run: number, channel: number): string => `_mogwai_decorate_r${run}_c${channel}`;
 
 /** Land the barrier's `(id → value)` relation as a fenced Plan binding: a SCAN of `barrier_state`
  *  (the OLAP scratch table — `src/storage.ts`) filtered to this query's `run`, its final `round` slot,
@@ -40,13 +40,12 @@ const decorateName = (run: number): string => `_mogwai_decorate_r${run}`;
  *  count and text size are O(1) regardless of |V| — the whole point of keeping the vector SQL-resident.
  *  Returned as the binding NODE; the caller pairs it with `name`.
  *
- *  **The `scope=0 AND channel=0` pin is load-bearing, not decoration.** A decorate barrier writes ONE
- *  cell per node today, so `(run, round)` alone happens to select one row per id — correct by luck. The
- *  moment any run holds a second channel (the value-width Tier-2 family — HITS hub+auth, Bellman-Ford
- *  dist+pred) or a non-zero scope, the unpinned filter would return several rows per id and the decorate
- *  join would silently multiply the stream. Pinned, it stays the single-scalar read regardless — exactly
- *  the pin `VEC` already carries (`services/catalog/graph-algorithms.ts`). */
-function decorateBinding(run: number, round: number, name: string, fresh: Minter): Rel {
+ *  **The `scope=0 AND channel=<channel>` pin is load-bearing, not decoration.** `(run, round)` alone
+ *  selects EVERY channel/scope a run holds, so a multi-channel algorithm (HITS hub+auth) or a non-zero
+ *  scope would return several rows per id and the decorate join would silently multiply the stream.
+ *  Pinned to the ONE `(scope=0, channel)` cell, it reads exactly that property — the same shape `VEC`
+ *  carries. A multi-channel decorate is one binding PER channel (the resume stacks a layer each). */
+function decorateBinding(run: number, round: number, channel: number, name: string, fresh: Minter): Rel {
   const scan = make.scan({
     id: fresh('decs'), table: 'barrier_state', alias: fresh('rbr'), channels: [],
     type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('scope', 'int'), meta('id', 'int'), meta('channel', 'int'), meta('cval', 'any', true)),
@@ -55,7 +54,7 @@ function decorateBinding(run: number, round: number, name: string, fresh: Minter
     id: fresh('decf'), input: scan, channels: [], type: scan.type,
     pred: and(
       and(eq(col(scan.id, 'run'), compilerInt(run)), eq(col(scan.id, 'round'), compilerInt(round))),
-      and(eq(col(scan.id, 'scope'), compilerInt(0)), eq(col(scan.id, 'channel'), compilerInt(0))),
+      and(eq(col(scan.id, 'scope'), compilerInt(0)), eq(col(scan.id, 'channel'), compilerInt(channel))),
     ),
   });
   const projected = make.project({
@@ -72,8 +71,8 @@ function decorateBinding(run: number, round: number, name: string, fresh: Minter
  *  stream. It DECLARES its own binding (and, transitively, the whole stack's) via `bindings()`, collected
  *  once at `lowered()` — the caller no longer threads the binding into effects by hand. `vtype` is the
  *  decorated value's canonical Gremlin type, used only to frame a `values(key)` read. */
-export function decorateGraph(base: GraphSource, run: number, round: number, key: string, vtype: string): GraphSource {
-  const bindingName = decorateName(run);
+export function decorateGraph(base: GraphSource, run: number, round: number, channel: number, key: string, vtype: string): GraphSource {
+  const bindingName = decorateName(run, channel);
   const ref = (fresh: Minter): Rel =>
     make.ref({ id: fresh('dref'), name: bindingName, channels: [], type: typeOf(...DECORATE_COLS) });
   const rowById = (id: Expr, fresh: Minter): Rel => {
@@ -89,7 +88,7 @@ export function decorateGraph(base: GraphSource, run: number, round: number, key
     // The stack's bindings: the base's (if it is itself a decorateGraph) then THIS layer's landed
     // relation, so `lowered()` declares every OLAP algorithm's CTE the statement reads through.
     bindings(fresh: Minter): readonly Binding[] {
-      const own: Binding = { name: bindingName, node: decorateBinding(run, round, bindingName, fresh) };
+      const own: Binding = { name: bindingName, node: decorateBinding(run, round, channel, bindingName, fresh) };
       return [...(base.bindings?.(fresh) ?? []), own];
     },
 

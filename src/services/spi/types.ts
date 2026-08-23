@@ -156,12 +156,12 @@ export type BarrierOutput = readonly ForeignRow[] | BarrierRelation;
  *  compose over the passed-through elements. This is the native OLAP steps' contract (pageRank/wcc/
  *  peerPressure decorate each incoming vertex with its score under a canonical property key). */
 export interface DecorateSpec {
-  readonly key: string;
-  /** The canonical Gremlin type of the decorated value (`src/gremlin/types.ts` vocabulary — e.g.
-   *  `'double'` for a pageRank score, `'string'` for a connectedComponent id). It is what
-   *  `values(key)`/`valueMap(key)` need to FRAME the value on the wire (a REAL score as a Double, not a
-   *  Long); `order().by(key)`/`has(key)` read it raw and do not consult it. */
-  readonly vtype: string;
+  /** The decorated properties, one per `barrier_state` CHANNEL the algorithm writes (GDS's
+   *  `CompositeNodeValue` — a multi-property algorithm like HITS declares hub=channel 0, auth=channel 1;
+   *  a single-scalar one (pageRank/wcc/peerPressure) declares one channel 0). The decorate resume STACKS
+   *  a `decorateGraph` layer per channel, so `values(hub)`, `order().by(auth)`, `project().by(hub).by(auth)`
+   *  all compose over the one passed-through element stream. */
+  readonly channels: readonly DecorateChannel[];
   /** THE BARRIER WANTS TO SEE ITS INPUT STREAM. When set, and the prefix is not a bare `V()`/`E()`
    *  source, the decorate segment gives `apply` a head that projects the incoming per-traverser element
    *  id (one row per traverser, uncollapsed) — so the barrier learns the per-element MULTIPLICITY that
@@ -170,6 +170,19 @@ export interface DecorateSpec {
    *  and `apply` gets no rows. Generic: any algorithm whose result depends on incoming multiplicity
    *  declares this and reads the counts off `apply`'s rows. */
   readonly seedFromInput?: boolean;
+}
+
+/** ONE decorated property = one `barrier_state` channel read back under a Gremlin property key. */
+export interface DecorateChannel {
+  readonly key: string;
+  /** The `barrier_state.channel` this property's value lives in (the algorithm's `apply` wrote it there).
+   *  A single-scalar algorithm uses `0`; HITS uses `0` (hub) and `1` (auth). */
+  readonly channel: number;
+  /** The canonical Gremlin type of the decorated value (`src/gremlin/types.ts` vocabulary — e.g.
+   *  `'double'` for a pageRank/HITS score, `'string'` for a connectedComponent id). It is what
+   *  `values(key)`/`valueMap(key)` need to FRAME the value on the wire (a REAL score as a Double, not a
+   *  Long); `order().by(key)`/`has(key)` read it raw and do not consult it. */
+  readonly vtype: string;
 }
 
 /** A PATH barrier's reconstruction descriptor — weighted shortestPath. When present on a barrier

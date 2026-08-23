@@ -406,7 +406,7 @@ export function createWccService(store: GraphStore | undefined): Service {
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key, vtype: 'string' }, // a component id is the min external-id STRING
+        decorate: { channels: [{ key, channel: 0, vtype: 'string' }] }, // a component id is the min external-id STRING
         ...syncBarrier((): BarrierRelation => {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
@@ -526,7 +526,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key, vtype: 'double', seedFromInput: true }, // a PageRank score is a double; initial rank = incoming count
+        decorate: { channels: [{ key, channel: 0, vtype: 'double' }], seedFromInput: true }, // a PageRank score is a double; initial rank = incoming count
         ...syncBarrier((rows): BarrierRelation => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
@@ -653,7 +653,7 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key, vtype: 'int' }, // a cluster id is a vertex id (integer rowid, modern graph)
+        decorate: { channels: [{ key, channel: 0, vtype: 'int' }] }, // a cluster id is a vertex id (integer rowid, modern graph)
         ...syncBarrier((): BarrierRelation => {
           if (!store)
             throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
