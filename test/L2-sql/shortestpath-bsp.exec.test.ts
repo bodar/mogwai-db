@@ -5,7 +5,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadGraphson } from '../../src/formats/graphson.ts';
 import { readFileSync } from 'node:fs';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { relaxShortestPath } from '../../src/services/catalog/graph-algorithms.ts';
+import { relaxShortestPath } from '../../src/services/catalog/olap/kernel.ts';
 
 // The BSP half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5): a
 // Bellman-Ford relaxation writing dist per (source, node) into barrier_state (scope = source, channel 0).

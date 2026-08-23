@@ -6,7 +6,12 @@ import { searchService } from './catalog/search.ts';
 import { createFederateService } from './catalog/federate.ts';
 import { createIoService } from './catalog/io.ts';
 import { schemaService } from './catalog/schema.ts';
-import { createClosenessService, createHarmonicService, createHitsService, createPageRankService, createPeerPressureService, createShortestPathService, createWccService } from './catalog/graph-algorithms.ts';
+import { createShortestPathService } from './catalog/olap/shortest-path.ts';
+import { createWccService } from './catalog/olap/wcc.ts';
+import { createPageRankService } from './catalog/olap/pagerank.ts';
+import { createPeerPressureService } from './catalog/olap/peer-pressure.ts';
+import { createHitsService } from './catalog/olap/hits.ts';
+import { createClosenessService, createHarmonicService } from './catalog/olap/centrality.ts';
 
 // ---------- the standard + extended registries ----------
 //

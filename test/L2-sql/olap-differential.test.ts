@@ -3,12 +3,120 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { connectedComponents, pageRankScores, peerPressureClusters } from '../../src/services/catalog/graph-algorithms.ts';
+// The OLAP computes execute as SQL-resident relaxations (one INSERT..SELECT per round over
+// `barrier_state`; docs/2026-08-23-barrier-substrate-reshape-plan.md). The pure-JS functions BELOW are
+// the differential ORACLES: this asserts the SQL rounds agree with them over the WHOLE vertex vector
+// (not just the conformance-asserted subset), so the SQL rewrite cannot silently drift from the
+// algorithm. They are TEST-ONLY (independent re-derivations of the reference), so they live here with
+// their only consumer rather than in `src/` — the execution path in `src/services/catalog/olap/` is the
+// SQL, and a JS reference in production source would read as a second, unused implementation.
 
-// The OLAP computes execute as substrate-A-iterated SQL (one relaxation per round, the vector crossing
-// as a json_each bind — docs/2026-08-21-barrier-substrate-design.md). The pure-JS functions here are the
-// differential ORACLES: this asserts the SQL rounds agree with them over the WHOLE vertex vector (not
-// just the conformance-asserted subset), so the SQL rewrite cannot silently drift from the algorithm.
+type IdValue = { readonly id: number; readonly value: unknown };
+
+/** Weakly-connected components by union-find over the (undirected) edge list, labelling each component
+ *  with the lexicographically-smallest external-id string among its members (the reference's exact
+ *  `id().toString()`/string-`compareTo` rule) — the oracle for mogwai.wcc's SQL rounds. */
+function connectedComponents(
+  nodes: readonly { readonly id: number; readonly ext: string | number }[],
+  edges: readonly { readonly src: number; readonly tgt: number }[],
+): readonly IdValue[] {
+  const parent = new Map<number, number>();
+  for (const n of nodes) parent.set(n.id, n.id);
+  const find = (x: number): number => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    let c = x;
+    while (parent.get(c) !== r) { const next = parent.get(c)!; parent.set(c, r); c = next; }
+    return r;
+  };
+  for (const e of edges) {
+    if (!parent.has(e.src) || !parent.has(e.tgt)) continue;
+    parent.set(find(e.src), find(e.tgt));
+  }
+  const label = new Map<number, string>();
+  for (const n of nodes) {
+    const root = find(n.id);
+    const s = String(n.ext);
+    const cur = label.get(root);
+    if (cur === undefined || s < cur) label.set(root, s);
+  }
+  return nodes.map((n) => ({ id: n.id, value: label.get(find(n.id))! }));
+}
+
+/** PageRank (α damping, teleport redistribution of dangling rank) — the oracle for mogwai.pageRank. A
+ *  faithful re-derivation of PageRankVertexProgram, so a modern-graph sink ranks correctly. */
+function pageRankScores(
+  nodes: readonly { readonly id: number }[],
+  edges: readonly { readonly src: number; readonly tgt: number }[],
+  alpha: number,
+): readonly IdValue[] {
+  const ids = nodes.map((n) => n.id);
+  const N = ids.length;
+  if (N === 0) return [];
+  const out = new Map<number, number[]>(ids.map((id) => [id, []]));
+  for (const e of edges) out.get(e.src)?.push(e.tgt);
+  const outdeg = new Map<number, number>(ids.map((id) => [id, out.get(id)!.length]));
+  const pr = new Map<number, number>(ids.map((id) => [id, 0]));
+  let messages = new Map<number, number>(ids.map((id) => [id, 0]));
+  let teleport = 1.0;
+  const EPSILON = 0.00001;
+  for (let k = 1; k <= 20; k++) {
+    const teleportK = teleport;
+    const localTerminal = teleportK > 0 ? teleportK / N : 0;
+    const nextMessages = new Map<number, number>(ids.map((id) => [id, 0]));
+    let nextTeleport = 0;
+    let convergence = 0;
+    for (const id of ids) {
+      const rank = (k === 1 ? 0 : messages.get(id)!) + (teleportK > 0 ? localTerminal : 0);
+      convergence += Math.abs(rank - pr.get(id)!);
+      pr.set(id, rank);
+      nextTeleport += (1 - alpha) * rank;
+      const send = alpha * rank;
+      const od = outdeg.get(id)!;
+      if (od > 0) { const share = send / od; for (const t of out.get(id)!) nextMessages.set(t, nextMessages.get(t)! + share); }
+      else nextTeleport += send;
+    }
+    teleport = nextTeleport;
+    messages = nextMessages;
+    if (convergence < EPSILON) break;
+  }
+  return ids.map((id) => ({ id, value: pr.get(id)! }));
+}
+
+/** Peer-pressure clustering: each vertex adopts the max-vote cluster among {itself} ∪ {voters}, ties to
+ *  the smallest id string, to a fixpoint — the oracle for mogwai.peerPressure. */
+function peerPressureClusters(
+  nodes: readonly { readonly id: number; readonly ext: string | number }[],
+  edges: readonly { readonly src: number; readonly tgt: number }[],
+): readonly IdValue[] {
+  const ids = nodes.map((n) => n.id);
+  const ext = new Map<number, string | number>(nodes.map((n) => [n.id, n.ext]));
+  const voters = new Map<number, number[]>(ids.map((id) => [id, []]));
+  for (const e of edges) voters.get(e.tgt)?.push(e.src);
+  let cluster = new Map<number, string | number>(ids.map((id) => [id, ext.get(id)!]));
+  for (let round = 0; round < 30; round++) {
+    const next = new Map<number, string | number>();
+    let changed = false;
+    for (const id of ids) {
+      const votes = new Map<string | number, number>();
+      votes.set(cluster.get(id)!, 1);
+      for (const u of voters.get(id)!) {
+        const c = cluster.get(u)!;
+        votes.set(c, (votes.get(c) ?? 0) + 1);
+      }
+      let best: string | number = cluster.get(id)!;
+      let bestVote = -1;
+      for (const [c, v] of votes) {
+        if (v > bestVote || (v === bestVote && String(c) < String(best))) { best = c; bestVote = v; }
+      }
+      next.set(id, best);
+      if (best !== cluster.get(id)) changed = true;
+    }
+    cluster = next;
+    if (!changed) break;
+  }
+  return ids.map((id) => ({ id, value: cluster.get(id)! }));
+}
 
 const store = () => seeded(MODERN_SEED);
 const nodesOf = (s: ReturnType<typeof store>) => s.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
