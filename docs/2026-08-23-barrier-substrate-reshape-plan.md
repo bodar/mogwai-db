@@ -4,7 +4,8 @@
 `docs/2026-08-21-barrier-substrate-design.md` for the OLAP/graph-algorithm barriers. Records the
 decision to generalize the `barrier_relation` scratch table, grounded in the newly-vendored
 `vendor/gds` (Neo4j GDS Pregel) as the shape reference. The authority remains the code
-(`src/storage.ts`, `src/compiler/rel/segment.ts`, `src/services/catalog/graph-algorithms.ts`);
+(`src/storage.ts`, `src/compiler/rel/segment.ts`, `src/services/catalog/olap/` — split from the former
+`graph-algorithms.ts` into a shared `kernel.ts` + one file per algorithm);
 this is the mental model and the phased plan.
 
 ## 1. The finding — `barrier_relation` is GDS's `SingleNodeValue` special case
