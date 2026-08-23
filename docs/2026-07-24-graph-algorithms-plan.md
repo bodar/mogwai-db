@@ -161,8 +161,24 @@ trivial path is gated by the same endpoint filter, since its endpoint is its sou
 `g_V_hasXname_markoX_shortestPath_targetXhasLabelXsoftwareXX`, and the crew
 `g_V_hasXname_danielX_shortestPath_targetXhasXname_stephenXX_edgesXbothEXusesXX`.
 
-**✅ LANDED (2026-08-23) — shortestPath weighted distance. shortestPath is COMPLETE — all four native
-OLAP steps done.** `~tinkerpop.shortestPath.distance` (a weight property key) makes distance the SUM of
+⚠️ **CORRECTION (2026-08-23, `9b77dd5`) — the weighted "LANDED" below is WITHDRAWN; it HANGS.** The
+recursive-CTE walk (Template B) enumerates every SIMPLE path, and a min-distance relaxation cannot prune
+INSIDE a recursive term (P3 / repeat-two-regimes §1a — no aggregate over the accumulation). So on a dense
+graph it is exponential and reads as a hang (the §7.1 cost wall): L3's grateful
+`g_V_hasXsong_name_MIGHT_AS_WELLX_..._edgesXoutEXfollowedByXX_distanceXweightX` never completes (measured
+>95s standalone, bun 100% CPU), which is why no clean L3 run could re-record the floor. The unweighted
+family survives only on small/hop-capped fixtures — it is the SAME latent flaw, unexercised. **Weighted
+distance now FAILS CLOSED** (`shortestPathService` throws a deferral). This confirms the Tier-2 line above
+(line ~273): weighted paths are Bellman-Ford iterative relaxation, a BSP BARRIER — not a recursive CTE.
+**Phase 2 (authorized): rebuild ALL of shortestPath on the BSP relaxation barrier, delete the walk.** A
+relaxation barrier computes min-dist + PREDECESSORS per node (V−1 rounds, the SQL-resident
+`barrier_relation` substrate; Bellman-Ford handles the NEGATIVE/custom weights the reference allows, which
+is why weighted maxDistance is a final filter not a prune); a recursive CTE then reconstructs paths over
+the PRUNED predecessor DAG (dist strictly decreases → acyclic → enumerates only the actual shortest paths);
+`path`-framed. New plumbing: a barrier whose product is a PATH relation, not a decorate resume.
+
+**✅ ~~LANDED~~ WITHDRAWN — SEE CORRECTION ABOVE (2026-08-23) — shortestPath weighted distance.**
+`~tinkerpop.shortestPath.distance` (a weight property key) makes distance the SUM of
 edge weights (a REAL) rather than the hop count: the recursive term reads each edge's weight as a
 correlated `values(key)` scalar (`child.scalar` over the edge — a nested SELECT, P2-legal) and sums it;
 the MIN-over-partition outside the walk still selects the least-weight path (P3 forbids the min INSIDE
