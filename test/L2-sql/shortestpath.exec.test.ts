@@ -3,6 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { CREW_SEED } from '../fixtures/seed-crew.ts';
 
 // shortestPath() (mogwai.shortestPath) — Template B: a single recursive-CTE enumerating every simple
 // path, keeping the shortest per (source, target) with all ties, landed in the path channel. It is a
@@ -79,17 +80,36 @@ describe('shortestPath() — mogwai.shortestPath recursive-CTE (unweighted)', ()
     }
   });
 
+  const TO_MARKO = ['josh,marko', 'lop,marko', 'marko', 'peter,lop,marko', 'ripple,josh,marko', 'vadas,marko'].sort();
+
+  test('g_V_shortestPath_targetXhasXname_markoXX — endpoint target filter', async () => {
+    const store = seeded(MODERN_SEED);
+    expect(seqs(await run(store, `g.V().shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","marko"))`)))
+      .toEqual(TO_MARKO);
+  });
+
+  test('g_V_shortestPath_targetXvaluesXnameX_isXmarkoXX — a value-predicate target', async () => {
+    const store = seeded(MODERN_SEED);
+    expect(seqs(await run(store, `g.V().shortestPath().with("~tinkerpop.shortestPath.target", __.values("name").is("marko"))`)))
+      .toEqual(TO_MARKO);
+  });
+
+  test('g_V_hasXname_markoX_shortestPath_targetXhasLabelXsoftwareXX — source + target', async () => {
+    const store = seeded(MODERN_SEED);
+    expect(seqs(await run(store, `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.target", __.hasLabel("software"))`)))
+      .toEqual(['marko,josh,ripple', 'marko,lop'].sort());
+  });
+
+  test('g_V_hasXname_danielX_..._edgesXbothEXusesXX — crew graph, label-scoped edges + target', async () => {
+    const store = seeded(CREW_SEED);
+    expect(seqs(await run(store, `g.V().has("name","daniel").shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","stephen")).with("~tinkerpop.shortestPath.edges", __.bothE("uses"))`)))
+      .toEqual(['daniel,gremlin,stephen', 'daniel,tinkergraph,stephen'].sort());
+  });
+
   test('fail closed: a weighted distance is not supported yet', async () => {
     const store = seeded(MODERN_SEED);
     await expect(exec(store).framedAsync(
       `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.distance", "weight")`, {}))
       .rejects.toThrow('weighted distance');
-  });
-
-  test('fail closed: a target filter is not supported yet', async () => {
-    const store = seeded(MODERN_SEED);
-    await expect(exec(store).framedAsync(
-      `g.V().shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","marko"))`, {}))
-      .rejects.toThrow('target filter');
   });
 });

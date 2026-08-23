@@ -152,18 +152,22 @@ bump distributes over the movement union while `extendPath` sits above it. This 
 append, the distance bump and the simple-path filter INTO each arm, so each references the walk once (P1)
 and a `both` scope is two arms `UNION ALL`, exactly as `both()` is.
 
-**NEXT — the remaining shortestPath config (all fail CLOSED today, clear deferral):**
-- **target filter** (`~tinkerpop.shortestPath.target`, an anonymous vertex predicate) — 4 scenarios
-  (`targetXhasXname_markoXX`, `targetXvaluesXnameX_isXmarkoXX`, `hasXname_markoX_..._targetXhasLabelXsoftwareXX`,
-  and the crew `edgesXbothEXusesXX` which also needs a LABEL-scoped edges traversal). Filter the emitted
-  paths by the endpoint passing the target predicate (a `child.predicate` over the endpoint element),
-  and the trivial `p[v[X]]` is emitted iff the source passes the target.
-- **label-scoped edges** (`__.bothE("uses")`, `__.outE("followedBy")`) — the `edgeLabelMatch` join
-  condition (already used by the decorate edge scope); the builder currently declines any scope labels.
+**✅ LANDED (2026-08-23) — shortestPath target filter + label-scoped edges.** The `.target` predicate
+(`~tinkerpop.shortestPath.target`) filters the emitted paths by the ENDPOINT passing an anonymous vertex
+predicate (`child.predicate` over the endpoint, applied AFTER the shortest-per-pair selection — the
+trivial path is gated by the same endpoint filter, since its endpoint is its source). Label-scoped edges
+(`__.bothE("uses")`) add `edgeLabelMatch` to the arm join (inline string labels, no bind). **L3 +4**:
+`g_V_shortestPath_targetXhasXname_markoXX`, `g_V_shortestPath_targetXvaluesXnameX_isXmarkoXX`,
+`g_V_hasXname_markoX_shortestPath_targetXhasLabelXsoftwareXX`, and the crew
+`g_V_hasXname_danielX_shortestPath_targetXhasXname_stephenXX_edgesXbothEXusesXX`.
+
+**NEXT — the last shortestPath config (fail CLOSED today):**
 - **weighted distance** (`~tinkerpop.shortestPath.distance`, a weight property) — Tier-2: the recursive
   term sums the edge's weight property instead of 1 (P3 forbids the min INSIDE the term, so the
   MIN-over-partition outside the walk still does the selection); the weighted `.maxDistance` filters the
-  final shortest distance at collection, not by pruning. 3 scenarios (all weighted).
+  final shortest distance at collection, not by pruning. 3 scenarios (all weighted):
+  `hasXname_markoX_..._targetXhasXname_joshXX_distanceXweightX`, the grateful `...outEXfollowedByX_distanceXweightX`,
+  `hasXname_vadasX_..._distanceXweightX_maxDistanceX1_3X`.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

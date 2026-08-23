@@ -5,6 +5,7 @@ import {
 import type { GraphStore } from '../../storage.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { parseGremlin, stepChain } from '../../gremlin/frontend.ts';
+import type { IRStep } from '../../compiler/ir/step.ts';
 import { shortestPathWalk } from '../../compiler/rel/shortestpath.ts';
 
 // ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
@@ -130,6 +131,20 @@ const SP_TARGET = '~tinkerpop.shortestPath.target';
 const SP_DISTANCE = '~tinkerpop.shortestPath.distance';
 const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
 
+/** Parse a `~tinkerpop.shortestPath.target` value — an anonymous vertex traversal used as an ENDPOINT
+ *  predicate — to its body IR (the steps after the source root), or `undefined` when no target is set.
+ *  Same read as `edgeScopeOf`: a `TraversalParam` carries the serialized gremlin; our parser roots at a
+ *  source, so an anonymous body is prepended one and the source step dropped. */
+function targetBody(value: unknown): readonly IRStep[] | undefined {
+  if (value === undefined) return undefined;
+  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
+  if (gremlin === null)
+    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${String(value)}`);
+  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
+  try { return stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E'); }
+  catch { throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${gremlin}"`); }
+}
+
 export const shortestPathService: Service = {
   name: SHORTEST_PATH_SERVICE_NAME,
   type: 'streaming',
@@ -151,10 +166,6 @@ export const shortestPathService: Service = {
 
       const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
       // Fail closed on the config not yet built — a clear deferral, never a wrong answer.
-      if (scope.labels.length > 0)
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a label-scoped edges traversal is not supported yet`);
-      if (SP_TARGET in site.params)
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a target filter (~tinkerpop.shortestPath.target) is not supported yet`);
       if (SP_DISTANCE in site.params)
         throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a weighted distance (~tinkerpop.shortestPath.distance) is not supported yet`);
 
@@ -166,9 +177,10 @@ export const shortestPathService: Service = {
         maxHops = md;
       }
       const includeEdges = SP_INCLUDE_EDGES in site.params;
+      const target = targetBody(site.params[SP_TARGET]);
 
       const { input, elem, source } = site.stream;
-      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, includeEdges, maxHops }, site.child!, site.fresh);
+      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, site.child!, site.fresh);
       return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
     },
   }),

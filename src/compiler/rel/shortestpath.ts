@@ -4,6 +4,7 @@ import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
+import type { Arg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../plan/alias.ts';
 import type { Elem } from '../plan/plan.ts';
@@ -61,10 +62,19 @@ const DIR_HOPS: Readonly<Record<'out' | 'in' | 'both', readonly { readonly from:
 
 export interface ShortestPathConfig {
   readonly direction: 'out' | 'in' | 'both';
+  /** Edge labels the scope restricts to (`~tinkerpop.shortestPath.edges` = `__.bothE("uses")`); empty =
+   *  every label. Inline string literals, so they inline into the join with no bind. */
+  readonly labels: readonly string[];
   readonly includeEdges: boolean;
   /** An unweighted hop cap (`~tinkerpop.shortestPath.maxDistance`) — a path longer than this is never
    *  extended (`ShortestPathVertexProgram.exceedsMaxDistance`, which only prunes for hop distances). */
   readonly maxHops?: number;
+  /** `~tinkerpop.shortestPath.target` — a vertex predicate the ENDPOINT must pass for its path to be
+   *  emitted (`ShortestPathVertexProgram.isEndVertex`, applied in `collectShortestPaths`). The shortest
+   *  path to EVERY vertex is still computed; the target only filters what is collected — so it applies
+   *  AFTER the shortest-per-pair selection. The trivial path (source == endpoint) is emitted iff the
+   *  source passes it, which the same endpoint filter covers. Parsed to the predicate body IR. */
+  readonly target?: readonly IRStep[];
 }
 
 const vertexEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'vertex', id });
@@ -112,6 +122,8 @@ export function shortestPathWalk(
   });
 
   const hops = DIR_HOPS[cfg.direction];
+  // Inline string-literal label Args (no bind — they came from a parsed anonymous edge traversal).
+  const labelArgs: Arg[] = cfg.labels.map((label) => ({ value: label, type: null, name: null }));
   let termOk = true;
   const walkId = fresh('spw');
   const walk = make.recursive({
@@ -121,10 +133,13 @@ export function shortestPathWalk(
         const e = source.adjacencyEdges(fresh);
         // JOIN self ⋈ edges on the endpoint. The output type is left cols ++ right cols positionally
         // (`movement`'s `pid` convention): self's `id`/`src` are renamed to avoid the edge's own
-        // `id`/`src`, the channel columns keep their canonical names.
+        // `id`/`src`, the channel columns keep their canonical names. A label-scoped edges traversal
+        // restricts the hop, exactly as a `both("uses")` movement does — inline string labels, no bind.
+        const labelMatch = labelArgs.length
+          ? source.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh) : undefined;
         const joined = make.join({
           id: fresh('spj'), left: self, right: e, join: 'inner', ordered: true, channels,
-          on: eq(col(e.id, hop.from), col(self.id, 'id')),
+          on: and(eq(col(e.id, hop.from), col(self.id, 'id')), labelMatch),
           type: typeOf(
             meta('pid', 'int'), meta('psrc', 'int'), meta('dist', 'int'), meta('bulk', 'int'), meta(PATH_COL, 'json', true),
             meta('eid', 'int'), meta('esrc', 'int'), meta('elabel', 'int'), meta('etgt', 'int'),
@@ -179,9 +194,18 @@ export function shortestPathWalk(
     id: fresh('spd'), input: shortest, channels, type: walkType,
     exprs: header.map((name) => [name, col(shortest.id, name)] as const),
   });
+  // TARGET FILTER — the endpoint (the path's last vertex) must pass the target predicate. Applied AFTER
+  // the shortest-per-pair selection (the reference computes the shortest path to every vertex and filters
+  // only what it collects). The trivial path's endpoint IS its source, so the same filter gates it.
+  let selected: Rel = dropped;
+  if (cfg.target) {
+    const pred = child.predicate(cfg.target, { kind: 'element', id: col(dropped.id, 'id'), rel: dropped, elem: 'vertex' }, false);
+    if (!pred) return null;
+    selected = make.filter({ id: fresh('spt'), input: dropped, channels, type: dropped.type, pred });
+  }
   // The reference keeps a SET of shortest paths per pair — dedup identical paths (a JSONB path equals
   // another iff its bytes match, which two identical vertex sequences produce).
-  const deduped = make.distinct({ id: fresh('spdd'), input: dropped, channels, type: dropped.type });
+  const deduped = make.distinct({ id: fresh('spdd'), input: selected, channels, type: selected.type });
 
   // Consume the path channel exactly as `path()` does. shortestPath carries no `by()` modulation, so a
   // bare `path` step is the honest input — every position frames as its own element.
