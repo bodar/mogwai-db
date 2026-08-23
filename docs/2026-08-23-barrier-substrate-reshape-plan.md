@@ -1,12 +1,27 @@
 # Barrier substrate reshape — from single-scalar fixpoint to a general per-node schema
 
-**Status: DESIGN SYNTHESIS (2026-08-23), not yet built.** Supersedes the "output shape" half of
-`docs/2026-08-21-barrier-substrate-design.md` for the OLAP/graph-algorithm barriers. Records the
-decision to generalize the `barrier_relation` scratch table, grounded in the newly-vendored
-`vendor/gds` (Neo4j GDS Pregel) as the shape reference. The authority remains the code
-(`src/storage.ts`, `src/compiler/rel/segment.ts`, `src/services/catalog/olap/` — split from the former
-`graph-algorithms.ts` into a shared `kernel.ts` + one file per algorithm);
-this is the mental model and the phased plan.
+**Status: SUBSTRATE COMPLETE (2026-08-23) — all phased items 1–6 landed + a GDS-style algorithm
+library built on it.** Supersedes the "output shape" half of `docs/2026-08-21-barrier-substrate-design.md`
+for the OLAP/graph-algorithm barriers. Generalized `barrier_relation` →
+`barrier_state(run,round,scope,id,channel,cval)`, grounded in the vendored `vendor/gds` (Neo4j GDS
+Pregel) as the shape reference. The authority is the code (`src/storage.ts`, `src/compiler/rel/segment.ts`,
+`src/services/catalog/olap/` — split from the former `graph-algorithms.ts` into a shared `kernel.ts` +
+one file per algorithm); this doc is the mental model + landing record.
+
+**All three `barrier_state` dimensions and all four barrier OUTPUT shapes now exist, each exercised by a
+real algorithm:**
+- dimensions: **multi-channel** (HITS hub+auth) · **scope key** (closeness/harmonic/Brandes, per-source) ·
+  **keep-all rounds** (Brandes reverse pass).
+- output shapes: **decorate** (per-vertex score) · **path** (shortestPath) · **detached rows**
+  (federate/io) · **pair-maps** (nodeSimilarity — a stream of `{node1,node2,similarity}` maps).
+- **Algorithm library (`src/services/catalog/olap/`), all GDS-oracled, `do`-residency ones real-workerd
+  validated:** shortestPath, wcc, pageRank, peerPressure, hits, closeness, harmonic, triangleCount,
+  localClusteringCoefficient, kcore, betweenness, nodeSimilarity. (degree is `tinker.degree.centrality`.)
+- **Remaining GDS candidates all REUSE existing shapes** (scc, labelPropagation, articleRank, eigenvector,
+  louvain) — more algorithms, no new substrate. Eigenvector's GDS Pregel formulation is finicky to
+  exact-match (A+I, one-step message lag) — deferred, noted in-session. Modes: one shape (decorate/etc.)
+  per algo; NO GDS stream/stats/mutate matrix — the traversal after the call is the mode (user decision,
+  revisit only on concrete need).
 
 ## 1. The finding — `barrier_relation` is GDS's `SingleNodeValue` special case
 
