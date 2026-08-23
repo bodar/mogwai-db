@@ -98,6 +98,13 @@ function olapContract(getOrigin: () => string) {
         expect(topAuth.value).toBe('lop');
         const topHub = await g.V().call('mogwai.hits').order().by('hub', gremlin.process.order.desc).limit(1).values('name').next();
         expect(topHub.value).toBe('marko');
+
+        // mogwai.closeness — a SCOPE-keyed barrier (reuses relaxShortestPath's per-source distances).
+        // IN direction: lop & josh are reached (closeness 1 each), marko is a pure source (0). Proves the
+        // all-source relaxation + the per-scope aggregation write (scope 0) run on the real DO store.
+        expect((await g.V().call('mogwai.closeness').has('closeness').count().next()).value).toBe(3);
+        const closeness = await g.V().call('mogwai.closeness').values('closeness').toList();
+        expect(closeness.reduce((a: number, b: number) => a + b, 0)).toBeCloseTo(2.0, 10);
       } finally { await conn.close(); }
     }, 40_000);
   });

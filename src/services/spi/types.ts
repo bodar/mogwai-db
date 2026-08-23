@@ -343,3 +343,7 @@ export const SHORTEST_PATH_SERVICE_NAME = 'mogwai.shortestPath';
  *  `internal: true` like the others: served by both registries, absent from `--list`, so it cannot shift
  *  the reference provider surface the conformance `--list`/g_call scenarios assert. */
 export const HITS_SERVICE_NAME = 'mogwai.hits';
+/** Closeness centrality — a GDS-style call-only algorithm, `internal: true` like the rest. Reuses the
+ *  scope-keyed `barrier_state` (`relaxShortestPath`, scope = source) that weighted shortestPath already
+ *  writes: the first pair-keyed-state consumer beyond shortestPath (reshape plan item 5). */
+export const CLOSENESS_SERVICE_NAME = 'mogwai.closeness';

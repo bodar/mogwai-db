@@ -1,6 +1,6 @@
 import type { BarrierInput, BarrierRelation, CallParams, PathSpec, Service } from '../spi/types.ts';
 import {
-    PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME, HITS_SERVICE_NAME,
+    PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME, HITS_SERVICE_NAME, CLOSENESS_SERVICE_NAME,
 } from '../spi/types.ts';
 import type { GraphStore } from '../../storage.ts';
 import { isTraversalParam } from '../params/call-params.ts';
@@ -787,3 +787,64 @@ export function createHitsService(store: GraphStore | undefined): Service {
   };
 }
 
+
+// ---------- mogwai.closeness — closeness centrality, a scope-keyed DECORATE barrier ----------
+//
+// `g.call("mogwai.closeness")` decorates each vertex with its closeness centrality — the first
+// pair-keyed-state consumer beyond shortestPath, reusing the SAME scope-keyed `barrier_state` that
+// `relaxShortestPath` writes (scope = source, channel 0 = distance). GDS's DefaultCentralityComputer:
+// closeness[v] = reached[v] / farness[v], where farness[v] = Σ dist(u→v) over all u that REACH v and
+// reached[v] is how many do (0 when none). The IN direction is the algorithm's, proven by GDS's own
+// directed test (`vendor/gds/algo/src/test/java/org/neo4j/gds/closeness/ClosenessCentralityDirectedTest.java`
+// — a=2/3, b=1, c=0 only reproduce with reverse-edge BFS; GPLv3, re-expressed). On an undirected graph
+// in ≡ out. Compute: relax unweighted distances FROM every vertex over reversed edges (so scope=v holds
+// dist(u→v) for each reaching u), then aggregate per scope into one closeness score at (scope 0, channel 0).
+
+const CLOSENESS_KEY = 'closeness';
+
+/** closeness() over a store: a DECORATE barrier. `apply` relaxes all-source reverse distances into
+ *  `barrier_state` (`relaxShortestPath`, scope = source) then folds each source's rows to reached/farness,
+ *  written at (scope 0, channel 0) for the decorate resume. `internal: true` — call-only, GDS-style. */
+export function createClosenessService(store: GraphStore | undefined): Service {
+  return {
+    name: CLOSENESS_SERVICE_NAME,
+    type: 'barrier',
+    internal: true,
+    describeParams: () => ({ propertyName: `the vertex property key for the score (default ${CLOSENESS_KEY})` }),
+    resolve: (site) => {
+      const nameOverride = site.params.propertyName;
+      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : CLOSENESS_KEY;
+      return {
+        kind: 'barrier',
+        residency: 'do',
+        decorate: { channels: [{ key, channel: 0, vtype: 'double' }] },
+        ...syncBarrier((): BarrierRelation => {
+          if (!store)
+            throw new Error(`${CLOSENESS_SERVICE_NAME}: no graph store is available to compute closeness`);
+          const run = store.allocBarrierRun();
+          const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+          if (ids.length === 0) return { kind: 'relation-ref', run, round: 0 };
+          // Reverse-edge distances from every vertex: barrier_state[scope=v][id=u] = dist(u→v). The IN
+          // direction makes `scope=v` hold the distances of the nodes that REACH v — closeness's farness.
+          const distRound = relaxShortestPath(store, run, ids, { direction: 'in', labels: [] }, undefined);
+          // Aggregate each scope's reached distances into one score, at scope 0 / channel 0 so the decorate
+          // binding reads it. Every vertex gets a row (LEFT JOIN): an unreached vertex is farness 0 → 0.
+          // dist(v→v)=0 is excluded by `cval > 0`, so `reached` counts OTHER nodes exactly as GDS does.
+          const scoreRound = 2; // relaxShortestPath alternates slots 0/1 only, so 2 is a free round
+          store.query('DELETE FROM barrier_state WHERE run = ? AND round = ?', [run, scoreRound]);
+          store.query(
+            `${STATE_INSERT}
+               SELECT ?, ?, 0, n.id, 0,
+                      CASE WHEN COALESCE(SUM(bs.cval), 0) > 0
+                           THEN CAST(COUNT(bs.cval) AS REAL) / SUM(bs.cval) ELSE 0.0 END
+                 FROM nodes n
+                 LEFT JOIN barrier_state bs
+                   ON bs.run = ? AND bs.round = ? AND bs.channel = 0 AND bs.scope = n.id AND bs.cval > 0
+                GROUP BY n.id`,
+            [run, scoreRound, run, distRound]);
+          return { kind: 'relation-ref', run, round: scoreRound };
+        }),
+      };
+    },
+  };
+}
