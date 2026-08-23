@@ -282,7 +282,7 @@ PINNED="$PROVISIONED_SHA"
 # Self-healing: `provision` re-asserts the sparse set every run, so unsetting the variable restores
 # gremlin-core on the next run and re-provisions calcite from scratch.
 if [ -n "${MOGWAI_SKIP_REFERENCE:-}" ]; then
-  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, tinkergraph-gremlin, vendor/calcite)"
+  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, tinkergraph-gremlin, vendor/calcite, vendor/gds)"
 fi
 
 # ── calcite: READ-ONLY prior art for the RelIR ────────────────────────────────────────────────
@@ -310,6 +310,30 @@ if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
   provision vendor/calcite https://github.com/apache/calcite.git shallow \
     "$CALCITE_SRC/rel" "$CALCITE_SRC/rex" "$CALCITE_SRC/plan" "$CALCITE_SRC/sql" \
     "$CALCITE_SRC/sql2rel" "$CALCITE_SRC/util" "$CALCITE_SRC/tools"
+fi
+
+# ── gds (Neo4j Graph Data Science): READ-ONLY prior art for the algorithm + barrier layer ──────
+#
+# Never built, never imported, no Java toolchain implied — the same standing as gremlin-core and
+# calcite, and vendored for the same reason: docs/2026-07-24-graph-algorithms-plan.md names GDS as
+# the competitive target and the barrier-substrate design cites its Pregel model. A citation that
+# resolves only on one laptop is uncheckable; at the pin
+# `vendor/gds/<module>/src/main/java/org/neo4j/gds/…:NNN` resolves for everyone.
+#
+# ⚠️ GPLv3 (copyleft), UNLIKE the Apache-2.0 tinkerpop/calcite — the gitlink is a SHA only, so this
+# repo distributes no GPL bytes; the sparse checkout lands in the LOCAL tree. Study structure,
+# re-express in SQL, never transcribe.
+#
+# The sparse set is what it takes to STUDY the algorithms and their BSP framework, src/main only:
+#   pregel      — the Pregel/BSP framework + PregelSchema (typed multi-property per-node state),
+#                 the direct reference for the barrier scratch-table reshape
+#   algo        — the productized algorithm implementations (PageRank, Louvain, Dijkstra, Brandes…)
+#   algo-common — shared algorithm infrastructure the above build on
+#   core        — the in-memory graph-projection / CSR model (how GDS holds the graph)
+GDS_SRC=src/main/java/org/neo4j/gds
+if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
+  provision vendor/gds https://github.com/neo4j/graph-data-science.git shallow \
+    "pregel/$GDS_SRC" "algo/$GDS_SRC" "algo-common/$GDS_SRC" "core/$GDS_SRC"
 fi
 
 # ── the gremlin client: install deps, build, register the link ─────────────────────────────────
