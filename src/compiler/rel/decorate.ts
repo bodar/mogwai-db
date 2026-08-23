@@ -34,18 +34,29 @@ const DECORATE_COLS = [meta('id', 'int'), meta('cval', 'any', true)] as const;
 const decorateName = (run: number): string => `_mogwai_decorate_r${run}`;
 
 /** Land the barrier's `(id → value)` relation as a fenced Plan binding: a SCAN of `barrier_state`
- *  (the OLAP scratch table — `src/storage.ts`) filtered to this query's `run` and its final `round`
- *  slot, projected to `(id, cval)`. `run`/`round` are compiler-held constants, inlined as SQL literals
- *  (never binds), so the plan's bind count and text size are O(1) regardless of |V| — the whole point of
- *  keeping the vector SQL-resident. Returned as the binding NODE; the caller pairs it with `name`. */
+ *  (the OLAP scratch table — `src/storage.ts`) filtered to this query's `run`, its final `round` slot,
+ *  and the NODE-KEYED SINGLE-SCALAR cell (`scope = 0 AND channel = 0`), projected to `(id, cval)`.
+ *  `run`/`round` are compiler-held constants, inlined as SQL literals (never binds), so the plan's bind
+ *  count and text size are O(1) regardless of |V| — the whole point of keeping the vector SQL-resident.
+ *  Returned as the binding NODE; the caller pairs it with `name`.
+ *
+ *  **The `scope=0 AND channel=0` pin is load-bearing, not decoration.** A decorate barrier writes ONE
+ *  cell per node today, so `(run, round)` alone happens to select one row per id — correct by luck. The
+ *  moment any run holds a second channel (the value-width Tier-2 family — HITS hub+auth, Bellman-Ford
+ *  dist+pred) or a non-zero scope, the unpinned filter would return several rows per id and the decorate
+ *  join would silently multiply the stream. Pinned, it stays the single-scalar read regardless — exactly
+ *  the pin `VEC` already carries (`services/catalog/graph-algorithms.ts`). */
 function decorateBinding(run: number, round: number, name: string, fresh: Minter): Rel {
   const scan = make.scan({
     id: fresh('decs'), table: 'barrier_state', alias: fresh('rbr'), channels: [],
-    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('id', 'int'), meta('cval', 'any', true)),
+    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('scope', 'int'), meta('id', 'int'), meta('channel', 'int'), meta('cval', 'any', true)),
   });
   const filtered = make.filter({
     id: fresh('decf'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, 'run'), compilerInt(run)), eq(col(scan.id, 'round'), compilerInt(round))),
+    pred: and(
+      and(eq(col(scan.id, 'run'), compilerInt(run)), eq(col(scan.id, 'round'), compilerInt(round))),
+      and(eq(col(scan.id, 'scope'), compilerInt(0)), eq(col(scan.id, 'channel'), compilerInt(0))),
+    ),
   });
   const projected = make.project({
     id: fresh('decp'), input: filtered, channels: [], type: typeOf(...DECORATE_COLS),
