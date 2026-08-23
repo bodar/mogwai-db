@@ -350,3 +350,7 @@ export const CLOSENESS_SERVICE_NAME = 'mogwai.closeness';
 /** Harmonic centrality — closeness's sibling (Σ 1/dist over reaching nodes, / (N−1)); shares the same
  *  scope-keyed distance relaxation. Call-only, `internal: true`. */
 export const HARMONIC_SERVICE_NAME = 'mogwai.harmonic';
+/** Triangle count + local clustering coefficient — ONE-SHOT decorate barriers (no BSP iteration, a single
+ *  undirected self-join), call-only, `internal: true`. */
+export const TRIANGLE_COUNT_SERVICE_NAME = 'mogwai.triangleCount';
+export const LCC_SERVICE_NAME = 'mogwai.localClusteringCoefficient';

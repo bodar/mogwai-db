@@ -12,6 +12,7 @@ import { createPageRankService } from './catalog/olap/pagerank.ts';
 import { createPeerPressureService } from './catalog/olap/peer-pressure.ts';
 import { createHitsService } from './catalog/olap/hits.ts';
 import { createClosenessService, createHarmonicService } from './catalog/olap/centrality.ts';
+import { createTriangleCountService, createLocalClusteringService } from './catalog/olap/triangle.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -43,7 +44,7 @@ import { createClosenessService, createHarmonicService } from './catalog/olap/ce
  *  are `internal: true` too, so the exact `--list` surface stays unchanged. */
 export const standardRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store)]);
+    createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store)]);
 
 /** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
  *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
@@ -52,4 +53,4 @@ export const standardRegistry: RegistryProvider = (app) =>
  *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */
 export const extendedRegistry: RegistryProvider = (app) =>
   createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
-    createFederateService(app.source), schemaService, createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store)]);
+    createFederateService(app.source), schemaService, createShortestPathService(app.store), createWccService(app.store), createPageRankService(app.store), createPeerPressureService(app.store), createHitsService(app.store), createClosenessService(app.store), createHarmonicService(app.store), createTriangleCountService(app.store), createLocalClusteringService(app.store)]);
