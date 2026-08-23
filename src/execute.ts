@@ -820,7 +820,7 @@ export class Executor implements ExecutorApi {
     // A SYNC barrier (regex) IS drivable here — its head read and resume run with no await, so the whole
     // traversal is one atomic synchronous stretch. Only an ASYNC barrier (federate, io) throws, since
     // this path has no await to run its transform. (`driveSegmentsSync`.)
-    return driveSegmentsSync((head) => readSegmentHead(this.store, head), plan);
+    return driveSegmentsSync(this.segmentHost, plan);
   }
 
   /** This Executor as a `SegmentHost` (src/drive.ts): compile bound to this app scope, and the
@@ -835,6 +835,9 @@ export class Executor implements ExecutorApi {
     // nothing. `readSegmentHead` is already synchronous; the two readers differ only in that the async
     // one may be an RPC Worker-side, which a sync barrier (always local) never is.
     readHeadSync: (head) => readSegmentHead(this.store, head),
+    // Leak-on-throw belt: drop the barrier runs of a chain that threw mid-drive (the framer's cleanup
+    // only fires for a chain that fully drove). Idempotent per run — a DELETE by token.
+    dropRuns: (runs) => { for (const run of runs) this.store.dropBarrierRun(run); },
   };
 
   /** Drive a (possibly segmented) plan to a final synchronous Compiled/Program — the ONE await

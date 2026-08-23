@@ -134,6 +134,13 @@ const SCHEMA = [
 export class GraphStore {
   constructor(private sql: Sql) {
     this.initSchema();
+    // ORPHANED-RUN SWEEP (the hard-crash belt). `barrier_state` is a RESIDENT scratch table that
+    // survives isolate restarts, but a barrier `run` is entirely intra-request and synchronous — so at
+    // construction, before this store serves anything, NO run is live and every surviving row is an
+    // orphan left by a prior isolate that died mid-request (a hard kill runs no JS `finally`, so neither
+    // the drive's drop-on-throw nor the framer's cleanup fired). Clearing it here reclaims them. The
+    // in-isolate leak (a chain that throws) is closed precisely by the drive's `dropRuns`.
+    this.sql.exec('DELETE FROM barrier_state');
   }
 
   /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`). Called

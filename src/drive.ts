@@ -28,6 +28,13 @@ import type { TypeNode } from './gremlin/types.ts';
 export interface SegmentReaders {
   readHead(head: Compiled): BarrierInput[] | Promise<BarrierInput[]>;
   readHeadSync(head: Compiled): BarrierInput[];
+  /** Drop the scratch rows of barrier runs allocated by a drive that then THREW — the leak-on-throw
+   *  belt. The happy path defers this to `frameResolved`'s `finally` (via `plan.cleanup`, populated only
+   *  once the FULL chain has driven), so a chain that throws at a LATER resume — after an earlier
+   *  `apply` already wrote its rows — never reaches that cleanup and would orphan those rows for the
+   *  isolate's life. The drive calls this from its own catch instead. The Worker edge drives only
+   *  `federate` (which returns detached rows, never a relation run), so its impl is a no-op. */
+  dropRuns(runs: readonly number[]): void;
 }
 
 /** The collaborators the trampoline needs, injected so the SAME loop runs in either runtime.
@@ -48,39 +55,57 @@ export async function driveSegmentsFrom(readers: SegmentReaders, first: Plan): P
   // across the (possibly compounding) chain and hand them to the framer, which drops them once it has
   // produced the rows — precise post-frame GC. A non-relation barrier (federate/io) contributes none.
   const barrierRuns: number[] = [];
-  while (p.kind === 'segment') {
-    if (p.mode === 'sync') { p = p.resume(readers.readHeadSync(p.head)); continue; }
-    const rows = p.head ? await readers.readHead(p.head) : [];
-    const foreign = await p.apply(rows);
-    if (!Array.isArray(foreign)) barrierRuns.push((foreign as BarrierRelation).run);
-    p = p.resume(foreign, rows);
+  try {
+    while (p.kind === 'segment') {
+      if (p.mode === 'sync') { p = p.resume(readers.readHeadSync(p.head)); continue; }
+      const rows = p.head ? await readers.readHead(p.head) : [];
+      const foreign = await p.apply(rows);
+      if (!Array.isArray(foreign)) barrierRuns.push((foreign as BarrierRelation).run);
+      p = p.resume(foreign, rows);
+    }
+    return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
+  } catch (error) {
+    // A resume that DECLINES (a chained barrier's tail the lowering cannot cover) throws here, AFTER
+    // earlier `apply`s wrote their rows — reachable now that barriers chain (item 4/6). That throw
+    // never reaches `frameResolved`'s cleanup, so drop the runs allocated so far right here. Harmless
+    // on the success path: `return` exits before this catch, so committed runs are dropped by the
+    // framer, never twice.
+    readers.dropRuns(barrierRuns);
+    throw error;
   }
-  return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
 }
 
 /** Drive a plan SYNCHRONOUSLY — the `framed()` path. Only SYNC barriers can be resolved here; an ASYNC
  *  barrier THROWS (there is no await to run its transform). This is what makes a sync barrier's "no async
  *  bit" a property of the CALL PATH, not just of the transform: regex runs to completion with zero
  *  suspension, so nothing can mutate the store mid-query. */
-export function driveSegmentsSync(readHeadSync: SegmentReaders['readHeadSync'], first: Plan): Executable {
+export function driveSegmentsSync(readers: Pick<SegmentReaders, 'readHeadSync' | 'dropRuns'>, first: Plan): Executable {
   let p: Plan = first;
   // OLAP barriers land their result in `barrier_state` under a run token; collect them for post-frame GC
   // exactly as the async drive does.
   const barrierRuns: number[] = [];
-  while (p.kind === 'segment') {
-    if (p.mode === 'sync') { p = p.resume(readHeadSync(p.head)); continue; }
-    // An ASYNC barrier with a SYNCHRONOUS CORE (the OLAP algorithms — a pure in-SQL loop, no real await)
-    // runs HERE with no suspension: busy-locking is fine on the sync/test `framed()` path. Production keeps
-    // the async `apply` so it can yield. A barrier WITHOUT a sync core (federate/io — real remote/object
-    // I/O) genuinely cannot be driven synchronously, so it still refuses this path.
-    if (!p.applySync)
-      throw new Error('this traversal suspends at an async barrier (a federated call(), or io()) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
-    const rows = p.head ? readHeadSync(p.head) : [];
-    const out = p.applySync(rows);
-    if (!Array.isArray(out)) barrierRuns.push((out as BarrierRelation).run);
-    p = p.resume(out, rows);
+  try {
+    while (p.kind === 'segment') {
+      if (p.mode === 'sync') { p = p.resume(readers.readHeadSync(p.head)); continue; }
+      // An ASYNC barrier with a SYNCHRONOUS CORE (the OLAP algorithms — a pure in-SQL loop, no real await)
+      // runs HERE with no suspension: busy-locking is fine on the sync/test `framed()` path. Production keeps
+      // the async `apply` so it can yield. A barrier WITHOUT a sync core (federate/io — real remote/object
+      // I/O) genuinely cannot be driven synchronously, so it still refuses this path.
+      if (!p.applySync)
+        throw new Error('this traversal suspends at an async barrier (a federated call(), or io()) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
+      const rows = p.head ? readers.readHeadSync(p.head) : [];
+      const out = p.applySync(rows);
+      if (!Array.isArray(out)) barrierRuns.push((out as BarrierRelation).run);
+      p = p.resume(out, rows);
+    }
+    return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
+  } catch (error) {
+    // Same leak-on-throw belt as the async drive: a resume that declines after an earlier `applySync`
+    // wrote rows never reaches the framer's cleanup. Drop the runs allocated so far. (A no-sync-core
+    // barrier throws BEFORE allocating, so `barrierRuns` is empty there — the drop is a no-op.)
+    readers.dropRuns(barrierRuns);
+    throw error;
   }
-  return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
 }
 
 /** Compile a traversal, then drive it — the ordinary entry point (in-process `Executor`). */

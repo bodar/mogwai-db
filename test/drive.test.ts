@@ -21,6 +21,7 @@ describe('driveSegments', () => {
       compile: () => ({ kind: 'sql', compiled: sql('DONE') }),
       readHead: () => { reads++; return []; },
       readHeadSync: () => { reads++; return []; },
+      dropRuns: () => {},
     };
     const out = await driveSegments(host, 'g.V()', {}, {}, 0);
     expect((out as any).sql).toBe('DONE');
@@ -45,6 +46,7 @@ describe('driveSegments', () => {
       compile: () => segment,
       readHead: (h) => { seen.readHead.push((h as any).sql); return headRowsRef; },
       readHeadSync: throwSync,
+      dropRuns: () => {},
     };
     const out = await driveSegments(host, 'g.V().call("x")', {}, {}, 0);
     expect((out as any).sql).toBe('RESUMED');
@@ -64,6 +66,7 @@ describe('driveSegments', () => {
       compile: () => segment,
       readHead: () => { reads++; return []; },
       readHeadSync: throwSync,
+      dropRuns: () => {},
     };
     const out = await driveSegments(host, 'g.call("x")', {}, {}, 0);
     expect((out as any).sql).toBe('SRC');
@@ -81,6 +84,7 @@ describe('driveSegments', () => {
       compile: () => segment,
       readHead: () => { seen.readHead++; return []; },        // must NOT be used
       readHeadSync: (h) => { seen.readHeadSync.push((h as any).sql); return headRowsRef; },
+      dropRuns: () => {},
     };
     const out = await driveSegments(host, 'g.V().has("k", TextP.regex("^m"))', {}, {}, 0);
     expect((out as any).sql).toBe('SYNC_DONE');
@@ -94,6 +98,7 @@ describe('driveSegments', () => {
       compile: (_g, _p, _pt, depth) => { seenDepth = depth; return { kind: 'sql', compiled: sql('D') }; },
       readHead: () => [],
       readHeadSync: () => [],
+      dropRuns: () => {},
     };
     await driveSegments(host, 'g.V()', {}, {}, 3);
     expect(seenDepth).toBe(3);
@@ -107,12 +112,12 @@ describe('driveSegmentsSync', () => {
       kind: 'segment', mode: 'sync', head: head('H'),
       resume: () => ({ kind: 'sql', compiled: sql('SYNC') }),
     };
-    const out = driveSegmentsSync(() => headRows, segment);
+    const out = driveSegmentsSync({ readHeadSync: () => headRows, dropRuns: () => {} }, segment);
     expect((out as any).sql).toBe('SYNC');
   });
 
   test('a non-segmented plan passes straight through', () => {
-    const out = driveSegmentsSync(() => [], { kind: 'sql', compiled: sql('PLAIN') });
+    const out = driveSegmentsSync({ readHeadSync: () => [], dropRuns: () => {} }, { kind: 'sql', compiled: sql('PLAIN') });
     expect((out as any).sql).toBe('PLAIN');
   });
 
@@ -121,6 +126,6 @@ describe('driveSegmentsSync', () => {
       kind: 'segment', mode: 'async', head: head('H'), params: {}, residency: 'do',
       apply: async () => [], resume: () => ({ kind: 'sql', compiled: sql('X') }),
     };
-    expect(() => driveSegmentsSync(() => [], segment)).toThrow(/async barrier/);
+    expect(() => driveSegmentsSync({ readHeadSync: () => [], dropRuns: () => {} }, segment)).toThrow(/async barrier/);
   });
 });

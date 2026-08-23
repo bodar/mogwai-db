@@ -44,7 +44,10 @@ class EdgeExecutor implements RemoteExecutor {
       const final = await driveSegmentsFrom(
         // A Worker-driven loop reads an async barrier's head by RPC; a sync barrier is never Worker-driven,
         // so its reader throws rather than pretend the Worker holds a store.
-        { readHead: (head) => this.readHead(head), readHeadSync: () => { throw new Error('a sync barrier cannot be Worker-driven — it runs on the DO'); } },
+        // A Worker-driven loop drives only `federate` (worker residency), which returns detached rows,
+        // never a barrier-state relation run — so there is nothing to drop and `dropRuns` is a no-op.
+        // A 'do'-residency OLAP barrier (which allocates runs) never reaches this Worker loop.
+        { readHead: (head) => this.readHead(head), readHeadSync: () => { throw new Error('a sync barrier cannot be Worker-driven — it runs on the DO'); }, dropRuns: () => {} },
         plan,
       );
       return rpcUnwrap(await this.stub.runFramed(final) as RpcResult<Framed[]>);
