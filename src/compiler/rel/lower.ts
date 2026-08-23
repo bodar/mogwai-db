@@ -3937,15 +3937,13 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
   // does over the base graph.
   if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard' && framing.kind !== 'detached') return null;
   switch (framing.kind) {
-    case 'elements': return {
-      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain), detached }, fresh),
-      shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
-    };
-    // A BOUND (detached) element travels as an ID under id-carry, so its wire payload is REJOINED from
-    // the landed relation — `BoundGraph.leafPayload` (Mechanism B) reconstitutes the (id, label, props
-    // [, src, tgt]) tuple `foreign.ts` used to carry. The `Shape` is the ordinary one: the byte framers
-    // cannot tell a federated vertex from a local one and must not, since the wire has no such
-    // distinction. (`source` is the bound graph here — a base chain never emits `detached`.)
+    // `elements` (a base element stream) and `detached` (a BOUND element stream) frame IDENTICALLY at the
+    // leaf: both are id-carrying, and `source.leafPayload` reads the base tables for `BaseGraph` or REJOINS
+    // the landed relation for `BoundGraph` (Mechanism B) — reconstituting the (id, label, props[, src, tgt])
+    // tuple `foreign.ts` used to carry. The `Shape` is the ordinary one: the byte framers cannot tell a
+    // federated vertex from a local one and must not. The two arms differ only UPSTREAM, in the step
+    // vocabulary each may reach (`continueAs` → `elementTail` vs `detachedTail`), never in the wire payload.
+    case 'elements':
     case 'detached': return {
       rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain), detached }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },

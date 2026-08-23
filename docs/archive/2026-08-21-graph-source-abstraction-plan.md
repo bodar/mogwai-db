@@ -1,6 +1,17 @@
 # GraphSource — one traversal vocabulary over two graph shapes (PLAN)
 
-**Status: IN PROGRESS.** Plan of record. **Naming SETTLED (step 1): `GraphSource` / `BaseGraph` /
+**✅ LANDED AND ARCHIVED (2026-08-23).** The GraphSource abstraction is COMPLETE: one traversal
+vocabulary (`src/compiler/rel/source.ts`) lowers over both the base SQLite schema (`BaseGraph`) and an
+injected/federated subgraph (`BoundGraph`) via id-carry + rejoin, with Calcite materialize-once. Every
+Mechanism-A chokepoint (movement, values, has, labels, tokens, element scan) and Mechanism-B leaf/member
+framing (`leafPayload`, `elementNode`, `elementObject`) routes through `ctx.source`; the dead pre-RelIR
+leaf-framing twin (`src/compiler/plan/plan.ts`) is deleted (→ `src/compiler/elem.ts`). Kept for the
+MEASURED FACTS — the id-carry-vs-payload-carry decision (§"bound-stream model", verified against TinkerPop
++ Calcite) and the fail-closed boundaries. **Three by-design deferrals remain, tracked in
+`docs/outstanding-work.md`, none an engine wall:** bound WRITES (a detached snapshot is immutable),
+FTS/`trigramSeek` over a bound graph (no landed FTS index — fails closed), and one path+encounter combo.
+
+**Status (historical): IN PROGRESS.** Plan of record. **Naming SETTLED (step 1): `GraphSource` / `BaseGraph` /
 `BoundGraph`** (compiler words for machinery, per root `CLAUDE.md`). `GraphSource` + `BaseGraph` live in
 `src/compiler/rel/source.ts`, threaded on `ChainCtx.source` (default `BaseGraph`). The interface grows
 ONE method per rerouted chokepoint (no speculative/dead methods).
@@ -121,8 +132,10 @@ What follows are the by-design exclusions and staged residue, not unbuilt reads:
   and is byte-invariant (sql-hygiene: 0 spine diffs). This was the last landed-DATA gap; it was never an
   engine wall.
 - **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline (out of scope by design).
-- **FTS / `trigramSeek` over bound** — no landed FTS index; `has(containing…)` would be a linear JSON scan
-  or a decline. Decide when reached.
+- **FTS / `trigramSeek` over bound** — DEFERRED by design (fails closed today). A landed subgraph has no
+  FTS index, so `has(key, containing…)` over a bound graph would need either indexing the landed rows or a
+  linear JSON scan; neither is built, and it declines rather than answering slowly-and-silently. Tracked in
+  `docs/outstanding-work.md` — build when a use case reaches it.
 - **Mechanism-B leaf UNIFICATION (`leafPayload`) — LANDED.** Both graphs frame a terminal element through
   `source.leafPayload`: `framed()`'s `elements`/`detached` arms are the identical call (`lower.ts:3939-3952`),
   `BoundGraph.leafPayload` (`boundgraph.ts:354`) rejoins the landed CTE, `BaseGraph.leafPayload` delegates to
@@ -130,20 +143,22 @@ What follows are the by-design exclusions and staged residue, not unbuilt reads:
   `src/compiler/plan/plan.ts` (the doc's original "Mechanism B" location) were the DEAD twin of this and are
   DELETED; the file is gutted to the element-kind primitive (`Elem`/`sqlElem`) and renamed
   `src/compiler/elem.ts`.
-- **Two residual pieces, now the real "step 5":**
-  - **`GraphSource.elementNode` per-member routing gap.** `leafPayload` (the terminal element) is unified,
-    but its sibling `elementNode` (a raw element embedded as a `path()` position, a list member, a map
-    key/value, a record field, or a `by()`-produced value) is routed through `ctx.source` ONLY in `path.ts`.
-    `record.ts`, `modulator.ts` (both `producedMemberNode`/`byNode`), `collection.ts`, `list.ts`, `map.ts`
-    call the base-only `element.ts` `elementNode` directly — some with a `GraphSource` already in scope. So a
-    bound element embedded as a member would rejoin the BASE tables against a foreign id. **Reachability
-    must be checked first** (`detachedTail`'s narrow vocabulary / `BOUND_HANDOFF_DENY` may fail it closed
-    today); if reachable it is a latent wrong answer, if fail-closed it is a deferral to route + widen.
-  - **`RelFraming.kind: 'detached'` type tidy.** At the leaf it is byte-identical to `'elements'` (same
-    `leafPayload` call). It survives only as a step-vocabulary ROUTER (`continueAs` → `detachedTail` vs
-    `elementTail`), unrelated to payload shape, and its `framing.ts:39-46` doc comment still describes the
-    pre-id-carry payload-carry model. Retire the leaf-level distinction and correct the comment; keep (or
-    rename off `detached`) the routing distinction.
+- **`GraphSource.elementNode`/`elementObject` per-member routing — LANDED (commit `a7e3601`).** The
+  terminal element (`leafPayload`) was unified, but its per-MEMBER twins were not: a bound element embedded
+  as a `path()` position (already routed), a list member, a group VALUE/KEY, a `project()`/record field, a
+  `by()`-produced member, or a variant member was framed by the base-only `element.ts` builders — rejoining
+  the LOCAL base tables against a foreign id, which yields NULL and CRASHES (`federate(sg).V().fold()` →
+  `TypeError`). Fixed by threading the graph source through every element-as-member builder and its caller
+  chain (`groupMap`/`collectedValue`/`rowidMember`/`groupReduced`/`groupCollected`, `fieldNode`/
+  `recordPayload`/`recordToMap`, `listNodeExpr`/`listPayloadExpr`/`listPayload`, `memberEnvelope` +
+  `accumulate`, `producedMemberNode`, `variantPayload`, and the branch-merge chain), and by adding a NINTH
+  seam method `GraphSource.elementObject` (the bare `{id,label,props}` encoding the top-level list framer
+  uses — it had no source method at all). Base byte-identical; new `test/federation.test.ts` cases oracle
+  `.V().fold()` / element-valued `group().by(fold())` / `project().by(identity())` on crew.
+- **`RelFraming.kind: 'detached'` type tidy — LANDED.** The `elements`/`detached` arms of `framed()` are
+  byte-identical (both id-carrying, both `source.leafPayload`) and are collapsed; the `'detached'` arm
+  survives only as a step-vocabulary ROUTER (`continueAs` → `detachedTail` vs `elementTail`), and its
+  `framing.ts` type comment (which described the pre-id-carry payload-carry model) is corrected.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
 `detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work

@@ -39,7 +39,14 @@ per-step support; closed work belongs in git history or `docs/archive/`.
 
 - **Graph capabilities:** `tree`, `match`, graph algorithms, and the remaining
   strategy/options forms. Pick a family only after identifying the substrate it needs.
-- **Services and graph movement:** federation tails, bulk materialization, and IO formats.
+- **Services and graph movement:** federation tails, bulk materialization, and IO formats. The
+  `GraphSource` abstraction (one traversal vocabulary over base + injected/federated subgraphs) is DONE
+  and its plan is archived
+  ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md)). Three by-design deferrals
+  remain, all fail closed today, none an engine wall: **bound WRITES** (a fetched subgraph is an
+  immutable snapshot), **FTS/`trigramSeek` over a bound graph** (no landed FTS index — build when a use
+  case reaches it), and one **path+encounter combo** (a bound path chain that also demands an emission
+  encounter — the seed cannot carry both the path append and the order renumber).
 - **Operations:** a real Cloudflare deployment, graph authentication, transaction/session
   semantics, and GraphSON response encoding.
 - **Query-plan performance.** The join-order fence and source seek made filtered lookups

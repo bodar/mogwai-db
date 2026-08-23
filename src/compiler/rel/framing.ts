@@ -36,13 +36,15 @@ import type { VariantArm } from './variant.ts';
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }
-  /** A DETACHED element — a barrier `call()`'s awaited rows, landed by `foreign.ts`. The wire shape is
-   *  an ordinary vertex/edge (the framers cannot tell, and must not), but the relation is ALREADY the
-   *  payload rather than a stream of rowids to project one from: a detached reference has no row in
-   *  this graph to read `COALESCE(uid, id)`, a label set or a property bag off. That is the whole
-   *  difference from `elements`, and it is why this is its own arm instead of a flag — every consumer
-   *  that would rebuild the payload has to say what it does with one, and for most of them the answer
-   *  is that live adjacency over a detached element does not exist. */
+  /** A BOUND element — a federated subgraph / barrier `call()`'s awaited rows, landed by `foreign.ts`.
+   *  The wire shape is an ordinary vertex/edge (the framers cannot tell, and must not). Under id-carry
+   *  (locked 2026-08-22) this is an id-carrying stream EXACTLY like `elements`, and it frames through the
+   *  same `source.leafPayload` seam — `BoundGraph` REJOINS the landed relation by id to reconstitute the
+   *  (id, label, props[, src, tgt]) tuple, where `BaseGraph` reads the base tables. So the two arms are
+   *  byte-identical at the leaf; this stays its own arm only to ROUTE the step vocabulary a bound element
+   *  may continue with (`continueAs` → the narrow `detachedTail` vs the full `elementTail`), which is a
+   *  real coverage limit, not a payload-representation difference. (Historical: before id-carry a detached
+   *  relation carried its own payload; that model is gone.) */
   | { readonly kind: 'detached'; readonly elem: Elem }
   /** `productiveNull` says a NULL result is a REAL value rather than the framer's signal to emit
    *  nothing. It is the `ProductiveByStrategy` fact, and it reaches here from the LIST whose members
