@@ -1,9 +1,9 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
-import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, Service } from '../../services/spi/types.ts';
+import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerDecorateResume, lowerForeignResume, lowerToRel, type Lowering } from './lower.ts';
+import { lowerDecorateResume, lowerForeignResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
@@ -43,6 +43,10 @@ interface Barrier {
    *  relation and the resume keeps the LIVE element stream, reading the value as a synthetic property
    *  under `decorate.key`. Absent for `federate`/`io` (detached `ForeignRow[]` + `lowerForeignResume`). */
   readonly decorate?: DecorateSpec;
+  /** Present iff this is a PATH barrier (weighted shortestPath): `apply` returns a `(run, round)` handle
+   *  into `barrier_state` and the resume reconstructs the shortest PATHS from it, REPLACING the stream
+   *  (unlike `decorate`, which passes elements through). */
+  readonly path?: PathSpec;
 }
 
 /** What a segment needs from the enclosing request — the same settled values the RelIR route takes,
@@ -80,7 +84,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, residency: contribution.residency, decorate: contribution.decorate };
+    return { at, site, spec, apply: contribution.apply, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path };
   }
   return null;
 }
@@ -144,6 +148,8 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   // A DECORATE barrier (an OLAP algorithm) keeps the LIVE element stream — it does not land detached
   // rows — so it takes its own resume, not the source/mid foreign one.
   if (call!.decorate) return decorateSegment(steps, call!, request);
+  // A PATH barrier (weighted shortestPath) REPLACES the stream with reconstructed paths.
+  if (call!.path) return pathSegment(steps, call!, request);
   return call!.at === 0 ? sourceSegment(steps, call!, request) : midSegment(steps, call!, request);
 }
 
@@ -247,6 +253,42 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
         );
       }
       return { kind: 'sql', compiled: finishLowering(lowered) };
+    },
+  };
+}
+
+/** A PATH barrier (weighted shortestPath). The head projects the SOURCE ids — the incoming traverser
+ *  vertices the search runs from (always, unlike decorate's optional `seedFromInput`), one row per
+ *  source, collapse off. `apply` relaxes the weighted shortest distance from those sources into
+ *  `barrier_state` and returns the `(run, round)` handle; `lowerPathResume` reconstructs the paths and
+ *  continues the tail, REPLACING the stream. */
+function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
+  const prefix = steps.slice(0, barrier.at);
+  const lowered = lowerToRel([...prefix, { name: 'id', args: [], ctx: steps[barrier.at]!.ctx } as IRStep], { ...request.lowering, collapse: false });
+  const compiled = lowered && finishLowering(lowered);
+  const head = compiled && compiled.kind === 'read' ? compiled : null;
+  return {
+    kind: 'segment',
+    mode: 'async',
+    head,
+    params: barrier.site.params,
+    apply: barrier.apply,
+    residency: barrier.residency,
+    resume: (out: BarrierOutput): Plan => {
+      // A path barrier's `apply` returns a relation handle (the run/round in barrier_state), never rows.
+      if (Array.isArray(out))
+        throw new Error(`call("${barrier.spec.serviceName}"): a path barrier must return a (run, round) relation handle, not detached rows`);
+      const relation = out as BarrierRelation;
+      const resumed = lowerPathResume(relation.run, relation.round, barrier.path!, steps, barrier.at, request.lowering);
+      if (!resumed) {
+        const next = steps[barrier.at + 1];
+        throw new Error(
+          next
+            ? `${next.name}() is not supported after ${barrier.spec.serviceName} yet`
+            : `${barrier.spec.serviceName} produced a result this route cannot frame`,
+        );
+      }
+      return { kind: 'sql', compiled: finishLowering(resumed) };
     },
   };
 }

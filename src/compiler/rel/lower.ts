@@ -58,6 +58,7 @@ import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
+import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
@@ -4275,6 +4276,26 @@ export function lowerDecorateResume(
   const source = decorateGraph(name, key, vtype);
   const chain = lowerChain(chainSteps, { ...opts, source }, fresh);
   return chain && lowered({ ...chain, effects: [binding, ...(chain.effects ?? [])] }, source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+}
+
+/**
+ * THE PATH RESUME — weighted shortestPath's tail. Unlike the decorate resume (element-preserving) this
+ * REPLACES the stream with reconstructed paths: the barrier's `apply` relaxed the weighted shortest
+ * distance into `barrier_state` (scope = source, channel 0), and this rebuilds the shortest PATHS from
+ * that relation (`shortestPathReconstruct`) then continues the tail after the shortestPath call over the
+ * path-framed stream — exactly the `FramedRel` the unweighted rel walk hands the fold, but produced in
+ * the resume because the relaxation is a runtime barrier. `run`/`round` inline as literals (O(1) plan).
+ */
+export function lowerPathResume(
+  run: number, round: number, cfg: ReconstructConfig, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  const { ctx } = chainCtxOf(steps, opts);
+  const built = shortestPathReconstruct(run, round, cfg, ctx.source, childSeam(ctx, fresh), fresh);
+  if (!built) return null;
+  const tail = continueAs(built.rel, { kind: 'path', of: built.of, scalars: built.scalars }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind

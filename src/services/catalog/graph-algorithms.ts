@@ -1,4 +1,4 @@
-import type { BarrierRelation, CallParams, RelCallSite, RelContribution, Service } from '../spi/types.ts';
+import type { BarrierInput, BarrierRelation, CallParams, PathSpec, RelCallSite, RelContribution, Service } from '../spi/types.ts';
 import {
   PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME,
 } from '../spi/types.ts';
@@ -252,53 +252,86 @@ function targetBody(value: unknown): readonly IRStep[] | undefined {
   catch { throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${gremlin}"`); }
 }
 
-export const shortestPathService: Service = {
-  name: SHORTEST_PATH_SERVICE_NAME,
-  type: 'streaming',
-  internal: true,
-  describeParams: () => ({
-    edges: 'the message scope — a Direction or an anonymous edge traversal (default bothE)',
-    includeEdges: 'interleave the traversed edges in the path',
-    maxDistance: 'a hop cap (unweighted)',
-  }),
-  resolve: () => ({
-    kind: 'rel',
-    buildRel: (site: RelCallSite): RelContribution | null => {
+/** shortestPath() — DUAL substrate, chosen by whether a weight key is set (`~tinkerpop.shortestPath.distance`):
+ *  - UNWEIGHTED → the recursive-CTE path WALK (`shortestPathWalk`), an inline `rel` contribution compiled
+ *    at compile time (store-free; hop distance, hop-cap prunes).
+ *  - WEIGHTED → a BSP relaxation BARRIER: `apply` relaxes the weighted shortest distance from the sources
+ *    into `barrier_state` (`relaxWeighted`, scope = source, channel 0) and returns the `(run, round)`
+ *    handle; the resume (`lowerPathResume`) reconstructs the shortest paths from it. This is why the
+ *    service captures a store — the barrier's `apply` runs at runtime. The walk cannot serve weighted: a
+ *    min-distance relaxation is an aggregate a recursive term forbids (P3 / repeat-two-regimes §1a), so
+ *    the walk would enumerate every simple path and hang on a dense graph (the §7.1 cost wall). */
+export function createShortestPathService(store: GraphStore | undefined): Service {
+  return {
+    name: SHORTEST_PATH_SERVICE_NAME,
+    type: 'streaming',
+    internal: true,
+    describeParams: () => ({
+      edges: 'the message scope — a Direction or an anonymous edge traversal (default bothE)',
+      includeEdges: 'interleave the traversed edges in the path',
+      distance: 'a weight property key — makes the search weighted (least edge-weight sum)',
+      maxDistance: 'a hop cap (unweighted) or a final weight cap (weighted)',
+    }),
+    resolve: (site) => {
       const mode = site.params.mode;
       if (mode !== undefined && mode !== 'path')
         throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: only the native shortestPath() (path mode) is implemented yet, not "${String(mode)}"`);
-      // A `start` position for this streaming step is invalid Gremlin (§6·5 — a THROW, not a decline).
-      if (!site.stream)
-        throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
-
       const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
-      // WEIGHTED shortestPath (a `~tinkerpop.shortestPath.distance` weight key) is DEFERRED to the BSP
-      // relaxation substrate. The recursive-CTE walk below enumerates every SIMPLE path; a min-distance
-      // relaxation cannot prune INSIDE a recursive term (P3 / repeat-two-regimes §1a — no aggregate over
-      // the accumulation), so on a dense graph (grateful `followedBy`) it is exponential and reads as a
-      // hang (the §7.1 cost wall — measured: L3 timeout, bun at 100% CPU). Weighted paths are Tier 2 =
-      // Bellman-Ford iterative relaxation, a barrier like pageRank/wcc/peerPressure — see
-      // docs/2026-07-24-graph-algorithms-plan.md. Fail closed until that lands, never mis-execute.
-      if (SP_DISTANCE in site.params)
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a weighted distance (~tinkerpop.shortestPath.distance) is deferred to the BSP relaxation substrate — the recursive-CTE walk cannot prune by distance and is exponential on dense graphs`);
-      // maxDistance is a HOP cap (unweighted) that PRUNES the walk. A non-integer value is a weighted cap,
-      // which only the deferred weighted path uses.
-      let maxHops: number | undefined;
-      if (SP_MAX_DISTANCE in site.params) {
-        const md = site.params[SP_MAX_DISTANCE];
-        if (typeof md !== 'number' || !Number.isInteger(md))
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is a weighted cap, deferred with weighted distance`);
-        maxHops = md;
-      }
       const includeEdges = SP_INCLUDE_EDGES in site.params;
       const target = targetBody(site.params[SP_TARGET]);
+      const distanceKey = site.params[SP_DISTANCE];
 
-      const { input, elem, source } = site.stream;
-      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, site.child!, site.fresh);
-      return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
+      // WEIGHTED → the BSP relaxation barrier.
+      if (distanceKey !== undefined) {
+        if (typeof distanceKey !== 'string')
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(distanceKey)}`);
+        let maxWeight: number | undefined;
+        if (SP_MAX_DISTANCE in site.params) {
+          const md = site.params[SP_MAX_DISTANCE];
+          if (typeof md !== 'number')
+            throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
+          maxWeight = md;
+        }
+        const path: PathSpec = { direction: scope.direction, labels: scope.labels, includeEdges, distanceKey, maxWeight, target };
+        return {
+          kind: 'barrier',
+          residency: 'do',
+          path,
+          apply: async (rows: readonly BarrierInput[]): Promise<BarrierRelation> => {
+            if (!store)
+              throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: no graph store is available to compute weighted shortest paths`);
+            // The sources are the incoming traverser vertices (the head projected their ids), deduped.
+            const sourceIds = [...new Set(rows.map((r) => Number(r.injectedValue)))];
+            const run = store.allocBarrierRun();
+            const round = relaxWeighted(store, run, sourceIds, scope, distanceKey);
+            return { kind: 'relation-ref', run, round };
+          },
+        };
+      }
+
+      // UNWEIGHTED → the recursive-CTE walk, an inline rel contribution.
+      return {
+        kind: 'rel',
+        buildRel: (rcs: RelCallSite): RelContribution | null => {
+          // A `start` position for this streaming step is invalid Gremlin (§6·5 — a THROW, not a decline).
+          if (!rcs.stream)
+            throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
+          // maxDistance is a HOP cap (unweighted) that PRUNES the walk; a non-integer is a weighted cap.
+          let maxHops: number | undefined;
+          if (SP_MAX_DISTANCE in rcs.params) {
+            const md = rcs.params[SP_MAX_DISTANCE];
+            if (typeof md !== 'number' || !Number.isInteger(md))
+              throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is a weighted cap — set a distance key to use it`);
+            maxHops = md;
+          }
+          const { input, elem, source } = rcs.stream;
+          const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, rcs.child!, rcs.fresh);
+          return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
+        },
+      };
     },
-  }),
-};
+  };
+}
 
 // ---------- mogwai.wcc — connectedComponent(), a DECORATE barrier ----------
 //
@@ -664,8 +697,3 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
   };
 }
 
-/** The OLAP services with NO store dependency (pending stubs). `mogwai.wcc`, `mogwai.pageRank` and
- *  `mogwai.peerPressure` are store-backed, so they are built with their `create*Service(app.store)`
- *  factories at the registry composition root (standard.ts). */
-export const pendingGraphAlgorithmServices: readonly Service[] =
-  [shortestPathService];

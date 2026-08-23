@@ -5,6 +5,7 @@ import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
+import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -171,9 +172,18 @@ export interface DecorateSpec {
   readonly seedFromInput?: boolean;
 }
 
+/** A PATH barrier's reconstruction descriptor — weighted shortestPath. When present on a barrier
+ *  contribution, the segment builds a PATH resume (`pathSegment` → `lowerPathResume`): `apply` relaxed
+ *  the weighted shortest distance into `barrier_state` (scope = source, channel 0) and returns the
+ *  `(run, round)` handle; the resume rebuilds the shortest PATHS from that relation and continues the
+ *  tail over the path-framed stream, REPLACING the element stream (unlike the element-preserving
+ *  `decorate`). The spec is the reconstruction's static half (scope, weight key, includeEdges, target,
+ *  maxWeight); `apply` supplies the runtime `(run, round)`. */
+export type PathSpec = ReconstructConfig;
+
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
-  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; readonly decorate?: DecorateSpec; apply(rows: readonly BarrierInput[]): Promise<BarrierOutput> };
+  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; readonly decorate?: DecorateSpec; readonly path?: PathSpec; apply(rows: readonly BarrierInput[]): Promise<BarrierOutput> };
 
 /**
  * WHAT A MID-TRAVERSAL BARRIER'S HEAD HANDS ITS `apply` — one row per parent traverser, carrying the

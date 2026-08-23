@@ -244,3 +244,144 @@ export function shortestPathWalk(
   const pathStep = { name: 'path', args: [] } as unknown as IRStep;
   return pathPositions(deduped, pathStep, child, source, fresh);
 }
+
+// ---------- WEIGHTED reconstruction from a precomputed dist relation (the BSP path) ----------
+//
+// The resume half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5). The
+// barrier's `apply` already relaxed the weighted shortest DISTANCE into `barrier_state` (scope = source,
+// channel 0 = dist REAL; `relaxWeighted`). This rebuilds the shortest PATHS from that relation with the
+// SAME `Recursive` + `pathPositions` machinery as the unweighted walk, but the guard is the DIST-GATE
+// instead of enumerate-then-MIN: an edge (u,v) is on a shortest path from s iff dist[s][v] = dist[s][u] +
+// w(u,v), so walking only those edges yields exactly the shortest paths (all ties) and terminates without
+// the exponential blowup that hangs the unweighted walk on a dense graph. Both dist reads come from
+// `barrier_state` (never the walk's own accumulation), so the equality is FLOAT-EXACT — `dv` is the
+// stored MIN the relaxation wrote, and `du + w` recomputes the same sum from the same stored operands.
+
+export interface ReconstructConfig {
+  readonly direction: 'out' | 'in' | 'both';
+  readonly labels: readonly string[];
+  readonly includeEdges: boolean;
+  readonly distanceKey: string;
+  /** A weighted distance cap — filters the FINAL shortest distance per pair (dist[s][endpoint] <= cap).
+   *  Not a walk prune (a custom distance may be negative). */
+  readonly maxWeight?: number;
+  readonly target?: readonly IRStep[];
+}
+
+/** A correlated scalar reading dist[scope][id] off `barrier_state` (this run's final slot, channel 0).
+ *  `run`/`round` inline as literals (compiler-held, O(1) plan — like `decorateBinding`); `scope`/`id` are
+ *  the correlation. A `WITHOUT ROWID` PK on (run,round,scope,id,channel) makes it a single row. */
+function distAt(run: number, round: number, scopeExpr: Expr, idExpr: Expr, fresh: Minter): Expr {
+  const scan = make.scan({
+    id: fresh('rds'), table: 'barrier_state', alias: fresh('rdb'), channels: [],
+    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('scope', 'int'), meta('id', 'int'), meta('channel', 'int'), meta('cval', 'real', true)),
+  });
+  const filtered = make.filter({
+    id: fresh('rdf'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, 'run'), compilerInt(run)),
+          and(eq(col(scan.id, 'round'), compilerInt(round)),
+          and(eq(col(scan.id, 'channel'), compilerInt(0)),
+          and(eq(col(scan.id, 'scope'), scopeExpr), eq(col(scan.id, 'id'), idExpr))))),
+  });
+  const proj = make.project({
+    id: fresh('rdp'), input: filtered, channels: [], type: typeOf(meta('cval', 'real', true)),
+    exprs: [['cval', col(filtered.id, 'cval')]],
+  });
+  return { kind: 'scalar', plan: proj };
+}
+
+/** DISTINCT source vertices — the scopes the relaxation seeded — as the reconstruction's seed rows. */
+function reconstructSources(run: number, round: number, walkType: ReturnType<typeof typeOf>, channels: Channels, fresh: Minter): Rel {
+  const scan = make.scan({
+    id: fresh('sss'), table: 'barrier_state', alias: fresh('ssb'), channels: [],
+    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('scope', 'int'), meta('id', 'int'), meta('channel', 'int'), meta('cval', 'real', true)),
+  });
+  const filtered = make.filter({
+    id: fresh('ssf'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, 'run'), compilerInt(run)), and(eq(col(scan.id, 'round'), compilerInt(round)), eq(col(scan.id, 'channel'), compilerInt(0)))),
+  });
+  const scopes = make.distinct({
+    id: fresh('ssd'), channels: [], type: typeOf(meta('scope', 'int')),
+    input: make.project({ id: fresh('ssp'), input: filtered, channels: [], type: typeOf(meta('scope', 'int')), exprs: [['scope', col(filtered.id, 'scope')]] }),
+  });
+  return make.project({
+    id: fresh('ssseed'), input: scopes, channels, type: walkType,
+    exprs: [
+      ['id', col(scopes.id, 'scope')], ['src', col(scopes.id, 'scope')], ['bulk', compilerInt(1)],
+      [PATH_COL, seedPath(vertexEntry(col(scopes.id, 'scope')))],
+    ],
+  });
+}
+
+export function shortestPathReconstruct(
+  run: number, round: number, cfg: ReconstructConfig, source: GraphSource, child: ChildSeam, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
+  const channels: Channels = [BULK_CHANNEL, PATH_CHANNEL];  // ROLE_ORDER: bulk before path
+  // No `dist` payload — the gate reads both endpoints' distance off `barrier_state` (float-exact).
+  const walkType = typeOf(meta('id', 'int'), meta('src', 'int'), ...carriedCols(channels));
+  const header = walkType.cols.map((c) => c.name);
+  const hops = DIR_HOPS[cfg.direction];
+  const labelArgs: Arg[] = cfg.labels.map((label) => ({ value: label, type: null, name: null }));
+  let termOk = true;
+  const walkId = fresh('spr');
+  const walk = make.recursive({
+    id: walkId, name: `spr_${walkId}`, channels, type: walkType, cols: header,
+    seed: reconstructSources(run, round, walkType, channels, fresh),
+    step: (self) => {
+      const arms = hops.map((hop) => {
+        const e = source.adjacencyEdges(fresh);
+        const labelMatch = labelArgs.length ? source.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh) : undefined;
+        const joined = make.join({
+          id: fresh('spj'), left: self, right: e, join: 'inner', ordered: true, channels,
+          on: and(eq(col(e.id, hop.from), col(self.id, 'id')), labelMatch),
+          type: typeOf(
+            meta('pid', 'int'), meta('psrc', 'int'), meta('bulk', 'int'), meta(PATH_COL, 'json', true),
+            meta('eid', 'int'), meta('esrc', 'int'), meta('elabel', 'int'), meta('etgt', 'int'),
+          ),
+        });
+        const neighbourCol = hop.to === 'tgt' ? 'etgt' : 'esrc';
+        const neighbour = col(joined.id, neighbourCol);
+        // The per-edge weight (the reference's `values(key)` over the edge, COALESCE 0) — the SAME read
+        // the relaxation used, so `du + w` reproduces the stored `dv` exactly.
+        const w = child.scalar(valuesStep(cfg.distanceKey), { kind: 'element', id: col(joined.id, 'eid'), elem: 'edge' });
+        if (!w) { termOk = false; return joined; }
+        const weight: Expr = { kind: 'call', fn: 'COALESCE', args: [w.expr, compilerReal(0)] };
+        const du = distAt(run, round, col(joined.id, 'psrc'), col(joined.id, 'pid'), fresh);
+        const dv = distAt(run, round, col(joined.id, 'psrc'), neighbour, fresh);
+        // Keep only shortest-path edges (dist-gate), and never revisit a vertex (backstop for zero/negative
+        // weights, where the dist-gate alone would not strictly increase).
+        const guarded = make.filter({
+          id: fresh('spg'), input: joined, channels, type: joined.type,
+          pred: and(notInPath(joined, neighbour, fresh), eq(dv, { kind: 'binary', op: '+', left: du, right: weight })),
+        });
+        const appended = cfg.includeEdges
+          ? historyAppend(historyAppend(col(guarded.id, PATH_COL), objectEntry(edgeEntry(col(guarded.id, 'eid')))), objectEntry(vertexEntry(col(guarded.id, neighbourCol))))
+          : historyAppend(col(guarded.id, PATH_COL), objectEntry(vertexEntry(col(guarded.id, neighbourCol))));
+        return make.project({
+          id: fresh('spa'), input: guarded, channels, type: walkType,
+          exprs: [['id', col(guarded.id, neighbourCol)], ['src', col(guarded.id, 'psrc')], ['bulk', compilerInt(1)], [PATH_COL, appended]],
+        });
+      });
+      return arms.length === 1 ? arms[0]! : make.union({ id: fresh('spu'), inputs: arms, all: true, channels, type: walkType });
+    },
+  });
+  if (recursiveViolation(walk) || !termOk) return null;
+
+  // Every emitted path IS a shortest path (the gate), so no MIN window — the reconstruction is the result.
+  let selected: Rel = walk;
+  // A weighted maxDistance caps the FINAL shortest distance per (source, endpoint): dist[src][id] <= cap.
+  if (cfg.maxWeight !== undefined) {
+    selected = make.filter({
+      id: fresh('sprw'), input: selected, channels, type: selected.type,
+      pred: { kind: 'binary', op: '<=', left: distAt(run, round, col(selected.id, 'src'), col(selected.id, 'id'), fresh), right: compilerReal(cfg.maxWeight) },
+    });
+  }
+  if (cfg.target) {
+    const pred = child.predicate(cfg.target, { kind: 'element', id: col(selected.id, 'id'), rel: selected, elem: 'vertex' }, false);
+    if (!pred) return null;
+    selected = make.filter({ id: fresh('sprt'), input: selected, channels, type: selected.type, pred });
+  }
+  const deduped = make.distinct({ id: fresh('sprd'), input: selected, channels, type: selected.type });
+  const pathStep = { name: 'path', args: [] } as unknown as IRStep;
+  return pathPositions(deduped, pathStep, child, source, fresh);
+}
