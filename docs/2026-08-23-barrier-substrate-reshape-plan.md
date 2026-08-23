@@ -165,9 +165,11 @@ this target and the pair-keyed reshape are one build, not two.
 
 ## 7. Phased plan (green trunk per increment)
 
-1. **`barrier_state` general table + driver, migrate the 3 landed algorithms** to `scope=0,
-   channel=0`. Census/L3 unchanged by construction (same answers, new storage). One authority; delete
-   nothing else yet. `barrier_relation` becomes `barrier_state` or is retired in the same move.
+1. ✅ **LANDED (`e4c6c8c`) — `barrier_state(run,round,scope,id,channel,cval)`, the 3 algorithms
+   migrated** to `scope=0, channel=0`. Behaviour-preserving: L3 1736 and census 1546-ran both
+   unchanged. `barrier_relation` renamed to `barrier_state`; the shape centralised into `STATE_INSERT`
+   + `VEC` (`graph-algorithms.ts`) so the Tier-2 consumers extend one place; delta helpers join on the
+   full `(id,scope,channel)` key. One authority, no `SingleNodeValue` fork.
 2. **Multi-channel decorate** (`DecorateSpec` plural). No new algorithm yet — a differential that a
    two-channel decorate reads back both channels.
 3. **Weighted shortestPath (§5)** — the relaxation barrier (dist + pred-set channels) + predecessor-DAG
