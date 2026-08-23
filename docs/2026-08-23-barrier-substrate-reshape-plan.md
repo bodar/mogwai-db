@@ -277,14 +277,22 @@ this target and the pair-keyed reshape are one build, not two.
 Items 1–4 are the shortestPath Phase 2 rebuild in general clothing plus its chaining; 5–6 are the
 nesting + Tier-2 centrality reach. Each is an independently green push.
 
-## 8. Robustness — the resident-table hazard the 2026-08-21 doc flagged
+## 8. Robustness — the resident-table hazard the 2026-08-21 doc flagged ✅ LANDED (`b86dc41`)
 
 A resident scratch table leaks on crash: run-token GC (`frameResolved`'s `finally`,
-`src/execute.ts:618`) fires only on the happy path, so a request dying mid-`apply` orphans its rows
-until never. With the generalized, potentially larger and longer-lived `barrier_state` this matters
-more. Add an **orphaned-run sweep** — a bounded `DELETE FROM barrier_state WHERE run NOT IN (live
-runs)` at store open, or a run-age column swept on a schedule. Cheap belt for the one genuinely silent
-failure mode of a durable scratch substrate.
+`src/execute.ts`) fires only on the happy path (via `plan.cleanup`, populated only once the FULL chain
+drove), so a chain that THROWS at a later resume — after an earlier `apply` wrote its rows — orphaned
+them until never. Chaining (item 4) and repeat-body barriers (item 6 slice 1) made this reachable
+(`pageRank().connectedComponent().has(score, v)`). TWO belts landed:
+- **drop-on-throw (precise, in-isolate):** `SegmentReaders.dropRuns`; both drives (`src/drive.ts`)
+  wrap their loop and drop the runs allocated so far from the catch, then rethrow — harmless on success
+  (the `return` exits before the catch). The Worker edge drives only federate (no relation runs), so
+  its impl is a no-op.
+- **ctor sweep (hard-crash, cross-isolate):** a run is intra-request + synchronous, so at GraphStore
+  construction none is live and any surviving row is a prior isolate's orphan (a hard kill runs no JS
+  finally). `DELETE FROM barrier_state` in the ctor reclaims them.
+Verified non-vacuous (3/4 GC tests fail without drop-on-throw) and on real workerd. Test:
+`test/L2-sql/barrier-run-gc.exec.test.ts`.
 
 ## 9. GDS as prior art — where to read at the pin
 
