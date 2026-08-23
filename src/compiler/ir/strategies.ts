@@ -1263,12 +1263,26 @@ export function markUnrollSuppressed(steps: Step[], params: Record<string, any>)
   return (changed ? marked : steps) as IRStep[];
 }
 
-/** A body step an unrolled phase may contain: one of the barriers above, or a row-local
- *  movement/filter the main chain already lowers. */
+/** A body step an unrolled phase may contain: one of the barriers above, a row-local movement/filter
+ *  the main chain already lowers, or a barrier `call()` — a service boundary.
+ *
+ *  **`call` unrolls by the same "phase k IS the frontier at iteration k" argument as the barriers
+ *  above, delegated to the SEGMENT machinery.** A repeat body with a barrier drains every start into
+ *  the body per iteration (`RepeatStep.standardAlgorithm`'s global children), so n phase-local
+ *  service boundaries ask the same question as n iterations. Unrolled they become n SEQUENTIAL
+ *  top-level `call()`s, which `segmentPlan`'s resume re-entry (`planOf`) already chains — an OLAP
+ *  DECORATE barrier (`pageRank`/`connectedComponent`/`peerPressure`) recomputes globally and passes the
+ *  stream through, so sequential re-decoration matches the interpreter exactly (pinned in
+ *  `test/L2-sql/olap-chain.exec.test.ts`). A `call` this route cannot chain (a `federate`/`io`/path
+ *  barrier, whose resume replaces or detaches the stream) fails CLOSED at that resume — a named throw,
+ *  never a wrong answer — which is why the admission is safe without resolving the service here (the
+ *  unroll pass holds no registry). The EMIT regime declines a `call` body separately: an emitted level
+ *  is a UNION arm, and a barrier inside a union arm is the tree-Plan promotion target (§6), not this. */
 const unrollableBodyStep = (s: Step): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
-  || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity';
+  || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity'
+  || s.name === 'call';
 
 /**
  * THE STATEMENT-TEXT CEILING WAS A PROXY, AND IT IS GONE.
@@ -1370,6 +1384,11 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // the pipeline this pass happens to sit.
   const body = childBody(args[0].value.nested, params);
   if (!body.length || !body.every(unrollableBodyStep)) return null;
+  // A barrier `call()` unrolls only in the NON-emit regime. `emit` makes each level a UNION-ALL arm
+  // (below), and a barrier inside a union arm is the tree-Plan promotion target (§6), not the sequential
+  // chaining this slice reuses — so decline it here, fail closed, rather than splice a `call` into an arm
+  // the segment planner cannot descend into.
+  if (emit && body.some((s) => s.name === 'call')) return null;
   // `withoutStrategies(RepeatUnrollStrategy)` — SCOPED TO THE TRANSFORMATION THAT STRATEGY PERFORMS,
   // which is the barrier-free half of this pass and not all of it. Read at the vendored pin:
   // `ALLOWED_STEP_CLASSES` is `VertexStepContract`/`EdgeVertexStep`/`EdgeOtherVertexStep`/`HasStep` +
@@ -1388,9 +1407,12 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // strategy that never touched this body, is the fail-closed rule read backwards.
   //
   // The set is stated as the DIFFERENCE rather than as a second vocabulary (step.ts's rule: derive with
-  // a named difference, never merge) — `unrollableBodyStep` minus `UNROLLABLE_BARRIERS` IS upstream's
-  // admitted set, so the two cannot drift apart as either grows.
-  const widensPastTheStrategy = body.some((s) => s.name in UNROLLABLE_BARRIERS);
+  // a named difference, never merge) — `unrollableBodyStep` minus (`UNROLLABLE_BARRIERS` ∪ `call`) IS
+  // upstream's admitted set (movement + `has()`), so the two cannot drift apart as either grows. A
+  // barrier `call()` is on the widening side too: it is a service boundary upstream's `ALLOWED_STEP_
+  // CLASSES` never contained, and the unroll is the only route that expresses such a body — so
+  // `withoutStrategies(RepeatUnrollStrategy)` must not suppress it any more than it suppresses a `dedup`.
+  const widensPastTheStrategy = body.some((s) => s.name in UNROLLABLE_BARRIERS || s.name === 'call');
   if (rep.unrollSuppressed && !widensPastTheStrategy) return null;
   // Barrier-free bodies unroll too. A bounded frontier is a multiset, and only an ordinary phase can
   // collapse it with GROUP BY + SUM(bulk): SQLite forbids that aggregate in a recursive term. This is

@@ -119,6 +119,24 @@ describe('the repeat() unroll boundary', () => {
     expect(large).toBeLessThan(small * 5);
   });
 
+  test('a barrier call() body unrolls to sequential top-level calls — the SEGMENT machinery chains them', () => {
+    // A repeat body whose barrier is an OLAP `call()` (native `connectedComponent()`/`pageRank()` desugar
+    // to `call`) unrolls like any admitted barrier: phase k IS the frontier at iteration k, so n phases
+    // are n sequential service boundaries, which `segmentPlan`'s resume re-entry chains (item 4). Pinned
+    // structurally here (no `repeat` survives; n `call` steps appear); the EXEC identity — that it equals
+    // the barrier written out n times — is in `test/L2-sql/olap-chain.exec.test.ts` because a barrier
+    // needs the async drive this sync helper does not run.
+    const names = (g: string) =>
+      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+    const cc = names('g.V().repeat(__.connectedComponent()).times(2).count()');
+    expect(cc).not.toContain('repeat');
+    expect(cc.filter((n) => n === 'call').length).toBe(2);
+    // EMIT + a barrier call() declines — an emitted level is a UNION arm, and a barrier in a union arm is
+    // the tree-Plan promotion target (§6), not sequential chaining. Fail closed: the repeat survives, so
+    // the traversal reaches the ordinary (declining) route rather than splicing a call into an arm.
+    expect(names('g.V().repeat(__.connectedComponent()).emit().times(2).count()')).toContain('repeat');
+  });
+
   test('until and a named loop decline — a predicate bound and a live counter, not a fixed n', () => {
     // until() is a predicate rather than a count (the unbounded regime → the walk), and a named
     // repeat("a", …) carries a counter loops("a") can read from arbitrarily deep, which the phases have
@@ -185,6 +203,11 @@ describe('the repeat() unroll boundary', () => {
       const chain = marked(`${spelling}.repeat(__.both().limit(1)).times(2)`);
       expect(chain.map((s) => s.name)).not.toContain('repeat');
       expect(chain.filter((s) => s.name === 'limit')).toHaveLength(2);
+      // A barrier CALL() body is widening too — the mark must not suppress it, or `pageRank`/`connected
+      // Component` inside a repeat becomes a throw under an unrelated `withoutStrategies` request.
+      const cc = marked(`${spelling}.repeat(__.connectedComponent()).times(2)`);
+      expect(cc.map((s) => s.name)).not.toContain('repeat');
+      expect(cc.filter((s) => s.name === 'call')).toHaveLength(2);
     }
     // …and the answer is what the corpus asserts, on the real store, however it is spelled.
     expect(vals('g.withoutStrategies(RepeatUnrollStrategy).V().repeat(__.both().limit(1)).times(2)'))

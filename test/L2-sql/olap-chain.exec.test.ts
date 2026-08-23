@@ -59,3 +59,28 @@ describe('sequential barrier chaining — pageRank() then connectedComponent()',
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 });
+
+// A barrier inside a BOUNDED repeat body — `repeat(__.connectedComponent()).times(n)`. The unroll pass
+// splices the body n times onto the flat chain (a native OLAP step desugars to `call`), so the barrier
+// becomes n SEQUENTIAL top-level calls that the segment machinery chains exactly as above — no tree
+// Plan, no promotion. This is the smallest slice of §6 (barrier-in-body), reusing item 4. The structural
+// pin (unrolls, does not while EMIT is present) is in test/compiler/repeat-unroll-boundary.exec.test.ts;
+// this is the EXEC identity the unroll doctrine demands (`UNROLLABLE_BARRIERS`): rolled ≡ written out n.
+describe('barrier in a bounded repeat body — repeat(__.connectedComponent()).times(n)', () => {
+  test('repeat(cc).times(n) equals cc — the unroll agrees with the barrier written out', async () => {
+    const byName = (rs: any[]) => Object.fromEntries(rs.map((r: any) => [r.name, r[CC]]));
+    const q = (g: string) => `g.V().${g}.project("name","${CC}").by("name").by("${CC}")`;
+    const plain = byName((await run(seeded(MODERN_SEED), q('connectedComponent()'))).map(unmap));
+    for (const n of [1, 2, 3]) {
+      const rolled = byName((await run(seeded(MODERN_SEED), q(`repeat(__.connectedComponent()).times(${n})`))).map(unmap));
+      expect(rolled).toEqual(plain);
+    }
+  });
+
+  test('a barrier in an EMITTED repeat body fails closed — barrier-in-union-arm is the tree-Plan target', async () => {
+    // emit makes each level a UNION arm; a barrier there needs promotion (§6), not this slice, so it must
+    // refuse rather than answer plausibly.
+    await expect(exec(seeded(MODERN_SEED)).framedAsync(`g.V().repeat(__.connectedComponent()).emit().times(2).count()`, {}))
+      .rejects.toThrow();
+  });
+});
