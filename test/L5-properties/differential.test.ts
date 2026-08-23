@@ -17,7 +17,7 @@
 // gated by the witness ratchets so only a NEW signature fails — that is what makes rotation non-flaky,
 // rather than pinning the seed and moving discovery to a run nobody remembers. Whatever draw rule is
 // chosen must keep CI and local identical. Index item 0d;
-// docs/2026-07-28-property-based-testing-l5.md "Seeds". `mise run L5-random` is the deeper sweep;
+// docs/property-based-testing-l5.md "Seeds". `mise run L5-random` is the deeper sweep;
 // anything it finds gets diagnosed into known.ts (or fixed) and, per test/CLAUDE.md, promoted into an
 // L4 `.feature` so the floor rises permanently.
 import { test, expect, describe } from 'bun:test';

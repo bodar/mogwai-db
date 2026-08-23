@@ -4,7 +4,7 @@
 // see a disagreement. A defect present in BOTH is invisible to it by construction, and two such were
 // found by hand while diagnosing it — one of them making an L3 scenario pass for entirely the wrong
 // reason because two compensating bugs cancelled. Rationale:
-// docs/2026-07-28-property-based-testing-l5.md.
+// docs/property-based-testing-l5.md.
 //
 // A metamorphic law closes that gap by comparing against a LAW rather than an implementation. Each
 // law is a pair of traversals that Gremlin's semantics require to produce the same traverser

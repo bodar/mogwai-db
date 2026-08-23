@@ -415,7 +415,7 @@ types) — not our execution semantics. Cheap, high-value, and it lands before a
 `graphql-js` is the reference implementation. Point it at a naive resolver set over the same graph
 and it becomes an **execution oracle**: same document, same variables, two engines, compare. This is
 exactly the L5 property-based shape already built here
-(`docs/2026-07-28-property-based-testing-l5.md`) — generate documents from the *reflected schema*
+(`docs/property-based-testing-l5.md`) — generate documents from the *reflected schema*
 (which bounds generation to legal queries for free) and diff.
 
 Where the two disagree, graphql-js is right by definition. It covers field ordering, null
@@ -727,5 +727,5 @@ Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the preceden
 `docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
 `docs/archive/2026-08-07-edge-compilation-plan.md` (a finding §5's probes turned up; the plan-stability
 finding has since landed, RelIR plan §1 P4),
-`docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
+`docs/property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).

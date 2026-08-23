@@ -1,7 +1,7 @@
 # L5 — property-based testing
 
 **Current state and how to run it.** Design rationale, the oracle design space, and the open work are
-in `docs/2026-07-28-property-based-testing-l5.md` — this file deliberately describes only what is
+in `docs/property-based-testing-l5.md` — this file deliberately describes only what is
 there now.
 
 ```

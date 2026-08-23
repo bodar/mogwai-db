@@ -93,7 +93,7 @@
   `mise run L5-random` is the deeper sweep. **L5 is the CEILING instrument** — it measures what composes,
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:
-  `docs/2026-07-28-property-based-testing-l5.md`.
+  `docs/property-based-testing-l5.md`.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they
   live in neither.

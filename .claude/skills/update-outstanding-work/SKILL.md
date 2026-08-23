@@ -128,7 +128,7 @@ File each cause as ONE item (never one per seed or per traversal). **If the swee
 itself a finding and it has an item**: the rotating seed landed, so a green sweep means the GENERATOR is
 saturated, not that the compiler is correct — file the lattice gap (which corpus step names the
 transition table cannot emit) rather than reporting "L5 clean". See
-`docs/2026-07-28-property-based-testing-l5.md` "Seeds"; the index carries this as item 34.
+`docs/property-based-testing-l5.md` "Seeds"; the index carries this as item 34.
 
 ### 2. Sweep newer docs (subagent, `general-purpose`)
 
