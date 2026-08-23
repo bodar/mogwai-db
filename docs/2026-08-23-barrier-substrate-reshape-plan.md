@@ -190,11 +190,24 @@ this target and the pair-keyed reshape are one build, not two.
      `shortestPathReconstruct` (reuses `pathPositions`, guard = dist-gate `dv=du+w` float-exact +
      simple-path backstop, no MIN window). The grateful scenario that HUNG the walk now terminates and
      passes. First end-to-end consumer of barrier_state's scope + channel dims.
-   - **3c (next) — migrate UNWEIGHTED to the barrier + DELETE the walk.** Generalize the relaxation to
-     w=1 (hop distance) and the reconstruction gate to `dv=du+1`; route ALL shortestPath through the
-     barrier; maxHops becomes a `dist<=cap` final filter. Delete `shortestPathWalk` (the enumerate-then-MIN
-     recursive CTE) — kills the latent uncapped-unweighted-dense hang (a valid query that would also
-     explode). Differential: the 12 unweighted L3 scenarios must hold.
+   - ⚠️ **3c ATTEMPTED, REVERTED — BLOCKED on sync-driveable barriers (a design fork).** Migrating
+     unweighted onto the barrier + deleting the walk was built and worked (L3 held 1739, L2 16/16), but
+     the CENSUS regressed: 12 unweighted-shortestPath corpus traversals STOPPED EXECUTING. Cause is
+     structural, not a bug — the census (and every sync-exec test) runs traversals through the SYNC path
+     (`exec(store).framed(...)`), which cannot drive a BARRIER (an async segment). Unweighted shortestPath
+     being sync-runnable via the walk (a `rel` contribution) was load-bearing; as a barrier it loses sync
+     execution. **The OLAP barriers all have SYNCHRONOUS `apply`s** (relaxShortestPath / wcc / pageRank /
+     peerPressure — no internal await; the async keyword buys nothing), so they COULD be driven
+     synchronously — but the barrier `apply` signature is `Promise<…>`, so the sync drive can't extract
+     the value. Two roads (HUMAN DECISION):
+     - **A — keep the DUAL substrate (current 3b state).** Walk unweighted (sync), barrier weighted
+       (async). Green. The walk's latent uncapped-unweighted-DENSE hang stays (a valid query, but no
+       corpus/census scenario exercises it — they are small/capped). GDS itself ships several SP impls.
+     - **B — sync-driveable `do` barriers.** Add a SYNC-apply barrier shape (a `SyncSegmentPlan` arm for
+       a `do` barrier whose apply is synchronous) + a sync drive, then unweighted→barrier + delete walk.
+       Bonus: the census could then run wcc/pageRank/peerPressure too (they currently defer in sync). A
+       compounding substrate move, but real infra + a census re-record. This is the "one substrate" end
+       state the plan named.
    - **Original 3b plan (done above):**
      1. `graph-algorithms.ts`: `shortestPathService` → `createShortestPathService(store)` (store-capturing,
         like wcc — the barrier `apply` needs the store); DUAL resolve — weighted (`SP_DISTANCE` set) →
