@@ -412,7 +412,7 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
 // used to live in.
 
 /** The syntax-only scalar transform vocabulary — the step names whose meaning is "reshape this one
- *  scalar value", emitted by `scalarTx` (`plan/plan.ts`). Membership is decided by SYNTAX alone,
+ *  scalar value", emitted by `transformExpr` (`rel/transform.ts`). Membership is decided by SYNTAX alone,
  *  which is why child-shape classification can consult it without importing an emitter: the
  *  classifier must run BEFORE the engine it would otherwise pull in. */
 export const SCALAR_TRANSFORMS: ReadonlySet<string> = new Set([

@@ -3,7 +3,7 @@ import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { asLabelsOf } from '../ir/labels.ts';
 import type { IRStep } from '../ir/step.ts';

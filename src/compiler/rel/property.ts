@@ -7,7 +7,7 @@ import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
 import { storedCompareOn, valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 
 // ---------- the PROPERTY shape: a traverser that IS a property, not its value ----------
 //

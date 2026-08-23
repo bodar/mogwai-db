@@ -123,9 +123,27 @@ What follows are the by-design exclusions and staged residue, not unbuilt reads:
 - **Bound WRITES** — a fetched subgraph is a read-only snapshot; writes decline (out of scope by design).
 - **FTS / `trigramSeek` over bound** — no landed FTS index; `has(containing…)` would be a linear JSON scan
   or a decline. Decide when reached.
-- **Mechanism-B leaf UNIFICATION** (step 5) — the detached framing still covers the bound leaf; folding it
-  into `source.leafPayload` everywhere is staged, not required for flow-through.
-- Mechanism B for the BASE leaf is already `source.leafPayload` (= `elementPayload`); no further work.
+- **Mechanism-B leaf UNIFICATION (`leafPayload`) — LANDED.** Both graphs frame a terminal element through
+  `source.leafPayload`: `framed()`'s `elements`/`detached` arms are the identical call (`lower.ts:3939-3952`),
+  `BoundGraph.leafPayload` (`boundgraph.ts:354`) rejoins the landed CTE, `BaseGraph.leafPayload` delegates to
+  `element.ts`'s `elementPayload`. The old q-template leaf/property/label builders in
+  `src/compiler/plan/plan.ts` (the doc's original "Mechanism B" location) were the DEAD twin of this and are
+  DELETED; the file is gutted to the element-kind primitive (`Elem`/`sqlElem`) and renamed
+  `src/compiler/elem.ts`.
+- **Two residual pieces, now the real "step 5":**
+  - **`GraphSource.elementNode` per-member routing gap.** `leafPayload` (the terminal element) is unified,
+    but its sibling `elementNode` (a raw element embedded as a `path()` position, a list member, a map
+    key/value, a record field, or a `by()`-produced value) is routed through `ctx.source` ONLY in `path.ts`.
+    `record.ts`, `modulator.ts` (both `producedMemberNode`/`byNode`), `collection.ts`, `list.ts`, `map.ts`
+    call the base-only `element.ts` `elementNode` directly — some with a `GraphSource` already in scope. So a
+    bound element embedded as a member would rejoin the BASE tables against a foreign id. **Reachability
+    must be checked first** (`detachedTail`'s narrow vocabulary / `BOUND_HANDOFF_DENY` may fail it closed
+    today); if reachable it is a latent wrong answer, if fail-closed it is a deferral to route + widen.
+  - **`RelFraming.kind: 'detached'` type tidy.** At the leaf it is byte-identical to `'elements'` (same
+    `leafPayload` call). It survives only as a step-vocabulary ROUTER (`continueAs` → `detachedTail` vs
+    `elementTail`), unrelated to payload shape, and its `framing.ts:39-46` doc comment still describes the
+    pre-id-carry payload-carry model. Retire the leaf-level distinction and correct the comment; keep (or
+    rename off `detached`) the routing distinction.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
 `detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
@@ -195,11 +213,12 @@ interface GraphSource {
   traverser facts threaded by the vocabulary; the base stream carries them, the landed stream currently
   carries none. `GraphSource` abstracts only the PHYSICAL ROWS, so once the vocabulary is source-
   parameterised the bound graph GAINS collapse/path/order for free — the improvement, not just a merge.
-- **Leaf framing (Mechanism B) is STAGED, not in the first milestone.** Two physical-access mechanisms
-  exist: Mechanism A is the traversal algebra above; Mechanism B is `src/compiler/plan/plan.ts` reading
-  `nodes`/`vertex_properties`/`labels` to build the id/label/prop WIRE BAGS at terminal output. A bound
-  element's leaf output already frames through the detached framing (the `foreign.ts` landed payload), so
-  Mechanism B stays base-specific until a later milestone unifies it. The first milestone is Mechanism A.
+- **Leaf framing (Mechanism B) — the terminal element is UNIFIED (historical note: this was staged after
+  Mechanism A).** Both graphs build the id/label/prop wire bag through `source.leafPayload`
+  (`element.ts`'s `elementPayload` for base; `BoundGraph.leafPayload`'s landed-CTE rejoin for bound). The old
+  `src/compiler/plan/plan.ts` builders that read `nodes`/`vertex_properties`/`labels` were the dead twin and
+  are deleted (file gutted + renamed `elem.ts`). What is NOT yet unified is `elementNode` (a per-member/
+  per-position element node) — routed through `source` only in `path.ts` — see "What is deferred / open".
 
 ## The site inventory (the map for the refactor)
 
@@ -225,9 +244,12 @@ DDL live in `src/storage.ts`.
   the `PROPERTIES` owner map `build.ts:148`. Fast paths (physical rewrites over finished algebra):
   `indexSeek` `semijoin.ts:193`, `trigramSeek` `semijoin.ts:242` (+ `SEEK_PROPERTIES` `semijoin.ts:162`).
 
-**Mechanism B — leaf framing (`src/compiler/plan/plan.ts`), a LATER milestone:** label builders
-`plan.ts:37-135`; property readers `plan.ts:848-953`; `elemTable()` `plan.ts:541`; `sqlElem()`
-`plan.ts:527`; external-id `extIdOf()` `plan.ts:644`; element payload `elementPayload()` `plan.ts:664`.
+**Mechanism B — leaf framing — DONE, and the legacy home is DELETED.** Leaf framing is now
+`src/compiler/rel/element.ts` (`elementPayload`/`elementNode`) reached through `source.leafPayload`/
+`source.elementNode`. The pre-RelIR q-template builders this section used to inventory in
+`src/compiler/plan/plan.ts` (label builders, property readers, `elemTable`, `extIdOf`, `elementPayload`) had
+NO callers after the RelIR migration and are deleted; the file is gutted to the element-kind primitive
+(`Elem`/`sqlElem`) and renamed `src/compiler/elem.ts`.
 
 **The existing BoundGraph (to fold in, then delete as a standalone twin):** `src/compiler/rel/foreign.ts`
 — `foreignRelation()` `:60`, `boundVertexMove()` `:237`, `endpointVertices()` `:133`, `foreignValues()`
@@ -251,8 +273,10 @@ step. The base graph's SQL stays semantically identical until step 4. `bash scri
 4. **Point the subgraph tail at `BoundGraph` and DELETE the `detachedTail`/`foreign.ts` twin.** The one
    vocabulary now flows over the injected graph — and the bound graph gains collapse/path/order/group for
    free (verify each against the sibling's own traversal, as the current bound tests do).
-5. **(Later milestone) Mechanism B — unify leaf framing** so a bound element frames through the same seam
-   (`plan.ts`), retiring the detached framing. Not required for flow-through; staged deliberately.
+5. **Mechanism B — unify leaf framing — DONE for the terminal element (`leafPayload`).** Both graphs frame
+   through `source.leafPayload`; the dead q-template twin in `plan.ts` is deleted (file gutted + renamed
+   `elem.ts`). The residue is now the `elementNode` per-MEMBER routing gap and the `RelFraming.'detached'`
+   type tidy — see "What is deferred / open".
 
 ## What is deferred / open
 

@@ -14,7 +14,7 @@ import { armBatches, assertsGType, collectionAssert, isLocalScope, isStreamBarri
 import { labelReads, labelsBoundBefore } from '../ir/labels.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';

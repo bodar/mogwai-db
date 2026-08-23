@@ -1,6 +1,6 @@
 import { compilerInt, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';

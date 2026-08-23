@@ -2,7 +2,7 @@ import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.t
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { and, eq, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';

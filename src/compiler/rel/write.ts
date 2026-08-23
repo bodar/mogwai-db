@@ -7,7 +7,7 @@ import type { Channels } from '../../channels.ts';
 import { insert, remove } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { ChildSeam } from './child.ts';

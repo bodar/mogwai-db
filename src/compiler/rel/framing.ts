@@ -1,7 +1,7 @@
 import { perRowColumnOf, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { VariantArm } from './variant.ts';
 
 // ---------- what the framing layer must build over a result relation ----------

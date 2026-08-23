@@ -1,6 +1,6 @@
 import { q, type Query, type Relation } from './q.ts';
 import type { ValueType } from '../../gremlin/types.ts';
-import type { Elem } from '../../compiler/plan/plan.ts';
+import type { Elem } from '../../compiler/elem.ts';
 import type { RenderedProgram } from '../../program.ts';
 
 // ---------- compile output contract ----------

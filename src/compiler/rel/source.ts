@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { storedCompareOn } from './predicate.ts';

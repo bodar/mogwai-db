@@ -73,8 +73,9 @@ describe('every write reaches them through a waist', () => {
 // Twelve hosts each wrote their own two-arm `token === 'label' ? … : token === 'id' ? …` resolver,
 // and four of them returned the INTERNAL rowid. That is invisible on a graph whose ids are rowids —
 // which the modern fixture is, and which is why nothing caught it — and becomes a wrong answer the
-// moment a graph supplies its own ids. `tokenExpr` (plan/plan.ts) is now the one resolution, and it
-// returns the outward-facing `COALESCE(uid, id)`.
+// moment a graph supplies its own ids. The source-routed `externalId`/`labelScalar` (`rel/modulator.ts`
+// `byExpr`'s token arm, shared with `id()`/`label()`) is now the one resolution, returning the
+// outward-facing `COALESCE(uid, id)`.
 describe('T.id is the outward-facing id at every by() position', () => {
   const withIds = () => {
     const s = store();

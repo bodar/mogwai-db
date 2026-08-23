@@ -16,7 +16,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { elementNode, elementObject } from './element.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 

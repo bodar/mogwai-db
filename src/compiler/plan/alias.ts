@@ -1,5 +1,5 @@
 import { q, value, empty, type Expression } from '../../sql/kernel/q.ts';
-import { type Elem } from './plan.ts';
+import { type Elem } from '../elem.ts';
 import { PER_ROW, PER_ROW_ENVELOPE, sameScalarType, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 
 // ---------- as() label encoding: per-traverser path history ----------

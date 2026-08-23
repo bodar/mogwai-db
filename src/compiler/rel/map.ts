@@ -3,7 +3,7 @@ import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';

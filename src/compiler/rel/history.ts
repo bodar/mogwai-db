@@ -1,6 +1,6 @@
 import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../plan/alias.ts';
 
 /**

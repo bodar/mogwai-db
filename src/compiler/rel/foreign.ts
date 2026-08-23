@@ -2,7 +2,7 @@ import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { meta, typeOf, type Minter } from './build.ts';

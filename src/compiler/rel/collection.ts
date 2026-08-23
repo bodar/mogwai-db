@@ -6,7 +6,7 @@ import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { meetScalarTypes, PER_ROW, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MixedArm, type ScalarType } from '../../sql/kernel/render.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';

@@ -3,7 +3,7 @@ import type { Minter } from '../../compiler/rel/build.ts';
 import type { FramedRel } from '../../compiler/rel/framing.ts';
 import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Elem } from '../../compiler/plan/plan.ts';
+import type { Elem } from '../../compiler/elem.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
 import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
 

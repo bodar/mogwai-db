@@ -10,7 +10,7 @@ import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
-import type { Elem } from '../plan/plan.ts';
+import type { Elem } from '../elem.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
 //

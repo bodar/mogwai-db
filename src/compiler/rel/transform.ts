@@ -1,9 +1,19 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
-import { JAVA_WHITESPACE } from '../plan/plan.ts';
 import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
+
+// Java's whitespace set — the exact code points `String.trim()`/`strip()`/the Gremlin `trim` family
+// remove. Excludes the non-breaking spaces (U+00A0 NBSP, U+2007 figure, U+202F narrow NBSP), which
+// Java also excludes; includes U+3000 ideographic space (the suite's fullwidth-space case). SQLite
+// trim(x, set) removes any char in `set`. Built from explicit code points so the source carries no
+// literal control/space chars. Lives here because `VALUE_TX`'s trim family is its only consumer.
+const JAVA_WHITESPACE = [
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029, 0x205f, 0x3000,
+].map((c) => String.fromCharCode(c)).join("");
 
 /**
  * THE SCALAR TRANSFORM VOCABULARY — `v -> v'`, as RelIR expressions.
@@ -22,12 +32,12 @@ import type { IRStep } from '../ir/step.ts';
  *
  * ## What is shared rather than re-derived
  *
- * `numericSpec`, `dtFactor` and `JAVA_WHITESPACE` are imported. They are DATA and pure computation —
- * a GType's numeric range, a DT unit's millisecond factor, Java's 24 whitespace code points — not SQL,
- * so there is nothing to re-express and a second copy would be a second thing to keep in step. Only
- * the EMISSION is re-expressed here, which is the boundary the whole migration draws (§2). The
- * whitespace list is the clearest case: `trim()` in Gremlin trims Java's whitespace set, not SQLite's
- * space, and a re-derived list that missed U+1680 would be wrong in a way no test would name.
+ * `numericSpec` and `dtFactor` are imported (a GType's numeric range, a DT unit's millisecond factor);
+ * `JAVA_WHITESPACE` is defined just below. They are DATA and pure computation — not SQL — so there is
+ * nothing to re-express and a second copy would be a second thing to keep in step. Only the EMISSION is
+ * re-expressed here, which is the boundary the whole migration draws (§2). The whitespace list is the
+ * clearest case: `trim()` in Gremlin trims Java's whitespace set, not SQLite's space, and a re-derived
+ * list that missed U+1680 would be wrong in a way no test would name.
  *
  * ## What declines, each for its own reason
  *

@@ -2,7 +2,7 @@ import * as make from '../../rel/factory.ts';
 import { col, compilerInt, compilerText } from '../../rel/expr.ts';
 import { and, eq, meta, typeOf } from '../../compiler/rel/build.ts';
 import { propertyJoin } from '../../compiler/rel/property.ts';
-import { sqlElem, type Elem } from '../../compiler/plan/plan.ts';
+import { sqlElem, type Elem } from '../../compiler/elem.ts';
 import type { Service, RelCallSite, RelContribution, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
