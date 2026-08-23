@@ -29,7 +29,7 @@ import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
-import { isExcludedScenario } from './tags.ts';
+import { isExcludedScenario, isIgnoredScenario } from './tags.ts';
 
 export interface QueryRecord {
   g: string;
@@ -278,8 +278,9 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
   for (const feat of cucumberJson) for (const el of feat.elements ?? []) {
     if (el.type && el.type !== 'scenario') continue;
     // A DECLARED WALL leaves the report entirely — numerator and denominator both — so it can neither
-    // read as a regression in the delta nor sit in the floor as a permanent failure (tags.ts).
-    if (isExcludedScenario(el.name)) continue;
+    // read as a regression in the delta nor sit in the floor as a permanent failure (tags.ts). An
+    // upstream-IGNORED scenario (gremlin-js's IgnoreError map — float/uuid-unstable) leaves it too.
+    if (isExcludedScenario(el.name) || isIgnoredScenario(el.name)) continue;
     const steps = el.steps ?? [];
     const passed = steps.length > 0 && steps.every((s: any) => s.result?.status === 'passed');
     if (passed) { rows.push({ name: el.name, passed: true }); continue; }

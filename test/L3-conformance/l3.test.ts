@@ -31,7 +31,7 @@ import '../support/undici-shim.ts'; // client teardown calls Agent.close() — s
 import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
-import { L3_TAGS, isExcludedScenario } from './tags.ts';
+import { L3_TAGS, isExcludedScenario, isIgnoredScenario } from './tags.ts';
 import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
@@ -129,6 +129,9 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     // A DECLARED WALL is not part of the denominator — see `EXCLUDED_SCENARIOS` in tags.ts. It never
     // reaches `passing` either (it fails), so cucumber's own summary cross-check below still holds.
     if (isExcludedScenario(el.name)) continue;
+    // A scenario the upstream runner SKIPPED (its IgnoreError map — float/uuid-unstable) leaves the
+    // denominator, exactly as a runner-skipped tag does; counting it as our failure would be a lie.
+    if (isIgnoredScenario(el.name)) continue;
     total++;
     const steps = el.steps ?? [];
     if (steps.length && steps.every((s: any) => s.result?.status === 'passed')) passing++;

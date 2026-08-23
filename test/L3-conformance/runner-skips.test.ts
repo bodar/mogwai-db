@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { RUNNER_SKIPPED } from './tags.ts';
+import { RUNNER_SKIPPED, IGNORED_SCENARIOS } from './tags.ts';
 
 // The vendored cucumber runner refuses to run some scenarios itself, with
 // `Before({tags: "@X"}, () => 'skipped')`. Those can never pass whatever our engine does, so
@@ -30,4 +30,12 @@ test('tags.ts excludes exactly what the vendored runner refuses to run', () => {
   // fail loudly rather than quietly comparing two empty lists and passing.
   expect(actual.length).toBeGreaterThan(0);
   expect(actual).toEqual([...RUNNER_SKIPPED].sort());
+});
+
+test('IGNORED_SCENARIOS parses the runner IgnoreError map (auto-tracked, non-empty)', () => {
+  // Sourced from feature-steps.js at load, so it cannot drift — but a broken parse regex would
+  // silently empty it and re-admit float/uuid-unstable scenarios as false failures. Assert it stays
+  // non-empty and includes a known member (the pageRank float-unstable scenario 8).
+  expect(IGNORED_SCENARIOS.size).toBeGreaterThan(0);
+  expect(IGNORED_SCENARIOS.has('g_V_hasLabelXsoftwareX_hasXname_rippleX_pageRankX1X_withXedges_inEXcreatedX_withXtimes_1X_withXpropertyName_priorsX_inXcreatedX_unionXboth__identityX_valueMapXname_priorsX')).toBe(true);
 });

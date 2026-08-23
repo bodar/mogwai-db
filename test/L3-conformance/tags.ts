@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 // L3 scope. Every exclusion below is one of THREE kinds, and they are different claims — the file
 // used to state them all as "what we deliberately don't support", which read as a capability
 // decision even where we had made none.
@@ -93,3 +95,24 @@ export const EXCLUDED_SCENARIOS: ReadonlySet<string> = new Set([
 
 /** Whether the report should ignore this scenario entirely — see `EXCLUDED_SCENARIOS`. */
 export const isExcludedScenario = (name: string): boolean => EXCLUDED_SCENARIOS.has(name);
+
+/**
+ * SCENARIOS THE UPSTREAM RUNNER ITSELF IGNORES — gremlin-js's `IgnoreError` map (float- and
+ * uuid-serialization-unstable scenarios the reference refuses to adjudicate). Category 3, like the
+ * runner-skipped TAGS: our engine may well produce the right answer (the instability is in the
+ * corpus's own expected value — e.g. a pageRank(1.0) whose .feature float noise upstream flags), so
+ * counting one as OUR failure would be a lie.
+ *
+ * Sourced DIRECTLY from `feature-steps.js` (parsed, not copied) so it cannot drift from upstream: a pin
+ * bump that adds or drops an IgnoreError is reflected on the next run. Our own cucumber runner does not
+ * replay gremlin-js's scenario-map path (it reads the docstring — `test/CLAUDE.md`), so the map's own
+ * `'skipped'` return never fires; excluding by name is the equivalent, and it is deterministic.
+ */
+export const IGNORED_SCENARIOS: ReadonlySet<string> = (() => {
+  const src = readFileSync(new URL('../../vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/feature-steps.js', import.meta.url), 'utf8');
+  return new Set([...src.matchAll(/'([^']+)':\s*new IgnoreError/g)].map((m) => m[1]));
+})();
+
+/** Whether the upstream runner ignores this scenario (its `IgnoreError` map) — unadjudicable, so it
+ *  leaves the L3 denominator, exactly as a runner-skipped tag does. */
+export const isIgnoredScenario = (name: string): boolean => IGNORED_SCENARIOS.has(name);
