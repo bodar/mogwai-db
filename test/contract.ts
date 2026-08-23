@@ -105,6 +105,12 @@ function olapContract(getOrigin: () => string) {
         expect((await g.V().call('mogwai.closeness').has('closeness').count().next()).value).toBe(3);
         const closeness = await g.V().call('mogwai.closeness').values('closeness').toList() as number[];
         expect(closeness.reduce((a, b) => a + b, 0)).toBeCloseTo(2.0, 10);
+
+        // mogwai.betweenness (Brandes) — the MULTI-SOURCE + KEEP-ALL-ROUNDS barrier. Proves the forward
+        // level-BFS, the reverse dependency pass and the per-source aggregation all run on the real DO.
+        // On this graph every shortest path is a direct edge, so all betweenness is 0 — but all three
+        // vertices are decorated, which exercises the full compute end to end.
+        expect((await g.V().call('mogwai.betweenness').has('betweenness').count().next()).value).toBe(3);
       } finally { await conn.close(); }
     }, 40_000);
   });

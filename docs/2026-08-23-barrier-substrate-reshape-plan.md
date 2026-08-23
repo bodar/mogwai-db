@@ -273,9 +273,19 @@ this target and the pair-keyed reshape are one build, not two.
    - ✅ **`mogwai.harmonic` LANDED (`0a03944`)** — closeness's sibling on the SAME distances (extracted the
      shared `distanceCentrality` engine; they differ ONLY in the reduction: closeness reached/farness,
      harmonic Σ(1/dist)/(N−1)). Ported + matched GDS's undirected test (0.375/0.5/0.375/0.25/0.25).
-   - **Next in this family:** node-similarity (per-(u,v) — `scope=u, id=v`, a genuinely NEW pair-keyed
-     shape, not just reusing shortestPath's scope=source), Brandes betweenness (needs keep-all round
-     retention for the reverse pass). GDS refs: `vendor/gds/algo/.../{similarity,betweenness}/`.
+   - ✅ **`mogwai.betweenness` (Brandes) LANDED** — the first barrier that exercises BOTH remaining
+     limits at once: MULTI-SOURCE (scope = source, so "Brandes from every source" is ONE level-BFS) and
+     KEEP-ALL ROUNDS (round = BFS level; the dependency pass walks them in reverse). σ per level (channel
+     0) forward, δ per level (channel 1) backward, betweenness = Σ over sources s≠v of δ. Directed
+     (GDS default); undirected variant deferred to a `direction` param. Ported + matched GDS's
+     BetweennessCentralityTest (line 0/3/4/3/0, cycle 1/1/1, diamond b=8, connected-cycles a=13, clique
+     0); validated on real workerd. The retention "limit" needed no schema change — keep-all is just not
+     DELETE-ing prior rounds. `docs/.../betweenness/` (GPLv3, re-expressed).
+   - **Also landed this family/session (one-shot + fixpoint decorates, kernel-based):** `mogwai.hits`
+     (multi-channel), `mogwai.triangleCount` + `mogwai.localClusteringCoefficient` (one-shot), `mogwai.kcore`
+     (h-index fixpoint). **Next:** node-similarity — the one genuinely-new shape LEFT: per-(u,v)
+     `scope=u, id=v` state AND a pair-STREAM output (not a per-vertex decoration), so it needs a new
+     output arm, not just a new algorithm. GDS ref: `vendor/gds/algo/.../similarity/`.
 6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
    so a barrier inside one must too. Two regimes, split by whether the body flattens:
    - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded

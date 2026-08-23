@@ -357,3 +357,7 @@ export const LCC_SERVICE_NAME = 'mogwai.localClusteringCoefficient';
 /** k-core decomposition — each vertex's coreness, a BSP fixpoint (the Montresor h-index update).
  *  Call-only, `internal: true`. */
 export const KCORE_SERVICE_NAME = 'mogwai.kcore';
+/** Betweenness centrality (Brandes) — the first KEEP-ALL-round, multi-source (scope-keyed) consumer:
+ *  a per-level forward BFS accumulating shortest-path counts, then a reverse-level dependency pass.
+ *  Call-only, `internal: true`. */
+export const BETWEENNESS_SERVICE_NAME = 'mogwai.betweenness';
