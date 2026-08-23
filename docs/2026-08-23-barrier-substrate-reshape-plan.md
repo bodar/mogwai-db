@@ -172,9 +172,17 @@ this target and the pair-keyed reshape are one build, not two.
    full `(id,scope,channel)` key. One authority, no `SingleNodeValue` fork.
 2. **Multi-channel decorate** (`DecorateSpec` plural). No new algorithm yet — a differential that a
    two-channel decorate reads back both channels.
-3. **Weighted shortestPath (§5)** — the relaxation barrier (dist + pred-set channels) + predecessor-DAG
-   reconstruction + path-output arm. Restores the `9b77dd5`-deferred weighted scenarios as real
-   answers; the grateful hang scenario now terminates. **L3 +3.**
+3. **Weighted shortestPath (§5)** — the relaxation barrier + reconstruction, un-defers `9b77dd5`. **L3 +3.**
+   - ✅ **3a LANDED (`2b48641`) — the relaxation core.** `relaxWeighted` (Bellman-Ford dist, scope=source,
+     channel 0) on `barrier_state` — the first scope+channel consumer, reusing `iterateInSql`. Design
+     simplification: NO predecessor channel — an edge (u,v) is a shortest-path edge iff
+     `dist[s][v] = dist[s][u] + w`, so reconstruction derives from dist alone. New `changedOrNew`
+     fixpoint (LEFT JOIN) for the sparse frontier. Tested: correct on modern, TERMINATES on grateful
+     (367ms) where the walk hangs. Not yet wired (weighted still fails closed).
+   - **3b (next) — wire it: `pathSegment` barrier + `lowerPathResume`.** Head projects the source ids;
+     `apply` runs `relaxWeighted`; the resume reconstructs paths via a `Recursive` rel reusing
+     `pathPositions`, the guard swapped from simple-path to the dist-equality gate (simple-path kept as a
+     zero/negative-weight backstop). Route weighted here; unweighted stays the walk until 3c.
 4. **Sequential barrier chaining** — decorate/foreign resumes call `planOf` (`pageRank().wcc()`).
 5. **`scope`-keyed working state** — the first pair-keyed consumer (closeness or node-similarity is
    simplest; Brandes adds the reverse-pass retention policy).
