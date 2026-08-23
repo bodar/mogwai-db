@@ -5,7 +5,7 @@ import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
-import { edgeLabel, elementNode, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
+import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { storedCompareOn } from './predicate.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
@@ -181,6 +181,13 @@ export interface GraphSource {
    *  the stored path entry — an INT rowid for the base, a possibly-string external id for a bound graph —
    *  so neither side casts it. */
   elementNode(kind: Elem, id: Expr, fresh: Minter): Expr;
+
+  /** AN ELEMENT AS A BARE PAYLOAD OBJECT — `{id, label, props[, src, tgt]}` with NO `{t,v}` envelope,
+   *  correlated on an id. `elementNode`'s twin (the two serve different framers — see `element.ts`): this
+   *  targets the top-level `listItemBuffers` `elem` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
+   *  straight over bare objects. `BaseGraph` reads the base tables by rowid (`elementObject`); a bound
+   *  graph REJOINS the landed relation by id to reconstitute the same object. */
+  elementObject(kind: Elem, id: Expr, fresh: Minter): Expr;
 
   /** THE LEAF FRAMING — a terminal element relation → the wire PAYLOAD tuple (id, label, props[, src,
    *  tgt]). `BaseGraph` reads `nodes`/`edges`/`vertex_properties`/`labels` by id (`elementPayload`); a
@@ -511,6 +518,8 @@ export const BaseGraph: GraphSource = {
   // A path position IS the base element node — `elementNode` already builds the `{t,v}` scalar over the
   // physical tables, so the source method is that call with the vocabulary's argument order.
   elementNode: (kind, id, fresh) => elementNode(id, kind, fresh),
+
+  elementObject: (kind, id, fresh) => elementObject(id, kind, fresh),
 
   leafPayload: (input, kind, opts, fresh) => elementPayload(input, kind, opts, fresh),
 };

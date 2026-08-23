@@ -10,7 +10,6 @@ import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { elementNode } from './element.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 
 /**
@@ -392,8 +391,8 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * member position has no room for). The `null`-preserving CASE outside the node is how the shared
  * productivity filter tells a child that yielded nothing from a value worth collecting.
  */
-export function producedMemberNode(value: Expr, framing: RelFraming, fresh: Minter): Expr | null {
-  const member = framing.kind === 'elements' ? elementNode(value, framing.elem, fresh)
+export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter): Expr | null {
+  const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
       : framing.kind === 'scalar' ? typedNode(value, staticTagExpr(framing.type))
         : null;
@@ -415,7 +414,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
     // ALIAS arm below gives — a child body and a labelled read are the same question about a different
     // scope, so they must not encode their results two ways.
-    return producedMemberNode(produced.expr, produced.framing, fresh);
+    return producedMemberNode(produced.expr, produced.framing, source, fresh);
   }
 
   if (key.kind === 'alias') {
@@ -424,7 +423,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // An ELEMENT becomes a `{t:'vertex', v:{…}}` member, which is the encoding the typed tree already
     // frames at any depth — so a map keyed or valued by a labelled element needs nothing new.
     if (scoped.framing.kind === 'elements')
-      return elementNode(scoped.payload[0]![1], scoped.framing.elem, fresh);
+      return source.elementNode(scoped.framing.elem, scoped.payload[0]![1], fresh);
     // Anything else — a LIST, a nested RECORD — needs a member encoding a `{t,v}` node cannot carry
     // from here, so it declines and stays the FIELD vocabulary's business.
     if (scoped.framing.kind !== 'scalar') return null;

@@ -76,6 +76,26 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
     return make.ref({ id: fresh('bref'), name, channels: [], type: typeOf(...landedCols(kind)) });
   };
 
+  // The rejoined landed row + its bare wire payload `{id, label, props[, src, tgt]}`, shared by
+  // `elementNode` (which adds the `{t,v}` envelope) and `elementObject` (which returns it bare).
+  const boundPayload = (kind: Elem, id: Expr, fresh: Minter): { row: Rel; payload: Expr } => {
+    const row = rowById(cteOf(kind, fresh), id, fresh);
+    const asJson = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+    const payload: Expr = {
+      kind: 'json-object',
+      entries: [
+        ['id', col(row.id, 'id')],
+        ['label', kind === 'edge' ? col(row.id, 'label') : asJson(col(row.id, 'label'))],
+        ...(kind === 'edge'
+          ? [['src', col(row.id, 'src')] as const, ['tgt', col(row.id, 'tgt')] as const]
+          : []),
+        ['props', asJson(col(row.id, 'props'))],
+      ],
+      binary: false,
+    };
+    return { row, payload };
+  };
+
   return {
     // ---- element sourcing: `.V()` / `.E()` re-root at the landed relation, narrowed by inline id ----
     elementScan(kind, args, fresh) {
@@ -326,28 +346,22 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       return { kind: 'scalar', plan: make.project({ id: fresh('bla'), input: row, channels: [], type: typeOf(meta('v', 'json', true)), exprs: [['v', value]] }) };
     },
 
-    // ---- a path position: rejoin by id, rebuild the {t,v} node from the landed columns ----
+    // ---- a member/position element, rejoined by id and rebuilt from the landed columns ----
+    // The landed columns ARE the wire payload — a vertex's `label` is a JSON name array and its `props`
+    // the {t,v} tree; wrap those in json() so they NEST as JSON rather than a quoted TEXT string
+    // (frameTypedNode reads a string otherwise), exactly as valueMapPairs does. An edge's label is a bare
+    // name and needs no wrap. `elementNode` adds the `{t,v}` envelope the typed-tree framer reads;
+    // `elementObject` returns the bare payload the `listItemBuffers` `elem` arm maps `rowVertex` over —
+    // the same `elementNode`/`elementObject` split the base graph draws in `element.ts`.
     elementNode(kind, id, fresh) {
-      const row = rowById(cteOf(kind, fresh), id, fresh);
-      // The landed columns ARE the wire payload — a vertex's `label` is a JSON name array and its
-      // `props` the {t,v} tree; wrap those in json() so they NEST as JSON rather than a quoted TEXT
-      // string (frameTypedNode reads a string otherwise), exactly as valueMapPairs does. An edge's
-      // label is a bare name and needs no wrap.
-      const asJson = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
-      const payload: Expr = {
-        kind: 'json-object',
-        entries: [
-          ['id', col(row.id, 'id')],
-          ['label', kind === 'edge' ? col(row.id, 'label') : asJson(col(row.id, 'label'))],
-          ...(kind === 'edge'
-            ? [['src', col(row.id, 'src')] as const, ['tgt', col(row.id, 'tgt')] as const]
-            : []),
-          ['props', asJson(col(row.id, 'props'))],
-        ],
-        binary: false,
-      };
+      const { row, payload } = boundPayload(kind, id, fresh);
       const node: Expr = { kind: 'json-object', entries: [['t', compilerText(kind)], ['v', payload]], binary: false };
       return { kind: 'scalar', plan: make.project({ id: fresh('ben'), input: row, channels: [], type: typeOf(meta('n', 'json', true)), exprs: [['n', node]] }) };
+    },
+
+    elementObject(kind, id, fresh) {
+      const { row, payload } = boundPayload(kind, id, fresh);
+      return { kind: 'scalar', plan: make.project({ id: fresh('beo'), input: row, channels: [], type: typeOf(meta('n', 'json', true)), exprs: [['n', payload]] }) };
     },
 
     // ---- leaf (Mechanism B): rejoin to reconstitute the wire payload for a terminal bound element ----

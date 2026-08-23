@@ -9,7 +9,6 @@ import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, eq, fenced, firstOf, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
-import { elementNode } from './element.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -133,7 +132,7 @@ export function groupBarrier(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): GroupedMap | null {
   const rows = groupRows(input, host, step, bulked, child, source, fresh);
-  return rows && (rows.done ?? groupMap(rows.rel, rows.recipe, fresh));
+  return rows && (rows.done ?? groupMap(rows.rel, rows.recipe, source, fresh));
 }
 
 /** A grouped relation folded into one map value, plus what the framing layer must be told about each
@@ -336,7 +335,7 @@ export function groupRows(
     if (valueBy.key.kind === 'child') {
       const produced = child.scalar(valueBy.key.body, host);
       if (!produced) return null;
-      const node = producedMemberNode(produced.expr, produced.framing, fresh);
+      const node = producedMemberNode(produced.expr, produced.framing, source, fresh);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
@@ -475,7 +474,7 @@ const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
  * field because it is a property of the RELATION being aggregated, not of the grouping: two sites must
  * agree about their recipe and cannot agree about a column only their union has.
  */
-export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: readonly string[] = [ORD_COL]): GroupedMap {
+export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fresh: Minter, order: readonly string[] = [ORD_COL]): GroupedMap {
   const { counting, keyElem, bulkCol } = recipe;
   // THE VALUE. `groupCount()` reduces the group to a traverser COUNT — `SUM(bulk)` where the stream
   // carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct after a
@@ -496,7 +495,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
     ? (bulkCol
       ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulkCol)] }
       : { kind: 'agg', fn: 'count', args: [compilerInt(1)] })
-    : collectedValue(rows, recipe, fresh, order);
+    : collectedValue(rows, recipe, source, fresh, order);
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
     channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
@@ -513,7 +512,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
     // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
     // follows, one container along.
     key: keyElem
-      ? elementNode(col(productive.id, KEY_COL), keyElem, fresh)
+      ? source.elementNode(keyElem, col(productive.id, KEY_COL), fresh)
       : col(productive.id, KEY_COL),
     val: counting ? typedNode(col(productive.id, VAL_COL), compilerText('long')) : col(productive.id, VAL_COL),
     // THE VALUE'S TRUE SHAPE (`docs/archive/2026-08-21-map-value-shape-plan.md`): the COLLECTING arm's value is
@@ -552,7 +551,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
  * `groupCount()` has none: naming those columns unconditionally worked only while the member expression
  * could be re-derived from the HOST, which is the one thing a recipe shared by N sites cannot reach.
  */
-function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: readonly string[]): Expr {
+function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fresh: Minter, order: readonly string[]): Expr {
   const { member, single, memberDrop: dropMembers, step } = recipe;
   const collected = member?.kind === 'node'
     // A projected VALUE is already a self-describing `{t,v}` node (`byNode` builds it from the row the
@@ -560,7 +559,7 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: re
     // `by()`-less member is that same node. `json()` around it for the list module's own reason: without
     // it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
-    : jsonOf(rowidMember((member as { readonly host: ChildHost }).host, col(rows.id, MEMBER_COL), fresh));
+    : jsonOf(rowidMember((member as { readonly host: ChildHost }).host, col(rows.id, MEMBER_COL), source, fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
   // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
   // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
@@ -717,7 +716,7 @@ function groupReduced(
     aggs: [[VAL_COL, reduced.value]],
   });
   const entry: Entry = {
-    key: elementKey ? elementNode(col(productive.id, KEY_COL), host.elem, fresh) : col(productive.id, KEY_COL),
+    key: elementKey ? source.elementNode(host.elem, col(productive.id, KEY_COL), fresh) : col(productive.id, KEY_COL),
     // THE TAG IS A CANONICAL TYPE, NOT A STORAGE CLASS. `reducerAggregate` reports `typeof(<the
     // aggregate>)` — `'integer'`/`'real'` — which is what `scalarPayload`'s `result: 'number'` arm
     // reads, and the typed tree speaks the OTHER vocabulary (`'long'`/`'double'`). Handing it a storage
@@ -776,7 +775,7 @@ function groupCollected(
   // The MEMBER, encoded exactly as a value `by()` member is: an element row's rowid → `{t:'vertex',…}`,
   // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
   const valueCol = rows.framing.kind === 'elements' ? col(rows.rel.id, 'id') : col(rows.rel.id, 'v');
-  const member = producedMemberNode(valueCol, rows.framing, fresh);
+  const member = producedMemberNode(valueCol, rows.framing, source, fresh);
   if (!member) return null;
 
   const elementKey = !keyBy;
@@ -813,7 +812,7 @@ function groupCollected(
     counting: false, keyElem: elementKey ? host.elem : undefined, member: { kind: 'node' },
     single: false, memberDrop: true, bulkCol: undefined, step,
   };
-  const grouped = groupMap(rowsIn, recipe, fresh);
+  const grouped = groupMap(rowsIn, recipe, source, fresh);
   return grouped;
 }
 
@@ -840,8 +839,8 @@ function traverserMember(host: ChildHost, source: GraphSource, fresh: Minter): E
  *  half of `traverserMember`, and the reason the two are stated together: what goes into `gt` and what
  *  comes back out of it must be the same traverser. A host with no rowid never reaches here (its member
  *  is already a node), so this throws rather than declining, exactly as its twin does. */
-function rowidMember(host: ChildHost, rowid: Expr, fresh: Minter): Expr {
-  if (host.kind === 'element') return elementNode(rowid, host.elem, fresh);
+function rowidMember(host: ChildHost, rowid: Expr, source: GraphSource, fresh: Minter): Expr {
+  if (host.kind === 'element') return source.elementNode(host.elem, rowid, fresh);
   if (host.kind === 'property') return propertyNode(rowid, host.ownerElem, fresh);
   throw new Error(`RelIR lowering: a ${host.kind} host has no rowid member to expand`);
 }

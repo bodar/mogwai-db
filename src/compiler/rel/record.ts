@@ -5,7 +5,6 @@ import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, eq, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
@@ -154,7 +153,7 @@ export function recordNode(
     // not a traversal this route cannot express — the same invariant `recordOf` throws on.
     if (!expr) throw new Error(`RelIR lowering: record field column ${column} has no expression`);
     return expr;
-  }, built.fields, fresh);
+  }, built.fields, source, fresh);
 }
 
 /**
@@ -235,7 +234,7 @@ function presence(read: FieldRead, field: RecordField): Expr | null {
  * (`byField`'s arms are element/value only), so the arm arrives with its producer rather than being
  * guessed at now.
  */
-function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | null {
+function fieldNode(read: FieldRead, field: RecordField, source: GraphSource, fresh: Minter): Expr | null {
   const own = (name: string): Expr => read(fieldCol(field.prefix, name));
   const framing = field.framing;
   switch (framing.kind) {
@@ -248,7 +247,7 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
     // payload is the landed tuple rather than an `id` to build a node from, and a barrier's rows exist
     // only after the segment boundary, so no expression in this plan can name them.
     case 'detached': return null;
-    case 'elements': return elementNode(own('id'), framing.elem, fresh);
+    case 'elements': return source.elementNode(framing.elem, own('id'), fresh);
     case 'scalar': {
       // The tag rides where the type does: a numeric reducer's is the aggregate's runtime `typeof` in
       // `vt`, a stored value's is its `vtype` column, a cast's is one compile-time token, and an
@@ -263,7 +262,7 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
       // A NESTED record composes the accessor rather than a prefix string: its own fields' columns sit
       // under `<this field's prefix>_<inner prefix>_<name>`, which is exactly `framingCols`' recursive
       // arm, so composing the read is the same rule read from the other end.
-      const nested = recordPairs((column) => own(column), framing.fields, fresh);
+      const nested = recordPairs((column) => own(column), framing.fields, source, fresh);
       return nested && mapNode(nested);
     }
     // A MAP field is a record that has ALREADY spent its fields — `by(__.project(…))` inside a
@@ -283,7 +282,7 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
       // `listNodeExpr`, NOT `listPayloadExpr`: this member is framed by the tree walker (`frameTypedNode`),
       // which needs every leaf tagged (`{t:'vertex',…}`), where the top-level list framer takes bare
       // element objects — the `elementNode`/`elementObject` split, one level up.
-      const members = listNodeExpr(own('list'), framing.of, fresh);
+      const members = listNodeExpr(own('list'), framing.of, source, fresh);
       return members && listNode(members);
     }
     // A per-row TYPED NODE field would be a `cap(mixed).unfold()` in a `project()` slot — terminal, and
@@ -305,10 +304,10 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
  * `ProductiveByStrategy` — the accumulator collapses to a single `json_array(…)` and the `CASE` chain
  * costs nothing.
  */
-function recordPairs(read: FieldRead, fields: readonly RecordField[], fresh: Minter): Expr | null {
+function recordPairs(read: FieldRead, fields: readonly RecordField[], source: GraphSource, fresh: Minter): Expr | null {
   const pairs: { readonly pair: Expr; readonly present: Expr | null }[] = [];
   for (const field of fields) {
-    const node = fieldNode(read, field, fresh);
+    const node = fieldNode(read, field, source, fresh);
     if (!node) return null;
     const present = field.optional ? presence(read, field) : null;
     if (field.optional && !present) return null;
@@ -329,7 +328,7 @@ function recordPairs(read: FieldRead, fields: readonly RecordField[], fresh: Min
 
 /** The record relation with its fields COLLAPSED into the one `map` column the map vocabulary reads —
  *  channels intact, because the caller still has to sort by the emission order. */
-export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Minter): Rel | null {
+export function recordToMap(rel: Rel, fields: readonly RecordField[], source: GraphSource, fresh: Minter): Rel | null {
   // FENCE the record relation when it is SELF-CONTAINED — the collapse below reads each field column
   // through `jsonMember`'s `CASE`, which spells `v`/`vtype` ~6× per field, and the emitter INLINES a
   // `Project`'s column definition at every reference. A field whose value is a `firstOf` subquery (a
@@ -346,7 +345,7 @@ export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Min
   const base = freeRelIds(rel).size === 0
     ? make.materialize({ id: fresh('rmf'), input: rel, channels: rel.channels, type: rel.type })
     : rel;
-  const value = recordPairs(readingRel(base, ''), fields, fresh);
+  const value = recordPairs(readingRel(base, ''), fields, source, fresh);
   return value && make.project({
     id: fresh('rm'), input: base, channels: base.channels,
     type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(base.channels)),
@@ -362,11 +361,11 @@ export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Min
  *  shapes ARE one: a `mapValue` row is a `map` JSONB column, and a record that has spent its fields is
  *  exactly that. */
 export function recordPayload(
-  rel: Rel, fields: readonly RecordField[], fresh: Minter,
+  rel: Rel, fields: readonly RecordField[], source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
   // The fence that de-duplicates the field-column reads lives in `recordToMap` (gated on
   // self-containment), so both the wire payload and the top-level fold get it.
-  const mapped = recordToMap(rel, fields, fresh);
+  const mapped = recordToMap(rel, fields, source, fresh);
   return mapped && mapPayload(mapped, fresh);
 }
 

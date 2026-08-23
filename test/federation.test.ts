@@ -439,6 +439,51 @@ describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project vi
   });
 });
 
+// A whole bound ELEMENT embedded as a MEMBER — a list member (fold), a group VALUE (by(fold())), or a
+// project() record field (by(identity())). Each rejoins the landed relation through `source.elementNode`
+// (Mechanism B's per-member twin); before it was source-routed these hit the LOCAL base tables against a
+// foreign id and CRASHED (`TypeError: null is not an object`). Oracle: the same traversal on crew,
+// compared on each embedded vertex's label:name (element identity round-trips; list order may differ
+// between the landed array order and crew's native order, so the member SET is the invariant).
+describe('mogwai.graph.federate — SUBGRAPH element as a MEMBER (list / group value / project field)', () => {
+  const sg = (tail: string) =>
+    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
+  const one = async (g: string, on: 'home' | 'crew' = 'home') => dec((await mgr.executor(on).framedAsync(g, {}))[0]!);
+  const isVertex = (x: any) => x && typeof x === 'object' && x.label !== undefined && Array.isArray(x.properties);
+  // Every vertex nested anywhere in a decoded value, as sorted `label:name` — walks Maps, arrays, objects.
+  const nl = (v: any): string[] => {
+    const out: string[] = [];
+    const walk = (x: any): void => {
+      if (isVertex(x)) out.push(`${x.label}:${x.properties.find((p: any) => p.label === 'name')?.value ?? ''}`);
+      else if (Array.isArray(x)) x.forEach(walk);
+      else if (x instanceof Map) x.forEach(walk);
+      else if (x && typeof x === 'object') Object.values(x).forEach(walk);
+    };
+    walk(v);
+    return out.sort();
+  };
+  // A decoded group Map → { key: sorted label:name of its value } — pins per-key membership, not just the union.
+  const groupNL = (m: any): Record<string, string[]> => {
+    const out: Record<string, string[]> = {};
+    (m as Map<any, any>).forEach((val, key) => { out[String(key)] = nl(val); });
+    return out;
+  };
+
+  test('.V().fold() — whole bound vertices collected as a list', async () => {
+    expect(nl(await one(sg('.V().fold()')))).toEqual(nl(await one(`${crewBoth}.fold()`, 'crew')));
+  });
+  test('group().by(T.label).by(__.fold()) — element-valued groups (whole vertices per label)', async () => {
+    expect(groupNL(await one(sg('.V().group().by(T.label).by(__.fold())'))))
+      .toEqual(groupNL(await one(`${crewBoth}.group().by(T.label).by(__.fold())`, 'crew')));
+  });
+  test('project(v).by(__.identity()) — a whole bound element as a record field', async () => {
+    const got = await Promise.all((await mgr.executor('home').framedAsync(sg('.V().project("v").by(__.identity())'), {})).map(dec));
+    const exp = await Promise.all((await mgr.executor('crew').framedAsync(`${crewBoth}.project("v").by(__.identity())`, {})).map(dec));
+    expect(nl(got)).toEqual(nl(exp));
+  });
+});
+
 // Richer subgraph vertex selection: has(key, within(...)), the 3-arg has(label, key, value), and
 // V(ids)/E(ids) filtering the bound source by id.
 // valueMap()/elementMap() over a bound subgraph — the per-key value arrays read from the landed {t,v}

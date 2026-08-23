@@ -14,7 +14,6 @@ import { byField, isProductiveBy, modulations, productivityFilter } from './modu
 import type { GraphSource } from './source.ts';
 import { foldElements, foldScalars, inferredVtype, LIST_COL, NODE_COL } from './list.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
-import { elementNode } from './element.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
@@ -256,7 +255,7 @@ export function registerCollection(
   // are bare values: mixing them is `Operator.addAll` over a Map and a Collection, which is the
   // reference's own IllegalArgumentException ("Objects must be both of Map or Collection",
   // `Operator.java:178-196`) — an error, not two member relations to union.
-  const accumulated = accumulate(held, retained, fresh);
+  const accumulated = accumulate(held, retained, source, fresh);
   if (!accumulated) return null;
   collections.set(label, accumulated);
   return bindings;
@@ -308,7 +307,7 @@ function snapshotted(
  * SHAPES is the dynamic-tag variant's question, one level down at the member encoding, and is not
  * this module's to invent.
  */
-function accumulate(held: Collection, added: Collection, fresh: Minter): Collection | null {
+function accumulate(held: Collection, added: Collection, source: GraphSource, fresh: Minter): Collection | null {
   const sites = [...held.sites, ...added.sites];
   // The POLICY is the LABEL's, not the site's — one `withSideEffect` declaration, however many
   // registration positions read it — so it is carried rather than merged, and the two sides cannot
@@ -349,7 +348,7 @@ function accumulate(held: Collection, added: Collection, fresh: Minter): Collect
   // the seed.
   if (merge && merge.operator !== ADD_ALL) return null;
   return {
-    sites: [...envelopeSites(held, fresh), ...envelopeSites(added, fresh)],
+    sites: [...envelopeSites(held, source, fresh), ...envelopeSites(added, source, fresh)],
     of: { kind: 'mixed', arms: dedupeArms([...armsOf(held.of), ...armsOf(added.of)]) },
     // The `addAll` policy (if any) is CARRIED, not spent here: it is spent at the read by prepending
     // its seed items (`reduce` → `seedAsSite`), exactly as it is for a homogeneous collection.
@@ -390,10 +389,10 @@ const dedupeArms = (arms: readonly MixedArm[]): readonly MixedArm[] => {
  * are indistinguishable, so each element must be self-describing before the union. That is why this is
  * its own arm rather than `elements` reused.
  */
-function envelopeSites(collection: Collection, fresh: Minter): readonly Site[] {
+function envelopeSites(collection: Collection, source: GraphSource, fresh: Minter): readonly Site[] {
   if (collection.of.kind === 'mixed') return collection.sites;
   return collection.sites.map((site) => {
-    const envelope = memberEnvelope(site.rel, collection.of, fresh);
+    const envelope = memberEnvelope(site.rel, collection.of, source, fresh);
     const orderMeta = site.order.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));
     return {
       rel: make.project({
@@ -413,8 +412,8 @@ function envelopeSites(collection: Collection, fresh: Minter): readonly Site[] {
  *  (`elementNode`); a scalar is `{"t":<vtype>,"v":<value>}` (`typedNode`), the type read from the
  *  member's own carrier — a per-row column, a static tag, or inferred from the storage class where the
  *  stream never declared one. */
-function memberEnvelope(rel: Rel, of: Members, fresh: Minter): Expr {
-  if (of.kind === 'elements') return elementNode(col(rel.id, 'id'), of.elem, fresh);
+function memberEnvelope(rel: Rel, of: Members, source: GraphSource, fresh: Minter): Expr {
+  if (of.kind === 'elements') return source.elementNode(of.elem, col(rel.id, 'id'), fresh);
   if (of.kind !== 'scalars') throw new Error(`memberEnvelope: ${of.kind} has no scalar member`);
   const value = col(rel.id, 'v');
   const column = perRowColumnOf(of.type);
@@ -439,7 +438,7 @@ const honouring = (sites: readonly Site[], from: ScalarType, to: ScalarType, fre
  */
 export function registerGrouping(
   step: IRStep, rows: GroupRows, collections: Collections,
-  policies: ReadonlyMap<string, MergePolicy>, fresh: Minter,
+  policies: ReadonlyMap<string, MergePolicy>, source: GraphSource, fresh: Minter,
 ): boolean {
   const label = labelOf(step);
   if (label === null) return false;
@@ -468,7 +467,7 @@ export function registerGrouping(
     };
   const held = collections.get(label);
   if (!held) { collections.set(label, added); return true; }
-  const accumulated = accumulate(held, added, fresh);
+  const accumulated = accumulate(held, added, source, fresh);
   if (!accumulated) return false;
   collections.set(label, accumulated);
   return true;
@@ -572,7 +571,7 @@ function projectedMembers(
  * A collection NOTHING reached needs no arm: both folds `COALESCE` an empty aggregate to `[]`, so
  * `cap()` over it is an EMPTY list — which is what the reference's `BulkSet` seed supplies.
  */
-export function reduce(collection: Collection, fresh: Minter): FramedRel | null {
+export function reduce(collection: Collection, source: GraphSource, fresh: Minter): FramedRel | null {
   // A KEYED GROUPING reduces per KEY rather than into a list, so its policy question is a different one
   // (`GroupBiOperator` merges maps, not members) and `registerGrouping` refuses a declared one outright.
   // What it shares with the other two arms is everything that matters: N sites are a `UNION ALL` of
@@ -586,14 +585,14 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
         const site = accumulated(collection.sites, groupRowCols(recipe), fresh);
         return { site, order: site.order };
       })();
-    const map = groupMap(grouped.site.rel, recipe, fresh, grouped.order);
+    const map = groupMap(grouped.site.rel, recipe, source, fresh, grouped.order);
     return { rel: map.rel, framing: { kind: 'map', keyOf: map.keyOf, valOf: map.valOf } };
   }
   // `addAll` IS the ordinary list fold — over one more site. So the policy is spent BEFORE the
   // reduction rather than instead of it, and everything downstream sees a plain collection. This
   // precedes the MIXED dispatch because spending a LIST seed beside element members is exactly what
   // TURNS the collection mixed (`seedAsSite`).
-  const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(collection, fresh) : collection;
+  const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(collection, source, fresh) : collection;
   if (!seeded) return null;
   // A MIXED collection's sites hold `{t,v}` envelopes in ONE column (`envelopeSites`), so its reduction
   // is the ordinary list fold over that column. A `Set` seed's dedup is read from the ORIGINAL policy —
@@ -734,7 +733,7 @@ function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): S
  * A `Set` seed is the same prepend — a JS `Set` still carries its items as `members` — and the DEDUP it
  * additionally implies belongs at the read, over every site's members at once (`firstOccurrences`).
  */
-function seedAsSite({ sites, of, merge }: Collection, fresh: Minter): Collection | null {
+function seedAsSite({ sites, of, merge }: Collection, source: GraphSource, fresh: Minter): Collection | null {
   // Only a collection LITERAL carries per-item `Arg`s. A bound list PARAMETER is ONE oversized value
   // with no members to spell as rows, and a SCALAR seed is `Operator.addAll`'s own
   // IllegalArgumentException ("Objects must be both of Map or Collection") rather than a list to prepend.
@@ -777,7 +776,7 @@ function seedAsSite({ sites, of, merge }: Collection, fresh: Minter): Collection
   // that `accumulate` produces one. The `addAll` policy rides through unchanged (it is what `reduce`
   // reads to apply a `Set` seed's dedup), exactly as it did for the scalar-only case.
   return accumulate({ sites: [seed], of: { kind: 'scalars', type, productiveNull: of.kind === 'scalars' && of.productiveNull }, merge },
-    { sites, of, merge }, fresh);
+    { sites, of, merge }, source, fresh);
 }
 
 /** The walk's two columns: the member ordinal reached so far, and the accumulator. Named apart from
@@ -973,12 +972,12 @@ type ListedRel = { readonly rel: Rel; readonly framing: Extract<RelFraming, { re
  * function is what stops a second caller reading a collection and forgetting to reduce it — the
  * registry holds member rows now, and member rows are not a traverser.
  */
-export function readCollection(step: IRStep, collections: Collections, fresh: Minter): FramedRel | null {
+export function readCollection(step: IRStep, collections: Collections, source: GraphSource, fresh: Minter): FramedRel | null {
   if (step.modulators?.length) return null;
   const label = labelOf(step);
   if (label === null) return null;
   const collection = collections.get(label);
-  return collection ? reduce(collection, fresh) : null;
+  return collection ? reduce(collection, source, fresh) : null;
 }
 
 /** The collection a `cap("a")` names, WITHOUT reducing it — so a consumer-driven read can pick the

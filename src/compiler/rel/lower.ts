@@ -1809,10 +1809,10 @@ const tagArm = (rel: Rel, k: number, fresh: Minter): Rel => {
  * rather than reach here. (Calcite: a plain `Union` carries no collation — `RelMdCollation` — so the
  * order is IMPOSED as a window, `SqlStdOperatorTable.ROW_NUMBER`.)
  */
-const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap, fresh: Minter): FramedRel | null => {
+const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap, graph: GraphSource, fresh: Minter): FramedRel | null => {
   const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
   const base = withChannel(withoutEncounter(source.channels), BORD_ARM);
-  const merged = mergeArms(tagged, base, labels, fresh);
+  const merged = mergeArms(tagged, base, labels, graph, fresh);
   if (!merged) return null;
   const rel = merged.rel;
   // FAIL CLOSED if an arm dropped the sort key: a BATCHED barrier inside an arm empties `origin`
@@ -2571,10 +2571,10 @@ function scalarTail(
         // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
         // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
         if (ctx.mutating) return null;
-        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, fresh)) return null;
+        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return null;
         continue;
       }
-      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, fresh);
+      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
         steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -2992,7 +2992,7 @@ function scalarTail(
         const members = collection && readUnfolded(collection, fresh);
         if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
       }
-      const collected = readCollection(step, ctx.collections, fresh);
+      const collected = readCollection(step, ctx.collections, ctx.source, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -3951,11 +3951,11 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
-    case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
+    case 'list': return listPayload(chain.rel, framing.of, !!framing.set, source, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, fresh);
     case 'mapEntry': return mapEntryPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
-    case 'record': return recordPayload(chain.rel, framing.fields, fresh);
+    case 'record': return recordPayload(chain.rel, framing.fields, source, fresh);
     case 'property': return {
       rel: propertyPayload(chain.rel, framing.ownerElem, fresh),
       shape: { kind: 'property' },
@@ -3963,7 +3963,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
     // further, which is exactly what every other arm here now also means.
-    case 'variant': return variantPayload(chain.rel, framing.arms, fresh);
+    case 'variant': return variantPayload(chain.rel, framing.arms, source, fresh);
     // A per-row TYPED NODE is already ONE self-describing envelope per row in `NODE_COL`; the wire
     // parses and frames each with `frameTypedNode`, so the payload is that column in emission order.
     case 'typedNode': {
@@ -4914,10 +4914,10 @@ function elementTail(
         // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
         // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
         if (ctx.mutating) return null;
-        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, fresh)) return null;
+        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return null;
         continue;
       }
-      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, fresh);
+      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
         steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -4979,7 +4979,7 @@ function elementTail(
         const members = collection && readUnfolded(collection, fresh);
         if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
       }
-      const collected = readCollection(step, ctx.collections, fresh);
+      const collected = readCollection(step, ctx.collections, ctx.source, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -5602,7 +5602,7 @@ function recordTail(
     // `recordToMap` — the same boundary `select`/wire cross — so the fold sees a `MAP_COL` whatever the
     // fields were, and the member shape is the map's self-describing pairs array (`MapOf.scalar`).
     if (step.name === 'fold' && !argValues(step).length && !isLocalScope(step)) {
-      const mapped = recordToMap(rel, fields, fresh);
+      const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       const encounter = encounterOf(rel.channels);
       const folded = foldMaps(mapped, MAP_COL, { kind: 'scalar' }, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
@@ -5741,10 +5741,10 @@ function branchArms(
  * `[]`). They must agree; a disagreement (e.g. one arm kept `bulk`, i.e. it did NOT actually collapse)
  * declines.
  */
-const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter): FramedRel | null => {
+const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, graph: GraphSource, fresh: Minter): FramedRel | null => {
   if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
   const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
-  const merged = mergeArms(tagged, withChannel(base, BORD_ARM), labels, fresh);
+  const merged = mergeArms(tagged, withChannel(base, BORD_ARM), labels, graph, fresh);
   if (!merged) return null;
   const rel = merged.rel;
   if (!rel.channels.some((channel) => channel.col === BORD_ARM.col)) return null;
@@ -5767,9 +5767,9 @@ const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, f
  * arm's subplan roots at it), so a second reference from an `Exists` makes `name` CTE it — no replication.
  */
 function batchedBranch(
-  arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap,
+  arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
-  const merged = mintArmMajor(arms, arms[0]!.rel.channels, labels, fresh);
+  const merged = mintArmMajor(arms, arms[0]!.rel.channels, labels, graph, fresh);
   if (!merged) return null;
   const gated = make.filter({
     id: fresh('bg'), input: merged.rel, channels: merged.rel.channels, type: merged.rel.type,
@@ -5838,7 +5838,7 @@ function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
  * path/property arm, or an arm carrying an alias the collapsed arm cannot (`union(min.as('x'),
  * …).select('x')`, the `mintArmMajor` channel check), declines.
  */
-function mixedBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: AliasMap): FramedRel | null {
+function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap): FramedRel | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
     const fr = arm.framing;
@@ -5854,7 +5854,7 @@ function mixedBranch(arms: readonly Tail[], input: Rel, fresh: Minter, labels: A
     if (fr.kind !== 'elements' && fr.kind !== 'list') return null;
     normalized.push({ ...arm, rel: ensureBulk(arm.rel, fresh) });
   }
-  return batchedBranch(normalized, input, fresh, labels);
+  return batchedBranch(normalized, input, graph, fresh, labels);
 }
 
 function unionArms(
@@ -5907,12 +5907,12 @@ function unionArms(
   // stays the ordinary merge rather than an arm-major reduction (else `union(out().limit(1), in())`
   // would wrongly decline). Only reachable when `!slice` (a batched arm under a downstream slice already
   // declined above).
-  if (!slice && bodies.every((body) => isReductionArm(body!))) return batchedBranch(arms, input, fresh, labels);
+  if (!slice && bodies.every((body) => isReductionArm(body!))) return batchedBranch(arms, input, ctx.source, fresh, labels);
   // SOME (not all) reduce → a MIXED arm-major union of a collapsed arm and a per-input one (`mixedBranch`).
-  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedBranch(arms, input, fresh, labels);
+  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedBranch(arms, input, ctx.source, fresh, labels);
   return slice
-    ? mintTraverserMajor(arms, source, labels, fresh)
-    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
+    ? mintTraverserMajor(arms, source, labels, ctx.source, fresh)
+    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
 }
 
 /**
@@ -6035,7 +6035,7 @@ function sourceUnion(
   // `Union` needs two inputs anyway). Unlike a chain-position single arm there is no empty-input gate to
   // owe: a source union's arms each root their own read, which carries its own reducer semantics.
   if (arms.length === 1) return { rel: arms[0]!.rel, framing: arms[0]!.framing };
-  return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, fresh);
+  return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, ctx.source, fresh);
 }
 
 /**
@@ -6089,7 +6089,7 @@ const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] => {
 };
 
 function mergeArms(
-  arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
+  arms: readonly Tail[], base: Channels, labels: AliasMap, source: GraphSource, fresh: Minter,
 ): FramedRel | null {
   let [first, ...rest] = arms as [Tail, ...Tail[]];
   // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
@@ -6113,7 +6113,7 @@ function mergeArms(
   // that needs no widening at all: a record's fields collapse into the single `map` column the map
   // vocabulary already reads, so the divergence moves INSIDE the value and the arms' row types agree
   // trivially. See `mapDemotedArms`.
-  const demoted = mapDemotedArms(arms, fresh);
+  const demoted = mapDemotedArms(arms, source, fresh);
   if (demoted) [first, ...rest] = (arms = demoted) as unknown as [Tail, ...Tail[]];
   // ARMS THAT DISAGREE ON SHAPE MERGE TO A VARIANT — a per-row tagged union, and the same move the
   // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
@@ -6336,7 +6336,7 @@ function chooseOptions(
     });
   }
   if (built.length < 2) return null;
-  return mergeArms(built, input.channels, labels, fresh);
+  return mergeArms(built, input.channels, labels, ctx.source, fresh);
 }
 
 /**
@@ -6439,8 +6439,8 @@ function coalesceMerge(
     exhausted = and(exhausted, empty);
   }
   return slice
-    ? mintTraverserMajor(arms, source, labels, fresh)
-    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
+    ? mintTraverserMajor(arms, source, labels, ctx.source, fresh)
+    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
 }
 
 function chooseArms(
@@ -6494,11 +6494,11 @@ function chooseArms(
   const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
   const arms = [armThen, armElse];
-  if (slice) return mintTraverserMajor(arms, source, labels, fresh);
+  if (slice) return mintTraverserMajor(arms, source, labels, ctx.source, fresh);
   // Drop the spent position from each arm (an arm-local `order()`/`limit()`), as `union` does — a
   // `choose` is unordered, so the merged stream carries none.
   const dropped = arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
-  return branchResult(mergeArms(dropped, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
+  return branchResult(mergeArms(dropped, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which
@@ -6598,7 +6598,7 @@ const MAP_OF_NODES = { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 's
  * so those rows DROP rather than reading a sibling arm's value. Measured on all three key-presence
  * arrangements (`record-branch-arms.exec.test.ts`).
  */
-function mapDemotedArms(arms: readonly Tail[], fresh: Minter): readonly Tail[] | null {
+function mapDemotedArms(arms: readonly Tail[], source: GraphSource, fresh: Minter): readonly Tail[] | null {
   const fieldsOf = (arm: Tail): readonly RecordField[] | null => (arm.framing.kind === 'record' ? arm.framing.fields : null);
   const records = arms.map(fieldsOf);
   if (!records.some((fields) => fields)) return null;
@@ -6619,7 +6619,7 @@ function mapDemotedArms(arms: readonly Tail[], fresh: Minter): readonly Tail[] |
   for (const [at, arm] of arms.entries()) {
     const fields = records[at];
     if (!fields) { out.push({ ...arm, framing: MAP_OF_NODES }); continue; }
-    const mapped = recordToMap(arm.rel, fields, fresh);
+    const mapped = recordToMap(arm.rel, fields, source, fresh);
     if (!mapped) return null;
     out.push({ ...arm, rel: mapped, framing: MAP_OF_NODES });
   }

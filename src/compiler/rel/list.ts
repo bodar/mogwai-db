@@ -15,7 +15,6 @@ import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts'
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import type { GraphSource } from './source.ts';
-import { elementNode, elementObject } from './element.ts';
 import type { Elem } from '../elem.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { transformExpr } from './transform.ts';
@@ -1552,7 +1551,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  * `elementObject` and NOT `elementNode` — a `{t,v}` envelope here would be a level the `of.kind === 'elem'`
  * framer does not unwrap, and `of` has already said every member is an element.
  */
-export function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
+export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fresh: Minter): Expr | null {
   // A MIXED list's members were expanded to `{t,v}` envelopes AT THE SITE (`collection.ts`
   // `envelopeSites`) — the one place elements-until-root cannot hold, because a mixed union shares one
   // member column and a bare rowid is indistinguishable from a scalar in it. So there is nothing to
@@ -1570,7 +1569,9 @@ export function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | n
         kind: 'agg', fn: 'json_group_array',
         // `json()` for `jsonOf`'s standing reason: without it the expanded object is re-encoded as a
         // JSON STRING inside the enclosing array.
-        args: [jsonOf(elementObject(col(rowids.id, MEMBER.value), of.elem, fresh))],
+        // Source-routed: a base member reads the physical tables, a bound (federated) member rejoins the
+        // landed CTE. `BaseGraph.elementObject` is byte-identical to the former free `elementObject`.
+        args: [jsonOf(source.elementObject(of.elem, col(rowids.id, MEMBER.value), fresh))],
         orderBy: [memberOrder(rowids)],
       }]],
     });
@@ -1578,7 +1579,7 @@ export function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | n
   }
   if (of.kind !== 'list') return null;
   const members = membersOf(jsonOf(list), fresh);
-  const inner = listPayloadExpr(col(members.id, MEMBER.value), of.of, fresh);
+  const inner = listPayloadExpr(col(members.id, MEMBER.value), of.of, source, fresh);
   if (!inner) return null;
   return rebuiltMembers(members, inner, fresh);
 }
@@ -1613,28 +1614,31 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
  *   this genuinely differs from `listPayloadExpr`, which expands to the bare `elementObject`;
  * - a NESTED list recurses under `listNode`, so a list of lists frames as `{t:'list', v:[{t:'list',…}]}`.
  */
-export function listNodeExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
+export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh: Minter): Expr | null {
   if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
   if (of.kind === 'map') {
     const members = membersOf(jsonOf(list), fresh);
     return rebuiltMembers(members, mapNode(jsonOf(col(members.id, MEMBER.value))), fresh);
   }
   if (of.kind === 'elem') {
+    // A member ELEMENT node is source-routed — a base member rejoins the physical tables, a bound
+    // (federated) member rejoins the landed CTE. `BaseGraph.elementNode` is byte-identical to the
+    // former free `elementNode`, so the base wire is unchanged.
     const members = membersOf(jsonOf(list), fresh);
-    return rebuiltMembers(members, jsonOf(elementNode(col(members.id, MEMBER.value), of.elem, fresh)), fresh);
+    return rebuiltMembers(members, jsonOf(source.elementNode(of.elem, col(members.id, MEMBER.value), fresh)), fresh);
   }
   if (of.kind !== 'list') return null;
   const members = membersOf(jsonOf(list), fresh);
-  const inner = listNodeExpr(col(members.id, MEMBER.value), of.of, fresh);
+  const inner = listNodeExpr(col(members.id, MEMBER.value), of.of, source, fresh);
   return inner && rebuiltMembers(members, listNode(inner), fresh);
 }
 
 /** The list relation as WIRE ROWS: one `list` column per traverser, in emission order, plus the `Shape`
  *  that says how to frame each member. The arm ORDER is deliberate — a nested list is
  *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form. */
-export function listPayload(rel: Rel, of: ListOf, set: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
+export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSource, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
-  const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, fresh);
+  const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, source, fresh);
   if (!payload) return null;
   const shape: Shape = of.kind === 'list' ? { kind: 'jsonbList', items: of }
     : set ? { kind: 'jsonbSet', items: of }

@@ -4,6 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { STATIC, staticTypeOf, UNKNOWN, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
 import { byEncounter, carriedCols, meta, typeOf, type Minter } from './build.ts';
+import type { GraphSource } from './source.ts';
 import { correlatedElementColumns } from './element.ts';
 import type { RelFraming } from './framing.ts';
 import { listPayloadExpr } from './list.ts';
@@ -113,7 +114,7 @@ export const variantHasList = (arms: readonly VariantArm[]): boolean => arms.som
  * `UNKNOWN` and infer per value — the extension point §6·7 names.
  */
 export function variantPayload(
-  rel: Rel, arms: readonly VariantArm[], fresh: Minter,
+  rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
   const elems = new Set(arms.flatMap((arm) => (arm.kind === 'elements' ? [arm.elem] : [])));
@@ -156,7 +157,7 @@ export function variantPayload(
   // `rowVertex` in the framer reads a member object rather than a bare rowid. A member shape it cannot
   // frame (a nested unframeable) declines the whole variant.
   if (listArm) {
-    const listExpr = listPayloadExpr(col(ordered.id, 'list'), listArm.of, fresh);
+    const listExpr = listPayloadExpr(col(ordered.id, 'list'), listArm.of, source, fresh);
     if (!listExpr) return null;
     payload.push([meta('list', 'json', true), listExpr]);
   }
