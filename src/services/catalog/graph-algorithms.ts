@@ -159,6 +159,15 @@ const SP_TARGET = '~tinkerpop.shortestPath.target';
 const SP_DISTANCE = '~tinkerpop.shortestPath.distance';
 const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
 
+/** The `~tinkerpop.shortestPath.distance` weight-property key, or `undefined` when unweighted. The
+ *  reference takes a property NAME (`distanceProperty` → `__.values(name)`); a non-string is refused. */
+function distanceKeyOf(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string')
+    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(value)}`);
+  return value;
+}
+
 /** Parse a `~tinkerpop.shortestPath.target` value — an anonymous vertex traversal used as an ENDPOINT
  *  predicate — to its body IR (the steps after the source root), or `undefined` when no target is set.
  *  Same read as `edgeScopeOf`: a `TraversalParam` carries the serialized gremlin; our parser roots at a
@@ -193,22 +202,25 @@ export const shortestPathService: Service = {
         throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
 
       const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
-      // Fail closed on the config not yet built — a clear deferral, never a wrong answer.
-      if (SP_DISTANCE in site.params)
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a weighted distance (~tinkerpop.shortestPath.distance) is not supported yet`);
-
+      // A distance PROPERTY key makes the search weighted (least edge-weight sum, not fewest hops).
+      const distanceKey = distanceKeyOf(site.params[SP_DISTANCE]);
+      // maxDistance is a HOP cap when unweighted (prunes the walk) and a WEIGHT cap when weighted
+      // (filters the final shortest distance) — the reference's `distanceEqualsNumberOfHops` split.
       let maxHops: number | undefined;
+      let maxWeight: number | undefined;
       if (SP_MAX_DISTANCE in site.params) {
         const md = site.params[SP_MAX_DISTANCE];
-        if (typeof md !== 'number' || !Number.isInteger(md))
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is weighted and not supported yet`);
-        maxHops = md;
+        if (typeof md !== 'number')
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
+        if (distanceKey !== undefined) maxWeight = md;
+        else if (Number.isInteger(md)) maxHops = md;
+        else throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: an unweighted maxDistance must be an integer hop count`);
       }
       const includeEdges = SP_INCLUDE_EDGES in site.params;
       const target = targetBody(site.params[SP_TARGET]);
 
       const { input, elem, source } = site.stream;
-      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, site.child!, site.fresh);
+      const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, distanceKey, maxWeight, target }, site.child!, site.fresh);
       return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
     },
   }),

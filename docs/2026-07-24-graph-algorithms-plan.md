@@ -161,13 +161,20 @@ trivial path is gated by the same endpoint filter, since its endpoint is its sou
 `g_V_hasXname_markoX_shortestPath_targetXhasLabelXsoftwareXX`, and the crew
 `g_V_hasXname_danielX_shortestPath_targetXhasXname_stephenXX_edgesXbothEXusesXX`.
 
-**NEXT — the last shortestPath config (fail CLOSED today):**
-- **weighted distance** (`~tinkerpop.shortestPath.distance`, a weight property) — Tier-2: the recursive
-  term sums the edge's weight property instead of 1 (P3 forbids the min INSIDE the term, so the
-  MIN-over-partition outside the walk still does the selection); the weighted `.maxDistance` filters the
-  final shortest distance at collection, not by pruning. 3 scenarios (all weighted):
-  `hasXname_markoX_..._targetXhasXname_joshXX_distanceXweightX`, the grateful `...outEXfollowedByX_distanceXweightX`,
-  `hasXname_vadasX_..._distanceXweightX_maxDistanceX1_3X`.
+**✅ LANDED (2026-08-23) — shortestPath weighted distance. shortestPath is COMPLETE — all four native
+OLAP steps done.** `~tinkerpop.shortestPath.distance` (a weight property key) makes distance the SUM of
+edge weights (a REAL) rather than the hop count: the recursive term reads each edge's weight as a
+correlated `values(key)` scalar (`child.scalar` over the edge — a nested SELECT, P2-legal) and sums it;
+the MIN-over-partition outside the walk still selects the least-weight path (P3 forbids the min INSIDE
+the term). The weighted `.maxDistance` filters the FINAL shortest distance per pair at collection (a
+custom distance may be negative, so it does NOT prune the walk — the reference's
+`distanceEqualsNumberOfHops` split). **L3 +3**:
+`g_V_hasXname_markoX_shortestPath_targetXhasXname_joshXX_distanceXweightX`, the grateful
+`g_V_hasXsong_name_MIGHT_AS_WELLX_..._edgesXoutEXfollowedByXX_distanceXweightX`,
+`g_V_hasXname_vadasX_shortestPath_distanceXweightX_maxDistanceX1_3X`.
+
+All 15 ShortestPath.feature scenarios now pass. The four native TinkerPop OLAP steps
+(pageRank/connectedComponent/peerPressure/shortestPath) are complete and reference-faithful.
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

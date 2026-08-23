@@ -1,5 +1,5 @@
 import type { Channel, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -69,6 +69,14 @@ export interface ShortestPathConfig {
   /** An unweighted hop cap (`~tinkerpop.shortestPath.maxDistance`) — a path longer than this is never
    *  extended (`ShortestPathVertexProgram.exceedsMaxDistance`, which only prunes for hop distances). */
   readonly maxHops?: number;
+  /** `~tinkerpop.shortestPath.distance` — a WEIGHT property key on the edge. When set, distance is the
+   *  sum of edge weights (a REAL) rather than the hop count, so the shortest path is the least-weight
+   *  one. The reference reads it as `__.values(key)` over each edge, orElse 0 (`getDistance`). */
+  readonly distanceKey?: string;
+  /** A WEIGHTED distance cap (`~tinkerpop.shortestPath.maxDistance` with a `distance` set). Unlike the
+   *  hop cap it does NOT prune the walk (a custom distance may be negative); it filters the FINAL
+   *  shortest distance per pair at collection (`pair.dist <= maxDistance`, `collectShortestPaths`). */
+  readonly maxWeight?: number;
   /** `~tinkerpop.shortestPath.target` — a vertex predicate the ENDPOINT must pass for its path to be
    *  emitted (`ShortestPathVertexProgram.isEndVertex`, applied in `collectShortestPaths`). The shortest
    *  path to EVERY vertex is still computed; the target only filters what is collected — so it applies
@@ -79,6 +87,10 @@ export interface ShortestPathConfig {
 
 const vertexEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'vertex', id });
 const edgeEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'edge', id });
+
+/** The distance sub-traversal the reference uses — `__.values(key)` over each edge (`getDistance`). */
+const valuesStep = (key: string): readonly IRStep[] =>
+  [{ name: 'values', args: [{ value: key, type: null, name: null }] }] as unknown as readonly IRStep[];
 
 /** `NOT EXISTS (a vertex position already holding <neighbour>)` over the carried path — the simple-path
  *  guard, correlated to `rel`'s row. P2-legal (a `NOT EXISTS` over a `json_each` in a recursive term). */
@@ -104,8 +116,11 @@ export function shortestPathWalk(
   if (elem !== 'vertex') return null;
 
   const channels: Channels = [BULK_CHANNEL, PATH_CHANNEL];  // ROLE_ORDER: bulk before path
-  // Payload = the endpoint id, the source it started from, and the hop distance; then the channels.
-  const walkType = typeOf(meta('id', 'int'), meta('src', 'int'), meta('dist', 'int'), ...carriedCols(channels));
+  // Distance is a hop COUNT (int) by default, or a WEIGHT SUM (real) when a distance property is set.
+  const weighted = cfg.distanceKey !== undefined;
+  const zeroDist: Expr = weighted ? compilerReal(0) : compilerInt(0);
+  // Payload = the endpoint id, the source it started from, and the distance; then the channels.
+  const walkType = typeOf(meta('id', 'int'), meta('src', 'int'), meta('dist', weighted ? 'real' : 'int'), ...carriedCols(channels));
   const header = walkType.cols.map((c) => c.name);
 
   // SEED: one row per source vertex — path [source], src = itself, dist 0, one traverser. The trivial
@@ -115,7 +130,7 @@ export function shortestPathWalk(
     exprs: [
       ['id', col(input.id, 'id')],
       ['src', col(input.id, 'id')],
-      ['dist', compilerInt(0)],
+      ['dist', zeroDist],
       ['bulk', compilerInt(1)],
       [PATH_COL, seedPath(vertexEntry(col(input.id, 'id')))],
     ],
@@ -155,12 +170,20 @@ export function shortestPathWalk(
         const appended = cfg.includeEdges
           ? historyAppend(historyAppend(col(guarded.id, PATH_COL), objectEntry(edgeEntry(col(guarded.id, 'eid')))), objectEntry(vertexEntry(neighbour)))
           : historyAppend(col(guarded.id, PATH_COL), objectEntry(vertexEntry(neighbour)));
+        // The per-hop distance: 1 hop, or the edge's weight property (orElse 0) when a distance key is
+        // set. The weight is a correlated `values(key)` read over the edge — a nested SELECT, P2-legal.
+        let delta: Expr = weighted ? compilerReal(0) : compilerInt(1);
+        if (weighted) {
+          const w = child.scalar(valuesStep(cfg.distanceKey!), { kind: 'element', id: col(guarded.id, 'eid'), elem: 'edge' });
+          if (w) delta = { kind: 'call', fn: 'COALESCE', args: [w.expr, compilerReal(0)] };
+          else termOk = false;  // the weight read did not lower — decline the whole walk
+        }
         const extended = make.project({
           id: fresh('spa'), input: guarded, channels, type: walkType,
           exprs: [
             ['id', neighbour],
             ['src', col(guarded.id, 'psrc')],
-            ['dist', { kind: 'binary', op: '+', left: col(guarded.id, 'dist'), right: compilerInt(1) }],
+            ['dist', { kind: 'binary', op: '+', left: col(guarded.id, 'dist'), right: delta }],
             ['bulk', compilerInt(1)],
             [PATH_COL, appended],
           ],
@@ -194,14 +217,23 @@ export function shortestPathWalk(
     id: fresh('spd'), input: shortest, channels, type: walkType,
     exprs: header.map((name) => [name, col(shortest.id, name)] as const),
   });
-  // TARGET FILTER — the endpoint (the path's last vertex) must pass the target predicate. Applied AFTER
-  // the shortest-per-pair selection (the reference computes the shortest path to every vertex and filters
-  // only what it collects). The trivial path's endpoint IS its source, so the same filter gates it.
+  // COLLECTION FILTERS — applied AFTER the shortest-per-pair selection (the reference computes the
+  // shortest path to every vertex and filters only what it collects, `collectShortestPaths`).
   let selected: Rel = dropped;
+  // A WEIGHTED maxDistance caps the final shortest distance per pair (it does NOT prune the walk, since a
+  // custom distance may be negative — `exceedsMaxDistance` only prunes for hop distances).
+  if (weighted && cfg.maxWeight !== undefined) {
+    selected = make.filter({
+      id: fresh('spw'), input: selected, channels, type: selected.type,
+      pred: { kind: 'binary', op: '<=', left: col(selected.id, 'dist'), right: compilerReal(cfg.maxWeight) },
+    });
+  }
+  // TARGET FILTER — the endpoint (the path's last vertex) must pass the target predicate. The trivial
+  // path's endpoint IS its source, so the same filter gates it.
   if (cfg.target) {
-    const pred = child.predicate(cfg.target, { kind: 'element', id: col(dropped.id, 'id'), rel: dropped, elem: 'vertex' }, false);
+    const pred = child.predicate(cfg.target, { kind: 'element', id: col(selected.id, 'id'), rel: selected, elem: 'vertex' }, false);
     if (!pred) return null;
-    selected = make.filter({ id: fresh('spt'), input: dropped, channels, type: dropped.type, pred });
+    selected = make.filter({ id: fresh('spt'), input: selected, channels, type: selected.type, pred });
   }
   // The reference keeps a SET of shortest paths per pair — dedup identical paths (a JSONB path equals
   // another iff its bytes match, which two identical vertex sequences produce).

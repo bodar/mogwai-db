@@ -106,10 +106,16 @@ describe('shortestPath() — mogwai.shortestPath recursive-CTE (unweighted)', ()
       .toEqual(['daniel,gremlin,stephen', 'daniel,tinkergraph,stephen'].sort());
   });
 
-  test('fail closed: a weighted distance is not supported yet', async () => {
+  test('g_V_hasXname_markoX_..._targetXhasXname_joshXX_distanceXweightX — least-weight path', async () => {
     const store = seeded(MODERN_SEED);
-    await expect(exec(store).framedAsync(
-      `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.distance", "weight")`, {}))
-      .rejects.toThrow('weighted distance');
+    // marko->lop->josh (0.4+0.4=0.8) beats the direct marko-knows->josh (1.0).
+    expect(seqs(await run(store, `g.V().has("name","marko").shortestPath().with("~tinkerpop.shortestPath.target", __.has("name","josh")).with("~tinkerpop.shortestPath.distance", "weight")`)))
+      .toEqual(['marko,lop,josh']);
+  });
+
+  test('g_V_hasXname_vadasX_shortestPath_distanceXweightX_maxDistanceX1_3X — weighted cap', async () => {
+    const store = seeded(MODERN_SEED);
+    expect(seqs(await run(store, `g.V().has("name","vadas").shortestPath().with("~tinkerpop.shortestPath.distance", "weight").with("~tinkerpop.shortestPath.maxDistance", 1.3)`)))
+      .toEqual(['vadas', 'vadas,marko', 'vadas,marko,lop', 'vadas,marko,lop,josh', 'vadas,marko,lop,peter'].sort());
   });
 });
