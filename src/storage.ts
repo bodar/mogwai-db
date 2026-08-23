@@ -109,6 +109,18 @@ const SCHEMA = [
   `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
      owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED, kind UNINDEXED,
      text, tokenize="trigram case_sensitive 0")`,
+  // OLAP barrier scratch (pageRank/wcc/peerPressure). An iterative algorithm's (id → value) vector
+  // lives HERE, in SQL, never in JS — each round is one INSERT..SELECT that reads the prior round and
+  // writes the next, so only O(1) scalars (teleport, convergence delta) ever cross to the host. Keyed
+  // by a per-query `run` token so concurrent queries in ONE Durable Object never collide across the
+  // apply→resume await gap; `round` (0/1) holds the alternating cur/next slots. Rows are deleted after
+  // the query's decorate tail is framed (precise post-frame GC — `frameResolved`). `cval` is untyped
+  // (BLOB affinity) so it preserves the value's storage class (a REAL score, a TEXT component id),
+  // exactly as `vertex_properties.value` does.
+  `CREATE TABLE IF NOT EXISTS barrier_run_seq(id INTEGER PRIMARY KEY AUTOINCREMENT)`,
+  `CREATE TABLE IF NOT EXISTS barrier_relation(
+     run INTEGER NOT NULL, round INTEGER NOT NULL, id INTEGER NOT NULL, cval,
+     PRIMARY KEY (run, round, id)) WITHOUT ROWID`,
 ];
 
 export class GraphStore {
@@ -132,6 +144,19 @@ export class GraphStore {
     // in-range bigint→number, big bigint / BigDecimal / Duration → canonical decimal
     // text. So has('sold', true) and an exact 64-bit id behave identically on both.
     return this.sql.query<T>(sql, binds.map(coerceBindValue));
+  }
+
+  /** Allocate a fresh OLAP-barrier run token (see the `barrier_relation` schema note). Atomic per
+   *  allocation, and safe under the DO's run-to-completion `apply` because the whole compute — alloc,
+   *  seed, every round — is one synchronous span that nothing interleaves. */
+  allocBarrierRun(): number {
+    return this.query<{ id: number }>('INSERT INTO barrier_run_seq DEFAULT VALUES RETURNING id')[0].id;
+  }
+
+  /** Drop a finished barrier run's scratch rows — precise post-frame GC, fired once the decorate tail
+   *  has been framed (`frameResolved`). Idempotent: a run with no rows is a no-op. */
+  dropBarrierRun(run: number): void {
+    this.query('DELETE FROM barrier_relation WHERE run = ?', [run]);
   }
 
   labelId(name: string): number {

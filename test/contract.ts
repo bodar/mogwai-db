@@ -37,6 +37,60 @@ export function graphContract(name: string, harness: Harness) {
     docsContract(() => origin);
     ioContract(() => origin);
     federationContract(() => origin);
+    olapContract(() => origin);
+  });
+}
+
+/**
+ * OLAP DECORATE barriers (pageRank/connectedComponent/peerPressure) on the REAL runtime. Their
+ * `(id → value)` vector is SQL-RESIDENT — computed into the `barrier_relation` scratch table and read
+ * back by the decorate tail — so this is the ONLY place that new SQL is exercised on real **DO SQLite**:
+ * `WITHOUT ROWID` + `INSERT … RETURNING` (the run-token allocation), `WITH … INSERT` per round, a
+ * `ROW_NUMBER()` window (peerPressure), `IS NOT` convergence, and the post-frame GC `DELETE`. The
+ * Program/clone lesson (federation above) is that a DO-only SQL fault is invisible on Bun and surfaces
+ * only on workerd — so a decorate barrier that ran only in the unit tests would be unverified here.
+ * Runs on Bun too, proving parity.
+ */
+function olapContract(getOrigin: () => string) {
+  const PR_KEY = 'gremlin.pageRankVertexProgram.pageRank';
+  const CC_KEY = 'gremlin.connectedComponentVertexProgram.component';
+  const PP_KEY = 'gremlin.peerPressureVertexProgram.cluster';
+  describe('olap (decorate barriers — barrier_relation SQL on the real store)', () => {
+    const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
+
+    test('pageRank/connectedComponent/peerPressure decorate the live stream and reclaim their scratch', async () => {
+      const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const conn = new DriverRemoteConnection(graphUrl(`olap-${stamp}`));
+      const g = traversal().with_(conn);
+      try {
+        // marko→josh (knows), marko→lop, josh→lop (created). lop is a SINK (out-degree 0) — its rank
+        // accrues from both and is redistributed via the teleport energy, so it ranks highest.
+        await g.addV('person').property('name', 'marko').as('m')
+          .addV('person').property('name', 'josh').as('j')
+          .addV('software').property('name', 'lop').as('l')
+          .addE('knows').from_('m').to('j')
+          .addE('created').from_('m').to('l')
+          .addE('created').from_('j').to('l')
+          .iterate();
+
+        // Every vertex is decorated → element-preserving count. Proves each barrier's per-round SQL
+        // (seed, relaxation, convergence) and the alloc/GC lifecycle run end to end on this store.
+        expect((await g.V().pageRank().has(PR_KEY).count().next()).value).toBe(3);
+        expect((await g.V().connectedComponent().has(CC_KEY).count().next()).value).toBe(3);
+        expect((await g.V().peerPressure().has(PP_KEY).count().next()).value).toBe(3);
+
+        // The decorated REAL score reads back positive, and the sink ranks first.
+        const ranks = await g.V().pageRank().values(PR_KEY).toList();
+        expect(ranks.length).toBe(3);
+        expect(ranks.every((r) => typeof r === 'number' && r > 0)).toBe(true);
+        expect((await g.V().pageRank().order().by(PR_KEY, gremlin.process.order.desc).by('name').values('name').next()).value)
+          .toBe('lop');
+
+        // Undirected connectivity: all three vertices share ONE component id.
+        const comps = await g.V().connectedComponent().project('name', CC_KEY).by('name').by(CC_KEY).toList();
+        expect(new Set(comps.map((m: any) => String(m.get(CC_KEY)))).size).toBe(1);
+      } finally { await conn.close(); }
+    }, 40_000);
   });
 }
 

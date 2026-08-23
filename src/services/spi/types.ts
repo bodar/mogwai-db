@@ -125,14 +125,23 @@ export type BarrierResidency = 'do' | 'worker';
  * A barrier's SECOND output shape (`docs/2026-08-21-barrier-substrate-design.md` Axis 2): a
  * data-sized `(id → value)` RELATION rather than a set of detached elements. An iterative graph
  * algorithm's product is a NUMERIC/label relation keyed by element id, not a stream of elements — so
- * `federate`/`io`'s `ForeignRow[]` is the wrong shape for it. The tuples cross the segment boundary as
- * ONE `json_each` bind (substrate A, §6·2), and a DECORATE resume reads them per-parent, correlated on
- * the LIVE element stream's id, keeping the stream element-preserving. `id` is the INTERNAL element
- * rowid (the correlation key `BaseGraph` uses); `value` is the algorithm's per-element result.
+ * `federate`/`io`'s `ForeignRow[]` is the wrong shape for it.
+ *
+ * **The relation lives in SQL, never in JS.** `apply` computes it into `barrier_relation` (a scratch
+ * table keyed by a per-query `run` token — `src/storage.ts`) and returns only the HANDLE: the run
+ * token plus the `round` slot that holds the final vector. The DECORATE resume then reads it straight
+ * off that table, correlated on the LIVE element stream's id, keeping the stream element-preserving —
+ * so a graph of millions of vertices never materializes its O(V) vector in the host, not per
+ * iteration and not at the segment handoff. `run` is reclaimed once the tail is framed
+ * (`frameResolved`, precise post-frame GC). This REPLACES the former `relation-tuples` shape, which
+ * crossed the whole vector as a `json_each` bind twice over.
  */
 export interface BarrierRelation {
-  readonly kind: 'relation-tuples';
-  readonly tuples: readonly { readonly id: number; readonly value: unknown }[];
+  readonly kind: 'relation-ref';
+  /** The run token whose rows in `barrier_relation` hold this `(id → value)` result. */
+  readonly run: number;
+  /** The `round` slot (0/1) holding the FINAL vector for this run. */
+  readonly round: number;
 }
 
 /** What a barrier's `apply` may return: detached elements (`federate`/`io`) OR a keyed relation (an

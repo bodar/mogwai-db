@@ -44,3 +44,39 @@ describe('OLAP SQL-per-round ≡ JS oracle (whole-vector differential)', () => {
     expect(sql).toEqual(oracle);
   });
 });
+
+// The OLAP vector is SQL-RESIDENT (`barrier_relation`, keyed by a per-query run token). Two invariants
+// follow: the scratch is reclaimed once the tail is framed (precise post-frame GC), and concurrent
+// queries in one store never collide because each holds its own run token across the apply→resume await.
+describe('OLAP barrier scratch — SQL-resident vector', () => {
+  const scratch = (s: ReturnType<typeof store>) => s.query<{ c: number }>('SELECT COUNT(*) AS c FROM barrier_relation')[0].c;
+
+  test('scratch is empty after a decorate query is framed (precise GC)', async () => {
+    const s = store();
+    expect(scratch(s)).toBe(0);
+    await decorated(s, 'pageRank()', 'gremlin.pageRankVertexProgram.pageRank');
+    expect(scratch(s)).toBe(0);
+    await decorated(s, 'connectedComponent()', 'gremlin.connectedComponentVertexProgram.component');
+    expect(scratch(s)).toBe(0);
+    // A seed-from-input prefix (non-bare) takes the other seed path — still reclaimed.
+    await new Map((await Promise.all((await exec(s).framedAsync(
+      'g.V().has("name","marko").out().pageRank().project("id","v").by(id).by("gremlin.pageRankVertexProgram.pageRank")', {}))
+      .map((f) => decode(f.buf)))).map((m: any) => [Number(m.get('id')), m.get('v')]));
+    expect(scratch(s)).toBe(0);
+  });
+
+  test('concurrent decorate queries stay isolated (per-run token)', async () => {
+    const s = store();
+    // Both computed against the SAME store, interleaving at the apply→resume await — each must see only
+    // its own run's rows. Run in parallel and check both agree with their oracle.
+    const prOracle = new Map(pageRankScores(nodesOf(s).map((n) => ({ id: n.id })), outE(s), 0.85).map((t) => [t.id, t.value as number]));
+    const ccOracle = new Map(connectedComponents(nodesOf(s), bothE(s)).map((t) => [t.id, String(t.value)]));
+    const [pr, cc] = await Promise.all([
+      decorated(s, 'pageRank()', 'gremlin.pageRankVertexProgram.pageRank'),
+      decorated(s, 'connectedComponent()', 'gremlin.connectedComponentVertexProgram.component'),
+    ]);
+    for (const [id, v] of pr) expect(Math.abs((v as number) - prOracle.get(id)!)).toBeLessThan(1e-9);
+    expect(new Map([...cc].map(([k, v]) => [k, String(v)]))).toEqual(ccOracle);
+    expect(scratch(s)).toBe(0);
+  });
+});

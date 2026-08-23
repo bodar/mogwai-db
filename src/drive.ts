@@ -15,7 +15,7 @@
 
 import type { Compiled, Executable } from './sql/kernel/render.ts';
 import type { Plan } from './compiler/segment.ts';
-import type { BarrierInput } from './services/spi/types.ts';
+import type { BarrierInput, BarrierRelation } from './services/spi/types.ts';
 import type { TypeNode } from './gremlin/types.ts';
 
 /** The two head readers a barrier segment needs, split by the SYNC/ASYNC contract (`compiler/segment.ts`).
@@ -43,13 +43,19 @@ export interface SegmentHost extends SegmentReaders {
  *  first Plan (the Worker edge) reuses this loop without recompiling. */
 export async function driveSegmentsFrom(readers: SegmentReaders, first: Plan): Promise<Executable> {
   let p: Plan = first;
+  // OLAP DECORATE barriers leave their `(id → value)` result in the `barrier_relation` scratch table,
+  // keyed by a per-query `run` token; the FINAL plan's SQL reads those rows. Collect every such token
+  // across the (possibly compounding) chain and hand them to the framer, which drops them once it has
+  // produced the rows — precise post-frame GC. A non-relation barrier (federate/io) contributes none.
+  const barrierRuns: number[] = [];
   while (p.kind === 'segment') {
     if (p.mode === 'sync') { p = p.resume(readers.readHeadSync(p.head)); continue; }
     const rows = p.head ? await readers.readHead(p.head) : [];
     const foreign = await p.apply(rows);
+    if (!Array.isArray(foreign)) barrierRuns.push((foreign as BarrierRelation).run);
     p = p.resume(foreign, rows);
   }
-  return p.compiled;
+  return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
 }
 
 /** Drive a plan SYNCHRONOUSLY — the `framed()` path. Only SYNC barriers can be resolved here; an ASYNC

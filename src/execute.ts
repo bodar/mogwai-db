@@ -609,11 +609,17 @@ export function* frameResolved(store: GraphStore, plan: Executable): Generator<F
   // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
   // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
   // effects change WHERE the rows come from and nothing about how they are framed.
-  const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
-  const shape = plan.shape;
-  if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
-  if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
-  for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
+  try {
+    const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
+    const shape = plan.shape;
+    if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
+    if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
+    for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
+  } finally {
+    // Precise post-frame GC: the rows are materialized above, so an OLAP DECORATE barrier's scratch is
+    // now free to reclaim. Runs whether framing completed or threw (or the consumer stopped early).
+    if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
+  }
 }
 
 // Every non-element value shape → one Buffer per result, single multiplicity. Unchanged framing;

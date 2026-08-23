@@ -235,7 +235,7 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
       if (Array.isArray(out))
         throw new Error(`call("${barrier.spec.serviceName}"): a decorate barrier must return an (id → value) relation, not detached rows`);
       const relation = out as BarrierRelation;
-      const lowered = lowerDecorateResume(relation.tuples, key, vtype, steps, barrier.at, request.lowering);
+      const lowered = lowerDecorateResume(relation.run, relation.round, key, vtype, steps, barrier.at, request.lowering);
       // A resume CANNOT decline — the rows are computed. An unsupported step after the algorithm RAISES
       // naming it, rather than a silent different answer (§6·5), exactly as the foreign resume does.
       if (!lowered) {

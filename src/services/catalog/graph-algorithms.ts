@@ -45,24 +45,29 @@ function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], algo: s
   return { direction: dir, labels: steps[0].args.map((a) => a.value).filter((v): v is string => typeof v === 'string') };
 }
 
-// ---------- substrate-A-iterated: an OLAP relaxation as ONE SQL statement per round ----------
+// ---------- substrate-A-iterated: an OLAP relaxation as ONE SQL statement per round, SQL-RESIDENT ----------
 //
-// The compute stays in SQLite (locked decision #3): each round crosses the current `(id → v)` vector as
-// ONE `json_each` bind into a relaxation that JOINS the real `nodes`/`edges` tables, reads the new
-// vector, and repeats to a fixpoint. Only the O(V) vector crosses per round — the graph never enters JS
-// (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2, "OLAP iteration → substrate (A) ITERATED").
+// The compute stays in SQLite (locked decision #3), AND so does its state. The `(id → value)` vector
+// lives in `barrier_relation` (`src/storage.ts`) — a scratch table keyed by a per-query `run` token —
+// never in a JS Map. Each round is one INSERT..SELECT that reads the prior round's slot and writes the
+// next, joining the real `nodes`/`edges` tables; the ONLY things that cross to the host per round are
+// O(1) SCALARS (pageRank's teleport energy, the convergence delta). So a graph of millions of vertices
+// never materializes its O(V) vector in JS — not per iteration, and not at the segment handoff, where
+// the DECORATE resume reads the final slot straight off the table by run token
+// (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2). This replaced the former json_each vector
+// bind, which crossed the whole vector both per round and again into the decorate binding.
 //
 // The pure-JS `connectedComponents`/`pageRankScores`/`peerPressureClusters` below are kept as
 // differential ORACLES (a test asserts the SQL rounds agree with them), not the execution path.
 
-type Vec = ReadonlyMap<number, string | number>;
-
-/** The current vector as the ONE json bind a round reads (`[{id, v}]`). */
-const vecJson = (vec: Vec): string => JSON.stringify([...vec].map(([id, v]) => ({ id, v })));
+/** One `(id → value)` tuple — the shape the JS oracles return (the SQL path keeps the vector in the
+ *  `barrier_relation` table and never builds this array). */
+export type IdValue = { readonly id: number; readonly value: unknown };
 
 /** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". `out` reads
  *  edges as-is, `in` swaps, `both` unions both directions. The label filter (if any) is ONE json_each
- *  bind; the returned `labelBinds` are prepended to the round's binds (before the vector bind). */
+ *  bind; the returned `labelBinds` are prepended to a statement's binds (before the run/round binds).
+ *  A statement embedding `${cte}` once takes one copy of `labelBinds`. */
 function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
   const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
   const filter = scope.labels.length
@@ -76,28 +81,51 @@ function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
   return { cte: `e(src, tgt) AS (${body})`, labelBinds: binds };
 }
 
-/** Drive a relaxation to a fixpoint. `round(prev)` runs ONE SQL statement (crossing `prev` as a json
- *  bind) and returns the new vector; iteration stops when `converged(prev, next)` holds or at `maxIter`.
- *  Default convergence is exact equality (label algorithms stabilise exactly); pageRank passes an
- *  ε-threshold (floats never settle to bit-equality). */
-function iterateToFixpoint(
-  seed: Vec, round: (prev: Vec) => Map<number, string | number>, maxIter: number,
-  converged: (prev: Vec, next: Vec) => boolean = exactlyEqual,
-): Map<number, string | number> {
-  let cur: Map<number, string | number> = new Map(seed);
-  for (let i = 0; i < maxIter; i++) {
-    const next = round(cur);
-    if (converged(cur, next)) return next;
+/** A round `slot` in `barrier_relation` — the vector alternates between two slots so a run holds at
+ *  most two vectors, cur and next. */
+type Slot = 0 | 1;
+
+/** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_relation`
+ *  under `run`, in alternating slots (0/1) — it never enters JS. `seed()` writes slot 0; `step(prev,
+ *  next)` runs ONE INSERT..SELECT reading slot `prev` and writing slot `next`; `delta(prev, next)`
+ *  returns ONE scalar measuring change between the slots (the ONLY thing that crosses per round).
+ *  Iteration stops when `stop(delta)` holds or after `maxRounds`. Returns the slot holding the final
+ *  vector — `maxRounds === 0` (pageRank `times(0)`) returns the seed unchanged. */
+function iterateInSql(
+  store: GraphStore, run: number,
+  seed: () => void, step: (prev: Slot, next: Slot) => void,
+  delta: (prev: Slot, next: Slot) => number, maxRounds: number, stop: (d: number) => boolean,
+): Slot {
+  seed();
+  let cur: Slot = 0;
+  for (let i = 0; i < maxRounds; i++) {
+    const next: Slot = cur === 0 ? 1 : 0;
+    // Overwrite the slot we are about to fill (a prior iteration left the old cur there).
+    store.query('DELETE FROM barrier_relation WHERE run = ? AND round = ?', [run, next]);
+    step(cur, next);
+    const d = delta(cur, next);
     cur = next;
+    if (stop(d)) break;
   }
   return cur;
 }
 
-const exactlyEqual = (prev: Vec, next: Vec): boolean => {
-  if (prev.size !== next.size) return false;
-  for (const [k, v] of next) if (prev.get(k) !== v) return false;
-  return true;
-};
+/** Σ|next − prev| over the two slots — pageRank's ε-convergence measure (floats never settle to
+ *  bit-equality). One scalar. */
+const sumAbsDelta = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
+  store.query<{ d: number }>(
+    `SELECT COALESCE(SUM(ABS(a.cval - b.cval)), 0) AS d
+       FROM barrier_relation a JOIN barrier_relation b ON a.id = b.id
+      WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ?`,
+    [run, next, run, prev])[0].d;
+
+/** Count of ids whose value changed between the slots — the label algorithms' "no change" fixpoint
+ *  test (`IS NOT` is null-safe distinctness). One scalar. */
+const changedCount = (store: GraphStore, run: number, prev: Slot, next: Slot): number =>
+  store.query<{ d: number }>(
+    `SELECT COUNT(*) AS d FROM barrier_relation a JOIN barrier_relation b ON a.id = b.id
+      WHERE a.run = ? AND a.round = ? AND b.run = ? AND b.round = ? AND a.cval IS NOT b.cval`,
+    [run, next, run, prev])[0].d;
 
 // ---------- mogwai.pageRank / .wcc / .peerPressure / .shortestPath — the OLAP algorithm layer ----------
 //
@@ -220,7 +248,7 @@ function componentKey(params: CallParams): string {
 export function connectedComponents(
   nodes: readonly { readonly id: number; readonly ext: string | number }[],
   edges: readonly { readonly src: number; readonly tgt: number }[],
-): BarrierRelation['tuples'] {
+): readonly IdValue[] {
   const parent = new Map<number, number>();
   for (const n of nodes) parent.set(n.id, n.id);
   const find = (x: number): number => {
@@ -274,21 +302,27 @@ export function createWccService(store: GraphStore | undefined): Service {
         apply: async (): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
-          const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          // Seed each component to the vertex's external-id STRING; each round takes the lexicographic
-          // MIN over {self} ∪ {neighbours} (the `e` CTE carries both directions for bothE). Fixpoint in
-          // ≤ diameter rounds; |V| is the safe backstop.
-          const seed: Vec = new Map(nodes.map((n) => [n.id, String(n.ext)]));
+          const run = store.allocBarrierRun();
           const { cte, labelBinds } = adjacencyCte(scope);
-          const sql = `WITH ${cte},
-            vec AS (SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.v') AS v FROM json_each(?)),
-            adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src
-                    UNION ALL SELECT id, v FROM vec)
-            SELECT n.id AS id, MIN(adj.v) AS v FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`;
-          const final = iterateToFixpoint(seed, (prev) =>
-            new Map(store.query<{ id: number; v: string }>(sql, [...labelBinds, vecJson(prev)]).map((r) => [r.id, r.v])),
-            nodes.length + 1);
-          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
+          // Seed each component to the vertex's external-id STRING (stored in `cval`, in SQL). Each
+          // round takes the lexicographic MIN over {self} ∪ {neighbours} (the `e` CTE carries both
+          // directions for bothE), writing the next slot. Fixpoint in ≤ diameter rounds; |V|+1 is the
+          // safe backstop — one scalar COUNT, not the vertex vector.
+          const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c + 1;
+          const seed = () => store.query(
+            'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, CAST(COALESCE(uid, id) AS TEXT) FROM nodes',
+            [run]);
+          const step = (prev: Slot, next: Slot) => store.query(
+            `WITH ${cte},
+               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+               adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src
+                       UNION ALL SELECT id, v FROM vec)
+             INSERT INTO barrier_relation(run, round, id, cval)
+               SELECT ?, ?, n.id, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
+            [...labelBinds, run, prev, run, next]);
+          const round = iterateInSql(store, run, seed, step,
+            (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
+          return { kind: 'relation-ref', run, round };
         },
       };
     },
@@ -325,7 +359,7 @@ export function pageRankScores(
   nodes: readonly { readonly id: number }[],
   edges: readonly { readonly src: number; readonly tgt: number }[],
   alpha: number,
-): BarrierRelation['tuples'] {
+): readonly IdValue[] {
   const ids = nodes.map((n) => n.id);
   const N = ids.length;
   if (N === 0) return [];
@@ -388,56 +422,53 @@ export function createPageRankService(store: GraphStore | undefined): Service {
         apply: async (rows): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
-          const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          const ids = nodes.map((n) => n.id);
-          const N = ids.length;
-          if (N === 0) return { kind: 'relation-tuples', tuples: [] };
+          const run = store.allocBarrierRun();
+          const N = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c; // one scalar, not the vertex set
+          if (N === 0) return { kind: 'relation-ref', run, round: 0 }; // nothing seeded → empty relation
           const { cte, labelBinds } = adjacencyCte(scope);
-          // Out-degree per vertex over the scope (rank flows src→tgt); computed ONCE in SQL, read as an
-          // O(V) map. Sinks (no out-edge) redistribute their rank through the global teleport.
-          const outdeg = new Map<number, number>(
-            store.query<{ id: number; c: number }>(`WITH ${cte} SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src`, labelBinds).map((r) => [r.id, r.c]));
-          // INITIAL RANK. A non-bare prefix hands us its incoming per-vertex traverser count (rows, one
-          // per traverser carrying the EXTERNAL id) — TinkerPop's HaltedTraversersCount, seeded with
-          // teleport 0. A bare source hands no rows → the uniform 1/N seed (teleport 1). Both then
-          // iterate the SAME relaxation; only the seed differs (PageRankVertexProgram:164,181-183).
-          let seed: Vec;
-          if (rows.length > 0) {
-            const rowid = new Map<string, number>(nodes.map((n) => [String(n.ext), n.id]));
-            const init = new Map<number, number>(ids.map((id) => [id, 0]));
-            for (const r of rows) {
-              const id = rowid.get(String(r.injectedValue));
-              if (id !== undefined) init.set(id, init.get(id)! + 1);
-            }
-            seed = init;
-          } else {
-            seed = new Map(ids.map((id) => [id, 1 / N]));
-          }
-          // Each round: messages[v] = Σ_{u→v} α·pr[u]/outdeg[u] (in SQL, joining the real edges), plus a
-          // teleport share localTerminal = teleport_k/N (teleport_k an O(V) scalar off the prev vector).
-          const sql = `WITH ${cte},
-            vec AS (SELECT json_extract(value,'$.id') AS id, CAST(json_extract(value,'$.v') AS REAL) AS v FROM json_each(?)),
-            od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
-            msg AS (SELECT e.tgt AS id, SUM(? * vec.v / od.c) AS m FROM e JOIN vec ON vec.id = e.src JOIN od ON od.id = e.src GROUP BY e.tgt)
-            SELECT n.id AS id, COALESCE(msg.m, 0) + ? AS v FROM nodes n LEFT JOIN msg ON msg.id = n.id`;
-          const teleportOf = (prev: Vec): number => {
-            let t = 0;
-            for (const [id, v] of prev) t += (1 - alpha) * (v as number) + ((outdeg.get(id) ?? 0) === 0 ? alpha * (v as number) : 0);
-            return t;
-          };
-          const converged = (prev: Vec, next: Vec): boolean => {
-            let delta = 0;
-            for (const [id, v] of next) delta += Math.abs((v as number) - (prev.get(id) as number));
-            return delta < PR_EPSILON;
+          // SEED slot 0, in SQL. A bare source → the uniform 1/N rank. A non-bare prefix hands us its
+          // incoming per-vertex traverser count (`rows`, one per traverser carrying the EXTERNAL id) —
+          // TinkerPop's HaltedTraversersCount — which cross as ONE json bind (O(input traversers), the
+          // input that already crossed the boundary), matched to internal ids and counted per vertex.
+          // Both then iterate the SAME relaxation; only the seed differs (PageRankVertexProgram:164,181-183).
+          const seed = rows.length > 0
+            ? () => store.query(
+                `INSERT INTO barrier_relation(run, round, id, cval)
+                   SELECT ?, 0, n.id, COUNT(j.value) FROM nodes n
+                     LEFT JOIN json_each(?) j ON CAST(COALESCE(n.uid, n.id) AS TEXT) = CAST(j.value AS TEXT)
+                   GROUP BY n.id`,
+                [run, JSON.stringify(rows.map((r) => r.injectedValue))])
+            : () => store.query(
+                'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, 1.0 / ? FROM nodes',
+                [run, N]);
+          // TELEPORTATION ENERGY off the prev slot — one scalar: Σ (1−α)·rank over all vertices, plus
+          // α·rank for the DANGLING ones (out-degree 0 sinks redistribute their whole rank). Then each
+          // round: messages[v] = Σ_{u→v} α·pr[u]/outdeg[u] (in SQL, joining the real edges) plus the
+          // teleport share localTerminal = teleport/N, written to the next slot.
+          const teleportOf = (prev: Slot): number => store.query<{ t: number }>(
+            `WITH ${cte}, od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
+               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?)
+             SELECT COALESCE(SUM((1 - ?) * vec.v + CASE WHEN od.c IS NULL THEN ? * vec.v ELSE 0 END), 0) AS t
+               FROM vec LEFT JOIN od ON od.id = vec.id`,
+            [...labelBinds, run, prev, alpha, alpha])[0].t;
+          const step = (prev: Slot, next: Slot) => {
+            const localTerminal = teleportOf(prev) / N;
+            store.query(
+              `WITH ${cte}, od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
+                 vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+                 msg AS (SELECT e.tgt AS id, SUM(? * vec.v / od.c) AS m
+                           FROM e JOIN vec ON vec.id = e.src JOIN od ON od.id = e.src GROUP BY e.tgt)
+               INSERT INTO barrier_relation(run, round, id, cval)
+                 SELECT ?, ?, n.id, COALESCE(msg.m, 0) + ? FROM nodes n LEFT JOIN msg ON msg.id = n.id`,
+              [...labelBinds, run, prev, alpha, run, next, localTerminal]);
           };
           // `times` caps propagation rounds exactly (no ε short-circuit — times=0 means output the seed
           // as-is; times=1 means one round); default runs to ε-convergence within PR_MAX_ITERATIONS.
           const maxRounds = times ?? PR_MAX_ITERATIONS;
-          const stop = times !== undefined ? () => false : converged;
-          const final = iterateToFixpoint(seed, (prev) =>
-            new Map(store.query<{ id: number; v: number }>(sql, [...labelBinds, vecJson(prev), alpha, teleportOf(prev) / N]).map((r) => [r.id, r.v])),
-            maxRounds, stop);
-          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
+          const stop = times !== undefined ? () => false : (d: number) => d < PR_EPSILON;
+          const round = iterateInSql(store, run, seed, step,
+            (p, n) => sumAbsDelta(store, run, p, n), maxRounds, stop);
+          return { kind: 'relation-ref', run, round };
         },
       };
     },
@@ -466,7 +497,7 @@ const PP_MAX_ITERATIONS = 30;
 export function peerPressureClusters(
   nodes: readonly { readonly id: number; readonly ext: string | number }[],
   edges: readonly { readonly src: number; readonly tgt: number }[],
-): BarrierRelation['tuples'] {
+): readonly IdValue[] {
   const ids = nodes.map((n) => n.id);
   const ext = new Map<number, string | number>(nodes.map((n) => [n.id, n.ext]));
   const voters = new Map<number, number[]>(ids.map((id) => [id, []])); // receiver -> [voter…]
@@ -518,24 +549,29 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
         apply: async (): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
-          const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
-          // Seed each cluster to the vertex's external id. Each round: every vertex tallies the votes of
-          // {itself} ∪ {its voters} (strength 1 each; `e` is voter→receiver) and adopts the max-total
-          // cluster, ties to the smallest cluster-id STRING (CAST … AS TEXT, matching the reference's
-          // .toString().compareTo). ROW_NUMBER picks the winner per vertex.
-          const seed: Vec = new Map(nodes.map((n) => [n.id, n.ext]));
+          const run = store.allocBarrierRun();
           const { cte, labelBinds } = adjacencyCte(scope);
-          const sql = `WITH ${cte},
-            vec AS (SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.v') AS v FROM json_each(?)),
-            votes AS (SELECT id, v AS c FROM vec
-                      UNION ALL SELECT e.tgt AS id, voter.v AS c FROM e JOIN vec voter ON voter.id = e.src),
-            tally AS (SELECT id, c, COUNT(*) AS total FROM votes GROUP BY id, c),
-            ranked AS (SELECT id, c, ROW_NUMBER() OVER (PARTITION BY id ORDER BY total DESC, CAST(c AS TEXT) ASC) AS rn FROM tally)
-            SELECT id, c AS v FROM ranked WHERE rn = 1`;
-          const final = iterateToFixpoint(seed, (prev) =>
-            new Map(store.query<{ id: number; v: string | number }>(sql, [...labelBinds, vecJson(prev)]).map((r) => [r.id, r.v])),
-            PP_MAX_ITERATIONS);
-          return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
+          // Seed each cluster to the vertex's external id (in `cval`, in SQL). Each round: every vertex
+          // tallies the votes of {itself} ∪ {its voters} (strength 1 each; `e` is voter→receiver) and
+          // adopts the max-total cluster, ties to the smallest cluster-id STRING (CAST … AS TEXT,
+          // matching the reference's .toString().compareTo). ROW_NUMBER picks the winner per vertex,
+          // written to the next slot.
+          const seed = () => store.query(
+            'INSERT INTO barrier_relation(run, round, id, cval) SELECT ?, 0, id, COALESCE(uid, id) FROM nodes',
+            [run]);
+          const step = (prev: Slot, next: Slot) => store.query(
+            `WITH ${cte},
+               vec AS (SELECT id, cval AS v FROM barrier_relation WHERE run = ? AND round = ?),
+               votes AS (SELECT id, v AS c FROM vec
+                         UNION ALL SELECT e.tgt AS id, voter.v AS c FROM e JOIN vec voter ON voter.id = e.src),
+               tally AS (SELECT id, c, COUNT(*) AS total FROM votes GROUP BY id, c),
+               ranked AS (SELECT id, c, ROW_NUMBER() OVER (PARTITION BY id ORDER BY total DESC, CAST(c AS TEXT) ASC) AS rn FROM tally)
+             INSERT INTO barrier_relation(run, round, id, cval)
+               SELECT ?, ?, id, c FROM ranked WHERE rn = 1`,
+            [...labelBinds, run, prev, run, next]);
+          const round = iterateInSql(store, run, seed, step,
+            (p, n) => changedCount(store, run, p, n), PP_MAX_ITERATIONS, (d) => d === 0);
+          return { kind: 'relation-ref', run, round };
         },
       };
     },

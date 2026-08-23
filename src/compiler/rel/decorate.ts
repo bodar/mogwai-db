@@ -1,7 +1,7 @@
-import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { carriedCols, elementCols, eq, jsonOf, meta, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, elementCols, eq, jsonOf, meta, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
@@ -14,29 +14,34 @@ import { BaseGraph, type GraphSource } from './source.ts';
 // correlated on the element id — exactly as `BoundGraph` rejoins a landed graph, but wrapping the base
 // graph and intercepting ONE key rather than replacing the whole source.
 //
-// The relation crosses the segment boundary as ONE `json_each` bind and is declared ONCE as a fenced
-// binding (`decorateBinding`); every read references it by name (a `Ref`), so it is computed once
-// (materialize-once, exactly `lowerForeignResume`'s model). `id` is the INTERNAL element rowid (the
-// correlation key `BaseGraph` uses); `cval` is the algorithm's per-element value.
+// The relation lives in SQL — the algorithm's `apply` computed it into `barrier_relation` under a
+// per-query `run` token (`src/storage.ts`), so `decorateBinding` READS it there rather than crossing the
+// vector as a bind. It is declared ONCE as a fenced binding; every read references it by name (a `Ref`),
+// so it is materialized once (materialize-once, exactly `lowerForeignResume`'s model). `id` is the
+// INTERNAL element rowid (the correlation key `BaseGraph` uses); `cval` is the algorithm's per-element value.
 
 /** The two columns the landed `(id → value)` relation (and every `Ref` to it) declares. `cval` is
  *  `any` because the value's storage class is the algorithm's (a TEXT component id for WCC, a REAL
  *  score for pageRank). */
 const DECORATE_COLS = [meta('id', 'int'), meta('cval', 'any', true)] as const;
 
-/** Land the barrier's `(id, value)` pairs as a fenced Plan binding: an array of `[id, value]` pairs
- *  crosses as ONE `json_each` bind (never one bind per row — the DO 100-bind wall), each row's id and
- *  value recovered by `json_extract`. Returned as the binding NODE; the caller pairs it with `name`. */
-export function decorateBinding(pairs: readonly (readonly [number, unknown])[], name: string, fresh: Minter): Rel {
-  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(pairs), name)] };
-  const exploded = make.explode({
-    id: fresh('decx'), channels: [], expr: source, as: { value: 'pair' },
-    type: typeOf(meta('pair', 'json', true)),
+/** Land the barrier's `(id → value)` relation as a fenced Plan binding: a SCAN of `barrier_relation`
+ *  (the OLAP scratch table — `src/storage.ts`) filtered to this query's `run` and its final `round`
+ *  slot, projected to `(id, cval)`. `run`/`round` are compiler-held constants, inlined as SQL literals
+ *  (never binds), so the plan's bind count and text size are O(1) regardless of |V| — the whole point of
+ *  keeping the vector SQL-resident. Returned as the binding NODE; the caller pairs it with `name`. */
+export function decorateBinding(run: number, round: number, name: string, fresh: Minter): Rel {
+  const scan = make.scan({
+    id: fresh('decs'), table: 'barrier_relation', alias: fresh('rbr'), channels: [],
+    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('id', 'int'), meta('cval', 'any', true)),
   });
-  const extract = (path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'pair'), compilerText(path)] });
+  const filtered = make.filter({
+    id: fresh('decf'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, 'run'), compilerInt(run)), eq(col(scan.id, 'round'), compilerInt(round))),
+  });
   const projected = make.project({
-    id: fresh('decp'), input: exploded, channels: [], type: typeOf(...DECORATE_COLS),
-    exprs: [['id', extract('$[0]')], ['cval', extract('$[1]')]],
+    id: fresh('decp'), input: filtered, channels: [], type: typeOf(...DECORATE_COLS),
+    exprs: [['id', col(filtered.id, 'id')], ['cval', col(filtered.id, 'cval')]],
   });
   return make.materialize({ id: fresh('decm'), input: projected, channels: [], type: typeOf(...DECORATE_COLS), name, fenced: true });
 }

@@ -393,6 +393,9 @@ export interface Compiled {
   sql: string;
   binds: any[];
   shape: Shape;
+  /** OLAP-barrier run tokens whose `barrier_relation` scratch this plan reads (a decorate tail). The
+   *  framer drops them once it has produced the rows — precise post-frame GC (`frameResolved`). */
+  cleanup?: readonly number[];
 }
 
 /**
@@ -412,6 +415,8 @@ export interface Compiled {
 export interface Program extends RenderedProgram {
   kind: 'program';
   shape: Shape;
+  /** As `Compiled.cleanup` — OLAP-barrier run tokens to reclaim after framing. */
+  cleanup?: readonly number[];
 }
 
 /** What `compile()` hands back: one statement, or a several-statement program. Both are DATA — every

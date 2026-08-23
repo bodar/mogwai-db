@@ -4252,13 +4252,17 @@ const DECORATE_RESUME_PARAM = '_mogwai_decorate';
  * relation — every element passes through, decorated, and `has(key)`/`order().by(key)`/`project().by(key)`
  * compose as ordinary property reads.
  *
- * The relation is DATA, so it crosses as ONE `json_each` bind (§6·2) and is declared ONCE as a fenced
+ * The relation lives in SQL — the algorithm's `apply` computed it into `barrier_relation` under a
+ * per-query `run` token (`src/services/spi/types.ts` `BarrierRelation`), so this reads it straight off
+ * that table by (run, round) rather than crossing the vector as a bind. It is declared ONCE as a fenced
  * binding referenced by name — materialize-once, exactly `lowerForeignResume`'s model. One `fresh`
  * threads the binding AND the re-lowered chain, so their relation ids share one id space (a second
- * `minter()` would restart at 0 and the emitter would see one id naming two relations).
+ * `minter()` would restart at 0 and the emitter would see one id naming two relations). The `run` token
+ * is a compiler-held constant, inlined as a SQL literal (never a bind — the parameter budget is the
+ * user's, root `CLAUDE.md`).
  */
 export function lowerDecorateResume(
-  tuples: readonly { readonly id: number; readonly value: unknown }[],
+  run: number, round: number,
   key: string, vtype: string, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
 ): RelLowering | null {
   const fresh = minter();
@@ -4267,7 +4271,7 @@ export function lowerDecorateResume(
   // element traversal differing only in the source it reads through.
   const chainSteps = [...steps.slice(0, barrierAt), ...steps.slice(barrierAt + 1)];
   const name = fresh(DECORATE_RESUME_PARAM);
-  const binding: Binding = { name, node: decorateBinding(tuples.map((t) => [t.id, t.value] as const), name, fresh) };
+  const binding: Binding = { name, node: decorateBinding(run, round, name, fresh) };
   const source = decorateGraph(name, key, vtype);
   const chain = lowerChain(chainSteps, { ...opts, source }, fresh);
   return chain && lowered({ ...chain, effects: [binding, ...(chain.effects ?? [])] }, source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
