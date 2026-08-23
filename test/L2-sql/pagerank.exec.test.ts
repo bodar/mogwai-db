@@ -66,9 +66,12 @@ describe('pageRank() — mogwai.pageRank DECORATE barrier', () => {
       .toEqual({ marko: 15, vadas: 21, lop: 15, josh: 21, ripple: 15, peter: 15 });
   });
 
-  test('a fixed iteration count (times) still fails closed — deferred to a follow-up', async () => {
+  test('a fixed iteration count (times) caps the propagation rounds', async () => {
     const store = seeded(MODERN_SEED);
-    await expect(exec(store).framedAsync(`g.V().pageRank().with("~tinkerpop.pageRank.times", 0).has("${KEY}")`, {}))
-      .rejects.toThrow('iteration count');
+    // times=0 over a bare source = the seed only (no propagation): uniform 1/N for every vertex.
+    const rows = (await run(store, `g.V().pageRank().with("~tinkerpop.pageRank.times", 0).project("n","${KEY}").by("name").by("${KEY}")`))
+      .map((m: any) => m instanceof Map ? Object.fromEntries(m) : m);
+    expect(rows.length).toBe(6);
+    for (const r of rows) expect(r[KEY]).toBeCloseTo(1 / 6, 9);
   });
 });

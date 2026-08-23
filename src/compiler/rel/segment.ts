@@ -194,16 +194,38 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
   };
 }
 
+/** Is the prefix a BARE source (`V()`/`E()` alone)? TinkerPop pushes such a `GraphStep` past the OLAP
+ *  step, so it is NOT a preceding traversal-vertex-program — no `HaltedTraversersCount` initial rank. Any
+ *  richer prefix (a filter/movement) IS a preceding program, so its per-vertex traverser count seeds the
+ *  algorithm (`VertexProgramStep.previousTraversalVertexProgram`). */
+const bareSource = (prefix: readonly IRStep[]): boolean =>
+  prefix.length === 1 && (prefix[0]!.name === 'V' || prefix[0]!.name === 'E');
+
 /** A DECORATE barrier (an OLAP algorithm — `pageRank`/`connectedComponent`/`peerPressure`). The compute
- *  is GLOBAL and reads the store inside `apply`, so there is no per-parent head — `head` is null and the
- *  prefix is re-lowered LIVE inside `lowerDecorateResume`, which threads the awaited `(id → value)`
- *  relation as a synthetic property under `decorate.key` and keeps the element stream flowing. */
+ *  is GLOBAL and reads the store inside `apply`; the prefix is re-lowered LIVE inside
+ *  `lowerDecorateResume`, which threads the awaited `(id → value)` relation as a synthetic property under
+ *  `decorate.key` and keeps the element stream flowing.
+ *
+ *  When the barrier declares `seedFromInput` and the prefix is NOT a bare source, the head projects the
+ *  incoming element id per traverser (uncollapsed, so multiplicity survives as row count) — the barrier's
+ *  view of its input, which pageRank reads as its initial rank. A bare source keeps `head` null. */
 function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
-  const { key, vtype } = barrier.decorate!;
+  const { key, vtype, seedFromInput } = barrier.decorate!;
+  const prefix = steps.slice(0, barrier.at);
+  // The input head: `<prefix>.id()` with collapse OFF, so each incoming traverser is one row (a
+  // collapsed `SUM(bulk)` would hide the multiplicity the initial rank needs). A `read` (value) head —
+  // `readSegmentHead` turns each row into `{injectedValue: id}`.
+  const inputHead = seedFromInput && !bareSource(prefix)
+    ? (() => {
+        const lowered = lowerToRel([...prefix, { name: 'id', args: [], ctx: steps[barrier.at]!.ctx } as IRStep], { ...request.lowering, collapse: false });
+        const compiled = lowered && finishLowering(lowered);
+        return compiled && compiled.kind === 'read' ? compiled : null;
+      })()
+    : null;
   return {
     kind: 'segment',
     mode: 'async',
-    head: null,
+    head: inputHead,
     params: barrier.site.params,
     apply: barrier.apply,
     residency: barrier.residency,

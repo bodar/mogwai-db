@@ -74,13 +74,15 @@ at the pin:
   0.3047, ripple 0.1758 — dead-on its asserted ranges). WCC's `hasLabel("software").connectedComponent()`
   → global "1"/"1" ✓. Both landed algorithms are already reference-faithful; the prefix-as-output-filter
   is exactly what the decorate resume does. **No correct-by-design bug, no guard, no subgraph compute.**
-- **Scenario 6 (`hasLabel("person").pageRank()` → marko 0.46) is REFERENCE-ANOMALOUS.** The pinned
-  executor yields the GLOBAL 0.1138 (which my impl produces), NOT 0.46. `0.46` is not reproducible from
-  ANY behavior in the pinned code (global 0.1138; a 3.x-style edge-filter would give uniform 0.167;
-  person-subgraph 0.219) — a frozen value, never revalidated (v4 has no remote OLAP execution surface, so
-  `@GraphComputerOnly` scenarios are not run by the JS/HTTP suite). **Do NOT fit it** — leave scenario 6
-  failing; matching the executor beats matching a stale corpus number. `GraphFilterStrategy` stays a
-  no-op (correct — it does nothing for the in-memory computer).
+- **Scenario 6 (`hasLabel("person").pageRank()` → marko 0.46) — RESOLVED, NOT anomalous (2026-08-23).**
+  My earlier "anomalous" call was WRONG: I hadn't implemented `initialRank`. The step form seeds
+  `initialRank = HaltedTraversersCount` (the incoming per-vertex traverser count) with teleport 0 when a
+  preceding traversal-vertex-program exists (`PageRankVertexProgramStep.generateProgram` →
+  `.initialRank(...)`; `VertexProgramStep.previousTraversalVertexProgram`). A bare `g.V()` has its
+  `GraphStep` pushed PAST the OLAP step, so it is NOT a preceding program → no initialRank → the uniform
+  seed (mass 1). So: `hasLabel(person)` → initialRank person=1/software=0, total mass 4, converges to the
+  global SHAPE × 4 (marko 0.1138 × 4 = 0.455 → ceil 46) — EXACTLY the .feature. LANDED (initialRank
+  feature below).
 
 **✅ LANDED (2026-08-22) — edge-config carrying.** The source-rooted check moved OUT of
 `nestedTraversalToGremlin` (it now carries an anonymous body verbatim) and INTO `federate`'s
@@ -110,15 +112,25 @@ substrate verbatim: peer-pressure label propagation (each vertex adopts the max-
 decorate algorithms (wcc/pageRank/peerPressure) are now landed and reference-faithful — the decorate
 substrate generalized cleanly to each.
 
+**✅ LANDED (2026-08-23) — initialRank (the "barrier sees its input" substrate) + `times`.** A decorate
+barrier may declare `seedFromInput`; when set and the prefix is NOT a bare `V()`/`E()` source, the
+decorate segment gives `apply` a head that projects the incoming per-traverser element id (uncollapsed,
+so multiplicity = row count) — the barrier's view of its input, reusing the existing value-head +
+`readSegmentHead` machinery. pageRank reads it as `initialRank` (teleport 0); a bare source keeps the
+uniform seed. `~tinkerpop.pageRank.times` caps the propagation rounds (maxIter = times+1; times=0 → the
+seed as-is). L3 +1 (scenario 6, exact). Generic: any algorithm whose result depends on incoming
+multiplicity uses `seedFromInput`.
+
 **NEXT — the remaining leaves:**
-- **`times`** (fixed iteration count, `~tinkerpop.pageRank.times`) — pageRank 2/8. Entangled edge cases:
-  scenario 2 is `times(0)` + `out("created")` prefix + bothE (its projectRank looks like the edge count,
-  not a rank — verify against the reference; possibly anomalous like 6); scenario 8 is `times(1)` + α=1 +
-  inE(created), then movement + valueMap. Nail times=0/times=1 against the reference before building.
-- **shortestPath** (Template B — recursive-CTE all-pairs paths over the path channel, no barrier, its
-  own shape; 15 scenarios: unweighted + weighted/target/maxDistance/includeEdges).
-- **valueMap over a decorated key** (`DecorateGraph.valueMapPairs`) — needed by peerPressure scenario 3's
-  `valueMap(name, cluster)` and any `valueMap` including an algorithm key.
+- **valueMap over a decorated key** (`DecorateGraph.valueMapPairs`) — unblocks pageRank 2 (`valueMap(name,
+  projectRank)`) and 8 (`valueMap(name, priors)`), and peerPressure 3 (`valueMap(name, cluster)`). The
+  mixed case (a base key + the decorate key) is a UNION of base pairs and the decorate row.
+- **pageRank 2/8** then pass (initialRank + times already land; 2 needs bulk-preserved output — the
+  resume re-lowers the prefix, which keeps bulk — and 8 needs the `in(created).union(both,identity)` tail).
+- **pageRank 9** — `group(m).by(label)…pageRank…group(m).by(pageRank).cap(m)`: pageRank inside group
+  side-effects + `group().by(<decorate key>)` + cap. Hard group-compose; its own piece.
+- **shortestPath** (Template B — recursive-CTE all-pairs paths over the path channel, no barrier; 15
+  scenarios: unweighted + weighted/target/maxDistance/includeEdges).
 
 > **The bet in one sentence:** implement graph algorithms *once* as `call()` **services** (the
 > extensible, GDS-class superset surface), and expose TinkerPop's four canonical OLAP step names

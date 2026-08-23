@@ -312,21 +312,25 @@ export function createPageRankService(store: GraphStore | undefined): Service {
       const mode = site.params.mode;
       if (mode !== undefined && mode !== 'decorate')
         throw new Error(`${PAGERANK_SERVICE_NAME}: only decorate mode (the native pageRank() step) is implemented yet, not "${String(mode)}"`);
-      if (site.params[PR_TIMES] !== undefined)
-        throw new Error(`${PAGERANK_SERVICE_NAME}: a fixed iteration count (.with("${PR_TIMES}", …)) is not supported yet — pageRank runs to convergence (α=${PR_ALPHA_DEFAULT}, ε=${PR_EPSILON}, ≤${PR_MAX_ITERATIONS} iterations)`);
       // Default message scope is outE (rank flows along out-edges); a custom scope is honoured.
       const scope = edgeScopeOf(site.params[PR_EDGES], 'out', PAGERANK_SERVICE_NAME);
       const alpha = typeof site.params.dampingFactor === 'number' ? site.params.dampingFactor : PR_ALPHA_DEFAULT;
+      // `~tinkerpop.pageRank.times` caps the PROPAGATION rounds (VertexProgramStep sets maxIterations =
+      // times + 1; the reference's iteration 1 is the seed, so `times` is the number of propagation
+      // rounds after it). Absent → run to ε-convergence, ≤ PR_MAX_ITERATIONS.
+      const timesParam = site.params[PR_TIMES];
+      const times = typeof timesParam === 'number' && Number.isInteger(timesParam) ? timesParam : undefined;
       const nameOverride = site.params[PR_PROPERTY_NAME];
       const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PR_PAGERANK_KEY;
       return {
         kind: 'barrier',
         residency: 'do',
-        decorate: { key, vtype: 'double' }, // a PageRank score is a double
-        apply: async (): Promise<BarrierRelation> => {
+        decorate: { key, vtype: 'double', seedFromInput: true }, // a PageRank score is a double; initial rank = incoming count
+        apply: async (rows): Promise<BarrierRelation> => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
-          const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+          const nodes = store.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
+          const ids = nodes.map((n) => n.id);
           const N = ids.length;
           if (N === 0) return { kind: 'relation-tuples', tuples: [] };
           const { cte, labelBinds } = adjacencyCte(scope);
@@ -334,9 +338,22 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           // O(V) map. Sinks (no out-edge) redistribute their rank through the global teleport.
           const outdeg = new Map<number, number>(
             store.query<{ id: number; c: number }>(`WITH ${cte} SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src`, labelBinds).map((r) => [r.id, r.c]));
-          // The reported rank after the reference's first real iteration is 1/N for every vertex; the
-          // teleport for the NEXT round is derived from the current vector (PageRankVertexProgram:189-203).
-          const seed: Vec = new Map(ids.map((id) => [id, 1 / N]));
+          // INITIAL RANK. A non-bare prefix hands us its incoming per-vertex traverser count (rows, one
+          // per traverser carrying the EXTERNAL id) — TinkerPop's HaltedTraversersCount, seeded with
+          // teleport 0. A bare source hands no rows → the uniform 1/N seed (teleport 1). Both then
+          // iterate the SAME relaxation; only the seed differs (PageRankVertexProgram:164,181-183).
+          let seed: Vec;
+          if (rows.length > 0) {
+            const rowid = new Map<string, number>(nodes.map((n) => [String(n.ext), n.id]));
+            const init = new Map<number, number>(ids.map((id) => [id, 0]));
+            for (const r of rows) {
+              const id = rowid.get(String(r.injectedValue));
+              if (id !== undefined) init.set(id, init.get(id)! + 1);
+            }
+            seed = init;
+          } else {
+            seed = new Map(ids.map((id) => [id, 1 / N]));
+          }
           // Each round: messages[v] = Σ_{u→v} α·pr[u]/outdeg[u] (in SQL, joining the real edges), plus a
           // teleport share localTerminal = teleport_k/N (teleport_k an O(V) scalar off the prev vector).
           const sql = `WITH ${cte},
@@ -354,9 +371,13 @@ export function createPageRankService(store: GraphStore | undefined): Service {
             for (const [id, v] of next) delta += Math.abs((v as number) - (prev.get(id) as number));
             return delta < PR_EPSILON;
           };
+          // `times` caps propagation rounds exactly (no ε short-circuit — times=0 means output the seed
+          // as-is; times=1 means one round); default runs to ε-convergence within PR_MAX_ITERATIONS.
+          const maxRounds = times ?? PR_MAX_ITERATIONS;
+          const stop = times !== undefined ? () => false : converged;
           const final = iterateToFixpoint(seed, (prev) =>
             new Map(store.query<{ id: number; v: number }>(sql, [...labelBinds, vecJson(prev), alpha, teleportOf(prev) / N]).map((r) => [r.id, r.v])),
-            PR_MAX_ITERATIONS, converged);
+            maxRounds, stop);
           return { kind: 'relation-tuples', tuples: [...final].map(([id, value]) => ({ id, value })) };
         },
       };

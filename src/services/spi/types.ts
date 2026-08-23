@@ -149,6 +149,14 @@ export interface DecorateSpec {
    *  `values(key)`/`valueMap(key)` need to FRAME the value on the wire (a REAL score as a Double, not a
    *  Long); `order().by(key)`/`has(key)` read it raw and do not consult it. */
   readonly vtype: string;
+  /** THE BARRIER WANTS TO SEE ITS INPUT STREAM. When set, and the prefix is not a bare `V()`/`E()`
+   *  source, the decorate segment gives `apply` a head that projects the incoming per-traverser element
+   *  id (one row per traverser, uncollapsed) — so the barrier learns the per-element MULTIPLICITY that
+   *  flowed in. pageRank uses it as its initial rank (TinkerPop's `HaltedTraversersCount`, seeded only
+   *  when a preceding traversal-vertex-program exists — i.e. a non-bare prefix); a bare source has none
+   *  and `apply` gets no rows. Generic: any algorithm whose result depends on incoming multiplicity
+   *  declares this and reads the counts off `apply`'s rows. */
+  readonly seedFromInput?: boolean;
 }
 
 export type Contribution =
