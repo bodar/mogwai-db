@@ -379,3 +379,7 @@ export const BETWEENNESS_SERVICE_NAME = 'mogwai.betweenness';
 /** Node similarity (Jaccard over neighbour sets) — the first PAIR-OUTPUT barrier: a stream of
  *  `{node1, node2, similarity}` maps rather than a per-vertex decoration. Call-only, `internal: true`. */
 export const NODE_SIMILARITY_SERVICE_NAME = 'mogwai.nodeSimilarity';
+/** Strongly connected components — a ONE-SHOT decorate barrier over the DIRECTED graph: two vertices
+ *  share a component iff they are mutually reachable, computed as a directed transitive-closure CTE.
+ *  Call-only, `internal: true` (no native TinkerPop step; connectedComponent() is the UNDIRECTED wcc). */
+export const SCC_SERVICE_NAME = 'mogwai.scc';

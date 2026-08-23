@@ -118,6 +118,14 @@ function olapContract(getOrigin: () => string) {
         const sims = await g.call('mogwai.nodeSimilarity').toList();
         expect(sims.length).toBe(2);
         for (const m of sims as Map<string, unknown>[]) expect(m.get('similarity')).toBeCloseTo(0.5, 10);
+
+        // mogwai.scc — DIRECTED strongly connected components (one-shot mutual-reachability CTE). This
+        // graph is a DAG (marko→josh→lop, marko→lop; no back edges), so every vertex is its OWN SCC —
+        // 3 distinct component ids, the exact opposite of connectedComponent's single undirected one.
+        // Proves the recursive closure + the decorate read run on the real DO store.
+        expect((await g.V().call('mogwai.scc').has('componentId').count().next()).value).toBe(3);
+        const scc = await g.V().call('mogwai.scc').values('componentId').toList();
+        expect(new Set(scc.map((c) => String(c))).size).toBe(3);
       } finally { await conn.close(); }
     }, 40_000);
   });
