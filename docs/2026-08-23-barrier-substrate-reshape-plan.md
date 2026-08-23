@@ -190,7 +190,17 @@ this target and the pair-keyed reshape are one build, not two.
      `shortestPathReconstruct` (reuses `pathPositions`, guard = dist-gate `dv=du+w` float-exact +
      simple-path backstop, no MIN window). The grateful scenario that HUNG the walk now terminates and
      passes. First end-to-end consumer of barrier_state's scope + channel dims.
-   - ⚠️ **3c ATTEMPTED, REVERTED — BLOCKED on sync-driveable barriers (a design fork).** Migrating
+   - ✅ **3c LANDED via B (sync-driveable barriers).** The census/sync path could not drive an async
+     barrier, so unweighted-shortestPath-as-barrier lost sync execution (the revert below records the
+     attempt). Resolved by giving the OLAP barriers a SYNCHRONOUS CORE (`applySync`): production keeps the
+     async `apply` (yields, no DO busy-lock — the occupancy axis is load-bearing, per the user), the
+     sync/test drive runs the core (busy-lock fine). Then ALL shortestPath routes through the barrier and
+     `shortestPathWalk` is DELETED — one substrate, the latent unweighted-dense hash gone. Census
+     re-recorded (OLAP now runs in the sync census: ran 1546→1563, all L3-validated). L3 held 1739.
+     - `494960a` — sync-apply barriers (Contribution.applySync + AsyncSegmentPlan.applySync +
+       driveSegmentsSync runs the core + `syncBarrier` wrapper on all 4 OLAP services).
+     - (this) — unweighted→barrier, delete the walk. maxDistance = a `dist<=cap` final filter.
+   - ⚠️ **3c FIRST ATTEMPT, REVERTED — the design fork that led to B (kept for the record).** Migrating
      unweighted onto the barrier + deleting the walk was built and worked (L3 held 1739, L2 16/16), but
      the CENSUS regressed: 12 unweighted-shortestPath corpus traversals STOPPED EXECUTING. Cause is
      structural, not a bug — the census (and every sync-exec test) runs traversals through the SYNC path

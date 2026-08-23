@@ -7,7 +7,6 @@ import type { ListOf } from '../../sql/kernel/render.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../plan/alias.ts';
-import type { Elem } from '../plan/plan.ts';
 import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
 import type { ChildSeam } from './child.ts';
 import { historyAppend, objectEntry, type TraverserObject } from './history.ts';
@@ -15,40 +14,23 @@ import { PATH_CHANNEL, PATH_COL, pathPositions, seedPath } from './path.ts';
 import type { GraphSource } from './source.ts';
 
 /**
- * `shortestPath()` — TinkerPop's OLAP shortest-path step, compiled to ONE recursive CTE (Template B,
- * `docs/2026-07-24-graph-algorithms-plan.md`). Unlike the three DECORATE algorithms
- * (pageRank/wcc/peerPressure), it is NOT a barrier: an unweighted all-pairs shortest path is expressible
- * as a single `Recursive` term (§1's P1/P2), so it lowers inline like `repeat()`'s unbounded regime does.
+ * `shortestPath()` — path RECONSTRUCTION for the BSP barrier (`docs/2026-08-23-barrier-substrate-reshape-plan.md`
+ * §5). TinkerPop's OLAP shortest-path step runs on ONE substrate for BOTH weighted and unweighted searches:
+ * the service's barrier `apply` relaxes the shortest DISTANCE from each source vertex into `barrier_state`
+ * (scope = source, channel 0 — `relaxShortestPath`), and this file rebuilds the shortest PATHS from it.
  *
- * ## The shape
- *
- * The incoming element stream is the set of SOURCE vertices (TinkerPop seeds the search from the halted
- * traversers, `ShortestPathVertexProgram.isStartVertex`). Each source fans out to every reachable target
- * along its SHORTEST path(s), landing the result in the PATH channel (`path.ts`) — the same list value
- * `path()` produces, so the wire framing is shared.
- *
- * A recursive walk enumerates every SIMPLE path (cycle-free — `!currentPath.objects().contains(otherV)`,
- * which is P2-legal as a `NOT EXISTS` membership over the carried path array). It carries three payload
- * columns beside the path: `id` (the current endpoint), `src` (the source it started from) and `dist`
- * (hop count). AFTER the walk, a `MIN(dist) OVER (PARTITION BY src, id)` window keeps only the shortest
- * distance per (source, target), ALL ties included — exactly the reference's `Set<Path>` per pair.
- *
- * Why the walk cannot be `repeatWalk` (`walk.ts`): that regime DECLINES a path channel ("path needs its
- * own append regime") because its per-arm counter bump distributes over the movement union, and
- * `extendPath` sits ABOVE that union. This builder distributes the append, the distance bump and the
- * simple-path filter INTO each arm, so each arm references the walk exactly once (P1) and a `both` scope
- * is two arms `UNION ALL`, exactly as a `both()` movement is.
- *
- * ## Scope this builder covers
- *
- * The UNWEIGHTED family: the default `bothE` scope and the `~tinkerpop.shortestPath.edges` direction
- * override (`Direction.IN`/`__.outE()`/`__.bothE()`), `~tinkerpop.shortestPath.includeEdges` (the path
- * interleaves the traversed edges), and the unweighted `~tinkerpop.shortestPath.maxDistance` (a hop cap
- * that prunes the walk). A weighted `distance` and a `target` filter fail closed in the service until
- * their increments land — never a mis-execution.
+ * Reconstruction is a `Recursive` term (P1/P2) framed by `pathPositions` (the same wire form `path()`
+ * produces), seeded from the source vertices, walking ONLY shortest-path edges: an edge (u,v) is on a
+ * shortest path from s iff `dist[s][v] = dist[s][u] + w(u,v)` (w = the edge weight, or 1 unweighted). Both
+ * distances are read from `barrier_state`, so the equality is FLOAT-EXACT; a simple-path backstop guards
+ * zero/negative weights. Because only shortest-path edges are walked there is no MIN window and no
+ * exponential blowup — which is exactly why the old enumerate-every-simple-path walk (deleted) hung on a
+ * dense graph even unweighted, and why the min-distance relaxation lives in the barrier (an aggregate a
+ * recursive term forbids — P3 / repeat-two-regimes §1a). The helpers below (`DIR_HOPS`, `notInPath`, the
+ * path-entry builders) were the walk's and are reused verbatim.
  */
 
-/** The bulk channel this walk carries beside the path — one traverser per emitted path. */
+/** The bulk channel carried beside the path — one traverser per emitted path. */
 const BULK_CHANNEL: Channel = { col: 'bulk', role: 'bulk' };
 
 /** A scope direction as an edge-column pair: which edge column matches the current endpoint (`from`)
@@ -60,30 +42,6 @@ const DIR_HOPS: Readonly<Record<'out' | 'in' | 'both', readonly { readonly from:
   both: [{ from: 'src', to: 'tgt' }, { from: 'tgt', to: 'src' }],
 };
 
-export interface ShortestPathConfig {
-  readonly direction: 'out' | 'in' | 'both';
-  /** Edge labels the scope restricts to (`~tinkerpop.shortestPath.edges` = `__.bothE("uses")`); empty =
-   *  every label. Inline string literals, so they inline into the join with no bind. */
-  readonly labels: readonly string[];
-  readonly includeEdges: boolean;
-  /** An unweighted hop cap (`~tinkerpop.shortestPath.maxDistance`) — a path longer than this is never
-   *  extended (`ShortestPathVertexProgram.exceedsMaxDistance`, which only prunes for hop distances). */
-  readonly maxHops?: number;
-  /** `~tinkerpop.shortestPath.distance` — a WEIGHT property key on the edge. When set, distance is the
-   *  sum of edge weights (a REAL) rather than the hop count, so the shortest path is the least-weight
-   *  one. The reference reads it as `__.values(key)` over each edge, orElse 0 (`getDistance`). */
-  readonly distanceKey?: string;
-  /** A WEIGHTED distance cap (`~tinkerpop.shortestPath.maxDistance` with a `distance` set). Unlike the
-   *  hop cap it does NOT prune the walk (a custom distance may be negative); it filters the FINAL
-   *  shortest distance per pair at collection (`pair.dist <= maxDistance`, `collectShortestPaths`). */
-  readonly maxWeight?: number;
-  /** `~tinkerpop.shortestPath.target` — a vertex predicate the ENDPOINT must pass for its path to be
-   *  emitted (`ShortestPathVertexProgram.isEndVertex`, applied in `collectShortestPaths`). The shortest
-   *  path to EVERY vertex is still computed; the target only filters what is collected — so it applies
-   *  AFTER the shortest-per-pair selection. The trivial path (source == endpoint) is emitted iff the
-   *  source passes it, which the same endpoint filter covers. Parsed to the predicate body IR. */
-  readonly target?: readonly IRStep[];
-}
 
 const vertexEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'vertex', id });
 const edgeEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'edge', id });
@@ -109,161 +67,21 @@ function notInPath(rel: Rel, neighbour: Expr, fresh: Minter): Expr {
   return { kind: 'exists', negated: true, plan: probe };
 }
 
-export function shortestPathWalk(
-  input: Rel, elem: Elem, source: GraphSource, cfg: ShortestPathConfig, child: ChildSeam, fresh: Minter,
-): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
-  // The sources are the incoming traversers, which must be vertices (shortestPath walks the vertex graph).
-  if (elem !== 'vertex') return null;
 
-  const channels: Channels = [BULK_CHANNEL, PATH_CHANNEL];  // ROLE_ORDER: bulk before path
-  // Distance is a hop COUNT (int) by default, or a WEIGHT SUM (real) when a distance property is set.
-  const weighted = cfg.distanceKey !== undefined;
-  const zeroDist: Expr = weighted ? compilerReal(0) : compilerInt(0);
-  // Payload = the endpoint id, the source it started from, and the distance; then the channels.
-  const walkType = typeOf(meta('id', 'int'), meta('src', 'int'), meta('dist', weighted ? 'real' : 'int'), ...carriedCols(channels));
-  const header = walkType.cols.map((c) => c.name);
-
-  // SEED: one row per source vertex — path [source], src = itself, dist 0, one traverser. The trivial
-  // path (source == target) is this row; it is emitted like any other once it passes the tail filters.
-  const seed = make.project({
-    id: fresh('sps'), input, channels, type: walkType,
-    exprs: [
-      ['id', col(input.id, 'id')],
-      ['src', col(input.id, 'id')],
-      ['dist', zeroDist],
-      ['bulk', compilerInt(1)],
-      [PATH_COL, seedPath(vertexEntry(col(input.id, 'id')))],
-    ],
-  });
-
-  const hops = DIR_HOPS[cfg.direction];
-  // Inline string-literal label Args (no bind — they came from a parsed anonymous edge traversal).
-  const labelArgs: Arg[] = cfg.labels.map((label) => ({ value: label, type: null, name: null }));
-  let termOk = true;
-  const walkId = fresh('spw');
-  const walk = make.recursive({
-    id: walkId, name: `sp_${walkId}`, channels, type: walkType, cols: header, seed,
-    step: (self) => {
-      const arms = hops.map((hop) => {
-        const e = source.adjacencyEdges(fresh);
-        // JOIN self ⋈ edges on the endpoint. The output type is left cols ++ right cols positionally
-        // (`movement`'s `pid` convention): self's `id`/`src` are renamed to avoid the edge's own
-        // `id`/`src`, the channel columns keep their canonical names. A label-scoped edges traversal
-        // restricts the hop, exactly as a `both("uses")` movement does — inline string labels, no bind.
-        const labelMatch = labelArgs.length
-          ? source.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh) : undefined;
-        const joined = make.join({
-          id: fresh('spj'), left: self, right: e, join: 'inner', ordered: true, channels,
-          on: and(eq(col(e.id, hop.from), col(self.id, 'id')), labelMatch),
-          type: typeOf(
-            meta('pid', 'int'), meta('psrc', 'int'), meta('dist', 'int'), meta('bulk', 'int'), meta(PATH_COL, 'json', true),
-            meta('eid', 'int'), meta('esrc', 'int'), meta('elabel', 'int'), meta('etgt', 'int'),
-          ),
-        });
-        const neighbourCol = hop.to === 'tgt' ? 'etgt' : 'esrc';
-        // Simple-path guard: the neighbour must not already be on the path (BEFORE it is appended).
-        const guarded = make.filter({
-          id: fresh('spg'), input: joined, channels, type: joined.type,
-          pred: notInPath(joined, col(joined.id, neighbourCol), fresh),
-        });
-        const neighbour = col(guarded.id, neighbourCol);
-        const appended = cfg.includeEdges
-          ? historyAppend(historyAppend(col(guarded.id, PATH_COL), objectEntry(edgeEntry(col(guarded.id, 'eid')))), objectEntry(vertexEntry(neighbour)))
-          : historyAppend(col(guarded.id, PATH_COL), objectEntry(vertexEntry(neighbour)));
-        // The per-hop distance: 1 hop, or the edge's weight property (orElse 0) when a distance key is
-        // set. The weight is a correlated `values(key)` read over the edge — a nested SELECT, P2-legal.
-        let delta: Expr = weighted ? compilerReal(0) : compilerInt(1);
-        if (weighted) {
-          const w = child.scalar(valuesStep(cfg.distanceKey!), { kind: 'element', id: col(guarded.id, 'eid'), elem: 'edge' });
-          if (w) delta = { kind: 'call', fn: 'COALESCE', args: [w.expr, compilerReal(0)] };
-          else termOk = false;  // the weight read did not lower — decline the whole walk
-        }
-        const extended = make.project({
-          id: fresh('spa'), input: guarded, channels, type: walkType,
-          exprs: [
-            ['id', neighbour],
-            ['src', col(guarded.id, 'psrc')],
-            ['dist', { kind: 'binary', op: '+', left: col(guarded.id, 'dist'), right: delta }],
-            ['bulk', compilerInt(1)],
-            [PATH_COL, appended],
-          ],
-        });
-        // An unweighted maxDistance PRUNES the walk: a hop past the cap is never taken.
-        return cfg.maxHops === undefined ? extended : make.filter({
-          id: fresh('spm'), input: extended, channels, type: walkType,
-          pred: { kind: 'binary', op: '<=', left: col(extended.id, 'dist'), right: compilerInt(cfg.maxHops) },
-        });
-      });
-      return arms.length === 1 ? arms[0]! : make.union({
-        id: fresh('spu'), inputs: arms, all: true, channels, type: walkType,
-      });
-    },
-  });
-  if (recursiveViolation(walk) || !termOk) return null;
-
-  // SHORTEST per (source, target), ALL ties: keep the rows whose distance equals the partition minimum.
-  const ranked = make.window({
-    id: fresh('spr'), input: walk, channels, type: typeOf(...walk.type.cols, meta('md', 'int')),
-    specs: [['md', {
-      kind: 'window-expr', fn: 'min', args: [col(walk.id, 'dist')],
-      spec: { partitionBy: [col(walk.id, 'src'), col(walk.id, 'id')], orderBy: [] },
-    }]],
-  });
-  const shortest = make.filter({
-    id: fresh('spmn'), input: ranked, channels, type: ranked.type,
-    pred: eq(col(ranked.id, 'dist'), col(ranked.id, 'md')),
-  });
-  const dropped = make.project({
-    id: fresh('spd'), input: shortest, channels, type: walkType,
-    exprs: header.map((name) => [name, col(shortest.id, name)] as const),
-  });
-  // COLLECTION FILTERS — applied AFTER the shortest-per-pair selection (the reference computes the
-  // shortest path to every vertex and filters only what it collects, `collectShortestPaths`).
-  let selected: Rel = dropped;
-  // A WEIGHTED maxDistance caps the final shortest distance per pair (it does NOT prune the walk, since a
-  // custom distance may be negative — `exceedsMaxDistance` only prunes for hop distances).
-  if (weighted && cfg.maxWeight !== undefined) {
-    selected = make.filter({
-      id: fresh('spw'), input: selected, channels, type: selected.type,
-      pred: { kind: 'binary', op: '<=', left: col(selected.id, 'dist'), right: compilerReal(cfg.maxWeight) },
-    });
-  }
-  // TARGET FILTER — the endpoint (the path's last vertex) must pass the target predicate. The trivial
-  // path's endpoint IS its source, so the same filter gates it.
-  if (cfg.target) {
-    const pred = child.predicate(cfg.target, { kind: 'element', id: col(selected.id, 'id'), rel: selected, elem: 'vertex' }, false);
-    if (!pred) return null;
-    selected = make.filter({ id: fresh('spt'), input: selected, channels, type: selected.type, pred });
-  }
-  // The reference keeps a SET of shortest paths per pair — dedup identical paths (a JSONB path equals
-  // another iff its bytes match, which two identical vertex sequences produce).
-  const deduped = make.distinct({ id: fresh('spdd'), input: selected, channels, type: selected.type });
-
-  // Consume the path channel exactly as `path()` does. shortestPath carries no `by()` modulation, so a
-  // bare `path` step is the honest input — every position frames as its own element.
-  const pathStep = { name: 'path', args: [] } as unknown as IRStep;
-  return pathPositions(deduped, pathStep, child, source, fresh);
-}
-
-// ---------- WEIGHTED reconstruction from a precomputed dist relation (the BSP path) ----------
+// ---------- reconstruction from the precomputed dist relation (the BSP resume) ----------
 //
-// The resume half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5). The
-// barrier's `apply` already relaxed the weighted shortest DISTANCE into `barrier_state` (scope = source,
-// channel 0 = dist REAL; `relaxWeighted`). This rebuilds the shortest PATHS from that relation with the
-// SAME `Recursive` + `pathPositions` machinery as the unweighted walk, but the guard is the DIST-GATE
-// instead of enumerate-then-MIN: an edge (u,v) is on a shortest path from s iff dist[s][v] = dist[s][u] +
-// w(u,v), so walking only those edges yields exactly the shortest paths (all ties) and terminates without
-// the exponential blowup that hangs the unweighted walk on a dense graph. Both dist reads come from
-// `barrier_state` (never the walk's own accumulation), so the equality is FLOAT-EXACT — `dv` is the
-// stored MIN the relaxation wrote, and `du + w` recomputes the same sum from the same stored operands.
+// See the file header: the barrier's `apply` (`relaxShortestPath`) landed the shortest DISTANCE in
+// `barrier_state`, and this rebuilds the shortest PATHS from it — weighted or unweighted — gated on the
+// float-exact `dv = du + w`.
 
 export interface ReconstructConfig {
   readonly direction: 'out' | 'in' | 'both';
   readonly labels: readonly string[];
   readonly includeEdges: boolean;
-  readonly distanceKey: string;
-  /** A weighted distance cap — filters the FINAL shortest distance per pair (dist[s][endpoint] <= cap).
-   *  Not a walk prune (a custom distance may be negative). */
+  /** The edge WEIGHT property key (weighted), or `undefined` for unweighted (hop distance, w=1). */
+  readonly distanceKey?: string;
+  /** A distance cap — filters the FINAL shortest distance per pair (dist[s][endpoint] <= cap): a hop cap
+   *  when unweighted, a weight cap when weighted. Not a walk prune (a custom weight may be negative). */
   readonly maxWeight?: number;
   readonly target?: readonly IRStep[];
 }
@@ -341,11 +159,16 @@ export function shortestPathReconstruct(
         });
         const neighbourCol = hop.to === 'tgt' ? 'etgt' : 'esrc';
         const neighbour = col(joined.id, neighbourCol);
-        // The per-edge weight (the reference's `values(key)` over the edge, COALESCE 0) — the SAME read
-        // the relaxation used, so `du + w` reproduces the stored `dv` exactly.
-        const w = child.scalar(valuesStep(cfg.distanceKey), { kind: 'element', id: col(joined.id, 'eid'), elem: 'edge' });
-        if (!w) { termOk = false; return joined; }
-        const weight: Expr = { kind: 'call', fn: 'COALESCE', args: [w.expr, compilerReal(0)] };
+        // The per-edge weight — the SAME the relaxation used, so `du + w` reproduces the stored `dv`
+        // exactly: the `values(key)` read over the edge (COALESCE 0) when weighted, else the constant 1.
+        let weight: Expr;
+        if (cfg.distanceKey !== undefined) {
+          const w = child.scalar(valuesStep(cfg.distanceKey), { kind: 'element', id: col(joined.id, 'eid'), elem: 'edge' });
+          if (!w) { termOk = false; return joined; }
+          weight = { kind: 'call', fn: 'COALESCE', args: [w.expr, compilerReal(0)] };
+        } else {
+          weight = compilerInt(1);
+        }
         const du = distAt(run, round, col(joined.id, 'psrc'), col(joined.id, 'pid'), fresh);
         const dv = distAt(run, round, col(joined.id, 'psrc'), neighbour, fresh);
         // Keep only shortest-path edges (dist-gate), and never revisit a vertex (backstop for zero/negative

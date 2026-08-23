@@ -378,12 +378,13 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
     expect(call.withArgs).toContainEqual(['~tinkerpop.connectedComponent.propertyName', 'cluster']);
   });
 
-  test('all four native OLAP steps are built — shortestPath compiles to a recursive-CTE read', () => {
-    // The compute for every native OLAP step is now built (mogwai.pageRank/.wcc/.peerPressure are
-    // DECORATE barriers; mogwai.shortestPath is a pure recursive-CTE `rel`). shortestPath compiles
-    // SYNCHRONOUSLY to a single read plan — no barrier, no pending-execution deferral. L2/L3 cover the
-    // values.
-    const compiled = compile('g.V().shortestPath()', {}, { registry: standardRegistry });
-    expect(compiled.kind).toBe('read');
+  test('all four native OLAP steps are built as BARRIERS — shortestPath included', () => {
+    // Every native OLAP step is now a barrier (mogwai.pageRank/.wcc/.peerPressure DECORATE barriers;
+    // mogwai.shortestPath a BSP relaxation + path-reconstruction barrier — the recursive-CTE walk is
+    // gone, docs/2026-08-23-barrier-substrate-reshape-plan.md §5). So bare compile() cannot drive it —
+    // it must go through an Executor (a barrier's `apply` runs at runtime against the store). L2/L3
+    // cover the values; this pins that shortestPath is on the barrier substrate, not a compile-time rel.
+    expect(() => compile('g.V().shortestPath()', {}, { registry: standardRegistry }))
+      .toThrow(/barrier step .* compiles to a segment plan that must be DRIVEN against a store/);
   });
 });

@@ -1,12 +1,11 @@
-import type { BarrierInput, BarrierRelation, CallParams, PathSpec, RelCallSite, RelContribution, Service } from '../spi/types.ts';
+import type { BarrierInput, BarrierRelation, CallParams, PathSpec, Service } from '../spi/types.ts';
 import {
-  PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME,
+    PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME,
 } from '../spi/types.ts';
 import type { GraphStore } from '../../storage.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { parseGremlin, stepChain } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/step.ts';
-import { shortestPathWalk } from '../../compiler/rel/shortestpath.ts';
 
 // ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
 //
@@ -175,12 +174,13 @@ const changedCount = (store: GraphStore, run: number, prev: Slot, next: Slot): n
 // channel needed. Negative/custom weights are legal (the reference's `distanceEqualsNumberOfHops` split;
 // GDS `BellmanFord`), so the bound is |V|-1 rounds with no Dijkstra prune.
 
-/** A weighted adjacency CTE `e(src, tgt, w)` — like `adjacencyCte` but carrying each edge's weight
- *  (the `distanceKey` property, COALESCE 0). `distanceKey` is a parsed literal (the user's Gremlin), so
- *  it inlines as a typed SQL literal — no bind (the bind rule, root CLAUDE.md). The label filter stays a
- *  `json_each` bind, prepended like `adjacencyCte`'s. */
-function weightedAdjacencyCte(scope: EdgeScope, distanceKey: string): { cte: string; labelBinds: string[] } {
-  const w = `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${distanceKey.replace(/'/g, "''")}'), 0)`;
+/** A shortest-path adjacency CTE `e(src, tgt, w)` — like `adjacencyCte` but carrying each edge's WEIGHT:
+ *  the `distanceKey` property (COALESCE 0) when weighted, else the constant `1` (hop distance). A
+ *  `distanceKey` is a parsed literal (the user's Gremlin), so it inlines as a SQL literal — no bind (the
+ *  bind rule, root CLAUDE.md). The label filter stays a `json_each` bind, prepended like `adjacencyCte`'s. */
+function shortestPathAdjacencyCte(scope: EdgeScope, distanceKey: string | undefined): { cte: string; labelBinds: string[] } {
+  const w = distanceKey === undefined ? '1'
+    : `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${distanceKey.replace(/'/g, "''")}'), 0)`;
   const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
   const filter = scope.labels.length
     ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
@@ -191,16 +191,17 @@ function weightedAdjacencyCte(scope: EdgeScope, distanceKey: string): { cte: str
   return { cte: `e(src, tgt, w) AS (${body})`, labelBinds: binds };
 }
 
-/** Relax weighted shortest DISTANCE from a set of source vertices into `barrier_state` (scope = source,
- *  channel 0 = dist REAL), Bellman-Ford, entirely in SQL — reusing the two-slot `iterateInSql` driver and
- *  `changedCount` fixpoint from the node-keyed algorithms. Seeds dist 0 at each source; each round writes
- *  the next slot with dist[s][v] = MIN(current, MIN over u→v of dist[s][u] + w(u,v)). Only REACHABLE
- *  (source, node) pairs get rows (an absent row is +∞). Returns the final slot; the dist relation stays
- *  SQL-resident for the path-reconstruction resume. Backstop |V| rounds (Bellman-Ford). */
-export function relaxWeighted(
-  store: GraphStore, run: number, sourceIds: readonly number[], scope: EdgeScope, distanceKey: string,
+/** Relax shortest DISTANCE from a set of source vertices into `barrier_state` (scope = source, channel 0
+ *  = dist), Bellman-Ford, entirely in SQL — reusing the two-slot `iterateInSql` driver and the sparse
+ *  `changedOrNew` fixpoint. Weighted (a `distanceKey`) sums edge weights (REAL); unweighted (no key) sums
+ *  hops (w=1). Seeds dist 0 at each source; each round writes the next slot with dist[s][v] = MIN(current,
+ *  MIN over u→v of dist[s][u] + w(u,v)). Only REACHABLE (source, node) pairs get rows (an absent row is
+ *  +∞). Returns the final slot; the dist relation stays SQL-resident for the path-reconstruction resume.
+ *  Backstop |V| rounds (Bellman-Ford). */
+export function relaxShortestPath(
+  store: GraphStore, run: number, sourceIds: readonly number[], scope: EdgeScope, distanceKey: string | undefined,
 ): Slot {
-  const { cte, labelBinds } = weightedAdjacencyCte(scope, distanceKey);
+  const { cte, labelBinds } = shortestPathAdjacencyCte(scope, distanceKey);
   const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
   const seed = () => store.query(
     `${STATE_INSERT} SELECT ?, 0, s.value, s.value, 0, 0.0 FROM json_each(?) s`,
@@ -263,15 +264,15 @@ function targetBody(value: unknown): readonly IRStep[] | undefined {
   catch { throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${gremlin}"`); }
 }
 
-/** shortestPath() — DUAL substrate, chosen by whether a weight key is set (`~tinkerpop.shortestPath.distance`):
- *  - UNWEIGHTED → the recursive-CTE path WALK (`shortestPathWalk`), an inline `rel` contribution compiled
- *    at compile time (store-free; hop distance, hop-cap prunes).
- *  - WEIGHTED → a BSP relaxation BARRIER: `apply` relaxes the weighted shortest distance from the sources
- *    into `barrier_state` (`relaxWeighted`, scope = source, channel 0) and returns the `(run, round)`
- *    handle; the resume (`lowerPathResume`) reconstructs the shortest paths from it. This is why the
- *    service captures a store — the barrier's `apply` runs at runtime. The walk cannot serve weighted: a
- *    min-distance relaxation is an aggregate a recursive term forbids (P3 / repeat-two-regimes §1a), so
- *    the walk would enumerate every simple path and hang on a dense graph (the §7.1 cost wall). */
+/** shortestPath() — ONE substrate: a BSP relaxation BARRIER for BOTH weighted and unweighted searches.
+ *  `apply` relaxes the shortest distance from the incoming source vertices into `barrier_state`
+ *  (`relaxShortestPath`, scope = source, channel 0 — weighted sums edge weights, unweighted sums hops) and
+ *  returns the `(run, round)` handle; the resume (`lowerPathResume`) reconstructs the shortest paths from
+ *  that relation, walking only shortest-path edges (`dist[s][v] = dist[s][u] + w`). This REPLACES the
+ *  recursive-CTE walk, whose enumerate-then-MIN is exponential and hangs on a dense graph even unweighted
+ *  (a min-distance relaxation is an aggregate a recursive term forbids — P3 / repeat-two-regimes §1a). The
+ *  compute is a synchronous in-SQL core (`syncBarrier`): `apply` yields in production, `applySync` drives
+ *  the sync/census path. */
 export function createShortestPathService(store: GraphStore | undefined): Service {
   return {
     name: SHORTEST_PATH_SERVICE_NAME,
@@ -291,52 +292,31 @@ export function createShortestPathService(store: GraphStore | undefined): Servic
       const includeEdges = SP_INCLUDE_EDGES in site.params;
       const target = targetBody(site.params[SP_TARGET]);
       const distanceKey = site.params[SP_DISTANCE];
-
-      // WEIGHTED → the BSP relaxation barrier.
-      if (distanceKey !== undefined) {
-        if (typeof distanceKey !== 'string')
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(distanceKey)}`);
-        let maxWeight: number | undefined;
-        if (SP_MAX_DISTANCE in site.params) {
-          const md = site.params[SP_MAX_DISTANCE];
-          if (typeof md !== 'number')
-            throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
-          maxWeight = md;
-        }
-        const path: PathSpec = { direction: scope.direction, labels: scope.labels, includeEdges, distanceKey, maxWeight, target };
-        return {
-          kind: 'barrier', residency: 'do', path,
-          ...syncBarrier((rows): BarrierRelation => {
-            if (!store)
-              throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: no graph store is available to compute weighted shortest paths`);
-            // The sources are the incoming traverser vertices (the head projected their ids), deduped.
-            const sourceIds = [...new Set(rows.map((r) => Number(r.injectedValue)))];
-            const run = store.allocBarrierRun();
-            const round = relaxWeighted(store, run, sourceIds, scope, distanceKey);
-            return { kind: 'relation-ref', run, round };
-          }),
-        };
+      if (distanceKey !== undefined && typeof distanceKey !== 'string')
+        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(distanceKey)}`);
+      // maxDistance caps the FINAL shortest distance per pair — a hop cap (integer) unweighted, a weight
+      // cap (any number) weighted. Applied at reconstruction, not as a walk prune (a weight may be negative).
+      let maxWeight: number | undefined;
+      if (SP_MAX_DISTANCE in site.params) {
+        const md = site.params[SP_MAX_DISTANCE];
+        if (typeof md !== 'number')
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
+        if (distanceKey === undefined && !Number.isInteger(md))
+          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: an unweighted maxDistance must be an integer hop count, got ${md}`);
+        maxWeight = md;
       }
-
-      // UNWEIGHTED → the recursive-CTE walk, an inline rel contribution.
+      const path: PathSpec = { direction: scope.direction, labels: scope.labels, includeEdges, distanceKey, maxWeight, target };
       return {
-        kind: 'rel',
-        buildRel: (rcs: RelCallSite): RelContribution | null => {
-          // A `start` position for this streaming step is invalid Gremlin (§6·5 — a THROW, not a decline).
-          if (!rcs.stream)
-            throw new Error('shortestPath() must be called mid-traversal on vertices (e.g. g.V().shortestPath())');
-          // maxDistance is a HOP cap (unweighted) that PRUNES the walk; a non-integer is a weighted cap.
-          let maxHops: number | undefined;
-          if (SP_MAX_DISTANCE in rcs.params) {
-            const md = rcs.params[SP_MAX_DISTANCE];
-            if (typeof md !== 'number' || !Number.isInteger(md))
-              throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: a non-integer maxDistance is a weighted cap — set a distance key to use it`);
-            maxHops = md;
-          }
-          const { input, elem, source } = rcs.stream;
-          const built = shortestPathWalk(input, elem, source, { direction: scope.direction, labels: scope.labels, includeEdges, maxHops, target }, rcs.child!, rcs.fresh);
-          return built && { kind: 'relation', rel: built.rel, framing: { kind: 'path', of: built.of, scalars: built.scalars } };
-        },
+        kind: 'barrier', residency: 'do', path,
+        ...syncBarrier((rows): BarrierRelation => {
+          if (!store)
+            throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: no graph store is available to compute shortest paths`);
+          // The sources are the incoming traverser vertices (the head projected their ids), deduped.
+          const sourceIds = [...new Set(rows.map((r) => Number(r.injectedValue)))];
+          const run = store.allocBarrierRun();
+          const round = relaxShortestPath(store, run, sourceIds, scope, distanceKey);
+          return { kind: 'relation-ref', run, round };
+        }),
       };
     },
   };

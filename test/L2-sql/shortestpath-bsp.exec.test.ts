@@ -5,7 +5,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadGraphson } from '../../src/formats/graphson.ts';
 import { readFileSync } from 'node:fs';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { relaxWeighted } from '../../src/services/catalog/graph-algorithms.ts';
+import { relaxShortestPath } from '../../src/services/catalog/graph-algorithms.ts';
 
 // The BSP half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5): a
 // Bellman-Ford relaxation writing dist per (source, node) into barrier_state (scope = source, channel 0).
@@ -25,7 +25,7 @@ describe('weighted shortest distance — Bellman-Ford relaxation (barrier_state,
     const store = seeded(MODERN_SEED);
     const marko = idByName(store, 'marko');
     const run = store.allocBarrierRun();
-    const slot = relaxWeighted(store, run, [marko], { direction: 'both', labels: [] }, 'weight');
+    const slot = relaxShortestPath(store, run, [marko], { direction: 'both', labels: [] }, 'weight');
     // marko→lop 0.4 + lop-josh 0.4 (josh created lop, undirected) = 0.8; direct marko-knows-josh = 1.0.
     expect(dist(store, run, slot, marko, idByName(store, 'josh'))).toBeCloseTo(0.8, 5);
     expect(dist(store, run, slot, marko, idByName(store, 'marko'))).toBe(0); // self
@@ -37,7 +37,7 @@ describe('weighted shortest distance — Bellman-Ford relaxation (barrier_state,
     const marko = idByName(store, 'marko');
     const josh = idByName(store, 'josh');
     const run = store.allocBarrierRun();
-    const slot = relaxWeighted(store, run, [marko], { direction: 'both', labels: [] }, 'weight');
+    const slot = relaxShortestPath(store, run, [marko], { direction: 'both', labels: [] }, 'weight');
     // An edge (u,v) is on a shortest path from s iff dist[s][v] = dist[s][u] + w(u,v). Walk only those.
     const rows = store.query<{ endpoint: number; path: string }>(
       `WITH RECURSIVE
@@ -69,7 +69,7 @@ describe('weighted shortest distance — Bellman-Ford relaxation (barrier_state,
     const tgt = store.query<{ node: number }>(`SELECT node FROM vertex_properties WHERE key = 'name' AND value = 'MAYBE YOU KNOW HOW I FEEL'`)[0].node;
     const run = store.allocBarrierRun();
     const t = performance.now();
-    const slot = relaxWeighted(store, run, [src], { direction: 'out', labels: ['followedBy'] }, 'weight');
+    const slot = relaxShortestPath(store, run, [src], { direction: 'out', labels: ['followedBy'] }, 'weight');
     const ms = performance.now() - t;
     expect(ms).toBeLessThan(30_000); // the recursive-CTE walk never finished here
     expect(dist(store, run, slot, src, tgt)).toBeGreaterThan(0); // reachable, finite
