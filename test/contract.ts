@@ -111,6 +111,13 @@ function olapContract(getOrigin: () => string) {
         // On this graph every shortest path is a direct edge, so all betweenness is 0 — but all three
         // vertices are decorated, which exercises the full compute end to end.
         expect((await g.V().call('mogwai.betweenness').has('betweenness').count().next()).value).toBe(3);
+
+        // mogwai.nodeSimilarity — the PAIR-OUTPUT barrier (a stream of {node1,node2,similarity} maps, a
+        // new output shape). Out-neighbours: marko→{josh,lop}, josh→{lop}; Jaccard(marko,josh)=1/2, both
+        // directions → 2 pairs. Proves the pair compute + map framing run on the real DO.
+        const sims = await g.call('mogwai.nodeSimilarity').toList();
+        expect(sims.length).toBe(2);
+        for (const m of sims as Map<string, unknown>[]) expect(m.get('similarity')).toBeCloseTo(0.5, 10);
       } finally { await conn.close(); }
     }, 40_000);
   });

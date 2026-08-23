@@ -194,6 +194,20 @@ export interface DecorateChannel {
  *  maxWeight); `apply` supplies the runtime `(run, round)`. */
 export type PathSpec = ReconstructConfig;
 
+/** A PAIR barrier's output descriptor — node-similarity. When present on a barrier contribution, the
+ *  segment builds a PAIR resume (`pairSegment` → `lowerPairResume`): `apply` computed a set of scored
+ *  vertex PAIRS into `barrier_state` (scope = node1, id = node2, channel 0 = the score) and returns the
+ *  `(run, round)` handle; the resume frames each pair as a MAP `{key1: node1, key2: node2, valueKey:
+ *  score}` — a NEW output shape (a stream of maps), unlike the element-preserving `decorate`, the
+ *  path-replacing `path`, or the detached `federate`/`io`. node1/node2 frame as their external ids. */
+export interface PairSpec {
+  readonly key1: string;
+  readonly key2: string;
+  readonly valueKey: string;
+  /** The canonical Gremlin type of the score (e.g. `'double'` for a Jaccard similarity). */
+  readonly valueVtype: string;
+}
+
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
   | {
@@ -201,6 +215,7 @@ export type Contribution =
       readonly residency: BarrierResidency;
       readonly decorate?: DecorateSpec;
       readonly path?: PathSpec;
+      readonly pairs?: PairSpec;
       /** The PRODUCTION transform — async, so a long compute (an OLAP relaxation over a large graph)
        *  can YIELD between segments/rounds rather than busy-locking the single-threaded Durable Object
        *  while other requests wait. Every barrier has one; it is what the async drive awaits. */
@@ -361,3 +376,6 @@ export const KCORE_SERVICE_NAME = 'mogwai.kcore';
  *  a per-level forward BFS accumulating shortest-path counts, then a reverse-level dependency pass.
  *  Call-only, `internal: true`. */
 export const BETWEENNESS_SERVICE_NAME = 'mogwai.betweenness';
+/** Node similarity (Jaccard over neighbour sets) — the first PAIR-OUTPUT barrier: a stream of
+ *  `{node1, node2, similarity}` maps rather than a per-vertex decoration. Call-only, `internal: true`. */
+export const NODE_SIMILARITY_SERVICE_NAME = 'mogwai.nodeSimilarity';

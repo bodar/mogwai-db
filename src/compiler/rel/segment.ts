@@ -1,9 +1,9 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
-import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PathSpec, Service } from '../../services/spi/types.ts';
+import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
+import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
@@ -52,6 +52,10 @@ interface Barrier {
    *  into `barrier_state` and the resume reconstructs the shortest PATHS from it, REPLACING the stream
    *  (unlike `decorate`, which passes elements through). */
   readonly path?: PathSpec;
+  /** Present iff this is a PAIR barrier (node-similarity): `apply` returns a `(run, round)` handle into
+   *  `barrier_state` (scope = node1, id = node2, channel 0 = score) and the resume frames each pair as a
+   *  MAP — a stream of `{key1, key2, valueKey}` maps, a new output shape. */
+  readonly pairs?: PairSpec;
 }
 
 /** What a segment needs from the enclosing request — the same settled values the RelIR route takes,
@@ -89,7 +93,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path };
+    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path, pairs: contribution.pairs };
   }
   return null;
 }
@@ -155,6 +159,8 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   if (call!.decorate) return decorateSegment(steps, call!, request);
   // A PATH barrier (weighted shortestPath) REPLACES the stream with reconstructed paths.
   if (call!.path) return pathSegment(steps, call!, request);
+  // A PAIR barrier (node-similarity) PRODUCES a stream of scored-pair maps — a source-form global compute.
+  if (call!.pairs) return pairSegment(steps, call!, request);
   return call!.at === 0 ? sourceSegment(steps, call!, request) : midSegment(steps, call!, request);
 }
 
@@ -294,6 +300,36 @@ function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: Segmen
         throw new Error(`call("${barrier.spec.serviceName}"): a path barrier must return a (run, round) relation handle, not detached rows`);
       const relation = out as BarrierRelation;
       const resumed = lowerPathResume(relation.run, relation.round, barrier.path!, steps, barrier.at, request.lowering);
+      if (!resumed) {
+        const next = steps[barrier.at + 1];
+        throw new Error(
+          next
+            ? `${next.name}() is not supported after ${barrier.spec.serviceName} yet`
+            : `${barrier.spec.serviceName} produced a result this route cannot frame`,
+        );
+      }
+      return { kind: 'sql', compiled: finishLowering(resumed) };
+    },
+  };
+}
+
+/** A PAIR barrier (node-similarity). GLOBAL, source-form: `apply` runs over no input, computes the scored
+ *  pairs into `barrier_state`, and returns the `(run, round)` handle; `lowerPairResume` frames each pair as
+ *  a MAP (a stream of maps — the new output shape). */
+function pairSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
+  return {
+    kind: 'segment',
+    mode: 'async',
+    head: null,
+    params: barrier.site.params,
+    apply: barrier.apply,
+    applySync: barrier.applySync,
+    residency: barrier.residency,
+    resume: (out: BarrierOutput): Plan => {
+      if (Array.isArray(out))
+        throw new Error(`call("${barrier.spec.serviceName}"): a pair barrier must return a (run, round) relation handle, not detached rows`);
+      const relation = out as BarrierRelation;
+      const resumed = lowerPairResume(relation.run, relation.round, barrier.pairs!, steps, barrier.at, request.lowering);
       if (!resumed) {
         const next = steps[barrier.at + 1];
         throw new Error(

@@ -283,9 +283,16 @@ this target and the pair-keyed reshape are one build, not two.
      DELETE-ing prior rounds. `docs/.../betweenness/` (GPLv3, re-expressed).
    - **Also landed this family/session (one-shot + fixpoint decorates, kernel-based):** `mogwai.hits`
      (multi-channel), `mogwai.triangleCount` + `mogwai.localClusteringCoefficient` (one-shot), `mogwai.kcore`
-     (h-index fixpoint). **Next:** node-similarity — the one genuinely-new shape LEFT: per-(u,v)
-     `scope=u, id=v` state AND a pair-STREAM output (not a per-vertex decoration), so it needs a new
-     output arm, not just a new algorithm. GDS ref: `vendor/gds/algo/.../similarity/`.
+     (h-index fixpoint).
+   - ✅ **`mogwai.nodeSimilarity` LANDED — the NEW OUTPUT SHAPE (a 4th barrier output arm).** Every prior
+     barrier either decorated the live stream, replaced it with paths, or landed detached rows;
+     node-similarity emits a STREAM OF MAPS `{node1, node2, similarity}` — scored vertex PAIRS. New
+     plumbing: `PairSpec` + `pairs?` on the barrier Contribution; `pairSegment` (source-form) →
+     `lowerPairResume`, which builds the self-describing `[[key,{t,v}],…]` blob per pair (`typedNode`) and
+     frames it through the existing `mapValue` wire form (`framed`'s `map` arm → `mapPayload`) — so NO new
+     wire/framer code, just a new resume that produces a `MAP_COL` blob. Jaccard of out-neighbour sets in
+     ONE SQL statement (a neighbour self-join). Matched a bipartite oracle + validated on real workerd.
+     `docs/.../similarity/` (GPLv3, re-expressed).
 6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
    so a barrier inside one must too. Two regimes, split by whether the body flattens:
    - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded

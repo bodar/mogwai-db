@@ -33,7 +33,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseEr
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet,
     jsonMemberByTypeof, labelSetArgs, meta, minter, notProduced, or, payloadCols, propertyKeyArgs, renumber,
-    typeOf, withMergedVtype, type Minter,
+    typedNode, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -50,7 +50,7 @@ import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
-import type { InjectionKind } from '../../services/spi/types.ts';
+import type { InjectionKind, PairSpec } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
@@ -4261,6 +4261,45 @@ export function lowerPathResume(
   const built = shortestPathReconstruct(run, round, cfg, ctx.source, childSeam(ctx, fresh), fresh);
   if (!built) return null;
   const tail = continueAs(built.rel, { kind: 'path', of: built.of, scalars: built.scalars }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+}
+
+/**
+ * THE PAIR RESUME — node-similarity's tail, and a NEW output shape: a stream of `{key1, key2, valueKey}`
+ * MAPS. `apply` computed scored vertex PAIRS into `barrier_state` (scope = node1, id = node2, channel 0 =
+ * score); this frames each pair row as one map, reusing the `mapValue` wire form — build the self-describing
+ * `[[key, {t,v}], …]` blob per row (`typedNode`), carry it in `MAP_COL`, and let `framed`'s `map` arm
+ * (`mapPayload`) turn each blob into one GraphBinary map. node1/node2 frame as their EXTERNAL ids
+ * (`source.externalId`); the score by the spec's vtype. `run`/`round` inline as literals (O(1) plan).
+ */
+export function lowerPairResume(
+  run: number, round: number, spec: PairSpec, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  const { ctx } = chainCtxOf(steps, opts);
+  const scan = make.scan({
+    id: fresh('pss'), table: 'barrier_state', alias: fresh('rps'), channels: [],
+    type: typeOf(meta('run', 'int'), meta('round', 'int'), meta('scope', 'int'), meta('id', 'int'), meta('channel', 'int'), meta('cval', 'any', true)),
+  });
+  const rows = make.filter({
+    id: fresh('psf'), input: scan, channels: [], type: scan.type,
+    pred: and(and(eq(col(scan.id, 'run'), compilerInt(run)), eq(col(scan.id, 'round'), compilerInt(round))), eq(col(scan.id, 'channel'), compilerInt(0))),
+  });
+  // node1/node2 as EXTERNAL ids, correlated off the pair's scope/id rowids (no join → no column clash).
+  const ext1 = ctx.source.externalId('vertex', col(rows.id, 'scope'), fresh);
+  const ext2 = ctx.source.externalId('vertex', col(rows.id, 'id'), fresh);
+  const pair = (key: string, node: Expr): Expr => ({ kind: 'json-array', items: [compilerText(key), node], binary: false });
+  const blob: Expr = { kind: 'json-array', binary: false, items: [
+    pair(spec.key1, typedNode(ext1, compilerText('int'))),
+    pair(spec.key2, typedNode(ext2, compilerText('int'))),
+    pair(spec.valueKey, typedNode(col(rows.id, 'cval'), compilerText(spec.valueVtype))),
+  ] };
+  const rel = make.project({
+    id: fresh('psm'), input: rows, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
+    exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [blob] }]],
+  });
+  const tail = continueAs(rel, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
   return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
