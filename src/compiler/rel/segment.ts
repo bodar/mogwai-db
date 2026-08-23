@@ -36,6 +36,9 @@ interface Barrier {
   readonly site: CallSite;
   readonly spec: CallSpec;
   readonly apply: (rows: readonly BarrierInput[]) => Promise<BarrierOutput>;
+  /** The synchronous core of `apply` (the OLAP barriers), letting the SYNC drive run it with no await.
+   *  Absent for federate/io (real I/O). See `services/spi/types.ts`. */
+  readonly applySync?: (rows: readonly BarrierInput[]) => BarrierOutput;
   /** WHERE this barrier's `apply` runs (§4·3) — carried through to the `SegmentPlan` so the drive
    *  loop can decide whether the Worker may drive it (`'worker'`) or it must stay DO-side (`'do'`). */
   readonly residency: BarrierResidency;
@@ -84,7 +87,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path };
+    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path };
   }
   return null;
 }
@@ -192,6 +195,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     head,
     params: barrier.site.params,
     apply: barrier.apply,
+    applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput, headRows: readonly BarrierInput[]): Plan =>
       resumed(steps, barrier, request, out as ForeignRow[], {
@@ -234,6 +238,7 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
     head: inputHead,
     params: barrier.site.params,
     apply: barrier.apply,
+    applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput): Plan => {
       // A decorate barrier's own `apply` returns a relation, never `ForeignRow[]` — a foreign result
@@ -273,6 +278,7 @@ function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: Segmen
     head,
     params: barrier.site.params,
     apply: barrier.apply,
+    applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput): Plan => {
       // A path barrier's `apply` returns a relation handle (the run/round in barrier_state), never rows.
@@ -302,6 +308,7 @@ function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: Segm
     head: null,
     params: barrier.site.params,
     apply: barrier.apply,
+    applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput): Plan => resumed(steps, barrier, request, out as ForeignRow[]),
   };

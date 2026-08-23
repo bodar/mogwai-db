@@ -64,12 +64,23 @@ export async function driveSegmentsFrom(readers: SegmentReaders, first: Plan): P
  *  suspension, so nothing can mutate the store mid-query. */
 export function driveSegmentsSync(readHeadSync: SegmentReaders['readHeadSync'], first: Plan): Executable {
   let p: Plan = first;
+  // OLAP barriers land their result in `barrier_state` under a run token; collect them for post-frame GC
+  // exactly as the async drive does.
+  const barrierRuns: number[] = [];
   while (p.kind === 'segment') {
-    if (p.mode !== 'sync')
+    if (p.mode === 'sync') { p = p.resume(readHeadSync(p.head)); continue; }
+    // An ASYNC barrier with a SYNCHRONOUS CORE (the OLAP algorithms — a pure in-SQL loop, no real await)
+    // runs HERE with no suspension: busy-locking is fine on the sync/test `framed()` path. Production keeps
+    // the async `apply` so it can yield. A barrier WITHOUT a sync core (federate/io — real remote/object
+    // I/O) genuinely cannot be driven synchronously, so it still refuses this path.
+    if (!p.applySync)
       throw new Error('this traversal suspends at an async barrier (a federated call(), or io()) — use the async path (framedAsync / raw), not the sync framed()/buffers()');
-    p = p.resume(readHeadSync(p.head));
+    const rows = p.head ? readHeadSync(p.head) : [];
+    const out = p.applySync(rows);
+    if (!Array.isArray(out)) barrierRuns.push((out as BarrierRelation).run);
+    p = p.resume(out, rows);
   }
-  return p.compiled;
+  return barrierRuns.length ? { ...p.compiled, cleanup: barrierRuns } : p.compiled;
 }
 
 /** Compile a traversal, then drive it — the ordinary entry point (in-process `Executor`). */

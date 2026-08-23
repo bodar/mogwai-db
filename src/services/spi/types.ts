@@ -183,7 +183,23 @@ export type PathSpec = ReconstructConfig;
 
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
-  | { readonly kind: 'barrier'; readonly residency: BarrierResidency; readonly decorate?: DecorateSpec; readonly path?: PathSpec; apply(rows: readonly BarrierInput[]): Promise<BarrierOutput> };
+  | {
+      readonly kind: 'barrier';
+      readonly residency: BarrierResidency;
+      readonly decorate?: DecorateSpec;
+      readonly path?: PathSpec;
+      /** The PRODUCTION transform — async, so a long compute (an OLAP relaxation over a large graph)
+       *  can YIELD between segments/rounds rather than busy-locking the single-threaded Durable Object
+       *  while other requests wait. Every barrier has one; it is what the async drive awaits. */
+      apply(rows: readonly BarrierInput[]): Promise<BarrierOutput>;
+      /** The SYNCHRONOUS CORE, present iff the compute has no real I/O await (the OLAP barriers —
+       *  `relaxShortestPath` / wcc / pageRank / peerPressure are pure in-SQL loops; `apply` merely wraps
+       *  this). It lets the SYNC drive (`driveSegmentsSync`, the `framed()`/census path) run the barrier
+       *  with no await, where busy-locking is fine — a TEST/in-process property, never the production
+       *  path, which stays `apply` so it can yield. `federate`/`io` omit it (genuine remote/object I/O),
+       *  so they still refuse the sync path. */
+      applySync?(rows: readonly BarrierInput[]): BarrierOutput;
+    };
 
 /**
  * WHAT A MID-TRAVERSAL BARRIER'S HEAD HANDS ITS `apply` — one row per parent traverser, carrying the

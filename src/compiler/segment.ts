@@ -65,6 +65,11 @@ export interface AsyncSegmentPlan {
   readonly mode: 'async';
   readonly head: Compiled | null;
   readonly apply: (rows: readonly BarrierInput[]) => Promise<BarrierOutput>;
+  /** The SYNCHRONOUS CORE of `apply`, present iff the compute has no real await (the OLAP barriers). It
+   *  lets the SYNC drive run this async barrier with no suspension — the `framed()`/census path, where
+   *  busy-locking is acceptable — while production keeps `apply` so it can yield. Absent for federate/io
+   *  (real I/O), which therefore still refuse the sync path. */
+  readonly applySync?: (rows: readonly BarrierInput[]) => BarrierOutput;
   readonly params: CallParams;
   /** WHERE this barrier's `apply` runs (§4·3): `'worker'` — the Worker may drive the loop off the DO
    *  (federate); `'do'` — must run beside the store, so the edge falls back to the DO's own drive (io).

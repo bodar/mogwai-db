@@ -99,6 +99,17 @@ const VEC = 'vec AS (SELECT id, cval AS v FROM barrier_state WHERE run = ? AND r
  *  most two vectors, cur and next. */
 type Slot = 0 | 1;
 
+/** Wrap an OLAP barrier's SYNCHRONOUS core into the `{apply, applySync}` a barrier contribution declares.
+ *  `apply` (async) is the PRODUCTION path — it can yield so a large compute does not busy-lock the DO;
+ *  `applySync` is the SAME core for the sync/test drive (`framed()`/census), where busy-locking is fine.
+ *  Exact because the OLAP computes are pure in-SQL loops with no real await (`src/services/spi/types.ts`). */
+function syncBarrier(core: (rows: readonly BarrierInput[]) => BarrierRelation): {
+  readonly apply: (rows: readonly BarrierInput[]) => Promise<BarrierRelation>;
+  readonly applySync: (rows: readonly BarrierInput[]) => BarrierRelation;
+} {
+  return { apply: async (rows) => core(rows), applySync: core };
+}
+
 /** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_state`
  *  under `run`, in alternating slots (0/1) — it never enters JS. `seed()` writes slot 0; `step(prev,
  *  next)` runs ONE INSERT..SELECT reading slot `prev` and writing slot `next`; `delta(prev, next)`
@@ -294,10 +305,8 @@ export function createShortestPathService(store: GraphStore | undefined): Servic
         }
         const path: PathSpec = { direction: scope.direction, labels: scope.labels, includeEdges, distanceKey, maxWeight, target };
         return {
-          kind: 'barrier',
-          residency: 'do',
-          path,
-          apply: async (rows: readonly BarrierInput[]): Promise<BarrierRelation> => {
+          kind: 'barrier', residency: 'do', path,
+          ...syncBarrier((rows): BarrierRelation => {
             if (!store)
               throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: no graph store is available to compute weighted shortest paths`);
             // The sources are the incoming traverser vertices (the head projected their ids), deduped.
@@ -305,7 +314,7 @@ export function createShortestPathService(store: GraphStore | undefined): Servic
             const run = store.allocBarrierRun();
             const round = relaxWeighted(store, run, sourceIds, scope, distanceKey);
             return { kind: 'relation-ref', run, round };
-          },
+          }),
         };
       }
 
@@ -418,7 +427,7 @@ export function createWccService(store: GraphStore | undefined): Service {
         kind: 'barrier',
         residency: 'do',
         decorate: { key, vtype: 'string' }, // a component id is the min external-id STRING
-        apply: async (): Promise<BarrierRelation> => {
+        ...syncBarrier((): BarrierRelation => {
           if (!store)
             throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
           const run = store.allocBarrierRun();
@@ -442,7 +451,7 @@ export function createWccService(store: GraphStore | undefined): Service {
           const round = iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
           return { kind: 'relation-ref', run, round };
-        },
+        }),
       };
     },
   };
@@ -538,7 +547,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
         kind: 'barrier',
         residency: 'do',
         decorate: { key, vtype: 'double', seedFromInput: true }, // a PageRank score is a double; initial rank = incoming count
-        apply: async (rows): Promise<BarrierRelation> => {
+        ...syncBarrier((rows): BarrierRelation => {
           if (!store)
             throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
           const run = store.allocBarrierRun();
@@ -588,7 +597,7 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           const round = iterateInSql(store, run, seed, step,
             (p, n) => sumAbsDelta(store, run, p, n), maxRounds, stop);
           return { kind: 'relation-ref', run, round };
-        },
+        }),
       };
     },
   };
@@ -665,7 +674,7 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
         kind: 'barrier',
         residency: 'do',
         decorate: { key, vtype: 'int' }, // a cluster id is a vertex id (integer rowid, modern graph)
-        apply: async (): Promise<BarrierRelation> => {
+        ...syncBarrier((): BarrierRelation => {
           if (!store)
             throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
           const run = store.allocBarrierRun();
@@ -691,7 +700,7 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
           const round = iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), PP_MAX_ITERATIONS, (d) => d === 0);
           return { kind: 'relation-ref', run, round };
-        },
+        }),
       };
     },
   };
