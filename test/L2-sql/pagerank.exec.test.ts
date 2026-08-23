@@ -66,6 +66,27 @@ describe('pageRank() — mogwai.pageRank DECORATE barrier', () => {
       .toEqual({ marko: 15, vadas: 21, lop: 15, josh: 21, ripple: 15, peter: 15 });
   });
 
+  test('initialRank = incoming traverser count (a non-bare prefix seeds the mass)', async () => {
+    const store = seeded(MODERN_SEED);
+    // g_V_hasLabelXpersonX_pageRank_... — person init=1 (mass 4) → the global shape × 4.
+    const rows = (await run(store, `g.V().hasLabel("person").pageRank().with("~tinkerpop.pageRank.propertyName","pageRank").project("name","pageRank").by("name").by(__.values("pageRank").math("ceil(_ * 100)"))`))
+      .map((m: any) => m instanceof Map ? Object.fromEntries(m) : m);
+    expect(Object.fromEntries(rows.map((r: any) => [r.name, r.pageRank]))).toEqual({ marko: 46, vadas: 59, josh: 59, peter: 46 });
+  });
+
+  test('valueMap over a decorated key (mixed with a stored key), with times=0 = the seed', async () => {
+    const store = seeded(MODERN_SEED);
+    // g_V_outXcreatedX_pageRank_...times_0X_valueMapXname_projectRankX — times=0 → projectRank = the
+    // incoming count (lop created by 3, ripple by 1); lop flows through ×3 (bulk preserved).
+    const rows = (await run(store, `g.V().out("created").pageRank().with("~tinkerpop.pageRank.edges",__.bothE()).with("~tinkerpop.pageRank.propertyName","projectRank").with("~tinkerpop.pageRank.times",0).valueMap("name", "projectRank")`))
+      .map((m: any) => Object.fromEntries([...m].map(([k, v]) => [k, v])));
+    expect(rows.length).toBe(4); // lop ×3, ripple ×1
+    const lop = rows.filter((r: any) => r.name[0] === 'lop');
+    expect(lop.length).toBe(3);
+    for (const r of lop) expect(r.projectRank).toEqual([3]);
+    expect(rows.find((r: any) => r.name[0] === 'ripple').projectRank).toEqual([1]);
+  });
+
   test('a fixed iteration count (times) caps the propagation rounds', async () => {
     const store = seeded(MODERN_SEED);
     // times=0 over a bare source = the seed only (no propagation): uniform 1/N for every vertex.

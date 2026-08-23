@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { carriedCols, elementCols, eq, meta, typeOf, type Minter } from './build.ts';
+import { carriedCols, elementCols, eq, jsonOf, meta, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
@@ -98,9 +98,40 @@ export function decorateGraph(bindingName: string, key: string, vtype: string): 
           ...input.channels.map((ch) => [ch.col, col(joined.id, ch.col)] as const)],
       });
     },
+    // valueMap(…keys…) — one (key, values[], ord) row per key. The decorated key contributes ONE row:
+    // its value as a single-element typed list `[{t: vtype, v: cval}]` (so a REAL score frames as a
+    // Double, not the raw json number), correlated on the element id. Mixed with stored keys → a UNION
+    // of the base pairs and this row; other keys alone → the base.
     valueMapPairs(kind, id, keys, fresh) {
-      if (keys?.includes(key)) throw new Error(`valueMap("${key}") over a decorated OLAP property is not supported yet`);
-      return BaseGraph.valueMapPairs(kind, id, keys, fresh);
+      if (keys !== null && !keys.includes(key)) return BaseGraph.valueMapPairs(kind, id, keys, fresh);
+      const r = ref(fresh);
+      const row = make.filter({ id: fresh('dvmf'), input: r, channels: [], type: r.type, pred: eq(col(r.id, 'id'), id) });
+      const decorateRow = make.project({
+        id: fresh('dvmp'), input: row, channels: [],
+        type: typeOf(meta(VALUEMAP_PAIR.key, 'text'), meta(VALUEMAP_PAIR.values, 'json'), meta(VALUEMAP_PAIR.ord, 'int')),
+        exprs: [
+          [VALUEMAP_PAIR.key, compilerText(key)],
+          [VALUEMAP_PAIR.values, { kind: 'call', fn: 'json_array', args: [jsonOf(typedNode(col(row.id, 'cval'), compilerText(vtype)))] }],
+          // valueMap is an unordered map; a fixed ord past any stored key's rank is a stable, harmless slot.
+          [VALUEMAP_PAIR.ord, compilerInt(1_000_000)],
+        ],
+      });
+      const baseKeys = keys ? keys.filter((k) => k !== key) : null;
+      if (baseKeys && baseKeys.length === 0) return decorateRow;
+      const base = BaseGraph.valueMapPairs(kind, id, baseKeys, fresh);
+      // Distinct keys on each side (the decorate key is not stored) — UNION ALL, no dedup.
+      const unioned = make.union({ id: fresh('dvmu'), inputs: [base, decorateRow], all: true, channels: [], type: base.type });
+      // A UNION strips SQLite's JSON subtype from the `values` column, so the caller's `{t:'list', v:…}`
+      // wrap would embed it as TEXT (and `frameTypedNode` would do `.map` on a string). Re-apply `json()`
+      // to restore the subtype — the values array embeds as a nested array again.
+      return make.project({
+        id: fresh('dvmr'), input: unioned, channels: [], type: unioned.type,
+        exprs: [
+          [VALUEMAP_PAIR.key, col(unioned.id, VALUEMAP_PAIR.key)],
+          [VALUEMAP_PAIR.values, jsonOf(col(unioned.id, VALUEMAP_PAIR.values))],
+          [VALUEMAP_PAIR.ord, col(unioned.id, VALUEMAP_PAIR.ord)],
+        ],
+      });
     },
   };
 }
