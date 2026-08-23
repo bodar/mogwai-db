@@ -269,10 +269,12 @@ this target and the pair-keyed reshape are one build, not two.
      proven by GDS's directed test), then aggregate each scope into one score at (scope 0, channel 0).
      Both GDS test graphs ported + matched; validated on real workerd. NO new substrate needed — the
      scope key already existed. `docs/.../closeness/` (GPLv3, re-expressed).
-   - **Next in this family:** harmonic (Σ 1/dist, a trivial variant of closeness's aggregation),
-     node-similarity (per-(u,v) — `scope=u, id=v`, a genuinely new pair-keyed shape), Brandes betweenness
-     (the reverse-pass retention policy — needs keep-all rounds). GDS refs at the pin:
-     `vendor/gds/algo/.../{harmonic,similarity,betweenness}/`.
+   - ✅ **`mogwai.harmonic` LANDED (`0a03944`)** — closeness's sibling on the SAME distances (extracted the
+     shared `distanceCentrality` engine; they differ ONLY in the reduction: closeness reached/farness,
+     harmonic Σ(1/dist)/(N−1)). Ported + matched GDS's undirected test (0.375/0.5/0.375/0.25/0.25).
+   - **Next in this family:** node-similarity (per-(u,v) — `scope=u, id=v`, a genuinely NEW pair-keyed
+     shape, not just reusing shortestPath's scope=source), Brandes betweenness (needs keep-all round
+     retention for the reverse pass). GDS refs: `vendor/gds/algo/.../{similarity,betweenness}/`.
 6. **Barrier-in-body (§6).** A COMPOSITION target — pageRank/wcc work, and the body constructs work,
    so a barrier inside one must too. Two regimes, split by whether the body flattens:
    - ✅ **Slice 1 LANDED (`005e2a4`) — barrier in a BOUNDED `repeat` body**, via the unroll. A bounded
