@@ -338,3 +338,8 @@ export const PAGERANK_SERVICE_NAME = 'mogwai.pageRank';
 export const WCC_SERVICE_NAME = 'mogwai.wcc';
 export const PEER_PRESSURE_SERVICE_NAME = 'mogwai.peerPressure';
 export const SHORTEST_PATH_SERVICE_NAME = 'mogwai.shortestPath';
+/** HITS (Kleinberg hubs & authorities) — a GDS-style algorithm with NO native TinkerPop step, so it is
+ *  call-only (`g.call("mogwai.hits", …)`) and the FIRST multi-channel decorate consumer (hub + auth).
+ *  `internal: true` like the others: served by both registries, absent from `--list`, so it cannot shift
+ *  the reference provider surface the conformance `--list`/g_call scenarios assert. */
+export const HITS_SERVICE_NAME = 'mogwai.hits';

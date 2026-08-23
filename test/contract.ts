@@ -89,6 +89,15 @@ function olapContract(getOrigin: () => string) {
         // Undirected connectivity: all three vertices share ONE component id.
         const comps = await g.V().connectedComponent().project('name', CC_KEY).by('name').by(CC_KEY).toList();
         expect(new Set(comps.map((m: any) => String(m.get(CC_KEY)))).size).toBe(1);
+
+        // mogwai.hits — the MULTI-CHANNEL decorate barrier (hub=channel 0, auth=channel 1). Proves the
+        // two-channel barrier_state read AND the in-place UPDATE normalisation run on the real DO store.
+        // lop is the strongest authority (in-edges from marko+josh); marko the strongest hub (out only).
+        expect((await g.V().call('mogwai.hits').has('hub').has('auth').count().next()).value).toBe(3);
+        const topAuth = await g.V().call('mogwai.hits').order().by('auth', gremlin.process.order.desc).limit(1).values('name').next();
+        expect(topAuth.value).toBe('lop');
+        const topHub = await g.V().call('mogwai.hits').order().by('hub', gremlin.process.order.desc).limit(1).values('name').next();
+        expect(topHub.value).toBe('marko');
       } finally { await conn.close(); }
     }, 40_000);
   });
