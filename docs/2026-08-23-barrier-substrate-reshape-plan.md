@@ -16,12 +16,27 @@ real algorithm:**
   (federate/io) · **pair-maps** (nodeSimilarity — a stream of `{node1,node2,similarity}` maps).
 - **Algorithm library (`src/services/catalog/olap/`), all GDS-oracled, `do`-residency ones real-workerd
   validated:** shortestPath, wcc, pageRank, peerPressure, hits, closeness, harmonic, triangleCount,
-  localClusteringCoefficient, kcore, betweenness, nodeSimilarity. (degree is `tinker.degree.centrality`.)
-- **Remaining GDS candidates all REUSE existing shapes** (scc, labelPropagation, articleRank, eigenvector,
-  louvain) — more algorithms, no new substrate. Eigenvector's GDS Pregel formulation is finicky to
-  exact-match (A+I, one-step message lag) — deferred, noted in-session. Modes: one shape (decorate/etc.)
-  per algo; NO GDS stream/stats/mutate matrix — the traversal after the call is the mode (user decision,
-  revisit only on concrete need).
+  localClusteringCoefficient, kcore, betweenness, nodeSimilarity, **scc, articleRank**.
+  (degree is `tinker.degree.centrality`.)
+  - **scc** = strongly connected components, a one-shot decorate over the DIRECTED graph (mutual-
+    reachability transitive-closure CTE; the partition is algorithm-independent, so no Tarjan replay).
+    connectedComponent()/wcc is the UNDIRECTED sibling.
+  - **articleRank** = PageRank variant damping by (out-degree + avg degree); the SECOND multi-channel
+    consumer after HITS (rank = channel 0, per-round delta = channel 1). Faithful replay of GDS's
+    delta-accumulation formulation; matches GDS's two exact-value graphs to 1e-5.
+- **Remaining GDS candidates** (labelPropagation, louvain, eigenvector) are all the ORDER-DEPENDENT /
+  finicky-Pregel class — NOT clean reuse, and each deferred with cause, NOT abandoned:
+  - **eigenvector** — GDS's A+I one-step-lagged Pregel is finicky to exact-match.
+  - **labelPropagation** — GDS asserts an EXACT 1-iteration label array that depends on ASYNC in-iteration
+    visibility + node order; SQL is synchronous (set-based), so it cannot reproduce it. Its robust oracle
+    is the converged PARTITION only, synchronous LPA risks bipartite oscillation, and self-vote damping
+    collapses it into peerPressure — marginal value for real risk. Do a synchronous variant only if
+    convergence is proven on the target graph; oracle the partition, never the exact array.
+  - **louvain** — sequential greedy local-moving (order-sensitive) + per-level coarsening (a graph
+    rewrite). A set-based/synchronous SQL version is a DIFFERENT algorithm that can decrease modularity;
+    exact GDS match is not achievable and it needs real new substrate (coarsening + accumulate retention).
+  Modes: one shape (decorate/etc.) per algo; NO GDS stream/stats/mutate matrix — the traversal after the
+  call is the mode (user decision, revisit only on concrete need).
 
 ## 1. The finding — `barrier_relation` is GDS's `SingleNodeValue` special case
 
