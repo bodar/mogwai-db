@@ -3,7 +3,9 @@ import type { Plan, SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerDecorateResume, lowerForeignResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
+import { lowerForeignResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
+import { decorateGraph } from './decorate.ts';
+import { BaseGraph } from './source.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
@@ -157,14 +159,15 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
 }
 
 /** A resumed chain to its `Plan` — another segment if the tail STILL holds a barrier (a second regex,
- *  a `call()`), else the SQL compile. A resume CANNOT decline (`resumed`), so a chain the lowering
- *  cannot cover after re-injecting `within(<survivors>)` RAISES, naming the failure, rather than
- *  returning a silent different answer. */
+ *  a chained OLAP `call()` such as `pageRank().connectedComponent()`), else the SQL compile. A resume
+ *  CANNOT decline: the prior barrier has already run, so a tail the lowering cannot cover RAISES rather
+ *  than returning a silent different answer. Shared by the regex resume (which re-injects
+ *  `within(<survivors>)`) and the decorate resume (which re-reads through a `decorateGraph` stack). */
 function planOf(steps: readonly IRStep[], request: SegmentRequest): Plan {
   const segment = segmentPlan(steps, request);
   if (segment) return segment;
   const lowered = lowerToRel(steps, request.lowering);
-  if (!lowered) throw new Error('regex barrier resume: no lowering covers the traversal after re-injecting within(<survivors>)');
+  if (!lowered) throw new Error('barrier resume: no lowering covers the traversal after the barrier — push the unsupported step into the sub-traversal the service runs, or file it as a resume gap');
   return { kind: 'sql', compiled: finishLowering(lowered) };
 }
 
@@ -246,18 +249,17 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
       if (Array.isArray(out))
         throw new Error(`call("${barrier.spec.serviceName}"): a decorate barrier must return an (id → value) relation, not detached rows`);
       const relation = out as BarrierRelation;
-      const lowered = lowerDecorateResume(relation.run, relation.round, key, vtype, steps, barrier.at, request.lowering);
-      // A resume CANNOT decline — the rows are computed. An unsupported step after the algorithm RAISES
-      // naming it, rather than a silent different answer (§6·5), exactly as the foreign resume does.
-      if (!lowered) {
-        const next = steps[barrier.at + 1];
-        throw new Error(
-          next
-            ? `${next.name}() is not supported after ${barrier.spec.serviceName} yet`
-            : `${barrier.spec.serviceName} produced a result this route cannot frame`,
-        );
-      }
-      return { kind: 'sql', compiled: finishLowering(lowered) };
+      // The chain WITHOUT the algorithm's own call() step — the live prefix plus the tail — re-planned
+      // over a `decorateGraph` STACKED on the current source. Re-planning (not lowering straight to SQL)
+      // is what makes a SECOND barrier in the tail — `pageRank().connectedComponent()` — its own segment:
+      // `planOf` finds it, its head reads THROUGH this decoration, and its resume stacks another layer,
+      // so both scores land on the final stream. When the tail holds no further barrier `planOf` lowers
+      // it to one SQL statement, exactly as the single-decorate case always did. The source self-declares
+      // its landed CTE (`decorateGraph.bindings`, collected at `lowered()`), so nothing threads a binding
+      // by hand and a stack's several CTEs coexist under their `run`-derived names.
+      const chainSteps = [...steps.slice(0, barrier.at), ...steps.slice(barrier.at + 1)];
+      const source = decorateGraph(request.lowering.source ?? BaseGraph, relation.run, relation.round, key, vtype);
+      return planOf(chainSteps, { ...request, lowering: { ...request.lowering, source } });
     },
   };
 }

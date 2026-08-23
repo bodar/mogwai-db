@@ -1,6 +1,7 @@
 import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
+import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../plan/plan.ts';
 import { constLit } from './const.ts';
@@ -187,6 +188,15 @@ export interface GraphSource {
    *  The `bulk` option carries a surviving multiplicity column for a collapsed base stream (a bound
    *  stream carries none). */
   leafPayload(input: Rel, kind: Elem, opts: { readonly bulk: boolean; readonly detached: boolean }, fresh: Minter): Rel;
+
+  /** THE PLAN BINDINGS this source needs declared in every statement that reads through it — a
+   *  `decorateGraph` layer's landed `(id → value)` CTE, one per stacked OLAP algorithm. Collected ONCE
+   *  at `lowered()` and prepended to the chain's effects, so a source that carries state declares it
+   *  itself rather than every entry point remembering to. `BaseGraph`/`BoundGraph` carry none (the
+   *  method is absent). A STACK returns the whole stack's bindings (base first), each under a
+   *  `run`-derived name so the same statement can hold several and two independent lowerings that both
+   *  read a layer agree on its CTE name. */
+  bindings?(fresh: Minter): readonly Binding[];
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal

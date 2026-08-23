@@ -49,7 +49,6 @@ import { edgeEndpoint } from './element.ts';
 import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
-import { decorateBinding, decorateGraph } from './decorate.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -4065,12 +4064,17 @@ const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSub
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
   ]));
+  // A stateful SOURCE (a `decorateGraph` stack) declares its landed `(id → value)` CTEs HERE — the one
+  // collection point — so every entry that reads through it (a resume's final SQL, a downstream
+  // barrier's head) gets them without threading a binding by hand. `BaseGraph`/`BoundGraph` carry none.
+  const sourceBindings = source.bindings?.(fresh) ?? [];
+  const effects = chain.effects ? [...sourceBindings, ...chain.effects] : sourceBindings;
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the
   // day a write RESULT needs naming across that boundary, this is where the pass grows to walk a
   // program rather than a tree.
-  const built = chain.effects ? program({ bindings: [...chain.effects, ...named.bindings], result: named.result }) : named;
+  const built = effects.length ? program({ bindings: [...effects, ...named.bindings], result: named.result }) : named;
   // A held LITERAL — of any size — inlines as a typed SQL literal (`constLit`), so a big `inject(v1…vN)`
   // is 0 binds and DO-legal with nothing to convert. The 100-bind cap is a PARAMETER budget, and the only
   // way past it is 100+ distinct PARAMETERS in one statement, which fails closed at the gate below rather
@@ -4080,7 +4084,7 @@ const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSub
   // measured by (its bindings are CTEs of ONE statement) would refuse a nine-statement cascade on a
   // number no database ever asks. `emit` renders every step and raises `BindBudgetExceeded` on the
   // one that is over, which is the same rendered-list authority the read path renders for.
-  if (chain.effects) {
+  if (effects.length) {
     try { emit(plan); } catch (error) {
       if (!(error instanceof BindBudgetExceeded)) throw error;
       return null;
@@ -4238,44 +4242,6 @@ export function lowerForeignResume(
     });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
   return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
-}
-
-/** The reserved bind a DECORATE barrier's `(id → value)` relation crosses under — one `json_each` bind
- *  of a data-sized set, underscore-namespaced so it cannot collide with a user parameter. */
-const DECORATE_RESUME_PARAM = '_mogwai_decorate';
-
-/**
- * THE DECORATE RESUME — the element-preserving tail of an OLAP algorithm (`connectedComponent`,
- * `pageRank`, `peerPressure`). Unlike `lowerForeignResume`, it does NOT replace the stream with landed
- * rows: the compute is global (run inside `apply`, reading the store), and its product is an
- * `(id → value)` relation. So this re-lowers the LIVE element prefix (the chain WITHOUT the algorithm's
- * own `call()` step) over a `decorateGraph` source that answers the one decorated `key` off that
- * relation — every element passes through, decorated, and `has(key)`/`order().by(key)`/`project().by(key)`
- * compose as ordinary property reads.
- *
- * The relation lives in SQL — the algorithm's `apply` computed it into `barrier_state` under a
- * per-query `run` token (`src/services/spi/types.ts` `BarrierRelation`), so this reads it straight off
- * that table by (run, round) rather than crossing the vector as a bind. It is declared ONCE as a fenced
- * binding referenced by name — materialize-once, exactly `lowerForeignResume`'s model. One `fresh`
- * threads the binding AND the re-lowered chain, so their relation ids share one id space (a second
- * `minter()` would restart at 0 and the emitter would see one id naming two relations). The `run` token
- * is a compiler-held constant, inlined as a SQL literal (never a bind — the parameter budget is the
- * user's, root `CLAUDE.md`).
- */
-export function lowerDecorateResume(
-  run: number, round: number,
-  key: string, vtype: string, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
-): RelLowering | null {
-  const fresh = minter();
-  const settled = settle(opts);
-  // The chain WITHOUT the algorithm's own call() step — the live prefix plus the tail, one ordinary
-  // element traversal differing only in the source it reads through.
-  const chainSteps = [...steps.slice(0, barrierAt), ...steps.slice(barrierAt + 1)];
-  const name = fresh(DECORATE_RESUME_PARAM);
-  const binding: Binding = { name, node: decorateBinding(run, round, name, fresh) };
-  const source = decorateGraph(name, key, vtype);
-  const chain = lowerChain(chainSteps, { ...opts, source }, fresh);
-  return chain && lowered({ ...chain, effects: [binding, ...(chain.effects ?? [])] }, source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
 /**
