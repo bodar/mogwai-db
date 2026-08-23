@@ -347,3 +347,6 @@ export const HITS_SERVICE_NAME = 'mogwai.hits';
  *  scope-keyed `barrier_state` (`relaxShortestPath`, scope = source) that weighted shortestPath already
  *  writes: the first pair-keyed-state consumer beyond shortestPath (reshape plan item 5). */
 export const CLOSENESS_SERVICE_NAME = 'mogwai.closeness';
+/** Harmonic centrality — closeness's sibling (Σ 1/dist over reaching nodes, / (N−1)); shares the same
+ *  scope-keyed distance relaxation. Call-only, `internal: true`. */
+export const HARMONIC_SERVICE_NAME = 'mogwai.harmonic';
