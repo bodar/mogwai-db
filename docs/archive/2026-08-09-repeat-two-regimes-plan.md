@@ -18,7 +18,7 @@ for anything `repeat()`-shaped from now on:
 
 | residue | was | measured upside |
 |---|---|---|
-| §3.3 — the unroll's admitted body set becomes a DENY-list | allow-list of movement + `has` + argued barriers | **+10 corpus traversals.** NOT the +79 the raw bounded-decline count suggests: 79 of 135 corpus `repeat`s decline while bounded, but 69 of those are blocked by steps the SPLICED chain still cannot lower, so relaxing the gate does not reach them. Its side-effect subset (`group('a')`/`aggregate`) is separately blocked on `docs/2026-08-09-named-collections-are-bindings-plan.md` — accumulation ACROSS phases is not the stateless argument the landed names use |
+| §3.3 — the unroll's admitted body set becomes a DENY-list | allow-list of movement + `has` + argued barriers | **+10 corpus traversals.** NOT the +79 the raw bounded-decline count suggests: 79 of 135 corpus `repeat`s decline while bounded, but 69 of those are blocked by steps the SPLICED chain still cannot lower, so relaxing the gate does not reach them. Its side-effect subset (`group('a')`/`aggregate`) is separately blocked on `docs/archive/2026-08-09-named-collections-are-bindings-plan.md` — accumulation ACROSS phases is not the stateless argument the landed names use |
 | §3.5 — a parameterised `times($x)` should PREFER the walk | unbuilt | the unroll forces the one early parameter reduction the root `CLAUDE.md` names; the walk keeps it a bind |
 | §6's last cell — an unbounded body whose UNION is not the top node (`repeat(__.bothE().inV())`) | declines on shape | ~0 corpus reach. Needs the same distribution through a JOIN (Calcite's `JoinUnionTransposeRule`); `repeat(__.outE().inV())` already walks because it has one arm |
 

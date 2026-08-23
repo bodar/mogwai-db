@@ -349,7 +349,7 @@ test('until(__.sack().is(P)) loops until the ACCUMULATED sack crosses a threshol
 
 // A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
 // accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
-// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
+// (docs/archive/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
   const store = seededStore();
   // marko out → {vadas,josh,lop} (depth 1); josh out → {ripple,lop} (depth 2). The bag is a
@@ -360,7 +360,7 @@ test('a body aggregate() collects every vertex the walk visits (the :TOUCHED pro
 
 // A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
 // accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
-// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
+// (docs/archive/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
   const store = seededStore();
   // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
@@ -374,7 +374,7 @@ test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (
 
 // A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
 // accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
-// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
+// (docs/archive/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
   const store = seededStore();
   // no movement → each of the 6 vertices stays put and is collected once per iteration; times(2) → 12.

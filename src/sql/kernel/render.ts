@@ -73,7 +73,7 @@ export type MapOf =
   // a scalar key side, exactly as `unfoldMapMembers` does for a `{kind:'map'}` list member). Without
   // this arm the value framed correct-but-opaque as `{kind:'scalar'}`, and `select(values).unfold()`
   // silently mis-shaped it as a scalar — `[{}]` instead of the inner map
-  // (`docs/2026-08-21-map-value-shape-plan.md`).
+  // (`docs/archive/2026-08-21-map-value-shape-plan.md`).
   | { kind: 'map'; of: MapOf };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result

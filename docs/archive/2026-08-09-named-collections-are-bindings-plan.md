@@ -1,5 +1,11 @@
 # A NAMED COLLECTION IS A BOUND RELATION, REDUCED AT THE READ
 
+**✅ LANDED AND ARCHIVED (2026-08-23).** The collection substrate is complete — every phase this doc
+planned (Phases 1/2/3a/3b/4/5/6/7 + Phase 2b) is on trunk. The one remaining feature, a KEYED-label
+seeded merge, is a separate multi-mechanism feature that this doc explicitly does NOT own (see
+§"What is LEFT"); it is tracked in `docs/outstanding-work.md`. Kept for the MEASURED FACTS — the
+thesis (reduce at the READ, not the write) and the fail-closed boundary for multi-site shapes.
+
 **Read this before touching `src/compiler/rel/collection.ts`.** Coverage and L3 floors move for
 unrelated reasons — read the instruments (`l3-state.json`, `scenarios.tsv`), never a number quoted here.
 
@@ -127,7 +133,7 @@ feature, separate from this doc.
 
 | shape | blocked by |
 |---|---|
-| `group().by(k).by(__.bothE().values("weight").mean())` (group-scoped mean) | the `by(<reducer>)` type gap is **CLOSED**. `correlatedReduce` (`lower.ts`) is ONE root-agnostic engine: `sum`/`mean`/`count`/`min`/`max` compose in a record field and a collection member whether the body is rooted at a MOVEMENT (`by(__.inE().values().sum())`) or at the HOST ITSELF (a one-row self relation — `by(__.values("age").max())`), and being root-agnostic it composes with any body the host carries (`map(__.union(out,in).count())` now answers). min/max are a `sort`+`limit(1)` argmax sharing `minMaxOrder`/`minMaxWinnerVt` with the global barrier; every form is member-framing-identical to the top-level reducer (`test/compiler/by-reducer-type.exec`). The ONLY reducer-in-`by()` left is the group-scoped POOLED **`mean`** (`map.ts` `groupReduced`), which declines for a §12 JSON/REAL precision reason, NOT this substrate |
+| `group().by(k).by(__.bothE().values("weight").mean())` (group-scoped mean) | the `by(<reducer>)` type gap is **CLOSED**. `correlatedReduce` (`lower.ts`) is ONE root-agnostic engine: `sum`/`mean`/`count`/`min`/`max` compose in a record field and a collection member whether the body is rooted at a MOVEMENT (`by(__.inE().values().sum())`) or at the HOST ITSELF (a one-row self relation — `by(__.values("age").max())`), and being root-agnostic it composes with any body the host carries (`map(__.union(out,in).count())` now answers). min/max are a `sort`+`limit(1)` argmax sharing `minMaxOrder`/`minMaxWinnerVt` with the global barrier; every form is member-framing-identical to the top-level reducer (`test/compiler/by-reducer-type.exec`). The group-scoped POOLED **`mean`** that once declined for a §12 JSON/REAL precision reason is now **CLOSED too** (`map.ts:647-652`): the map VALUE is a `typedNode` and `typedNode` makes every numeric member lossless for the JSON channel (a binary64 rides as a 17-digit number), so no reducer-in-`by()` remains |
 | `cap("a").unfold().path()` | the path substrate |
 | `within(__.cap('a').unfold())` | predicate-operand label resolution at the `where` (Phase 5 was a precondition, not the whole of it) |
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |

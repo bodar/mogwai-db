@@ -44,7 +44,7 @@ import type { Channel } from '../../channels.ts';
  * whole-relation question (`list.ts:769-789`) over every site's members rather than per site, which
  * is the difference between one member encoding and an inconsistent one, and makes `cap().unfold()`
  * cancel rather than fold-then-explode. Full rationale + phases:
- * `docs/2026-08-09-named-collections-are-bindings-plan.md`.
+ * `docs/archive/2026-08-09-named-collections-are-bindings-plan.md`.
  *
  * ## What declines, and why each is the honest answer
  *

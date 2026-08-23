@@ -1,7 +1,7 @@
 // Consumer-driven fold: `cap("a").select(Column.keys)` over an element-keyed grouping reads the key
 // SIDE of the member rows directly (rowids that MOVE), instead of folding to a JSONB map that would
 // expand each key to a public payload and lose the rowid. See collection.ts `groupedKeys` and
-// docs/2026-08-09-named-collections-are-bindings-plan.md.
+// docs/archive/2026-08-09-named-collections-are-bindings-plan.md.
 import { test, expect, describe } from 'bun:test';
 import { run, seededStore } from '../support/harness.ts';
 

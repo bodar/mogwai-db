@@ -628,12 +628,16 @@ against the reference: six fragment cases in the graphql-js differential, which 
 through its own `CollectFields` while we inline them, so a disagreement in field set, order or alias
 handling shows up as differing `{data}`.
 
-🚧 What the translator still owes: **union minting** in `schema.ts` plus the SDL; and **null-fill shaping** in
-the edge — `edge.ts` is a straight `toJson(decode(...))` passthrough, so a selected field on a vertex
-lacking that property is ABSENT from `{data}` where the spec requires `null`. That last one is a
-pre-existing conformance hole the differential oracle misses (the modern graph is uniform per label), and
-unions make it load-bearing, because after them key-absence would otherwise mean both "wrong member" and
-"property unset". `__typename` disambiguates it, so the shaping is what keeps the two apart.
+✅ **null-fill shaping LANDED** (`ff2ff89` — `Translation` now carries a `ResponseShape` that completes
+every selected field, `null` where it resolved to nothing) — so a selected field on a vertex lacking
+that property is present as `null`, as the spec requires. This closed a pre-existing conformance hole the
+differential oracle misses (the modern graph is uniform per label) and is what makes unions safe:
+`__typename` plus the shape keep "wrong member" and "property unset" apart.
+
+🚧 What the translator still owes: **union minting** in `schema.ts` plus the SDL — the last translator
+gap besides Phase 5 mutations; the substrate (per-member branch/`coalesce` dispatch, fragment inlining,
+null-fill) is all landed, so what remains is reflecting/emitting union types and growing `conditionApplies`
+from name-equality to "implements or is a member of".
 
 One perf lesson taken for free: Neo4j's [issue #5061](https://github.com/neo4j/graphql/issues/5061) is that
 they union EVERY implementation even when the document requests no type condition. Branch only over the

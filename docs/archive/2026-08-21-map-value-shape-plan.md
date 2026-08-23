@@ -29,9 +29,10 @@ and its `groupCollected` sibling compose `select(Column.values).unfold().order(S
 and `select(<key>).unfold()` correctly (census 0 changed / 0 crashed / 0 stopped, +6 newly executing
 all reference-verified via L3 +6; pinned in `test/L4-addendum/map-value-list-shape.feature`). One
 entry-framing fix was needed and is recorded below (`framed` collapses a list `valOf` to `scalar`,
-because a Map.Entry column always holds a self-describing `{t,v}` node). **Still LEFT:
-`elementValueMap`'s vertex value → `{kind:'list', of: TYPED_MEMBERS}`** so the `valueMap(k).select(values)
-.unfold().order(local)`/`conjoin` family composes too — same read-side, one more producer flip.
+because a Map.Entry column always holds a self-describing `{t,v}` node). **`elementValueMap`'s vertex
+value → `{kind:'list', of: TYPED_MEMBERS}` LANDED** (`map.ts:1031`, commit `d002123`), so the
+`valueMap(k).select(values).unfold().order(local)`/`conjoin` family composes too — same read-side, one
+more producer flip. That was the last leaf; **this plan is fully landed and archived (2026-08-23).**
 
 This is substrate, not an L3 chase. The goal is a `MapOf` that
 tells a CONSUMER the real shape of a map's value, so `select(Column.values)`, `select(<key>)`,

@@ -44,13 +44,14 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   (`RelMetadataQuery` per node, `SqlSplittableAggFunction` per function) both model it. Its
   chain-global relaxation stays REFUTED — do not retry it. Residue moved to the RelIR build plan's
   Phase 3 step 4.
-- `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
-  name; `cap("a")` reduces it, which is why N sites are a UNION of relations rather than N−1 list
-  concatenations. **Phases 1/2/3a/4/5/6/7 have all LANDED** — multi-site accumulation, a site as a
-  `snapshot` Binding, a declared merge policy (`withSideEffect(k, seed, Operator)` — ONE object with
-  `withSack`'s) as a seeded LEFT FOLD, and a keyed `group("a")`/`groupCount("a")` as `(key, contribution)`
-  MEMBER ROWS so N sites merge per key. Its remaining work is mixed member shapes, keyed declared
-  policies, and safe member re-entry; downstream step gaps remain owned by their own substrates.
+- `docs/archive/2026-08-09-named-collections-are-bindings-plan.md` — ✅ **LANDED AND ARCHIVED
+  (2026-08-23).** `aggregate("a")` RETAINS a relation under a name; `cap("a")` reduces it, which is why N
+  sites are a UNION of relations rather than N−1 list concatenations. The collection substrate is
+  COMPLETE — every phase (1/2/3a/3b/4/5/6/7 + 2b) is on trunk: multi-site accumulation, a `snapshot`
+  Binding, a declared merge policy (`withSideEffect(k, seed, Operator)`), keyed
+  `group("a")`/`groupCount("a")` as `(key, contribution)` member rows, mixed member shapes, and safe
+  `cap().unfold()` member re-entry. The one remaining feature — a KEYED-label SEEDED merge — is a
+  separate multi-mechanism feature the doc explicitly does not own (tracked in `outstanding-work.md`).
   Read it before touching `collection.ts`
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the bright line in `src/compiler/CLAUDE.md` — the

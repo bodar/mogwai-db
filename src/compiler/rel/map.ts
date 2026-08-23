@@ -327,7 +327,7 @@ export function groupRows(
   }
   // A CHILD value `by()` (`by(__.project(…))`, `by(__.valueMap())`) is lowered here rather than through
   // `byNode` so its FRAMING is captured, not discarded: a MAP-shaped child makes the value a `Map<K,Map>`,
-  // whose true `valOf` is `{kind:'map', of}` (`docs/2026-08-21-map-value-shape-plan.md`). Without the
+  // whose true `valOf` is `{kind:'map', of}` (`docs/archive/2026-08-21-map-value-shape-plan.md`). Without the
   // shape `select(values).unfold()` silently mis-shaped the inner map as a scalar (`[{}]`). The node
   // encoding is identical to `byNode`'s (both `producedMemberNode`), so only the shape is new.
   let member: Expr | undefined;
@@ -516,7 +516,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
       ? elementNode(col(productive.id, KEY_COL), keyElem, fresh)
       : col(productive.id, KEY_COL),
     val: counting ? typedNode(col(productive.id, VAL_COL), compilerText('long')) : col(productive.id, VAL_COL),
-    // THE VALUE'S TRUE SHAPE (`docs/2026-08-21-map-value-shape-plan.md`): the COLLECTING arm's value is
+    // THE VALUE'S TRUE SHAPE (`docs/archive/2026-08-21-map-value-shape-plan.md`): the COLLECTING arm's value is
     // a `List` (TinkerPop injects `fold()` into every non-reducing value traversal — `GroupStep.java:61`,
     // `Grouping.java:92-101`), whose members are all self-describing `{t,v}` nodes (a rowid is expanded
     // to an `elementNode` at the aggregate, so both element and scalar members frame the same way) —
@@ -1024,7 +1024,7 @@ export function elementValueMap(
     keyOf: { kind: 'scalar' },
     // A vertex `valueMap()` value is ALWAYS a `List` — one `ArrayList` per key regardless of cardinality
     // (`PropertyMapStep.java:246-267`) — stored here as the `{t:'list', v:values}` node above, so its
-    // TRUE shape is `{kind:'list', of: TYPED_MEMBERS}` (docs/2026-08-21-map-value-shape-plan.md). The FLAT
+    // TRUE shape is `{kind:'list', of: TYPED_MEMBERS}` (docs/archive/2026-08-21-map-value-shape-plan.md). The FLAT
     // form (`elementMap`) takes the single last value (`$[#-1]`), an EDGE's key is single by schema, and
     // `valueMap(true)`'s id/label TOKENS are scalar — a mixed map — so those keep the self-describing
     // scalar arm (framed-correct, opaque to a consumer until a mixed-value increment).
@@ -1172,7 +1172,7 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  *
  * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are. A `list` VALUE
  * is a list whose members have shape `of.of` — so `select(Column.values)` over a `Map<K,List>` is a
- * list-of-lists (`docs/2026-08-21-map-value-shape-plan.md`): the RESULT list's member IS that value
+ * list-of-lists (`docs/archive/2026-08-21-map-value-shape-plan.md`): the RESULT list's member IS that value
  * list, so the translation is the identity on the `list` arm (`{kind:'list', of}` describes both the
  * value and the result member). The members are collected at the ROOT encoding (raw inner arrays — see
  * `mapSide`), so `unfoldNested`/`listPayloadExpr` serve them unchanged. An `elem` side is an expanded
@@ -1211,7 +1211,7 @@ export function mapSide(
   // THE MEMBER IS THE SIDE'S NODE, except a LIST value collects at the ROOT encoding: its `{t:'list',
   // v:[…]}` node is UNWRAPPED to its raw inner array (`$.v`), so `select(Column.values)` over a
   // `Map<K,List>` is a standard root-encoded list-of-lists that `unfoldNested`/`listPayloadExpr` frame
-  // unchanged (`docs/2026-08-21-map-value-shape-plan.md`, the encoding fork). A scalar side keeps its
+  // unchanged (`docs/archive/2026-08-21-map-value-shape-plan.md`, the encoding fork). A scalar side keeps its
   // self-describing `{t,v}` node (`TYPED_MEMBERS`).
   const node = pairSide(col(pairs.id, PAIR.value), side);
   const member = of.kind === 'list' || of.kind === 'map'
@@ -1290,7 +1290,7 @@ function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
   const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${name}`)] });
   // A LIST value UNWRAPS its `{t:'list', v:[…]}` node to the raw inner array in `LIST_COL` — the same
   // root encoding `mapSide` collects — so `select(<key>)`/an entry's value side is a LIST stream the
-  // caller continues with `listTail` (`docs/2026-08-21-map-value-shape-plan.md`). Without this a list
+  // caller continues with `listTail` (`docs/archive/2026-08-21-map-value-shape-plan.md`). Without this a list
   // `valOf` would make `select(<key>)` DECLINE where it executes today — a regression, not a gap.
   if (of.kind === 'list') return withPayload(input, [[LIST_COL, jsonOf(field('v'))]], [meta(LIST_COL, 'json', true)], fresh);
   // A MAP value UNWRAPS its `{t:'map', v:pairs}` node to the raw pairs array in `MAP_COL`, so the caller
@@ -1456,5 +1456,5 @@ export function mapEntryPayload(
 // `scalar` here, not just `elem`. A `list` valOf (a `Map<K,List>` entry) must collapse too: the value
 // column is the `{t:'list', v}` node, not the root-encoded raw array, so framing it as a list would
 // `items.map` over the node object. The list precision is for CONSUMERS (`select`/`unfold`-then-op),
-// never for the entry's own node framing (`docs/2026-08-21-map-value-shape-plan.md`).
+// never for the entry's own node framing (`docs/archive/2026-08-21-map-value-shape-plan.md`).
 const framed = (of: MapOf): MapOf => (of.kind === 'scalar' ? of : { kind: 'scalar' });

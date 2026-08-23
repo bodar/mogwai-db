@@ -23,10 +23,15 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   `loadGraphson`, `loadCsv`); the remaining wire is a `g.io(...).with(...)` STEP modulator to select
   the policy from a traversal, which is front-end work (a new `io()` option), not substrate.
   See [the RelIR plan](./2026-08-01-relir-build-plan.md).
-- **Retained relations.** The remaining named-collection work is keyed seeds, mixed
-  member shapes, and safe direct member re-entry; its downstream gaps are owned by their
-  respective substrates. See
-  [named collections](./2026-08-09-named-collections-are-bindings-plan.md).
+- **Retained relations.** The named-collection substrate is DONE and its plan is archived
+  ([named collections](./archive/2026-08-09-named-collections-are-bindings-plan.md)) — multi-site
+  accumulation, snapshot bindings, declared merge policies, keyed `group`/`groupCount` merge, mixed
+  member shapes, and safe `cap().unfold()` re-entry all landed. One feature remains, a **KEYED-label
+  seeded merge** (`withSideEffect("a", <map seed>).group("a")…`): a separate multi-mechanism feature
+  (a map-level `GroupBiOperator` per-key merge + a mixed group-VALUE list), not a leaf of the
+  collection doc. It fails closed today (`collection.ts` `registerGrouping`); building it is its own
+  future plan. Its downstream gaps (path/`simplePath`/`sample`/`within` operand) are owned by their
+  respective substrates.
 - **Encounter and order.** Establish the missing encounter/rejoin authority for fan-out
   child bodies and the consumers that need deterministic order.
 

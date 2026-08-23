@@ -32,11 +32,12 @@ export const landedCols = (kind: Elem): readonly import('../../rel/types.ts').Co
 // relation by id — the same act `BaseGraph` performs against `nodes`/`edges`, differing only in the
 // physical shape (a landed `{t,v}` JSON tree / JSON label array vs. the base side tables).
 //
-// Each read builds its OWN copy of the landed relation from the rows (see `cteOf`): the landed relation
-// is referenced from many EXISTS/join subtrees, and a structurally SHARED node is duplicated by a
-// tree-rebuild pass — the RelIR scope check refuses that. TODO(materialize-once): hoist the landed
-// relation into a NAMED `AS MATERIALIZED` Plan binding (Calcite's `RelOptMaterialization` — the planner
-// move) so N reads share ONE CTE rather than re-exploding the JSON literal per read.
+// Each read REFERENCES the landed relation by NAME (a `Ref`, see `cteOf`) rather than rebuilding it: a
+// structurally SHARED node would be duplicated by a tree-rebuild pass — the RelIR scope check refuses
+// that — so `lowerForeign` declares the landed relation ONCE as a `fenced` (`AS MATERIALIZED`) Plan
+// binding and every read points a `Ref` at it. That is Calcite's materialize-once
+// (`RelOptMaterialization` — the planner move): N reads share ONE CTE and its ONE `json_each` bind,
+// computed once, rather than re-exploding the JSON literal per read.
 //
 // The physical column shapes are `foreignRelation`'s (`foreign.ts`): a landed VERTEX carries
 // `(id, label: JSON name array, props: JSON {t,v} tree)`; a landed EDGE carries
