@@ -184,7 +184,18 @@ this target and the pair-keyed reshape are one build, not two.
      the executable SPEC the rel port must reproduce (seed from `DISTINCT scope`; step joins the weighted
      adjacency + `barrier_state du`(=dist[s][u]) + `dv`(=dist[s][v]), gate `dv.cval = du.cval + w`, plus a
      `json_each` simple-path backstop for zero/negative weights; append via `json_insert($[#])`).
-   - **3b (next) — the COMPILER PORT + wiring, ~5 files:**
+   - ✅ **3b LANDED (`0dd4ac4`) — the compiler port + wiring, L3 1736→1739.** `createShortestPathService`
+     (store-capturing, DUAL resolve: weighted→barrier, unweighted→walk); `PathSpec` on the barrier
+     contribution; `pathSegment` (head = source ids, apply = `relaxWeighted`, resume = `lowerPathResume`);
+     `shortestPathReconstruct` (reuses `pathPositions`, guard = dist-gate `dv=du+w` float-exact +
+     simple-path backstop, no MIN window). The grateful scenario that HUNG the walk now terminates and
+     passes. First end-to-end consumer of barrier_state's scope + channel dims.
+   - **3c (next) — migrate UNWEIGHTED to the barrier + DELETE the walk.** Generalize the relaxation to
+     w=1 (hop distance) and the reconstruction gate to `dv=du+1`; route ALL shortestPath through the
+     barrier; maxHops becomes a `dist<=cap` final filter. Delete `shortestPathWalk` (the enumerate-then-MIN
+     recursive CTE) — kills the latent uncapped-unweighted-dense hang (a valid query that would also
+     explode). Differential: the 12 unweighted L3 scenarios must hold.
+   - **Original 3b plan (done above):**
      1. `graph-algorithms.ts`: `shortestPathService` → `createShortestPathService(store)` (store-capturing,
         like wcc — the barrier `apply` needs the store); DUAL resolve — weighted (`SP_DISTANCE` set) →
         `{kind:'barrier', apply, path: PathSpec, residency:'do'}`, unweighted → the existing `{kind:'rel'}`
