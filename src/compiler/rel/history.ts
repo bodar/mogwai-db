@@ -36,21 +36,26 @@ export const shapeOf = (object: TraverserObject): AliasShape =>
  *
  * A list's payload goes through `json()` so SQLite stores it AS json rather than as a quoted string.
  */
-export const objectEntry = (object: TraverserObject): Expr => {
+export const objectEntry = (object: TraverserObject, withLabels = false): Expr => {
   const k = compilerInt(SHAPE_K[shapeOf(object)]);
+  // A gated PATH entry carries an `L` label array (empty at creation — `as()` appends). It rides only
+  // when `ChainFacts.demandsPathLabels` is set (a `from`/`to` is present), never on an alias history.
+  const labels: (readonly [string, Expr])[] = withLabels
+    ? [['L', { kind: 'json-array', items: [], binary: true }]]
+    : [];
   if (object.kind === 'element')
-    return { kind: 'json-object', entries: [['k', k], ['v', object.id]], binary: true };
+    return { kind: 'json-object', entries: [['k', k], ['v', object.id], ...labels], binary: true };
   if (object.kind === 'list')
     return {
       kind: 'json-object', binary: true,
-      entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [object.list] }]],
+      entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [object.list] }], ...labels],
     };
   // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
   // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.
   const tag = object.type.kind === 'static' ? compilerText(object.type.type) : object.vtype;
   return {
     kind: 'json-object', binary: true,
-    entries: [['k', k], ['v', object.value], ...(tag ? [['t', tag] as const] : [])],
+    entries: [['k', k], ['v', object.value], ...(tag ? [['t', tag] as const] : []), ...labels],
   };
 };
 

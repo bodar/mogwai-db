@@ -51,7 +51,7 @@ import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind, PairSpec } from '../../services/spi/types.ts';
-import { appendValuePosition, extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
+import { appendPathLabel, appendValuePosition, extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath, subPathMembers } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
@@ -257,6 +257,9 @@ interface FilterCtx { readonly params: Record<string, any>; readonly correlatedC
 interface ChainCtx extends FilterCtx {
   readonly collapse: boolean;
   readonly tracksPath: boolean;
+  /** Gated labels-on-path: a `from`/`to` on a path-family step (`ChainFacts.demandsPathLabels`). When
+   *  set, each path position records its `as()` LABELS so `subPath` can slice by label position. */
+  readonly demandsPathLabels: boolean;
   /** Does this chain have an EMISSION ORDER at all — `analyzeChain`'s chain-global answer, threaded
    *  rather than re-derived. A step that MINTS a fresh traverser (`addV`) has to know: it seeds the
    *  position channel exactly where the source would have, and a step-local re-derivation would be a
@@ -1047,7 +1050,7 @@ const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
 const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
 
-function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter): { rel: Rel; elem: Elem } | null {
+function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter, withLabels = false): { rel: Rel; elem: Elem } | null {
   const hops = HOPS[step.name];
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
@@ -1116,7 +1119,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, 
     ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: carried, type: typeOf(...armCols) })
     : first;
   if (pathCarried(fanned))
-    fanned = extendPath(fanned, { kind: 'element', elem: hops[0]!.elem, id: col(fanned.id, 'id') }, fresh);
+    fanned = extendPath(fanned, { kind: 'element', elem: hops[0]!.elem, id: col(fanned.id, 'id') }, fresh, withLabels);
   const encounter = encounterOf(carried);
   return { rel: encounter ? remintOrder(fanned, encounter, fresh) : fanned, elem: hops[0]!.elem };
 }
@@ -2519,17 +2522,17 @@ function scalarTail(
     // general scalar tail does not thread a path through every retype, so a non-path-family step consumes
     // it (fail-safe — a later `path()` then declines with no channel rather than framing a gap).
     if (pathCarried(rel)) {
-      if (step.name === 'path' && (step.args ?? []).length === 0 && step.from === undefined && step.to === undefined) {
+      if (step.name === 'path' && (step.args ?? []).length === 0) {
         const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
         if (!positions) return null;
         return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
       }
       if (step.name === 'simplePath' || step.name === 'cyclicPath') {
-        if ((step.args ?? []).length || step.from !== undefined || step.to !== undefined) return null;
+        if ((step.args ?? []).length) return null;
         const cyclic = step.name === 'cyclicPath';
         const pred = step.modulators?.length
           ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
-          : pathSimplePredicate(rel, cyclic, fresh);
+          : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
         if (!pred) return null;
         rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
         continue;
@@ -4265,7 +4268,7 @@ export function lowerForeignResume(
         exprs: [['id', col(rejoined.id, 'id')],
           ...channels.map((channel) => [channel.col,
             channel.role === 'bulk' ? compilerInt(1)
-              : seedPath({ kind: 'element', elem: streamElem, id: col(rejoined.id, 'id') })] as const)],
+              : seedPath({ kind: 'element', elem: streamElem, id: col(rejoined.id, 'id') }, facts.demandsPathLabels)] as const)],
       });
     })()
     : seedsEncounter
@@ -4440,6 +4443,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
     facts,
     ctx: {
       params, correlatedChildren, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
+      demandsPathLabels: facts.demandsPathLabels,
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
     },
@@ -4602,7 +4606,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
       channel.role === 'bulk' ? compilerInt(1)
         : channel.role === 'encounter' ? col(source.id, 'id')
-          : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }),
+          : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }, facts.demandsPathLabels),
     ] as const)],
   });
 
@@ -4684,7 +4688,7 @@ function detachedTail(
             exprs: [['id', col(withBulk.id, 'id')],
               ...channels.map((channel) => [channel.col,
                 channel.role === 'bulk' ? col(withBulk.id, 'bulk')
-                  : seedPath({ kind: 'element', elem: kind, id: col(withBulk.id, 'id') })] as const)],
+                  : seedPath({ kind: 'element', elem: kind, id: col(withBulk.id, 'id') }, ctx.demandsPathLabels)] as const)],
           });
         })()
         : ctx.ordered
@@ -4816,7 +4820,7 @@ function elementTail(
       const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
       return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
     }
-    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh);
+    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
       // emission order must not collapse, whether that order was seeded at the source or minted by
@@ -4869,6 +4873,11 @@ function elementTail(
       if (!bound) return null;
       rel = bound.rel;
       labels = bound.aliases;
+      // Labels-on-path (gated): `as('x')` also records 'x' at the CURRENT path position (its last entry),
+      // so a later `from`/`to` can slice by label. One append per label; a no-op unless a `from`/`to` is
+      // in the chain, so an ordinary `as()` in a path query is untouched.
+      if (ctx.demandsPathLabels && pathCarried(rel))
+        for (const name of argValues(step)) if (typeof name === 'string') rel = appendPathLabel(rel, name, fresh);
       continue;
     }
     if (step.name === 'select') {
@@ -4914,8 +4923,9 @@ function elementTail(
       return continueAs(walked.rel, walked.framing, steps, at + 1, bulked, ctx, fresh, walked.aliases);
     }
     if (step.name === 'path') {
-      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
-        || step.from !== undefined || step.to !== undefined) return null;
+      // `from`/`to` scope to a SUB-path (`subPathMembers`, via the labels-on-path recorded when
+      // `ChainFacts.demandsPathLabels` gated them on).
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
       const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
@@ -4924,18 +4934,15 @@ function elementTail(
       // `Path.isSimple()` is "no two path objects are equal" (`PathIsSimpleStep`); `cyclicPath` its
       // complement. Every position is a tagged history entry (`{k,v[,t]}`), and equal objects — an
       // element by rowid, a value by (value,type) — produce the IDENTICAL entry, so uniqueness is a
-      // COUNT(DISTINCT) over the path array against its length. The path is already carried
-      // (`tracksPath`, seeded because a PATH_FAMILY step is present) and extended at every hop.
-      // `from`/`to` scope the check to a SUB-path (`Path.subPath`); not built, so decline (fail closed)
-      // rather than checking the whole path and silently answering a different question.
-      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
-        || step.from !== undefined || step.to !== undefined) return null;
+      // COUNT(DISTINCT) over the path array against its length. `from`/`to` scope the check to a
+      // SUB-path (`Path.subPath` — the labels-on-path slice).
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
       // A `by(<proj>)` modulator compares each position by its PROJECTION rather than by the object
       // (`pathSimpleByPredicate`); the bare form compares the raw objects (`pathSimplePredicate`).
       const cyclic = step.name === 'cyclicPath';
       const pred = step.modulators?.length
         ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
-        : pathSimplePredicate(rel, cyclic, fresh);
+        : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
       if (!pred) return null;
       rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -7220,17 +7227,23 @@ function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: Ch
  * a correlated scalar subquery per row. A one-position path is trivially simple (1 = 1), which the
  * source's seeded p0 guarantees is the shortest case.
  */
-function pathSimplePredicate(rel: Rel, cyclic: boolean, fresh: Minter): Expr {
+function pathSimplePredicate(rel: Rel, cyclic: boolean, from: string | undefined, to: string | undefined, fresh: Minter): Expr {
   const json: Expr = { kind: 'call', fn: 'json', args: [col(rel.id, PATH_CHANNEL.col)] };
   const exploded = make.explode({
-    id: fresh('spx'), channels: [], expr: json, as: { value: 'v' },
-    type: typeOf(meta('v', 'any', true)),
+    id: fresh('spx'), channels: [], expr: json, as: { value: 'pv', ord: 'po' },
+    type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
   });
+  // A `from`/`to` scopes the simplicity check to the SUB-path (`subPathMembers`).
+  const members = from !== undefined || to !== undefined ? subPathMembers(exploded, from, to, fresh) : exploded;
+  // Path simplicity compares OBJECTS, never labels — so the distinctness key STRIPS the gated `L` label
+  // array (`json_remove`, a no-op where no `from`/`to` put one on), or the same vertex visited under two
+  // `as()` labels would read as two distinct objects and a cycle would slip through simplePath.
+  const identity: Expr = { kind: 'call', fn: 'json_remove', args: [col(members.id, 'pv'), compilerText('$.L')] };
   const counted = make.aggregate({
-    id: fresh('spc'), input: exploded, channels: [], type: typeOf(meta('total', 'int'), meta('uniq', 'int')),
+    id: fresh('spc'), input: members, channels: [], type: typeOf(meta('total', 'int'), meta('uniq', 'int')),
     groupBy: [], aggs: [
       ['total', { kind: 'agg', fn: 'count', args: [] }],
-      ['uniq', { kind: 'agg', fn: 'count', args: [col(exploded.id, 'v')], distinct: true }],
+      ['uniq', { kind: 'agg', fn: 'count', args: [identity], distinct: true }],
     ],
   });
   const probe = make.project({

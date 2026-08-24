@@ -34,6 +34,12 @@ export interface ChainFacts {
    *  takes any deterministic order, since TinkerPop's own branch emission order is impl-defined and
    *  no corpus scenario pins a branch fold's member order. See `withFanoutOrder` (lower.ts). */
   readonly demandsSlice: boolean;
+  /** Does a `from`/`to` on a path-family step scope the check to a SUB-path? Only then does each path
+   *  position also carry the alias LABELS bound at it (`as()` appends to the last entry), so `subPath`
+   *  can slice by label position (`Path.subPath` — cycle-safe, unlike matching by object). Gated,
+   *  because carrying labels adds a `jsonb_set` per `as()` and a per-position array a chain with no
+   *  `from`/`to` never reads — a path query without one is byte-for-byte unchanged. */
+  readonly demandsPathLabels: boolean;
 }
 
 /** Steps that need the linear path threaded through the fold: the source vertex becomes path
@@ -373,5 +379,6 @@ export function analyzeChain(steps: IRStep[]): ChainFacts {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s)),
     demandsEncounter: computeDemandsEncounter(steps),
     demandsSlice: steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)),
+    demandsPathLabels: steps.some((s) => PATH_STEPS.has(s.name) && (s.from !== undefined || s.to !== undefined)),
   };
 }

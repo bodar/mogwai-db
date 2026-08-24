@@ -6,7 +6,6 @@ Feature: mogwai addendum — path() position scoping and per-position children
   # @gap:path-position marks the family for a possible gremlin-test PR.
 
   @gap:path-position
-  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_out_asXcX_path_fromXbX_toXcX_byXnameX
     Given the modern graph
     And the traversal of
@@ -162,7 +161,6 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[noLang,SW] |
 
   @gap:path-position
-  @Unsupported
   Scenario: g_V_out_out_path_byXnameX_from_to_count
     Given the modern graph
     And the traversal of

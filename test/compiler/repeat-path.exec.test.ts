@@ -174,6 +174,26 @@ test('a barrier consumes a path-carrying stream: count()/fold()/groupCount() dro
   expect(JSON.parse(folded[0].list).map((e: any) => e.id).sort()).toEqual([4, 6]);
 });
 
+test('from()/to() scope a path/simplePath/cyclicPath to a SUB-path (labels-on-path)', async () => {
+  const store = seededStore();
+  // labels-on-path is GATED: only a from/to records the as() labels per position, then Path.subPath
+  // slices between the LAST from-labelled and to-labelled positions. path().from('b').to('c') keeps
+  // positions b..c: marko→josh→{lop,ripple} → subPaths [josh,lop],[josh,ripple].
+  const p1 = (await decodePaths(store, "g.V().as('a').out().as('b').out().as('c').path().from('b').to('c').by('name')"))
+    .map((p: any) => p.objects);
+  expect(bagOf(p1)).toEqual(bagOf([['josh', 'lop'], ['josh', 'ripple']]));
+  // from/to on simplePath scopes the CHECK, not the framing: the check runs over b..c, path() frames whole.
+  const p2 = (await decodePaths(store, "g.V().as('a').out().as('b').out().as('c').simplePath().by(T.label).from('b').to('c').path().by('name')"))
+    .map((p: any) => p.objects);
+  expect(bagOf(p2)).toEqual(bagOf([['marko', 'josh', 'lop'], ['marko', 'josh', 'ripple']]));
+  // cyclicPath().from('a').to('b') over an acyclic sub-path → empty (corpus CyclicPath.feature).
+  expect(run(store, "g.V(1).as('a').out('created').as('b').in('created').as('c').cyclicPath().from('a').to('b').path()")).toEqual([]);
+  // a from/to count() (an L4 addendum): both full paths share sub-path [marko,josh] → count 2.
+  expect((run(store, "g.V().as('a').out().as('b').out().as('c').path().from('a').to('b').by('name').count()") as any[])[0].v).toBe(2);
+  // REGRESSION: the gated labels never change a path query WITHOUT from/to — whole-path simplePath intact.
+  expect((run(store, 'g.V().both().both().simplePath().count()') as any[])[0].v).toBe(18);
+});
+
 test('a VALUE position mid-path: values(k).path() records the produced value', async () => {
   const store = seededStore();
   // out().values('name').path() — the path is [startVertex, neighbourVertex, name-VALUE]. `values()`

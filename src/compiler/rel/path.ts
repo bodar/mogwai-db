@@ -83,8 +83,34 @@ export const PATH_CHANNEL: Channel = { col: PATH_COL, role: 'path' };
  *  emission-order readers key on `encounter`'s. */
 export const pathCarried = (rel: Rel): boolean => rel.channels.some((channel) => channel.role === 'path');
 
-/** Position 0 — the source element, seeded where the chain's own text says it tracks a path. */
-export const seedPath = (object: TraverserObject): Expr => historySeed(objectEntry(object));
+/** Position 0 — the source element, seeded where the chain's own text says it tracks a path. `withLabels`
+ *  gives position 0 an empty label array so a leading `as()` (before the first hop) can label it. */
+export const seedPath = (object: TraverserObject, withLabels = false): Expr => historySeed(objectEntry(object, withLabels));
+
+/** Append `label` (a user string) to the LAST path position's `L` array — what `as('x')` does to the
+ *  traverser's path when the chain scopes a `from`/`to`. `jsonb_set` on `$[#-1].L`; `COALESCE` keeps it
+ *  total on a position seeded without the array (belt-and-braces — every gated seed/hop carries one). */
+export function appendPathLabel(rel: Rel, label: string, fresh: Minter): Rel {
+  if (!pathCarried(rel)) return rel;
+  const last = col(rel.id, PATH_COL);
+  const appended: Expr = {
+    kind: 'call', fn: 'jsonb_set', args: [last, compilerText('$[#-1].L'), {
+      kind: 'call', fn: 'jsonb_insert', args: [
+        { kind: 'call', fn: 'COALESCE', args: [
+          { kind: 'call', fn: 'jsonb_extract', args: [last, compilerText('$[#-1].L')] },
+          { kind: 'json-array', items: [], binary: true },
+        ] },
+        compilerText('$[#]'), compilerText(label),
+      ],
+    }],
+  };
+  return make.project({
+    id: fresh('pal'), input: rel, channels: rel.channels, type: rel.type,
+    exprs: rel.type.cols.map((column) => [
+      column.name, column.name === PATH_COL ? appended : col(rel.id, column.name),
+    ] as const),
+  });
+}
 
 /**
  * APPEND A VALUE POSITION — a `values()`/`id()`/`label()` mid-path records its produced value as the
@@ -111,15 +137,71 @@ export function appendValuePosition(rel: Rel, type: ScalarType, fresh: Minter): 
  *  A movement appends ONCE over its whole fan-out rather than per arm, because the object being recorded
  *  is the NEW traverser's — two arms each appending their own would be the same expression twice and, at
  *  the fan-out's own `id`, the identical value. */
-export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Rel {
+export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter, withLabels = false): Rel {
   return make.project({
     id: fresh('pa'), input: rel, channels: rel.channels, type: rel.type,
     exprs: rel.type.cols.map((column) => [
       column.name,
       column.name === PATH_COL
-        ? historyAppend(col(rel.id, PATH_COL), objectEntry(object))
+        ? historyAppend(col(rel.id, PATH_COL), objectEntry(object, withLabels))
         : col(rel.id, column.name),
     ] as const),
+  });
+}
+
+/**
+ * `from`/`to` SUB-PATH scoping — `Path.subPath(fromLabel, toLabel)`
+ * (`vendor/tinkerpop/gremlin-core/.../Path.java:259`). Given the exploded path members (each with its
+ * `L` label array, recorded because `ChainFacts.demandsPathLabels` gated the labels on), keep only the
+ * positions between the LAST position carrying `from` and the LAST carrying `to` (inclusive), which is
+ * exactly the reference's backward scan. A null modulator defaults to the path's start / end. A
+ * from-label that is never found leaves its bound NULL, so the `BETWEEN` excludes every row — an empty
+ * sub-path rather than the reference's throw, which is fail-CLOSED (no corpus reaches the not-found case,
+ * where every `from`/`to` names a bound `as()`).
+ */
+export function subPathMembers(members: Rel, from: string | undefined, to: string | undefined, fresh: Minter): Rel {
+  const pv = col(members.id, 'pv');
+  const po = col(members.id, 'po');
+  const labelAt = (label: string): Expr => {
+    const exploded = make.explode({
+      id: fresh('sle'), channels: [], as: { value: 'lv' }, type: typeOf(meta('lv', 'any', true)),
+      expr: { kind: 'call', fn: 'json', args: [{ kind: 'call', fn: 'json_extract', args: [pv, compilerText('$.L')] }] },
+    });
+    const matched = make.filter({
+      id: fresh('slf'), input: exploded, channels: [], type: exploded.type,
+      pred: { kind: 'binary', op: '=', left: col(exploded.id, 'lv'), right: compilerText(label) },
+    });
+    return { kind: 'exists', negated: false, plan: matched };
+  };
+  const posIf = (label: string | undefined): Expr =>
+    label === undefined ? compilerNull('int') : { kind: 'case', whens: [[labelAt(label), po]] };
+  const flagged = make.project({
+    id: fresh('spm'), input: members, channels: [],
+    type: typeOf(meta('pv', 'any', true), meta('po', 'int'), meta('fpo', 'int', true), meta('tpo', 'int', true)),
+    exprs: [['pv', pv], ['po', po], ['fpo', posIf(from)], ['tpo', posIf(to)]],
+  });
+  const maxOf = (name: string): Extract<Expr, { kind: 'window-expr' }> =>
+    ({ kind: 'window-expr', fn: 'max', args: [col(flagged.id, name)], spec: { partitionBy: [], orderBy: [] } });
+  const bounded = make.window({
+    id: fresh('spw'), input: flagged, channels: [],
+    type: typeOf(...flagged.type.cols, meta('lo', 'int', true), meta('hi', 'int', true)),
+    // `from` null → the path's first position (`min(po)`); `to` null → its last (`max(po)`).
+    specs: [
+      ['lo', from === undefined ? { kind: 'window-expr', fn: 'min', args: [col(flagged.id, 'po')], spec: { partitionBy: [], orderBy: [] } } : maxOf('fpo')],
+      ['hi', maxOf(to === undefined ? 'po' : 'tpo')],
+    ],
+  });
+  const kept = make.filter({
+    id: fresh('spk'), input: bounded, channels: [], type: bounded.type,
+    pred: {
+      kind: 'binary', op: 'and',
+      left: { kind: 'binary', op: '>=', left: col(bounded.id, 'po'), right: col(bounded.id, 'lo') },
+      right: { kind: 'binary', op: '<=', left: col(bounded.id, 'po'), right: col(bounded.id, 'hi') },
+    },
+  });
+  return make.project({
+    id: fresh('spp'), input: kept, channels: [], type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
+    exprs: [['pv', col(kept.id, 'pv')], ['po', col(kept.id, 'po')]],
   });
 }
 
@@ -152,11 +234,15 @@ export function pathPositions(
   const fenced = rel.kind === 'materialize'
     ? rel
     : make.materialize({ id: fresh('pm'), input: rel, channels: rel.channels, type: rel.type });
-  const members = make.explode({
+  const exploded = make.explode({
     id: fresh('px'), expr: jsonOf(col(fenced.id, PATH_COL)), channels: [],
     as: { value: 'pv', ord: 'po' },
     type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
   });
+  // A `from`/`to` scopes to the SUB-path before the positions are rebuilt (`subPathMembers`); its `po`
+  // ordinals stay the ORIGINAL ones, so the aggregate's `ORDER BY po` still holds.
+  const members = step.from !== undefined || step.to !== undefined
+    ? subPathMembers(exploded, step.from, step.to, fresh) : exploded;
   const entry = col(members.id, 'pv');
   // The stored id, RAW — an INT rowid over the base graph, a possibly-string external id over a bound
   // graph. `source.elementNode` rejoins by it (base: `nodes`/`edges`; bound: the landed relation), and
@@ -310,16 +396,20 @@ export function pathSimpleByPredicate(
   if (!pathCarried(rel)) return null;
   const parsed = modulations(step, step.modulators?.length ?? 0, child);
   if (!parsed || parsed.length === 0) return null;
-  const members = make.explode({
+  const exploded = make.explode({
     id: fresh('spx'), expr: jsonOf(col(rel.id, PATH_COL)), channels: [],
     as: { value: 'pv', ord: 'po' }, type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
   });
+  const members = step.from !== undefined || step.to !== undefined
+    ? subPathMembers(exploded, step.from, step.to, fresh) : exploded;
   const entry = col(members.id, 'pv');
   const rowid: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] };
   const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
   const isEdge: Expr = { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) };
   const perModulation = (modulation: Modulation): Expr | null => {
-    if (modulation.key.kind === 'identity') return entry;
+    // An identity `by()` compares the raw OBJECT, stripped of the gated `L` label array (see
+    // `pathSimplePredicate`) so a label never makes two visits to one object look distinct.
+    if (modulation.key.kind === 'identity') return { kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.L')] };
     const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, source, fresh, child);
     const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh, child);
     if (!edge || !vertex) return null;
