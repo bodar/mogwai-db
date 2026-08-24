@@ -10,8 +10,9 @@ import type { IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
+import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
 import type { ChildHost, Subject } from './child.ts';
+import { SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 import type { GraphSource } from './source.ts';
@@ -80,8 +81,13 @@ type Pattern =
    *  per-branch tables. A branch that would bind a fresh variable is the disjunctive-UNION regime (a
    *  later phase) and DECLINES here. `branches` are the raw args (each re-classified at run time against
    *  the bound set); `reads` is every alias any branch references, so readiness waits for all of them.
-   *  (A top-level `and(…)` is not this — it flattens into the shared binding table via `andChildren`.) */
-  | { readonly kind: 'connective'; readonly op: 'or'; readonly branches: readonly Arg[]; readonly reads: readonly string[] };
+   *  (A top-level `and(…)` is not this — it flattens into the shared binding table via `andChildren`.)
+   *  `declares` is the branches' START∪END labels (their `as()` anchors, recursively) — the variables
+   *  the bindings map must carry, because TinkerPop folds a nested connective's `matchStartLabels`/
+   *  `matchEndLabels` into the parent's (`MatchStep.java:127-128`), and `getBindings` keys on that union
+   *  (`:330`). It is a SUBSET of `reads`: `reads` also carries `where`-referenced labels (needed for
+   *  readiness) which are NOT bindings-map keys unless some pattern also anchors them. */
+  | { readonly kind: 'connective'; readonly op: 'or'; readonly branches: readonly Arg[]; readonly reads: readonly string[]; readonly declares: readonly string[] };
 
 /** A pattern chain PARSED AND NORMALIZED. The Pass pipeline folds `order().by()`, `repeat().times()`,
  *  `sack().by()` and every other modulator into ONE `IRStep` (`normalize`, `passes.ts:336` — "`order().by()`
@@ -114,6 +120,16 @@ function aliasRefsIn(steps: readonly IRStep[], params: Record<string, any>, out:
       if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') out.add(o.value);
     }
     for (const a of s.args ?? []) if (isNested(a.value)) { const inner = patternSteps(a.value.nested, params); if (inner) aliasRefsIn(inner, params, out); }
+  }
+}
+
+/** The START∪END labels a branch body BINDS/references via `as()` — recursively, so a nested `and`/`or`
+ *  contributes its own anchors. Distinct from `aliasRefsIn`: this is ONLY the `as()` labels (the
+ *  bindings-map keys per `MatchStep.getBindings`), not the `where`-referenced ones. */
+function asLabelsDeep(steps: readonly IRStep[], params: Record<string, any>, out: Set<string>): void {
+  for (const s of steps) {
+    if (s.name === 'as') for (const l of asLabelsOf(s)) out.add(l);
+    for (const a of s.args ?? []) if (isNested(a.value)) { const inner = patternSteps(a.value.nested, params); if (inner) asLabelsDeep(inner, params, out); }
   }
 }
 
@@ -299,8 +315,9 @@ function orConnective(a: unknown, params: Record<string, any>): Pattern | null {
   const branches = chain[0]!.args ?? [];
   if (branches.length < 2) return null;
   const reads = new Set<string>();
-  for (const b of branches) if (isNested(b.value)) { const bs = patternSteps(b.value.nested, params); if (bs) aliasRefsIn(bs, params, reads); }
-  return { kind: 'connective', op: 'or', branches, reads: [...reads] };
+  const declares = new Set<string>();
+  for (const b of branches) if (isNested(b.value)) { const bs = patternSteps(b.value.nested, params); if (bs) { aliasRefsIn(bs, params, reads); asLabelsDeep(bs, params, declares); } }
+  return { kind: 'connective', op: 'or', branches, reads: [...reads], declares: [...declares] };
 }
 
 /** Flatten a match argument list into patterns, expanding every top-level `and(…)` connective into its
@@ -454,12 +471,16 @@ function thetaExpr(keyA: string, op: 'eq' | 'neq', keyB: string, rel: Rel, label
  *  - a NESTED connective (`and(…)`/`or(…)`) — recurse and combine (scenario A's
  *    `or(…, and(<back-edge>, <scalar is>))`);
  *  - a `where('a', P.eq/neq('c'))` theta, or a `where(<body>)`/`not(<body>)` existence leg;
- *  - an anchored `as(start).<body>[.as(end)]` whose `start` (and any `end`) are ALREADY BOUND: a bound
- *    `.as(end)` is a BACK EDGE (rewritten to `where(P.eq(end))`, so a movement branch becomes a
- *    multi-correlation existence via `legExpr`), and a no-end movement/filter body is a single- or
- *    multi-correlation existence over `start`.
- *  A branch that would bind a FRESH variable (an unbound `.as(end)`), or a reducing/scalar shape, is a
- *  later phase and returns `null` — declining the whole connective (fail closed). */
+ *  - an anchored `as(start).<body>[.as(end)]` whose `start` (and any `end`) are ALREADY BOUND:
+ *    · a REDUCING-scalar back edge (`as('b').in().count().as('c')`, c a bound scalar) → `reduce(start)`
+ *      (a correlated `child.scalar`) EQUALS the stored `c`;
+ *    · an element back edge (`as('a').out('knows').as('b')`, b bound) → `where(P.eq(b))` rewrite, then a
+ *      multi-correlation existence via `legExpr`;
+ *    · a no-end movement/filter body over an element `start` → single/multi-correlation existence;
+ *    · a no-end body over a SCALAR `start` (`as('c').is(P.gt(2))`) → a value predicate over the bound
+ *      scalar (`child.predicate` with a scalar subject).
+ *  A branch that would bind a FRESH variable (an unbound `.as(end)`) is the disjunctive-UNION regime —
+ *  a later phase — and returns `null`, declining the whole connective (fail closed). */
 function branchToExpr(
   branch: unknown, rel: Rel, labels: AliasMap, bound: ReadonlySet<string>,
   child: ChildSeam, host: IRStep, fresh: Minter, params: Record<string, any>,
@@ -498,9 +519,22 @@ function branchToExpr(
     // A FRESH end is a binding branch (the disjunctive-UNION regime) — a later phase; decline.
     if (!bound.has(end)) return null;
     const inner = steps.slice(1, -1);
-    // A reducing/scalar back edge (`as('b').in().count().as('c')`, c a bound scalar) is a value
-    // compare, not an existence — a later phase; decline rather than treat it as an element back edge.
-    if (reducingEnd(inner)) return null;
+    const reduce = reducingEnd(inner);
+    if (reduce) {
+      // A REDUCING-SCALAR BACK EDGE (`as('b').in().count().as('c')`, c a bound scalar): the per-origin
+      // reduction of the start EQUALS the bound scalar — `child.scalar` rooted at start (the same
+      // correlated read the binding form uses), compared to the stored `c` value. A trailing `is()`
+      // filter (`reduce.filtered`) would DROP the row before the compare — a later phase; decline.
+      if (reduce.filtered) return null;
+      const sproj = aliasProjection(rel, labels, start, 'last', fresh);
+      if (!sproj || sproj.read.kind !== 'element') return null;
+      const cEntry = liveAliases(labels, rel).get(end);
+      if (!cEntry) return null;
+      const hostR: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), elem: sproj.read.elem, row: { rel, aliases: labels } };
+      const produced = child.scalar(reduce.reduceBody, hostR);
+      if (!produced || produced.framing.kind !== 'scalar') return null;
+      return eq(produced.expr, aliasValueAt(col(rel.id, cEntry.col), 'last'));
+    }
     // A bound `.as(end)` back edge is `where(P.eq(end))`, exactly the trailing-end rewrite the Pass
     // applies to a `where`/`not` arg — done HERE because the connective heads are (deliberately) not in
     // `MATCH_FILTER_HEADS`, so the bind-vs-constrain decision for an `or` branch lives in this lowering.
@@ -508,6 +542,14 @@ function branchToExpr(
   } else {
     body = steps.slice(1);
     if (!body.length || body.some((s) => s.name === 'as')) return null;
+    // A SCALAR-start branch (`as('c').is(P.gt(2))`, c a bound scalar): a value predicate over the bound
+    // scalar via `child.predicate` with a scalar subject. An element start falls through to `legExpr`.
+    const sproj = aliasProjection(rel, labels, start, 'last', fresh);
+    if (!sproj) return null;
+    if (sproj.read.kind === 'value') {
+      const subject = scalarSubjectOf(sproj, rel);
+      return subject && child.predicate(body, subject, false);
+    }
   }
   const reads = new Set<string>([start]);
   for (const s of body) {
@@ -516,6 +558,19 @@ function branchToExpr(
     if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') reads.add(o.value);
   }
   return legExpr({ negated: false, start, body, reads: [...reads] }, rel, labels, child, host, fresh);
+}
+
+/** A bound SCALAR alias as a `child.predicate` subject — its stored `v` value plus the `SubjectType`
+ *  restored from the alias's recorded scalar type (a per-row type reads back its `t` tag column, the
+ *  same mapping `values(k).is(P)` uses over a stream). `null` when the alias is not a value. */
+function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>, rel: Rel): Subject | null {
+  if (sproj.read.kind !== 'value') return null;
+  const value = aliasValueAt(col(rel.id, sproj.entry.col), 'last');
+  const t = sproj.read.type;
+  const vtype = t.kind === 'perRow' ? aliasTypeAt(col(rel.id, sproj.entry.col), 'last') : undefined;
+  const type: SubjectType = t.kind === 'static' ? { kind: 'static', type: t.type, text: t.text }
+    : vtype ? { kind: 'perRow', vtype } : SUBJECT_UNKNOWN;
+  return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}) };
 }
 
 /** A whole `and(…)`/`or(…)` connective as one boolean `Expr`: every branch to an `Expr`, folded with
@@ -752,8 +807,12 @@ export function lowerMatch(
   // `select(labels)` uses; `framing` above is otherwise unused now that the map is unconditional.
   const declared: string[] = [];
   const declaredOf = (p: Pattern): readonly string[] =>
-    p.kind === 'binding' ? [p.start, p.end] : p.kind === 'constraint' ? [p.start] : [];
-  // wpred and connective declare nothing (they bind no variable) — handled by the [] fallback above.
+    p.kind === 'binding' ? [p.start, p.end] : p.kind === 'constraint' ? [p.start]
+      // A connective's branches ANCHOR variables the bindings map must carry (`b` in
+      // `or(as('a').out('knows').as('b'), …)`) even though the connective binds no NEW column — those
+      // labels are already live (pre-bound or bound by a sibling pattern), and TinkerPop's `getBindings`
+      // keys on the folded start∪end union. A `wpred` only references already-declared aliases → [].
+      : p.kind === 'connective' ? p.declares : [];
   for (const p of patterns) for (const l of declaredOf(p)) if (!declared.includes(l)) declared.push(l);
   // A 0- or 1-variable pattern's bindings map is NOT a `select()`: `select('a')` yields the VALUE, not
   // the `{a: …}` one-key map TinkerPop emits (a `project('a').by(select('a'))`, as `gql.ts` builds).

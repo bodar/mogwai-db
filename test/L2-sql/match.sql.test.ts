@@ -175,4 +175,15 @@ describe('match() SQL', () => {
     const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a},${g.b},${g.c}`; }).sort();
     expect(triples).toEqual(['1,3,4', '1,3,6', '4,3,1', '4,3,6']);
   });
+
+  // The zero-root corpus scenario (Match.feature g_V_asXaX_out_asXbX_matchXa_out_count_c__orX…X): a/b are
+  // PRE-bound, and the or's branches are all back-edges/scalar tests over already-bound vars — an element
+  // back-edge (a.out(knows)==b), a reducing-scalar back-edge (b.in().count()==c) and a scalar-alias
+  // predicate (c>2). Three (a,b) bindings, all marko, with c=3.
+  test('or() over scalar/element back-edges in the zero-root regime (corpus scenario)', () => {
+    const q = 'g.V().as("a").out().as("b").match(__.as("a").out().count().as("c"), __.or(__.as("a").out("knows").as("b"),__.as("b").in().count().as("c").and().as("c").is(P.gt(2)))).select("a","b").by("name")';
+    const rows = run(seededStore(), q) as any[];
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    expect(pairs).toEqual(['marko->josh', 'marko->lop', 'marko->vadas']);
+  });
 });

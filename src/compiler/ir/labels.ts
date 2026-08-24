@@ -110,6 +110,32 @@ function descend(value: any, params: Record<string, any>, acc: Acc): void {
   if ('operands' in value) descend((value as any).operands, params, acc);
 }
 
+/** Every `as()` label reachable at ANY depth inside a match()'s arguments is a READ of the enclosing
+ *  scope — the variable-location rule `matchLabelsOf`'s note explains, applied recursively so it holds
+ *  inside a CONNECTIVE (`and`/`or`) or a filter (`where`/`not`) branch too, not only on a top-level
+ *  pattern. `matchLabelsOf` (the exact BIND side) deliberately does NOT descend, so a variable a
+ *  pattern re-roots on but a naive scan would call a bind — e.g. a pre-bound `b` used only as a
+ *  BACK EDGE `as('b')` inside an `or` branch — would be retracted before the match and answer wrong
+ *  (`g.V().as('a').out().as('b').match(…, or(as('a').out('knows').as('b'), …))`). Fail closed on a body
+ *  this scan cannot parse, exactly as `descend` does — an unknown read is not a licence to delete. */
+function matchAsReads(s: Step, params: Record<string, any>, acc: Acc): void {
+  const visit = (chain: readonly Step[]): void => {
+    for (const st of chain) {
+      for (const l of asLabelsOf(st)) acc.labels.add(l);
+      for (const a of st.args ?? []) if (isNested(a.value)) {
+        let body: Step[];
+        try { body = stepChain(a.value.nested, params); } catch { acc.all = true; return; }
+        visit(body);
+      }
+    }
+  };
+  for (const { value: a } of s.args ?? []) if (isNested(a)) {
+    let body: Step[];
+    try { body = stepChain(a.nested, params); } catch { acc.all = true; return; }
+    visit(body);
+  }
+}
+
 function walkReads(chain: readonly Step[], params: Record<string, any>, acc: Acc): void {
   for (const s of chain) {
     // `path()` emits the labels bound along it; `simplePath()`/`cyclicPath()` do not, but they share
@@ -126,7 +152,7 @@ function walkReads(chain: readonly Step[], params: Record<string, any>, acc: Acc
     // __.as('b').in().count().as('c'))` answered at trunk and DEFERRED here, because both outer binds
     // were retracted as unread. `matchLabelsOf` is the same bind-side helper the pass uses, read here
     // from the other direction — inside a match, a variable's every mention is a use.
-    if (s.name === 'match') for (const l of matchLabelsOf(s, params)) acc.labels.add(l);
+    if (s.name === 'match') matchAsReads(s, params, acc);
     // An `as()` BINDS; a bind is not a read, and counting one would make every label read itself.
     // Liveness is therefore per label NAME rather than per bind site, which is also what makes a
     // REBIND (`as('a')…as('a')`, whose history a later `select(Pop.first)` can read back) safe: both

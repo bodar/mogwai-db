@@ -21,13 +21,16 @@
 > - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
 >   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
 >
-> **`or(…)` LANDED (filter regime, L3 1753 → 1754):** the corpus `or`s are FILTER disjunctions (branches
-> bind nothing), so one predicate `branch₁ ∨ …` via `branchToExpr`/`legExpr`, NOT a UNION — see P3. The
-> infix `.and()` inside a branch canonicalizes before classification, so it composes for free.
+> **BOTH `or(…)` scenarios LANDED (filter regime, L3 1753 → 1755):** the corpus `or`s are FILTER
+> disjunctions (branches bind nothing), so one predicate `branch₁ ∨ …` via `branchToExpr`/`legExpr`, NOT a
+> UNION — see P3. The infix `.and()` inside a branch canonicalizes before classification, so it composes
+> for free; a branch's back-edges (element, reducing-scalar) and scalar-alias predicates all lower to
+> Exprs. The zero-root scenario also needed two fixes: `labels.ts` now sees a back-edge label referenced
+> only inside a connective (so a pre-bound `b` is not retracted before the match), and the bindings map
+> declares a connective's anchored variables (TinkerPop folds a nested connective's start/end labels into
+> the parent's, `MatchStep.java:127-128`).
 >
-> **Remaining (each needs new plumbing beyond the leg/seam reuse): the SECOND `or` scenario's scalar
-> branches — a reducing-scalar back-edge (`as('b').in().count().as('c')` with `c` bound) and a
-> scalar-alias predicate (`as('c').is(P.gt(2))`) inside `branchToExpr`; a truly BINDING `or` branch (a
+> **Remaining (each needs new plumbing beyond the leg/seam reuse): a truly BINDING `or` branch (a
 > fresh `.as()`) → the disjunctive-UNION regime with alias reconciliation; `local(match)`; a `map(<mean>)`
 > body; a `where(and(…))` CONNECTIVE inside a leg (recurse the connective in `classifyLeg`); a by-modulated
 > alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); top-level
@@ -202,13 +205,19 @@ landing order of one engine, not a support matrix.
   `MATCH_FILTER_HEADS`), rewriting a bound `.as(end)` to `where(P.eq(end))` and recursing through nested
   `and`/`or`; `legExpr` (a leg's existence as a boolean `Expr`, beside `applyLeg`'s `semi`/`anti` join —
   you cannot OR two joins) composes the correlated `EXISTS`. Shared `legSingle`/`legCorrelated` cores
-  keep the standalone join byte-identical (no `sql-hygiene` ratchet moves). Reaps `Match.feature`
-  `g_V_matchXa_whereXa_neqXcXX…orX…X` (L3 1753 → 1754). **Still open (all fail closed):** the OTHER `or`
-  scenario `g_V_asXaX_out_asXbX_matchXa_out_count_c__orX…X` needs a branch with a REDUCING-scalar
-  back-edge (`as('b').in().count().as('c')`, c a bound scalar → `reduce == c`) and a SCALAR-alias
-  predicate (`as('c').is(P.gt(2))`) — the next increment; a truly BINDING `or` branch (a fresh `.as()`)
-  is the disjunctive-UNION regime; a `where(and(…))` CONNECTIVE inside a leg; top-level
-  `not(match(…).where(…).select(…))` (needs the top-level filter vocabulary to admit a `match`-headed body).
+  keep the standalone join byte-identical (no `sql-hygiene` ratchet moves). **BOTH corpus `or` scenarios
+  reaped (L3 1753 → 1755).** The zero-root `g_V_asXaX_out_asXbX_matchXa_out_count_c__orX…X` added the
+  scalar-branch shapes to `branchToExpr` — a REDUCING-scalar back-edge (`as('b').in().count().as('c')`, c
+  bound → `child.scalar(start) == c`) and a SCALAR-alias predicate (`as('c').is(P.gt(2))` → `child.predicate`
+  with a scalar subject) — plus two cross-cutting fixes: (a) `labels.ts` `matchAsReads` treats an `as()`
+  inside a connective/leg branch as a READ of the enclosing scope, so a pre-bound `b` used only as a
+  connective back-edge is not retracted before the match (it was, and the match then saw `b` unbound); and
+  (b) the bindings map DECLARES a connective's anchored variables (`declares`), because TinkerPop folds a
+  nested connective's `matchStartLabels`/`matchEndLabels` into the parent's (`MatchStep.java:127-128`) and
+  `getBindings` keys on that union (`:330`) — so `b` reappears in `{a,b,c}`. **Still open (all fail
+  closed):** a truly BINDING `or` branch (a fresh `.as()`) is the disjunctive-UNION regime; a `where(and(…))`
+  CONNECTIVE inside a leg; top-level `not(match(…).where(…).select(…))` (needs the top-level filter
+  vocabulary to admit a `match`-headed body).
 - **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
   `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
   classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`
