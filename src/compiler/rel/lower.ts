@@ -1679,6 +1679,26 @@ const withoutEncounter = (channels: Channels): Channels =>
   channels.filter((channel) => channel.role !== 'encounter');
 
 /**
+ * DROP a carried PATH — a `Project` that forgets the path column and its channel, every other column
+ * and the rows untouched.
+ *
+ * A REDUCING BARRIER (`count`/`fold`/`sum`/`group`/…) consumes its input traversers into ONE new
+ * traverser, so no per-traverser path survives it — `CHANNEL_BARRIER_POLICY.path` is `drop`. The path
+ * has already done its work by the time a barrier reaches it (a `simplePath()` filtered the stream, a
+ * `path()` framed it into a list value); what a barrier must NOT do is DECLINE, which the §6·3 rule did
+ * blanketly. This is the barrier half of that rule stated positively: append at a movement, carry at a
+ * position-preserving step, DROP at a barrier. A no-op where there is no path to drop.
+ */
+const dropPath = (rel: Rel, fresh: Minter): Rel => {
+  if (!pathCarried(rel)) return rel;
+  const cols = rel.type.cols.filter((column) => column.name !== PATH_CHANNEL.col);
+  return make.project({
+    id: fresh('dp'), input: rel, channels: rel.channels.filter((channel) => channel.role !== 'path'),
+    type: typeOf(...cols), exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+  });
+};
+
+/**
  * MINT ONE DETERMINISTIC WINDOW ORDER OVER A WHOLE FAN-OUT (§10) — the demanded-order half of the
  * branch merge for a COLLECTING/write demand, and the reason `union`/`choose`/`coalesce` no longer
  * decline outright under `ctx.ordered`.
@@ -4894,7 +4914,12 @@ function elementTail(
     // construction here: `continueAs`'s map arm declines a step after one until the map re-entry
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
-      if (pathCarried(rel)) return null;
+      // The UNKEYED form is a reducing BARRIER (its result is one map) — drop any carried path
+      // (`CHANNEL_BARRIER_POLICY.path`). The KEYED form (`group("a")`) is a SIDE EFFECT that passes its
+      // incoming traversers ON, so the path would have to CARRY through the member rows — a distinct
+      // concern not built here, so it still declines with a path (fail closed).
+      if (argValues(step).length) { if (pathCarried(rel)) return null; }
+      else rel = dropPath(rel, fresh);
       // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
       // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
       // the reduction happens at the `cap`, which is where a label filled at N positions can be one
@@ -4986,7 +5011,11 @@ function elementTail(
     // `listPayload` expands it at the root, so a following `range(local)`/`unfold().limit(1)` throws
     // rows away before anything computes a property bag for them.
     if (step.name === 'fold') {
-      if (argValues(step).length || isLocalScope(step) || step.modulators?.length || pathCarried(rel)) return null;
+      if (argValues(step).length || isLocalScope(step) || step.modulators?.length) return null;
+      // `fold()` is a COLLECTING BARRIER: it gathers the surviving element traversers into one list and
+      // emits a single new traverser, so any carried path is consumed with them (`dropPath`). A
+      // `simplePath().fold()` collects the elements that survived the filter — the path did its work.
+      rel = dropPath(rel, fresh);
       const encounter = encounterOf(rel.channels);
       const folded = foldElements(rel, elem, encounter ? { order: [encounter.col] } : {}, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
@@ -5109,7 +5138,14 @@ function elementTail(
 
   if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels, bulked };
 
-  if (pathCarried(rel)) return null;
+  // A carried path meets a RETYPE (`count`/`values`/`id`/`label`/`valueMap`/`constant`/…). Every terminal
+  // here produces a NEW traverser — a reducing barrier consumes the stream, a value producer replaces it —
+  // so a per-traverser path does not survive and is DROPPED (`dropPath`), never DECLINED: `simplePath().count()`
+  // counts what the filter kept, `repeat(__.both().simplePath())...values('name')` reads the survivors'
+  // names. ⚠️ A value producer that FEEDS A LATER `path()` should instead APPEND its value as a position —
+  // that is the value-position increment; until it lands, a `values().path()` still fails closed, because
+  // `path()` declines with no channel rather than framing a history that silently omits the value step.
+  if (pathCarried(rel)) rel = dropPath(rel, fresh);
   const retyped = terminal(steps[at], rel, elem, fresh, ctx, labels);
   if (!retyped) return null;
 

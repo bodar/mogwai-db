@@ -160,6 +160,33 @@ test('simplePath() inside the body genuinely prunes cyclic walks (no artificial 
   expect(bagOf(names)).toEqual(bagOf(['marko', 'lop', 'marko', 'josh', 'lop']));
 });
 
+// ---------- a REDUCING BARRIER after a path-carrying stream DROPS the path (not declines) ----------
+test('a barrier consumes a path-carrying stream: count()/fold()/groupCount() drop the path', () => {
+  const store = seededStore();
+  // V(1).out(created).in(created).simplePath() keeps josh,peter (marko revisits itself, filtered).
+  expect(scalarValues(store, "g.V(1).out('created').in('created').simplePath().count()")).toEqual([2]);
+  // cyclicPath() is the complement: only marko (the revisit) survives.
+  expect(scalarValues(store, "g.V(1).out('created').in('created').cyclicPath().count()")).toEqual([1]);
+  // both().both().simplePath() has 18 acyclic length-3 walks; count() drops the path and totals them.
+  expect(scalarValues(store, 'g.V().both().both().simplePath().count()')).toEqual([18]);
+  // fold() collects the surviving ELEMENTS (their paths consumed): josh(4), peter(6).
+  const folded = run(store, "g.V(1).out('created').in('created').simplePath().fold()") as any[];
+  expect(JSON.parse(folded[0].list).map((e: any) => e.id).sort()).toEqual([4, 6]);
+});
+
+test('an in-body simplePath() demands path tracking even with NO trailing path()', () => {
+  // `repeatBodyTracksPath` (analyze): a path-family step inside a repeat body seeds the walk's path just
+  // like a top-level path() would. So `repeat(both().simplePath()).until(hasId(6))` prunes cyclic walks
+  // and a barrier/retype after it composes — count() drops the path, values() reads the survivors.
+  const store = seededStore();
+  // two acyclic routes reach peter(6): [marko,lop,peter] and [marko,josh,lop,peter] — 2 survivors.
+  expect(scalarValues(store, 'g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).count()')).toEqual([2]);
+  expect(scalarValues(store, "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).values('name')")).toEqual(['peter', 'peter']);
+  // a bare element terminal keeps the (now unobserved) path and frames the reached vertices.
+  const els = run(store, 'g.V(1).repeat(__.both().simplePath()).until(__.hasId(6))') as any[];
+  expect(els.map((r) => r.id)).toEqual([6, 6]);
+});
+
 test('BOUNDED times(n) unrolls a simplePath() body — corpus SimplePath.feature', async () => {
   // g_V_repeatXboth_simplePathX_timesX3X_path. A `simplePath()` in the body is a PURE FILTER an
   // unrolled phase reproduces exactly, so `unrollableBodyStep` admits it: the walk splices to

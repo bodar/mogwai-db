@@ -40,6 +40,27 @@ export interface ChainFacts {
  *  position p0 and every hop appends a position. */
 const PATH_STEPS = PATH_FAMILY;
 
+/** A PATH-family step inside a REPEAT body demands whole-chain path tracking exactly as a top-level one
+ *  does: the walk seeds the path at the source and the body's own `simplePath()`/`cyclicPath()` reads it
+ *  (`repeatWalk`), so `repeat(__.both().simplePath())` with no trailing `path()` still needs a seed.
+ *
+ *  ⚠️ Scoped to REPEAT bodies (recursively for a nested repeat). A path-family step in a branch/`by()`/
+ *  `local()`/`match()` body has its OWN carriage story and is NOT admitted here — seeding a path a
+ *  currently-working chain never carried would make it decline (fail closed, but a regression). A bounded
+ *  `times(n)` body is already unrolled by the time analyze runs, so its `simplePath()` is a top-level step
+ *  and this never sees it. */
+function repeatBodyTracksPath(step: IRStep): boolean {
+  if (step.name !== 'repeat') return false;
+  for (const value of argValues(step)) {
+    if (!isNested(value)) continue;
+    try {
+      const body = stepChain((value as { nested: unknown }).nested, {}) as IRStep[];
+      if (body.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s))) return true;
+    } catch { /* unnormalizable — declines in the lowering, never mis-seeds here */ }
+  }
+  return false;
+}
+
 // ---------- demandsEncounter (moved verbatim from strategies.ts demandsEncounterOrder) ----------
 //
 // A traversal needs a threaded emission-order `encounter` ONLY when it contains a positional
@@ -349,7 +370,7 @@ export function chainCollapseSafe(steps: IRStep[]): boolean {
  *  `isPlainOrder` still lives in `ir/step.ts` because three scans hinge on it and none may drift. */
 export function analyzeChain(steps: IRStep[]): ChainFacts {
   return {
-    tracksPath: steps.some((s) => PATH_STEPS.has(s.name)),
+    tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s)),
     demandsEncounter: computeDemandsEncounter(steps),
     demandsSlice: steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)),
   };

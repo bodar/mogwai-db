@@ -37,12 +37,14 @@ describe('ChainFacts.tracksPath', () => {
     // spliced TOP-LEVEL into the flat chain — which is exactly why the bounded form tracks a path and
     // the spliced filter has one to read.
     expect(facts('g.V().repeat(__.both().simplePath()).times(2)').tracksPath).toBe(true);
-    // An UNBOUNDED repeat keeps the path-family step inside the folded region, so a top-level `path()`
-    // is what makes the chain track a path (the corpus `repeat(both.simplePath)...path()` forms, which
-    // the walk then carries). WITHOUT one, `tracksPath` is false and the in-body `simplePath()` declines
-    // for want of a seed — a known fail-closed gap (analyze does not yet scan folded repeat bodies).
+    // An UNBOUNDED repeat keeps the path-family step inside the folded region, but a path-family step
+    // in a REPEAT body demands whole-chain tracking exactly as a top-level one does (`repeatBodyTracksPath`):
+    // the walk seeds the path at the source and the body's `simplePath()` reads it, so the chain tracks a
+    // path even with no trailing `path()` step.
     expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6)).path()').tracksPath).toBe(true);
-    expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6))').tracksPath).toBe(false);
+    expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6))').tracksPath).toBe(true);
+    // …but ONLY a repeat body — a path-family step in a branch/by/local body is not admitted here.
+    expect(facts('g.V().union(__.out().simplePath(), __.identity())').tracksPath).toBe(false);
   });
 });
 
