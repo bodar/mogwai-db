@@ -7,8 +7,8 @@ import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import { asLabelsOf } from '../ir/labels.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, eq, type Minter } from './build.ts';
-import type { ChildSeam } from './child.ts';
+import { and, eq, or, type Minter } from './build.ts';
+import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
 import type { ChildHost, Subject } from './child.ts';
@@ -72,7 +72,16 @@ type Pattern =
    *  alias it re-roots at and `reads` is every alias the body references (all must be bound). A leg
    *  reading ONE alias is a single-correlation `[NOT] EXISTS` (the tested predicate seam); a leg
    *  reading SEVERAL is a multi-column SEMI/ANTI join. */
-  | { readonly kind: 'leg'; readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] };
+  | { readonly kind: 'leg'; readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] }
+  /** `or(<branch>, <branch>, …)` — TinkerPop's OR connective in match position, a DISJUNCTION over the
+   *  binding table. Every corpus `or` is a FILTER disjunction (each branch tests already-bound
+   *  variables and BINDS NOTHING NEW — an existence/back-edge/theta condition), so the whole connective
+   *  is one boolean PREDICATE `branch₁ ∨ branch₂ ∨ …` applied as a single `Filter`, NOT a UNION of
+   *  per-branch tables. A branch that would bind a fresh variable is the disjunctive-UNION regime (a
+   *  later phase) and DECLINES here. `branches` are the raw args (each re-classified at run time against
+   *  the bound set); `reads` is every alias any branch references, so readiness waits for all of them.
+   *  (A top-level `and(…)` is not this — it flattens into the shared binding table via `andChildren`.) */
+  | { readonly kind: 'connective'; readonly op: 'or'; readonly branches: readonly Arg[]; readonly reads: readonly string[] };
 
 /** A pattern chain PARSED AND NORMALIZED. The Pass pipeline folds `order().by()`, `repeat().times()`,
  *  `sack().by()` and every other modulator into ONE `IRStep` (`normalize`, `passes.ts:336` — "`order().by()`
@@ -87,7 +96,26 @@ function patternSteps(nested: unknown, params: Record<string, any>): IRStep[] | 
 
 /** The alias labels a pattern READS — all must be bound before it is ready to run. */
 const readsOf = (p: Pattern): readonly string[] =>
-  p.kind === 'wpred' ? [p.startKey, p.otherKey] : p.kind === 'leg' ? p.reads : [p.start];
+  p.kind === 'wpred' ? [p.startKey, p.otherKey] : (p.kind === 'leg' || p.kind === 'connective') ? p.reads : [p.start];
+
+/** Every ALIAS label a branch body references — its `as()` anchors/back-edges, its `select()`/`where()`
+ *  key, and any predicate operand under a `where()` (a `P.eq(label)` alias reference, NOT a `has()`
+ *  value). Recurses into nested connective/leg bodies. Used to size a connective's readiness `reads`:
+ *  an over-approximation is safe (a filter branch binds nothing, so every alias it mentions must be
+ *  bound anyway), but it must EXCLUDE non-alias strings (edge labels, property values) or readiness
+ *  would wait forever on a name that is never a binding and the whole step would fail closed. */
+function aliasRefsIn(steps: readonly IRStep[], params: Record<string, any>, out: Set<string>): void {
+  for (const s of steps) {
+    if (s.name === 'as') for (const l of asLabelsOf(s)) out.add(l);
+    if (s.name === 'select') for (const a of s.args ?? []) if (typeof a.value === 'string') out.add(a.value);
+    if (s.name === 'where') {
+      if (typeof s.args?.[0]?.value === 'string') out.add(s.args[0]!.value);
+      const pred = s.args?.[0]?.value;
+      if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') out.add(o.value);
+    }
+    for (const a of s.args ?? []) if (isNested(a.value)) { const inner = patternSteps(a.value.nested, params); if (inner) aliasRefsIn(inner, params, out); }
+  }
+}
 
 /** The adjacency steps — a body containing one FANS the traverser OUT. A no-end constraint whose body
  *  is FILTER-ONLY (none of these) is a pure narrowing of `start` and folds as one re-rooted filter; a
@@ -258,9 +286,27 @@ function andChildren(a: unknown, params: Record<string, any>): readonly Arg[] | 
   return chain?.length === 1 && chain[0]!.name === 'and' ? (chain[0]!.args ?? []) : null;
 }
 
+/** If a match ARGUMENT is a bare `or(…)` connective, return it as a `connective` Pattern; else `null`.
+ *  Unlike `and`, an `or` is NOT flattened into the binding table — its branches are ALTERNATIVES, so it
+ *  stays one pattern whose branches are re-classified against the bound set at run time (`branchToExpr`)
+ *  and combined into one disjunctive predicate. `reads` (for readiness) is every alias the branches
+ *  reference. TinkerPop replaces a match arg whose start step is an `OrStep` with a nested `MatchStep`
+ *  of connective OR (`MatchStep.configureStartAndEndSteps`, `MatchStep.java:122`). */
+function orConnective(a: unknown, params: Record<string, any>): Pattern | null {
+  if (!isNested(a)) return null;
+  const chain = patternSteps((a as { nested: unknown }).nested, params);
+  if (!(chain?.length === 1 && chain[0]!.name === 'or')) return null;
+  const branches = chain[0]!.args ?? [];
+  if (branches.length < 2) return null;
+  const reads = new Set<string>();
+  for (const b of branches) if (isNested(b.value)) { const bs = patternSteps(b.value.nested, params); if (bs) aliasRefsIn(bs, params, reads); }
+  return { kind: 'connective', op: 'or', branches, reads: [...reads] };
+}
+
 /** Flatten a match argument list into patterns, expanding every top-level `and(…)` connective into its
- *  children (recursively — a nested `and` flattens too). Each non-connective argument classifies as one
- *  `Pattern`. Returns `null` to DECLINE the whole step (fail closed) on any unclassifiable argument. */
+ *  children (recursively — a nested `and` flattens too) and keeping each top-level `or(…)` as one
+ *  disjunctive `connective`. Each other argument classifies as one `Pattern`. Returns `null` to DECLINE
+ *  the whole step (fail closed) on any unclassifiable argument. */
 function collectPatterns(args: readonly Arg[], params: Record<string, any>): Pattern[] | null {
   const out: Pattern[] = [];
   for (const a of args) {
@@ -271,6 +317,8 @@ function collectPatterns(args: readonly Arg[], params: Record<string, any>): Pat
       out.push(...nested);
       continue;
     }
+    const conn = orConnective(a.value, params);
+    if (conn) { out.push(conn); continue; }
     const p = classify(a.value, params);
     if (!p) return null;
     out.push(p);
@@ -284,7 +332,7 @@ function collectPatterns(args: readonly Arg[], params: Record<string, any>): Pat
  *  `a_created_b__b_0created_a`), fall back to the first start label; the readiness loop then still has
  *  an anchor because the incoming traverser is bound to it. */
 function rootLabel(patterns: readonly Pattern[]): string | null {
-  const starts = patterns.flatMap((p) => (p.kind === 'wpred' ? [] : [p.start]));
+  const starts = patterns.flatMap((p) => (p.kind === 'wpred' || p.kind === 'connective' ? [] : [p.start]));
   const ends = new Set(patterns.flatMap((p) => (p.kind === 'binding' ? [p.end] : [])));
   return starts.find((s) => !ends.has(s)) ?? starts[0] ?? null;
 }
@@ -314,17 +362,61 @@ export function applyLeg(
   leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
   rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
 ): Rel | null {
+  const single = legSingle(leg, rel, labels, child, fresh);
+  if (single === null) return null;
+  if (single) return make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: single });
+  // A MULTI-correlation leg is a `semi`/`anti` JOIN against the fresh walk — the standalone form, one
+  // relational node (`branchToExpr` reaches for the `exists`-Expr form instead, so it composes inside a
+  // disjunction; `src/rel/emit.ts:404` renders BOTH to the same `[NOT] EXISTS (SELECT 1 …)` SQL).
+  const cor = legCorrelated(leg, rel, labels, child, host, fresh);
+  return cor && make.join({ id: fresh('mj'), left: rel, right: cor.ran.rel, join: leg.negated ? 'anti' : 'semi', on: cor.on, channels: rel.channels, type: rel.type });
+}
+
+/** A leg's existence test as a boolean `Expr` over the carrying table — the composable form the
+ *  connective path (`branchToExpr`) OR/ANDs together. You cannot OR two SEMI JOINs, but you can OR two
+ *  `exists` Exprs, which is the whole reason a leg is an Expr here and a `Rel` in `applyLeg`: an
+ *  `or(<leg>, <leg>)` match argument is one predicate, not two joins. A single-correlation leg is its
+ *  correlated predicate directly; a multi-correlation one is a correlated `[NOT] EXISTS` over the same
+ *  fresh walk `applyLeg`'s join builds (`negated` ⇒ `NOT EXISTS`). */
+export function legExpr(
+  leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
+  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
+): Expr | null {
+  const single = legSingle(leg, rel, labels, child, fresh);
+  if (single === null) return null;
+  if (single) return single;
+  const cor = legCorrelated(leg, rel, labels, child, host, fresh);
+  return cor && { kind: 'exists', plan: make.filter({ id: fresh('mx'), input: cor.ran.rel, channels: cor.ran.rel.channels, type: cor.ran.rel.type, pred: cor.on }), negated: leg.negated };
+}
+
+/** The SINGLE-correlation arm shared by `applyLeg`/`legExpr`: a leg reading only its own start, whose
+ *  body `child.predicate` can express (a movement/filter head over the one bound element), is that
+ *  correlated predicate. `null` = the start alias is not a bound element (decline the whole leg); a
+ *  present `false` (`undefined`) = "fall through to the multi-correlation form" — either the leg reads
+ *  more than its start, or the body is a walk only `child.chain` can lower (a `repeat`/reducing walk),
+ *  which `child.predicate` fails closed on. */
+function legSingle(
+  leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
+  rel: Rel, labels: AliasMap, child: ChildSeam, fresh: Minter,
+): Expr | null | undefined {
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
   if (!startProj || startProj.read.kind !== 'element') return null;
+  if (leg.reads.length !== 1) return undefined;
+  const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
+  return child.predicate(leg.body, subject, leg.negated) ?? undefined;
+}
 
-  if (leg.reads.length === 1) {
-    const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
-    const clause = child.predicate(leg.body, subject, leg.negated);
-    // A movement-headed body answered here; a non-movement head (a recursive/reducing walk) declines
-    // and falls through to the fresh-walk join, which lowers the body via `child.chain`.
-    if (clause) return make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
-  }
-
+/** The MULTI-correlation core shared by `applyLeg` (→ `semi`/`anti` join) and `legExpr` (→ `exists`
+ *  Expr): a FRESH walk of the leg body (its own `V()`/`E()` source, never a re-derivation of the
+ *  carrying table — `col(rel.id,…)` on both sides collapses the correlation) plus the `on` clause
+ *  correlating it back on every position `legRight` bound (the start by equality, each
+ *  `where(P.eq/neq(label))` at any depth as a channel). `null` to decline. */
+function legCorrelated(
+  leg: { readonly start: string; readonly body: readonly IRStep[] },
+  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
+): { readonly ran: ChainRead; readonly on: Expr } | null {
+  const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
+  if (!startProj || startProj.read.kind !== 'element') return null;
   const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
   const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
   if (!src || src.framing.kind !== 'elements') return null;
@@ -341,8 +433,104 @@ export function applyLeg(
       : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
     on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
   }
-  if (!on) return null;
-  return make.join({ id: fresh('mj'), left: rel, right: ran.rel, join: leg.negated ? 'anti' : 'semi', on, channels: rel.channels, type: rel.type });
+  return on ? { ran, on } : null;
+}
+
+/** A two-variable THETA clause between two already-bound ELEMENT aliases (`where('a', P.eq/neq('c'))`),
+ *  as a boolean `Expr` — the same rowid compare the `wpred` pattern applies, factored out so a `where`
+ *  inside an `or` branch composes. Both aliases must be elements; a scalar-alias compare is a later
+ *  phase. */
+function thetaExpr(keyA: string, op: 'eq' | 'neq', keyB: string, rel: Rel, labels: AliasMap, fresh: Minter): Expr | null {
+  const pa = aliasProjection(rel, labels, keyA, 'last', fresh);
+  const pb = aliasProjection(rel, labels, keyB, 'last', fresh);
+  if (!pa || !pb || pa.read.kind !== 'element' || pb.read.kind !== 'element') return null;
+  const same = eq(aliasIdAt(col(rel.id, pa.entry.col), 'last'), aliasIdAt(col(rel.id, pb.entry.col), 'last'));
+  return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+}
+
+/** One branch of an `or`/`and` connective as a boolean `Expr` over the binding table — the recursive
+ *  core that makes a disjunction of existence tests one predicate. A branch is a filter that BINDS
+ *  NOTHING; it reads only already-bound aliases. The shapes, in the order tried:
+ *  - a NESTED connective (`and(…)`/`or(…)`) — recurse and combine (scenario A's
+ *    `or(…, and(<back-edge>, <scalar is>))`);
+ *  - a `where('a', P.eq/neq('c'))` theta, or a `where(<body>)`/`not(<body>)` existence leg;
+ *  - an anchored `as(start).<body>[.as(end)]` whose `start` (and any `end`) are ALREADY BOUND: a bound
+ *    `.as(end)` is a BACK EDGE (rewritten to `where(P.eq(end))`, so a movement branch becomes a
+ *    multi-correlation existence via `legExpr`), and a no-end movement/filter body is a single- or
+ *    multi-correlation existence over `start`.
+ *  A branch that would bind a FRESH variable (an unbound `.as(end)`), or a reducing/scalar shape, is a
+ *  later phase and returns `null` — declining the whole connective (fail closed). */
+function branchToExpr(
+  branch: unknown, rel: Rel, labels: AliasMap, bound: ReadonlySet<string>,
+  child: ChildSeam, host: IRStep, fresh: Minter, params: Record<string, any>,
+): Expr | null {
+  if (!isNested(branch)) return null;
+  const steps = patternSteps(branch.nested, params);
+  if (!steps || !steps.length) return null;
+  const only = steps[0]!;
+
+  if (steps.length === 1 && (only.name === 'and' || only.name === 'or'))
+    return connectiveExpr(only.name, only.args ?? [], rel, labels, bound, child, host, fresh, params);
+
+  if (steps.length === 1 && (only.name === 'where' || only.name === 'not')) {
+    if (only.name === 'where') {
+      const wargs = only.args ?? [];
+      const pred = wargs[1]?.value;
+      if (wargs.length === 2 && typeof wargs[0]!.value === 'string' && isPred(pred)
+        && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string')
+        return thetaExpr(wargs[0]!.value, pred.op, pred.operands[0]!.value, rel, labels, fresh);
+    }
+    const leg = classifyLeg(only, params);
+    return leg && leg.kind === 'leg' ? legExpr(leg, rel, labels, child, host, fresh) : null;
+  }
+
+  const head = steps[0]!;
+  const starts = asLabelsOf(head);
+  if (head.name !== 'as' || starts.length !== 1) return null;
+  const start = starts[0]!;
+  if (!bound.has(start)) return null;
+  const tail = steps[steps.length - 1]!;
+  let body: readonly IRStep[];
+  if (tail.name === 'as' && steps.length >= 2) {
+    const ends = asLabelsOf(tail);
+    if (ends.length !== 1) return null;
+    const end = ends[0]!;
+    // A FRESH end is a binding branch (the disjunctive-UNION regime) — a later phase; decline.
+    if (!bound.has(end)) return null;
+    const inner = steps.slice(1, -1);
+    // A reducing/scalar back edge (`as('b').in().count().as('c')`, c a bound scalar) is a value
+    // compare, not an existence — a later phase; decline rather than treat it as an element back edge.
+    if (reducingEnd(inner)) return null;
+    // A bound `.as(end)` back edge is `where(P.eq(end))`, exactly the trailing-end rewrite the Pass
+    // applies to a `where`/`not` arg — done HERE because the connective heads are (deliberately) not in
+    // `MATCH_FILTER_HEADS`, so the bind-vs-constrain decision for an `or` branch lives in this lowering.
+    body = [...inner, syn(head, 'where', [{ op: 'eq', operands: [arg(end)] }])];
+  } else {
+    body = steps.slice(1);
+    if (!body.length || body.some((s) => s.name === 'as')) return null;
+  }
+  const reads = new Set<string>([start]);
+  for (const s of body) {
+    if (s.name !== 'where') continue;
+    const pred = s.args?.[0]?.value;
+    if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') reads.add(o.value);
+  }
+  return legExpr({ negated: false, start, body, reads: [...reads] }, rel, labels, child, host, fresh);
+}
+
+/** A whole `and(…)`/`or(…)` connective as one boolean `Expr`: every branch to an `Expr`, folded with
+ *  the connective's operator. Fail closed — one unclassifiable branch declines the whole connective. */
+function connectiveExpr(
+  op: 'and' | 'or', branches: readonly Arg[], rel: Rel, labels: AliasMap, bound: ReadonlySet<string>,
+  child: ChildSeam, host: IRStep, fresh: Minter, params: Record<string, any>,
+): Expr | null {
+  let acc: Expr | undefined;
+  for (const b of branches) {
+    const e = branchToExpr(b.value, rel, labels, bound, child, host, fresh, params);
+    if (!e) return null;
+    acc = op === 'and' ? and(acc, e) : or(acc, e);
+  }
+  return acc ?? null;
 }
 
 /** Parse a top-level `where(<body>)`/`not(<body>)` step (over a record's bound aliases) into a leg, or
@@ -452,6 +640,16 @@ export function lowerMatch(
       continue;
     }
 
+    if (p.kind === 'connective') {
+      // A DISJUNCTIVE FILTER — every branch is an existence/back-edge/theta test over already-bound
+      // variables, so the connective is one boolean predicate over the binding table (readiness has
+      // ensured every alias it reads is bound). A branch that would bind a fresh variable declines.
+      const clause = connectiveExpr(p.op, p.branches, rel, labels, bound, child, step, fresh, params);
+      if (!clause) return null;
+      rel = make.filter({ id: fresh('mo'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      continue;
+    }
+
     // A REDUCING-barrier end (`as('a').out().count().as('c')`) binds a per-origin reduction with a
     // 0/empty default — the scalar-child seam, rooted at the start alias, NOT the row fold (which
     // drops empty origins). The reduction is a correlated scalar projected into the alias column; the
@@ -555,6 +753,7 @@ export function lowerMatch(
   const declared: string[] = [];
   const declaredOf = (p: Pattern): readonly string[] =>
     p.kind === 'binding' ? [p.start, p.end] : p.kind === 'constraint' ? [p.start] : [];
+  // wpred and connective declare nothing (they bind no variable) — handled by the [] fallback above.
   for (const p of patterns) for (const l of declaredOf(p)) if (!declared.includes(l)) declared.push(l);
   // A 0- or 1-variable pattern's bindings map is NOT a `select()`: `select('a')` yields the VALUE, not
   // the `{a: …}` one-key map TinkerPop emits (a `project('a').by(select('a'))`, as `gql.ts` builds).

@@ -147,4 +147,32 @@ describe('match() SQL', () => {
     const map = (rows[0] as { map: string }).map;
     for (const [k, v] of [['a', 'marko'], ['b', 'lop'], ['c', 'josh']]) expect(map).toContain(`["${k}",{"t":"string","v":"${v}"}]`);
   });
+
+  // An `or(<branch>, <branch>)` match argument whose branches BIND NOTHING (existence tests over an
+  // already-bound variable) is one DISJUNCTIVE predicate over the binding table — an `OR` of correlated
+  // EXISTS, not a UNION of tables. Here both branches test `a`, and the second is a nested `and` (its
+  // infix `.and()` canonicalized), so the filter is `EXISTS(a.out(knows).has(name,vadas)) OR
+  // (EXISTS(a.in(knows)) AND a.has(label,person))`.
+  test('or() of filter branches → one disjunctive EXISTS predicate, not a union', () => {
+    const q = 'g.V().match(__.as("a").out("created").as("b"), __.or(__.as("a").out("knows").has("name","vadas"), __.as("a").in("knows").and().as("a").has(T.label,"person")))';
+    const p = read(q);
+    // A disjunction lands as an OR of correlated EXISTS subqueries in the WHERE — never a UNION.
+    expect(p.sql).toMatch(/ OR /);
+    expect((p.sql.match(/EXISTS \(SELECT/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(p.sql).not.toContain('UNION');
+    // Creators satisfying the or: marko (out-knows vadas) and josh (in-knows from marko, is a person).
+    const rows = run(seededStore(), q + '.select("a","b").by("name")') as any[];
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    expect(pairs).toEqual(['josh->lop', 'josh->ripple', 'marko->lop']);
+  });
+
+  // The full corpus scenario (Match.feature g_V_matchXa_whereXa_neqXcXX…orX…X…): a wpred, two binding
+  // hops, a disjunctive `or` filter over `a`, and a reducing-count constraint over `b`, all on one
+  // binding table. Four (a,b,c) triples over id.
+  test('or() composes with wpred, bindings and a reducing constraint (corpus scenario)', () => {
+    const q = 'g.V().match(__.where("a", P.neq("c")), __.as("a").out("created").as("b"), __.or(__.as("a").out("knows").has("name", "vadas"), __.as("a").in("knows").and().as("a").has(T.label, "person")), __.as("b").in("created").as("c"), __.as("b").in("created").count().is(P.gt(1))).select("a", "b", "c").by(T.id)';
+    const rows = run(seededStore(), q) as any[];
+    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a},${g.b},${g.c}`; }).sort();
+    expect(triples).toEqual(['1,3,4', '1,3,6', '4,3,1', '4,3,6']);
+  });
 });
