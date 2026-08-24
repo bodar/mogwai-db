@@ -174,6 +174,21 @@ test('a barrier consumes a path-carrying stream: count()/fold()/groupCount() dro
   expect(JSON.parse(folded[0].list).map((e: any) => e.id).sort()).toEqual([4, 6]);
 });
 
+test('a VALUE position mid-path: values(k).path() records the produced value', async () => {
+  const store = seededStore();
+  // out().values('name').path() — the path is [startVertex, neighbourVertex, name-VALUE]. `values()`
+  // preserves channels through propertyValues, so the path rides into the scalar and appendValuePosition
+  // records the value; pathPositions' value arm frames the {t,v} node self-describingly.
+  const ps = (await decodePaths(store, "g.V(1).out().values('name').path()")).map((p: any) => p.objects);
+  // three out-neighbours of marko → three paths, each ending in a plain string value (unordered).
+  expect(bagOf(ps.map((o: any) => o.map((x: any) => (typeof x === 'object' ? 'V' : x)))))
+    .toEqual(bagOf([['V', 'V', 'vadas'], ['V', 'V', 'lop'], ['V', 'V', 'josh']]));
+  // REGRESSION: a value producer with NO following path-family step is unaffected (no path exists).
+  expect((run(store, "g.V(1).out().values('name').count()") as any[])[0].v).toBe(3);
+  // a barrier after the value position drops the (spent) path and composes.
+  expect((run(store, "g.V().hasLabel('person').values('name').path().is(P.typeOf(GType.PATH)).count()") as any[])[0].v).toBe(4);
+});
+
 test('simplePath()/cyclicPath().by(<proj>) compares positions by their projection', () => {
   const store = seededStore();
   // corpus CyclicPath.feature: both().both() paths [v1,mid,end]; by(age) keeps the ones with an age

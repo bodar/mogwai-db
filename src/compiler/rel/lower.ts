@@ -51,7 +51,7 @@ import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind, PairSpec } from '../../services/spi/types.ts';
-import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
+import { appendValuePosition, extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
@@ -2512,6 +2512,30 @@ function scalarTail(
     }
     const args = argValues(step);
     if (step.optionArms) return null;
+    // A PATH carried into the scalar stream (a `values()` appended a value position). It composes with
+    // exactly the path-family steps — `path()` frames it, `simplePath()`/`cyclicPath()` filter it —
+    // handled BEFORE the blanket modulator decline so `path().by()`/`simplePath().by()` reach their own
+    // parsers. Any OTHER step DROPS the path here: a value producer records a value position, but the
+    // general scalar tail does not thread a path through every retype, so a non-path-family step consumes
+    // it (fail-safe — a later `path()` then declines with no channel rather than framing a gap).
+    if (pathCarried(rel)) {
+      if (step.name === 'path' && (step.args ?? []).length === 0 && step.from === undefined && step.to === undefined) {
+        const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
+        if (!positions) return null;
+        return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
+      }
+      if (step.name === 'simplePath' || step.name === 'cyclicPath') {
+        if ((step.args ?? []).length || step.from !== undefined || step.to !== undefined) return null;
+        const cyclic = step.name === 'cyclicPath';
+        const pred = step.modulators?.length
+          ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
+          : pathSimplePredicate(rel, cyclic, fresh);
+        if (!pred) return null;
+        rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
+        continue;
+      }
+      rel = dropPath(rel, fresh);
+    }
     // The blanket modulator decline exempts the two steps that HOST a `by()` here; each reads it
     // through `modulator.ts` and declines the projections a value stream cannot serve.
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
@@ -5157,15 +5181,19 @@ function elementTail(
   if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels, bulked };
 
   // A carried path meets a RETYPE (`count`/`values`/`id`/`label`/`valueMap`/`constant`/…). Every terminal
-  // here produces a NEW traverser — a reducing barrier consumes the stream, a value producer replaces it —
-  // so a per-traverser path does not survive and is DROPPED (`dropPath`), never DECLINED: `simplePath().count()`
-  // counts what the filter kept, `repeat(__.both().simplePath())...values('name')` reads the survivors'
-  // names. ⚠️ A value producer that FEEDS A LATER `path()` should instead APPEND its value as a position —
-  // that is the value-position increment; until it lands, a `values().path()` still fails closed, because
-  // `path()` declines with no channel rather than framing a history that silently omits the value step.
-  if (pathCarried(rel)) rel = dropPath(rel, fresh);
+  // here produces a NEW traverser — a reducing barrier consumes the stream, a value producer replaces it.
+  // `values()` is a MapStep that records its produced value as the next path OBJECT, and it preserves the
+  // carried channels through `propertyValues`, so the path rides into the scalar and a value position is
+  // APPENDED (`appendValuePosition`); the path then frames at a later `path()` or drops at a barrier
+  // (the scalar tail's own path discipline). Every OTHER terminal drops the path here (`dropPath`): a
+  // reducing barrier consumes it (`simplePath().count()` counts what the filter kept), and `id`/`label`/
+  // `valueMap` do not yet carry channels through, so appending is not expressible for them — fail closed
+  // rather than framing a history with a step silently missing.
+  if (pathCarried(rel) && steps[at].name !== 'values') rel = dropPath(rel, fresh);
   const retyped = terminal(steps[at], rel, elem, fresh, ctx, labels);
   if (!retyped) return null;
+  if (steps[at].name === 'values' && retyped.framing.kind === 'scalar' && pathCarried(retyped.rel))
+    return continueAs(appendValuePosition(retyped.rel, retyped.framing.type, fresh), retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
 
   // Through the ONE dispatcher rather than straight to `scalarTail`. It was hardcoded while every
   // `terminal` arm produced a scalar; `properties()` produces a PROPERTY, and hardcoding is exactly

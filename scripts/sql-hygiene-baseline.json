@@ -122,7 +122,7 @@
   "count": {
     "binds": 4,
     "bytes": 3205,
-    "compiler": 36,
+    "compiler": 40,
     "bound": 3
   },
   "dateAdd": {
@@ -295,8 +295,8 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 3140,
-    "compiler": 42,
+    "bytes": 3276,
+    "compiler": 46,
     "bound": 0
   },
   "key": {
@@ -439,8 +439,8 @@
   },
   "path": {
     "binds": 0,
-    "bytes": 6485,
-    "compiler": 106,
+    "bytes": 6621,
+    "compiler": 110,
     "bound": 0
   },
   "product": {

@@ -387,6 +387,7 @@ ran	4	4	1a2cf3d3523c1108	072dd2ca6f96e0f0	g.V().hasLabel("person").values("name"
 ran	4	2	9eb7190ca729b794	83dfb8b6e77e6a11	g.V().hasLabel("person").values("name").as("a").concat("X").as("a").length().as("a"). select(Pop.last, "a")
 ran	4	4	1378869d9ab24b8f	efde15eb86d41c88	g.V().hasLabel("person").values("name").as("a").constant("Mr.").concat(__.select("a"))
 ran	4	4	00138ff382f9ed53	62c4063aaa3ef07a	g.V().hasLabel("person").values("name").concat(" ").concat("person")
+ran	4	4	9781b245c14d716c	825b84083a42d7cb	g.V().hasLabel("person").values("name").path().is(P.typeOf(GType.PATH))
 ran	4	4	32eae6f91f23aa9d	b82e5bc974259c78	g.V().hasLabel("person").values("name").split(null)
 ran	4	4	4a7ecf52cc8c857e	a35dc56074b11fa3	g.V().hasLabel("person").values("name").substring(-3)
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().hasLabel("person","software", "blah")

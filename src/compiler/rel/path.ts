@@ -2,7 +2,7 @@ import type { Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { TYPED_MEMBERS, type ListOf, type Shape } from '../../sql/kernel/render.ts';
+import { TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
@@ -86,6 +86,26 @@ export const pathCarried = (rel: Rel): boolean => rel.channels.some((channel) =>
 /** Position 0 — the source element, seeded where the chain's own text says it tracks a path. */
 export const seedPath = (object: TraverserObject): Expr => historySeed(objectEntry(object));
 
+/**
+ * APPEND A VALUE POSITION — a `values()`/`id()`/`label()` mid-path records its produced value as the
+ * next path object (`vendor/tinkerpop/gremlin-core/.../map/PropertyValueStep` extends `MapStep`, so the
+ * traverser's path gains the value). The scalar stream already carries the path column (a value producer
+ * that preserves channels rides it through); this appends the `{k:value, v, t}` entry, keyed by the
+ * stream's own `vtype` column where it has one so a per-row type survives into the tagged history.
+ */
+export function appendValuePosition(rel: Rel, type: ScalarType, fresh: Minter): Rel {
+  if (!pathCarried(rel)) return rel;
+  const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+  const entry = objectEntry({ kind: 'value', value: col(rel.id, 'v'), type, ...(vtype ? { vtype } : {}) });
+  return make.project({
+    id: fresh('pav'), input: rel, channels: rel.channels, type: rel.type,
+    exprs: rel.type.cols.map((column) => [
+      column.name,
+      column.name === PATH_COL ? historyAppend(col(rel.id, PATH_COL), entry) : col(rel.id, column.name),
+    ] as const),
+  });
+}
+
 /** ONE MORE POSITION: the path column replaced, every other column and channel through untouched.
  *
  *  A movement appends ONCE over its whole fan-out rather than per arm, because the object being recorded
@@ -147,12 +167,20 @@ export function pathPositions(
   // ONE `case` over the entry's own tag, whatever the path's length — which is the whole reason the entry
   // carries a tag at all. Two arms because only element objects reach the append today; a VALUE position
   // is a third arm here and an append at the retype, not a different encoding.
+  // A VALUE position (a `values()`/`id()`/`label()` mid-path) is self-contained — its `{v,t}` is stored
+  // IN the entry, so unlike an element it needs no rejoin. Reshape `{k,v,t}` → the `{t,v}` node the
+  // typed-tree framer reads. Its tag distinguishes it from a vertex (`else`), which would otherwise try
+  // to rejoin the value as a rowid.
+  const valueNode: Expr = { kind: 'json-object', binary: false, entries: [
+    ['t', { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.t')] }],
+    ['v', { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] }],
+  ] };
   const element: Expr = {
     kind: 'case',
-    whens: [[
-      { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) },
-      source.elementNode('edge', rowid, fresh),
-    ]],
+    whens: [
+      [{ kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) }, source.elementNode('edge', rowid, fresh)],
+      [{ kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.value) }, valueNode],
+    ],
     else: source.elementNode('vertex', rowid, fresh),
   };
   const projectedNode = (modulation: Modulation): Expr | null => {

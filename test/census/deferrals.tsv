@@ -197,7 +197,6 @@ unbound	Unbound parameter 'vid1'	g.V().hasLabel("person").values("age"). is(P.wi
 deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("person").values("name").fold().order(Scope.local).index().with(WithOptions.indexer, WithOptions.map)	g.V().hasLabel("person").values("name").fold().order(Scope.local).index().with(WithOptions.indexer, WithOptions.map)
 deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("person").values("name").order().fold().split(Scope.local, "").unfold()	g.V().hasLabel("person").values("name").order().fold().split(Scope.local, "").unfold()
 deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("person").values("name").order().fold().split(Scope.local, "a").unfold()	g.V().hasLabel("person").values("name").order().fold().split(Scope.local, "a").unfold()
-deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("person").values("name").path().is(P.typeOf(GType.PATH))	g.V().hasLabel("person").values("name").path().is(P.typeOf(GType.PATH))
 unbound	Unbound parameter 'xx1'	g.V().hasLabel("person",xx1)
 deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("reptile").group().by(__.labels().order().fold()).by(__.values("name").fold())	g.V().hasLabel("reptile").group().by(__.labels().order().fold()).by(__.values("name").fold())
 unbound	Unbound parameter 'vid1'	g.V().hasLabel("software"). has("name", P.without(__.union(__.V(vid1).out("created").values("name"), __.V(vid4).out("created").values("name")).fold()))
