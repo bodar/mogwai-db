@@ -3,6 +3,8 @@ import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
+import type { RelId } from '../../rel/types.ts';
+import { containsSelfRef, mapRelChildren, mapRelExprs, rewriteExpr } from '../../rel/walk.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { AliasMap } from '../alias.ts';
 import type { Elem } from '../elem.ts';
@@ -52,6 +54,60 @@ interface WalkRead {
  * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelNode.java`), it is state declared at
  * the relational position where it is live.
  */
+/** Substitute one relation id for another throughout an expression, INCLUDING correlated subplans —
+ *  a `simplePath()` filter's `COUNT(DISTINCT)` reads the body's path column through a scalar subquery,
+ *  so distributing (below) that reparents the filter must follow the reference into that subquery, or
+ *  the pushed-down copy still reads a column from the relation it was lifted off of. */
+function substRelId(e: Expr, from: RelId, to: RelId): Expr {
+  const inSubplan = (plan: Rel): Rel =>
+    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to));
+  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node), inSubplan);
+}
+
+/** Rebuild a unary `Project`/`Filter` over a NEW input, remapping every reference to its OLD input's
+ *  id onto the new one. The new input carries the same columns (it is one arm of the UNION ALL the
+ *  node sat over), so the remap is total. A fresh node id keeps the two distributed copies distinct. */
+function reparent(unary: Extract<Rel, { readonly kind: 'project' | 'filter' }>, input: Rel, fresh: Minter): Rel {
+  const from = unary.input.id;
+  return unary.kind === 'project'
+    ? make.project({ id: fresh('wt'), input, channels: unary.channels, type: unary.type,
+        exprs: unary.exprs.map(([name, e]) => [name, substRelId(e, from, input.id)] as const) })
+    : make.filter({ id: fresh('wt'), input, channels: unary.channels, type: unary.type,
+        pred: substRelId(unary.pred, from, input.id) });
+}
+
+/**
+ * Project/Filter distribute over UNION ALL — Calcite's `Project`/`FilterSetOpTransposeRule` — pushing
+ * the unary nodes a recursive body stacked over its hop-union DOWN into the arms, so each arm becomes
+ * its own recursive term referencing the walk EXACTLY ONCE.
+ *
+ * ⚠️ **This is why a `both()`-bodied `repeat()` composes with anything above the hop.** A projection
+ * (the path append, the loops bump) or a filter (`simplePath()`) left ABOVE the union takes a DERIVED
+ * TABLE over a compound (the emitter's fusion rule, `src/rel/block.ts`), and a derived table collects
+ * every arm's `SelfRef` into ONE SELECT — `circular reference`, P1/§6 of the build plan. Distributed,
+ * each arm is a single recursive term SQLite accepts, which is also what makes a self-loop yield the
+ * vertex twice. It is the same transpose the loops bump did by hand; generalizing it lets the body's
+ * OWN path-append and `simplePath` nodes ride through the identical mechanism.
+ *
+ * A no-op wherever there is no self-referencing UNION ALL underneath — an ordinary `union` over a
+ * non-recursive relation stays for the emitter to derived-table as before.
+ */
+function distributeThroughUnion(rel: Rel, name: string, fresh: Minter): Rel {
+  const selfUnion = (r: Rel): r is Extract<Rel, { readonly kind: 'union' }> =>
+    r.kind === 'union' && r.all && r.inputs.some((arm) => containsSelfRef(arm, name));
+  if (rel.kind === 'union')
+    return selfUnion(rel)
+      ? make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
+          inputs: rel.inputs.map((arm) => distributeThroughUnion(arm, name, fresh)) })
+      : rel;
+  if (rel.kind !== 'project' && rel.kind !== 'filter') return rel;
+  const inner = distributeThroughUnion(rel.input, name, fresh);
+  if (selfUnion(inner))
+    return make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
+      inputs: inner.inputs.map((arm) => reparent(rel, arm, fresh)) });
+  return inner === rel.input ? rel : reparent(rel, inner, fresh);
+}
+
 export function repeatWalk(
   step: IRStep, input: Rel, elem: Elem, child: ChildSeam, fresh: Minter, aliases: AliasMap,
 ): WalkRead | null {
@@ -161,8 +217,9 @@ export function repeatWalk(
 
   let termValid = true;
   const walkId = fresh('w');
+  const walkName = `wk_${walkId}`;
   const walk = make.recursive({
-    id: walkId, name: `wk_${walkId}`, channels: carried, type: walkType,
+    id: walkId, name: walkName, channels: carried, type: walkType,
     cols: header.map((column) => column.name), seed,
     step: (self) => {
       const stop = exits(self);
@@ -180,33 +237,29 @@ export function repeatWalk(
         termValid = false;
         return self;
       }
-      /** The counter bump, over ONE source relation. */
-      const bump = (source: Rel): Rel => make.project({
-        id: fresh('wi'), input: source, channels: carried, type: walkType,
-        exprs: [['id', col(source.id, 'id')], ...carried.map((channel) => [channel.col,
+      /** The counter bump — one projection incrementing `loops`, carrying every other column and
+       *  channel (the path column the body just appended to included) through unchanged. */
+      const bump = make.project({
+        id: fresh('wi'), input: term.rel, channels: carried, type: walkType,
+        exprs: [['id', col(term.rel.id, 'id')], ...carried.map((channel) => [channel.col,
           channel === depth
-            ? { kind: 'binary', op: '+', left: col(source.id, channel.col), right: compilerInt(1) } as Expr
-            : col(source.id, channel.col),
+            ? { kind: 'binary', op: '+', left: col(term.rel.id, channel.col), right: compilerInt(1) } as Expr
+            : col(term.rel.id, channel.col),
         ] as const)],
       });
       /**
-       * ⚠️ **A TERM IS A COMPOUND, so the bump DISTRIBUTES over its arms rather than sitting above
-       * them.** `both()`/`bothE()`/`bothV()` are two `HOPS` entries unioned `ALL`, each arm joining
-       * the frontier — which in a walk IS the `SelfRef`. Left alone, the counter bump is one
-       * projection over the compound, a projection over a compound takes a DERIVED TABLE, and that
-       * collects both references into one subquery: `circular reference` (§6). Distributed, each arm
-       * becomes its own recursive term referencing the walk once, which SQLite accepts and which is
-       * what makes a self-loop yield the vertex twice. This is the textbook `Project` through
-       * `UNION ALL` distribution — Calcite's `ProjectSetOpTransposeRule`.
-       *
-       * Only a top-level `UNION ALL` distributes. A non-`ALL` compound would dedup the whole walk,
-       * and `recursiveViolation` refuses it by name rather than letting this quietly rebuild it.
+       * ⚠️ **A TERM IS A COMPOUND, so the bump — and every per-iteration node the body stacked over
+       * its hop-union (a path append, a `simplePath` filter) — DISTRIBUTES over the arms rather than
+       * sitting above them.** `both()`/`bothE()`/`bothV()` are two `HOPS` entries unioned `ALL`, each
+       * arm joining the frontier, which in a walk IS the `SelfRef`. A projection over that compound
+       * takes a DERIVED TABLE that collects both references into one subquery: `circular reference`
+       * (§6). `distributeThroughUnion` pushes the unary chain down into the arms so each becomes its
+       * own recursive term referencing the walk once — the textbook `Project`/`Filter` through
+       * `UNION ALL` transpose (Calcite's `Project`/`FilterSetOpTransposeRule`), and what makes a
+       * self-loop yield the vertex twice. A non-`ALL` compound would dedup the whole walk, which
+       * `recursiveViolation` refuses by name rather than letting this quietly rebuild it.
        */
-      return term.rel.kind === 'union' && term.rel.all
-        ? make.union({
-          id: fresh('wd'), inputs: term.rel.inputs.map(bump), all: true, channels: carried, type: walkType,
-        })
-        : bump(term.rel);
+      return distributeThroughUnion(bump, walkName, fresh);
     },
   });
 
