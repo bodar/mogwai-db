@@ -381,7 +381,7 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
   test('all four native OLAP steps are built as BARRIERS — shortestPath included', () => {
     // Every native OLAP step is now a barrier (mogwai.pageRank/.wcc/.peerPressure DECORATE barriers;
     // mogwai.shortestPath a BSP relaxation + path-reconstruction barrier — the recursive-CTE walk is
-    // gone, docs/2026-08-23-barrier-substrate-reshape-plan.md §5). So bare compile() cannot drive it —
+    // gone, docs/archive/2026-08-23-barrier-substrate-reshape-plan.md §5). So bare compile() cannot drive it —
     // it must go through an Executor (a barrier's `apply` runs at runtime against the store). L2/L3
     // cover the values; this pins that shortestPath is on the barrier substrate, not a compile-time rel.
     expect(() => compile('g.V().shortestPath()', {}, { registry: standardRegistry }))

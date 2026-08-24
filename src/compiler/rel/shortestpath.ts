@@ -14,7 +14,7 @@ import { PATH_CHANNEL, PATH_COL, pathPositions, seedPath } from './path.ts';
 import type { GraphSource } from './source.ts';
 
 /**
- * `shortestPath()` — path RECONSTRUCTION for the BSP barrier (`docs/2026-08-23-barrier-substrate-reshape-plan.md`
+ * `shortestPath()` — path RECONSTRUCTION for the BSP barrier (`docs/archive/2026-08-23-barrier-substrate-reshape-plan.md`
  * §5). TinkerPop's OLAP shortest-path step runs on ONE substrate for BOTH weighted and unweighted searches:
  * the service's barrier `apply` relaxes the shortest DISTANCE from each source vertex into `barrier_state`
  * (scope = source, channel 0 — `relaxShortestPath`), and this file rebuilds the shortest PATHS from it.

@@ -1,7 +1,12 @@
 # Barrier substrate reshape — from single-scalar fixpoint to a general per-node schema
 
-**Status: SUBSTRATE COMPLETE (2026-08-23) — all phased items 1–6 landed + a GDS-style algorithm
-library built on it.** Supersedes the "output shape" half of `docs/2026-08-21-barrier-substrate-design.md`
+**Status: ✅ LANDED AND ARCHIVED (2026-08-24).** Substrate complete — phased items 1–6 landed (item 6
+slice 2, per-parent nesting by promotion, is the one exception: a future COMPOSITION target, not
+substrate, deferred with cause below) + a GDS-style algorithm library built on it. Read for the MEASURED
+FACTS: the `barrier_state` schema and its four output arms, GDS as prior art (§9), and the deferred-with-
+cause GDS algorithms (§ intro: labelPropagation/louvain/eigenvector). The remaining LIVE work it names —
+barrier-in-body slice 2 (blocked on the OLAP graph-filter question) and those three algorithms — is
+indexed in `docs/outstanding-work.md`. Supersedes the "output shape" half of `docs/2026-08-21-barrier-substrate-design.md`
 for the OLAP/graph-algorithm barriers. Generalized `barrier_relation` →
 `barrier_state(run,round,scope,id,channel,cval)`, grounded in the vendored `vendor/gds` (Neo4j GDS
 Pregel) as the shape reference. The authority is the code (`src/storage.ts`, `src/compiler/rel/segment.ts`,

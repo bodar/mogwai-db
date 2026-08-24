@@ -7,7 +7,7 @@ import { STATE_INSERT, syncBarrier } from './kernel.ts';
 //
 // `g.call("mogwai.hits")` decorates each vertex with TWO scores — a hub and an authority — the first
 // consumer of the multi-channel decorate substrate (barrier_state channel 0 = hub, channel 1 = auth;
-// docs/2026-08-23-barrier-substrate-reshape-plan.md item 2). HITS has no native TinkerPop step, so it is
+// docs/archive/2026-08-23-barrier-substrate-reshape-plan.md item 2). HITS has no native TinkerPop step, so it is
 // call-only, GDS-style. A faithful replay of the Wikipedia iteration GDS itself asserts against
 // (`vendor/gds/algo/src/test/java/org/neo4j/gds/hits/HitsTest.java` `PseudoCodeHits`, GPLv3 — re-expressed
 // in SQL, never transcribed): init hub=auth=1, then k iterations of

@@ -10,7 +10,7 @@ import { STATE_INSERT, syncBarrier } from './kernel.ts';
 // undirected variant halves and is left for a `direction` param).
 //
 // Brandes, and the first consumer of BOTH remaining barrier_state dimensions at once
-// (docs/2026-08-23-barrier-substrate-reshape-plan.md): it is MULTI-SOURCE (scope = source vertex) and it
+// (docs/archive/2026-08-23-barrier-substrate-reshape-plan.md): it is MULTI-SOURCE (scope = source vertex) and it
 // KEEPS ALL ROUNDS (round = BFS level), because the algorithm's two phases run in opposite directions:
 //   FORWARD  — a level-synchronous BFS from every source at once; σ[s][v] (channel 0) = the number of
 //              shortest s→v paths = Σ σ of the level-(L−1) predecessors. Node v lands in round dist(s,v).

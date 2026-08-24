@@ -6,7 +6,7 @@ import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 // The shared OLAP BARRIER KERNEL — the substrate every graph algorithm in `olap/` builds on: the edge
 // message scope, the `barrier_state` scratch fragments + the in-SQL fixpoint driver (`iterateInSql`),
 // and the scope-keyed shortest-distance relaxation (`relaxShortestPath`). One home so an algorithm file
-// extends ONE kernel, not three copies. Reference + rationale: docs/2026-08-23-barrier-substrate-reshape-plan.md,
+// extends ONE kernel, not three copies. Reference + rationale: docs/archive/2026-08-23-barrier-substrate-reshape-plan.md,
 // docs/2026-07-24-graph-algorithms-plan.md.
 
 // ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
@@ -78,7 +78,7 @@ export function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: strin
 }
 
 // The barrier scratch is the general `barrier_state(run, round, scope, id, channel, cval)` — one row per
-// (run, round, scope, id, channel) (`src/storage.ts`, `docs/2026-08-23-barrier-substrate-reshape-plan.md`).
+// (run, round, scope, id, channel) (`src/storage.ts`, `docs/archive/2026-08-23-barrier-substrate-reshape-plan.md`).
 // A NODE-KEYED, SINGLE-CHANNEL fixpoint (wcc/pageRank/peerPressure) uses `scope` 0 and `channel` 0; the
 // two extra key dims stay literal 0 here and become live for the pair-keyed (Brandes/similarity) and
 // multi-channel (shortest-path dist + predecessor) consumers. Centralised so those consumers extend ONE
@@ -162,7 +162,7 @@ export const changedCount = (store: GraphStore, run: number, prev: Slot, next: S
 
 // ---------- weighted shortest DISTANCE — Bellman-Ford relaxation, PAIR-KEYED by source ----------
 //
-// The BSP half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5). Unlike
+// The BSP half of weighted shortestPath (docs/archive/2026-08-23-barrier-substrate-reshape-plan.md §5). Unlike
 // the three node-keyed fixpoints above, shortest path runs from EACH source traverser, so its state is
 // per (source, node) — `scope` = the source vertex, `channel` 0 = the tentative distance (a REAL). This
 // is the first consumer of the general `barrier_state`'s scope + channel dims. Reconstruction is NOT

@@ -4,7 +4,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 // The OLAP computes execute as SQL-resident relaxations (one INSERT..SELECT per round over
-// `barrier_state`; docs/2026-08-23-barrier-substrate-reshape-plan.md). The pure-JS functions BELOW are
+// `barrier_state`; docs/archive/2026-08-23-barrier-substrate-reshape-plan.md). The pure-JS functions BELOW are
 // the differential ORACLES: this asserts the SQL rounds agree with them over the WHOLE vertex vector
 // (not just the conformance-asserted subset), so the SQL rewrite cannot silently drift from the
 // algorithm. They are TEST-ONLY (independent re-derivations of the reference), so they live here with

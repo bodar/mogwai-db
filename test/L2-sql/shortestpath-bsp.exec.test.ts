@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { relaxShortestPath } from '../../src/services/catalog/olap/kernel.ts';
 
-// The BSP half of weighted shortestPath (docs/2026-08-23-barrier-substrate-reshape-plan.md §5): a
+// The BSP half of weighted shortestPath (docs/archive/2026-08-23-barrier-substrate-reshape-plan.md §5): a
 // Bellman-Ford relaxation writing dist per (source, node) into barrier_state (scope = source, channel 0).
 // This pins the relaxation itself — dist correctness on modern, and TERMINATION on the dense grateful
 // `followedBy` graph that the recursive-CTE walk hangs on (9b77dd5). Path reconstruction is a later step.

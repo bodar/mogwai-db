@@ -11,7 +11,7 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 // therefore compose onto the final element stream, and the plan holds both landed `barrier_state` CTEs
 // (self-declared by the `decorateGraph` stack). No official corpus scenario chains OLAP steps, so this
 // is our own safety net for the composition (root CLAUDE.md: X works, Y works ⇒ X-then-Y must work).
-// Substrate: docs/2026-08-23-barrier-substrate-reshape-plan.md §7 item 4.
+// Substrate: docs/archive/2026-08-23-barrier-substrate-reshape-plan.md §7 item 4.
 
 const PR = 'gremlin.pageRankVertexProgram.pageRank';
 const CC = 'gremlin.connectedComponentVertexProgram.component';

@@ -39,6 +39,15 @@ per-step support; closed work belongs in git history or `docs/archive/`.
 
 - **Graph capabilities:** `tree`, `match`, graph algorithms, and the remaining
   strategy/options forms. Pick a family only after identifying the substrate it needs.
+  - *Graph algorithms* — the barrier substrate and the GDS-style library are DONE and archived
+    ([barrier substrate reshape](./archive/2026-08-23-barrier-substrate-reshape-plan.md); 14
+    algorithms + the four native OLAP steps, all reference-faithful). Two pieces remain, both
+    deferred with cause there: **barrier-in-body slice 2** (per-parent nesting by promotion for
+    `local`/`union`-arm/`by`-child/unbounded-`repeat` bodies — needs a tree `Plan` + drive-as-stack +
+    the `scope=parent` key, and its clean OLAP consumer is blocked on the unresolved graph-filter
+    question; unbounded-`repeat` stays P3 fail-closed forever), and the **order-dependent GDS
+    algorithms** (`labelPropagation`, `louvain`, `eigenvector` — not clean set-based reuse; each
+    would need new substrate or a variant that diverges from GDS's exact oracle).
 - **Services and graph movement:** federation tails, bulk materialization, and IO formats. The
   `GraphSource` abstraction (one traversal vocabulary over base + injected/federated subgraphs) is DONE
   and its plan is archived

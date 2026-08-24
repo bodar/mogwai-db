@@ -121,7 +121,7 @@ const SCHEMA = [
   //   `channel` — the named per-node property (GDS Pregel's PregelSchema element): a single-scalar
   //               fixpoint uses channel 0; a multi-channel algorithm (shortest-path dist + predecessor)
   //               declares several. This is GDS's CompositeNodeValue; the single-channel case is its
-  //               SingleNodeValue. See docs/2026-08-23-barrier-substrate-reshape-plan.md.
+  //               SingleNodeValue. See docs/archive/2026-08-23-barrier-substrate-reshape-plan.md.
   //   `cval`    — untyped (BLOB affinity), preserving the value's storage class (a REAL score, a TEXT
   //               component id, a JSON array for a set-valued channel), exactly as vertex_properties.value.
   `CREATE TABLE IF NOT EXISTS barrier_run_seq(id INTEGER PRIMARY KEY AUTOINCREMENT)`,
