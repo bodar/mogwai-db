@@ -671,6 +671,10 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   `emit()`, `until()` — the transform's validity is a property of `repeat`, not the body's step names. ⚠️
   Worth ~+10, but most bounded declines are blocked by steps the SPLICED chain still cannot lower (`select`,
   `local`, `group`, the map shape) — most of the repeat gap is the ordinary coverage gap in a `repeat` costume.
+  ✅ Partially done by ADDITION rather than inversion: `simplePath()`/`cyclicPath()` joined `unrollableBodyStep`
+  (they are pure path filters an unrolled phase reproduces exactly), which is the pattern — each step earns
+  admission by an argument that its spliced phase is faithful, and the residual gate becomes a deny-list once
+  every remaining body step has one. The path filters were the ones the SPLICED chain already lowers.
 
 **Leaf gaps — one family, no downstream unlock:**
 
@@ -688,9 +692,17 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   recursive-term barrier laws allow). The append (`Project`) and the filter both sit over a `both()` body's
   hop-union, and `distributeThroughUnion` (the generalized loops-bump transpose, Calcite
   `Project`/`FilterSetOpTransposeRule`) pushes them into the arms so each stays a single recursive reference.
-  L3 +5 (`Unfold`/`Loops` incl. `loops()` in `until`/`Repeat` `outE_inV`). 🚧 LEFT — a `by(<proj>)`
-  (compare by a projection), `from`/`to` scoping, and a reducer after a still-path-carrying stream
-  (`simplePath().count()` — the path channel blocks the barrier); the ENCOUNTER-plus-path walk still declines.
+  L3 +5 (`Unfold`/`Loops` incl. `loops()` in `until`/`Repeat` `outE_inV`).
+  ✅ **The BOUNDED form landed too** — `simplePath()`/`cyclicPath()` are now `unrollableBodyStep`s
+  (`ir/strategies.ts`), so `repeat(__.both().simplePath()).times(n)` splices the filter into a flat chain
+  and lowers through the linear path machinery; splicing it TOP-LEVEL is also what makes `analyzeChain`
+  track a path with no explicit `path()` tail (the pass runs before analyze). L3 +2
+  (`SimplePath` `timesX3X_path`, and the `order()`-in-body `order_byXname_descX...timesX2X_path` — order
+  composes through the per-phase splice, verified incl. ORDER). 🚧 LEFT — a `by(<proj>)` (compare by a
+  projection, `cyclicPath().by('age')`), `from`/`to` scoping, a reducer after a still-path-carrying stream
+  (`simplePath().count()` — the path channel blocks the barrier; a barrier should DROP path per
+  `CHANNEL_BARRIER_POLICY`), an UNBOUNDED in-body path step with no `path()` tail (analyze does not scan
+  folded repeat bodies), and the ENCOUNTER-plus-path walk.
 - ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
   non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
