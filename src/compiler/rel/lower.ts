@@ -1448,7 +1448,12 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, shape);
   const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
-  if (step.name === 'dedup' && pathCarried(input)) return null;
+  // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks
+  // to one vertex differ by route), defeating the collapse — but the path has already done its work
+  // (a `simplePath()` filtered the stream) and nothing downstream observes it here, so DROP it and
+  // dedup by id. `simplePath().dedup()` keeps one traverser per surviving element. A `dedup().path()`
+  // that needs the survivor's route is the value-position increment; until then it fails closed.
+  if (step.name === 'dedup' && pathCarried(input)) input = dropPath(input, fresh);
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
   // A BARE `dedup()` is a grouping by traverser IDENTITY, so the channel policy table decides whether
@@ -4843,7 +4848,11 @@ function elementTail(
       continue;
     }
     if (step.name === 'select') {
-      if (pathCarried(rel)) return null;
+      // `select` RE-ROOTS to an aliased object — a retype, so a carried path is DROPPED (its work
+      // is done: a `simplePath()` filtered the stream) rather than declined. A `select().path()` that
+      // should APPEND the selected object as a position is the value-position increment; until then it
+      // fails closed (the following `path()` declines with no channel).
+      rel = dropPath(rel, fresh);
       const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
         { framing: { kind: 'elements', elem }, named: namedElsewhere(ctx) });
       if (!selected) return null;

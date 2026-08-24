@@ -174,6 +174,35 @@ test('a barrier consumes a path-carrying stream: count()/fold()/groupCount() dro
   expect(JSON.parse(folded[0].list).map((e: any) => e.id).sort()).toEqual([4, 6]);
 });
 
+test('a JOIN-over-UNION recursive body composes — bothE().inV() (join-union transpose)', async () => {
+  // `inV()` re-joins the edge table to read `tgt`, so a `bothE().inV()` body's recursive term is
+  // project(join(union(edge-arms), edges), …) — a JOIN over a self-referencing UNION. distributeThroughUnion
+  // pushes the join into the arms (Calcite JoinUnionTransposeRule), sharing the plain edge scan across them.
+  // bothE().inV() is out-heads plus a self-loop per in-edge (inV of an in-edge is the vertex itself), which
+  // simplePath() prunes — so bothE().inV().simplePath() reaches exactly what out().simplePath() does.
+  const store = seededStore();
+  const reach = (id: number, body: string) =>
+    (run(store, `g.V(1).repeat(${body}).until(__.hasId(${id})).count()`) as any[])[0]?.v;
+  for (const id of [2, 3, 4, 5, 6])
+    expect(reach(id, '__.bothE().inV().simplePath()')).toBe(reach(id, '__.out().simplePath()'));
+  // …and the path interleaves the traversed EDGES: marko →e josh →e ripple.
+  const ps = await decodePaths(store, "g.V(1).repeat(__.bothE().inV().simplePath()).until(__.hasId(5)).path()");
+  expect(ps.map((p: any) => p.objects.map((o: any) => o.constructor.name)))
+    .toEqual([['Vertex', 'Edge', 'Vertex', 'Edge', 'Vertex']]);
+  expect(ps.map((p: any) => p.objects.map((o: any) => o.id))).toEqual([[1, 8, 4, 10, 5]]);
+});
+
+test('dedup()/select() after a path filter drop the (spent) path and compose', () => {
+  const store = seededStore();
+  // V(1).out(created).in(created).simplePath() keeps josh(4),peter(6); dedup() is a no-op here (already
+  // distinct) but must COMPOSE — the path is dropped so dedup keys by element id, not by route.
+  const deduped = run(store, "g.V(1).out('created').in('created').simplePath().dedup()") as any[];
+  expect(deduped.map((r) => r.id).sort()).toEqual([4, 6]);
+  // select('a') re-roots to the aliased start after the filter: marko for each surviving 2-hop walk.
+  const selected = run(store, "g.V(1).as('a').out().out().simplePath().select('a')") as any[];
+  expect(selected.every((r) => r.id === 1)).toBe(true);
+});
+
 test('an in-body simplePath() demands path tracking even with NO trailing path()', () => {
   // `repeatBodyTracksPath` (analyze): a path-family step inside a repeat body seeds the walk's path just
   // like a top-level path() would. So `repeat(both().simplePath()).until(hasId(6))` prunes cyclic walks

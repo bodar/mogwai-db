@@ -101,6 +101,30 @@ function distributeThroughUnion(rel: Rel, name: string, fresh: Minter): Rel {
       ? make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
           inputs: rel.inputs.map((arm) => distributeThroughUnion(arm, name, fresh)) })
       : rel;
+  // A JOIN over a self-referencing UNION-ALL side — Calcite's `JoinUnionTransposeRule`, the shape a
+  // `bothE().inV()` recursive body makes (`inV()` re-joins the edge table to read `tgt`, so the term is
+  // `project(join(union(edge-arms), edges), …)`). Push the join INTO the union's arms so each arm is a
+  // single recursive reference. The OTHER side (the plain edge scan) is SHARED across the arms — legal,
+  // because the arms are distinct UNION-ALL SELECTs whose aliases are scoped per-SELECT (the `check`
+  // that forbids a shared id is about the TWO SIDES of one join, which stay distinct here). The `on`
+  // references the union side by its id, remapped to the arm's; the shared side's references are
+  // untouched, and its schema — hence the join's positional output — is identical in every arm.
+  if (rel.kind === 'join') {
+    const left = distributeThroughUnion(rel.left, name, fresh);
+    const right = distributeThroughUnion(rel.right, name, fresh);
+    const distribute = (arms: readonly Rel[], onSide: 'left' | 'right'): Rel =>
+      make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
+        inputs: arms.map((arm) => make.join({
+          id: fresh('wj'), join: rel.join, ordered: rel.ordered,
+          left: onSide === 'left' ? arm : left, right: onSide === 'left' ? right : arm,
+          on: rel.on ? substRelId(rel.on, onSide === 'left' ? rel.left.id : rel.right.id, arm.id) : undefined,
+          channels: rel.channels, type: rel.type,
+        })) });
+    if (selfUnion(left) && !containsSelfRef(right, name)) return distribute(left.inputs, 'left');
+    if (selfUnion(right) && !containsSelfRef(left, name)) return distribute(right.inputs, 'right');
+    return left === rel.left && right === rel.right ? rel
+      : make.join({ id: fresh('wj'), left, right, on: rel.on, join: rel.join, ordered: rel.ordered, channels: rel.channels, type: rel.type });
+  }
   if (rel.kind !== 'project' && rel.kind !== 'filter') return rel;
   const inner = distributeThroughUnion(rel.input, name, fresh);
   if (selfUnion(inner))
