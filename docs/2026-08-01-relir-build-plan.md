@@ -698,11 +698,21 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   and lowers through the linear path machinery; splicing it TOP-LEVEL is also what makes `analyzeChain`
   track a path with no explicit `path()` tail (the pass runs before analyze). L3 +2
   (`SimplePath` `timesX3X_path`, and the `order()`-in-body `order_byXname_descX...timesX2X_path` — order
-  composes through the per-phase splice, verified incl. ORDER). 🚧 LEFT — a `by(<proj>)` (compare by a
-  projection, `cyclicPath().by('age')`), `from`/`to` scoping, a reducer after a still-path-carrying stream
-  (`simplePath().count()` — the path channel blocks the barrier; a barrier should DROP path per
-  `CHANNEL_BARRIER_POLICY`), an UNBOUNDED in-body path step with no `path()` tail (analyze does not scan
-  folded repeat bodies), and the ENCOUNTER-plus-path walk.
+  composes through the per-phase splice, verified incl. ORDER).
+  ✅ **The PATH-COMPOSITION family LANDED — combinatorial completeness (the corpus combines none of them):**
+  a `by(<proj>)` compares each position by its projection (`pathSimpleByPredicate` — cycling `by()` ring,
+  drop on unproductive, distinctness over projections; `cyclicPath().by('age')` → `[marko,marko]`, L3 +1);
+  a BARRIER/retype after a path-carrying stream DROPS the spent path (`dropPath` — `count`/`fold`/unkeyed
+  `group`/`dedup`/`select`; `simplePath().count()` counts what the filter kept) rather than declining; an
+  UNBOUNDED in-body path step with no `path()` tail seeds the walk anyway (`repeatBodyTracksPath` in analyze
+  scans repeat bodies); a JOIN-over-UNION recursive body composes (`distributeThroughUnion`'s join case,
+  Calcite `JoinUnionTransposeRule` — `bothE().inV()` sharing the plain edge scan across arms); and a VALUE
+  position mid-path is recorded (`appendValuePosition` — `values(k).path()` frames `[V,V,value]`, the
+  `pathPositions` value arm reshaping `{k,v,t}`→`{t,v}` with no rejoin; L3 +2). 🚧 LEFT — `from`/`to`
+  sub-path scoping (`simplePath().by(T.label).from('b').to('c')` — a `subPath` between alias positions,
+  fail-closed today); `id`/`label`/`valueMap` value positions (channels:`[]`, no carry); `path().unfold()`
+  over a MIXED element+value path (the `scalars` boundary — a list cannot yet hold an element member); and
+  the ENCOUNTER-plus-path walk.
 - ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
   non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
