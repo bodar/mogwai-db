@@ -30,9 +30,15 @@
 > declares a connective's anchored variables (TinkerPop folds a nested connective's start/end labels into
 > the parent's, `MatchStep.java:127-128`).
 >
+> **`where(and(…))`/`not(<conn>)` LANDED:** a `where`/`not` arg whose filtered body is a connective is one
+> conjunctive/disjunctive predicate (negated for `not`) via the same `connectiveExpr`/`legExpr` substrate
+> — its branches arrive Pass-rewritten (`select`-headed), which `branchToExpr`/`existenceExpr` now handle
+> alongside the bare `as`-headed form. Unlike a bare `or(…)` its labels are scope keys, not bindings
+> (`declares: []`). Reaps `Match.feature` `g_V_matchXwhereXandX…XX…`.
+>
 > **Remaining (each needs new plumbing beyond the leg/seam reuse): a truly BINDING `or` branch (a
 > fresh `.as()`) → the disjunctive-UNION regime with alias reconciliation; `local(match)`; a `map(<mean>)`
-> body; a `where(and(…))` CONNECTIVE inside a leg (recurse the connective in `classifyLeg`); a by-modulated
+> body; a by-modulated
 > alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); top-level
 > `not(match(…))` (the top-level filter vocabulary must admit a `match`-headed body); a per-origin windowed
 > slice in a pattern body (currently fail-closed); a `fold()` list end; and `ProductiveByStrategy`
@@ -214,10 +220,13 @@ landing order of one engine, not a support matrix.
   connective back-edge is not retracted before the match (it was, and the match then saw `b` unbound); and
   (b) the bindings map DECLARES a connective's anchored variables (`declares`), because TinkerPop folds a
   nested connective's `matchStartLabels`/`matchEndLabels` into the parent's (`MatchStep.java:127-128`) and
-  `getBindings` keys on that union (`:330`) — so `b` reappears in `{a,b,c}`. **Still open (all fail
-  closed):** a truly BINDING `or` branch (a fresh `.as()`) is the disjunctive-UNION regime; a `where(and(…))`
-  CONNECTIVE inside a leg; top-level `not(match(…).where(…).select(…))` (needs the top-level filter
-  vocabulary to admit a `match`-headed body).
+  `getBindings` keys on that union (`:330`) — so `b` reappears in `{a,b,c}`. ✅ **`where(<conn>)`/`not(<conn>)`
+  LANDED** — a `where`/`not` arg over an `and(…)`/`or(…)` body is one predicate (negated for `not`) through
+  the same substrate; `branchToExpr`/`existenceExpr` handle the Pass-rewritten `select`-headed branches,
+  and a `where`'s labels are scope keys not bindings (`declares: []`). Reaps
+  `g_V_matchXwhereXandX…XX…`. **Still open (all fail closed):** a truly BINDING `or` branch (a fresh
+  `.as()`) is the disjunctive-UNION regime; top-level `not(match(…).where(…).select(…))` (needs the
+  top-level filter vocabulary to admit a `match`-headed body).
 - **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
   `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
   classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`

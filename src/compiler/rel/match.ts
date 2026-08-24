@@ -86,8 +86,15 @@ type Pattern =
    *  the bindings map must carry, because TinkerPop folds a nested connective's `matchStartLabels`/
    *  `matchEndLabels` into the parent's (`MatchStep.java:127-128`), and `getBindings` keys on that union
    *  (`:330`). It is a SUBSET of `reads`: `reads` also carries `where`-referenced labels (needed for
-   *  readiness) which are NOT bindings-map keys unless some pattern also anchors them. */
-  | { readonly kind: 'connective'; readonly op: 'or'; readonly branches: readonly Arg[]; readonly reads: readonly string[]; readonly declares: readonly string[] };
+   *  readiness) which are NOT bindings-map keys unless some pattern also anchors them.
+   *
+   *  TWO sources produce a connective, distinguished by `declares`:
+   *  - a BARE `or(…)` arg → a nested `MatchStep`, so its branches ANCHOR bindings (`declares` = their
+   *    start/end labels), `negated: false`;
+   *  - a `where(<conn>)`/`not(<conn>)` arg → a `WhereTraversalStep`, whose labels are scope keys, NOT
+   *    bindings (`declares: []`), and `not` sets `negated: true`. Its branches are Pass-rewritten
+   *    (`select`-headed), which `branchToExpr` handles alongside the bare `as`-headed form. */
+  | { readonly kind: 'connective'; readonly op: 'and' | 'or'; readonly negated: boolean; readonly branches: readonly Arg[]; readonly reads: readonly string[]; readonly declares: readonly string[] };
 
 /** A pattern chain PARSED AND NORMALIZED. The Pass pipeline folds `order().by()`, `repeat().times()`,
  *  `sack().by()` and every other modulator into ONE `IRStep` (`normalize`, `passes.ts:336` — "`order().by()`
@@ -258,7 +265,9 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
         && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string')
         return { kind: 'wpred', startKey: wargs[0]!.value, op: pred.op, otherKey: pred.operands[0]!.value };
     }
-    return classifyLeg(head, params);
+    // A `where(<conn>)`/`not(<conn>)` over a connective body is a disjunctive/conjunctive predicate;
+    // an ordinary single-traversal body is a leg.
+    return whereConnective(head, params) ?? classifyLeg(head, params);
   }
   if (chain.length < 2) return null;
   const head = chain[0]!;
@@ -317,7 +326,27 @@ function orConnective(a: unknown, params: Record<string, any>): Pattern | null {
   const reads = new Set<string>();
   const declares = new Set<string>();
   for (const b of branches) if (isNested(b.value)) { const bs = patternSteps(b.value.nested, params); if (bs) { aliasRefsIn(bs, params, reads); asLabelsDeep(bs, params, declares); } }
-  return { kind: 'connective', op: 'or', branches, reads: [...reads], declares: [...declares] };
+  return { kind: 'connective', op: 'or', negated: false, branches, reads: [...reads], declares: [...declares] };
+}
+
+/** A `where(<conn>)`/`not(<conn>)` match ARGUMENT whose filtered body is itself an `and(…)`/`or(…)`
+ *  connective (`where(and(as('a').out().as('b'), as('b').in().count().is(P.eq(3))))`) → a `connective`
+ *  Pattern applied as ONE predicate, negated for `not`. Unlike a bare `or(…)`, a `where`/`not` is a
+ *  `WhereTraversalStep` — its labels are SCOPE keys, not bindings — so `declares` is EMPTY (`b` here is
+ *  bound by a sibling pattern, not by this filter). The branches arrive Pass-rewritten (`select`-headed),
+ *  which `branchToExpr` handles. Returns `null` for a non-connective body (an ordinary single leg, which
+ *  `classifyLeg` takes) or a malformed head. */
+function whereConnective(head: IRStep, params: Record<string, any>): Pattern | null {
+  if ((head.args?.length ?? 0) !== 1) return null;
+  const nested = head.args?.[0]?.value;
+  if (!isNested(nested)) return null;
+  const body = patternSteps(nested.nested, params);
+  if (!(body?.length === 1 && (body[0]!.name === 'and' || body[0]!.name === 'or'))) return null;
+  const branches = body[0]!.args ?? [];
+  if (branches.length < 2) return null;
+  const reads = new Set<string>();
+  for (const b of branches) if (isNested(b.value)) { const bs = patternSteps(b.value.nested, params); if (bs) aliasRefsIn(bs, params, reads); }
+  return { kind: 'connective', op: body[0]!.name as 'and' | 'or', negated: head.name === 'not', branches, reads: [...reads], declares: [] };
 }
 
 /** Flatten a match argument list into patterns, expanding every top-level `and(…)` connective into its
@@ -506,12 +535,20 @@ function branchToExpr(
   }
 
   const head = steps[0]!;
+  // A `select`-headed branch is a Pass-rewritten leg — a `where(<conn>)` branch, whose leading `as` the
+  // Pass turned into `select` and whose bound ends into `where(P.eq)`. Existence over (start, rest); the
+  // rewrite is already done, so there is no trailing bind to interpret.
+  if (head.name === 'select') {
+    const sels = (head.args ?? []).map((a) => a.value).filter((v): v is string => typeof v === 'string');
+    if (sels.length !== 1 || !bound.has(sels[0]!)) return null;
+    const body = steps.slice(1);
+    return body.length ? existenceExpr(sels[0]!, body, rel, labels, child, host, fresh) : null;
+  }
   const starts = asLabelsOf(head);
   if (head.name !== 'as' || starts.length !== 1) return null;
   const start = starts[0]!;
   if (!bound.has(start)) return null;
   const tail = steps[steps.length - 1]!;
-  let body: readonly IRStep[];
   if (tail.name === 'as' && steps.length >= 2) {
     const ends = asLabelsOf(tail);
     if (ends.length !== 1) return null;
@@ -538,18 +575,24 @@ function branchToExpr(
     // A bound `.as(end)` back edge is `where(P.eq(end))`, exactly the trailing-end rewrite the Pass
     // applies to a `where`/`not` arg — done HERE because the connective heads are (deliberately) not in
     // `MATCH_FILTER_HEADS`, so the bind-vs-constrain decision for an `or` branch lives in this lowering.
-    body = [...inner, syn(head, 'where', [{ op: 'eq', operands: [arg(end)] }])];
-  } else {
-    body = steps.slice(1);
-    if (!body.length || body.some((s) => s.name === 'as')) return null;
-    // A SCALAR-start branch (`as('c').is(P.gt(2))`, c a bound scalar): a value predicate over the bound
-    // scalar via `child.predicate` with a scalar subject. An element start falls through to `legExpr`.
-    const sproj = aliasProjection(rel, labels, start, 'last', fresh);
-    if (!sproj) return null;
-    if (sproj.read.kind === 'value') {
-      const subject = scalarSubjectOf(sproj, rel);
-      return subject && child.predicate(body, subject, false);
-    }
+    return existenceExpr(start, [...inner, syn(head, 'where', [{ op: 'eq', operands: [arg(end)] }])], rel, labels, child, host, fresh);
+  }
+  const body = steps.slice(1);
+  if (!body.length || body.some((s) => s.name === 'as')) return null;
+  return existenceExpr(start, body, rel, labels, child, host, fresh);
+}
+
+/** An existence test over an already-bound `start` and a `body`, as a boolean `Expr`. An ELEMENT start
+ *  is a single/multi-correlation `legExpr` (movements + `where(P.eq/neq(label))` correlations); a SCALAR
+ *  start (`as('c').is(P.gt(2))`) is a value predicate over the bound scalar (`child.predicate` with a
+ *  scalar subject). The one existence tail shared by the bare `as`-headed and Pass-rewritten
+ *  `select`-headed branch forms. */
+function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter): Expr | null {
+  const sproj = aliasProjection(rel, labels, start, 'last', fresh);
+  if (!sproj) return null;
+  if (sproj.read.kind === 'value') {
+    const subject = scalarSubjectOf(sproj, rel);
+    return subject && child.predicate(body, subject, false);
   }
   const reads = new Set<string>([start]);
   for (const s of body) {
@@ -696,11 +739,13 @@ export function lowerMatch(
     }
 
     if (p.kind === 'connective') {
-      // A DISJUNCTIVE FILTER — every branch is an existence/back-edge/theta test over already-bound
-      // variables, so the connective is one boolean predicate over the binding table (readiness has
-      // ensured every alias it reads is bound). A branch that would bind a fresh variable declines.
-      const clause = connectiveExpr(p.op, p.branches, rel, labels, bound, child, step, fresh, params);
-      if (!clause) return null;
+      // A CONNECTIVE FILTER — a bare `or(…)` (disjunction) or a `where(<conn>)`/`not(<conn>)` group.
+      // Every branch is an existence/back-edge/theta test over already-bound variables, so the whole
+      // connective is one boolean predicate over the binding table (readiness has ensured every alias it
+      // reads is bound); `not(<conn>)` negates it. A branch that would bind a fresh variable declines.
+      const inner = connectiveExpr(p.op, p.branches, rel, labels, bound, child, step, fresh, params);
+      if (!inner) return null;
+      const clause: Expr = p.negated ? { kind: 'unary', op: 'not', arg: inner } : inner;
       rel = make.filter({ id: fresh('mo'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
       continue;
     }

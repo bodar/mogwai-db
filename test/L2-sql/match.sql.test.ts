@@ -186,4 +186,19 @@ describe('match() SQL', () => {
     const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['marko->josh', 'marko->lop', 'marko->vadas']);
   });
+
+  // A `where(<connective>)` leg (Match.feature g_V_matchXwhereXandX…XX…): a where whose body is an
+  // and(…) of two existence tests over already-bound vars — an element back-edge (a created b) AND a
+  // reducing-count constraint (b's in-created count == 3). Composes through the same connective/leg
+  // substrate the bare or() uses; the branches arrive Pass-rewritten (select-headed).
+  test('where(and(...)) leg → one conjunctive predicate over the binding table', () => {
+    const q = 'g.V().match(__.where(__.and(__.as("a").out("created").as("b"), __.as("b").in("created").count().is(P.eq(3)))), __.as("a").both().as("b"), __.where(__.as("b").in()))';
+    const p = read(q);
+    // The and(…) filter lands as a conjunction of correlated EXISTS in the WHERE (the `both()` pattern
+    // brings its own UNION, so the connective's shape is asserted by the EXISTS count, not absence of one).
+    expect((p.sql.match(/EXISTS \(SELECT/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    const rows = run(seededStore(), q + '.select("a","b").by("name")') as any[];
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    expect(pairs).toEqual(['josh->lop', 'marko->lop', 'peter->lop']);
+  });
 });
