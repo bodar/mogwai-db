@@ -201,4 +201,32 @@ describe('match() SQL', () => {
     const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['josh->lop', 'marko->lop', 'peter->lop']);
   });
+
+  // A top-level `not(__.match(…).select(…))` — the filter vocabulary admits a MATCH-headed body: the
+  // match is run ROOTED AT THE SUBJECT and existence-tested (a correlated `[NOT] EXISTS`). Here nobody
+  // has age == name, so the inner never produces and `not(...)` keeps every vertex.
+  test('not(match(...)) → a correlated NOT EXISTS rooted at the subject (corpus scenario)', () => {
+    const q = 'g.V().not(__.match(__.as("a").values("age").as("b"), __.as("a").values("name").as("c")).where("b", P.eq("c")).select("a")).values("name")';
+    const p = read(q);
+    expect(p.sql).toMatch(/NOT EXISTS \(SELECT/);
+    const names = (run(seededStore(), q) as any[]).map((r: any) => r.v).sort();
+    expect(names).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
+  // `where(__.match(...))` is the same seam, un-negated — marko is the only vertex with an out-knows.
+  test('where(match(...)) → a correlated EXISTS rooted at the subject', () => {
+    const q = 'g.V().where(__.match(__.as("a").out("knows").as("b")).select("a")).values("name")';
+    const p = read(q);
+    expect(p.sql).toMatch(/(?<!NOT )EXISTS \(SELECT/);
+    expect((run(seededStore(), q) as any[]).map((r: any) => r.v)).toEqual(['marko']);
+  });
+
+  // A downstream `where(k1, P.eq/neq(k2))` over two SCALAR aliases compares stored VALUES (not rowids):
+  // both bind a's name, so eq keeps all six and neq keeps none.
+  test('where(key, P) over two scalar aliases compares stored values', () => {
+    const eq = run(seededStore(), 'g.V().match(__.as("a").values("name").as("b"), __.as("a").values("name").as("c")).where("b", P.eq("c")).select("a").count()') as any[];
+    const neq = run(seededStore(), 'g.V().match(__.as("a").values("name").as("b"), __.as("a").values("name").as("c")).where("b", P.neq("c")).select("a").count()') as any[];
+    expect(Number(eq[0].v)).toBe(6);
+    expect(Number(neq[0].v)).toBe(0);
+  });
 });

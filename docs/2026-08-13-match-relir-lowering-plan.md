@@ -36,12 +36,15 @@
 > alongside the bare `as`-headed form. Unlike a bare `or(…)` its labels are scope keys, not bindings
 > (`declares: []`). Reaps `Match.feature` `g_V_matchXwhereXandX…XX…`.
 >
+> **top-level `not(match(…))`/`where(match(…))` LANDED:** a fourth predicate arm `matchPredicate` roots the
+> match at the SUBJECT (`source.elementRow`) and existence-tests it — a correlated `[NOT] EXISTS`. Landed
+> with a scalar-alias `where(k1, P.eq/neq(k2))` value compare. Reaps `g_V_notXmatchX…X…`.
+>
 > **Remaining (each needs new plumbing beyond the leg/seam reuse): a truly BINDING `or` branch (a
 > fresh `.as()`) → the disjunctive-UNION regime with alias reconciliation; `local(match)`; a `map(<mean>)`
 > body; a by-modulated
-> alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); top-level
-> `not(match(…))` (the top-level filter vocabulary must admit a `match`-headed body); a per-origin windowed
-> slice in a pattern body (currently fail-closed); a `fold()` list end; and `ProductiveByStrategy`
+> alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); a per-origin
+> windowed slice in a pattern body (currently fail-closed); a `fold()` list end; and `ProductiveByStrategy`
 > null-keeping semantics for a by-compare (currently fail-closed).**
 >
 > `match()` lowering was deleted with the legacy spine
@@ -224,9 +227,16 @@ landing order of one engine, not a support matrix.
   LANDED** — a `where`/`not` arg over an `and(…)`/`or(…)` body is one predicate (negated for `not`) through
   the same substrate; `branchToExpr`/`existenceExpr` handle the Pass-rewritten `select`-headed branches,
   and a `where`'s labels are scope keys not bindings (`declares: []`). Reaps
-  `g_V_matchXwhereXandX…XX…`. **Still open (all fail closed):** a truly BINDING `or` branch (a fresh
-  `.as()`) is the disjunctive-UNION regime; top-level `not(match(…).where(…).select(…))` (needs the
-  top-level filter vocabulary to admit a `match`-headed body).
+  `g_V_matchXwhereXandX…XX…`. ✅ **top-level `not(match(…))`/`where(match(…))` LANDED** — a FOURTH
+  predicate arm `matchPredicate` (`lower.ts`): a `match`-headed filter body is a correlated `[NOT] EXISTS`
+  rooted at the SUBJECT via `source.elementRow(subject.id)` (the one correlated row an id names), the whole
+  body run through the ordinary fold and existence-probed. `correlatedExists` couldn't express it (its head
+  must be a movement) — this seeds the subject instead of correlating through a hop; Calcite's
+  `SubQueryRemoveRule` anti/semi over a correlated subquery, `emit.ts` renders `[NOT] EXISTS`. Landed with a
+  **scalar-alias theta** (`aliasWhere`): a downstream `where(k1, P.eq/neq(k2))` over two VALUE aliases
+  compares stored values (the corpus body's `where("b", P.eq("c"))` over `age`/`name`). Reaps
+  `g_V_notXmatchXa_age_b__a_name_cX_whereXb_eqXcXX_selectXaXX_name`. **Still open (all fail closed):** a
+  truly BINDING `or` branch (a fresh `.as()`) is the disjunctive-UNION regime.
 - **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
   `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
   classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`

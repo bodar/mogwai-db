@@ -377,6 +377,45 @@ function correlatedExists(
 }
 
 /**
+ * A `match(…)`-HEADED body as a correlated `[NOT] EXISTS` over the subject — the fourth predicate arm,
+ * the one that makes `not(__.match(…).where(…).select(…))` / `where(__.match(…))` a filter at any
+ * position (top level, inside `where`, under another `not`). TinkerPop's `NotStep`/`WhereTraversalStep`
+ * asks "does this sub-traversal produce output for this traverser"; when the sub-traversal is a match,
+ * that is the match run ROOTED AT THE SUBJECT, existence-tested.
+ *
+ * `correlatedExists` cannot express it — its `movement(body[0], …)` needs an adjacency head, and a match
+ * is not a movement. So instead of correlating through a first hop, this seeds the body at the SUBJECT
+ * ITSELF: `source.elementRow(id)` is the one correlated row that id names (a `nodes`/`edges` scan
+ * filtered to `id = subject.id`), promoted to a fold-ready element source (an `id` column + the `bulk`
+ * channel every element source seeds). The WHOLE body — match, then whatever follows (`where`, `select`)
+ * — then runs through the ordinary fold, and the result is EXISTS-probed: a produced row means the body
+ * matched for this subject. Calcite's anti/semi-join over a correlated subquery
+ * (`SubQueryRemoveRule`), rendered `[NOT] EXISTS (SELECT 1 …)` by `emit.ts`.
+ *
+ * Only an ELEMENT subject roots a match (a scalar has no element to bind the root to), and only a
+ * `match`-headed body reaches here — every other head is answered by the three arms above, so this is
+ * new coverage, never a re-spelling.
+ */
+function matchPredicate(
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
+): Expr | null {
+  if (subject.kind !== 'element' || body[0]?.name !== 'match') return null;
+  const scan = ctx.source.elementRow(subject.elem, subject.id, fresh);
+  // Promote the bare correlated row to a fold-ready element source, exactly as the `V()`/`E()` seed does
+  // (a projected `id` + a `bulk` channel), so movements/reducers inside the match have what they read.
+  const seed = make.project({
+    id: fresh('ms'), input: scan, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+    exprs: [['id', col(scan.id, 'id')], ['bulk', compilerInt(1)]],
+  });
+  const ran = continueAs(seed, { kind: 'elements', elem: subject.elem }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
+  if (!ran) return null;
+  const probeCol = ran.rel.type.cols[0];
+  if (!probeCol) return null;
+  const probe = make.project({ id: fresh('mp'), input: ran.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(ran.rel.id, probeCol.name)]] });
+  return { kind: 'exists', plan: probe, negated };
+}
+
+/**
  * A BODY AS A PREDICATE on the current traverser — the two shapes a `choose()` condition can take,
  * and the distinction is TinkerPop's rather than ours.
  *
@@ -527,6 +566,10 @@ function childPredicateDirect(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
   aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
+  // A `match`-headed body is a correlated EXISTS rooted at the subject — self-negating, so it answers
+  // both polarities and only fires for a match head (every other head falls through to the arms below).
+  const asMatch = matchPredicate(body, subject, fresh, ctx, negated);
+  if (asMatch) return asMatch;
   if (!negated) return bodyPredicate(body, subject, fresh, ctx, aliases);
   // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
   // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
@@ -5612,6 +5655,16 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         if (!prodA || !prodB) return 'decline';
         const cmp: Expr = { kind: 'binary', op: ALIAS_CMP[pred.op]!, left: aVal, right: bVal };
         return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(and(prodA, prodB), cmp) });
+      }
+      // A SCALAR-alias theta (`where('b', P.eq('c'))` over two VALUE aliases, no `by()`) — compare the
+      // STORED values directly. `eq`/`neq` only (identity): TinkerPop's `P.eq` is value+type equality,
+      // which SQLite's `=` over two stored scalars matches (an int 29 and a text "marko" are unequal, as
+      // are two different types that print alike). Ordering over two arbitrary stored scalars — where the
+      // type space is not known to be one — stays a later phase.
+      if (projA && projB && projA.read.kind === 'value' && projB.read.kind === 'value' && !step.modulators?.length) {
+        if (pred.op !== 'eq' && pred.op !== 'neq') return 'decline';
+        const same = eq(aliasValueAt(col(rel.id, projA.entry.col), 'last'), aliasValueAt(col(rel.id, projB.entry.col), 'last'));
+        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
       }
     }
   }
