@@ -21,13 +21,19 @@
 > - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
 >   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
 >
-> **Remaining (each needs new plumbing beyond the leg/seam reuse): `or(…)` → UNION of branches with
-> alias reconciliation (both corpus scenarios also need a filter-after-reduce end + infix `.and`);
-> `local(match)`; a `map(<mean>)` body; a `where(and(…))` CONNECTIVE inside a leg (recurse the connective
-> in `classifyLeg`); a by-modulated alias compare with `or`/`and` in the predicate (predicate.ts
-> connective over two aliases); top-level `not(match(…))` (the top-level filter vocabulary must admit a
-> `match`-headed body); a per-origin windowed slice in a pattern body (currently fail-closed); a `fold()`
-> list end; and `ProductiveByStrategy` null-keeping semantics for a by-compare (currently fail-closed).**
+> **`or(…)` LANDED (filter regime, L3 1753 → 1754):** the corpus `or`s are FILTER disjunctions (branches
+> bind nothing), so one predicate `branch₁ ∨ …` via `branchToExpr`/`legExpr`, NOT a UNION — see P3. The
+> infix `.and()` inside a branch canonicalizes before classification, so it composes for free.
+>
+> **Remaining (each needs new plumbing beyond the leg/seam reuse): the SECOND `or` scenario's scalar
+> branches — a reducing-scalar back-edge (`as('b').in().count().as('c')` with `c` bound) and a
+> scalar-alias predicate (`as('c').is(P.gt(2))`) inside `branchToExpr`; a truly BINDING `or` branch (a
+> fresh `.as()`) → the disjunctive-UNION regime with alias reconciliation; `local(match)`; a `map(<mean>)`
+> body; a `where(and(…))` CONNECTIVE inside a leg (recurse the connective in `classifyLeg`); a by-modulated
+> alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); top-level
+> `not(match(…))` (the top-level filter vocabulary must admit a `match`-headed body); a per-origin windowed
+> slice in a pattern body (currently fail-closed); a `fold()` list end; and `ProductiveByStrategy`
+> null-keeping semantics for a by-compare (currently fail-closed).**
 >
 > `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
@@ -187,10 +193,22 @@ landing order of one engine, not a support matrix.
   semi-join (a `leg` reading only its start, `child.predicate` → correlated `EXISTS`). ✅ **`where(<body>)`/
   `not(<body>)` over a record LANDED** — `applyLeg` (extracted from the match loop) is reused by
   `recordTail`, with a single-correlation fallback to the fresh-walk SEMI/ANTI JOIN so a `repeat()` body
-  composes (`child.chain`, not `correlatedExists`). Remaining: `or(…)` → UNION of branches (needs a
-  per-branch table merge; both corpus `or` scenarios also need a filter-after-reduce end); a
-  `where(and(…))` CONNECTIVE inside a leg; top-level `not(match(…).where(…).select(…))` (needs the
-  top-level filter vocabulary to admit a `match`-headed body).
+  composes (`child.chain`, not `correlatedExists`). ✅ **`or(…)` connective LANDED (filter regime)** —
+  and the "UNION of branches" framing was CORRECTED by the corpus: BOTH `or` scenarios are FILTER
+  disjunctions, not binding unions. Every branch tests already-bound variables and BINDS NOTHING NEW (an
+  existence, a back-edge, a theta), so the whole `or` is ONE boolean predicate `branch₁ ∨ branch₂ ∨ …`
+  applied as a single `Filter` — never a UNION. `branchToExpr` re-classifies each branch against the
+  RUN-TIME bound set (the bind-vs-constrain decision the Pass can't make for `and`/`or`, which are out of
+  `MATCH_FILTER_HEADS`), rewriting a bound `.as(end)` to `where(P.eq(end))` and recursing through nested
+  `and`/`or`; `legExpr` (a leg's existence as a boolean `Expr`, beside `applyLeg`'s `semi`/`anti` join —
+  you cannot OR two joins) composes the correlated `EXISTS`. Shared `legSingle`/`legCorrelated` cores
+  keep the standalone join byte-identical (no `sql-hygiene` ratchet moves). Reaps `Match.feature`
+  `g_V_matchXa_whereXa_neqXcXX…orX…X` (L3 1753 → 1754). **Still open (all fail closed):** the OTHER `or`
+  scenario `g_V_asXaX_out_asXbX_matchXa_out_count_c__orX…X` needs a branch with a REDUCING-scalar
+  back-edge (`as('b').in().count().as('c')`, c a bound scalar → `reduce == c`) and a SCALAR-alias
+  predicate (`as('c').is(P.gt(2))`) — the next increment; a truly BINDING `or` branch (a fresh `.as()`)
+  is the disjunctive-UNION regime; a `where(and(…))` CONNECTIVE inside a leg; top-level
+  `not(match(…).where(…).select(…))` (needs the top-level filter vocabulary to admit a `match`-headed body).
 - **P4 — modulated bodies & downstream collectors.** ✅ **Modulated bodies LANDED** — `outE.order.by.limit.inV`,
   `repeat.times`, `map(mean)` bodies fall out of invariant 1 once a pattern body is `normalize`d before
   classification (`patternSteps`), which folds `order().by()`/`repeat().times()` into ONE `IRStep`
