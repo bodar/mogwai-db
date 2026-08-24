@@ -174,6 +174,21 @@ test('a barrier consumes a path-carrying stream: count()/fold()/groupCount() dro
   expect(JSON.parse(folded[0].list).map((e: any) => e.id).sort()).toEqual([4, 6]);
 });
 
+test('simplePath()/cyclicPath().by(<proj>) compares positions by their projection', () => {
+  const store = seededStore();
+  // corpus CyclicPath.feature: both().both() paths [v1,mid,end]; by(age) keeps the ones with an age
+  // COLLISION (and every position productive). marko→vadas→marko and marko→josh→marko both revisit
+  // marko (age 29 twice) → cyclic; ends are marko,marko.
+  expect((run(store, "g.V(1).both().both().cyclicPath().by('age')") as any[]).map((r) => r.id)).toEqual([1, 1]);
+  // by(T.label): [marko,josh,lop] labels [person,person,software] — person repeats → NOT simple → dropped
+  // (both 2-hop paths repeat 'person'), so simplePath by label is empty.
+  expect(run(store, 'g.V(1).out().out().simplePath().by(T.label)')).toEqual([]);
+  // by(name): names are all distinct → both paths kept, ending lop(3) and ripple(5).
+  expect((run(store, "g.V(1).out().out().simplePath().by('name')") as any[]).map((r) => r.id).sort()).toEqual([3, 5]);
+  // an UNPRODUCTIVE by() drops the whole path: lop has no age, so a path through lop is filtered.
+  expect(run(store, "g.V(1).out('created').in('created').simplePath().by('age')")).toEqual([]); // marko→lop→... lop no age
+});
+
 test('a JOIN-over-UNION recursive body composes — bothE().inV() (join-union transpose)', async () => {
   // `inV()` re-joins the edge table to read `tgt`, so a `bothE().inV()` body's recursive term is
   // project(join(union(edge-arms), edges), …) — a JOIN over a self-referencing UNION. distributeThroughUnion

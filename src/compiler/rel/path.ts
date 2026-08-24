@@ -263,6 +263,70 @@ export function pathPositions(
   };
 }
 
+/**
+ * `simplePath().by(<proj>)` / `cyclicPath().by(<proj>)` — the modulated form, where two positions are
+ * "equal" by their PROJECTION rather than by the object itself.
+ *
+ * The reference (`PathFilterStep.filter`, `vendor/tinkerpop/gremlin-core/.../filter/PathFilterStep.java`):
+ * project each path object through the cycling `by()` ring; if ANY projection is unproductive the whole
+ * path is filtered (the sizes no longer match); otherwise keep iff the projected path's simplicity equals
+ * `isSimple`. So the predicate is `allProductive AND (distinct == isSimple)` over the projected values —
+ * `count(*)` positions, `count(proj)` productive ones (a `by()` yields NULL when unproductive, which
+ * `count` skips), `count(DISTINCT proj)` distinct ones. An identity `by()` compares the raw object entry
+ * (an element by rowid), a `by(k)` compares the projected `{t,v}` node, and a mixed ring cycles the two —
+ * an element entry and a value node never collide, so a mixed compare is exact by construction.
+ */
+export function pathSimpleByPredicate(
+  rel: Rel, cyclic: boolean, step: IRStep, child: ChildSeam, source: GraphSource, fresh: Minter,
+): Expr | null {
+  if (!pathCarried(rel)) return null;
+  const parsed = modulations(step, step.modulators?.length ?? 0, child);
+  if (!parsed || parsed.length === 0) return null;
+  const members = make.explode({
+    id: fresh('spx'), expr: jsonOf(col(rel.id, PATH_COL)), channels: [],
+    as: { value: 'pv', ord: 'po' }, type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
+  });
+  const entry = col(members.id, 'pv');
+  const rowid: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] };
+  const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
+  const isEdge: Expr = { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) };
+  const perModulation = (modulation: Modulation): Expr | null => {
+    if (modulation.key.kind === 'identity') return entry;
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, source, fresh, child);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh, child);
+    if (!edge || !vertex) return null;
+    return { kind: 'case', whens: [[isEdge, edge]], else: vertex };
+  };
+  const projected = parsed.map(perModulation);
+  if (projected.some((node) => node === null)) return null;
+  const nodes = projected as Expr[];
+  const proj: Expr = nodes.length === 1 ? nodes[0] : {
+    kind: 'case',
+    whens: nodes.slice(0, -1).map((arm, j) => [{
+      kind: 'binary', op: '=',
+      left: { kind: 'binary', op: '%', left: col(members.id, 'po'), right: compilerInt(nodes.length) },
+      right: compilerInt(j),
+    }, arm] as const),
+    else: nodes[nodes.length - 1],
+  };
+  const counted = make.aggregate({
+    id: fresh('spc'), input: members, channels: [],
+    type: typeOf(meta('total', 'int'), meta('productive', 'int'), meta('uniq', 'int')),
+    groupBy: [], aggs: [
+      ['total', { kind: 'agg', fn: 'count', args: [] }],
+      ['productive', { kind: 'agg', fn: 'count', args: [proj] }],
+      ['uniq', { kind: 'agg', fn: 'count', args: [proj], distinct: true }],
+    ],
+  });
+  const allProductive: Expr = { kind: 'binary', op: '=', left: col(counted.id, 'total'), right: col(counted.id, 'productive') };
+  const distinctMatches: Expr = { kind: 'binary', op: cyclic ? '!=' : '=', left: col(counted.id, 'uniq'), right: col(counted.id, 'productive') };
+  const probe = make.project({
+    id: fresh('spp'), input: counted, channels: [], type: typeOf(meta('one', 'int')),
+    exprs: [['one', { kind: 'binary', op: 'and', left: allProductive, right: distinctMatches }]],
+  });
+  return { kind: 'scalar', plan: probe };
+}
+
 /** THE WIRE ROWS: one `list` column per Path, in emission order — `listPayload`'s twin, and deliberately
  *  only as different from it as the framer is. The `json()` is not cosmetic: a JSONB value crossing a
  *  subquery boundary loses SQLite's json subtype, which is the same reason every other payload arm spells

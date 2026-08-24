@@ -51,7 +51,7 @@ import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { InjectionKind, PairSpec } from '../../services/spi/types.ts';
-import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
+import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
@@ -4902,8 +4902,17 @@ function elementTail(
       // element by rowid, a value by (value,type) — produce the IDENTICAL entry, so uniqueness is a
       // COUNT(DISTINCT) over the path array against its length. The path is already carried
       // (`tracksPath`, seeded because a PATH_FAMILY step is present) and extended at every hop.
-      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length || step.modulators?.length) return null;
-      const pred = pathSimplePredicate(rel, step.name === 'cyclicPath', fresh);
+      // `from`/`to` scope the check to a SUB-path (`Path.subPath`); not built, so decline (fail closed)
+      // rather than checking the whole path and silently answering a different question.
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
+        || step.from !== undefined || step.to !== undefined) return null;
+      // A `by(<proj>)` modulator compares each position by its PROJECTION rather than by the object
+      // (`pathSimpleByPredicate`); the bare form compares the raw objects (`pathSimplePredicate`).
+      const cyclic = step.name === 'cyclicPath';
+      const pred = step.modulators?.length
+        ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
+        : pathSimplePredicate(rel, cyclic, fresh);
+      if (!pred) return null;
       rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
     }
