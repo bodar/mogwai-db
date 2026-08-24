@@ -120,6 +120,46 @@ test('repeat().times(n).path() emits the ordered walk, one Path per route', asyn
     .toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
 });
 
+// ---------- the UNBOUNDED regime carries the path channel through the walk ----------
+// The recursive `Recursive` walk now rides a seeded path column: a body movement APPENDS the arrived
+// object (`extendPath`), `simplePath()` reads it as an ordinary body filter, and a later `path()`
+// frames the carried column. The per-iteration append/filter sits over a `both()` body's hop-union and
+// is pushed into the arms by `distributeThroughUnion` (Calcite Project/FilterSetOpTransposeRule), so
+// each arm stays a single recursive term SQLite accepts.
+const scalarValues = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => r.v);
+
+test('unbounded repeat(out()).until(hasId).path() carries the path out of the walk', async () => {
+  // marko(1) →out josh(4) →out ripple(5): the one route reaching ripple, path pinned by the walk.
+  const paths = await decodePaths(seededStore(), 'g.V(1).repeat(__.out()).until(__.hasId(5)).path()');
+  expect(bagOf(paths.map((p) => p.objects.map((o: any) => o.id)))).toEqual(bagOf([[1, 4, 5]]));
+});
+
+test('unbounded repeat(both().simplePath()).until(hasId).path().by(name) — corpus Unfold.feature', async () => {
+  // g_VX1X_repeatXboth_simplePathX_untilXhasIdX6XX_path_byXnameX (modern graph, vid6 = peter).
+  // simplePath() runs INSIDE the recursive term, filtering the carried path per iteration; both()'s
+  // two arms each stay a single recursive reference after the transpose. Two acyclic routes to peter.
+  const rows = (await decodePaths(seededStore(),
+    "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).path().by('name')"))
+    .map((p: any) => p.objects);
+  expect(bagOf(rows)).toEqual(bagOf([['marko', 'lop', 'peter'], ['marko', 'josh', 'lop', 'peter']]));
+});
+
+test('...and .unfold() re-enters the list vocabulary over the framed path', () => {
+  // The corpus scenario's trailing unfold(): each path flattened to its named positions.
+  const names = scalarValues(seededStore(),
+    "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).path().by('name').unfold()");
+  expect(bagOf(names)).toEqual(bagOf(['marko', 'lop', 'peter', 'marko', 'josh', 'lop', 'peter']));
+});
+
+test('simplePath() inside the body genuinely prunes cyclic walks (no artificial cap)', () => {
+  // Without simplePath, marko↔lop↔marko… would revisit forever; simplePath forbids a repeated object,
+  // so the walk terminates at the natural fixpoint. Reaching lop(3) from marko(1): the direct edge
+  // marko→lop and the two-hop marko→josh→lop, both acyclic.
+  const names = scalarValues(seededStore(),
+    "g.V(1).repeat(__.both().simplePath()).until(__.hasId(3)).path().by('name').unfold()");
+  expect(bagOf(names)).toEqual(bagOf(['marko', 'lop', 'marko', 'josh', 'lop']));
+});
+
 
 
 

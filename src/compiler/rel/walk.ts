@@ -27,10 +27,11 @@ interface WalkRead {
 /**
  * `repeat()`'s unbounded `Recursive` regime.
  *
- * Admissions land one at a time (§8.6). This increment admits a predicate `until` and `emit()` in
- * both its bare and its predicate form, each before or after `repeat`, in ALL FOUR position
- * combinations; `times`, named loops, path state, body effects, shape changes and carried state
- * changes still decline to the whole-chain fallback.
+ * Admissions land one at a time (§8.6). Predicate `until` and `emit()` in both bare and predicate
+ * form, each before or after `repeat`, in ALL FOUR position combinations; a carried PATH (seeded at
+ * the source, appended per hop by the body, framed by a later `path()` — and read in-body by
+ * `simplePath()`/`cyclicPath()`). `times`, named loops, an ENCOUNTER demand, body effects, shape
+ * changes and other carried-state changes still decline to the whole-chain fallback.
  *
  * **OUTPUT POSITIONS — why three of the four combinations are one filter and the fourth is not.**
  * Bare `emit()` is a constant-true predicate (`TrueTraversal.instance()`, `GraphTraversal.java:4460`) and
@@ -139,9 +140,16 @@ export function repeatWalk(
     ? child.body(emit.args[0]?.value?.nested, 'child') : undefined;
   if (emit && (emit.args ?? []).length === 1 && !emitted?.length) return null;
 
-  // Encounter is a unique position that cannot repeat at every depth; path needs its own append
-  // regime. Both stay explicit rather than being carried through a regime whose update law this
-  // route has not reviewed.
+  // Encounter is a unique position that cannot repeat at every depth, so it stays explicit rather than
+  // being carried through a regime whose update law this route has not reviewed.
+  //
+  // A PATH now rides through, and its update law is exactly the recursive term's own. The channel is
+  // seeded at the source (position 0) and rides in `input.channels`; the body re-enters our fold with
+  // it live, so a movement APPENDS the arrived object (`extendPath` in `movement`) and `simplePath()`
+  // reads it as an ordinary body filter — no path-specific machinery here. The one structural fact is
+  // that an append is a `Project` and `simplePath` a `Filter`, and in a `both()` body those sit over
+  // the hop-union; `distributeThroughUnion` (above) pushes them into the arms so each stays a single
+  // recursive term. `path()` after the walk frames the carried column (`pathPositions`).
   //
   // A SACK does ride through, and it needs no rule here beyond the ones already holding. Its update
   // law is the recursive term's own — read the previous row's column, write the folded value — which
@@ -153,7 +161,7 @@ export function repeatWalk(
   // string grammar can only supply an `Operator.*`, which is a merge; with none, the sack is copied
   // to every fan-out row, which is what the term's projection does by construction.
   for (const channel of input.channels)
-    if (channel.role === 'encounter' || channel.role === 'path') return null;
+    if (channel.role === 'encounter') return null;
 
   const depth: Channel = {
     col: `lp${input.channels.filter((channel) => channel.role === 'loops').length}`,
