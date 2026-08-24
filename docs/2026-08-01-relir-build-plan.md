@@ -674,16 +674,23 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 
 **Leaf gaps — one family, no downstream unlock:**
 
-- ✅ **`simplePath()` / `cyclicPath()` — LANDED for the linear form (was 0 executing / 16 deferred).**
-  `Path.isSimple()` is "no two path objects are equal"; the path is already carried (`tracksPath`, seeded
+- ✅ **`simplePath()` / `cyclicPath()` — LANDED for BOTH the linear form AND inside the recursive walk.**
+  `Path.isSimple()` is "no two path objects are equal"; the path is carried (`tracksPath`, seeded
   because a PATH_FAMILY step is present, extended at every hop) as a JSONB array of tagged entries
   (`{k,v[,t]}`), and equal objects produce the IDENTICAL entry (an element by rowid, a value by its
   `{v,t}`), so uniqueness is a correlated `COUNT(*) = COUNT(DISTINCT entry)` over `json_each(path)`
   (`pathSimplePredicate`), a filter that keeps the element framing. Verified row-for-row
-  (`V(1).out('created').in('created').simplePath()` → josh,peter; `cyclicPath()` → marko). 🚧 LEFT — most of
-  the corpus needs these INSIDE a `repeat(__.both().simplePath())` (the recursive walk carrying the path,
-  a separate substrate), plus a `by(<proj>)` (compare by a projection), `from`/`to` scoping, and a reducer
-  after a still-path-carrying stream (`simplePath().count()` — the path channel blocks the barrier).
+  (`V(1).out('created').in('created').simplePath()` → josh,peter; `cyclicPath()` → marko).
+  ✅ **The RECURSIVE form landed with the path channel through the walk** (`repeatWalk`, `compiler/rel/walk.ts`):
+  the walk no longer declines a path-tracking input — the channel is seeded at the source, APPENDED per hop
+  by the body's own movement (`extendPath`, so a multi-hop `outE().inV()` body records edge AND vertex
+  positions), and `simplePath()` reads it in-body as an ordinary correlated filter (a nested SELECT the
+  recursive-term barrier laws allow). The append (`Project`) and the filter both sit over a `both()` body's
+  hop-union, and `distributeThroughUnion` (the generalized loops-bump transpose, Calcite
+  `Project`/`FilterSetOpTransposeRule`) pushes them into the arms so each stays a single recursive reference.
+  L3 +5 (`Unfold`/`Loops` incl. `loops()` in `until`/`Repeat` `outE_inV`). 🚧 LEFT — a `by(<proj>)`
+  (compare by a projection), `from`/`to` scoping, and a reducer after a still-path-carrying stream
+  (`simplePath().count()` — the path channel blocks the barrier); the ENCOUNTER-plus-path walk still declines.
 - ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
   non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,

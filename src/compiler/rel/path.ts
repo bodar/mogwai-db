@@ -32,8 +32,9 @@ import type { ChildSeam } from './child.ts';
  *   column (`_at`) to tell "this arm never got here" from "the property is missing". With an array, a
  *   two-hop arm's path simply has two entries and a three-hop arm's has three. None of that machinery
  *   has an analogue here, which is why `union`/`choose` needed no path-specific code at all.
- * - **`repeat()`'s dynamic length is the same shape as everything else**, so the recursive regime is
- *   nothing new when Phase 3 lands — the array is already what a `Recursive` step would append to.
+ * - **`repeat()`'s dynamic length is the same shape as everything else**, which is why the recursive
+ *   regime needed no new path encoding: the `Recursive` walk carries this very array and its body's
+ *   movement appends to it per hop exactly as a linear one does (`repeatWalk`, `compiler/rel/walk.ts`).
  * - **`CHANNEL_COL` is keyed by ROLE** (`build.ts`), so a role gets ONE column type. Per-position rowids
  *   would need `int`, an array needs `json`, and the table cannot say both — the encoding was going to be
  *   single either way, and the array is the one that serves both regimes.
