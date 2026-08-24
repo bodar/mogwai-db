@@ -708,11 +708,17 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   scans repeat bodies); a JOIN-over-UNION recursive body composes (`distributeThroughUnion`'s join case,
   Calcite `JoinUnionTransposeRule` — `bothE().inV()` sharing the plain edge scan across arms); and a VALUE
   position mid-path is recorded (`appendValuePosition` — `values(k).path()` frames `[V,V,value]`, the
-  `pathPositions` value arm reshaping `{k,v,t}`→`{t,v}` with no rejoin; L3 +2). 🚧 LEFT — `from`/`to`
-  sub-path scoping (`simplePath().by(T.label).from('b').to('c')` — a `subPath` between alias positions,
-  fail-closed today); `id`/`label`/`valueMap` value positions (channels:`[]`, no carry); `path().unfold()`
-  over a MIXED element+value path (the `scalars` boundary — a list cannot yet hold an element member); and
-  the ENCOUNTER-plus-path walk.
+  `pathPositions` value arm reshaping `{k,v,t}`→`{t,v}` with no rejoin; L3 +2).
+  ✅ **`from`/`to` SUB-path scoping LANDED via GATED labels-on-path** (`subPathMembers`): `Path.subPath`
+  slices by LABEL position (cycle-safe), so each position records its `as()` labels — but ONLY when a
+  `from`/`to` is present (`ChainFacts.demandsPathLabels`, so a path query without one is byte-for-byte
+  unchanged and a non-path query pays nothing). `objectEntry` carries an `L` array, `as()` appends
+  (`appendPathLabel`), `subPathMembers` slices between the LAST `from`- and `to`-labelled positions; a
+  not-found label yields an EMPTY sub-path (fail-closed). ⚠️ Path simplicity compares OBJECTS not labels,
+  so the distinctness key STRIPS `L` (`json_remove`) or a vertex under two labels would read as distinct.
+  L3 +4 (`Path`/`SimplePath`/`CyclicPath` from/to). 🚧 LEFT — `id`/`label`/`valueMap` value positions
+  (channels:`[]`, no carry); `path().unfold()` over a MIXED element+value path (the `scalars` boundary —
+  a list cannot yet hold an element member); and the ENCOUNTER-plus-path walk.
 - ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
   non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
   after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
