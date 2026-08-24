@@ -160,6 +160,21 @@ test('simplePath() inside the body genuinely prunes cyclic walks (no artificial 
   expect(bagOf(names)).toEqual(bagOf(['marko', 'lop', 'marko', 'josh', 'lop']));
 });
 
+test('BOUNDED times(n) unrolls a simplePath() body — corpus SimplePath.feature', async () => {
+  // g_V_repeatXboth_simplePathX_timesX3X_path. A `simplePath()` in the body is a PURE FILTER an
+  // unrolled phase reproduces exactly, so `unrollableBodyStep` admits it: the walk splices to
+  // both().simplePath().both().simplePath().both().simplePath(), and the spliced top-level path
+  // filter is what makes the flat chain track a path (`tracksPath`). 18 acyclic length-4 paths.
+  const ps = (await decodePaths(seededStore(), 'g.V().repeat(__.both().simplePath()).times(3).path()'))
+    .map((p: any) => p.objects.map((o: any) => o.id));
+  // marko1 vadas2 lop3 josh4 ripple5 peter6
+  expect(bagOf(ps)).toEqual(bagOf([
+    [1, 3, 4, 5], [1, 4, 3, 6], [2, 1, 3, 4], [2, 1, 3, 6], [2, 1, 4, 5], [2, 1, 4, 3],
+    [3, 1, 4, 5], [3, 4, 1, 2], [4, 3, 1, 2], [4, 1, 3, 6], [5, 4, 3, 1], [5, 4, 3, 6],
+    [5, 4, 1, 3], [5, 4, 1, 2], [6, 3, 1, 2], [6, 3, 1, 4], [6, 3, 4, 5], [6, 3, 4, 1],
+  ]));
+});
+
 
 
 

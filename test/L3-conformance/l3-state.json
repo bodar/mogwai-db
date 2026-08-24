@@ -1,5 +1,5 @@
 {
-  "passing": 1744,
+  "passing": 1746,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -809,6 +809,7 @@
     "g_V_order_byXnameX_name",
     "g_V_order_byXname_ascX_name",
     "g_V_order_byXname_descX_barrier_dedup_age_name",
+    "g_V_order_byXname_descX_repeatXboth_simplePath_order_byXname_descXX_timesX2X_path",
     "g_V_order_byXnoX_count",
     "g_V_order_byXoutE_count_descX_byXnameX",
     "g_V_outE_asXeX_inV_asXvX_selectXeX_order_byXweight_ascX_selectXvX_valuesXnameX_dedup",
@@ -907,6 +908,7 @@
     "g_V_repeatXbothXfollowedByXX_timesX2X_group_byXsongTypeX_byXcountX",
     "g_V_repeatXboth_hasXnot_productiveXX_timesX3X_constantX1X",
     "g_V_repeatXboth_repeatXorder_byXnameXX_timesX1XX_timesX1X",
+    "g_V_repeatXboth_simplePathX_timesX3X_path",
     "g_V_repeatXgroupCountXmX_byXnameX_outX_timesX2X_capXmX",
     "g_V_repeatXin_outX_timesX3X_tailX7X_count",
     "g_V_repeatXinjectXyXX_timesX2X",
@@ -2024,7 +2026,6 @@
     "g_V_mergeEXlabel_knows_out_marko_in_vadasX_optionXonMatch_sideEffectXpropertyXweight_0XX_constantXemptyXX",
     "g_V_notXmatchXa_age_b__a_name_cX_whereXb_eqXcXX_selectXaXX_name",
     "g_V_order_byXnameX_repeatXlocalXboth_simplePath_order_byXnameXXX_timesX2X_path",
-    "g_V_order_byXname_descX_repeatXboth_simplePath_order_byXname_descXX_timesX2X_path",
     "g_V_order_byXname_descX_repeatXlocalXout_order_byXnameXXX_timesX1X",
     "g_V_outEXknowsX_subgraphXsgX_capXsgX_asString",
     "g_V_outEXnoexistX_subgraphXsgXcapXsgX",
@@ -2062,7 +2063,6 @@
     "g_V_repeatXaddV_propertyXgenerated_trueXX_timesX2X",
     "g_V_repeatXaggregateXxXX_timesX2X_selectXxX_limitX1X_unfold",
     "g_V_repeatXbothEXcreatedX_subgraphXsgX_outVX_timesX5X_name_dedup_capXsgX",
-    "g_V_repeatXboth_simplePathX_timesX3X_path",
     "g_V_repeatXdedupX_timesX2X_count",
     "g_V_repeatXdedup_bothX_timesX2X",
     "g_V_repeatXoutXknowsXX_untilXrepeatXoutXcreatedXX_emitXhasXname_lopXXX_path_byXnameX",

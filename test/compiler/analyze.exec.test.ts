@@ -33,9 +33,16 @@ describe('ChainFacts.tracksPath', () => {
     expect(facts('g.V().out().path()').tracksPath).toBe(true);
     expect(facts('g.V().out().out().simplePath()').tracksPath).toBe(true);
     expect(facts('g.V().out().values("name")').tracksPath).toBe(false);
-    // A path step INSIDE a folded repeat cluster is not a top-level step — matches the former
-    // chainTracksPath scan (top-level only); the repeat body tracks its own path internally.
-    expect(facts('g.V().repeat(__.both().simplePath()).times(2)').tracksPath).toBe(false);
+    // A BOUNDED repeat body unrolls BEFORE analyze (`unrollFixedRepeat`), so its `simplePath()` is
+    // spliced TOP-LEVEL into the flat chain — which is exactly why the bounded form tracks a path and
+    // the spliced filter has one to read.
+    expect(facts('g.V().repeat(__.both().simplePath()).times(2)').tracksPath).toBe(true);
+    // An UNBOUNDED repeat keeps the path-family step inside the folded region, so a top-level `path()`
+    // is what makes the chain track a path (the corpus `repeat(both.simplePath)...path()` forms, which
+    // the walk then carries). WITHOUT one, `tracksPath` is false and the in-body `simplePath()` declines
+    // for want of a seed — a known fail-closed gap (analyze does not yet scan folded repeat bodies).
+    expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6)).path()').tracksPath).toBe(true);
+    expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6))').tracksPath).toBe(false);
   });
 });
 

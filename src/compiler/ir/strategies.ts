@@ -1282,6 +1282,14 @@ const unrollableBodyStep = (s: Step): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
   || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity'
+  // `simplePath()`/`cyclicPath()` are PURE PATH FILTERS: a spliced phase checks the whole-path-so-far
+  // distinctness exactly as the recursive term's per-iteration filter does, so unrolling reproduces the
+  // walk's semantics precisely. They ride no modulator/from/to here (those forms carry an `absorbed`
+  // modulator or `.from`/`.to` and decline downstream anyway). Splicing a path-family step top-level is
+  // also what lets `analyzeChain` see it (`tracksPath`), so the seed carries a path even when no explicit
+  // `path()` follows — `repeat(__.both().simplePath()).times(3)` and `.times(3).path()` alike.
+  || ((s.name === 'simplePath' || s.name === 'cyclicPath')
+      && !(s as IRStep).modulators?.length && (s as IRStep).from === undefined && (s as IRStep).to === undefined)
   || s.name === 'call';
 
 /**
