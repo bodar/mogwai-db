@@ -36,7 +36,7 @@ import {
     typedNode, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
-import type { AliasMap } from '../plan/alias.ts';
+import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, type ChainRead, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';

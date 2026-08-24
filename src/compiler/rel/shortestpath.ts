@@ -6,7 +6,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
-import { SHAPE_K } from '../plan/alias.ts';
+import { SHAPE_K } from '../alias.ts';
 import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
 import type { ChildSeam } from './child.ts';
 import { historyAppend, objectEntry, type TraverserObject } from './history.ts';

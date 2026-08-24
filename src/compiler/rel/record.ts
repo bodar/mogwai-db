@@ -12,7 +12,7 @@ import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
-import type { AliasMap } from '../plan/alias.ts';
+import type { AliasMap } from '../alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 
 /**

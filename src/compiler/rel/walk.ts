@@ -4,7 +4,7 @@ import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { IRStep } from '../ir/step.ts';
-import type { AliasMap } from '../plan/alias.ts';
+import type { AliasMap } from '../alias.ts';
 import type { Elem } from '../elem.ts';
 import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Minter } from './build.ts';
 import type { ChildSeam, Subject } from './child.ts';

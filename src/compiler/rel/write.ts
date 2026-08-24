@@ -19,7 +19,7 @@ import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './bui
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyRowId } from './property.ts';
-import type { AliasMap } from '../plan/alias.ts';
+import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 
 /**

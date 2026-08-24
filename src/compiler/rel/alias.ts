@@ -7,7 +7,7 @@ import type { ColMeta } from '../../rel/types.ts';
 import { PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, withMemberType, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
-import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../plan/alias.ts';
+import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../alias.ts';
 import { carriedCols, collectedOf, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';

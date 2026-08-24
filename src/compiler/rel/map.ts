@@ -13,7 +13,7 @@ import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import type { AliasMap } from '../plan/alias.ts';
+import type { AliasMap } from '../alias.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 
 /**
