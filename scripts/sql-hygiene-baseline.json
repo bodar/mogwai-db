@@ -43,8 +43,8 @@
   },
   "asBool": {
     "binds": 0,
-    "bytes": 76,
-    "compiler": 2,
+    "bytes": 185,
+    "compiler": 6,
     "bound": 0
   },
   "asDate": {

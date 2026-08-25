@@ -255,6 +255,23 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
     return { expr, type: STATIC(spec.as) };
   }
 
+  if (step.name === 'asBool') {
+    // `AsBoolStep.map` (`vendor/tinkerpop/.../map/AsBoolStep.java:38-54`) is TOTAL only over the shapes
+    // SQL can decide without raising: a Boolean is itself, and a Number is `NaN → false else != 0`. A
+    // String parses `true`/`false` (case-insensitive, trimmed) and RAISES on anything else; a null and a
+    // list/map RAISE too — none of which SQL can do, so those decline to the runtime-guard increment. Over
+    // a RUNTIME stream already framed numeric or boolean, only the total arms are reachable:
+    const known = staticTypeOf(incoming);
+    // A `NaN != 0` is not-true in SQLite, so the `!= 0` CASE gives `NaN → false` for free — the exact
+    // reference rule. A boolean input is stored as INTEGER 0/1, so `!= 0` is also its identity.
+    if (known === 'boolean') return { expr: v, type: STATIC('boolean') };
+    if (known && NUMBER_FAMILY.has(known)) return {
+      expr: { kind: 'case', whens: [[{ kind: 'binary', op: '!=', left: v, right: heldInt(0) }, heldInt(1)]], else: heldInt(0) },
+      type: STATIC('boolean'),
+    };
+    return null;
+  }
+
   if (step.name === 'asDate') {
     // Internal datetime IS epoch-millis: an integer/real value already is, a text value is ISO-8601
     // and `unixepoch` resolves any offset into the instant.

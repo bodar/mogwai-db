@@ -438,6 +438,7 @@ ran	6	6	1c896079cb4d3b31	a23df02ce161bf89	g.V().local(aggregate("a")).union(__.o
 ran	1	1	b9b3395f146a91c9	d4eb0e743e0360a2	g.V().local(aggregate("a").by("name")).out().cap("a")
 ran	1	1	1318d9366efba399	ae87ac828a734cc1	g.V().local(aggregate("a").by(__.outE("created").count())). out().out(). local(aggregate("a").by(__.inE("created").values("weight").sum())). cap("a")
 ran	1	1	5e54c621df10eddb	76fc2f09e6ecaa67	g.V().local(aggregate("x").by("age")).cap("x")
+ran	6	2	f5ed99fab8c06560	f2328874020f44f3	g.V().local(outE().count()).asBool()
 ran	4	4	27729c79d0b3e0d1	f1d0bdec0d37f464	g.V().local(union(values("age"), outE().values("weight")).fold()).max(local)
 ran	4	4	0fe0e9acd313b9df	d260f6a19bcda4dc	g.V().local(union(values("age"), outE().values("weight")).fold()).mean(local)
 ran	4	3	f784409c18676812	76dd51bbdaa195e9	g.V().local(union(values("age"), outE().values("weight")).fold()).min(local)

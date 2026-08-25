@@ -1,5 +1,5 @@
 {
-  "passing": 1762,
+  "passing": 1763,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -261,6 +261,7 @@
     "g_VX5X_repeatXrangeX0_1X_inX_timesX2X_valuesXnameX",
     "g_VX5X_repeatXrangeX0_1X_in_aggregateXxXX_timesX2X_capXxX",
     "g_VX5X_repeatXrangeX0_1X_in_repeatXrangeX0_1X_inX_timesX1XX_timesX1X_valuesXnameX",
+    "g_VXX_localX_outE_countX_asBool",
     "g_VX_hasLabelXpersonX_unionX_whereX_out_count_isXgtX2XXX_valuesXageX_notX_whereX_bothE_count_isXgt2XXX_valusXnameXX",
     "g_VXaX_addEXknowsX_toXbX_propertyXweight_0_1X",
     "g_VXaddVXxX_idX_rejected",
@@ -1860,7 +1861,6 @@
     "g_VX5X_repeatXrangeX0_1X_inX_untilXloopsXisX2XXX_valuesXnameX",
     "g_VX6X_repeatXa_bothXcreatedX_simplePathX_emitXrepeatXb_bothXknowsXX_untilXloopsXbX_asXb_whereXloopsXaX_asXbX_hasXname_vadasXX_dedup_name",
     "g_VXVXvid1X_idX_name",
-    "g_VXX_localX_outE_countX_asBool",
     "g_VXlistXnullXX",
     "g_VXnullX",
     "g_VXv7_properties_properties_element_element",

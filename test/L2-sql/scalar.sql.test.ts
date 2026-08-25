@@ -80,6 +80,21 @@ describe('scalar-parent / projection SQL', () => {
       .toEqual(['1965-10-31T00:00:00.000Z', '2020-08-02T00:00:00.000Z']);
   });
 
+  test('asBool() over a known-numeric/boolean stream is the reference identity (guard-free)', async () => {
+    // `AsBoolStep.map` (`vendor/tinkerpop/.../map/AsBoolStep.java:38-54`): a Boolean is itself, a Number
+    // is `NaN → false else != 0`. Both are SQL-total, so over a runtime stream framed numeric or boolean
+    // this needs no guard. A String parses `true`/`false` and RAISES otherwise — SQL cannot, so an
+    // UNTYPED property still declines to the runtime-guard increment. `NaN != 0` is not-true in SQLite,
+    // which gives `NaN → false` for free.
+    expect(read('g.V().count().asBool()').shape).toEqual({ kind: 'value', type: STATIC('boolean') });
+    expect(() => read('g.V().values("age").asBool()')).toThrow(UnsupportedTraversal);
+
+    // AsBool.feature `g_VXX_localX_outE_countX_asBool` over the modern graph: outE().count() != 0 per
+    // vertex → marko/josh/peter true, vadas/lop/ripple false.
+    const bools = await decodeAll(executeQuery(seededStore(), 'g.V().local(__.outE().count()).asBool()', {}));
+    expect(bools).toEqual([true, false, false, true, false, true]);
+  });
+
   test('dateDiff() over a constant(datetime|null) nested operand folds to a millis subtraction', async () => {
     // The other operand resolves to a millis CONSTANT: a datetime literal, or a `constant(datetime)`/
     // `constant(null)` nested traversal (`dateDiffOtherMs` owns `constant(null)` → epoch 0, `new

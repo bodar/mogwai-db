@@ -325,6 +325,9 @@ const COVERED = [
   // subtraction (`dateDiffOtherMs` owns `constant(null)` → epoch 0); the datetime-literal operand
   // already worked. Any OTHER nested body stays the correlated-child seam's decline.
   "g.V().values('birthday').asDate().dateDiff(__.constant(null))",
+  // BARE asBool() over a known-numeric/boolean stream is the reference identity (`!= 0`, `NaN → false`
+  // for free in SQLite), guard-free. An UNTYPED property (a String that could RAISE) still declines.
+  "g.V().local(__.outE().count()).asBool()", "g.V().count().asBool()",
   // `has()`'s three ARGUMENT SHAPES, all of one step. The 3-arg form is the label constraint AND the
   // property one, exactly as `HasStep` composes them; a `T`-token key asks about the ELEMENT rather
   // than a property row. Each was its own decline and each is a composition of clauses already built.

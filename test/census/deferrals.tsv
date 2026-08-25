@@ -219,7 +219,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().local(agg
 deferred	Aggregate step can only have one by modulator	g.V().local(aggregate("x").by("name").by("age")).cap("x")
 deferred	this traversal is not supported yet: no lowering covers g.V().local(group("a").by("name").by().select("a").count(local))	g.V().local(group("a").by("name").by().select("a").count(local))
 deferred	this traversal is not supported yet: no lowering covers g.V().local(groupCount("a").select("a").count(local))	g.V().local(groupCount("a").select("a").count(local))
-deferred	this traversal is not supported yet: no lowering covers g.V().local(outE().count()).asBool()	g.V().local(outE().count()).asBool()
 deferred	this traversal is not supported yet: no lowering covers g.V().map(__.bothE().values("weight").order().by(Order.asc).fold()).order().by(__.sum(Scope.local), Order.desc).by(__.count(Scope.local), Order.desc)	g.V().map(__.bothE().values("weight").order().by(Order.asc).fold()).order().by(__.sum(Scope.local), Order.desc).by(__.count(Scope.local), Order.desc)
 deferred	this traversal is not supported yet: no lowering covers g.V().map(__.constant(null))	g.V().map(__.constant(null))
 unbound	Unbound parameter 'vid1'	g.V().map(__.in().hasId(vid1)).limit(2).values("name")
