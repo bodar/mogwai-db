@@ -814,6 +814,22 @@ reads), side effects, then `local`, `match`, `where`, the `path` tails.
 
 🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
 pattern this whole stage kept finding:
+- ✅ **`select(name)` over a NAMED COLLECTION — LANDED as a CROSS join, and it was one missing caller.**
+  `Scoping.getScopeValue` consults `traverser.getSideEffects()` BEFORE the path
+  (`vendor/tinkerpop/gremlin-core/.../step/Scoping.java:119-131`), so a single-key `select("a")` naming a
+  `group`/`groupCount`/`aggregate` side effect resolves to the FINISHED collection whatever an `as()` bound.
+  `SelectStep` emits it once per surviving traverser, which is a CROSS join of the stream's channels onto the
+  one-row reduced value — `readCollection`, the SAME relation `cap("a")` reads, the `foreign.ts` constant
+  sub-traversal shape minus the injection ON (`selectCollection`, `lower.ts`). The value's framing is carried
+  verbatim, so the map/list tail takes the rest: `count(Scope.local)` → the map size, `unfold()` → the
+  members, and a WRITE (`select("x").unfold().addE(…).to("a")` → the full bipartite) composes. Five corpus
+  traversals, reads/repeat-unfold/write all at once. ⚠️ **The trap it surfaced, banked because it is a WRONG
+  ANSWER a retype invites:** a re-root that drops the traverser's payload must STILL thread the live alias
+  map, or a following `select(<label>)` empties the stream — `select("x").select("label")` returned `[]`
+  until the cross join carried the alias channels through and `continueAs` was handed the real `labels`, not
+  `NO_ALIASES` (the census cannot see it — the traversal was newly executing). 🚧 LEFT: a `by()` over a
+  collection select (a member projection) and a multi-key select mixing a collection name with labels
+  (both decline via `selectKeys`).
 - ✅ **`hasId(…)` — LANDED, and it was ENTIRELY unlowered (0 executing, 21 deferrals) despite the algebra
   existing.** `hasId` reads the element's EXTERNAL id (`COALESCE(uid,id)`), the same row `has(T.id,…)`
   does — so `sourceFilter` now routes it straight to `hasTokenClause('id',…)` with the id token supplied,
