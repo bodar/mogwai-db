@@ -78,6 +78,26 @@ window op. Decline (never mis-execute) when:
    partition-key seam (origin channel → alias id) proved out exactly as designed — one primitive, two
    consumers, differing only in `partitionBy`.
 
+3. ✅ **LANDED (`d8b6fc4`) — per-origin `dedup()` for `local`/`flatMap`.** `dedupOn` prepends the ambient
+   `origin` to its window `PARTITION BY`; the bare-dedup guard exempts `origin` from `groupableChannels`
+   (it is the partition key, not a grouped value); a payload-identified dedup with a live `origin` routes
+   through the ranked window (which keeps `origin`) instead of the Distinct/Aggregate arms (which cannot).
+   `flatMapRejoin` admits `order()`/`dedup()` barriers in the body prefix. Reaps `local(out().dedup())`,
+   `local(both().dedup())`, and dropped an `@Unsupported` L4 tag (`local(out().in().order().by(name).dedup())`,
+   ordered + perturbation-stable). This is the fold-mode rule in place for the row-preserving barriers.
+
+### Two semantics corrections found by reading the reference (not reasoning)
+
+- **`union`/`choose` arm barriers are ARM-MAJOR, not per-origin.** `BranchStep.standardAlgorithm`
+  (`BranchStep.java:140-150`) drains EVERY start into an arm before applying its barrier — so
+  `union(out().limit(2), …)` limits over the whole input, globally. The current answers are already
+  correct; a per-origin window there would be WRONG. **Union arms are not a per-origin consumer.**
+- **In-body-branch origin threading already works.** `movement` (`bothE`) and the `union`/`choose` steps
+  carry the input's `origin` channel through their merge (`mergeChannels` keeps the `identical` origin;
+  only `encounter` is dropped), so `local(bothE.limit(1))`, `local(union(out,in).limit(1))`,
+  `local(choose(…).limit(1))` all already scope per-origin. The earlier "decline" was the separate
+  `otherV()` deferral. So there was no threading gap — the real gap was `dedup` (item 3).
+
 ### Refined scope for the rest (found while building)
 
 - **`by(<body>)` — NOT a per-origin-window consumer.** The corpus `by(...)` bodies are `by(__.out()…fold())`
