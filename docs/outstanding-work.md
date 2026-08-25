@@ -48,6 +48,19 @@ per-step support; closed work belongs in git history or `docs/archive/`.
     question; unbounded-`repeat` stays P3 fail-closed forever), and the **order-dependent GDS
     algorithms** (`labelPropagation`, `louvain`, `eigenvector` — not clean set-based reuse; each
     would need new substrate or a variant that diverges from GDS's exact oracle).
+  - *Per-origin windowed slice — one increment left.* The light per-origin window substrate
+    (`perOriginWindow` in `src/compiler/rel/lower/slice.ts`) is DONE and its plan is archived
+    ([per-origin window](./archive/2026-08-25-per-origin-window-plan.md)): `order().by()`/`limit`/`range`/
+    `tail`/`skip`/`dedup()` scoped per entering traverser for `local`/`flatMap` bodies AND `match`
+    pattern bodies, all reference-faithful. One consumer remains — a per-origin slice inside a
+    **`union`/`choose` arm or a bounded-`repeat` body**. This is NOT a partition-key swap: it is the
+    branch substrate's **traverser-major/arm-major** question (`unionArms`/`armBatches`/
+    `mintTraverserMajor` in `src/compiler/rel/lower/branch.ts`, which today *declines* — `return null` —
+    a slice-demanded batched arm rather than present a subset the reference does not). The window
+    primitive is ready; the origin key must be the incoming traverser minted INSIDE the arm/iteration
+    and threaded through the traverser-major merge. Corpus witnesses are grateful-graph
+    `repeat(union(out.order.by.limit(2), …))`. Unbounded-`repeat` body stays P3 fail-closed forever
+    (recursive-term collapse is algebraically impossible).
 - **Services and graph movement:** federation tails, bulk materialization, and IO formats. The
   `GraphSource` abstraction (one traversal vocabulary over base + injected/federated subgraphs) is DONE
   and its plan is archived

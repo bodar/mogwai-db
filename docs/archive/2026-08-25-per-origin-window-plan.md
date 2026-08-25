@@ -1,8 +1,16 @@
 # Per-origin windowed slice — one substrate for every fan-out body
 
-> **Status: design + phased build. Correctness is the bar; the corpus is a witness, not the goal.**
-> Each increment is one `mise run ci`-green commit pushed to trunk (the container is ephemeral —
-> unpushed work is lost, so durability per increment is not optional).
+> **Status: ✅ LANDED AND ARCHIVED (2026-08-25).** The light per-origin window substrate
+> (`perOriginWindow`, `src/compiler/rel/lower/slice.ts`) and all five phased increments are on trunk:
+> `order().by()`/`limit`/`range`/`tail`/`skip`/`dedup()` scoped per entering traverser for
+> `local`/`flatMap` AND `match` pattern bodies, all reference-faithful (commits `dccf126`, `1dc63b2`,
+> `d8b6fc4`, `cf7a504`, `227f428`). The ONE remaining consumer — a per-origin slice inside a
+> `union`/`choose` arm or bounded-`repeat` body — is a distinct piece against the branch substrate's
+> traverser-major machinery (not a partition-key swap), tracked in `docs/outstanding-work.md`. Read this
+> for the MEASURED FACTS the increments established (below), which is why it is kept: the fail-closed
+> boundary, the two "found by reading the reference" semantics corrections (union arms are ARM-major, not
+> per-origin; in-body-branch origin threading already works), and why unbounded-`repeat` is a permanent
+> decline.
 
 ## What this is (and what it is NOT)
 
