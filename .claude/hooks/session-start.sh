@@ -219,6 +219,18 @@ if [ -n "$BUN_BIN" ]; then
   [ -n "$BUN_PIN" ] && mise link --force "bun@$BUN_PIN" "$BUN_PREFIX" >/dev/null
 fi
 
+# 4b. Same move for node: mise.toml pins node to the image's pre-installed version, so link that
+#     binary instead of downloading a build of the same version from mise's registry. Only link when
+#     the two agree — if the pin ever drifts from what the image ships, let mise fetch the pinned
+#     version rather than silently linking a mismatched node under the pinned name.
+NODE_BIN="$(command -v node || true)"
+if [ -n "$NODE_BIN" ]; then
+  NODE_PREFIX="$(cd "$(dirname "$NODE_BIN")/.." && pwd)"
+  NODE_PIN="$(sed -n 's/^[[:space:]]*node[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$CLAUDE_PROJECT_DIR/mise.toml" | head -1)"
+  NODE_HAVE="$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//')"
+  [ -n "$NODE_PIN" ] && [ "$NODE_PIN" = "$NODE_HAVE" ] && mise link --force "node@$NODE_PIN" "$NODE_PREFIX" >/dev/null
+fi
+
 # 5. Install project dependencies. NB this now provisions the submodule and builds the gremlin
 #    client too, because `install` depends on `submodule` (gremlin is a `link:` dep — see
 #    mise.toml). Slower on a cold session, and deliberately so: the previous npm-dep arrangement
@@ -236,4 +248,4 @@ fi
 # 7. One line of confirmation, last. Everything above speaks up only when something is wrong,
 #    so a healthy bootstrap was indistinguishable from a hook that never fired. `$SECONDS` is
 #    the whole hook, cold submodule provisioning included, which is the number worth seeing.
-echo "[bootstrap] mogwai-db ready in ${SECONDS}s — bun ${BUN_PIN:-unpinned} linked, submodule + deps provisioned, 'mise run test' will run."
+echo "[bootstrap] mogwai-db ready in ${SECONDS}s — bun ${BUN_PIN:-unpinned} + node ${NODE_PIN:-unpinned} linked, submodule + deps provisioned, 'mise run test' will run."
