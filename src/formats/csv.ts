@@ -41,7 +41,7 @@
 import { BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
-import { groupByOwner, keysetPages, rowsForOwners } from './drain.ts';
+import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 
 // ---------- RFC 4180 ----------
 
@@ -358,8 +358,6 @@ export function loadCsv(store: GraphStore, document: string, options?: BulkOptio
 
 // ---------- the writer ----------
 
-interface PropRow { id: number; owner: number; key: string; value: unknown; vtype: string | null; meta: string | null }
-
 /** One property column of the output: a (key, type) pair the graph actually contains. */
 interface PropColumn { key: string; vtype: CanonicalType | null; array: boolean; header: string }
 
@@ -447,13 +445,8 @@ export function* csvVertexLines(store: GraphStore, pageSize = 200): Generator<st
   yield csvLine(['~id', '~label', ...columns.map((c) => c.header)]);
   for (const page of keysetPages<{ id: number; uid: string | null }>(store, 'nodes', ['id', 'uid'], pageSize)) {
     const ids = page.map((v) => v.id);
-    const labels = groupByOwner(rowsForOwners<{ owner: number; name: string }>(store,
-      (ph) => `SELECT vl.node AS owner, l.name AS name FROM vertex_labels vl JOIN labels l ON l.id = vl.label
-               WHERE vl.node IN (${ph}) ORDER BY vl.node, vl.label`, ids));
-    const props = groupByOwner(rowsForOwners<PropRow>(store,
-      (ph) => `SELECT id, node AS owner, key, value, vtype,
-                      CASE WHEN meta IS NULL THEN NULL ELSE json(meta) END AS meta
-               FROM vertex_properties WHERE node IN (${ph}) ORDER BY node, id`, ids));
+    const labels = labelsForOwners(store, ids);
+    const props = vertexPropsForOwners(store, ids, false); // CSV re-emits each value as a cell — raw, not json() text
     for (const v of page) {
       const ext = String(v.uid ?? v.id);
       yield csvLine([
@@ -479,9 +472,7 @@ export function* csvEdgeLines(store: GraphStore, pageSize = 200): Generator<stri
     // distinct labels, and an endpoint recurs constantly.
     fill(store, 'labels', 'name', page.map((e) => e.label), labelNames);
     fill(store, 'nodes', 'COALESCE(uid, id)', [...page.map((e) => e.src), ...page.map((e) => e.tgt)], extIds);
-    const props = groupByOwner(rowsForOwners<PropRow>(store,
-      (ph) => `SELECT id, edge AS owner, key, value, vtype, NULL AS meta FROM edge_properties
-               WHERE edge IN (${ph}) ORDER BY edge, id`, page.map((e) => e.id)));
+    const props = edgePropsForOwners(store, page.map((e) => e.id), false);
     for (const e of page) {
       const ext = String(e.uid ?? e.id);
       yield csvLine([

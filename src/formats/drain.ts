@@ -66,3 +66,43 @@ export function groupByOwner<T extends { owner: number }>(rows: readonly T[]): M
   }
   return out;
 }
+
+// ---------- the standard owner-scoped reads every drain shares ----------
+//
+// A whole-graph writer reads the same three relations per page — a vertex's labels, a vertex's
+// properties, an edge's properties — keyed by that page's owner ids. Both writers (GraphSON, CSV) had
+// re-derived these membership reads and the `PropRow` shape from each other, which is exactly the
+// re-derivation this module's header warns is how a DO-only bind wall comes back. They live here once;
+// the one real difference between the two callers is whether a collection value arrives as `json()` TEXT.
+
+/** One property row a drain reads — a `(key, value)` under an owner, with its stored type and (for a
+ *  vertex property) its meta bag as `json()` TEXT. Shared by every writer's property stitching. */
+export interface PropRow { id: number; owner: number; key: string; value: unknown; vtype: string | null; meta: string | null }
+
+/** The `value` projection for a property read. A COLLECTION is stored as a JSONB blob, so a drain that
+ *  JSON-parses the value (GraphSON's `valueNodeFromStored`) must ask for its `json()` TEXT — a raw blob
+ *  would arrive as a byte Map; a drain that re-emits the value as a cell (CSV) leaves it raw. This is the
+ *  same wrap the write-path readers use (`write.ts` readVertexProps). */
+const valueExpr = (asText: boolean): string =>
+  asText ? "CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value" : 'value';
+
+/** A page of vertex owners' label names, grouped by owner (a vertex's labels in insertion order). */
+export const labelsForOwners = (w: RowWriter, ids: readonly number[]): Map<number, { owner: number; name: string }[]> =>
+  groupByOwner(rowsForOwners<{ owner: number; name: string }>(w,
+    (ph) => `SELECT vl.node AS owner, l.name AS name FROM vertex_labels vl JOIN labels l ON l.id = vl.label
+             WHERE vl.node IN (${ph}) ORDER BY vl.node, vl.label`, ids));
+
+/** A page of vertex owners' properties, grouped by owner. `asText` wraps a collection value as `json()`
+ *  TEXT for a caller that JSON-parses it. Carries the meta bag as `json()` TEXT (vertices only). */
+export const vertexPropsForOwners = (w: RowWriter, ids: readonly number[], asText: boolean): Map<number, PropRow[]> =>
+  groupByOwner(rowsForOwners<PropRow>(w,
+    (ph) => `SELECT id, node AS owner, key, ${valueExpr(asText)}, vtype,
+                    CASE WHEN meta IS NULL THEN NULL ELSE json(meta) END AS meta
+             FROM vertex_properties WHERE node IN (${ph}) ORDER BY node, id`, ids));
+
+/** A page of edge owners' properties, grouped by owner. Edges carry no meta (always NULL). `asText` as
+ *  for `vertexPropsForOwners`. */
+export const edgePropsForOwners = (w: RowWriter, ids: readonly number[], asText: boolean): Map<number, PropRow[]> =>
+  groupByOwner(rowsForOwners<PropRow>(w,
+    (ph) => `SELECT id, edge AS owner, key, ${valueExpr(asText)}, vtype, NULL AS meta FROM edge_properties
+             WHERE edge IN (${ph}) ORDER BY edge, id`, ids));

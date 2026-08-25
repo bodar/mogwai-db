@@ -34,7 +34,7 @@ import {
     BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
-import { groupByOwner, keysetPages, rowsForOwners } from './drain.ts';
+import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
@@ -359,12 +359,6 @@ const idJson = (id: number | string): unknown =>
   typeof id === 'string' ? id
     : typed(id >= -2147483648 && id <= 2147483647 ? 'int' : 'long', id);
 
-/** A COLLECTION value is stored as a JSONB blob, so a drain must ask for its `json()` TEXT —
- *  `valueNodeFromStored` JSON.parses it, and a raw blob would arrive as a byte Map. The same
- *  expression the write-path readers use (write.ts readVertexProps). */
-const VALUE_AS_TEXT = "CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value";
-
-interface PropRow { id: number; owner: number; key: string; value: unknown; vtype: string | null; meta: string | null }
 interface EdgeRow { id: number; uid: string | null; src: number; tgt: number; label: string; owner: number }
 
 /** `{key: <typed value>}` for an edge's properties. */
@@ -427,13 +421,8 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
     const ids = page.map((v) => v.id);
     const extId = new Map<number, number | string>(page.map((v) => [v.id, v.uid ?? v.id]));
 
-    const labels = groupByOwner(rowsForOwners<{ owner: number; name: string }>(store,
-      (ph) => `SELECT vl.node AS owner, l.name AS name FROM vertex_labels vl JOIN labels l ON l.id = vl.label
-               WHERE vl.node IN (${ph}) ORDER BY vl.node, vl.label`, ids));
-    const props = groupByOwner(rowsForOwners<PropRow>(store,
-      (ph) => `SELECT id, node AS owner, key, ${VALUE_AS_TEXT}, vtype,
-                      CASE WHEN meta IS NULL THEN NULL ELSE json(meta) END AS meta
-               FROM vertex_properties WHERE node IN (${ph}) ORDER BY node, id`, ids));
+    const labels = labelsForOwners(store, ids);
+    const props = vertexPropsForOwners(store, ids, true); // GraphSON JSON-parses each value — collections as json() text
 
     // Both incidence directions, per the header. `owner` is the vertex this side hangs off.
     const edgeSql = (endpointCol: 'src' | 'tgt') => (ph: string) =>
@@ -441,9 +430,7 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
        FROM edges e JOIN labels l ON l.id = e.label WHERE e.${endpointCol} IN (${ph}) ORDER BY e.${endpointCol}, e.id`;
     const outE = rowsForOwners<EdgeRow>(store, edgeSql('src'), ids);
     const inE = rowsForOwners<EdgeRow>(store, edgeSql('tgt'), ids);
-    const edgeProps = groupByOwner(rowsForOwners<PropRow>(store,
-      (ph) => `SELECT id, edge AS owner, key, ${VALUE_AS_TEXT}, vtype, NULL AS meta FROM edge_properties
-               WHERE edge IN (${ph}) ORDER BY edge, id`, [...new Set([...outE, ...inE].map((e) => e.id))]));
+    const edgeProps = edgePropsForOwners(store, [...new Set([...outE, ...inE].map((e) => e.id))], true);
     const outByOwner = groupByOwner(outE);
     const inByOwner = groupByOwner(inE);
 
