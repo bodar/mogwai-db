@@ -1207,7 +1207,11 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
   const origin = originOf(input.channels);
   if (origin && step.name !== 'sample') {
     if (bulked) return null;
-    if (step.name === 'tail') return encounter ? perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countArg(step) }, fresh) : null;
+    // A per-origin `tail(n)` is the last n per origin — the first n under the REVERSED collation.
+    // `reverseCollation` falls back to the payload when the body minted no `encounter` (no `order()`),
+    // so an unordered per-origin tail is a deterministic impl-defined pick rather than a decline — unlike
+    // a GLOBAL tail, which has no position to read and declines below.
+    if (step.name === 'tail') return perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countArg(step) }, fresh);
     if (sliceParamNames(step).some((name) => name != null)) return null;
     let w; try { w = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
     return perOriginWindow(input, col(input.id, origin.col), [], w, fresh);
@@ -7069,6 +7073,14 @@ function perTraverserChild(
   return tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
+/** The stream barriers that SELF-SCOPE per origin when run inside a per-traverser body — `order()` (a
+ *  global sort restricted to a partition IS that origin's order), `dedup()` (per-origin DISTINCT via
+ *  `dedupOn`), the slice family (`perOriginWindow` via `sliceOp`), and the no-op `barrier`. Every OTHER
+ *  `isStreamBarrier` step (`sample`, `fold`, `group`/`groupCount`/`aggregate`, a reducer, a nested
+ *  `local`) either changes the framing or has no per-origin form, so a body containing one DECLINES —
+ *  the whitelist twin of `match`'s `PER_ORIGIN_UNSAFE` blacklist. */
+const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'range', 'skip', 'tail', 'barrier']);
+
 /**
  * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
  * `scalarChild`'s movement arm explicitly defers ("fan-out `flatMap(__.V()…)` needs the general child
@@ -7077,14 +7089,12 @@ function perTraverserChild(
  *
  * A body with NO stream barrier is TRANSPARENT: `flatMap`/`local` run it per traverser, and with
  * nothing to scope per-origin the answer is the body inlined into the outer chain — `flatMap(__.out())`
- * is `out()`, `local(__.out())` is `out()`. So mint the `origin` channel (the seam's `rows` arm), lower
- * the body over it, then DROP origin: a later `dedup` is whole-row, so leaving origin as a column would
- * make it distinguish rows by WHICH host they descend from and keep convergent walks that must collapse.
- *
- * A barrier INSIDE the body (`local(__.out().order().by(k))`, `local(__.out().fold())`) needs the
- * order/slice/fold scoped PER ORIGIN — a window partitioned by `origin`, a later increment — so
- * `isStreamBarrier` declines it here rather than letting the ordinary fold answer the GLOBAL question
- * (a wrong answer `childRows` would not catch, since `order()`/`limit()` preserve the origin channel).
+ * is `out()`, `local(__.out())` is `out()`. A per-origin-SAFE barrier inside it
+ * (`local(__.out().order().by(k).limit(1))`, `local(__.both().dedup())`) is scoped to the ENTERING
+ * traverser: the whole body runs through `childRows(perRow: true)` (a per-ROW origin), and `sliceOp`/
+ * `dedupOn`/`order` self-scope by it. Then DROP origin: a later `dedup` is whole-row, so leaving origin
+ * as a column would distinguish rows by WHICH host they descend from and keep convergent walks that must
+ * collapse.
  *
  * `map` is excluded: it takes the FIRST body result, not all, so a fan-out under it is a per-origin
  * window, not this. A scalar host has no rowid for `origin` (`childRows`' own limit), so only an element
@@ -7113,33 +7123,23 @@ function flatMapRejoin(
     const outerReads = labelReads(steps.slice(at + 1), ctx.params);
     if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
   }
-  // A TRAILING GLOBAL SLICE is scoped PER ORIGIN — `local(__.bothE('created').limit(1))` is one edge per
-  // HOST vertex, not one total; `local(__.out().order().by('name').limit(1))` the first BY NAME per host;
-  // `tail(n)` the last n per host. The trailing window is `[order().by()?] <limit|skip|range|tail>`: the
-  // slice is popped here, and a preceding `order()` stays in the prefix for `childRows` to lower — the
-  // fold's `order` mints the `encounter` the window ranks by, and a total order restricted to a partition
-  // IS that origin's order, so ranking per origin gives the per-origin pick. Any OTHER barrier declines.
-  const last = body[body.length - 1]!;
-  const isSlice = (last.name === 'limit' || last.name === 'skip' || last.name === 'range') && !isLocalScope(last);
-  const isTail = last.name === 'tail' && !isLocalScope(last);
-  const perOriginSlice = body.length > 1 && (isSlice || isTail);
-  const prefix = perOriginSlice ? body.slice(0, -1) : body;
-  // The prefix's barriers must be ORIGIN-AWARE ones — `order()` (its global sort restricted to a
-  // partition is that origin's order) and `dedup()` (per-origin DISTINCT via `dedupOn`'s origin key).
-  // `childRows` lowers them and each self-scopes to the `origin` it mints; any OTHER barrier (a reduce,
-  // `fold`, `group`) changes the framing and is not this — decline.
-  if (!prefix.filter(isStreamBarrier).every((s) => s.name === 'order' || s.name === 'dedup')) return null;
-  // tail(n): n from the arg (default 1); a param count declines (fail closed — no data-sized window).
-  const tailN = isTail ? ((): number | null => { const a = argValues(last); return a.length === 0 ? 1 : (typeof a[0] === 'number' ? a[0] : null); })() : null;
-  if (isTail && tailN === null) return null;
-  const rows = childRows(prefix, rel, framing.elem, labels, ctx, fresh);
+  // Run the WHOLE body PER TRAVERSER: `local`/`flatMap` apply their body to each traverser
+  // independently (TinkerPop's `LocalStep`/`FlatMapStep`), so a slice/`dedup`/`order` inside it scopes
+  // to the ENTERING traverser, not globally — the SAME per-origin substrate `match` uses (a pattern body
+  // is TinkerPop's flatMap-localized barrier, `MatchStep.java:156-166`). `childRows(perRow: true)` mints
+  // a per-ROW origin (NOT the element id — `g.V().both().local(out().limit(1))` has three separate
+  // traversers at `marko`, each owed its own `limit(1)`, which the element-id seed collapsed to one), the
+  // body's slices/`dedup` self-scope by that origin (`sliceOp`/`dedupOn`) and its `order()` mints the
+  // encounter they rank by, then origin is shed. Only per-origin-SAFE barriers compose this way:
+  // `sample` (a global reservoir with no per-origin form), `fold`/`group`/`aggregate`/a reducer
+  // (framing-changing, and a reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE
+  // — a wrong answer if run across all origins at once.
+  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name))) return null;
+  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh, true);
   if (!rows) return null;
-  const window = !perOriginSlice ? rows.rel
-    : isTail ? perOriginWindow(rows.rel, col(rows.rel.id, rows.origin), reverseCollation(rows.rel), { scope: 'global', offset: 0, limit: tailN! }, fresh)
-      : perOriginWindow(rows.rel, col(rows.rel.id, rows.origin), [], sliceOf(last), fresh);
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const shed = dropOrigin(window, fresh);
+  const shed = dropOrigin(rows.rel, fresh);
   return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
@@ -7256,17 +7256,26 @@ function dropOrigin(rel: Rel, fresh: Minter): Rel {
  * so the origin rides through every hop with no per-step change — which is what the channel core was
  * built for and what makes this a caller rather than a second fold.
  *
- * The origin is the host's ROWID, so an ELEMENT host is the only one served: a value stream has no
- * rowid to name its parent by, and `origin` is typed `int`. That is a real limit rather than a
- * deferral of taste — a scalar-hosted group-scoped reducer needs the role to carry a VALUE, which is a
- * channels-core change.
+ * The origin is a host ROWID, so an ELEMENT host is the only one served: a value stream has no rowid to
+ * name its parent by, and `origin` is typed `int`. That is a real limit rather than a deferral of taste
+ * — a scalar-hosted group-scoped reducer needs the role to carry a VALUE, which is a channels-core
+ * change.
+ *
+ * **`perRow` picks WHICH identity the origin names, and the two consumers genuinely differ.** A GROUP
+ * reducer (`group().by(<reducer>)`, `perRow: false`) pools members by the ELEMENT they reached, so the
+ * origin is the element's rowid — two traversers at one element pool together, which is the point. A
+ * per-traverser body (`local`/`flatMap`, `perRow: true`) must NOT pool: `g.V().both().local(out().limit(1))`
+ * has three separate traversers at `marko`, each owed its own `limit(1)`, so the origin is a fresh
+ * per-ROW number (`mintRowOrigin`), never the element id (which would collapse the three into one — the
+ * exact wrong answer the element-id seed gave, the twin of `match`'s per-binding-row fix).
  */
 function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+  perRow = false,
 ): ChildRows | null {
   if (!body.length || originOf(input.channels)) return null;
   const channels = withChannel(input.channels, ORIGIN);
-  const seeded = make.project({
+  const seeded = perRow ? mintRowOrigin(input, fresh) : make.project({
     id: fresh('og'), input, channels, type: typeOf(...elementCols(channels)),
     // Driven off the MINTED channel list, not the input's plus one: `withChannel` inserts in
     // `ROLE_ORDER` (origin sits before encounter), and an appended expression would declare the columns
