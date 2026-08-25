@@ -136,10 +136,17 @@ function vertexPropertyBuffer(id: any, key: string, valueBuf: Buffer, meta: Reco
 // through frameTypedNode (exact element types) instead of the client's MapSerializer →
 // listSerializer inferring them. Token entries (T.id/T.label) frame via anySerializer
 // (an EnumValue rides as DataType.T; id/label are plain int/string).
+// A GraphBinary container header — its DataType tag, the 0x00 value-present byte, and the bare int32
+// element COUNT — followed by the already-fully-qualified member buffers (mirrors the client's
+// List/Set/Map serializers). LIST/SET carry one buffer per element; a MAP carries two per entry (key
+// then value), so `count` is the logical element/entry count, passed rather than derived from
+// `members.length`. Every hand-framed container goes through here so the header is written in one place.
+function sizedContainer(tag: number, count: number, members: readonly Buffer[]): Buffer {
+  return Buffer.concat([Buffer.from([tag, 0x00]), ioc.intSerializer.serialize(count, false), ...members]);
+}
+
 function mapFromEntries(pairs: [Buffer, Buffer][]): Buffer {
-  const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(pairs.length, false)];
-  for (const [k, v] of pairs) { parts.push(k, v); }
-  return Buffer.concat(parts);
+  return sizedContainer(ioc.DataType.MAP, pairs.length, pairs.flat());
 }
 /** The `T.label` value of a map shape. Under the MULTI-LABEL regime the `label` column carries a
  *  JSON array of every name and frames as a GraphBinary SET (`s[animal,bird,…]`); under the
@@ -179,13 +186,10 @@ function elementMapBuffer(id: number, label: string, props: Record<string, Value
 // mirrors MapSerializer: [MAP, 0x00], bare int32 count, then key/value pairs
 // where each value is an already-fully-qualified buffer.
 function mapBuffer(row: any, entries: MapEntry[]): Buffer {
-  const parts: Buffer[] = [
-    Buffer.from([ioc.DataType.MAP, 0x00]),
-    ioc.intSerializer.serialize(entries.length, false),
-  ];
+  const members: Buffer[] = [];
   for (const e of entries) {
-    parts.push(ioc.anySerializer.serialize(e.key));
-    parts.push(e.sub === 'value'
+    members.push(ioc.anySerializer.serialize(e.key));
+    members.push(e.sub === 'value'
       ? recordValueBuffer(row, e.prefix, e.type)
       : e.sub === 'list'
         ? listFieldBuffer(row[`${e.prefix}_list`], e.of)
@@ -193,7 +197,7 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
           ? frameValue(null, undefined)
           : elementBuffer(row, e.prefix, e.sub));
   }
-  return Buffer.concat(parts);
+  return sizedContainer(ioc.DataType.MAP, entries.length, members);
 }
 
 /** Frame a scalar field from its declared record channel. Unlike a bare JS value,
@@ -237,21 +241,13 @@ function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').List
 // go through vertexBuffer/edgeBuffer — routing them via listSerializer→
 // anySerializer would drop their props (same client-serializer bug).
 function listBuffer(items: Buffer[]): Buffer {
-  return Buffer.concat([
-    Buffer.from([ioc.DataType.LIST, 0x00]),
-    ioc.intSerializer.serialize(items.length, false),
-    ...items,
-  ]);
+  return sizedContainer(ioc.DataType.LIST, items.length, items);
 }
 
 // A GraphBinary SET framed by hand (same layout as LIST, DataType.SET) so its items go
 // through the typed framer instead of the client's element-type-inferring SetSerializer.
 function setBuffer(items: Buffer[]): Buffer {
-  return Buffer.concat([
-    Buffer.from([ioc.DataType.SET, 0x00]),
-    ioc.intSerializer.serialize(items.length, false),
-    ...items,
-  ]);
+  return sizedContainer(ioc.DataType.SET, items.length, items);
 }
 
 // ---- the unified typed-value framer (self-describing collection values) ----
@@ -317,9 +313,8 @@ function frameTypedNode(node: FrameNode): Buffer {
 // by the typed framer (so a non-string / typed key rides its true type). Layout mirrors
 // mapBuffer: [MAP, 0x00], bare int32 count, then key/value fully-qualified buffers.
 function typedMapBuffer(pairs: [FrameNode, FrameNode][]): Buffer {
-  const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(pairs.length, false)];
-  for (const [k, v] of pairs) { parts.push(frameTypedNode(k), frameTypedNode(v)); }
-  return Buffer.concat(parts);
+  return sizedContainer(ioc.DataType.MAP, pairs.length,
+    pairs.flatMap(([k, v]) => [frameTypedNode(k), frameTypedNode(v)]));
 }
 
 // Frame a stored (value, vtype) column pair: reconstruct its ValueNode (the one rule, in
@@ -578,15 +573,15 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
       case 'nestedMap': {
         const entries = Object.entries(JSON.parse(g.gv) as Record<string, any>);
         const isCount = val.innerVal === 'count';
-        const nested: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(entries.length, false)];
-        for (const [k, v] of entries) nested.push(ioc.anySerializer.serialize(k), isCount ? countBuffer(v) : ioc.anySerializer.serialize(v));
-        return Buffer.concat(nested);
+        const members = entries.flatMap(([k, v]) =>
+          [ioc.anySerializer.serialize(k), isCount ? countBuffer(v) : ioc.anySerializer.serialize(v)]);
+        return sizedContainer(ioc.DataType.MAP, entries.length, members);
       }
     }
   };
-  const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(groups.size, false)];
-  for (const g of groups.values()) { parts.push(g.buf, valueBuf(g)); }
-  return Buffer.concat(parts);
+  const members: Buffer[] = [];
+  for (const g of groups.values()) { members.push(g.buf, valueBuf(g)); }
+  return sizedContainer(ioc.DataType.MAP, groups.size, members);
 }
 
 // A generator over the result value buffers: per-row shapes `yield` one buffer per
