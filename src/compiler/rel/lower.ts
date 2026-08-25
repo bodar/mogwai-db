@@ -2538,6 +2538,120 @@ function concatEmptyGuard(rel: Rel, presents: readonly Expr[], fresh: Minter): B
   return { name: `${fresh('cg')}`, node, guard: { message: 'The provided traverser does not map to a value', raiseWhen: 'rows' } };
 }
 
+/** The outcome of `collectionArm`: `'pass'` — not one of its step names, the caller keeps looking;
+ *  `'continue'` — a side-effect step handled, the caller's loop continues with its relation unchanged;
+ *  `{tail}` — the step re-rooted the stream, return this. */
+type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
+
+/**
+ * THE COLLECTION-VOCABULARY ARMS BOTH TAILS SHARE — `select`, `group`/`groupCount`, `aggregate`, `cap`,
+ * `project` — one lowering at both hosts (§6·6: a shape works wherever it is legal). Each differs
+ * between the scalar and element folds ONLY by the `host` it reads a `by()` through and the `framing` it
+ * hands the reducer/record, so the caller supplies those two; the element-side path preambles
+ * (`dropPath`/decline-on-path) are kept here because they are no-ops over a scalar stream (the scalar
+ * loop drops any carried path before these arms). `reenter` is the caller's own fold, for the one arm
+ * (`aggregate`'s snapshot) that prepends an effect and continues the SAME tail from `at + 1`.
+ */
+function collectionArm(
+  step: IRStep, rel: Rel, host: ChildHost, framing: RelFraming, bulked: boolean,
+  steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  reenter: (at: number) => Tail | null,
+): ArmOutcome {
+  if (step.name === 'select') {
+    // `select` RE-ROOTS to an aliased object — a retype, so a carried path is DROPPED (its work is
+    // done: a `simplePath()` filtered the stream) rather than declined. No-op over a scalar stream.
+    rel = dropPath(rel, fresh);
+    const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing, named: namedElsewhere(ctx) });
+    if (!selected) return { tail: null };
+    return { tail: continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels) };
+  }
+
+  if (step.name === 'group' || step.name === 'groupCount') {
+    // The UNKEYED form is a reducing BARRIER (one map) — drop any carried path. The KEYED form
+    // (`group("a")`) is a SIDE EFFECT that passes its traversers on, so a path would have to carry
+    // through the member rows — not built, so it declines with a path (fail closed). Both no-ops over a
+    // scalar stream, which never carries a path here.
+    if (argValues(step).length) { if (pathCarried(rel)) return { tail: null }; }
+    else rel = dropPath(rel, fresh);
+    // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
+    // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and the
+    // reduction happens at the `cap`, which is where a label filled at N positions can be one grouping
+    // over the UNION of them.
+    const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
+    if (!rows) return { tail: null };
+    // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
+    // CONTINUES and only the unkeyed form becomes the traverser. One rule, two hosts (§6·6).
+    if (argValues(step).length) {
+      // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed rather
+      // than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what Phase 4 said
+      // would let them take the aggregate sites' `snapshot` binding — but the KEY column holds a JSONB
+      // node, and a retained binding travels as JSON (`src/program.ts`), which fails closed on exactly
+      // that. Projecting `json(gk)` at the binding is the remaining step.
+      if (ctx.mutating) return { tail: null };
+      if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
+      return 'continue';
+    }
+    const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
+    return { tail: continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
+  }
+
+  if (step.name === 'aggregate') {
+    // `aggregate("a")` — fill a NAMED COLLECTION and pass the traversers through. Shape-preserving.
+    // A carried path declines (the member rows would have to carry it — not built); no-op over a scalar.
+    if (pathCarried(rel)) return { tail: null };
+    const snapshot = registerCollection(step, rel, host, framing,
+      ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
+    if (!snapshot) return { tail: null };
+    // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the rest
+    // of the chain writes, which is the whole point of taking it. The recursion returns the tail from
+    // after this position, in the caller's OWN fold.
+    if (snapshot.length) {
+      const tail = reenter(at + 1);
+      return { tail: tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] } };
+    }
+    return 'continue';
+  }
+
+  if (step.name === 'cap') {
+    // CONSUMER-DRIVEN FOLD: the reduction a `cap` performs is chosen by what CONSUMES it, not fixed at
+    // the read. `cap("a").select(Column.keys)` over an element-keyed grouping wants the key SIDE, so it
+    // projects the DISTINCT key rowids straight off the member rows — a set that MOVES natively — instead
+    // of folding to a JSONB map that would expand each key to a public payload and lose the rowid the
+    // graph is keyed by (`groupedKeys`, `collection.ts`; the map blob is framed in JS and cannot expand a
+    // rowid back). Only the element-keyed case is intercepted; everything else takes the ordinary `reduce`.
+    const next = steps[at + 1];
+    if (next && selectedColumn(next) === 'keys' && !next.modulators?.length) {
+      const collection = collectionOf(step, ctx.collections);
+      const keys = collection && groupedKeys(collection, fresh);
+      if (keys) return { tail: continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES) };
+    }
+    // CONSUMER-DRIVEN FOLD, the other half: `cap("a").unfold()` folds the members to a JSONB array and
+    // immediately explodes it back, so the fold is the IDENTITY on the member rows — the collection
+    // already holds one row per member. `readUnfolded` hands back the member relation directly and
+    // `capUnfolded` mints an encounter from the SITE ORDER, so the stream is what fold+unfold produced
+    // minus the JSON round trip. Only a plain multiset of list members cancels (see `readUnfolded`).
+    if (next && next.name === 'unfold' && !(next.args ?? []).length && !next.modulators?.length) {
+      const collection = collectionOf(step, ctx.collections);
+      const members = collection && readUnfolded(collection, fresh);
+      if (members) return { tail: capUnfolded(members, steps, at + 2, ctx, fresh) };
+    }
+    const collected = readCollection(step, ctx.collections, ctx.source, fresh);
+    if (!collected) return { tail: null };
+    return { tail: continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
+  }
+
+  if (step.name === 'project') {
+    // A carried PATH declines: the record is a new traverser object and nothing here appends it as a
+    // path position, so a later `path()` would report a history with a step missing. No-op over a scalar.
+    if (pathCarried(rel)) return { tail: null };
+    const record = recordOf(rel, host, framing, step, childSeam(ctx, fresh), ctx.source, fresh);
+    if (!record) return { tail: null };
+    return { tail: continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels) };
+  }
+
+  return 'pass';
+}
+
 function scalarTail(
   seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES,
@@ -2652,14 +2766,13 @@ function scalarTail(
       continue;
     }
 
-    // A `select()` here may re-root to an ELEMENT, which is the whole reason `elementTail` is a
-    // function: the shape boundary runs both ways and `selectTail` is the one place that decides which
-    // loop the label's shape belongs to.
-    if (step.name === 'select') {
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing: out, named: namedElsewhere(ctx) });
-      if (!selected) return null;
-      return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
-    }
+    // THE SHARED COLLECTION VOCABULARY — `select` (which may re-root to an ELEMENT, the whole reason
+    // `elementTail` is a function), `group`/`groupCount`, `aggregate`, `cap`, `project` — all lowered by
+    // the one helper both tails share, reading `by()` through this fold's scalar `host` and framing `out`.
+    const armed = collectionArm(step, rel, host, out, bulked, steps, at, ctx, fresh, labels,
+      (nextAt) => scalarTail(rel, out, steps, nextAt, bulked, ctx, fresh, labels));
+    if (armed === 'continue') continue;
+    if (armed !== 'pass') return armed.tail;
 
     if (PER_TRAVERSER_HOSTS.has(step.name)) {
       if (out.kind !== 'scalar') return null;
@@ -2676,41 +2789,6 @@ function scalarTail(
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    // `group()`/`groupCount()` over a VALUE stream — the barrier at its second host, and it is the SAME
-    // `groupBarrier` rather than a scalar-shaped copy. `groupBarrier`'s own comment had predicted this
-    // ("over a SCALAR stream the traverser IS a value, so `by()`-less is exactly the identity
-    // projection… it arrives with the scalar-host caller that does not exist yet"), and the caller is
-    // all that was missing: `byNode`'s scalar arm already tags the value with its own `vtype`.
-    if (step.name === 'group' || step.name === 'groupCount') {
-      // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
-      // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
-      // the reduction happens at the `cap`, which is where a label filled at N positions can be one
-      // grouping over the UNION of them.
-      const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
-      if (!rows) return null;
-      // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, exactly
-      // as it does over an element stream — so the loop CONTINUES and only the unkeyed form becomes the
-      // traverser. One rule, two hosts (§6·6's "a child body works wherever it is LEGAL" applied to a
-      // barrier rather than to a body).
-      if (argValues(step).length) {
-        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed
-        // rather than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what
-        // Phase 4 said would let them take the aggregate sites' `snapshot` binding — but the KEY column
-        // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
-        // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
-        if (ctx.mutating) return null;
-        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return null;
-        continue;
-      }
-      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
-      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
-        steps, at + 1, false, ctx, fresh, NO_ALIASES);
-    }
-
-    // `project()` over a VALUE traverser — the identical record builder, with the host's own framing as
-    // what a bare `by()` projects. One lowering at both hosts is the point (§6·6's rule one level up: a
-    // shape works wherever it is legal, not wherever a host was taught it), and it is what
-    // `call(…)`'s scalar result then reaches through.
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
     // is shape-preserving and the read arm replaces the value, so neither needs a scalar-specific
     // lowering: `sackMutate` takes the host it is given and `sackRead` re-projects `v`.
@@ -2727,12 +2805,6 @@ function scalarTail(
       if (!folded) return null;
       rel = folded;
       continue;
-    }
-
-    if (step.name === 'project') {
-      const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), ctx.source, fresh);
-      if (!record) return null;
-      return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
     // THE PROJECTORS over a VALUE traverser — `_` IS the value, and a named variable is a scope key.
@@ -3079,50 +3151,6 @@ function scalarTail(
       });
       out = { kind: 'scalar', type: STATIC('long'), result: 'count' };
       continue;
-    }
-
-    // `aggregate("a")`/`cap("a")` over a VALUE traverser — the identical pair, for `project()`'s
-    // reason: a shape works wherever it is legal, not wherever a host was taught it. The members of a
-    // scalar collection are the VALUES, keeping their per-row type.
-    if (step.name === 'aggregate') {
-      const snapshot = registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectPolicies,
-        childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
-      if (!snapshot) return null;
-      // The element tail's rule, at the value tail: a snapshot is an execution step and belongs in
-      // the effect sequence at THIS position.
-      if (snapshot.length) {
-        const tail = scalarTail(rel, out, steps, at + 1, bulked, ctx, fresh, labels);
-        return tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] };
-      }
-      continue;
-    }
-    if (step.name === 'cap') {
-      // CONSUMER-DRIVEN FOLD: the reduction a `cap` performs is chosen by what CONSUMES it, not fixed at
-      // the read. `cap("a").select(Column.keys)` over an element-keyed grouping wants the key SIDE, so
-      // it projects the DISTINCT key rowids straight off the member rows — a set that MOVES natively —
-      // instead of folding to a JSONB map that would expand each key to a public payload and lose the
-      // rowid the graph is keyed by (`groupedKeys`, `collection.ts`; the map blob is framed in JS and
-      // cannot expand a rowid back). Only the element-keyed case is intercepted; everything else takes
-      // the ordinary `reduce`.
-      const next = steps[at + 1];
-      if (next && selectedColumn(next) === 'keys' && !next.modulators?.length) {
-        const collection = collectionOf(step, ctx.collections);
-        const keys = collection && groupedKeys(collection, fresh);
-        if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
-      }
-      // CONSUMER-DRIVEN FOLD, the other half: `cap("a").unfold()` folds the members to a JSONB array and
-      // immediately explodes it back, so the fold is the IDENTITY on the member rows — the collection
-      // already holds one row per member. `readUnfolded` hands back the member relation directly and
-      // `capUnfolded` mints an encounter from the SITE ORDER, so the stream is what fold+unfold produced
-      // minus the JSON round trip. Only a plain multiset of list members cancels (see `readUnfolded`).
-      if (next && next.name === 'unfold' && !(next.args ?? []).length && !next.modulators?.length) {
-        const collection = collectionOf(step, ctx.collections);
-        const members = collection && readUnfolded(collection, fresh);
-        if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
-      }
-      const collected = readCollection(step, ctx.collections, ctx.source, fresh);
-      if (!collected) return null;
-      return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
     // `fold()` — the SHAPE BOUNDARY out of the scalar tail and into the list vocabulary: every
@@ -4956,17 +4984,13 @@ function elementTail(
         for (const name of argValues(step)) if (typeof name === 'string') rel = appendPathLabel(rel, name, fresh);
       continue;
     }
-    if (step.name === 'select') {
-      // `select` RE-ROOTS to an aliased object — a retype, so a carried path is DROPPED (its work
-      // is done: a `simplePath()` filtered the stream) rather than declined. A `select().path()` that
-      // should APPEND the selected object as a position is the value-position increment; until then it
-      // fails closed (the following `path()` declines with no channel).
-      rel = dropPath(rel, fresh);
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-        { framing: { kind: 'elements', elem }, named: namedElsewhere(ctx) });
-      if (!selected) return null;
-      return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
-    }
+    // THE SHARED COLLECTION VOCABULARY — `select` (a re-root to an aliased object), `group`/`groupCount`,
+    // `aggregate`, `cap`, `project` — the one helper both tails share, reading `by()` through this fold's
+    // `elementHost` and framing the elements. Same lowering the scalar tail reaches (§6·6).
+    const armed = collectionArm(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, bulked, steps, at, ctx, fresh, labels,
+      (nextAt) => elementTail(rel, elem, steps, nextAt, bulked, ctx, fresh, labels));
+    if (armed === 'continue') continue;
+    if (armed !== 'pass') return armed.tail;
     // `match()` — the conjunctive pattern step. It re-roots each pattern body at its start alias and
     // folds it through the CHILD SEAM (the same fold this chain is), rejoining by binding or
     // constraining each end. It produces a bindings-map/alias-carrying stream, so it hands back to the
@@ -5035,44 +5059,6 @@ function elementTail(
       if (!tail) return null;
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
-    // `groupCount()` with no side-effect label — a BARRIER whose result is one map. It is terminal by
-    // construction here: `continueAs`'s map arm declines a step after one until the map re-entry
-    // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
-    if (step.name === 'groupCount' || step.name === 'group') {
-      // The UNKEYED form is a reducing BARRIER (its result is one map) — drop any carried path
-      // (`CHANNEL_BARRIER_POLICY.path`). The KEYED form (`group("a")`) is a SIDE EFFECT that passes its
-      // incoming traversers ON, so the path would have to CARRY through the member rows — a distinct
-      // concern not built here, so it still declines with a path (fail closed).
-      if (argValues(step).length) { if (pathCarried(rel)) return null; }
-      else rel = dropPath(rel, fresh);
-      // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
-      // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
-      // the reduction happens at the `cap`, which is where a label filled at N positions can be one
-      // grouping over the UNION of them.
-      const rows = groupRows(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
-      if (!rows) return null;
-      // A LABELLED `group("a")`/`groupCount("a")` is a SIDE EFFECT, not a barrier result:
-      // `GroupSideEffectStep` fills the named map and passes its incoming traversers ON, which is
-      // `aggregate`'s contract exactly. So the map is registered and the loop CONTINUES from the
-      // unchanged relation; only the unkeyed form becomes the traverser.
-      if (argValues(step).length) {
-        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed
-        // rather than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what
-        // Phase 4 said would let them take the aggregate sites' `snapshot` binding — but the KEY column
-        // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
-        // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
-        if (ctx.mutating) return null;
-        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return null;
-        continue;
-      }
-      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
-      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
-        steps, at + 1, false, ctx, fresh, NO_ALIASES);
-    }
-    // `project()` — a per-row RECORD, and NOT a barrier: the channels ride through, so the alias map
-    // carries and a following `select(label)` still finds its label. That is the whole difference from
-    // the `group()` arm above, and it is the reference's (`ProjectStep extends ScalarMapStep`, while
-    // `GroupStep extends ReducingBarrierStep`).
     // THE PROJECTORS — a RETYPE from an element traverser to a value, exactly as `values()`/`count()`
     // are, so they hand the relation to `continueAs` and the scalar tail takes the rest of the chain.
     // They are not in `terminal()` with them because they HOST a `by()`, which every arm there declines.
@@ -5083,53 +5069,6 @@ function elementTail(
       const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
-    }
-    // `aggregate("a")` — fill a NAMED COLLECTION and pass the traversers through. Shape-preserving,
-    // so it sits in the ordinary loop beside `as()`; what it changes is chain state, not the relation.
-    if (step.name === 'aggregate') {
-      if (pathCarried(rel)) return null;
-      const snapshot = registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
-        ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
-      if (!snapshot) return null;
-      // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the
-      // rest of the chain writes, which is the whole point of taking it. Same prepend a write step
-      // makes, for the same reason: the recursion returns the tail from after this position.
-      if (snapshot.length) {
-        const tail = elementTail(rel, elem, steps, at + 1, bulked, ctx, fresh, labels);
-        return tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] };
-      }
-      continue;
-    }
-    // `cap("a")` — the collection as ONE list traverser. A SHAPE BOUNDARY, and a total re-root: the
-    // incoming stream is discarded (a cap emits one fresh traverser), so the alias channel goes with
-    // it and the list tail takes the rest of the chain.
-    if (step.name === 'cap') {
-      // CONSUMER-DRIVEN FOLD: the reduction a `cap` performs is chosen by what CONSUMES it, not fixed at
-      // the read. `cap("a").select(Column.keys)` over an element-keyed grouping wants the key SIDE, so
-      // it projects the DISTINCT key rowids straight off the member rows — a set that MOVES natively —
-      // instead of folding to a JSONB map that would expand each key to a public payload and lose the
-      // rowid the graph is keyed by (`groupedKeys`, `collection.ts`; the map blob is framed in JS and
-      // cannot expand a rowid back). Only the element-keyed case is intercepted; everything else takes
-      // the ordinary `reduce`.
-      const next = steps[at + 1];
-      if (next && selectedColumn(next) === 'keys' && !next.modulators?.length) {
-        const collection = collectionOf(step, ctx.collections);
-        const keys = collection && groupedKeys(collection, fresh);
-        if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
-      }
-      // CONSUMER-DRIVEN FOLD, the other half: `cap("a").unfold()` folds the members to a JSONB array and
-      // immediately explodes it back, so the fold is the IDENTITY on the member rows — the collection
-      // already holds one row per member. `readUnfolded` hands back the member relation directly and
-      // `capUnfolded` mints an encounter from the SITE ORDER, so the stream is what fold+unfold produced
-      // minus the JSON round trip. Only a plain multiset of list members cancels (see `readUnfolded`).
-      if (next && next.name === 'unfold' && !(next.args ?? []).length && !next.modulators?.length) {
-        const collection = collectionOf(step, ctx.collections);
-        const members = collection && readUnfolded(collection, fresh);
-        if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
-      }
-      const collected = readCollection(step, ctx.collections, ctx.source, fresh);
-      if (!collected) return null;
-      return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
     // `fold()` — the SHAPE BOUNDARY out of the element loop, the twin of the scalar tail's own. Every
     // traverser becomes one MEMBER of one list traverser, and for elements the member is the rowid:
@@ -5144,15 +5083,6 @@ function elementTail(
       const encounter = encounterOf(rel.channels);
       const folded = foldElements(rel, elem, encounter ? { order: [encounter.col] } : {}, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
-    }
-    if (step.name === 'project') {
-      // A carried PATH declines for `terminal()`'s reason: the record is a new traverser object and
-      // nothing here appends it as a path position, so a later `path()` would report a history with a
-      // step missing rather than fail.
-      if (pathCarried(rel)) return null;
-      const record = recordOf(rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, step, childSeam(ctx, fresh), ctx.source, fresh);
-      if (!record) return null;
-      return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
     // `sack(Operator.x).by(v)` MUTATES the accumulator and leaves the traverser alone, so it is an
     // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
