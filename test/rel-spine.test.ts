@@ -321,6 +321,10 @@ const COVERED = [
   // property still declines (it could meet a non-numeric value it must RAISE on).
   "g.V().count().asNumber()", "g.V().values('birthday').asDate().asNumber()",
   "g.V().values('birthday').asDate().asNumber().asDate()",
+  // dateDiff() over a `constant(datetime)`/`constant(null)` nested operand folds to a millis
+  // subtraction (`dateDiffOtherMs` owns `constant(null)` → epoch 0); the datetime-literal operand
+  // already worked. Any OTHER nested body stays the correlated-child seam's decline.
+  "g.V().values('birthday').asDate().dateDiff(__.constant(null))",
   // `has()`'s three ARGUMENT SHAPES, all of one step. The 3-arg form is the label constraint AND the
   // property one, exactly as `HasStep` composes them; a `T`-token key asks about the ELEMENT rather
   // than a property row. Each was its own decline and each is a composition of clauses already built.

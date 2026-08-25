@@ -1,6 +1,6 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
-import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
+import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -83,7 +83,6 @@ const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args })
  *  the name is not reachable here and it binds. Threading the name is
  *  `docs/archive/2026-08-05-parameters-are-the-only-binds.md`'s remaining work, not this module's. */
 const text = (value: string): Expr => lit(value, 'text');
-const int = (value: number): Expr => lit(value, 'int');
 /** A value the COMPILER authored — a whitespace set, an epoch factor, an off-by-one — which is a
  *  CONSTANT and inlines at zero cost to the 100-parameter budget. `mise run sql-hygiene`'s `bound`
  *  ratchet is what catches one of these leaking back into a bind, and it caught `dateAdd`'s. */
@@ -280,11 +279,18 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
   }
 
   if (step.name === 'dateDiff') {
-    // Only a datetime LITERAL operand: the `constant(…)` nested form is a constant-folding pass's to
-    // handle (it parses a child chain, which a pure expression module has no business doing), and any
-    // other nested body is the correlated-child seam's.
-    if (typeof args[0] !== 'number') return null;
-    return { expr: { kind: 'binary', op: '-', left: v, right: int(args[0]) }, type: STATIC('long') };
+    // The other operand resolves to a millis CONSTANT: a datetime LITERAL, or a `constant(datetime)`/
+    // `constant(null)` nested traversal — `dateDiffOtherMs` is the coercion authority for both (it owns
+    // `constant(null)` → epoch 0, `= new Date(null)`), so this module reuses it rather than re-parsing a
+    // child chain (the §2 boundary — the same reason `dtFactor`/`numericSpec` are imported, not inlined).
+    // Any OTHER nested body (`inject(datetime(…))`, a movement) is the correlated-child seam's and stays
+    // declined here. `dateDiffOtherMs` THROWS a `ValueParseError` for an unsupported nested form, which
+    // is not this arm's decline — so it is asked only for the literal or the recognised constant.
+    const isNum = typeof args[0] === 'number';
+    if (!isNum && !isDateDiffConstant(args[0], {})) return null;
+    // A datetime literal is a PARSED constant (inlines as a typed literal); a folded `constant(null)`→0
+    // is COMPILER-AUTHORED — both are constants, neither spends a bind (`heldInt`, the root bind rule).
+    return { expr: { kind: 'binary', op: '-', left: v, right: heldInt(dateDiffOtherMs(args[0], {})) }, type: STATIC('long') };
   }
 
   return null;

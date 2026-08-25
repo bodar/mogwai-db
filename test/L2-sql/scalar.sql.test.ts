@@ -80,6 +80,24 @@ describe('scalar-parent / projection SQL', () => {
       .toEqual(['1965-10-31T00:00:00.000Z', '2020-08-02T00:00:00.000Z']);
   });
 
+  test('dateDiff() over a constant(datetime|null) nested operand folds to a millis subtraction', async () => {
+    // The other operand resolves to a millis CONSTANT: a datetime literal, or a `constant(datetime)`/
+    // `constant(null)` nested traversal (`dateDiffOtherMs` owns `constant(null)` → epoch 0, `new
+    // Date(null)`). Reused rather than re-parsed here (the §2 boundary). A datetime LITERAL operand
+    // already worked; the nested-constant form is what lands. All fold to zero binds.
+    for (const g of [
+      'g.V().values("birthday").asDate().dateDiff(__.constant(null))',
+      'g.V().values("birthday").asDate().dateDiff(datetime("1970-01-01T00:00Z"))',
+    ]) expect(read(g).binds.length, g).toBe(0);
+
+    // DateDiff.feature `g_V_hasXname_aliceX_valuesXbirthdayX_asDate_dateDiffXconstantXnullXX`:
+    // dateDiff(null) is dateDiff(epoch 0), so the answer is the birthday millis itself.
+    const store = storeSeededWith(['g.addV("person").property("name","alice").property("birthday",1596326400000)']);
+    const r = await decodeAll(executeQuery(store,
+      'g.V().has("name","alice").values("birthday").asDate().dateDiff(__.constant(null))', {}));
+    expect(r).toEqual([1596326400000]);
+  });
+
   test('inject([...]) is a real list value (not flattened)', () => {
     // Each bracket arg is ONE list traverser → a JSONB list-value stream.
     expect(read('g.inject([1,3,100,300])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
