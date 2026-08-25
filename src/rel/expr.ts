@@ -101,3 +101,17 @@ export const compilerReal = (value: number): Expr => {
 
 /** SQL NULL selected by the compiler itself. A null supplied by the query/store stays a bound `lit`. */
 export const compilerNull = (type: SqlType = 'any'): Expr => ({ kind: 'lit', value: null, type, source: 'compiler-null' });
+
+// Composite predicate combinators — so a pass that rewrites predicates builds them by name rather than
+// hand-writing `{ kind: 'binary', op: … }` literals (the shape drifts and reads poorly at a call site).
+/** `left = right`. */
+export const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
+/** `left IS NOT right` — SQLite's null-safe distinctness (not `!=`, which is null-unsafe). */
+export const isNot = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'is not', left, right });
+/** `left AND right`. */
+export const and = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'and', left, right });
+/** `left OR right`. */
+export const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
+/** Fold `terms` with AND; `undefined` for no terms (an absent predicate). */
+export const conjoin = (terms: readonly Expr[]): Expr | undefined =>
+  terms.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);

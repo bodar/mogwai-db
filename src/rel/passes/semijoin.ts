@@ -1,4 +1,4 @@
-import { type Expr, col, compilerText } from '../expr.ts';
+import { type Expr, and, col, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { minter, type Minter } from '../mint.ts';
@@ -109,7 +109,7 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
       const joined = make.join({
         id: mint.id('sj'), left: lifted, right: element, join: 'inner', ordered: true, channels: [],
         type: { cols: [{ name: 'sid', type: 'int', nullable: false }, ...element.type.cols] },
-        on: { kind: 'binary', op: '=', left: col(element.id, 'id'), right: col(lifted.id, 'sid') },
+        on: eq(col(element.id, 'id'), col(lifted.id, 'sid')),
       });
       // The predicate now filters the JOIN, so every reference to the scan is re-pointed at it — a
       // `Filter`'s expressions resolve against its INPUT alone (`check.ts`), and that includes the
@@ -131,11 +131,7 @@ function conjuncts(e: Expr): readonly Expr[] {
   return e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
 }
 
-const conjoin = (terms: readonly Expr[]): Expr | undefined =>
-  terms.reduce<Expr | undefined>((left, right) => (left ? { kind: 'binary', op: 'and', left, right } : right), undefined);
-
-const andAll = (parts: readonly Expr[]): Expr => parts.reduce((left, right) => ({ kind: 'binary', op: 'and', left, right }));
-const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
+const andAll = (parts: readonly Expr[]): Expr => parts.reduce(and);
 
 /** Re-point every `Col` naming `from` at `to`, THROUGH correlated subplans — a correlation inside an
  *  `EXISTS` names the enclosing relation, so leaving it behind would resolve to a relation that is no
@@ -299,7 +295,7 @@ function negativeOwners(
   const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
   const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: andAll([
     eq(col(rows.id, 'key'), compilerText(key)),
-    { kind: 'binary', op: 'or', left: { kind: 'binary', op: 'is not', left: col(rows.id, 'vtype'), right: compilerText('string') }, right: { kind: 'exists', plan: probe, negated: true } },
+    or(isNot(col(rows.id, 'vtype'), compilerText('string')), { kind: 'exists', plan: probe, negated: true }),
   ]) });
   const owners = make.project({ id: mint.id('np'), input: candidates, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(candidates.id, properties.owner)]] });
   return make.distinct({ id: mint.id('nd'), input: owners, channels: [], type: owners.type });
