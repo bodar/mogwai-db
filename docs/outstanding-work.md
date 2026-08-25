@@ -99,7 +99,8 @@ per-step support; closed work belongs in git history or `docs/archive/`.
 - Keep the existing architecture, bind-budget, type-check, and conformance gates green.
   Do not add a second build or test tool.
 - Keep the feature-support matrix accurate as capabilities land.
-- **Duplication / smell consolidation** — a whole-`src/` audit with a risk-sequenced menu of
-  behaviour-preserving extractions (most finish a factoring the code already began). Not a
-  commitment; pick items when a file is open anyway. See
-  [the duplication & smells plan](./2026-08-25-duplication-and-smells-plan.md).
+- **Duplication / smell consolidation is DONE** — the whole-`src/` audit's menu (Themes A/B/C/D) all
+  landed and its plan is archived
+  ([duplication & smells](./archive/2026-08-25-duplication-and-smells-plan.md)). Kept for the record and,
+  more durably, its "deliberately NOT flagged" list — the map of intentional parallels a future sweep
+  must re-read before "fixing" anything that looks duplicated.

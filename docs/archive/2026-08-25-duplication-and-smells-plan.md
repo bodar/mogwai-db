@@ -1,11 +1,11 @@
 # Duplication & architectural-smell consolidation — plan
 
-> **Status: PARTIALLY LANDED — remaining menu (audited 2026-08-25, compacted 2026-08-25).** A
-> whole-`src/` sweep for large-scale duplication and architectural smells. Nothing here is a bug; every
-> item is a behaviour-preserving consolidation, and almost all have a working precedent already in-repo.
-> This is a menu, sequenced by risk, not a commitment — pick items when a file is open for other reasons.
-> **The bulk of the original sweep has since landed** (see "Already landed" below); what follows is only
-> the residue.
+> **Status: ✅ COMPLETE — every item landed (2026-08-25).** A whole-`src/` sweep for large-scale
+> duplication and architectural smells; every item was a behaviour-preserving consolidation with a
+> working precedent already in-repo. All of Themes A/B/C/D are on trunk. This doc is kept for the
+> RECORD of what was consolidated and — more durably — the "Checked and deliberately NOT flagged" list,
+> which is the map of parallels a future sweep must not "fix". A new sweep starts by re-auditing, not by
+> reopening these.
 
 ## The one finding behind the whole sweep
 
@@ -45,26 +45,21 @@ The original audit's higher-value items shipped as their own commits and are on 
 
 ## Remaining findings
 
-### Theme A — `lower.ts` / step-family files
+**None — the menu is fully worked through.** Theme A landed last:
 
-- **A2 [HIGH] — "explode a collection column into a member stream" block ×6.** Identical
-  explode+project+channel-carry+ordinal-passthrough shape at `list.ts:805`, `831`, `853`, `1462`,
-  `1485` and `map.ts:1247`; the three-column member `typeOf(...)` triple recurs ~8× in `list.ts`. Only
-  the payload column and its expression differ.
-  → `explodeMembers(rel, column, as, payload, fresh)` in `build.ts`. Single largest concrete win in the
-  step-family files. (`build.ts`'s `withPayload` covers only the "replace payload, keep channels" case;
-  the unfold family needs *extra* passthrough columns, so widen the carry helper.) *(line numbers
-  predate the `lower/` split — re-locate before extracting.)*
-
-- **A4 [MED] — "project one value column, carry channels through" idiom ×9** (originally `lower.ts:2132`,
-  `2163`, `2241`, `2772`, `2804`, + detached variants); `constantRetype` and `sackRead` already
-  encapsulate the move. → `projectScalar(input, expr, {tag, valueType, framing})`; removes the "forgot
-  the `carriedCols` carry" bug class the arm comments document. *(the arms now live across `lower/`; grep
-  the idiom rather than trusting the old lines.)*
-
-- **A5 [MED] — 6 resume entry points share prologue/epilogue** (`lowerToRel` + `lower*Resume`);
-  `lowerValueResume`/`lowerListResume` are near-twins. → a `resume(seed, framing, …)` wrapper owning
-  minter/settle/chainCtx/`lowered`.
+- **A2** — `explodeMembers(rel, column, as, fresh)` in `build.ts`: the byte-identical json_each explode +
+  channel-carry + ordinal-passthrough of the six unfold sites, returning the explode plus a project
+  closure that lands the caller's payload. (The `as` descriptor carries the optional member-type column,
+  so `list.ts`'s `MEMBER` and `map.ts`'s `PAIR` both fit.)
+- **A4** — `projectScalar(input, exprs, cols, framing)`: the per-row scalar retype (`constant`, `label`/
+  `id`, the `labels` edge arm, the `call()`-value consumer), built on `withPayload` so the channel carry
+  has one authority. Fewer sites than the original ×9 — the `lower/` split had already absorbed several
+  into `withPayload`/`constantRetype`/`sackRead`.
+- **A5** — `valueResume`: the shared prologue/epilogue of `lowerValueResume`/`lowerListResume` (mint,
+  settle, chain facts, decline a channel-demanding tail, one json_each bind, `lowered()`), each producer
+  passing its own seed builder + re-entry tail.
+- **A3** (the file split into `lower/{branch,reduction,filter,slice,movement,chain}.ts`) landed earlier —
+  see "Already landed".
 
 ### Theme C — "extracted for one caller" leftovers
 
@@ -93,16 +88,15 @@ path); the `passes.ts` Pass registry (a registry with a `group()` constructor, n
 boilerplate; named functions required by the `arch-check` call-hierarchy gate). Re-auditing these is
 wasted effort.
 
-## Suggested sequencing
+## How it was landed (for the record)
 
-Risk-ascending; each is independently shippable and behaviour-preserving. `mise run ci` + the L1–L5
-ladder is the safety net; validate before every push (`bash scripts/ci.sh` for the truthful verdict).
+Risk-ascending, each an independently shippable behaviour-preserving commit validated by `mise run ci`
++ the L1–L5 ladder, with the **census** (`ran` unchanged, no answer changed) as the load-bearing gate
+for the hot-path Theme A extractions. Order: C1 → Theme B (the `decorateBarrier` factory + registries) →
+Theme C leftovers (C2/C3/C4/C5/C7/C8/C9) → Theme D (the small utils) → Theme A last (A3 file split, then
+A2/A4/A5 in the fold).
 
-1. **Theme A** (A2 `explodeMembers`, A4 `projectScalar`, A5 resume wrapper) — the only work left, and
-   the largest payoff. Hot path; touch carefully and lean on the conformance ladder.
-
-(Themes B, C, D are done — only Theme A remains.)
-
-Do not treat this as a rename campaign — each item is a real extraction with a test surface. The value is
-finishing factorings the code already started; the risk is turning a documented-deliberate twin into a
-wrong "fix", so re-read the "NOT flagged" list before touching anything that looks parallel.
+The one durable lesson: this was never a rename campaign — each item was a real extraction with a test
+surface, and the risk throughout was turning a documented-deliberate twin into a wrong "fix". The
+"Checked and deliberately NOT flagged" list above is the record of which parallels are intentional; a
+future sweep re-reads it before touching anything that looks duplicated.
