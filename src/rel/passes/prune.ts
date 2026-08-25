@@ -1,7 +1,7 @@
 import { channelCols } from '../../channels.ts';
 import type { Expr } from '../expr.ts';
 import { aggregate, project, recursive, values } from '../factory.ts';
-import { explodeColumns } from '../obligations.ts';
+import { mintedColumns, preservesColumns } from '../obligations.ts';
 import type { Rel } from '../rel.ts';
 import type { ColMeta, RelId } from '../types.ts';
 import { exprRels, forEachExpr, mapRelChildren, recursiveStep, relChildren, relExprs } from '../walk.ts';
@@ -14,12 +14,6 @@ const names = (cols: readonly ColMeta[]): readonly string[] => cols.map((column)
  *  parent must drop, since a Project is the only node that removes a column at source. */
 const survived = (rebuilt: Rel): ReadonlySet<string> => new Set(names(rebuilt.type.cols));
 const shrank = (original: Rel, rebuilt: Rel): boolean => original.type.cols.length !== rebuilt.type.cols.length;
-
-/** The columns a node ADDS on top of its input's, which its input therefore cannot supply. */
-const added = (r: Rel): readonly string[] =>
-  r.kind === 'window' ? r.specs.map(([name]) => name)
-    : r.kind === 'explode' ? explodeColumns(r.as)
-      : [];
 
 /**
  * The columns a `Recursive` must keep: what its consumer reads, PLUS what its own body reads back
@@ -104,11 +98,6 @@ export function prune(
     for (const col of cols) need.add(col);
     if (!needs.has(r) || need.size !== before) { needs.set(r, need); queue.push(r); }
   };
-  /** Unary kinds whose output IS their input's, extended at most by columns they mint themselves. */
-  const preserves = (r: Rel): boolean =>
-    r.kind === 'filter' || r.kind === 'sort' || r.kind === 'limit' || r.kind === 'distinct'
-    || r.kind === 'window' || r.kind === 'explode' || r.kind === 'materialize';
-
   require(plan, required);
   while (queue.length) {
     const r = queue.pop()!;
@@ -180,8 +169,8 @@ export function prune(
     }
 
     for (const child of relChildren(r)) {
-      const mine = new Set(added(r));
-      const childNeed = new Set(preserves(r)
+      const mine = new Set(mintedColumns(r));
+      const childNeed = new Set(preservesColumns(r.kind)
         ? [...[...need].filter((name) => !mine.has(name)), ...channelCols(child.channels)]
         : names(child.type.cols));
       for (const expression of relExprs(r)) refs(expression, child.id, childNeed);
@@ -213,10 +202,10 @@ export function prune(
     // Window/Explode theirs followed by the ones they mint, so the unary chain moves with whatever
     // pruned beneath it or the plan stops verifying. A source-less `Explode` has no relational child
     // and so can never be the node that has to move.
-    if (preserves(r) && kids.length === 1 && relChildren(r).length === 1) {
+    if (preservesColumns(r.kind) && kids.length === 1 && relChildren(r).length === 1) {
       const [input] = kids as readonly [Rel];
       if (!shrank(relChildren(r)[0]!, input)) return undefined;
-      const mine = new Set(added(r));
+      const mine = new Set(mintedColumns(r));
       return { cols: [...input.type.cols, ...r.type.cols.filter((col) => mine.has(col.name))] };
     }
     if (r.kind === 'join') {

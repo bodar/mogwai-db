@@ -50,6 +50,22 @@ const extending = (node: Rel & { readonly input: Rel }, added: readonly string[]
 export const explodeColumns = (as: { readonly key?: string; readonly value: string; readonly ord?: string; readonly type?: string }): readonly string[] =>
   [...(as.key ? [as.key] : []), as.value, ...(as.ord ? [as.ord] : []), ...(as.type ? [as.type] : [])];
 
+// The one classification of how a unary kind relates to its input's columns — so a new kind is placed
+// once, not re-encoded in the pruner's need computation and here. (`check.ts`'s `preservingType` is a
+// DIFFERENT question — declared-type identity for the kinds that mint nothing — and stays there.)
+
+/** The columns a node ADDS on top of its input's — a Window's spec names, an Explode's member columns;
+ *  empty for the purely column-preserving unary kinds (filter/sort/limit/distinct/materialize). */
+export const mintedColumns = (node: Rel): readonly string[] =>
+  node.kind === 'window' ? node.specs.map(([name]) => name)
+    : node.kind === 'explode' ? explodeColumns(node.as)
+      : [];
+
+/** A unary kind whose output IS its input's columns, extended at most by `mintedColumns`. */
+export const preservesColumns = (kind: RelKind): boolean =>
+  kind === 'filter' || kind === 'sort' || kind === 'limit' || kind === 'distinct'
+  || kind === 'window' || kind === 'explode' || kind === 'materialize';
+
 export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K> } = {
   // Sources answer for themselves: nothing flows in, so the only rule is that they emit what they claim.
   scan: declares,
@@ -85,10 +101,10 @@ export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K>
       throw new Error(`RelIR: a whole-row Distinct cannot carry the row-unique channel(s) ${unique.map((c) => `'${c.role}'`).join(', ')} — every row differs there, so the Distinct collapses nothing; group by traverser identity instead`);
   },
   materialize: preserving,
-  window: (node) => extending(node, node.specs.map(([name]) => name)),
+  window: (node) => extending(node, mintedColumns(node)),
   // With an input it EXTENDS (input columns then the member's); source-less it emits exactly the
   // member columns and carries nothing, so it answers for itself like any other source.
-  explode: (node) => (node.input ? extending(node as Rel & { readonly input: Rel }, explodeColumns(node.as)) : declares(node)),
+  explode: (node) => (node.input ? extending(node as Rel & { readonly input: Rel }, mintedColumns(node)) : declares(node)),
 
   /**
    * Reducing, and it is TWO contracts rather than one — §3.5 assumed one and left the gap open.
