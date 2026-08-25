@@ -2,7 +2,7 @@ import { compilerInt, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
-import type { IRStep, Slice } from '../ir/step.ts';
+import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
@@ -98,15 +98,16 @@ export interface ChildSeam {
    */
   readonly chain: (input: Rel, framing: RelFraming, body: readonly IRStep[], aliases: AliasMap) => ChainRead | null;
   /**
-   * A PER-ORIGIN WINDOWED SLICE — a body's `[order().by()?] <limit|range|skip|tail>` scoped to each
-   * origin, as `ROW_NUMBER() OVER (PARTITION BY <partitionBy> ORDER BY <collation>)` filtered to the
-   * slice. `partitionBy` names the ORIGIN (a bound alias's id for `match`, an `origin` channel column
-   * for `local`/`flatMap`). The body's own `order()` is lowered UPSTREAM (in `rows`), minting the
-   * `encounter` this ranks by, so a total order restricted to a partition IS that origin's order.
-   * `fromEnd` (a `tail`) reverses that collation (the last n per origin). One primitive; every fan-out
-   * consumer's per-origin slice lands on it.
+   * SCOPE a stream PER ORIGIN — mint a per-ROW `origin` channel (a `ROW_NUMBER() OVER ()` unique per
+   * row) so a per-origin barrier in a body run over it (`limit`/`range`/`skip`/`tail`/`dedup`, which
+   * consult the ambient `origin`) self-scopes to the row it descended from. `unscopeRows` sheds it once
+   * the body is done, so the origin never rides into a downstream whole-row `dedup`/merge. This is the
+   * ONE per-origin substrate — `local`/`flatMap` reach it through `rows` (origin = the host rowid),
+   * `match` reaches it here (origin = a per-binding-row number, because a binding row is not identified
+   * by any element it holds). A body with no per-origin barrier scopes nothing and calls neither.
    */
-  readonly window: (rows: Rel, partitionBy: Expr, slice: Slice, fromEnd: boolean) => Rel;
+  readonly scopeRows: (rows: Rel) => Rel;
+  readonly unscopeRows: (rows: Rel) => Rel;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
 }

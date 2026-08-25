@@ -234,6 +234,34 @@ describe('match() SQL', () => {
     expect(pairs).toEqual(['josh->ripple', 'marko->lop', 'peter->lop']);
   });
 
+  // The per-origin window is scoped PER BINDING ROW, not per start-alias VALUE — the fix that unified
+  // match onto the `local`/`flatMap` per-origin substrate. `a` here is bound by a FIRST pattern, so the
+  // same `a` (lop) appears on THREE binding rows (marko/josh/peter each -created-> lop); the second
+  // pattern's `limit(1)` per `a`'s top in-edge must apply to EACH of those rows, not collapse them.
+  // A partition by the alias id (the old hand-rolled window) kept one row for lop and answered 2; a
+  // partition by the per-binding-row origin keeps all three and answers 4.
+  test('per-origin window scopes per binding ROW, not per start-alias value', () => {
+    const q = 'g.V().match(__.as("x").out("created").as("a"), __.as("a").inE("created").order().by("weight").limit(1).outV().as("b")).select("x","a","b").by("name")';
+    const p = read(q);
+    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    const rows = run(seededStore(), q) as any[];
+    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.x}->${g.a}->${g.b}`; }).sort();
+    // lop's lowest-weight in-edge is peter-created->lop (0.2); ripple's only in-edge is josh (1.0).
+    expect(triples).toEqual(['josh->lop->peter', 'josh->ripple->josh', 'marko->lop->peter', 'peter->lop->peter']);
+  });
+
+  // A per-origin `dedup()` in a pattern body — `as('a').both().dedup().as('b')` binds each DISTINCT
+  // both-neighbour of `a`, DISTINCT within each `a` (not globally). It lowers to the same ranked window
+  // `local(both().dedup())` uses, partitioned by the per-binding-row origin plus the identity key —
+  // never a global Distinct that would collapse across binding rows.
+  test('per-origin dedup() in a pattern body (both().dedup())', () => {
+    const p = read('g.V().match(__.as("a").both().dedup().as("b"))');
+    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    // Distinct both-neighbours summed per vertex on the modern graph: 3+1+3+3+1+1 = 12.
+    const n = run(seededStore(), 'g.V().match(__.as("a").both().dedup().as("b")).count()') as any[];
+    expect(Number(n[0].v)).toBe(12);
+  });
+
   // A downstream `where(k1, P.eq/neq(k2))` over two SCALAR aliases compares stored VALUES (not rowids):
   // both bind a's name, so eq keeps all six and neq keeps none.
   test('where(key, P) over two scalar aliases compares stored values', () => {

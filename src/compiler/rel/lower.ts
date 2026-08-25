@@ -1196,6 +1196,23 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
   const encounter = encounterOf(input.channels);
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
 
+  // PER-ORIGIN when an `origin` channel is live: a DETERMINISTIC slice inside a per-parent body (a
+  // `local`/`flatMap` body, or a `match` pattern body that minted a per-traverser origin) is scoped to
+  // each parent — the fold-mode rule. Route `limit`/`range`/`skip`/`tail` to the ranked window
+  // (`perOriginWindow`) partitioned by `origin`; at the top level there is no `origin`, so the global
+  // `LIMIT`/sort below stands unchanged. `sample` is EXCLUDED and falls through to the RANDOM window
+  // below (which keeps `origin` as a carried channel) — a per-origin reservoir is a separate question,
+  // and intercepting it here regressed a working `by(__.…order().sample(n).fold())` reducer to a
+  // deferral. A bulked relation or a DATA-sized param count (the window inlines its bound) fail closed.
+  const origin = originOf(input.channels);
+  if (origin && step.name !== 'sample') {
+    if (bulked) return null;
+    if (step.name === 'tail') return encounter ? perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countArg(step) }, fresh) : null;
+    if (sliceParamNames(step).some((name) => name != null)) return null;
+    let w; try { w = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
+    return perOriginWindow(input, col(input.id, origin.col), [], w, fresh);
+  }
+
   // `sample(n)` is n traversers chosen UNIFORMLY — `SampleGlobalStep` is a weighted reservoir sample
   // whose weights come from a `by()`, and with no modulator every weight is 1. Rank once in a window
   // over RANDOM(), then FILTER the chosen ranks: a Sort(RANDOM()) -> Limit(n) can be fused so SQLite
@@ -1502,34 +1519,32 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   if (step.name === 'dedup' && pathCarried(input)) input = dropPath(input, fresh);
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
-  // A BARE `dedup()` is a grouping by traverser IDENTITY, so the channel policy table decides whether
-  // it may carry what the relation carries — and an ALIAS binding belongs to ONE of the merged rows.
-  // Keeping it in the key would distinguish two traversers reaching the same element by the label they
-  // bound on the way, which is a different multiset; taking an arbitrary one is the `undefined` the
-  // table names. So this declines rather than taking an arbitrary alias into the key (path-distinct
-  // semantics) — a clean deferral, not a wrong answer. The honest lowering is a ranked window over
-  // the identity partition (`dedupBy`'s shape with the id as its key), which is a separate increment.
-  // `origin` is exempt: in a per-parent body it is the dedup's PARTITION KEY (kept whole), not a value a
-  // grouping would take from an arbitrary member. The other channels still owe a defined N→1 answer.
-  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin'))) return null;
 
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
+  // A `dedup().by(k)` is a ranked WINDOW (`dedupBy` → `dedupOn`), which carries every channel whole, so
+  // it serves a body with alias channels or an `origin` with no guard — the guard below is for the
+  // COLLAPSING arms only.
   if (bys[0]) return dedupBy(step, bys[0], input, shape, ctx, fresh);
 
-  // A SHAPE WHOSE IDENTITY IS NOT ITS PAYLOAD takes the ranked window instead of the set forms below.
-  // The two arms after this one both project the group key and discard everything else, which is exact
-  // where the payload IS the key (an element `id`) and would erase five columns of a property row. The
-  // window keeps ONE member's payload whole, which is what "the first occurrence survives" means when a
-  // traverser is more than its identity — the honest lowering this comment block predicted.
+  // THE WINDOW ARMS — both `dedupOn`, which EXTENDS the row (a `row_number` window) and keeps every
+  // member's whole payload and every carried channel, so they serve a body that carries alias channels
+  // (a `match` binding table) or `origin` (a per-parent `local`/`match` body) with NO channel guard:
+  //  - a SHAPE WHOSE IDENTITY IS NOT ITS PAYLOAD (a property row) — the set arms below project the group
+  //    key and erase the rest, which is wrong where the payload is more than the key;
+  //  - a PER-ORIGIN body (`origin` live) — `dedupOn` partitions by `(origin, id)`, DISTINCT within each
+  //    parent, and the set arms cannot carry `origin` (its group policy is `undefined`).
   if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
-
-  // PER-ORIGIN (a `local(__.…dedup())` body carries `origin`): the Distinct/Aggregate arms below
-  // collapse the row to `(id, bulk)` and cannot carry `origin` (its group policy is `undefined`), so
-  // route through the ranked window instead — `dedupOn` partitions by `(origin, id)` and keeps the
-  // parent key whole, which is DISTINCT-within-each-parent.
   if (originOf(input.channels)) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
+
+  // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(id, bulk[, encounter])`, so the
+  // channel policy table decides whether they may carry what the relation carries — an ALIAS binding
+  // belongs to ONE of the merged rows, and keeping it would distinguish two traversers reaching the same
+  // element by the label they bound (a different multiset). So decline rather than take an arbitrary one
+  // — a clean deferral, not a wrong answer; the window arms above are the honest lowering where a
+  // traverser is more than its identity, and they have already claimed the `origin`/property cases.
+  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin'))) return null;
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -6864,8 +6879,8 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // around: it is the reason the BOUNDED regime unrolls into phases instead.
   chain: (input, framing, body, aliases) =>
     continueAs(input, framing, body, 0, false, inBody(ctx), fresh, aliases),
-  window: (rows, partitionBy, slice, fromEnd) =>
-    perOriginWindow(rows, partitionBy, fromEnd ? reverseCollation(rows) : [], slice, fresh),
+  scopeRows: (rows) => mintRowOrigin(rows, fresh),
+  unscopeRows: (rows) => dropOrigin(rows, fresh),
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
@@ -7124,12 +7139,7 @@ function flatMapRejoin(
       : perOriginWindow(rows.rel, col(rows.rel.id, rows.origin), [], sliceOf(last), fresh);
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const channels = window.channels.filter((channel) => channel.role !== 'origin');
-  const cols = window.type.cols.filter((column) => column.name !== rows.origin);
-  const shed = make.project({
-    id: fresh('fx'), input: window, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(window.id, column.name)] as const),
-  });
+  const shed = dropOrigin(window, fresh);
   return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
@@ -7193,6 +7203,47 @@ function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly SortTerm[
   return make.project({
     id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
+}
+
+/**
+ * MINT a per-ROW `origin` on a stream — a `ROW_NUMBER() OVER ()` unique per row — so a per-origin
+ * barrier in a body run over it (`sliceOp`/`dedupOn`, which consult the ambient `origin` channel)
+ * self-scopes to the row it descended from. This is `childRows`' mechanism for a stream that is NOT a
+ * host of distinct elements: `childRows` seeds `origin` from the host's ROWID (unique because the host
+ * is `V()`/`E()`), but a MATCH BINDING ROW is not identified by any element it holds — two rows can
+ * share every bound alias (`both()` on a self-loop, two `x` that both created one `a`) — so the origin
+ * must be a fresh per-row number, not an alias id. That is the whole fix that makes `match` reuse the
+ * `local`/`flatMap` per-origin substrate instead of a hand-rolled partition-by-start-alias (which
+ * collapsed binding rows sharing that alias). No `ORDER BY`: the number need only be UNIQUE per row,
+ * not ordered — the body's own `order()` mints the `encounter` a later slice ranks by.
+ */
+function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
+  if (originOf(rel.channels)) return rel;
+  const channels = withChannel(rel.channels, ORIGIN);
+  const numbered = make.window({
+    id: fresh('ow'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(ORIGIN.col, 'int')),
+    specs: [[ORIGIN.col, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [] } }]],
+  });
+  const cols = [...payloadCols(rel), ...carriedCols(channels)];
+  return make.project({
+    id: fresh('om'), input: numbered, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(numbered.id, column.name)] as const),
+  });
+}
+
+/** DROP the `origin` channel and its column — the counterpart of `mintRowOrigin`/`childRows`' mint,
+ *  run once a per-origin body is done so the host a row descended from does not ride into a downstream
+ *  whole-row `dedup`/merge (`flatMapRejoin` and `match`'s per-origin body both shed it here). A no-op
+ *  when no origin is carried. */
+function dropOrigin(rel: Rel, fresh: Minter): Rel {
+  const origin = originOf(rel.channels);
+  if (!origin) return rel;
+  const channels = rel.channels.filter((channel) => channel.role !== 'origin');
+  const cols = rel.type.cols.filter((column) => column.name !== origin.col);
+  return make.project({
+    id: fresh('dx'), input: rel, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
   });
 }
 

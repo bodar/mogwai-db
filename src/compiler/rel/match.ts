@@ -1,4 +1,4 @@
-import { arg, argValues, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
+import { arg, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
 import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
@@ -6,7 +6,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import { asLabelsOf } from '../ir/labels.ts';
-import { isLocalScope, isStreamBarrier, sliceOf, type IRStep, type Slice } from '../ir/step.ts';
+import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
@@ -148,16 +148,26 @@ const MOVEMENTS: ReadonlySet<string> = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'otherV', 'V', 'E', 'values', 'properties', 'label', 'id',
 ]);
 
-/** Steps whose fold crosses ORIGIN boundaries — a global slice or barrier. `child.chain` runs a
- *  pattern body over the WHOLE binding table, so any of these applies across all origins at once, while
- *  TinkerPop runs each pattern per traverser (`MatchStep.java:158-164`). A binding/constraint body
- *  containing one is a WRONG answer, not a slow one, so it DECLINES (a per-origin windowed lowering is a
- *  later phase). `order()` is absent — it drops nothing, so a global sort leaves the binding multiset
- *  unchanged; a reducing barrier as the END is absent from the general path because `reducingEnd` handles
- *  it per-origin first. */
+/** The row-preserving barriers that SELF-SCOPE per origin — a `limit`/`range`/`skip`/`tail` (a ranked
+ *  window) or a `dedup` (a per-origin DISTINCT). TinkerPop runs each pattern PER TRAVERSER
+ *  (`MatchStep` localizes a barrier body into a `TraversalFlatMapStep`,
+ *  `vendor/tinkerpop/gremlin-core/.../MatchStep.java:156-166`), so the barrier sees only ONE origin's
+ *  traversers. A body containing one is run with a per-ROW `origin` minted on the binding table
+ *  (`child.scopeRows`), so `sliceOp`/`dedupOn` — which consult the ambient `origin` channel — scope to
+ *  the binding row rather than globally. This is the SAME per-origin substrate `local`/`flatMap` use;
+ *  `match` differs only in how the origin is minted (a per-binding-row number, not a host rowid). */
+const PER_ORIGIN_SCOPED: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail', 'dedup']);
+
+/** Barriers whose fold has NO per-origin form yet, so a body containing one DECLINES (fail closed — a
+ *  wrong answer, not a slow one, if run across all origins at once). `sample` has no stable per-origin
+ *  reservoir here; `fold`/`group`/`groupCount`/`aggregate`/`cap` are COLLECTION barriers that change the
+ *  framing and cannot carry `origin` through a grouping (`CHANNEL_GROUP_POLICY[origin]='undefined'`); a
+ *  mid-body reducer (`count`/`sum`/…) reduces globally (a reducing barrier as the END is handled
+ *  per-origin first by `reducingEnd` → `child.scalar`). `order()` is absent from both sets — it drops
+ *  nothing and needs no origin (a global sort restricted to a partition IS that origin's order), and it
+ *  mints the `encounter` a following scoped slice ranks by. */
 const PER_ORIGIN_UNSAFE: ReadonlySet<string> = new Set([
-  'limit', 'range', 'tail', 'skip', 'sample',
-  'dedup', 'fold', 'group', 'groupCount', 'aggregate', 'cap',
+  'sample', 'fold', 'group', 'groupCount', 'aggregate', 'cap',
   'count', 'sum', 'mean', 'min', 'max',
 ]);
 
@@ -166,51 +176,6 @@ const PER_ORIGIN_UNSAFE: ReadonlySet<string> = new Set([
  *  seam's job (`child.scalar`, the same correlated read `by(__.out().count())` uses), NOT the row fold,
  *  which drops the empty origins. `fold` is absent — it ends a LIST, a later phase. */
 const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min', 'max']);
-
-/** A PER-ORIGIN WINDOW inside a pattern body: a `<prefix> [order().by()] <limit|range|skip|tail> <suffix>`
- *  where the slice is scoped to each `start` (`as('a').outE('created').order().by('weight',desc).limit(1)
- *  .inV().as('b')` is the top edge per `a`, not one globally). The order() stays in `prefix` so the fold
- *  lowers it (minting the encounter the window ranks by). Declines (⇒ the general per-origin-unsafe
- *  decline) when the prefix holds any barrier but a trailing order(), when the suffix holds any
- *  window/order (one window per body — a later phase), or when the slice count is a data-sized param. */
-function splitWindow(body: readonly IRStep[]): { readonly prefix: readonly IRStep[]; readonly slice: Slice; readonly fromEnd: boolean; readonly suffix: readonly IRStep[] } | null {
-  const i = body.findIndex((s) => (s.name === 'limit' || s.name === 'range' || s.name === 'skip' || s.name === 'tail') && !isLocalScope(s));
-  if (i < 0) return null;
-  const sliceStep = body[i]!;
-  const prefix = body.slice(0, i);
-  const suffix = body.slice(i + 1);
-  // The prefix must be barrier-free except a single trailing `order()` — its encounter is what the
-  // window ranks by, so it has to be the last thing before the slice.
-  const preBarriers = prefix.filter(isStreamBarrier);
-  if (preBarriers.length > 1 || (preBarriers.length === 1 && !(preBarriers[0] === prefix[prefix.length - 1] && prefix[prefix.length - 1]!.name === 'order'))) return null;
-  // A second window/order in the suffix is a later phase; the suffix otherwise runs through `child.chain`.
-  if (suffix.some((s) => PER_ORIGIN_UNSAFE.has(s.name) || s.name === 'order')) return null;
-  if (sliceStep.name === 'tail') {
-    const a = argValues(sliceStep);
-    const n = a.length === 0 ? 1 : (typeof a[0] === 'number' ? a[0] : null);
-    return n === null ? null : { prefix, slice: { scope: 'global', offset: 0, limit: n }, fromEnd: true, suffix };
-  }
-  let slice: Slice;
-  try { slice = sliceOf(sliceStep); } catch { return null; }
-  return slice.scope === 'global' ? { prefix, slice, fromEnd: false, suffix } : null;
-}
-
-/** Lower a pattern body that carries a per-origin window (`splitWindow`): re-root at `start` and run the
- *  prefix (incl. its order()) through the fold, WINDOW partitioned by the start alias's id (the origin),
- *  then continue the suffix. The window is `child.window` — the ONE primitive `local`/`flatMap` use — so
- *  a match pattern's per-origin slice is the same relational node, differing only in the partition key. */
-function windowedBody(
-  rel: Rel, framing: RelFraming, start: string, win: NonNullable<ReturnType<typeof splitWindow>>,
-  child: ChildSeam, labels: AliasMap, host: IRStep, fresh: Minter,
-): ChainRead | null {
-  const pre = child.chain(rel, framing, [syn(host, 'select', [start]), ...win.prefix], labels);
-  if (!pre || pre.framing.kind !== 'elements') return null;
-  const proj = aliasProjection(pre.rel, pre.aliases, start, 'last', fresh);
-  if (!proj || proj.read.kind !== 'element') return null;
-  const windowed = child.window(pre.rel, aliasIdAt(col(pre.rel.id, proj.entry.col), 'last'), win.slice, win.fromEnd);
-  return win.suffix.length ? child.chain(windowed, pre.framing, win.suffix, pre.aliases)
-    : { rel: windowed, framing: pre.framing, aliases: pre.aliases };
-}
 
 /** A pattern body that ENDS in a value-reducing barrier, optionally followed by scalar `is(P)` filters:
  *  `as('a').out().count().as('c')` or `as('a').out().count().is(P.gt(10)).as('c')`. Returns the
@@ -833,23 +798,26 @@ export function lowerMatch(
       continue;
     }
 
-    // A PER-ORIGIN WINDOW in the body (`a.outE.order.by(weight,desc).limit(1).inV.b`): the slice is
-    // scoped to each `start`, so split at it and window PARTITION BY the start alias — the top edge per
-    // `a`, not one globally. `windowedBody` re-roots the prefix (incl. its order, which mints the
-    // encounter), applies `child.window` (the shared primitive), then continues the suffix.
-    const win = splitWindow(p.body);
-    // FAIL CLOSED on any OTHER global slice/barrier in the body. `child.chain` folds the body over the
-    // WHOLE binding table at once, so a bare `dedup`/`fold`/`group`/reducer would apply ACROSS all origins
-    // rather than per-origin — a WRONG answer (`MatchStep` runs each pattern PER TRAVERSER,
-    // `vendor/tinkerpop/gremlin-core/.../MatchStep.java:158-164`). A reducing barrier as the END is handled
-    // per-origin above (`child.scalar`); `order()` alone drops nothing and stays.
-    if (!win && p.body.some((s) => PER_ORIGIN_UNSAFE.has(s.name))) return null;
+    // A PER-ORIGIN barrier in the body (`a.outE.order.by(weight,desc).limit(1).inV.b`, `a.both().dedup()`):
+    // the slice/dedup is scoped to each binding ROW, exactly as `local`/`flatMap` scope to each host.
+    // TinkerPop runs each pattern PER TRAVERSER (`MatchStep` localizes a barrier body into a
+    // `TraversalFlatMapStep`, `vendor/tinkerpop/gremlin-core/.../MatchStep.java:156-166`), so mint a
+    // per-ROW `origin` on the binding table (`child.scopeRows`) and run the WHOLE body through the ONE
+    // fold: `sliceOp`/`dedupOn` consult that `origin` and self-scope, the body's own `order()` mints the
+    // encounter a slice ranks by, and the origin is per-BINDING-ROW (not the start-alias id, which
+    // repeats across rows and would collapse two `x` that reached one `a`). Then shed origin.
+    const scoped = p.body.some((s) => PER_ORIGIN_SCOPED.has(s.name));
+    // FAIL CLOSED on a barrier with NO per-origin form. `child.chain` folds the body over the WHOLE
+    // binding table, so a bare `fold`/`group`/reducer/`sample` applies ACROSS all origins — a WRONG
+    // answer. A reducing barrier as the END is handled per-origin above (`child.scalar`); `order()`
+    // alone drops nothing and stays.
+    if (p.body.some((s) => PER_ORIGIN_UNSAFE.has(s.name))) return null;
 
     // Re-root at the pattern's start alias, then run the body through the ONE fold. The result relation
     // carries every prior alias channel (movements keep channels) plus a payload at the body's end.
-    const ran: ChainRead | null = win
-      ? windowedBody(rel, framing, p.start, win, child, labels, step, fresh)
-      : child.chain(rel, framing, [syn(step, 'select', [p.start]), ...p.body], labels);
+    const base = scoped ? child.scopeRows(rel) : rel;
+    const ranScoped = child.chain(base, framing, [syn(step, 'select', [p.start]), ...p.body], labels);
+    const ran: ChainRead | null = ranScoped && scoped ? { ...ranScoped, rel: child.unscopeRows(ranScoped.rel) } : ranScoped;
     if (!ran) return null;
 
     if (p.kind === 'constraint') {
