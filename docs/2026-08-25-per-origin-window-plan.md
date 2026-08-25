@@ -66,17 +66,32 @@ window op. Decline (never mis-execute) when:
 
 ## Phased build (green trunk per increment)
 
-1. **The primitive + `local`/`flatMap` generalization.** Extract `perOriginWindow`; rewire
-   `partitionedSlice`. Admit `order().by(k)` before the slice (thread the sort key into the window's
-   ORDER BY) and `tail` (fromEnd). Reaps `local(__.out().order().by('name').limit(1))`,
-   `local(__.properties(k).order().by(T.value).range(0,2))`, `local(__.bothE.limit(1))`, etc. Foundation
-   for all below.
-2. **`match` pattern body.** Partition by the start-alias id column; order by the body's `order().by()`.
-   Split the body at the per-origin barrier inside the match lowering. Reaps the `outE.order.by.limit.inV`
-   target.
-3. **`by(<body>)` child.** Per-element window — partition by the by-host id.
-4. **`union`/`choose` arm.** Per-arm window — partition by the incoming traverser.
-5. **Bounded `repeat` body.** Per-iteration window at each unrolled position; unbounded stays declined.
+1. ✅ **LANDED (`dccf126`, L3 1757→1759) — the primitive + `local`/`flatMap`.** Extracted
+   `perOriginWindow(rows, partitionBy, order, slice)` (a `window` arm on the `ChildSeam`); rewired the
+   old `partitionedSlice` into it. `flatMapRejoin` admits a trailing `order().by()` before the slice
+   (lowered inside `childRows`, so the fold's `order` mints the `encounter` the window ranks by) and
+   `tail` (reversed collation). Reaps `local(__.out().order().by('name').limit(1))`, `tail`, the
+   `properties().order().range()` shape.
+2. ✅ **LANDED (`1dc63b2`, L3 1759→1760) — `match` pattern body.** `splitWindow` finds the mid-body
+   slice; `windowedBody` re-roots the prefix (incl. its `order()`), applies `child.window` PARTITION BY
+   the start-alias id, then continues the suffix (`inV`). Reaps the `outE.order.by.limit.inV` target. The
+   partition-key seam (origin channel → alias id) proved out exactly as designed — one primitive, two
+   consumers, differing only in `partitionBy`.
+
+### Refined scope for the rest (found while building)
+
+- **`by(<body>)` — NOT a per-origin-window consumer.** The corpus `by(...)` bodies are `by(__.out()…fold())`
+  / `dedup().fold()` — list COLLECTION per group (`child.scalar` / the collection substrate), not a
+  stream slice that reattaches. A per-origin window does not apply; these stay on their own path (or
+  fail closed). No witness for a `by(__.out().limit(1))` stream-slice-as-value.
+- **`union`/`choose` arm + bounded-`repeat` body — the HARDER, distinct piece.** A per-origin slice
+  here is per-INCOMING-traverser, which is the branch substrate's **traverser-major/arm-major** question
+  (`unionArms`, `armBatches`, `mintTraverserMajor` — it already *declines* a slice-demanded batched arm
+  as "not built"). The window primitive is ready, but the origin key must be the incoming traverser
+  minted INSIDE the arm/iteration (like `childRows` does for `local`), threaded through the
+  traverser-major merge. Corpus witnesses are grateful-graph `repeat(union(out.order.by.limit(2), …))`
+  (unbound params). This is its own increment against the branch machinery — not a partition-key swap.
+- **Unbounded `repeat` body — permanent decline** (recursive-term, §"What this is").
 
 Each phase: L2 SQL snapshots, keep L1 100%, L3/L5 re-recorded, census read for deferral→wrong-answer.
 Reference every claim at the pin (`vendor/calcite` `convertDistinctOn` for the window; TinkerPop feature
