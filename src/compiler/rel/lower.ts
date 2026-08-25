@@ -1,4 +1,4 @@
-import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
+import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
@@ -26,7 +26,7 @@ import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/typ
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { BY_HOSTS, isStreamIdentity, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
-import { childSteps, normalize } from '../ir/passes.ts';
+import { normalize } from '../ir/passes.ts';
 import { alwaysProduces, MAPPING_TERMINAL } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, ValueParseError } from '../../gremlin/coerce.ts';
@@ -38,7 +38,7 @@ import {
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, type ChainRead, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -60,6 +60,7 @@ import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
+import { BULK, CARRIED_READ, ENCOUNTER, NO_ALIASES, ORIGIN, bodyOf, elementSubject, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './lower/chain.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -118,204 +119,6 @@ export interface RelLowering {
   readonly shape: Shape;
 }
 
-/** A lowered chain BEFORE naming and the budget — the relation, plus the two facts about it that are
- *  not properties of the relation itself. Every tail function returns this shape. */
-type Tail = ChainRead & {
-  /**
-   * DOES A ROW OF THIS RESULT STAND FOR MORE THAN ONE TRAVERSER — the fold's `bulked`, carried out to
-   * the payload projection because the leaf is the last consumer of a multiplicity and the only one
-   * that can still lose it.
-   *
-   * REQUIRED rather than optional, and that is the whole point: only the `elements` framing arm
-   * projects a `bulk` column (`framed`), so a site that produced an element result and forgot to say
-   * whether it collapsed would answer N traversers as one row. A required field makes that a compile
-   * error instead of a silent fail-open. It used to be read off the collapse SWITCH, which was correct
-   * only while the switch also carried the chain-global collapse verdict — once the decision is
-   * positional the switch can be on where nothing collapsed, and projecting a constant-1 column then
-   * re-spells the SQL of every element leaf for no behaviour.
-   */
-  readonly bulked: boolean;
-  /**
-   * THE STATEMENTS THIS CHAIN RUNS BEFORE ITS RESULT IS READ — a write's effects, in execution order
-   * (§3.0: effects are legal only at a `Plan` binding).
-   *
-   * Absent for every read, which is why it is optional rather than an empty list threaded through
-   * forty returns. A step that writes appends here and hands back a `Ref` to whichever binding its
-   * result is, so the fold's shape does not change and a write remains one step of the same loop
-   * rather than a second orchestrator.
-   */
-  readonly effects?: readonly Binding[];
-};
-
-/**
- * THE FOLD RE-ENTERED OVER A BODY rather than over the root chain, and the one thing that changes is
- * that a collapse is OFF.
- *
- * A collapse is legal at a hop only if every consumer behind it reads the multiplicity, and
- * `bulkObservedFrom` answers that by walking the `steps` it was given to their END. For the root chain
- * that end is the wire, where an `elements` result RLEs `(v, bulk)` onto it. **For a BODY it is not:**
- * the arm of a `union`, an `option()` arm, a `where()` child or a recursive term all continue into an
- * enclosing context the body cannot see, and reaching the end of the body proves nothing about it. The
- * witness was `g.V().union(__.values("name"), __.out())` — the `out()` arm collapsed because the arm's
- * own suffix ended in an element leaf, then the enclosing VARIANT framing dropped the `bulk` column and
- * the traversers with it. A wrong answer at the wire, on a widening that had nothing to do with unions.
- *
- * So: one named narrowing at every body re-entry, rather than a per-site judgement. It costs collapse
- * opportunities inside bodies and costs nothing that was working — before the decision became
- * positional, no body ever collapsed, because a chain containing a `union`/`choose`/`repeat` was never
- * collapse-safe at all. Admitting them back is a later increment, and the thing it needs is the
- * enclosing suffix, not a relaxation here. `framed` carries the fail-closed backstop for anything this
- * misses.
- */
-const inBody = (ctx: ChainCtx): ChainCtx => (ctx.collapse ? { ...ctx, collapse: false } : ctx);
-
-
-/** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
-const NO_ALIASES: AliasMap = new Map();
-
-/**
- * THE PER-TRAVERSER STATE A CHILD BODY MAY READ, by the channel ROLE each step names.
- *
- * A table rather than two arms because the question is uniform: these steps do not compute anything,
- * they REFERENCE state the parent row already carries. TinkerPop's own vocabulary is the same shape —
- * `LoopsStep`/`SackStep` are both `ScalarMapStep`s whose `map` is one `traverser.x()` call, and each
- * declares what it needs through `getRequirements()` (`TraverserRequirement.SACK`/`SINGLE_LOOP`)
- * exactly as Calcite's `RelNode.getVariablesSet()` declares what a node sets.
- *
- * Roles absent here are absent on purpose: `path` and `encounter` are not scalars, and `bulk` is a
- * multiplicity the language gives no step to read.
- */
-const CARRIED_READ: Readonly<Record<string, ChannelRole>> = { sack: 'sack', loops: 'loops' };
-
-/** The bulk channel every element source seeds: the RLE traverser count a reducer reads as
- *  `SUM(bulk)` and a movement collapse merges convergent walks on. One channel, one column, and the
- *  role vocabulary is the neutral core's — a RelIR node cannot know what a sack is. */
-const BULK: Channels = [{ col: 'bulk', role: 'bulk' }];
-
-/**
- * The EMISSION-ORDER channel, and the second carried role this route models.
- *
- * A chain that slices has an answer depending on which rows come first; `analyzeChain` marks it
- * `demandsEncounter` and the SOURCE seeds a monotone column — but that flag is only ever the seed's
- * question, never the plan's. **The channel set is a property of each RELATION**, so an `order()`
- * MINTS this channel where none arrived and every reader downstream keys on its presence rather than
- * on a chain-global boolean threaded from the source. That is why `withChannel` exists in the core:
- * `ROLE_ORDER` is an invariant of a `Channels` list, and the framing layer's `layoutCols` sorts the
- * same way — bulk before encounter — so a mint that appended out of order would desync the declared
- * schema from the physical one.
- */
-const ENCOUNTER: Channel = { col: 'encounter', role: 'encounter' };
-
-/**
- * THE ORIGIN CHANNEL — which HOST ROW a traverser descends from, carried through the ordinary fold.
- *
- * `src/channels.ts` has modelled the role since the channel core landed (merge `identical`, barrier
- * `empty`, a `ROLE_ORDER` slot) and nothing minted one, which is exactly where `sack` was one increment
- * earlier: the channel existed, the plumbing did not. It costs no per-step work to carry — a movement
- * preserves its input's channels by contract (§3.5) — so minting it on a relation and lowering a body
- * from there is the whole mechanism.
- *
- * It is what makes a GROUP-SCOPED reduction expressible: the child rows of every group member have to
- * pool before the reducer runs, so the value side is a JOIN the grouping aggregates over rather than a
- * scalar subquery per row — and a JOIN drops the parent's payload while keeping its channels. A
- * CORRELATED relation could not serve, because SQLite has no `LATERAL` and the correlation has to
- * become a join `ON`.
- */
-const ORIGIN: Channel = { col: 'origin', role: 'origin' };
-const originOf = (channels: Channels): Channel | undefined =>
-  channels.find((channel) => channel.role === 'origin');
-const encounterOf = (channels: Channels): Channel | undefined =>
-  channels.find((channel) => channel.role === 'encounter');
-
-/**
- * An element relation's DECLARED COLUMNS: the traverser's id, then one column per carried channel,
- * in the channel list's own order.
- *
- * Derived from the channels rather than from a boolean, which is the whole of the model change: a
- * chain no longer has one element shape decided at its source, so every producer here asks its
- * INPUT what it carries. A role this route grows tomorrow gets its column with no edit at all.
- */
-/**
- * A source-scope FILTER as a predicate over the element scan — the whole of `hasLabel`/`has` that
- * needs no predicate vocabulary.
- *
- * Written against the SCAN rather than against a projected id-relation, and that is the point of the
- * exercise: the naive form gives every filter its own CTE that re-joins the element table to reach a
- * column its predecessor projected away (`… FROM nodes n JOIN c1 p ON n.id=p.id WHERE EXISTS(…)`), so
- * `has(a).has(b)` is three CTEs and two redundant self-joins. Here they conjoin into ONE `WHERE` over
- * one scan, because a filter neither changes the relation's cardinality contract nor consumes a
- * channel, and the plan is data so a later step can still see the columns.
- */
-/** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
- *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
-interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
-
-/** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the
- *  movement collapse. One record rather than three positional arguments, because `elementTail` is now
- *  re-entered from three places and a re-entry that dropped one of them would silently pick a
- *  different lowering strategy. */
-interface ChainCtx extends FilterCtx {
-  readonly collapse: boolean;
-  readonly tracksPath: boolean;
-  /** Gated labels-on-path: a `from`/`to` on a path-family step (`ChainFacts.demandsPathLabels`). When
-   *  set, each path position records its `as()` LABELS so `subPath` can slice by label position. */
-  readonly demandsPathLabels: boolean;
-  /** Does this chain have an EMISSION ORDER at all — `analyzeChain`'s chain-global answer, threaded
-   *  rather than re-derived. A step that MINTS a fresh traverser (`addV`) has to know: it seeds the
-   *  position channel exactly where the source would have, and a step-local re-derivation would be a
-   *  second authority on a fact the source already decided. */
-  readonly ordered: boolean;
-  /** Does a POSITIONAL slice read the emission order downstream (`ChainFacts.demandsSlice`)? A
-   *  branch merge mints one deterministic fan-out order for a COLLECT/write demand, but DECLINES
-   *  when a slice reads its fan-out — a slice pins the reference's traverser-major/arm-major subset,
-   *  which this spine does not mint yet. Threaded, not re-derived, for the reason `ordered` is. */
-  readonly sliced: boolean;
-  /** The GRAPH's declared vertex-label cardinality, which decides what a creation with no label of
-   *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
-   *  step that asked the store instead would be asking at the wrong time. */
-  /** How a `T.label` ENTRY renders — a set of names or one name. Decided ONLY by an explicit
-   *  `with("multilabel")`/`with("singlelabel")`, since storage no longer carries a regime to inherit
-   *  from (every vertex holds a set — `src/api.ts`). Settled before a compile starts, so it travels
-   *  as a value rather than being re-derived from a source-options map inside the lowering. */
-  readonly labelRegime: LabelRegime;
-  /** THE GRAPH SOURCE this chain reads physical rows through — `BaseGraph` (SQLite tables) by default,
-   *  a landed `BoundGraph` for a subgraph segment. Threaded here so every physical-access chokepoint
-   *  (movement, `values`, `has`, labels, `elementScan`) reads ONE graph abstraction rather than naming
-   *  a table inline. See `src/compiler/rel/source.ts`. */
-  readonly source: GraphSource;
-  /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
-  readonly sideEffects: Map<string, any>;
-  /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
-  readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
-  /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
-  readonly services: ReadonlyMap<string, Service>;
-  /** `withSack(seed[, Operator.x])`'s policy, or `null`. See `Lowering.sack`. */
-  readonly sack: MergePolicy | null;
-  /**
-   * THE NAMED COLLECTIONS this chain has filled so far — `aggregate("a")` writes one, `cap("a")`
-   * reads it back.
-   *
-   * The one MUTABLE field here, and deliberately so: a side effect is chain-global state written at
-   * one step and read at a LATER one, which is the single thing a fold's return value cannot carry.
-   * `Tail` travels backwards out of the recursion; `cap` needs to see forwards from where
-   * `aggregate` stood. Everything else on this interface is settled before the chain starts.
-   */
-  readonly collections: Collections;
-  /**
-   * Does this chain MUTATE the graph? Read once from the step list rather than discovered as the
-   * fold proceeds, because the question it answers is about the WHOLE chain: a shared read node is
-   * re-evaluated by every statement that names it, so a named collection in a program with effects
-   * would see the graph AFTER the write. §3.0's answer to that is a `snapshot` binding, which is the
-   * increment this one is a prerequisite for rather than a shortcut it may take.
-   */
-  readonly mutating: boolean;
-}
-
-/** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
- *  throw there is a deferral rather than a bug. */
-const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null => {
-  try { return childSteps(nested, params, sideEffects); } catch { return null; }
-};
 
 /**
  * A SUB-TRAVERSAL AS A BOOLEAN — `EXISTS (<the body, rooted at the current row>)`.
@@ -705,14 +508,6 @@ function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
   };
 }
 
-/** The subject of a clause that reads an ELEMENT — a property row, a label row, an id. Named because
- *  three clause builders take it and each would otherwise re-state the narrowing in its signature. */
-type ElementSubject = Extract<Subject, { kind: 'element' }>;
-
-/** The ELEMENT subject, or `null` — the narrowing every element-only clause opens with, spelled once
- *  so an arm states "this question is about an element" rather than repeating a `kind` test. */
-const elementSubject = (subject: Subject): ElementSubject | null =>
-  subject.kind === 'element' ? subject : null;
 
 function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
