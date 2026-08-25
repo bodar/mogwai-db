@@ -31,7 +31,8 @@ import { PATH_CHANNEL, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
-import { BRANCH_HOSTS, continueAs, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { continueAs, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
