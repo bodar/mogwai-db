@@ -108,6 +108,20 @@ window op. Decline (never mis-execute) when:
    alias channels + `origin`) precede the `groupableChannels` guard, which now gates only the collapsing
    Distinct/Aggregate arms. 7 corpus traversals moved deferred→golden (all verified vs the reference).
 
+5. ✅ **LANDED (`227f428`) — per-TRAVERSER origin for `local`/`flatMap`, and `flatMapRejoin` unified
+   onto the match substrate.** The origin for a `local`/`flatMap` body was the ELEMENT rowid, which
+   REPEATS when two traversers land on one element — `g.V().both().local(__.out().limit(1)).count()`
+   collapsed the three traversers at `marko` into one and answered 3 instead of 7 (the twin of item 4's
+   binding-row bug, found by probing the unification at depth). `childRows` gains a `perRow` mode:
+   `group()`'s reducer keeps the element-id origin (it pools members BY the element — correct), while
+   `local`/`flatMap` mint a per-ROW origin (`mintRowOrigin`). `flatMapRejoin` now runs the WHOLE body
+   through `childRows(perRow)` and lets `sliceOp`/`dedupOn`/`order` self-scope — the SAME code path
+   match uses — deleting its hand-rolled trailing-slice pop and reaping interior slices
+   (`local(__.out().order().by(name).limit(2).out())`). `PER_ORIGIN_SAFE_BARRIER` keeps
+   `sample`/`fold`/`group`/reducers failing closed. The `ROW_NUMBER` origin costs a little SQL
+   (banked in the hygiene baseline — correctness over bytes); census is answer-preserving on the corpus;
+   an L4 regression (`per-traverser-fanout-slice.feature`) pins both the `local` and `match` cases.
+
 ### Two semantics corrections found by reading the reference (not reasoning)
 
 - **`union`/`choose` arm barriers are ARM-MAJOR, not per-origin.** `BranchStep.standardAlgorithm`
