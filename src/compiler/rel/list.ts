@@ -10,7 +10,7 @@ import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamN
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, fenced, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
@@ -802,20 +802,11 @@ export function unfoldList(
   // that is a vertex on one row and an edge on the next cannot take `out()` — so this is TERMINAL,
   // exactly as the stream-level variant is.
   if (of.kind === 'mixed') {
-    const exploded = make.explode({
-      id: fresh('umx'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
-      type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-    });
+    const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
     return {
-      rel: make.project({
-        id: fresh('umn'), input: exploded, channels: rel.channels,
-        type: typeOf(meta(NODE_COL, 'json', true), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
-        // `json()` turns the JSONB envelope into the text the framer parses — the same read the whole
-        // mixed list takes (`listPayloadExpr`), one member at a time.
-        exprs: [[NODE_COL, jsonOf(col(exploded.id, MEMBER.value))],
-          ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
-      }),
+      // `json()` turns the JSONB envelope into the text the framer parses — the same read the whole
+      // mixed list takes (`listPayloadExpr`), one member at a time.
+      rel: project([[NODE_COL, jsonOf(col(exploded.id, MEMBER.value))]], [meta(NODE_COL, 'json', true)]),
       ord: MEMBER.ord,
       typed: false,
       nodes: of.arms,
@@ -828,45 +819,28 @@ export function unfoldList(
   // Had the fold expanded its members to payload objects, this direction would have to parse them back
   // out of JSON and would have LOST the rowid the graph is keyed by.
   if (of.kind === 'elem') {
-    const exploded = make.explode({
-      id: fresh('ux'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
-      type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-    });
+    const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
     return {
-      rel: make.project({
-        id: fresh('ue'), input: exploded, channels: rel.channels,
-        type: typeOf(meta('id', 'int'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
-        // `json_each` hands a member back with the storage class the JSON held; the CAST states the
-        // rowid contract rather than trusting that, which is the same thing the alias channel's own
-        // rowid read does.
-        exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }],
-          ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
-      }),
+      // `json_each` hands a member back with the storage class the JSON held; the CAST states the
+      // rowid contract rather than trusting that, which is the same thing the alias channel's own
+      // rowid read does.
+      rel: project([['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }]], [meta('id', 'int')]),
       ord: MEMBER.ord,
       typed: false,
       elem: of.elem,
     };
   }
   if (!isBareList(of)) return null;
-  const exploded = make.explode({
-    id: fresh('uf'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
-    type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-  });
+  const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
   // A TYPED list's members carry their own type out with them: the unfolded stream frames PER ROW off
   // a `vtype` column, exactly as `values()` over a stored property does, so a heterogeneous folded
   // list round-trips instead of being re-inferred under one compile-time tag.
   const vtype = memberVtype(of, exploded);
   return {
-    rel: make.project({
-      id: fresh('uv'), input: exploded, channels: rel.channels,
-      type: typeOf(meta('v', 'any', true), ...(vtype ? [meta('vtype', 'text', true)] : []),
-        ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
-      exprs: [['v', memberPayload(of, exploded)],
-        ...(vtype ? [['vtype', vtype] as const] : []),
-        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-        [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
-    }),
+    rel: project(
+      [['v', memberPayload(of, exploded)], ...(vtype ? [['vtype', vtype] as const] : [])],
+      [meta('v', 'any', true), ...(vtype ? [meta('vtype', 'text', true)] : [])],
+    ),
     ord: MEMBER.ord,
     typed: !!vtype,
   };
@@ -1459,18 +1433,9 @@ export function listSetOp(
  *  written back WHOLE (`json(…)`) so a nested JSON array stays an array rather than being re-encoded
  *  as a string. Its own members keep the inner encoding, which is what `member` reports. */
 function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member: ListOf } {
-  const exploded = make.explode({
-    id: fresh('un'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
-    type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-  });
+  const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
   return {
-    rel: make.project({
-      id: fresh('ul'), input: exploded, channels: rel.channels,
-      type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
-      exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
-        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-        [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
-    }),
+    rel: project([[LIST_COL, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }]], [meta(LIST_COL, 'json')]),
     ord: MEMBER.ord,
     typed: false,
     member: of.of,
@@ -1482,18 +1447,9 @@ function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: M
  *  `foldMaps` already documents). The member is a self-describing pairs array, so `json()` around it for
  *  the nested arm's reason: without it the enclosing explode's subtype does not survive. */
 function unfoldMapMembers(rel: Rel, of: ListOf & { readonly kind: 'map' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly mapVal: MapOf } {
-  const exploded = make.explode({
-    id: fresh('um'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
-    type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-  });
+  const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
   return {
-    rel: make.project({
-      id: fresh('umv'), input: exploded, channels: rel.channels,
-      type: typeOf(meta('map', 'json'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
-      exprs: [['map', { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
-        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-        [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
-    }),
+    rel: project([['map', { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }]], [meta('map', 'json')]),
     ord: MEMBER.ord,
     typed: false,
     mapVal: of.of,

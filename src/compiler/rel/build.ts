@@ -88,6 +88,41 @@ export const withPayload = (
   exprs: [...exprs, ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
 });
 
+/** A member descriptor: the columns a collection explode mints — the member VALUE, its ORDINAL
+ *  (`json_each.key`, a total order only within one row), and, for a heterogeneous collection, its
+ *  stored member TYPE. `list.ts`'s `MEMBER` and `map.ts`'s `PAIR` are the two instances. */
+export interface MemberAs { readonly value: string; readonly ord: string; readonly type?: string; }
+
+/**
+ * EXPLODE a collection column into a member stream, and PROJECT the members back carrying every channel
+ * through plus the ordinal — the two byte-identical halves the whole unfold family (`unfoldMembers`'s
+ * mixed/elem/typed arms, `unfoldNested`, `unfoldMapMembers`, and `map.ts`'s `unfoldMap`) spelled by
+ * hand, differing only in the payload column(s) and their expressions.
+ *
+ * `make.explode` over `col(rel.id, column)` binding `as` is the identical part (only the fresh tag
+ * varied). `project(payload)` lands the caller's payload columns, then carries the channels read OFF THE
+ * EXPLODE (not `rel` — the members are its rows) and passes the ordinal, which is what `withPayload`
+ * cannot do (it reads channels off its input and adds no passthrough). The ordinal is emission order the
+ * caller re-mints, since `json_each.key` totally orders only within one row.
+ */
+export function explodeMembers(
+  rel: Rel, column: string, as: MemberAs, fresh: Minter,
+): { readonly exploded: Rel; readonly project: (payload: readonly (readonly [string, Expr])[], cols: readonly ColMeta[]) => Rel } {
+  const memberCols: ColMeta[] = [meta(as.value, 'any', true), meta(as.ord, 'int'), ...(as.type ? [meta(as.type, 'text', true)] : [])];
+  const exploded = make.explode({
+    id: fresh('ex'), input: rel, expr: col(rel.id, column), channels: rel.channels, as,
+    type: typeOf(...rel.type.cols, ...memberCols),
+  });
+  const project = (payload: readonly (readonly [string, Expr])[], cols: readonly ColMeta[]): Rel => make.project({
+    id: fresh('em'), input: exploded, channels: rel.channels,
+    type: typeOf(...cols, ...carriedCols(rel.channels), meta(as.ord, 'int')),
+    exprs: [...payload,
+      ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+      [as.ord, col(exploded.id, as.ord)]],
+  });
+  return { exploded, project };
+}
+
 /**
  * A FENCE in front of a `json_each` reader, and it is a legality wall rather than a bind-budget hint.
  *

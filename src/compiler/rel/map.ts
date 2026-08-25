@@ -7,7 +7,7 @@ import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, eq, fenced, firstOf, jsonField, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -1246,20 +1246,13 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
  */
 export function unfoldMap(input: Rel, fresh: Minter): { readonly rel: Rel; readonly ord: string } {
   const rel = fenced(input, fresh);
-  const exploded = make.explode({
-    id: fresh('ux'), input: rel, expr: col(rel.id, MAP_COL), channels: rel.channels, as: PAIR,
-    type: typeOf(...rel.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
-  });
+  const { exploded, project } = explodeMembers(rel, MAP_COL, PAIR, fresh);
   const pair = col(exploded.id, PAIR.value);
   return {
-    rel: make.project({
-      id: fresh('ue'), input: exploded, channels: rel.channels,
-      type: typeOf(meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true),
-        ...carriedCols(rel.channels), meta(PAIR.ord, 'int')),
-      exprs: [[ENTRY.key, pairSide(pair, 'keys')], [ENTRY.val, pairSide(pair, 'values')],
-        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
-        [PAIR.ord, col(exploded.id, PAIR.ord)]],
-    }),
+    rel: project(
+      [[ENTRY.key, pairSide(pair, 'keys')], [ENTRY.val, pairSide(pair, 'values')]],
+      [meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)],
+    ),
     ord: PAIR.ord,
   };
 }
