@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { KCORE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, changedCount, iterateInSql, syncBarrier, type Slot } from './kernel.ts';
+import { STATE_INSERT, UND, changedCount, decorateBarrier, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
 
 // ---------- mogwai.kcore — k-core decomposition (coreness), a BSP fixpoint decorate barrier ----------
 //
@@ -18,29 +18,18 @@ import { STATE_INSERT, changedCount, iterateInSql, syncBarrier, type Slot } from
 
 const KCORE_KEY = 'coreValue';
 
-/** The undirected, de-duplicated adjacency `und(x, y)` — both directions, no self-loops/parallels. */
-const UND = 'und(x, y) AS (SELECT DISTINCT a, b FROM '
-  + '(SELECT src AS a, tgt AS b FROM edges UNION SELECT tgt AS a, src AS b FROM edges) WHERE a <> b)';
-
 /** kcore() over a store: a BSP fixpoint DECORATE barrier. */
 export function createKCoreService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: KCORE_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key for the coreness (default ${KCORE_KEY})` }),
-    resolve: (site) => {
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : KCORE_KEY;
+    plan: (params) => {
+      const key = stringParam(params, 'propertyName', KCORE_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'int' }] },
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${KCORE_SERVICE_NAME}: no graph store is available to compute k-core`);
-          const run = store.allocBarrierRun();
-          const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c + 1;
+        channels: [{ key, channel: 0, vtype: 'int' }],
+        core: (store, run): number => {
+          const backstop = nodeCount(store) + 1;
           // Seed est[v] = undirected degree (0 for an isolated vertex, which then stays 0).
           const seed = () => store.query(
             `WITH ${UND}
@@ -58,11 +47,10 @@ export function createKCoreService(store: GraphStore | undefined): Service {
              ${STATE_INSERT}
                SELECT ?, ?, 0, n.id, 0, COALESCE(hidx.h, 0) FROM nodes n LEFT JOIN hidx ON hidx.v = n.id`,
             [run, prev, run, next]);
-          const round = iterateInSql(store, run, seed, step,
+          return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
-          return { kind: 'relation-ref', run, round };
-        }),
+        },
       };
     },
-  };
+  });
 }

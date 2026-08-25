@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { TRIANGLE_COUNT_SERVICE_NAME, LCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, syncBarrier } from './kernel.ts';
+import { STATE_INSERT, UND, decorateBarrier, stringParam } from './kernel.ts';
 
 // ---------- mogwai.triangleCount + mogwai.localClusteringCoefficient — ONE-SHOT decorate barriers ------
 //
@@ -13,9 +13,6 @@ import { STATE_INSERT, syncBarrier } from './kernel.ts';
 // Ported/matched against GDS's own tests (vendor/gds/algo/.../triangle/, GPLv3 — re-expressed): a
 // 5-clique gives every vertex 6 triangles and coefficient 1.0; a line/2-cycle gives 0.
 
-/** The undirected, de-duplicated adjacency `und(x, y)` (both directions, no self-loops, no parallels). */
-const UND = 'und(x, y) AS (SELECT DISTINCT a, b FROM '
-  + '(SELECT src AS a, tgt AS b FROM edges UNION SELECT tgt AS a, src AS b FROM edges) WHERE a <> b)';
 /** Per-vertex triangle count `tri(v, c)`: for each vertex, the number of connected neighbour PAIRS
  *  (`nv.y < nw.y` counts each triangle once). A vertex in no triangle is simply absent (LEFT JOIN → 0). */
 const TRI = 'tri(v, c) AS (SELECT nv.x, COUNT(*) FROM und nv '
@@ -26,28 +23,15 @@ const TRI = 'tri(v, c) AS (SELECT nv.x, COUNT(*) FROM und nv '
  *  writes the score per vertex at (round 0, scope 0, channel 0); the decorate resume reads it. `sql` is a
  *  full statement whose single `?` is the run token. */
 function oneShotDecorate(serviceName: string, defaultKey: string, vtype: string, sql: string, store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: serviceName,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key for the score (default ${defaultKey})` }),
-    resolve: (site) => {
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : defaultKey;
-      return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype }] },
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${serviceName}: no graph store is available`);
-          const run = store.allocBarrierRun();
-          store.query(sql, [run]);
-          return { kind: 'relation-ref', run, round: 0 };
-        }),
-      };
-    },
-  };
+    plan: (params) => ({
+      channels: [{ key: stringParam(params, 'propertyName', defaultKey), channel: 0, vtype }],
+      core: (store, run): number => { store.query(sql, [run]); return 0; },
+    }),
+  });
 }
 
 /** triangleCount — the number of triangles each vertex participates in (undirected). */

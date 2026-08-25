@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { HITS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, syncBarrier } from './kernel.ts';
+import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
 
 // ---------- mogwai.hits — HITS (Kleinberg hubs & authorities), a MULTI-CHANNEL DECORATE barrier ----------
 //
@@ -39,36 +39,26 @@ function hitsNormalize(store: GraphStore, run: number, round: number, channel: n
  *  an auth layer over it (`decorate.channels`). Directed edges only — no scope config (HITS is defined by
  *  the edge direction). `iterations` overrides k. */
 export function createHitsService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: HITS_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({
       iterations: `HITS iterations (default ${HITS_DEFAULT_ITERATIONS})`,
       hubProperty: `the vertex property key for the hub score (default ${HITS_HUB_KEY})`,
       authProperty: `the vertex property key for the authority score (default ${HITS_AUTH_KEY})`,
     }),
-    resolve: (site) => {
-      const itersParam = site.params.iterations;
+    plan: (params) => {
+      const itersParam = params.iterations;
       const iterations = typeof itersParam === 'number' && Number.isInteger(itersParam) && itersParam >= 0
         ? itersParam : HITS_DEFAULT_ITERATIONS;
-      const hubKey = typeof site.params.hubProperty === 'string' && site.params.hubProperty.length > 0
-        ? site.params.hubProperty : HITS_HUB_KEY;
-      const authKey = typeof site.params.authProperty === 'string' && site.params.authProperty.length > 0
-        ? site.params.authProperty : HITS_AUTH_KEY;
+      const hubKey = stringParam(params, 'hubProperty', HITS_HUB_KEY);
+      const authKey = stringParam(params, 'authProperty', HITS_AUTH_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [
+        channels: [
           { key: hubKey, channel: HITS_HUB_CHANNEL, vtype: 'double' },
           { key: authKey, channel: HITS_AUTH_CHANNEL, vtype: 'double' },
-        ] },
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${HITS_SERVICE_NAME}: no graph store is available to compute HITS`);
-          const run = store.allocBarrierRun();
-          const N = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
-          if (N === 0) return { kind: 'relation-ref', run, round: 0 };
+        ],
+        core: (store, run): number => {
           // SEED round 0: hub = auth = 1 for every vertex (the reference init). The first auth half-step
           // overwrites auth from these hubs, so only hub=1 is load-bearing, but seeding both keeps round 0
           // a complete two-channel snapshot.
@@ -97,10 +87,10 @@ export function createHitsService(store: GraphStore | undefined): Service {
               [run, r, HITS_HUB_CHANNEL, run, r, HITS_AUTH_CHANNEL]);
             hitsNormalize(store, run, r, HITS_HUB_CHANNEL);
           }
-          return { kind: 'relation-ref', run, round: iterations };
-        }),
+          return iterations;
+        },
       };
     },
-  };
+  });
 }
 

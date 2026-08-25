@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { CLOSENESS_SERVICE_NAME, HARMONIC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, relaxShortestPath, syncBarrier } from './kernel.ts';
+import { STATE_INSERT, decorateBarrier, relaxShortestPath, stringParam } from './kernel.ts';
 
 // ---------- mogwai.closeness — closeness centrality, a scope-keyed DECORATE barrier ----------
 //
@@ -25,9 +25,9 @@ const HARMONIC_KEY = 'harmonic';
  *  `cval > 0`) — written at (scope 0, channel 0) for the decorate resume. Every vertex gets a row (LEFT
  *  JOIN), so an unreached vertex aggregates over zero rows; `scoreExpr` must be null-safe there. The two
  *  algorithms differ ONLY in that one expression, which is why they share this. */
-function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCount: number) => string): BarrierRelation {
+function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCount: number) => string): number {
   const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
-  if (ids.length === 0) return { kind: 'relation-ref', run, round: 0 };
+  if (ids.length === 0) return 0;
   const distRound = relaxShortestPath(store, run, ids, { direction: 'in', labels: [] }, undefined);
   const scoreRound = 2; // relaxShortestPath alternates slots 0/1 only, so 2 is a free round
   store.query('DELETE FROM barrier_state WHERE run = ? AND round = ?', [run, scoreRound]);
@@ -39,7 +39,7 @@ function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCoun
            ON bs.run = ? AND bs.round = ? AND bs.channel = 0 AND bs.scope = n.id AND bs.cval > 0
         GROUP BY n.id`,
     [run, scoreRound, run, distRound]);
-  return { kind: 'relation-ref', run, round: scoreRound };
+  return scoreRound;
 }
 
 /** One distance-centrality DECORATE barrier — closeness or harmonic — given its name, default property
@@ -47,26 +47,15 @@ function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCoun
 function distanceCentralityService(
   serviceName: string, defaultKey: string, scoreExpr: (nodeCount: number) => string, store: GraphStore | undefined,
 ): Service {
-  return {
+  return decorateBarrier({
     name: serviceName,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key for the score (default ${defaultKey})` }),
-    resolve: (site) => {
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : defaultKey;
-      return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'double' }] },
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${serviceName}: no graph store is available`);
-          return distanceCentrality(store, store.allocBarrierRun(), scoreExpr);
-        }),
-      };
-    },
-  };
+    plan: (params) => ({
+      channels: [{ key: stringParam(params, 'propertyName', defaultKey), channel: 0, vtype: 'double' }],
+      core: (store, run): number => distanceCentrality(store, run, scoreExpr),
+    }),
+  });
 }
 
 /** closeness = reached / farness (GDS DefaultCentralityComputer): count of reaching nodes over the sum

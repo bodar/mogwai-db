@@ -1,7 +1,7 @@
-import type { BarrierRelation, CallParams, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { WCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, changedCount, edgeScopeOf, iterateInSql, syncBarrier, type Slot } from './kernel.ts';
+import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
 
 // ---------- mogwai.wcc — connectedComponent(), a DECORATE barrier ----------
 //
@@ -24,47 +24,31 @@ const CC_COMPONENT_KEY = 'gremlin.connectedComponentVertexProgram.component';
 const CC_PROPERTY_NAME = '~tinkerpop.connectedComponent.propertyName';
 const CC_EDGES = '~tinkerpop.connectedComponent.edges';
 
-/** The decorated key: the `~tinkerpop.connectedComponent.propertyName` override, else the canonical
- *  reference key. */
-function componentKey(params: CallParams): string {
-  const name = params[CC_PROPERTY_NAME];
-  return typeof name === 'string' && name.length > 0 ? name : CC_COMPONENT_KEY;
-}
-
 /** connectedComponent() over a store: an async DECORATE barrier computing WCC globally. The store is
  *  captured at construction (app-scope DI, like federate/io); a compile-only scope has none, but a
  *  DECORATE barrier is `'do'` residency and its `apply` runs only where the store exists. */
 export function createWccService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: WCC_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key to write the component id under (default ${CC_COMPONENT_KEY})` }),
-    resolve: (site) => {
-      const mode = site.params.mode;
-      if (mode !== undefined && mode !== 'decorate')
-        throw new Error(`${WCC_SERVICE_NAME}: only decorate mode (the native connectedComponent() step) is implemented yet, not "${String(mode)}"`);
+    plan: (params) => {
       // connectedComponent is UNDIRECTED (default bothE); union-find is symmetric, so a `both` scope is
       // exactly right and a directional (out/in) scope is a different, directional min-propagation we do
       // not model yet — fail closed rather than answer the undirected question for a directed scope.
-      const scope = edgeScopeOf(site.params[CC_EDGES], 'both', WCC_SERVICE_NAME);
+      const scope = edgeScopeOf(params[CC_EDGES], 'both', WCC_SERVICE_NAME);
       if (scope.direction !== 'both')
         throw new Error(`${WCC_SERVICE_NAME}: only an undirected (bothE) edge scope is supported yet, not ${scope.direction}E`);
-      const key = componentKey(site.params);
+      const key = stringParam(params, CC_PROPERTY_NAME, CC_COMPONENT_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'string' }] }, // a component id is the min external-id STRING
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${WCC_SERVICE_NAME}: no graph store is available to compute connected components`);
-          const run = store.allocBarrierRun();
+        channels: [{ key, channel: 0, vtype: 'string' }], // a component id is the min external-id STRING
+        core: (store, run): number => {
           const { cte, labelBinds } = adjacencyCte(scope);
           // Seed each component to the vertex's external-id STRING (stored in `cval`, in SQL). Each
           // round takes the lexicographic MIN over {self} ∪ {neighbours} (the `e` CTE carries both
           // directions for bothE), writing the next slot. Fixpoint in ≤ diameter rounds; |V|+1 is the
           // safe backstop — one scalar COUNT, not the vertex vector.
-          const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c + 1;
+          const backstop = nodeCount(store) + 1;
           const seed = () => store.query(
             `${STATE_INSERT} SELECT ?, 0, 0, id, 0, CAST(COALESCE(uid, id) AS TEXT) FROM nodes`,
             [run]);
@@ -76,11 +60,10 @@ export function createWccService(store: GraphStore | undefined): Service {
              ${STATE_INSERT}
                SELECT ?, ?, 0, n.id, 0, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
             [...labelBinds, run, prev, run, next]);
-          const round = iterateInSql(store, run, seed, step,
+          return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
-          return { kind: 'relation-ref', run, round };
-        }),
+        },
       };
     },
-  };
+  });
 }

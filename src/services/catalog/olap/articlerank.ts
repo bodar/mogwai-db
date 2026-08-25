@@ -1,8 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { ARTICLE_RANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, adjacencyCte, edgeScopeOf } from './kernel.ts';
-import { syncBarrier } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
 
 // ---------- mogwai.articleRank — ArticleRank, a MULTI-CHANNEL BSP decorate barrier ----------
 //
@@ -40,38 +39,27 @@ const AR_DELTA_CHANNEL = 1;
 /** articleRank() over a store: a multi-channel BSP DECORATE barrier. The store is captured at
  *  construction (app-scope DI); `apply` reads the graph and replays GDS's delta-accumulation. */
 export function createArticleRankService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: ARTICLE_RANK_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({
       propertyName: `the vertex property key to write the rank under (default ${AR_KEY})`,
       maxIterations: `iteration cap (default ${AR_MAX_ITERATIONS})`,
       dampingFactor: `damping factor (default ${AR_DAMPING_DEFAULT})`,
       tolerance: `per-node halt tolerance on the delta (default ${AR_TOLERANCE_DEFAULT})`,
     }),
-    resolve: (site) => {
-      const mode = site.params.mode;
-      if (mode !== undefined && mode !== 'decorate')
-        throw new Error(`${ARTICLE_RANK_SERVICE_NAME}: only decorate mode is implemented yet, not "${String(mode)}"`);
-      const scope = edgeScopeOf(site.params[AR_EDGES], 'out', ARTICLE_RANK_SERVICE_NAME);
-      const damping = typeof site.params.dampingFactor === 'number' ? site.params.dampingFactor : AR_DAMPING_DEFAULT;
-      const tolerance = typeof site.params.tolerance === 'number' ? site.params.tolerance : AR_TOLERANCE_DEFAULT;
-      const maxIterParam = site.params.maxIterations;
+    plan: (params) => {
+      const scope = edgeScopeOf(params[AR_EDGES], 'out', ARTICLE_RANK_SERVICE_NAME);
+      const damping = typeof params.dampingFactor === 'number' ? params.dampingFactor : AR_DAMPING_DEFAULT;
+      const tolerance = typeof params.tolerance === 'number' ? params.tolerance : AR_TOLERANCE_DEFAULT;
+      const maxIterParam = params.maxIterations;
       const maxIterations = typeof maxIterParam === 'number' && Number.isInteger(maxIterParam) && maxIterParam >= 1
         ? maxIterParam : AR_MAX_ITERATIONS;
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : AR_KEY;
+      const key = stringParam(params, 'propertyName', AR_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: AR_RANK_CHANNEL, vtype: 'double' }] }, // rank is the decorated channel; delta (1) is internal
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${ARTICLE_RANK_SERVICE_NAME}: no graph store is available to compute ArticleRank`);
-          const run = store.allocBarrierRun();
-          const N = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
-          if (N === 0) return { kind: 'relation-ref', run, round: 0 };
+        channels: [{ key, channel: AR_RANK_CHANNEL, vtype: 'double' }], // rank is the decorated channel; delta (1) is internal
+        core: (store, run): number => {
+          const N = nodeCount(store);
           const alpha = 1 - damping;
           const { cte, labelBinds } = adjacencyCte(scope);
           // avgDegree = mean out-degree over the scope = |E| / |N| (one scalar; the edge count in the
@@ -104,9 +92,9 @@ export function createArticleRankService(store: GraphStore | undefined): Service
                    FROM nodes n LEFT JOIN pr ON pr.id = n.id LEFT JOIN nd ON nd.id = n.id`,
               [run, r - 1, AR_RANK_CHANNEL, run, r, AR_DELTA_CHANNEL, run, r, AR_RANK_CHANNEL]);
           }
-          return { kind: 'relation-ref', run, round: maxIterations - 1 };
-        }),
+          return maxIterations - 1;
+        },
       };
     },
-  };
+  });
 }

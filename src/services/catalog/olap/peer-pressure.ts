@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { PEER_PRESSURE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, changedCount, edgeScopeOf, iterateInSql, syncBarrier, type Slot } from './kernel.ts';
+import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, stringParam, type Slot } from './kernel.ts';
 
 // ---------- mogwai.peerPressure — peerPressure(), a DECORATE barrier ----------
 //
@@ -20,26 +20,16 @@ const PP_MAX_ITERATIONS = 30;
 
 /** peerPressure() over a store: an async DECORATE barrier. */
 export function createPeerPressureService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: PEER_PRESSURE_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key to write the cluster id under (default ${PP_CLUSTER_KEY})` }),
-    resolve: (site) => {
-      const mode = site.params.mode;
-      if (mode !== undefined && mode !== 'decorate')
-        throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: only decorate mode (the native peerPressure() step) is implemented yet, not "${String(mode)}"`);
-      const scope = edgeScopeOf(site.params[PP_EDGES], 'out', PEER_PRESSURE_SERVICE_NAME);
-      const nameOverride = site.params[PP_PROPERTY_NAME];
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PP_CLUSTER_KEY;
+    plan: (params) => {
+      const scope = edgeScopeOf(params[PP_EDGES], 'out', PEER_PRESSURE_SERVICE_NAME);
+      const key = stringParam(params, PP_PROPERTY_NAME, PP_CLUSTER_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'int' }] }, // a cluster id is a vertex id (integer rowid, modern graph)
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${PEER_PRESSURE_SERVICE_NAME}: no graph store is available to compute clusters`);
-          const run = store.allocBarrierRun();
+        channels: [{ key, channel: 0, vtype: 'int' }], // a cluster id is a vertex id (integer rowid, modern graph)
+        core: (store, run): number => {
           const { cte, labelBinds } = adjacencyCte(scope);
           // Seed each cluster to the vertex's external id (in `cval`, in SQL). Each round: every vertex
           // tallies the votes of {itself} ∪ {its voters} (strength 1 each; `e` is voter→receiver) and
@@ -59,11 +49,10 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
              ${STATE_INSERT}
                SELECT ?, ?, 0, id, 0, c FROM ranked WHERE rn = 1`,
             [...labelBinds, run, prev, run, next]);
-          const round = iterateInSql(store, run, seed, step,
+          return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), PP_MAX_ITERATIONS, (d) => d === 0);
-          return { kind: 'relation-ref', run, round };
-        }),
+        },
       };
     },
-  };
+  });
 }

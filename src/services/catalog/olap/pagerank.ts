@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { PAGERANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, edgeScopeOf, iterateInSql, sumAbsDelta, syncBarrier, type Slot } from './kernel.ts';
+import { STATE_INSERT, VEC, adjacencyCte, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, sumAbsDelta, type Slot } from './kernel.ts';
 
 // ---------- mogwai.pageRank — pageRank(), a DECORATE barrier ----------
 //
@@ -28,35 +28,25 @@ const PR_MAX_ITERATIONS = 20;
 /** pageRank() over a store: an async DECORATE barrier. The store is captured at construction (app-scope
  *  DI); `apply` reads the graph and replays the reference BSP. */
 export function createPageRankService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: PAGERANK_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key to write the rank under (default ${PR_PAGERANK_KEY})` }),
-    resolve: (site) => {
-      const mode = site.params.mode;
-      if (mode !== undefined && mode !== 'decorate')
-        throw new Error(`${PAGERANK_SERVICE_NAME}: only decorate mode (the native pageRank() step) is implemented yet, not "${String(mode)}"`);
+    plan: (params) => {
       // Default message scope is outE (rank flows along out-edges); a custom scope is honoured.
-      const scope = edgeScopeOf(site.params[PR_EDGES], 'out', PAGERANK_SERVICE_NAME);
-      const alpha = typeof site.params.dampingFactor === 'number' ? site.params.dampingFactor : PR_ALPHA_DEFAULT;
+      const scope = edgeScopeOf(params[PR_EDGES], 'out', PAGERANK_SERVICE_NAME);
+      const alpha = typeof params.dampingFactor === 'number' ? params.dampingFactor : PR_ALPHA_DEFAULT;
       // `~tinkerpop.pageRank.times` caps the PROPAGATION rounds (VertexProgramStep sets maxIterations =
       // times + 1; the reference's iteration 1 is the seed, so `times` is the number of propagation
       // rounds after it). Absent → run to ε-convergence, ≤ PR_MAX_ITERATIONS.
-      const timesParam = site.params[PR_TIMES];
+      const timesParam = params[PR_TIMES];
       const times = typeof timesParam === 'number' && Number.isInteger(timesParam) ? timesParam : undefined;
-      const nameOverride = site.params[PR_PROPERTY_NAME];
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : PR_PAGERANK_KEY;
+      const key = stringParam(params, PR_PROPERTY_NAME, PR_PAGERANK_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'double' }], seedFromInput: true }, // a PageRank score is a double; initial rank = incoming count
-        ...syncBarrier((rows): BarrierRelation => {
-          if (!store)
-            throw new Error(`${PAGERANK_SERVICE_NAME}: no graph store is available to compute PageRank`);
-          const run = store.allocBarrierRun();
-          const N = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c; // one scalar, not the vertex set
-          if (N === 0) return { kind: 'relation-ref', run, round: 0 }; // nothing seeded → empty relation
+        channels: [{ key, channel: 0, vtype: 'double' }], // a PageRank score is a double
+        seedFromInput: true, // initial rank = incoming count
+        core: (store, run, rows): number => {
+          const N = nodeCount(store); // one scalar, not the vertex set
           const { cte, labelBinds } = adjacencyCte(scope);
           // SEED slot 0, in SQL. A bare source → the uniform 1/N rank. A non-bare prefix hands us its
           // incoming per-vertex traverser count (`rows`, one per traverser carrying the EXTERNAL id) —
@@ -98,11 +88,10 @@ export function createPageRankService(store: GraphStore | undefined): Service {
           // as-is; times=1 means one round); default runs to ε-convergence within PR_MAX_ITERATIONS.
           const maxRounds = times ?? PR_MAX_ITERATIONS;
           const stop = times !== undefined ? () => false : (d: number) => d < PR_EPSILON;
-          const round = iterateInSql(store, run, seed, step,
+          return iterateInSql(store, run, seed, step,
             (p, n) => sumAbsDelta(store, run, p, n), maxRounds, stop);
-          return { kind: 'relation-ref', run, round };
-        }),
+        },
       };
     },
-  };
+  });
 }

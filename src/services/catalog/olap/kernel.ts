@@ -1,4 +1,4 @@
-import type { BarrierInput, BarrierRelation } from '../../spi/types.ts';
+import type { BarrierInput, BarrierRelation, CallParams, DecorateChannel, Service } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { isTraversalParam } from '../../params/call-params.ts';
 import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
@@ -105,6 +105,87 @@ export function syncBarrier(core: (rows: readonly BarrierInput[]) => BarrierRela
 } {
   return { apply: async (rows) => core(rows), applySync: core };
 }
+
+// ---------- the DECORATE-barrier factory: one Service shell for every per-vertex OLAP algorithm ----------
+//
+// Every OLAP algorithm that DECORATES each vertex with a score wraps a unique SQL core in the SAME
+// Service shell: `{ name, type:'barrier', internal:true, describeParams, resolve }` → resolve rejects a
+// non-`decorate` mode, resolves the property key(s), and returns `{ kind:'barrier', residency:'do',
+// decorate:{channels}, ...syncBarrier(core) }` where the core refuses a missing store, allocs a run,
+// short-circuits an empty graph, and returns the final `barrier_state` round. That shell is ~half of a
+// ~65-line algorithm file and was copy-pasted across eight of them; `decorateBarrier` is the one home so
+// an algorithm supplies ONLY its channels and its compute. `oneShotDecorate` (triangle) and
+// `distanceCentralityService` (centrality) are thin callers of it — the round-0 one-shot and the
+// distance-reduction cases fall out as trivial `plan`s.
+
+/** The `?, <round>` empty-graph / mode / store guards are the factory's; a `plan` supplies the rest. */
+export interface DecoratePlan {
+  /** One decorated property per `barrier_state` channel the compute writes (`DecorateSpec.channels`). */
+  readonly channels: readonly DecorateChannel[];
+  /** Set when the compute reads its incoming per-traverser multiplicity (pageRank's seed). */
+  readonly seedFromInput?: boolean;
+  /** The compute — store non-null, run allocated, graph non-empty (all guaranteed by the factory).
+   *  Runs the relaxation into `barrier_state` under `run` and returns the FINAL round. */
+  readonly core: (store: GraphStore, run: number, rows: readonly BarrierInput[]) => number;
+}
+
+/** A decorate barrier rejects any mode but the implicit `decorate` — fail closed rather than silently
+ *  answer the decorate question for a mode we do not model (`GroupStep`-style seeded merge, etc.). */
+function requireDecorateMode(params: CallParams, name: string): void {
+  const mode = params.mode;
+  if (mode !== undefined && mode !== 'decorate')
+    throw new Error(`${name}: only decorate mode is implemented yet, not "${String(mode)}"`);
+}
+
+/** Build a DECORATE barrier `Service` from its name, its `describeParams`, the app-scope store, and a
+ *  `plan(params)` that resolves the property key(s) into `channels` + the SQL `core`. The factory owns the
+ *  whole shell: the `type`/`internal` fields, the mode guard, `residency:'do'`, the `syncBarrier` wrapper,
+ *  the missing-store refusal, the run alloc, and the empty-graph short-circuit (round 0). */
+export function decorateBarrier(spec: {
+  readonly name: string;
+  readonly store: GraphStore | undefined;
+  readonly describeParams?: () => Record<string, string>;
+  readonly plan: (params: CallParams) => DecoratePlan;
+}): Service {
+  return {
+    name: spec.name,
+    type: 'barrier',
+    internal: true,
+    describeParams: spec.describeParams ?? (() => ({})),
+    resolve: (site) => {
+      requireDecorateMode(site.params, spec.name);
+      const { channels, seedFromInput, core } = spec.plan(site.params);
+      return {
+        kind: 'barrier',
+        residency: 'do',
+        decorate: seedFromInput ? { channels, seedFromInput } : { channels },
+        ...syncBarrier((rows): BarrierRelation => {
+          if (!spec.store) throw new Error(`${spec.name}: no graph store is available`);
+          const run = spec.store.allocBarrierRun();
+          if (nodeCount(spec.store) === 0) return { kind: 'relation-ref', run, round: 0 };
+          return { kind: 'relation-ref', run, round: core(spec.store, run, rows) };
+        }),
+      };
+    },
+  };
+}
+
+/** The vertex count — one scalar, the empty-graph guard and the several algorithms that need `N` (the
+ *  pageRank teleport, articleRank's average degree, the |V| Bellman-Ford backstop) share it. */
+export const nodeCount = (store: GraphStore): number =>
+  store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
+
+/** A non-empty string call param under `key`, else `dflt` — the `propertyName` override idiom every
+ *  decorate algorithm parses (some under a `~tinkerpop.<algo>.propertyName` key, some bare). */
+export const stringParam = (params: CallParams, key: string, dflt: string): string => {
+  const v = params[key];
+  return typeof v === 'string' && v.length > 0 ? v : dflt;
+};
+
+/** The undirected, de-duplicated adjacency `und(x, y)` — both directions, no self-loops, no parallels.
+ *  Shared by the undirected algorithms (k-core, triangle count / LCC). */
+export const UND = 'und(x, y) AS (SELECT DISTINCT a, b FROM '
+  + '(SELECT src AS a, tgt AS b FROM edges UNION SELECT tgt AS a, src AS b FROM edges) WHERE a <> b)';
 
 /** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_state`
  *  under `run`, in alternating slots (0/1) — it never enters JS. `seed()` writes slot 0; `step(prev,

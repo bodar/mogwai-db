@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { BETWEENNESS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, syncBarrier } from './kernel.ts';
+import { STATE_INSERT, decorateBarrier, nodeCount, stringParam } from './kernel.ts';
 
 // ---------- mogwai.betweenness — Brandes betweenness centrality ----------------------------------------
 //
@@ -30,24 +30,16 @@ const E = 'e(src, tgt) AS (SELECT src, tgt FROM edges)';
 
 /** betweenness() over a store: a multi-source, keep-all-rounds DECORATE barrier. */
 export function createBetweennessService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: BETWEENNESS_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key for the score (default ${BETWEENNESS_KEY})` }),
-    resolve: (site) => {
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : BETWEENNESS_KEY;
+    plan: (params) => {
+      const key = stringParam(params, 'propertyName', BETWEENNESS_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'double' }] },
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${BETWEENNESS_SERVICE_NAME}: no graph store is available to compute betweenness`);
-          const run = store.allocBarrierRun();
-          const N = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
-          if (N === 0) return { kind: 'relation-ref', run, round: 0 };
+        channels: [{ key, channel: 0, vtype: 'double' }],
+        core: (store, run): number => {
+          const N = nodeCount(store);
 
           // FORWARD: seed level 0 — every node is its own source with one shortest path to itself.
           store.query(`${STATE_INSERT} SELECT ?, 0, id, id, ${SIGMA}, 1 FROM nodes`, [run]);
@@ -99,9 +91,9 @@ export function createBetweennessService(store: GraphStore | undefined): Service
                  LEFT JOIN barrier_state bs ON bs.run = ? AND bs.channel = ${DELTA} AND bs.scope <> bs.id AND bs.id = n.id
                 GROUP BY n.id`,
             [run, finalRound, run]);
-          return { kind: 'relation-ref', run, round: finalRound };
-        }),
+          return finalRound;
+        },
       };
     },
-  };
+  });
 }

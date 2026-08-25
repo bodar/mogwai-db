@@ -1,7 +1,7 @@
-import type { BarrierRelation, Service } from '../../spi/types.ts';
+import type { Service } from '../../spi/types.ts';
 import { SCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, syncBarrier } from './kernel.ts';
+import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
 
 // ---------- mogwai.scc — strongly connected components, a ONE-SHOT decorate barrier ----------
 //
@@ -24,25 +24,15 @@ const SCC_COMPONENT_KEY = 'componentId';
 
 /** strongly connected components over a store: a ONE-SHOT directed DECORATE barrier. */
 export function createSccService(store: GraphStore | undefined): Service {
-  return {
+  return decorateBarrier({
     name: SCC_SERVICE_NAME,
-    type: 'barrier',
-    internal: true,
+    store,
     describeParams: () => ({ propertyName: `the vertex property key to write the component id under (default ${SCC_COMPONENT_KEY})` }),
-    resolve: (site) => {
-      const mode = site.params.mode;
-      if (mode !== undefined && mode !== 'decorate')
-        throw new Error(`${SCC_SERVICE_NAME}: only decorate mode is implemented yet, not "${String(mode)}"`);
-      const nameOverride = site.params.propertyName;
-      const key = typeof nameOverride === 'string' && nameOverride.length > 0 ? nameOverride : SCC_COMPONENT_KEY;
+    plan: (params) => {
+      const key = stringParam(params, 'propertyName', SCC_COMPONENT_KEY);
       return {
-        kind: 'barrier',
-        residency: 'do',
-        decorate: { channels: [{ key, channel: 0, vtype: 'string' }] }, // component id = min external-id STRING (wcc convention)
-        ...syncBarrier((): BarrierRelation => {
-          if (!store)
-            throw new Error(`${SCC_SERVICE_NAME}: no graph store is available to compute strongly connected components`);
-          const run = store.allocBarrierRun();
+        channels: [{ key, channel: 0, vtype: 'string' }], // component id = min external-id STRING (wcc convention)
+        core: (store, run): number => {
           // reach(a, b): a reaches b over directed edges (incl. a=a). Extend the frontier by following the
           // out-edges of the reached endpoint b. UNION dedups, so it converges in ≤ diameter expansions.
           // scc(v, rep): for each v, the min external-id over all u that are MUTUALLY reachable with v
@@ -63,9 +53,9 @@ export function createSccService(store: GraphStore | undefined): Service {
              ${STATE_INSERT}
                SELECT ?, 0, 0, n.id, 0, scc.rep FROM nodes n JOIN scc ON scc.v = n.id`,
             [run]);
-          return { kind: 'relation-ref', run, round: 0 };
-        }),
+          return 0;
+        },
       };
     },
-  };
+  });
 }
