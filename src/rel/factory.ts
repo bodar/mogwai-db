@@ -1,6 +1,7 @@
 import type { Expr } from './expr.ts';
 import { brandRel, type Rel, type RelInit, type RelKind, type RelNode, type Table } from './rel.ts';
 import type { RelId, SortTerm } from './types.ts';
+import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape } from './structure.ts';
 
 type Node<K extends RelKind> = Extract<Rel, { readonly kind: K }>;
 type Init<K extends RelKind> = RelInit<K>;
@@ -27,12 +28,10 @@ const node = <K extends RelKind>(kind: K, init: WithId<K>): Node<K> => {
 export const scan = (init: WithId<'scan'>): Node<'scan'> => node('scan', init);
 
 export const values = (init: WithId<'values'>): Node<'values'> => {
-  // SQLite has no empty `VALUES` and no empty select list, so neither shape is constructible.
-  // An empty relation is `Filter(false)` over something, which says what it means; `Values([])`
-  // rendered to `SELECT  FROM (VALUES )` — invalid SQL that only failed at the database.
-  if (!init.rows.length) throw new Error('RelIR: Values requires at least one row; an empty relation is a Filter, not an empty VALUES');
-  if (!init.type.cols.length) throw new Error('RelIR: Values requires at least one column');
-  for (const row of init.rows) if (row.length !== init.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${init.type.cols.length}`);
+  // An empty relation is `Filter(false)` over something, which says what it means; `Values([])` would
+  // render to `SELECT  FROM (VALUES )` — invalid SQL that only failed at the database. The shape laws
+  // (non-empty rows/cols, uniform row width) live in structure.ts, shared with the checker.
+  checkValuesShape(init);
   return node('values', { ...init, rows: freeze(init.rows.map((row) => freeze([...row]))) });
 };
 /** A reference to a `Plan` binding (§3.0) — a named CTE when the binding is a `Rel`, an earlier
@@ -49,11 +48,7 @@ export const filter = (init: WithId<'filter'>): Node<'filter'> => node('filter',
  * expressions, not just the aggregates that already carry one. */
 export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => {
   named(init.aggs);
-  const declared = init.type.cols.map((column) => column.name);
-  if (declared.length !== init.groupBy.length + init.aggs.length)
-    throw new Error(`RelIR: Aggregate declares ${declared.length} columns but emits ${init.groupBy.length} group keys and ${init.aggs.length} aggregates`);
-  if (init.aggs.some(([name], i) => name !== declared[init.groupBy.length + i]))
-    throw new Error('RelIR: Aggregate output must be its group keys followed by its aggregates');
+  checkAggregateShape(init);
   return node('aggregate', init);
 };
 export const sort = (init: WithId<'sort'>): Node<'sort'> => node('sort', { ...init, terms: freeze([...init.terms] as SortTerm[]) });
@@ -77,19 +72,10 @@ export const materialize = (init: WithId<'materialize'>): Node<'materialize'> =>
 /** A join's output is its sides' columns POSITIONALLY — left then right, or the left alone for the
  * existence forms. The declared type supplies the names, because two sides routinely carry the same
  * one and `Col{rel, name}` cannot say which it meant; a duplicate is a construction error rather
- * than a silent last-write-wins, for the same reason two relations may not share a `RelId`. */
-export const joinWidth = (init: Pick<RelNode<'join'>, 'left' | 'right' | 'join'>): number =>
-  init.left.type.cols.length + (init.join === 'semi' || init.join === 'anti' ? 0 : init.right.type.cols.length);
-
+ * than a silent last-write-wins, for the same reason two relations may not share a `RelId`. The width,
+ * ON, order and duplicate-name laws live in structure.ts, shared with the checker (`joinWidth` too). */
 export const join = (init: WithId<'join'>): Node<'join'> => {
-  if (init.join === 'cross' && init.on) throw new Error('RelIR: cross join must not have an ON expression');
-  if ((init.join === 'inner' || init.join === 'left') && !init.on) throw new Error(`RelIR: ${init.join} join requires an ON expression`);
-  if (init.ordered && init.join !== 'inner') throw new Error(`RelIR: only an inner Join may pin its order; ${init.join} may not`);
-  const width = joinWidth(init);
-  if (init.type.cols.length !== width)
-    throw new Error(`RelIR: a ${init.join} Join emits its sides' ${width} columns; its type declares ${init.type.cols.length}`);
-  const declared = init.type.cols.map((column) => column.name);
-  if (new Set(declared).size !== declared.length) throw new Error('RelIR: a Join declares a duplicate output name');
+  checkJoinShape(init);
   return node('join', init);
 };
 export const union = (init: WithId<'union'>): Node<'union'> => {
@@ -97,8 +83,7 @@ export const union = (init: WithId<'union'>): Node<'union'> => {
   return node('union', init);
 };
 export const recursive = (init: WithId<'recursive'>): Node<'recursive'> => {
-  const output = init.type.cols.map((column) => column.name);
-  if (init.cols.length !== output.length || init.cols.some((name, i) => name !== output[i])) throw new Error('RelIR: Recursive CTE header must match its output columns');
+  checkRecursiveHeader(init);
   let built: Rel | undefined;
   return node('recursive', { ...init, step: (self) => built ??= init.step(self) });
 };

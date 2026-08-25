@@ -1,5 +1,6 @@
 import { bindsAsParameter, type Expr } from './expr.ts';
-import { joinWidth, scan } from './factory.ts';
+import { scan } from './factory.ts';
+import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape } from './structure.ts';
 import { checkChannels } from './obligations.ts';
 import { recursiveViolation } from './recursive.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
@@ -189,13 +190,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     // but legitimately extend their declared type, so the two overlapping sets are not one law.
     filter: preservingType, sort: preservingType, limit: preservingType, distinct: preservingType,
     materialize: preservingType, explode: () => {}, window: () => {},
-    aggregate: (node) => {
-      const declared = node.type.cols.map((column) => column.name);
-      if (declared.length !== node.groupBy.length + node.aggs.length)
-        throw new Error(`RelIR: Aggregate declares ${declared.length} columns but emits ${node.groupBy.length} group keys and ${node.aggs.length} aggregates`);
-      if (node.aggs.some(([name], i) => name !== declared[node.groupBy.length + i]))
-        throw new Error('RelIR: Aggregate output must be its group keys followed by its aggregates');
-    },
+    aggregate: (node) => checkAggregateShape(node),
     'self-ref': (node, scope) => {
       if (!scope.recursive || !scope.recursive.allowed || node.name !== scope.recursive.name)
         throw new Error('RelIR: SelfRef is legal only in its Recursive step');
@@ -207,12 +202,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       if (!bound) throw new Error(`RelIR: Ref '${node.name}' is not a Plan binding declared before this point`);
       if (!sameColumns(node.type.cols, bound.type.cols)) throw new Error(`RelIR: Ref '${node.name}' type must match its binding's`);
     },
-    values: (node) => {
-      if (!node.rows.length) throw new Error('RelIR: Values requires at least one row; an empty relation is a Filter, not an empty VALUES');
-      if (!node.type.cols.length) throw new Error('RelIR: Values requires at least one column');
-      for (const row of node.rows) if (row.length !== node.type.cols.length)
-        throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${node.type.cols.length}`);
-    },
+    values: (node) => checkValuesShape(node),
     project: (node) => {
       const names = node.exprs.map(([name]) => name);
       if (new Set(names).size !== names.length) throw new Error('RelIR: Project declares a duplicate output name');
@@ -221,20 +211,10 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     join: (node) => {
       // Both sides land in ONE `FROM`, and a derived side is introduced under its RelId — so two
       // sides sharing an id emit the same SQL alias twice ("ambiguous column name"). A replicated
-      // subplan (what `unroll` produces) must carry its own ids, not be the same node twice.
+      // subplan (what `unroll` produces) must carry its own ids, not be the same node twice. This is a
+      // TREE law a factory cannot see, so it stays here; the shape laws (ON/order/width/dup-name) are shared.
       if (node.left.id === node.right.id) throw new Error(`RelIR: a Join's sides must be distinct relations; both are '${node.left.id}'`);
-      const needsOn = node.join === 'inner' || node.join === 'left';
-      if ((node.join === 'cross' && node.on) || (needsOn && !node.on))
-        throw new Error(`RelIR: ${node.join} join ${node.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
-      if (node.ordered && node.join !== 'inner')
-        throw new Error(`RelIR: only an inner Join may pin its order; ${node.join} may not`);
-      // The emitter names the join's output positionally from both sides, so the declared width and
-      // the uniqueness of those names are what make a `Col` against the join resolvable at all.
-      const width = joinWidth(node);
-      if (node.type.cols.length !== width)
-        throw new Error(`RelIR: a ${node.join} Join emits its sides' ${width} columns; its type declares ${node.type.cols.length}`);
-      const declared = node.type.cols.map((column) => column.name);
-      if (new Set(declared).size !== declared.length) throw new Error('RelIR: a Join declares a duplicate output name');
+      checkJoinShape(node);
       if (node.join === 'left' && node.type.cols.slice(node.left.type.cols.length).some((column) => !column.nullable))
         throw new Error("RelIR: a left Join's right-side output columns must be nullable");
     },
@@ -244,9 +224,9 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
         throw new Error('RelIR: Union inputs and output must have identical columns');
     },
     recursive: (node) => {
-      if (!sameNames(node.cols, node.type.cols.map((column) => column.name))) throw new Error('RelIR: Recursive CTE header must match its output columns');
+      checkRecursiveHeader(node);
       // THE SAME ANSWER THE LOWERING DECLINES ON. Here it is a bug in whatever built the plan, so it
-      // throws; `recursive.ts` states why one function serves both.
+      // throws; `recursive.ts` states why one function serves both. A TREE law, so it stays here.
       const violation = recursiveViolation(node);
       if (violation) throw new Error(`RelIR: ${violation}`);
     },
