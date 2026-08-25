@@ -16,7 +16,8 @@ import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, inBody, type ChainCtx, type ElementSubject } from './chain.ts';
-import { continueAs, foldedListSet, nestedFirstValue, scalarChild } from '../lower.ts';
+import { continueAs } from '../lower.ts';
+import { foldedListSet, nestedFirstValue, scalarChild } from './reduction.ts';
 
 // FILTER / PREDICATE FAMILY — a step or a sub-traversal body lowered to a boolean `Expr`:
 // correlatedExists (a body as EXISTS), bodyPredicate/childPredicate/valuePredicate (the three shapes a

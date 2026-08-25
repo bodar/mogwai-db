@@ -24,7 +24,8 @@ import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
 import { pathCarried } from '../path.ts';
 import { BULK, encounterOf, originOf, type ChainCtx } from './chain.ts';
-import { childSeam, dropPath, orderRows, perOriginWindow, reverseCollation } from '../lower.ts';
+import { dropPath, orderRows } from '../lower.ts';
+import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
 
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
