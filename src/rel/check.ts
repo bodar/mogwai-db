@@ -7,7 +7,7 @@ import { isRel, type Rel, type RelKind } from './rel.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { exprChildren, exprRels, recursiveStep, refNames, relChildren, relExprs } from './walk.ts';
-import { EXCLUDED } from './types.ts';
+import { EXCLUDED, sameColumns, sameNames } from './types.ts';
 
 export const DO_BIND_CAP = 100;
 
@@ -64,13 +64,6 @@ const add = (scope: Scope, rel: Rel): Scope => {
 const excludedRow = (target: Extract<Rel, { readonly kind: 'scan' }>): Rel =>
   scan({ id: EXCLUDED, table: target.table, alias: 'excluded', channels: target.channels, type: target.type });
 const root = (bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false, bindings });
-const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
-  left.length === right.length && left.every((column, i) => {
-    const other = right[i];
-    return other?.name === column.name && other.type === column.type && other.nullable === column.nullable;
-  });
-const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
-  left.length === right.length && left.every((name, i) => name === right[i]);
 /**
  * The binds this node will render, counting a repeated wire PARAMETER ONCE.
  *

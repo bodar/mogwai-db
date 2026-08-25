@@ -1,6 +1,7 @@
 import { fromTree, fusedInto } from './block.ts';
 import type { Expr } from './expr.ts';
 import type { Rel, RelKind } from './rel.ts';
+import { sameColumns } from './types.ts';
 import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, relChildren, relExprs } from './walk.ts';
 
 /**
@@ -117,12 +118,6 @@ const fencedSelf = (term: Rel, name: string): boolean => {
   forEachRel(term, (r) => { if (r.kind === 'materialize' && containsSelfRef(r, name)) fenced = true; });
   return fenced;
 };
-
-const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
-  left.length === right.length && left.every((column, i) => {
-    const other = right[i];
-    return other?.name === column.name && other.type === column.type && other.nullable === column.nullable;
-  });
 
 /**
  * WHY THIS `Recursive` IS ILLEGAL, or `undefined` when it is not — the message WITHOUT the `RelIR: `

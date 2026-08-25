@@ -1,5 +1,6 @@
 import { barrierChannels, CHANNEL_GROUP_POLICY, channelCols, groupableChannels, mergeChannels, rigidChannels, rowUniqueChannels, sameChannels, type Channels } from '../channels.ts';
 import type { Rel, RelKind } from './rel.ts';
+import { sameNames } from './types.ts';
 import { recursiveStep } from './walk.ts';
 
 /**
@@ -21,8 +22,6 @@ import { recursiveStep } from './walk.ts';
 export type ChannelObligation<K extends RelKind> = (node: Extract<Rel, { readonly kind: K }>) => void;
 
 const names = (node: Rel): readonly string[] => node.type.cols.map((column) => column.name);
-const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
-  left.length === right.length && left.every((name, i) => name === right[i]);
 
 /** Every node: a carried channel it CLAIMS must be a column it actually emits. */
 const declares = (node: Rel): void => {

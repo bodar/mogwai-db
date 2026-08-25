@@ -11,6 +11,18 @@ export interface ColMeta {
 
 export interface RelType { readonly cols: readonly ColMeta[]; }
 
+/** Positional column equality — same name, SQL type, and nullability at each position. The one
+ *  definition the checker, the recursive fence, and the channel obligations all compare types with. */
+export const sameColumns = (left: RelType['cols'], right: RelType['cols']): boolean =>
+  left.length === right.length && left.every((column, i) => {
+    const other = right[i];
+    return other?.name === column.name && other.type === column.type && other.nullable === column.nullable;
+  });
+
+/** Positional name equality — the one definition the column-name comparisons share. */
+export const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every((name, i) => name === right[i]);
+
 /** A lexical relation identity. Expressions name relations, never emitter aliases. */
 export type RelId = string & { readonly __relId: unique symbol };
 export const relId = (name: string): RelId => name as RelId;
