@@ -394,6 +394,13 @@ const COVERED = [
   'g.V().values("age").as("a").select("a")', 'g.V().values("age").as("a").select("a").is(P.gt(30))',
   'g.V().values("name").as("a").select("a").count()',
   'g.V().as("a").values("name").select("a")', 'g.V().as("a").values("name").select("a").values("name")',
+  // `select(name)` where NAME is a NAMED COLLECTION resolves the side effect (not a path label) and
+  // CROSS-joins the finished collection onto the surviving traverser stream — `count(Scope.local)` then
+  // counts its entries, and `select` back to a still-live path LABEL after it composes (the alias map
+  // rides through the join). Reads, a repeat/unfold composition, and a write all compose.
+  "g.V().groupCount('a').select('a').count(local)",
+  "g.V().group('a').by('name').by().select('a').count(local)",
+  "g.V().repeat(__.aggregate('x')).times(2).select('x').limit(1).unfold()",
   // …and over a LIST stream, where the whole collection is ONE entry tagged `list`, carrying the
   // member encoding the fold produced so the member frame is re-entered with it rather than a guess.
   'g.V().values("name").fold().as("a").select("a")',
@@ -524,9 +531,10 @@ const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
   // refusal (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
-  // RelIR now expresses that as the `Filter(false)` §3.3 names. The remaining guard is the one where
-  // being empty would be WRONG: a name that resolves in a scope this record builder cannot see.
-  "g.V().groupCount('a').select('a')", // a NAMED COLLECTION resolves as a side effect, not as a label
+  // RelIR now expresses that as the `Filter(false)` §3.3 names.
+  // NOTE: `g.V().groupCount('a').select('a')` LEFT this list too — a NAMED COLLECTION resolves as a
+  // side effect (`Scoping.getScopeValue` consults them before the path), and `select(name)` now
+  // CROSS-joins the finished collection onto the surviving traverser stream. See COVERED.
   // NOTE: `union(__.out())` used to sit here — a SINGLE arm. `union(t)` IS `t` (`UnionStep`'s one branch
   // takes every traverser), so it is no longer refused; a single REDUCTION arm still declines (it owes the
   // batched empty-input gate), which is what `union(__.count())` below pins.

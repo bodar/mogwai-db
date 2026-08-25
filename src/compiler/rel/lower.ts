@@ -956,6 +956,15 @@ function collectionArm(
     // `select` RE-ROOTS to an aliased object — a retype, so a carried path is DROPPED (its work is
     // done: a `simplePath()` filtered the stream) rather than declined. No-op over a scalar stream.
     rel = dropPath(rel, fresh);
+    // A `select(name)` whose name is a NAMED COLLECTION resolves to that side effect, NOT a path label:
+    // `Scoping.getScopeValue` consults `traverser.getSideEffects()` BEFORE the path
+    // (`vendor/tinkerpop/.../step/Scoping.java:119-131`), so the finished collection wins even over an
+    // `as(name)`. `SelectStep` then emits the WHOLE collection once per surviving traverser, which is a
+    // CROSS join of the stream onto the reduced value — the same shape `foreign.ts` uses for a
+    // constant sub-traversal. `count(Scope.local)` over it then counts the map's entries.
+    const collectSelect = selectCollection(step, rel, ctx, fresh);
+    if (collectSelect !== 'pass')
+      return { tail: collectSelect && continueAs(collectSelect.rel, collectSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
     const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing, named: namedElsewhere(ctx) });
     if (!selected) return { tail: null };
     return { tail: continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels) };
@@ -1045,6 +1054,58 @@ function collectionArm(
   }
 
   return 'pass';
+}
+
+/**
+ * `select(name)` where `name` is a NAMED COLLECTION (a `group`/`groupCount`/`aggregate` side effect) —
+ * `'pass'` when it is not (the caller keeps looking, falling through to `selectKeys`), `null` to decline,
+ * else the reduced collection value CROSS-joined onto the surviving traverser stream.
+ *
+ * `Scoping.getScopeValue` consults the side effects before the path labels, so a single-key `select`
+ * naming a collection resolves to the FINISHED collection whatever an `as()` bound. `SelectStep` emits it
+ * once per surviving traverser — N rows, each the same value — which is exactly a CROSS join of the
+ * stream's channels (its rows and their encounter) with the one-row reduced value (`readCollection`, the
+ * same relation `cap(name)` reads). The value's payload columns ride through unchanged, so its framing is
+ * carried verbatim and the map/list tail takes the rest of the chain (`count(Scope.local)` → the map
+ * size).
+ *
+ * A `by()` modulator over a collection select is a different projection (over the members) and is not
+ * built — it declines. A MULTI-key select mixing a collection name with labels is likewise left to
+ * `selectKeys`' record path (no scenario needs the collection there).
+ */
+function selectCollection(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter): FramedRel | null | 'pass' {
+  if (step.modulators?.length || step.optionArms) return 'pass';
+  const spec = selectSpec(step);
+  if (!spec || spec.labels.length !== 1) return 'pass';
+  const name = spec.labels[0]!;
+  if (!collectionOf(step, ctx.collections) && !ctx.collections.has(name)) return 'pass';
+  const value = readCollection(step, ctx.collections, ctx.source, fresh);
+  if (!value) return null;
+  // CROSS the stream's CHANNELS (rows + encounter) with the one-row value. The channels ride on the
+  // LEFT and the value's payload on the RIGHT, projected back to the value's own columns plus the
+  // carried channels — the `foreignRejoin` shape, minus the injection ON.
+  const channels = rel.channels;
+  const stream = make.project({
+    id: fresh('scc'), input: rel, channels, type: typeOf(...carriedCols(channels)),
+    exprs: channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const),
+  });
+  // Positional: LEFT (the stream's channels) then RIGHT (the value's payload).
+  const joined = make.join({
+    id: fresh('scj'), left: stream, right: value.rel, join: 'cross', channels,
+    type: typeOf(...carriedCols(channels), ...value.rel.type.cols),
+  });
+  // A Join emits its sides' columns POSITIONALLY under the JOIN's own id, so the project above it reads
+  // `joined`, never the join's inputs (referencing an input from above the join is the "not in scope"
+  // error — the input is buried inside the join).
+  return {
+    rel: make.project({
+      id: fresh('scp'), input: joined, channels,
+      type: typeOf(...value.rel.type.cols, ...carriedCols(channels)),
+      exprs: [...value.rel.type.cols.map((c) => [c.name, col(joined.id, c.name)] as const),
+        ...channels.map((ch) => [ch.col, col(joined.id, ch.col)] as const)],
+    }),
+    framing: value.framing,
+  };
 }
 
 function scalarTail(

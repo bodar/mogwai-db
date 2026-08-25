@@ -134,6 +134,25 @@ describe('group / properties SQL', () => {
     expect(await dec("g.V().groupCount().by('name').select('marko')")).toEqual([1]);
   });
 
+  test('select(name) over a NAMED COLLECTION cross-joins the finished side effect onto the stream', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+    // `Scoping.getScopeValue` consults `traverser.getSideEffects()` before the path
+    // (`step/Scoping.java:119-131`), so `select("a")` naming a `groupCount`/`group`/`aggregate`
+    // side effect resolves to the FINISHED collection, emitted once per surviving traverser — a CROSS
+    // join of the stream onto the one-row reduced value. `count(Scope.local)` then counts its entries.
+    // GroupCount.feature `g_V_groupCountXaX_selectXaX_countXlocalX` / Group.feature the `by("name")` twin:
+    // 6 traversers each see the size-6 map → [6,6,6,6,6,6].
+    expect(await dec("g.V().groupCount('a').select('a').count(local)")).toEqual([6, 6, 6, 6, 6, 6]);
+    expect(await dec("g.V().group('a').by('name').by().select('a').count(local)")).toEqual([6, 6, 6, 6, 6, 6]);
+    // The alias map rides THROUGH the cross join, so a `select` back to a still-live path LABEL after a
+    // collection select composes (Select.feature the withoutStrategies scenario): the 6 vertices, once each.
+    const labelled = await dec('g.withoutStrategies(LazyBarrierStrategy).V().as("label").local(aggregate("x")).select("x").select("label")');
+    expect(labelled.map((v: any) => v.id).sort()).toEqual([1, 2, 3, 4, 5, 6]);
+    // A repeat/unfold composition: aggregate all vertices twice → the 12-member list, taken once, unfolded.
+    expect((await dec('g.V().repeat(__.aggregate("x")).times(2).select("x").limit(1).unfold()')).length).toBe(12);
+  });
+
   test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));
