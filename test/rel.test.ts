@@ -107,6 +107,41 @@ describe('RelIR', () => {
     expect(() => check(badGroup)).toThrow("cannot carry the 'alias' channel");
   });
 
+  test('a LINEAR collecting Aggregate must consume the emission-order encounter', () => {
+    // A fold/cap collects the stream in TRAVERSER order, so a json_group_array over an
+    // encounter-carrying input must ORDER BY that encounter — else its members take SQLite's scan
+    // order (order-by-luck, reversed under `mise run test:perturbed`). analyze.ts seeds the
+    // encounter; this obligation proves the collection actually consumes it.
+    const encCarried: Channels = [{ col: 'encounter', role: 'encounter' }];
+    const inShape = { cols: [{ name: 'name', type: 'text' as const, nullable: false }, { name: 'encounter', type: 'int' as const, nullable: false }] };
+    const input = valuesRel({ id: relId('foldInput'), rows: [[lit('marko', 'text'), lit(1, 'int')]], channels: encCarried, type: inShape });
+    const outType = { cols: [{ name: 'members', type: 'text' as const, nullable: true }] };
+    const fold = (orderBy?: readonly { readonly expr: ReturnType<typeof col>; readonly dir: 'asc' }[]) => aggregateRel({
+      id: relId('fold'), input, channels: [], type: outType, groupBy: [],
+      aggs: [['members', { kind: 'agg', fn: 'json_group_array', args: [col(input.id, 'name')], ...(orderBy ? { orderBy } : {}) }]],
+    });
+    // ORDER BY the encounter — the emission order the fold observes. Legal.
+    expect(() => check(fold([{ expr: col(input.id, 'encounter'), dir: 'asc' }]))).not.toThrow();
+    // ORDER BY the VALUE — a content sort: deterministic but the WRONG order, and exactly the shape a
+    // LOST encounter falls back to. This is the case `mise run test:perturbed` cannot see (both scans
+    // agree) and this law can.
+    expect(() => check(fold([{ expr: col(input.id, 'name'), dir: 'asc' }]))).toThrow('must ORDER BY the emission-order encounter');
+    // No ORDER BY — SQLite scan order, the order-by-luck this law exists to forbid.
+    expect(() => check(fold())).toThrow('must ORDER BY the emission-order encounter');
+  });
+
+  test('a linear collecting Aggregate whose input carries NO encounter is exempt', () => {
+    // analyze demanded no emission order (a genuine set/structural collection), so there is none to
+    // consume — the demand-SIDE miss is a separate question this law does not answer, and must NOT be
+    // a false positive here.
+    const input = valuesRel({ id: relId('noEncInput'), rows: [[lit('marko', 'text')]], channels: [], type: { cols: [{ name: 'name', type: 'text', nullable: false }] } });
+    const fold = aggregateRel({
+      id: relId('noEncFold'), input, channels: [], type: { cols: [{ name: 'members', type: 'text', nullable: true }] },
+      groupBy: [], aggs: [['members', { kind: 'agg', fn: 'json_group_array', args: [col(input.id, 'name')] }]],
+    });
+    expect(() => check(fold)).not.toThrow();
+  });
+
   test('names Values columns for downstream expressions', () => {
     const values = valuesRel({ id: relId('v'), rows: [[lit(1, 'int'), lit('marko', 'text')]], channels, type: { cols } });
     const plan = projectRel({ id: relId('p'), input: values, channels, type: { cols }, exprs: [['id', col(values.id, 'id')], ['name', col(values.id, 'name')]] });

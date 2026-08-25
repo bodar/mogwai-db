@@ -1,7 +1,7 @@
 import { barrierChannels, CHANNEL_GROUP_POLICY, channelCols, groupableChannels, mergeChannels, rigidChannels, rowUniqueChannels, sameChannels, type Channels } from '../channels.ts';
 import type { Rel, RelKind } from './rel.ts';
 import { sameNames } from './types.ts';
-import { recursiveStep } from './walk.ts';
+import { forEachExpr, recursiveStep } from './walk.ts';
 
 /**
  * What every node kind does to the carried CHANNELS — §3.5 of the build plan, as the table it
@@ -66,6 +66,42 @@ export const preservesColumns = (kind: RelKind): boolean =>
   kind === 'filter' || kind === 'sort' || kind === 'limit' || kind === 'distinct'
   || kind === 'window' || kind === 'explode' || kind === 'materialize';
 
+/** The collecting aggregate functions — a `fold`/`cap`/group-VALUE materializes its members into a
+ *  JSON array (or object), so their order is part of the answer (a collapsed traverser's members ride
+ *  inside its one buffer). The reducers (`count`/`sum`/`min`/…) are absent: they observe no order. */
+const COLLECTING_AGG: ReadonlySet<string> = new Set(['json_group_array', 'jsonb_group_array', 'json_group_object', 'jsonb_group_object']);
+
+/**
+ * A LINEAR collecting aggregate must ORDER its members by the emission-order `encounter` — the
+ * consume-side dual of `CHANNEL_GROUP_POLICY`'s `combine` for a reduction, now a build-time law.
+ *
+ * A `fold`/`cap` collects the stream in TRAVERSER order (TinkerPop preserves it), so a
+ * `json_group_array` over an encounter-carrying input that orders by anything else — or by nothing —
+ * takes its members in SQLite's SCAN order: right by luck on a small fixture, reversed under
+ * `PRAGMA reverse_unordered_selects` (`mise run test:perturbed`), and unseeable by any assertion in the
+ * ladder. `analyze.ts` seeds the encounter so the input carries it; this proves the collection
+ * actually CONSUMES it, turning a runtime coincidence into a checked obligation.
+ *
+ * SCOPED BY MEASUREMENT, not taste (probed over the whole corpus: 168 linear folds satisfy it, 0
+ * violate; 15 grouped and 2067 structural are exempt and correctly so):
+ *  - a GROUPED aggregate is exempt — its members pool by `origin`, a different, correct mechanism;
+ *  - an input carrying NO encounter is exempt — analyze demanded no order, so there is none to consume
+ *    (the demand-SIDE miss is a separate, harder question this does not answer);
+ *  - a STRUCTURAL collection (element property map, valueMap, path) builds over property/label rows
+ *    that carry no encounter, so it is exempt by that same rule.
+ */
+const collectionConsumesEncounter = (node: Extract<Rel, { readonly kind: 'aggregate' }>): void => {
+  if (node.groupBy.length) return;
+  const encounter = new Set(node.input.channels.filter((channel) => channel.role === 'encounter').map((channel) => channel.col));
+  if (!encounter.size) return;
+  for (const [, agg] of node.aggs) forEachExpr(agg, (e) => {
+    if (e.kind !== 'agg' || !COLLECTING_AGG.has(e.fn)) return;
+    const orderBy = e.orderBy ?? [];
+    if (!(orderBy.length && orderBy.every((term) => term.expr.kind === 'col' && encounter.has(term.expr.name))))
+      throw new Error(`RelIR: a linear collecting ${e.fn} over an encounter-carrying input must ORDER BY the emission-order encounter, else its members take SQLite's scan order (order-by-luck, reversed under mise run test:perturbed)`);
+  });
+};
+
 export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K> } = {
   // Sources answer for themselves: nothing flows in, so the only rule is that they emit what they claim.
   scan: declares,
@@ -129,6 +165,9 @@ export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K>
    * it already do.
    */
   aggregate: (node) => {
+    // A linear fold IS a barrier (the branch below returns early for it), so the emission-order
+    // consume law runs FIRST, before the channel-contract branching.
+    collectionConsumesEncounter(node);
     if (sameChannels(barrierChannels(node.input.channels), node.channels)) { declares(node); return; }
     if (!node.groupBy.length || !sameChannels(node.input.channels, node.channels))
       throw new Error('RelIR: Aggregate must either apply the barrier channel contract or, grouped, carry its input channels through unchanged');
