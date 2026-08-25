@@ -1,10 +1,9 @@
 import type { Expr } from './expr.ts';
 import { brandStmt, type Stmt, type StmtInit, type StmtKind, type StmtNode } from './stmt.ts';
+import { freeze } from './util.ts';
 
 type Node<K extends StmtKind> = Extract<Stmt, { readonly kind: K }>;
 type Init<K extends StmtKind> = StmtInit<K>;
-
-const freeze = <T>(value: T): T => Object.freeze(value);
 const names = (pairs: readonly (readonly [string, Expr])[], what: string): void => {
   if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error(`RelIR: duplicate ${what} name`);
 };

@@ -1,5 +1,6 @@
 import type { BarrierInput, BarrierRelation, CallParams, DecorateChannel, Service } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
+import type { IRStep } from '../../../compiler/ir/step.ts';
 import { isTraversalParam } from '../../params/call-params.ts';
 import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 
@@ -21,6 +22,24 @@ import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 /** `out`: rank/label flows src→tgt. `in`: tgt→src. `both`: both. */
 export type EdgeScope = { readonly direction: 'out' | 'in' | 'both'; readonly labels: readonly string[] };
 
+/** Read an ANONYMOUS sub-traversal PARAM to its body IR — the steps after the source root. A
+ *  `TraversalParam` carries the serialized gremlin; a bare string is taken as-is; our parser roots at a
+ *  source, so an anonymous `__.…` body is prepended `g.V().` and the `V`/`E` source step dropped. Throws
+ *  a `label`-prefixed message when the value is neither (`kind: 'notTraversal'`) or does not parse
+ *  (`kind: 'unparseable'`), so each caller phrases its own refusal. The `undefined` case stays the
+ *  caller's — `edgeScopeOf` maps it to its default direction, `targetBody` to "no target". */
+export function parseAnonBodyIR(
+  value: unknown, fail: (kind: 'notTraversal' | 'unparseable', gremlin: string) => never,
+): { readonly steps: readonly IRStep[]; readonly gremlin: string } {
+  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
+  if (gremlin === null) fail('notTraversal', String(value));
+  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
+  try {
+    const steps = stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E') as IRStep[];
+    return { steps, gremlin };
+  } catch { fail('unparseable', gremlin); }
+}
+
 /** Parse an edges-scope param into `{direction, labels}`. `undefined` → the algorithm's default
  *  direction, all labels. A `Direction` enum token (`{direction:'in'}`) is accepted too. Anything
  *  richer than a single `outE`/`inE`/`bothE(labels?)` fails closed — never a silent wrong scope. */
@@ -30,14 +49,11 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
     const d = String((value as { direction: unknown }).direction).toLowerCase();
     if (d === 'out' || d === 'in' || d === 'both') return { direction: d, labels: [] };
   }
-  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
-  if (gremlin === null)
-    throw new Error(`${algo}: unsupported edges scope ${String(value)}`);
-  // Our parser roots at a source; an anonymous edge body prepends one so the ONE edge step is readable.
-  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
-  let steps;
-  try { steps = stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E'); }
-  catch { throw new Error(`${algo}: could not read the edges scope "${gremlin}"`); }
+  const { steps, gremlin } = parseAnonBodyIR(value, (kind, g) => {
+    throw new Error(kind === 'notTraversal'
+      ? `${algo}: unsupported edges scope ${g}`
+      : `${algo}: could not read the edges scope "${g}"`);
+  });
   const dir = steps.length === 1
     ? ({ outE: 'out', inE: 'in', bothE: 'both' } as const)[steps[0].name as 'outE' | 'inE' | 'bothE']
     : undefined;

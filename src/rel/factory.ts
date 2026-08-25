@@ -2,12 +2,11 @@ import type { Expr } from './expr.ts';
 import { brandRel, type Rel, type RelInit, type RelKind, type RelNode, type Table } from './rel.ts';
 import type { RelId, SortTerm } from './types.ts';
 import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape } from './structure.ts';
+import { freeze } from './util.ts';
 
 type Node<K extends RelKind> = Extract<Rel, { readonly kind: K }>;
 type Init<K extends RelKind> = RelInit<K>;
 type WithId<K extends RelKind> = Init<K> & { readonly id: RelId };
-
-const freeze = <T>(value: T): T => Object.freeze(value);
 const named = (pairs: readonly (readonly [string, Expr])[]): void => {
   if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate output name');
 };

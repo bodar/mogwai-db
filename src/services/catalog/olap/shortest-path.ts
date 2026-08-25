@@ -1,10 +1,8 @@
 import type { BarrierRelation, PathSpec, Service } from '../../spi/types.ts';
 import { SHORTEST_PATH_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { isTraversalParam } from '../../params/call-params.ts';
-import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
-import { edgeScopeOf, relaxShortestPath, syncBarrier } from './kernel.ts';
+import { edgeScopeOf, parseAnonBodyIR, relaxShortestPath, syncBarrier } from './kernel.ts';
 
 // ---------- mogwai.shortestPath — shortestPath(), a recursive-CTE path walk (Template B) ----------
 //
@@ -32,12 +30,11 @@ const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
  *  source, so an anonymous body is prepended one and the source step dropped. */
 function targetBody(value: unknown): readonly IRStep[] | undefined {
   if (value === undefined) return undefined;
-  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
-  if (gremlin === null)
-    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${String(value)}`);
-  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
-  try { return stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E'); }
-  catch { throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${gremlin}"`); }
+  return parseAnonBodyIR(value, (kind, g) => {
+    throw new Error(kind === 'notTraversal'
+      ? `${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${g}`
+      : `${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${g}"`);
+  }).steps;
 }
 
 /** shortestPath() — ONE substrate: a BSP relaxation BARRIER for BOTH weighted and unweighted searches.

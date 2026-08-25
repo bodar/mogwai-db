@@ -37,9 +37,11 @@ The original audit's higher-value items shipped as their own commits and are on 
   two plain recursions `canonicalizeConnectives`/`markUnrollSuppressed`; the scope walk stays separate by
   design, it transforms the body and signals unchanged via null), `gatherRepeatRegion` for the
   repeat-cluster gathering loop shared by `unrollFixedRepeat`/`formRepeatRegions` (C9).
-- **Theme D** — `sameColumns`/`sameNames` hoisted to `rel/types.ts`, the column-preservation
-  classification single-sourced, `sizedContainer` for the GraphBinary containers, the composite `Expr`
-  builders in `expr.ts`, one `json_extract` builder (`jsonField`) in `build.ts`.
+- **Theme D (complete)** — `sameColumns`/`sameNames` hoisted to `rel/types.ts`, the column-preservation
+  classification single-sourced, `sizedContainer` for the GraphBinary containers (every MAP/LIST/SET
+  prefix goes through it — D3), the composite `Expr` builders in `expr.ts`, one `json_extract` builder
+  (`jsonField`) in `build.ts`, `freeze` hoisted to `rel/util.ts` (D1), `parseAnonBodyIR` in `olap/kernel.ts`
+  shared by `edgeScopeOf`/`targetBody` (D2).
 
 ## Remaining findings
 
@@ -72,14 +74,11 @@ folded into `mapNestedArgs` — it transforms the body before recursing (the whe
 signals "unchanged" with a null return rather than reference identity, so sharing that contract would
 obscure its scope tracking. Do not re-flag it.
 
-### Theme D — small shared utils (LOW, batchable)
+### Theme D — small shared utils
 
-*(most of Theme D landed; verify each before starting.)*
-
-- `execute.ts` open-codes the GraphBinary MAP container prefix at several sites; check whether
-  `sizedContainer` (already landed) absorbed all of them or a MAP-specific variant remains.
-- `freeze`/`uniqueNames` duplicated (`factory.ts:9` / `stmt-factory.ts:7`). → shared `rel/util.ts`.
-- `parseAnonBodyIR` shared by `kernel.ts:33 edgeScopeOf` and `shortest-path.ts:33 targetBody`.
+All landed (see "Already landed"). `uniqueNames` from the original audit does not exist (the two
+duplicate-name guards `named`/`names` differ by message wording and stay separate); the MAP prefix was
+already fully routed through `sizedContainer`.
 
 ## Checked and deliberately NOT flagged
 
@@ -99,11 +98,10 @@ wasted effort.
 Risk-ascending; each is independently shippable and behaviour-preserving. `mise run ci` + the L1–L5
 ladder is the safety net; validate before every push (`bash scripts/ci.sh` for the truthful verdict).
 
-1. **Theme D** — batch the remaining small utils in one pass (most already landed).
-2. **Theme A** (A2 `explodeMembers`, A4 `projectScalar`, A5 resume wrapper) — largest payoff, touch
-   last and carefully. Hot path; lean on the conformance ladder.
+1. **Theme A** (A2 `explodeMembers`, A4 `projectScalar`, A5 resume wrapper) — the only work left, and
+   the largest payoff. Hot path; touch carefully and lean on the conformance ladder.
 
-(Theme C is done — C1/C2/C3/C4/C5/C7/C8/C9 all landed.)
+(Themes B, C, D are done — only Theme A remains.)
 
 Do not treat this as a rename campaign — each item is a real extraction with a test surface. The value is
 finishing factorings the code already started; the risk is turning a documented-deliberate twin into a
