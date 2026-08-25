@@ -46,37 +46,10 @@ export interface IoStore {
   list(prefix: string): Promise<string[]>;
 }
 
-/** Drain a whole read stream into one `Uint8Array` — the BUFFERED convenience, for a caller that
- *  knows the object is small (a test fixture, a header probe). Never on the whole-graph path: that
- *  is exactly the materialization this seam exists to avoid. */
-export async function readAllBytes(io: IoStore, path: string): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  const reader = (await io.readStream(path)).getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) { out.set(c, at); at += c.length; }
-  return out;
-}
-
-/** Write one whole `Uint8Array` as `path` — the BUFFERED convenience twin of `readAllBytes`, same
- *  caveat: the bytes are already in memory, so this is for a small document a caller holds whole. */
-export async function writeAllBytes(io: IoStore, path: string, bytes: Uint8Array): Promise<void> {
-  const sink = await io.writeStream(path);
-  try {
-    await sink.write(bytes);
-    await sink.close();
-  } catch (e) {
-    await sink.abort(e);
-    throw e;
-  }
-}
+// No buffered `readAll`/`writeAll` convenience lives HERE, and that is deliberate: a whole-`Uint8Array`
+// read or write is exactly the materialization this seam exists to prevent, and a helper on the
+// production surface is a helper someone reaches for by mistake on a 10 GB graph. A test that wants to
+// drain a stream to bytes writes its own local helper (test/support), where the object is known small.
 
 /** The IoStore for a graph with no binding configured. Every operation fails closed NAMING the
  *  missing binding, because an absent R2 bucket / io directory is a configuration fact, not a

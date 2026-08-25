@@ -6,7 +6,6 @@ import { loadGraphsonStreaming, writeGraphson, writeGraphsonToSink } from '../sr
 import { loadCsvStreaming } from '../src/formats/csv.ts';
 import { linesOf } from '../src/formats/drain.ts';
 import { PART_SIZE, R2IoStore } from '../src/cloudflare/R2IoStore.ts';
-import { readAllBytes } from '../src/iostore.ts';
 
 // The STREAMING io path — the property the whole-string tests (io/graphson/csv) cannot show, because
 // their documents are kilobytes and everything materializes trivially. Here: that the reader is a
@@ -32,6 +31,24 @@ function streamOf(bytes: Uint8Array, chunk = 8): ReadableStream<Uint8Array> {
 }
 const stringStream = (s: string, chunk?: number) => streamOf(enc(s), chunk);
 const gInt = (v: number) => ({ '@type': 'g:Int32', '@value': v });
+
+/** Drain a read stream to bytes — a TEST-only convenience (production never materializes a whole
+ *  document; the io seam is stream-only for exactly that reason). Fine here: the objects are tiny. */
+async function drainToBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
 
 describe('GraphSON streaming read is two-pass — a forward-referencing edge resolves', () => {
   test('an edge on the FIRST line targeting the LAST vertex lands correctly', async () => {
@@ -198,7 +215,7 @@ describe('R2IoStore write is a bounded multipart upload', () => {
     await writeGraphsonToSink(store, sink);
     await sink.close();
 
-    const bytes = await readAllBytes(asR2(bucket), 'dump.json');
+    const bytes = await drainToBytes(await asR2(bucket).readStream('dump.json'));
     expect(new TextDecoder().decode(bytes)).toBe(writeGraphson(store));
   });
 });

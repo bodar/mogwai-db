@@ -56,16 +56,18 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   immutable snapshot), **FTS/`trigramSeek` over a bound graph** (no landed FTS index — build when a use
   case reaches it), and one **path+encounter combo** (a bound path chain that also demands an emission
   encounter — the seed cannot carry both the path append and the order renumber).
-- **`io()` is MEMORY-bounded, not yet TIME-bounded.** The whole `io()` path streams end to end —
-  `IoStore` is `readStream`/`writeStream` (R2 multipart on the DO), GraphSON/CSV drain through
-  `BatchingLoader`, and the GraphSON read is a two-pass byte stream — so a graph up to a DO's 10 GB
-  ceiling moves in/out without materializing (peak memory is one page / one part; the R2 sink and the
-  two-pass reader are covered by `test/io-streaming.test.ts`). What is NOT yet solved is a single
-  request's WALL-CLOCK / CPU budget: a 10 GB load or dump will not finish in one DO invocation, so the
-  next step is a RESUMABLE `io()` — a keyset cursor persisted per (path, direction) so a read resumes
-  at the next vertex line / edge line and a write resumes at the next R2 part (R2 `resumeMultipartUpload`
-  exists for exactly this). Two perf follow-ons, both optimizations not correctness: the two-pass read
-  looks up every edge endpoint against the store even under `idPolicy:'preserve'` with numeric ids
+- **`io()` streams end to end — MEMORY is bounded; confirm TIME under load.** `IoStore` is
+  `readStream`/`writeStream` (R2 multipart on the DO), production has NO buffered `readAll`/`writeAll`
+  (a test writes its own), GraphSON/CSV drain through `BatchingLoader`, and the GraphSON read is a
+  two-pass byte stream — so a graph up to a DO's 10 GB ceiling moves in/out without materializing (peak
+  memory is one page / one R2 part; the R2 sink and the two-pass reader are covered by
+  `test/io-streaming.test.ts`). A DO request can be given up to a 5-minute CPU budget, which a 10 GB
+  R2 transfer should fit inside — so the open item is to MEASURE a full-size round trip, not a known
+  wall. IF a graph is ever too large for one request, the escape hatch is a RESUMABLE `io()`: a keyset
+  cursor persisted per (path, direction) so a read resumes at the next vertex/edge line and a write
+  resumes at the next R2 part (`resumeMultipartUpload` exists for exactly this) — build it only if the
+  measurement shows it is needed. Two perf follow-ons, both optimizations not correctness: the two-pass
+  read looks up every edge endpoint against the store even under `idPolicy:'preserve'` with numeric ids
   (where the source id IS the rowid — a short-circuit would skip it, at the cost of the dangling-ref
   existence check), and it `JSON.parse`s each line twice (once per pass). Neither moves the memory bound.
 - **Operations:** a real Cloudflare deployment, graph authentication, transaction/session
