@@ -1,7 +1,7 @@
 import { col, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ColMeta } from '../../rel/types.ts';
+import type { ColMeta, RelId, SqlType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import {
     and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
@@ -54,6 +54,24 @@ import {
  *  table in one plan are two RELATIONS and a shared `RelId` is the one thing `Col` cannot disambiguate. */
 const labelTable = (fresh: Minter): Rel =>
   make.scan({ id: fresh('wlb'), table: 'labels', alias: fresh('rwl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+
+/**
+ * ONE column of a row a rowid names, as a correlated `{kind:'scalar'}` read — `scan(table) → filter(id =
+ * rowid) → project(['v', <expr>])`. The edge/vertex correlated reads below (`edgeEndpoint`,
+ * `nodeExternalId`, `edgeColumn`, and `externalId`'s edge arm) were four copies of exactly this shape,
+ * differing only in the table scanned and the value projected; `value(scan)` builds the projection off
+ * the filtered row so the fresh minter that owns the scan owns the read. Each caller still mints its OWN
+ * scan (two scans of one table are two relations — see `labelTable`). */
+function correlatedColumn(
+  scan: Rel, rowid: Expr, valueType: SqlType, value: (row: RelId) => Expr, fresh: Minter,
+): Expr {
+  const matching = make.filter({ id: fresh('ccf'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) });
+  const only = make.project({
+    id: fresh('ccx'), input: matching, channels: [], type: typeOf(meta('v', valueType, true)),
+    exprs: [['v', value(matching.id)]],
+  });
+  return { kind: 'scalar', plan: only };
+}
 
 /**
  * ALL of a vertex's labels as a JSON array of names — the PAYLOAD position (`labelPayloadFor`), which is
@@ -111,12 +129,7 @@ export function edgeLabel(labelId: Expr, fresh: Minter): Expr {
  */
 export function edgeEndpoint(edgeRowid: Expr, end: 'src' | 'tgt', fresh: Minter): Expr {
   const edges = make.scan({ id: fresh('ee'), table: 'edges', alias: fresh('ree'), channels: [], type: typeOf(...EDGE_COLS) });
-  const matching = make.filter({ id: fresh('eef'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), edgeRowid) });
-  const only = make.project({
-    id: fresh('eep'), input: matching, channels: [], type: typeOf(meta('v', 'int', true)),
-    exprs: [['v', col(matching.id, end)]],
-  });
-  return { kind: 'scalar', plan: only };
+  return correlatedColumn(edges, edgeRowid, 'int', (row) => col(row, end), fresh);
 }
 
 /**
@@ -127,12 +140,7 @@ export function edgeEndpoint(edgeRowid: Expr, end: 'src' | 'tgt', fresh: Minter)
  */
 function nodeExternalId(rowid: Expr, fresh: Minter): Expr {
   const nodes = make.scan({ id: fresh('wnd'), table: 'nodes', alias: fresh('rwn'), channels: [], type: typeOf(...NODE_COLS) });
-  const matching = make.filter({ id: fresh('wnf'), input: nodes, channels: [], type: nodes.type, pred: eq(col(nodes.id, 'id'), rowid) });
-  const only = make.project({
-    id: fresh('wnx'), input: matching, channels: [], type: typeOf(meta('v', 'any', true)),
-    exprs: [['v', coalesce(col(matching.id, 'uid'), col(matching.id, 'id'))]],
-  });
-  return { kind: 'scalar', plan: only };
+  return correlatedColumn(nodes, rowid, 'any', (row) => coalesce(col(row, 'uid'), col(row, 'id')), fresh);
 }
 
 /**
@@ -373,12 +381,7 @@ export function correlatedElementColumns(
  *  the rowid directly. */
 function edgeColumn(rowid: Expr, name: string, fresh: Minter): Expr {
   const edges = make.scan({ id: fresh('wec'), table: 'edges', alias: fresh('rwc'), channels: [], type: typeOf(...EDGE_COLS) });
-  const matching = make.filter({ id: fresh('wcf'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), rowid) });
-  const only = make.project({
-    id: fresh('wcx'), input: matching, channels: [], type: typeOf(meta('v', 'any', true)),
-    exprs: [['v', col(matching.id, name)]],
-  });
-  return { kind: 'scalar', plan: only };
+  return correlatedColumn(edges, rowid, 'any', (row) => col(row, name), fresh);
 }
 
 /** The PUBLIC id of either element kind — `nodeExternalId`'s generalization, so the variant tuple does
@@ -386,10 +389,5 @@ function edgeColumn(rowid: Expr, name: string, fresh: Minter): Expr {
 export function externalId(rowid: Expr, elem: Elem, fresh: Minter): Expr {
   if (elem === 'vertex') return nodeExternalId(rowid, fresh);
   const edges = make.scan({ id: fresh('wed'), table: 'edges', alias: fresh('rwd'), channels: [], type: typeOf(...EDGE_COLS) });
-  const matching = make.filter({ id: fresh('wef'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), rowid) });
-  const only = make.project({
-    id: fresh('wex'), input: matching, channels: [], type: typeOf(meta('v', 'any', true)),
-    exprs: [['v', coalesce(col(matching.id, 'uid'), col(matching.id, 'id'))]],
-  });
-  return { kind: 'scalar', plan: only };
+  return correlatedColumn(edges, rowid, 'any', (row) => coalesce(col(row, 'uid'), col(row, 'id')), fresh);
 }

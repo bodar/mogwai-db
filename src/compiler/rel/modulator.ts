@@ -1,4 +1,5 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import type { Rel } from '../../rel/rel.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
@@ -480,15 +481,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
   }
 
   // ONE subquery for both halves: the tag IS the row the value came from.
-  const { table, owner } = PROPERTIES[host.elem];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key.key))),
-  });
+  const mine = propertyRowFor(host, key.key, fresh);
   return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
 }
 
@@ -650,21 +643,31 @@ export function byField(
   };
 }
 
+/** The `vertex_properties` / `edge_properties` rows at `key` for one host element — the scan filtered to
+ *  `owner = host.id AND key = …`, stated ONCE. `byNode`'s `{t,v}` node, `propertyVtype` and
+ *  `propertyExists` are the same rows read three ways (value+vtype, vtype, presence); each projects off
+ *  this relation so the three cannot disagree about WHICH rows they describe — the drift a second
+ *  spelling of the column contract would open (`propertyRow` in `property.ts` is the sibling keyed by
+ *  ROWID rather than `(owner, key)`). */
+function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: string, fresh: Minter): Rel {
+  const { table, owner } = PROPERTIES[host.elem];
+  const scan = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  return make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
+  });
+}
+
 /** The stored `vtype` of the FIRST value at `key` — `byExpr`'s property arm with the other column
  *  projected, sharing its filter and its insertion-order pick so the tag cannot describe a different
  *  row than the value does. Exported because the child seam needs the identical read for a body that
  *  LEADS with `values(k)`: the same question, and a second spelling of it is a second chance for the
  *  tag to describe a row the value did not come from. */
 export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Expr {
-  const { table, owner } = PROPERTIES[host.elem];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
-  });
+  const mine = propertyRowFor(host, key, fresh);
   return firstOf(mine, col(mine.id, 'vtype'), col(mine.id, 'id'), fresh);
 }
 
@@ -678,16 +681,7 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
  * a property that is genuinely there. An `Exists` says exactly what is being asked.
  */
 export function propertyExists(key: string, host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Expr {
-  const { table, owner } = PROPERTIES[host.elem];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
-  });
-  return { kind: 'exists', plan: mine, negated: false };
+  return { kind: 'exists', plan: propertyRowFor(host, key, fresh), negated: false };
 }
 
 /** TinkerPop's default `by()` productivity, as a predicate: a traverser whose `by()` yielded nothing

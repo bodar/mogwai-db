@@ -1,9 +1,9 @@
 import type { IRStep } from '../ir/strategies.ts';
-import type { Plan, SegmentPlan } from '../segment.ts';
+import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerToRel, type Lowering } from './lower.ts';
+import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
@@ -228,6 +228,16 @@ const bareSource = (prefix: readonly IRStep[]): boolean =>
  *  When the barrier declares `seedFromInput` and the prefix is NOT a bare source, the head projects the
  *  incoming element id per traverser (uncollapsed, so multiplicity survives as row count) — the barrier's
  *  view of its input, which pageRank reads as its initial rank. A bare source keeps `head` null. */
+/** `<prefix>.id()` compiled with collapse OFF — one row per incoming traverser (a collapsed `SUM(bulk)`
+ *  would hide the multiplicity an initial rank / a source set needs), as a `read` head or null if it does
+ *  not compile to one. The shared input head of every barrier that seeds from its incoming vertices
+ *  (`decorateSegment`'s `seedFromInput`, `pathSegment`'s always-on source set). */
+function idHead(steps: readonly IRStep[], at: number, lowering: Lowering) {
+  const lowered = lowerToRel([...steps.slice(0, at), { name: 'id', args: [], ctx: steps[at]!.ctx } as IRStep], { ...lowering, collapse: false });
+  const compiled = lowered && finishLowering(lowered);
+  return compiled && compiled.kind === 'read' ? compiled : null;
+}
+
 function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
   const { channels, seedFromInput } = barrier.decorate!;
   const prefix = steps.slice(0, barrier.at);
@@ -235,11 +245,7 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
   // collapsed `SUM(bulk)` would hide the multiplicity the initial rank needs). A `read` (value) head —
   // `readSegmentHead` turns each row into `{injectedValue: id}`.
   const inputHead = seedFromInput && !bareSource(prefix)
-    ? (() => {
-        const lowered = lowerToRel([...prefix, { name: 'id', args: [], ctx: steps[barrier.at]!.ctx } as IRStep], { ...request.lowering, collapse: false });
-        const compiled = lowered && finishLowering(lowered);
-        return compiled && compiled.kind === 'read' ? compiled : null;
-      })()
+    ? idHead(steps, barrier.at, request.lowering)
     : null;
   return {
     kind: 'segment',
@@ -276,16 +282,16 @@ function decorateSegment(steps: readonly IRStep[], barrier: Barrier, request: Se
   };
 }
 
-/** A PATH barrier (weighted shortestPath). The head projects the SOURCE ids — the incoming traverser
- *  vertices the search runs from (always, unlike decorate's optional `seedFromInput`), one row per
- *  source, collapse off. `apply` relaxes the weighted shortest distance from those sources into
- *  `barrier_state` and returns the `(run, round)` handle; `lowerPathResume` reconstructs the paths and
- *  continues the tail, REPLACING the stream. */
-function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
-  const prefix = steps.slice(0, barrier.at);
-  const lowered = lowerToRel([...prefix, { name: 'id', args: [], ctx: steps[barrier.at]!.ctx } as IRStep], { ...request.lowering, collapse: false });
-  const compiled = lowered && finishLowering(lowered);
-  const head = compiled && compiled.kind === 'read' ? compiled : null;
+/** The shell BOTH relation-handle barriers share — a `(run, round)` producer whose resume re-lowers the
+ *  tail off the landed state. `apply` returns a handle, never rows (an `Array.isArray(out)` is a
+ *  service-authoring bug); `resume` re-lowers via `relower` and refuses clearly if the tail needs
+ *  something this route cannot frame. Only `head`, the barrier noun, and the resume lowering differ —
+ *  `pathSegment` seeds from its source ids, `pairSegment` is a global source form. */
+function relationHandleSegment(
+  steps: readonly IRStep[], barrier: Barrier,
+  head: AsyncSegmentPlan['head'], noun: string,
+  relower: (run: number, round: number) => RelLowering | null,
+): SegmentPlan {
   return {
     kind: 'segment',
     mode: 'async',
@@ -295,11 +301,10 @@ function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: Segmen
     applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput): Plan => {
-      // A path barrier's `apply` returns a relation handle (the run/round in barrier_state), never rows.
       if (Array.isArray(out))
-        throw new Error(`call("${barrier.spec.serviceName}"): a path barrier must return a (run, round) relation handle, not detached rows`);
+        throw new Error(`call("${barrier.spec.serviceName}"): a ${noun} barrier must return a (run, round) relation handle, not detached rows`);
       const relation = out as BarrierRelation;
-      const resumed = lowerPathResume(relation.run, relation.round, barrier.path!, steps, barrier.at, request.lowering);
+      const resumed = relower(relation.run, relation.round);
       if (!resumed) {
         const next = steps[barrier.at + 1];
         throw new Error(
@@ -313,34 +318,26 @@ function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: Segmen
   };
 }
 
+/** A PATH barrier (weighted shortestPath). The head projects the SOURCE ids — the incoming traverser
+ *  vertices the search runs from (always, unlike decorate's optional `seedFromInput`), one row per
+ *  source, collapse off. `apply` relaxes the weighted shortest distance from those sources into
+ *  `barrier_state` and returns the `(run, round)` handle; `lowerPathResume` reconstructs the paths and
+ *  continues the tail, REPLACING the stream. */
+function pathSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
+  return relationHandleSegment(
+    steps, barrier, idHead(steps, barrier.at, request.lowering), 'path',
+    (run, round) => lowerPathResume(run, round, barrier.path!, steps, barrier.at, request.lowering),
+  );
+}
+
 /** A PAIR barrier (node-similarity). GLOBAL, source-form: `apply` runs over no input, computes the scored
  *  pairs into `barrier_state`, and returns the `(run, round)` handle; `lowerPairResume` frames each pair as
  *  a MAP (a stream of maps — the new output shape). */
 function pairSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan {
-  return {
-    kind: 'segment',
-    mode: 'async',
-    head: null,
-    params: barrier.site.params,
-    apply: barrier.apply,
-    applySync: barrier.applySync,
-    residency: barrier.residency,
-    resume: (out: BarrierOutput): Plan => {
-      if (Array.isArray(out))
-        throw new Error(`call("${barrier.spec.serviceName}"): a pair barrier must return a (run, round) relation handle, not detached rows`);
-      const relation = out as BarrierRelation;
-      const resumed = lowerPairResume(relation.run, relation.round, barrier.pairs!, steps, barrier.at, request.lowering);
-      if (!resumed) {
-        const next = steps[barrier.at + 1];
-        throw new Error(
-          next
-            ? `${next.name}() is not supported after ${barrier.spec.serviceName} yet`
-            : `${barrier.spec.serviceName} produced a result this route cannot frame`,
-        );
-      }
-      return { kind: 'sql', compiled: finishLowering(resumed) };
-    },
-  };
+  return relationHandleSegment(
+    steps, barrier, null, 'pair',
+    (run, round) => lowerPairResume(run, round, barrier.pairs!, steps, barrier.at, request.lowering),
+  );
 }
 
 /** A SOURCE barrier: nothing local to drain, so `apply` runs over no rows and the resume is the rest of

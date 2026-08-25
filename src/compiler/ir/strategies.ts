@@ -1139,18 +1139,33 @@ function canonicalizeConnectivesLevel(steps: Step[]): Step[] {
  *  federate param with `tree.accept is not a function`. So this recursion is IDENTITY-PRESERVING:
  *  an arg (and a whole level) the fold does not change is returned by reference, and only a branch
  *  that genuinely folded is rebuilt. */
+/**
+ * Map ONE step's nested-traversal args through `recurse`, IDENTITY-PRESERVING: an arg whose body the
+ * recursion returns UNCHANGED (`=== inner`) is kept by reference — its `{nested}` may still be a raw
+ * parse tree that `traversal-param.ts` un-parses via `tree.accept`, and rebuilding it as `Step[]` breaks
+ * that (see `canonicalizeConnectives`' note). `changed` is true iff at least one arg was rebuilt, so the
+ * caller can likewise return the whole STEP by reference when nothing under it moved. Shared by the two
+ * plain nested-arg recursions (`canonicalizeConnectives`, `markUnrollSuppressed`); each supplies its own
+ * recursion and its own per-step wrapper. The scope walk's arg loop is deliberately NOT folded in — it
+ * transforms the body before recursing (the where-variable rewrite) and signals "unchanged" with a null
+ * return rather than reference identity, so sharing this contract would obscure its scope tracking. */
+function mapNestedArgs(args: readonly Arg[], params: Record<string, any>, recurse: (inner: Step[]) => Step[]): { args: Arg[]; changed: boolean } {
+  let changed = false;
+  const mapped = args.map((a) => {
+    if (!isNested(a.value)) return a;
+    const inner = stepChain(a.value.nested, params);
+    const folded = recurse(inner);
+    if (folded === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
+    changed = true;
+    return arg(nestedArg(folded));
+  });
+  return { args: mapped, changed };
+}
+
 export function canonicalizeConnectives(steps: Step[], params: Record<string, any>): IRStep[] {
   let anyChild = false;
   const mapped = steps.map((s) => {
-    let changed = false;
-    const args = s.args.map((a) => {
-      if (!isNested(a.value)) return a;
-      const inner = stepChain(a.value.nested, params);
-      const folded = canonicalizeConnectives(inner, params);
-      if (folded === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
-      changed = true;
-      return arg(nestedArg(folded));
-    });
+    const { args, changed } = mapNestedArgs(s.args, params, (inner) => canonicalizeConnectives(inner, params));
     if (!changed) return s;
     anyChild = true;
     return { ...s, args };
@@ -1245,15 +1260,7 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
 export function markUnrollSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
   let changed = false;
   const marked = steps.map((s) => {
-    let argsChanged = false;
-    const args = s.args.map((a) => {
-      if (!isNested(a.value)) return a;
-      const inner = stepChain(a.value.nested, params);
-      const innerMarked = markUnrollSuppressed(inner, params);
-      if (innerMarked === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
-      argsChanged = true;
-      return arg(nestedArg(innerMarked));
-    });
+    const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markUnrollSuppressed(inner, params));
     if (s.name !== 'repeat' && !argsChanged) return s;
     changed = true;
     const next: IRStep = argsChanged ? { ...s, args } : { ...s };
@@ -1333,19 +1340,28 @@ type ChildBody = (nested: any, params: Record<string, any>) => IRStep[];
  * `until()` is a predicate rather than a count, and a named `repeat("a", …)` carries a loop counter
  * the phases would have to reproduce.
  */
+/** The contiguous run of DISTINCT `REPEAT_CLUSTER` steps starting at `i` — the repeat/times/emit/until
+ *  cluster, gathered once so `unrollFixedRepeat` and `formRepeatRegions` cannot disagree about where a
+ *  region ends. `end` is the index one past the run (the caller's `i = end - 1`); the `seen` guard stops
+ *  at a repeated cluster name so two adjacent `repeat()`s stay two regions. */
+function gatherRepeatRegion(steps: Step[], i: number): { region: Step[]; end: number } {
+  const region: Step[] = [];
+  const seen = new Set<string>();
+  let j = i;
+  while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
+    seen.add(steps[j].name); region.push(steps[j]); j++;
+  }
+  return { region, end: j };
+}
+
 export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, body: ChildBody): Step[] {
   const out: Step[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
-    const region: Step[] = [];
-    const seen = new Set<string>();
-    let j = i;
-    while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
-      seen.add(steps[j].name); region.push(steps[j]); j++;
-    }
+    const { region, end } = gatherRepeatRegion(steps, i);
     const unrolled = tryUnroll(region, params, body);
     out.push(...(unrolled ?? region));
-    i = j - 1;
+    i = end - 1;
   }
   return out;
 }
@@ -1478,15 +1494,10 @@ export function formRepeatRegions(steps: Step[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
-    const region: Step[] = [];
-    const seen = new Set<string>();
-    let j = i;
-    while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
-      seen.add(steps[j].name); region.push(steps[j]); j++;
-    }
+    const { region, end } = gatherRepeatRegion(steps, i);
     const anchor = region.find((s) => s.name === 'repeat') ?? region[0];
     out.push({ ...anchor, repeatRegion: region });
-    i = j - 1;
+    i = end - 1;
   }
   return out;
 }
