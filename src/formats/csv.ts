@@ -38,10 +38,11 @@
 // and detects which it is from the header; `io("x.csv").write()` emits BOTH, at the derived keys
 // `csvPaths` names — and those derived keys are ordinary readable paths, so the round trip is two
 // reads with nothing magic in between.
-import { BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats } from '../bulk.ts';
+import { BatchingLoader, BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
+import type { IoSink } from '../iostore.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
-import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, rowsForOwners, vertexPropsForOwners } from './drain.ts';
+import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 
 // ---------- RFC 4180 ----------
 
@@ -58,42 +59,95 @@ import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, rowsFor
 export type CsvField = string | null;
 
 /**
- * Scan a whole document into records. A generator, so a reader never holds more than one record
- * beyond what it has already landed.
+ * An INCREMENTAL RFC 4180 scanner: feed it text with `push`, get back the records each chunk
+ * COMPLETES, and call `end` when the input is exhausted. One scanner drives both the whole-string
+ * reader (`csvRecords`) and the streaming `io()` reader, so the one place record boundaries are
+ * decided cannot drift between them.
  *
  * Cannot be `split('\n')`: a quoted field may CONTAIN a newline (RFC 4180 §2.6), so records are only
  * discoverable by scanning. `\r\n` and `\n` both terminate a record; a `\r` inside a quoted field is
- * kept verbatim.
+ * kept verbatim. A doubled quote inside a quoted field is one literal quote.
+ *
+ * Streaming safety: two decisions look at the NEXT character (`\r` vs `\r\n`, and `""` vs a closing
+ * quote), so `push` never processes the final buffered character — it retains it until the next
+ * chunk (or `end`) makes the lookahead unambiguous. That is the whole reason the scanner keeps an
+ * internal buffer rather than consuming each `push` argument outright.
+ */
+export class CsvScanner {
+  private buf = '';
+  private record: CsvField[] = [];
+  private field = '';
+  private quoted = false;      // this field was opened with a quote
+  private inQuotes = false;
+  private started = false;     // anything at all seen since the last delimiter (an empty last line is not a record)
+
+  private endField(): void {
+    this.record.push(this.quoted || this.field.length ? this.field : null);
+    this.field = '';
+    this.quoted = false;
+  }
+
+  private endRecord(): CsvField[] {
+    this.endField();
+    const r = this.record;
+    this.record = [];
+    this.started = false;
+    return r;
+  }
+
+  /** Feed a chunk; return the records it completes. The last buffered character is held back for
+   *  lookahead, so a record whose terminator is the very last character surfaces on the NEXT push
+   *  (or `end`), never lost. */
+  push(chunk: string): CsvField[][] {
+    this.buf += chunk;
+    return this.scan(this.buf.length - 1);
+  }
+
+  /** No more input: scan the retained tail and emit the trailing record, if any. */
+  end(): CsvField[][] {
+    const out = this.scan(this.buf.length);
+    if (this.started || this.record.length) out.push(this.endRecord());
+    return out;
+  }
+
+  /** Scan `buf` up to (not including) `limit`; retain the rest. `limit` is `length-1` on `push`
+   *  (lookahead safety) and `length` on `end`. Every `text[i+1]` peeked below is therefore in range. */
+  private scan(limit: number): CsvField[][] {
+    const out: CsvField[][] = [];
+    const text = this.buf;
+    let i = 0;
+    for (; i < limit; i++) {
+      const c = text[i];
+      if (this.inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { this.field += '"'; i++; } else this.inQuotes = false;
+        } else this.field += c;
+        continue;
+      }
+      if (c === '"' && !this.field.length) { this.inQuotes = true; this.quoted = true; this.started = true; continue; }
+      if (c === ',') { this.endField(); this.started = true; continue; }
+      if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        if (this.started || this.record.length) out.push(this.endRecord());
+        continue;
+      }
+      this.field += c;
+      this.started = true;
+    }
+    this.buf = text.slice(i);
+    return out;
+  }
+}
+
+/**
+ * Scan a whole document into records. A generator, so a reader never holds more than one record
+ * beyond what it has already landed. Thin over `CsvScanner` — the same scanner the streaming reader
+ * uses, so the two cannot disagree on where a record ends.
  */
 export function* csvRecords(text: string): Generator<CsvField[]> {
-  let record: CsvField[] = [];
-  let field = '';
-  let quoted = false;      // this field was opened with a quote
-  let inQuotes = false;
-  let started = false;     // anything at all seen since the last delimiter (an empty last line is not a record)
-  const endField = () => { record.push(quoted || field.length ? field : null); field = ''; quoted = false; };
-  const endRecord = () => { endField(); const r = record; record = []; started = false; return r; };
-
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      // A doubled quote inside a quoted field is one literal quote; a single quote closes it.
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false;
-      } else field += c;
-      continue;
-    }
-    if (c === '"' && !field.length) { inQuotes = true; quoted = true; started = true; continue; }
-    if (c === ',') { endField(); started = true; continue; }
-    if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      if (started || record.length) yield endRecord();
-      continue;
-    }
-    field += c;
-    started = true;
-  }
-  if (started || record.length) yield endRecord();
+  const scanner = new CsvScanner();
+  yield* scanner.push(text);
+  yield* scanner.end();
 }
 
 /** One record → its CSV line. A field is quoted when it must be (a delimiter, a quote, a newline, or
@@ -302,58 +356,91 @@ function required(record: readonly CsvField[], columns: readonly Column[], role:
   return i === -1 ? null : record[i] ?? null;
 }
 
+/** The minimal loader seam CSV record-feeding needs — `BulkLoader` and `BatchingLoader` both satisfy
+ *  it, so the whole-string and streaming readers share one record→element decoder. */
+interface RecordLoader { vertex(v: BulkVertex): unknown; edge(e: BulkEdge): unknown }
+
+/** The per-read state a CSV parse threads: the header (columns + which kind of file), decided from
+ *  the FIRST record, and the running record count for fail-closed messages. */
+interface CsvReadState { columns?: Column[]; kind?: CsvKind; n: number }
+
 /**
- * Load ONE CSV document — a vertex file or an edge file, decided by its header.
- *
- * Streams: `csvRecords` yields one record at a time and the loader buffers rows, so peak memory is
- * the loader's batches rather than the document.
+ * Decode ONE record into this file's loader. The first record is the header (columns + vertex-vs-edge
+ * decided from it); every later record is an element. Fails closed with the RECORD NUMBER, for the
+ * same reason the GraphSON reader does: a partially loaded graph is only diagnosable if the failure
+ * says where it stopped. Shared by `loadCsv` and `loadCsvStreaming` so they cannot diverge.
+ */
+function feedCsvRecord(loader: RecordLoader, state: CsvReadState, record: CsvField[]): void {
+  state.n++;
+  if (!state.columns) {
+    state.columns = record.map((cell) => headerColumn(cell ?? ''));
+    state.kind = kindOf(state.columns, record);
+    return;
+  }
+  const columns = state.columns;
+  try {
+    const id = required(record, columns, 'id');
+    const properties = recordProperties(columns, record);
+    if (state.kind === 'vertices') {
+      loader.vertex({
+        id: id === null ? undefined : csvId(id),
+        labels: csvLabels(required(record, columns, 'label')),
+        properties,
+      });
+    } else {
+      const from = required(record, columns, 'from');
+      const to = required(record, columns, 'to');
+      if (from === null || to === null) throw new Error('edge record has an empty endpoint');
+      const label = required(record, columns, 'label');
+      if (label === null || label === '') throw new Error('edge record has no label');
+      loader.edge({ id: id === null ? undefined : csvId(id), label, src: csvId(from), tgt: csvId(to), properties });
+    }
+  } catch (e) {
+    throw new Error(`CSV record ${state.n}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Load ONE CSV document from a string — a vertex file or an edge file, decided by its header.
  *
  * An edge file may be loaded on its own, after its vertex file: an endpoint this call has not seen
  * resolves against the store at `flush` (`BulkLoader.resolveEndpoint`) and fails closed naming the
  * vertex if it is not there either. That is the whole reason the two files need no shared state.
- *
- * Fails closed with the RECORD NUMBER, for the same reason the GraphSON reader does: a partially
- * loaded graph is only diagnosable if the failure says where it stopped.
  */
 export function loadCsv(store: GraphStore, document: string, options?: BulkOptions): BulkStats {
   const loader = new BulkLoader(store, options);
-  let columns: Column[] | undefined;
-  let kind: CsvKind | undefined;
-  let n = 0;
-  for (const record of csvRecords(document)) {
-    n++;
-    if (!columns) {
-      columns = record.map((cell) => headerColumn(cell ?? ''));
-      kind = kindOf(columns, record);
-      continue;
-    }
-    try {
-      const id = required(record, columns, 'id');
-      const properties = recordProperties(columns, record);
-      if (kind === 'vertices') {
-        loader.vertex({
-          id: id === null ? undefined : csvId(id),
-          labels: csvLabels(required(record, columns, 'label')),
-          properties,
-        });
-      } else {
-        const from = required(record, columns, 'from');
-        const to = required(record, columns, 'to');
-        if (from === null || to === null) throw new Error('edge record has an empty endpoint');
-        const label = required(record, columns, 'label');
-        if (label === null || label === '') throw new Error('edge record has no label');
-        const edge: BulkEdge = {
-          id: id === null ? undefined : csvId(id),
-          label, src: csvId(from), tgt: csvId(to), properties,
-        };
-        loader.edge(edge);
-      }
-    } catch (e) {
-      throw new Error(`CSV record ${n}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  if (!columns) throw new Error('CSV: empty document (no header)');
+  const state: CsvReadState = { n: 0 };
+  for (const record of csvRecords(document)) feedCsvRecord(loader, state, record);
+  if (!state.columns) throw new Error('CSV: empty document (no header)');
   return loader.flush();
+}
+
+/**
+ * Load ONE CSV document from a BYTE STREAM, bounded memory — the form `io()` uses so a file up to a
+ * Durable Object's 10 GB ceiling loads inside a ~128 MB isolate. `CsvScanner` reframes chunks into
+ * records (a record may span chunks, and a quoted field may contain a newline), and `BatchingLoader`
+ * lands them in bounded batches. Unlike GraphSON, CSV needs no two-pass read: a CSV export is already
+ * TWO files, so `io()` loads the vertex file first and the edge file second, and by the time an edge
+ * record arrives every vertex it names is already a row — resolved through the per-batch store lookup.
+ */
+export async function loadCsvStreaming(
+  store: GraphStore, stream: ReadableStream<Uint8Array>, options?: BulkOptions,
+): Promise<BulkStats> {
+  const loader = new BatchingLoader(store, options);
+  const state: CsvReadState = { n: 0 };
+  const scanner = new CsvScanner();
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const record of scanner.push(decoder.decode(value, { stream: true }))) feedCsvRecord(loader, state, record);
+  }
+  const tail = decoder.decode();
+  if (tail) for (const record of scanner.push(tail)) feedCsvRecord(loader, state, record);
+  for (const record of scanner.end()) feedCsvRecord(loader, state, record);
+  if (!state.columns) throw new Error('CSV: empty document (no header)');
+  return loader.done();
 }
 
 // ---------- the writer ----------
@@ -495,12 +582,23 @@ function fill(store: GraphStore, table: string, expr: string, ids: readonly numb
 /** The two documents of one CSV export. */
 export interface CsvDump { vertices: string; edges: string }
 
-/** The whole graph as a vertex document and an edge document. A caller streaming to a sink should
- *  iterate `csvVertexLines`/`csvEdgeLines` instead of joining. */
+/** The whole graph as a vertex document and an edge document — the in-memory form, for tests and
+ *  small callers. The whole-graph `io()` path uses the sink writers below, which never join. */
 export const writeCsv = (store: GraphStore, pageSize?: number): CsvDump => ({
   vertices: [...csvVertexLines(store, pageSize)].join('\n'),
   edges: [...csvEdgeLines(store, pageSize)].join('\n'),
 });
+
+/** Drain the vertex document into a byte SINK — the streaming half of `writeCsv.vertices`, bounded
+ *  memory (the lines already page the store; the sink flushes them without joining). */
+export function writeCsvVerticesToSink(store: GraphStore, sink: IoSink, pageSize?: number): Promise<void> {
+  return pumpLinesToSink(csvVertexLines(store, pageSize), sink);
+}
+
+/** Drain the edge document into a byte SINK — the streaming half of `writeCsv.edges`. */
+export function writeCsvEdgesToSink(store: GraphStore, sink: IoSink, pageSize?: number): Promise<void> {
+  return pumpLinesToSink(csvEdgeLines(store, pageSize), sink);
+}
 
 /**
  * The two keys `io("<path>").write()` writes, derived from one path.

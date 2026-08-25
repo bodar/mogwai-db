@@ -10,6 +10,8 @@
 // statement ONE fixed shape (so the prepared statement is reused), where a correlated
 // json_group_array per element would make the statement's shape depend on the page.
 
+import type { IoSink } from '../iostore.ts';
+
 /** The minimal store seam a drain reads through — `GraphStore.query` satisfies it. Typed
  *  structurally so this module depends on no concrete store. */
 export interface RowWriter {
@@ -55,6 +57,52 @@ export function* keysetPages<T extends { id: number }>(
     if (rows.length < pageSize) return;
     after = rows[rows.length - 1].id;
   }
+}
+
+/**
+ * Decode a byte stream into text LINES, streaming — the reframer a line-oriented reader (GraphSON
+ * adjacency) drains through. Never holds more than one chunk's worth of text: complete lines are
+ * yielded and only the trailing partial line is carried into the next chunk.
+ *
+ * UTF-8 aware across chunk boundaries: `TextDecoder({stream:true})` buffers a split multibyte
+ * sequence rather than emitting a replacement char, and the final `decode()` flushes any tail. A
+ * trailing `\r` (a CRLF file) is left on the line — `JSON.parse` treats it as whitespace, exactly as
+ * the whole-string `split('\n')` path always has.
+ */
+export async function* linesOf(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let carry = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    carry += decoder.decode(value, { stream: true });
+    const parts = carry.split('\n');
+    carry = parts.pop() ?? '';          // the last piece is the (possibly empty) incomplete line
+    for (const line of parts) yield line;
+  }
+  carry += decoder.decode();            // flush a dangling multibyte sequence
+  if (carry.length) yield carry;
+}
+
+/**
+ * Pump a line generator into a byte SINK, bounded memory — the streaming WRITE half every format
+ * shares (GraphSON and CSV both drain the store as a `Generator<string>` of lines). Lines join with
+ * `\n` and carry NO trailing newline, byte-identical to the whole-document `[...lines].join('\n')`
+ * form, so either writer round-trips through either reader. Encoded text is buffered only up to
+ * `flushBytes` before a `sink.write`, so peak memory is one flush buffer plus one store page —
+ * never the document.
+ */
+export async function pumpLinesToSink(lines: Iterable<string>, sink: IoSink, flushBytes = 256 * 1024): Promise<void> {
+  const encoder = new TextEncoder();
+  let buf = '';
+  let first = true;
+  for (const line of lines) {
+    buf += first ? line : `\n${line}`;
+    first = false;
+    if (buf.length >= flushBytes) { await sink.write(encoder.encode(buf)); buf = ''; }
+  }
+  if (buf.length) await sink.write(encoder.encode(buf));
 }
 
 /** Group rows by their owner id — the per-page join a drain does in JS (see the header). */

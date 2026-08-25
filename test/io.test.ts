@@ -185,12 +185,12 @@ describe('io() fails closed', () => {
 describe('FileIoStore is ROOTED', () => {
   test('a path that escapes the root is rejected, resolved-final not textually', async () => {
     const store = new FileIoStore(ioDir());
-    await expect(store.read('../../etc/passwd')).rejects.toThrow(/escapes the configured io directory/);
+    await expect(store.readStream('../../etc/passwd')).rejects.toThrow(/escapes the configured io directory/);
     // leaves and re-enters: textually contains "..", but lands inside, so it is legal
-    await expect(store.read('data/../modern.json')).resolves.toBeInstanceOf(Uint8Array);
+    await expect(store.readStream('data/../modern.json')).resolves.toBeInstanceOf(ReadableStream);
     // A LEADING SLASH is not an absolute path — a path is a KEY under the root, which is what it
     // is on R2 too, so `/etc/passwd` names a (missing) key rather than the host's file.
-    await expect(store.read('/etc/passwd')).rejects.toThrow(/ENOENT/);
+    await expect(store.readStream('/etc/passwd')).rejects.toThrow(/ENOENT/);
   });
 
   test('list() returns root-relative, /-separated keys under a prefix', async () => {
@@ -212,8 +212,8 @@ describe('the io service is INTERNAL', () => {
   });
 
   test('NO_IO_STORE rejects every operation, naming the binding', async () => {
-    await expect(NO_IO_STORE.read('x')).rejects.toThrow(/no io binding is configured/);
-    await expect(NO_IO_STORE.write('x', new Uint8Array())).rejects.toThrow(/no io binding is configured/);
+    await expect(NO_IO_STORE.readStream('x')).rejects.toThrow(/no io binding is configured/);
+    await expect(NO_IO_STORE.writeStream('x')).rejects.toThrow(/no io binding is configured/);
     await expect(NO_IO_STORE.list('')).rejects.toThrow(/no io binding is configured/);
   });
 });

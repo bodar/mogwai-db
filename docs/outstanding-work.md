@@ -56,6 +56,18 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   immutable snapshot), **FTS/`trigramSeek` over a bound graph** (no landed FTS index — build when a use
   case reaches it), and one **path+encounter combo** (a bound path chain that also demands an emission
   encounter — the seed cannot carry both the path append and the order renumber).
+- **`io()` is MEMORY-bounded, not yet TIME-bounded.** The whole `io()` path streams end to end —
+  `IoStore` is `readStream`/`writeStream` (R2 multipart on the DO), GraphSON/CSV drain through
+  `BatchingLoader`, and the GraphSON read is a two-pass byte stream — so a graph up to a DO's 10 GB
+  ceiling moves in/out without materializing (peak memory is one page / one part; the R2 sink and the
+  two-pass reader are covered by `test/io-streaming.test.ts`). What is NOT yet solved is a single
+  request's WALL-CLOCK / CPU budget: a 10 GB load or dump will not finish in one DO invocation, so the
+  next step is a RESUMABLE `io()` — a keyset cursor persisted per (path, direction) so a read resumes
+  at the next vertex line / edge line and a write resumes at the next R2 part (R2 `resumeMultipartUpload`
+  exists for exactly this). Two perf follow-ons, both optimizations not correctness: the two-pass read
+  looks up every edge endpoint against the store even under `idPolicy:'preserve'` with numeric ids
+  (where the source id IS the rowid — a short-circuit would skip it, at the cost of the dangling-ref
+  existence check), and it `JSON.parse`s each line twice (once per pass). Neither moves the memory bound.
 - **Operations:** a real Cloudflare deployment, graph authentication, transaction/session
   semantics, and GraphSON response encoding.
 - **Query-plan performance.** The join-order fence and source seek made filtered lookups

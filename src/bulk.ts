@@ -528,3 +528,72 @@ export function loadBulk(
   for (const e of edges) loader.edge(e);
   return loader.flush();
 }
+
+/**
+ * A BulkLoader that lands and RESETS every `batchSize` elements — the loader a STREAMING reader
+ * (formats/graphson.ts, formats/csv.ts over `io()`) drains through, so peak memory is one batch's
+ * buffered rows rather than the whole document. A `BulkLoader` alone buffers every row AND grows an
+ * unbounded source-id→rowid map until its single `flush()`; that is fine for an in-memory document
+ * but is exactly the 10 GB Durable Object OOM this whole path exists to avoid.
+ *
+ * It works by CUTTING a fresh `BulkLoader` per batch. A fresh loader re-reads its `max(id)` cursors
+ * from the store (four statements, amortized to nothing over a large batch) and starts with empty
+ * buffers and an empty id cache — so an edge in a later batch resolves its endpoints against the
+ * rows PRIOR batches already landed (`BulkLoader.resolveEndpoint`), never against an in-memory map
+ * that would have to hold every vertex. That is why a streaming GraphSON load runs vertices to
+ * completion FIRST and edges second (formats/graphson.ts `loadGraphsonStreaming`): by the time any
+ * edge is seen, every vertex it could name is already in the store.
+ *
+ * `onCollision:'replace'` is refused: last-write-wins is a WHOLE-BATCH resolution (dedup by key, one
+ * batched existence read, wipe-then-reland) that cannot span independently-flushed batches. A
+ * caller that needs replace holds the document in memory and uses `BulkLoader`/`loadBulk` directly.
+ */
+export class BatchingLoader {
+  private loader: BulkLoader;
+  private pending = 0;
+  private finished = false;
+  private readonly totals = { vertices: 0, edges: 0, properties: 0, ftsRows: 0, statements: 0 };
+
+  constructor(
+    private readonly store: GraphStore,
+    private readonly options: BulkOptions = {},
+    private readonly batchSize = 5000,
+  ) {
+    if (options.onCollision === 'replace')
+      throw new Error('BatchingLoader does not support onCollision:"replace" — a whole-batch '
+        + 'last-write-wins cannot span streamed batches; load an in-memory document with loadBulk for replace');
+    this.loader = new BulkLoader(store, options);
+  }
+
+  vertex(v: BulkVertex): void { this.loader.vertex(v); this.tick(); }
+  edge(e: BulkEdge): void { this.loader.edge(e); this.tick(); }
+
+  private tick(): void {
+    if (++this.pending >= this.batchSize) this.cut();
+  }
+
+  /** Land the current batch and start a fresh loader. */
+  private cut(): void {
+    this.accumulate(this.loader.flush());
+    this.loader = new BulkLoader(this.store, this.options);
+    this.pending = 0;
+  }
+
+  private accumulate(s: BulkStats): void {
+    this.totals.vertices += s.vertices;
+    this.totals.edges += s.edges;
+    this.totals.properties += s.properties;
+    this.totals.ftsRows += s.ftsRows;
+    this.totals.statements += s.statements;
+  }
+
+  /** Land the final batch and return the whole load's stats. Idempotent — a second call flushes
+   *  nothing (the loader's `counts` are cumulative, so re-accumulating them would double-count). */
+  done(): BulkStats {
+    if (!this.finished) {
+      this.accumulate(this.loader.flush());
+      this.finished = true;
+    }
+    return { ...this.totals };
+  }
+}

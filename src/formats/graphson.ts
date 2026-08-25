@@ -28,13 +28,14 @@
 // v3. Endpoint labels are NOT part of the adjacency form in either version (`inV` is a bare id, and
 // structurally has to be — each vertex is its own line, so a reader resolves the id against that
 // vertex's own entry).
-import { BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
+import { BatchingLoader, BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
+import type { IoSink } from '../iostore.ts';
 import {
     BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
-import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, rowsForOwners, vertexPropsForOwners } from './drain.ts';
+import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
@@ -241,8 +242,12 @@ function edgeProperties(properties: unknown): BulkProperty[] {
 const flatVtype = (t: TypeNode | null): CanonicalType | null =>
   t === null ? null : typeof t === 'string' ? t : t.t;
 
-/** One parsed adjacency line → the vertex plus the edges it embeds. */
-export function graphsonVertexLine(line: string): { vertex: BulkVertex; edges: BulkEdge[] } {
+/** One adjacency line, JSON-parsed and validated but not yet split into vertex vs edges — the shared
+ *  half of the two parses, so a STREAMING two-pass reader (`loadGraphsonStreaming`) reuses the
+ *  `JSON.parse` + guards and builds only the half each pass needs. */
+interface RawAdjacency { id: number | string; label: unknown; properties: unknown; outE: Record<string, unknown[]> }
+
+function parseAdjacency(line: string): RawAdjacency {
   const v = JSON.parse(quoteExactNumbers(line)) as {
     '@type'?: string; id?: unknown; label?: unknown; properties?: unknown;
     outE?: Record<string, unknown[]>; inE?: Record<string, unknown[]>;
@@ -254,21 +259,32 @@ export function graphsonVertexLine(line: string): { vertex: BulkVertex; edges: B
     throw new Error(`GraphSON: "${v['@type']}" is not the line-oriented adjacency form `
       + '(one bare vertex object per line, with embedded outE) — a g:Vertex/g:graph document is a different artefact');
   if (v.id === undefined || v.id === null) throw new Error('GraphSON: adjacency vertex has no id');
-  const id = idOf(v.id);
-  const vertex: BulkVertex = { id, labels: labelsOf(v.label), properties: vertexProperties(v.properties) };
+  return { id: idOf(v.id), label: v.label, properties: v.properties, outE: v.outE ?? {} };
+}
+
+const vertexFromRaw = (raw: RawAdjacency): BulkVertex =>
+  ({ id: raw.id, labels: labelsOf(raw.label), properties: vertexProperties(raw.properties) });
+
+/** The edges a vertex line embeds. Only `outE` is read: `inE` is the same edge from the other side,
+ *  so reading both would double every edge. Every edge appears exactly once as some vertex's outE
+ *  (an adjacency list is written that way), so nothing is lost. */
+function edgesFromRaw(raw: RawAdjacency): BulkEdge[] {
   const edges: BulkEdge[] = [];
-  // Only `outE` is read: `inE` is the same edge from the other side, so reading both would double
-  // every edge. Every edge appears exactly once as some vertex's outE (an adjacency list is written
-  // that way), so nothing is lost.
-  for (const [label, list] of Object.entries(v.outE ?? {}))
+  for (const [label, list] of Object.entries(raw.outE))
     for (const e of list) {
       const edge = e as { id?: unknown; inV: unknown; properties?: unknown };
       edges.push({
         id: edge.id === undefined ? undefined : idOf(edge.id),
-        label, src: id, tgt: idOf(edge.inV), properties: edgeProperties(edge.properties),
+        label, src: raw.id, tgt: idOf(edge.inV), properties: edgeProperties(edge.properties),
       });
     }
-  return { vertex, edges };
+  return edges;
+}
+
+/** One parsed adjacency line → the vertex plus the edges it embeds. */
+export function graphsonVertexLine(line: string): { vertex: BulkVertex; edges: BulkEdge[] } {
+  const raw = parseAdjacency(line);
+  return { vertex: vertexFromRaw(raw), edges: edgesFromRaw(raw) };
 }
 
 /**
@@ -298,6 +314,55 @@ export function loadGraphson(store: GraphStore, document: string, options?: Bulk
   }
   for (const e of edges) loader.edge(e);
   return loader.flush();
+}
+
+/**
+ * Load a whole line-oriented GraphSON document from a BYTE STREAM, bounded memory — the form `io()`
+ * uses so a graph up to a Durable Object's 10 GB ceiling loads inside a ~128 MB isolate. Where
+ * `loadGraphson` takes the whole document string (fine in memory, used by tests and small callers),
+ * this never holds more than one batch's rows.
+ *
+ * TWO PASSES over the stream, which is why `open` is a THUNK (it is called twice, and each call
+ * returns a fresh stream). An adjacency line embeds its own vertex's outgoing edges, and an edge's
+ * target may be a vertex on ANY later line — so a single memory-bounded pass cannot resolve a
+ * forward reference without spilling every deferred edge somewhere. Instead: pass 1 lands every
+ * VERTEX (ignoring edges), pass 2 lands every EDGE (ignoring vertices), and by pass 2 every endpoint
+ * a `tgt` could name is already a row in the store, resolved through `BatchingLoader`'s per-batch
+ * store lookup. Re-reading the object is cheap (R2 egress is free; a file re-opens) next to holding
+ * the graph — and it needs no scratch table.
+ *
+ * Fails closed with the line number on a malformed line, per pass — a partially loaded graph is only
+ * diagnosable if the failure names where it stopped.
+ */
+export async function loadGraphsonStreaming(
+  store: GraphStore, open: () => Promise<ReadableStream<Uint8Array>>, options?: BulkOptions,
+): Promise<BulkStats> {
+  const vertices = new BatchingLoader(store, options);
+  await eachLine(await open(), (raw) => vertices.vertex(vertexFromRaw(raw)));
+  const vStats = vertices.done();
+
+  const edges = new BatchingLoader(store, options);
+  await eachLine(await open(), (raw) => { for (const e of edgesFromRaw(raw)) edges.edge(e); });
+  const eStats = edges.done();
+
+  return {
+    vertices: vStats.vertices, edges: eStats.edges,
+    properties: vStats.properties + eStats.properties,
+    ftsRows: vStats.ftsRows + eStats.ftsRows,
+    statements: vStats.statements + eStats.statements,
+  };
+}
+
+/** Drain a stream line by line, parsing each non-blank line and handing the raw adjacency object to
+ *  `sink`. Fails closed naming the line number, matching `loadGraphson`. */
+async function eachLine(stream: ReadableStream<Uint8Array>, sink: (raw: RawAdjacency) => void): Promise<void> {
+  let n = 0;
+  for await (const line of linesOf(stream)) {
+    n++;
+    if (!line.trim()) continue;
+    try { sink(parseAdjacency(line)); }
+    catch (e) { throw new Error(`GraphSON line ${n}: ${e instanceof Error ? e.message : String(e)}`); }
+  }
 }
 
 // ---------- the writer: v4, line-oriented adjacency ----------
@@ -461,7 +526,18 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
   }
 }
 
-/** The whole graph as one newline-separated document — the file `io().write()` will put in R2 or on
- *  disk. A caller streaming to a sink should iterate `graphsonLines` instead of joining. */
+/** The whole graph as one newline-separated document — the in-memory form, for tests and small
+ *  callers. The whole-graph `io()` path uses `writeGraphsonToSink` instead, which never joins. */
 export const writeGraphson = (store: GraphStore, pageSize?: number): string =>
   [...graphsonLines(store, pageSize)].join('\n');
+
+/**
+ * Drain the whole graph into a byte SINK — the streaming writer `io().write()` uses, so a 10 GB
+ * export never materializes. `graphsonLines` already pages the store (bounded read memory); this
+ * adds the bounded WRITE half: lines are encoded and buffered only up to `flushBytes`, then pushed
+ * to the sink and forgotten. The document is byte-identical to `writeGraphson` — the same lines,
+ * newline-separated, no trailing newline — so either writer round-trips through either reader.
+ */
+export function writeGraphsonToSink(store: GraphStore, sink: IoSink, pageSize?: number): Promise<void> {
+  return pumpLinesToSink(graphsonLines(store, pageSize), sink);
+}

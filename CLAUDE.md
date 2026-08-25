@@ -366,10 +366,20 @@ remaining cross-cutting substrate.
   escape it), an **R2 bucket binding** inside a DO (`IO` in wrangler.jsonc — bindings are a property of
   a DO's env exactly as they are a Worker's, so a whole-graph read/write happens where the graph
   lives). **Optional on both**, and absent it fails closed NAMING the missing binding rather than
-  silently doing nothing. Formats are adapters in `src/formats/`, draining through the shared
-  keyset-page + `json_each` membership helpers (`src/formats/drain.ts`) and loading through the
-  set-based writer: typed GraphSON adjacency is the lossless one (backup, seeding, `io()`), CSV is
-  interop-only and says so by refusing what it cannot carry.
+  silently doing nothing. **STREAMING both ways, and that is load-bearing, not a nicety**: a graph can
+  be up to a DO's 10 GB storage ceiling while its isolate has ~128 MB, so the seam is `readStream` /
+  `writeStream` (a sink), never a `Uint8Array` in/out — a read the loader drains a page at a time, a
+  write the drain pushes pages into. R2 has no streaming request body, so the write sink is R2
+  **multipart upload** (bounded parts, single-`put` fallback for a small dump; `cloudflare/R2IoStore.ts`).
+  Peak memory is one page / one part, never the document. Formats are adapters in `src/formats/`,
+  draining through the shared keyset-page + `json_each` membership helpers (`src/formats/drain.ts`)
+  and loading through the set-based writer via `BatchingLoader` (`src/bulk.ts` — flushes + resets
+  every N so no buffer or id map scales with the graph). Typed GraphSON adjacency is the lossless one
+  (backup, seeding, `io()`), and its READ is TWO passes over the byte stream — every vertex, then
+  every edge — because an adjacency line's edge may target a later line and a memory-bounded single
+  pass cannot resolve that forward reference. CSV is interop-only (already two files, so no two-pass)
+  and says so by refusing what it cannot carry. The whole-string `loadGraphson`/`writeGraphson`/
+  `loadCsv`/`writeCsv` forms stay for tests and small in-memory callers; the `io()` path never joins.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`): `application(deps)` wires the shared router from one
   injected `GraphManager`. Entry points: `src/bun/server.ts`, `src/cloudflare/worker.ts`.
 - Web-session-only facts (which environment can build this at all, the shallow clone, pushing to a

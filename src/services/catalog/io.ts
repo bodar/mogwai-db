@@ -1,9 +1,9 @@
 import type { Service, CallParams } from '../spi/types.ts';
 import { IO_SERVICE_NAME } from '../spi/types.ts';
-import type { IoStore } from '../../iostore.ts';
+import type { IoSink, IoStore } from '../../iostore.ts';
 import type { GraphStore } from '../../storage.ts';
-import { loadGraphson, writeGraphson } from '../../formats/graphson.ts';
-import { csvPaths, loadCsv, writeCsv } from '../../formats/csv.ts';
+import { loadGraphsonStreaming, writeGraphsonToSink } from '../../formats/graphson.ts';
+import { csvPaths, loadCsvStreaming, writeCsvEdgesToSink, writeCsvVerticesToSink } from '../../formats/csv.ts';
 
 // ---------- mogwai.io — what io() desugars to (async, Barrier, INTERNAL) ----------
 //
@@ -85,6 +85,19 @@ function codecFor(path: string, params: CallParams, direction: IoDirection): Cod
   throw new Error(`io("${path}"): unrecognized format "${format}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
 }
 
+/** Open a write sink, run `drain` into it, and COMMIT on success or ABORT on failure — so a drain
+ *  that throws partway (a store error, an R2 hiccup) leaves no half-written document behind. */
+async function drainTo(io: IoStore, path: string, drain: (sink: IoSink) => Promise<void>): Promise<void> {
+  const sink = await io.writeStream(path);
+  try {
+    await drain(sink);
+    await sink.close();
+  } catch (e) {
+    await sink.abort(e);
+    throw e;
+  }
+}
+
 /** The io service. `apply` returns NO rows in both directions, which is already the right answer:
  *  a read mutates this graph and the official scenarios assert an empty result, and a write
  *  produces bytes, not traversers. */
@@ -107,22 +120,22 @@ export const createIoService = (io: IoStore, store: GraphStore | undefined): Ser
       const codec = codecFor(path, params, direction);   // format check FIRST, so an unsupported one costs no io
       if (!store)
         throw new Error(`io("${path}"): this compile has no graph store behind it (io() needs the executor's data plane)`);
+      // STREAMING both ways (iostore.ts): a graph up to a Durable Object's 10 GB ceiling never
+      // materializes in the ~128 MB isolate. A read drains the object's byte stream; a write drains
+      // the graph into a byte sink (R2 multipart / a file writer).
       if (direction === 'read') {
-        const document = new TextDecoder().decode(await io.read(path));
-        if (codec === 'graphson') loadGraphson(store, document);
-        // CSV is TWO documents (a vertex file and an edge file cannot share a header), so a read takes
-        // ONE of them and the header says which — load the vertex file first, then the edge file, whose
-        // endpoints resolve against the vertices already in the graph.
-        else loadCsv(store, document);
+        // GraphSON needs TWO passes over the bytes (vertices then edges — an edge's target may be a
+        // later line), so it takes a re-openable stream THUNK; CSV is already two files, so one stream.
+        if (codec === 'graphson') await loadGraphsonStreaming(store, () => io.readStream(path));
+        else await loadCsvStreaming(store, await io.readStream(path));
       } else if (codec === 'graphson') {
-        await io.write(path, new TextEncoder().encode(writeGraphson(store)));
+        await drainTo(io, path, (sink) => writeGraphsonToSink(store, sink));
       } else {
-        // …and a WRITE has to produce both halves, so it emits them at the two derived keys `csvPaths`
-        // names. They are ordinary readable paths, so the round trip is two `read()`s.
+        // A CSV WRITE produces BOTH halves, at the two derived keys `csvPaths` names — ordinary
+        // readable paths, so the round trip is two `read()`s (vertices first, then edges).
         const keys = csvPaths(path);
-        const dump = writeCsv(store);
-        await io.write(keys.vertices, new TextEncoder().encode(dump.vertices));
-        await io.write(keys.edges, new TextEncoder().encode(dump.edges));
+        await drainTo(io, keys.vertices, (sink) => writeCsvVerticesToSink(store, sink));
+        await drainTo(io, keys.edges, (sink) => writeCsvEdgesToSink(store, sink));
       }
       return [];
     },
