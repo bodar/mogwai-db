@@ -3,7 +3,7 @@ import { arg, isPred } from '../../gremlin/frontend.ts';
 import type { BarrierInput } from '../../services/spi/types.ts';
 import type { Plan, SegmentPlan } from '../segment.ts';
 import { lowerToRel, type Lowering } from './lower.ts';
-import { finishLowering } from './spine.ts';
+import { valueHead } from './barrier-value.ts';
 
 // ---------- regex as a barrier — `has(key, TextP.regex(...))`, on the RelIR route ----------
 //
@@ -186,9 +186,8 @@ export function buildRegexSegment(
     : null;
   const lowered = (prefilter && lowerToRel([...prefix, prefilter, read], lowering))
     || lowerToRel([...prefix, read], lowering);
-  if (!lowered) return null;
-  const head = finishLowering(lowered);
-  if (head.kind !== 'read' || head.shape.kind !== 'value') return null;
+  const head = valueHead(lowered);
+  if (!head) return null;
 
   // JS-`RegExp`, no `g` flag → `test` is a stateless partial SEARCH (Java `matcher.find()`). A pattern
   // valid in Java but not in JS throws here — a clear compile-time query failure, the committed

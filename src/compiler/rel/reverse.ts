@@ -1,8 +1,7 @@
 import type { Step } from '../../gremlin/frontend.ts';
-import type { BarrierInput } from '../../services/spi/types.ts';
-import type { Plan, SegmentPlan } from '../segment.ts';
-import { lowerToRel, lowerValueResume, type Lowering } from './lower.ts';
-import { finishLowering } from './spine.ts';
+import type { SegmentPlan } from '../segment.ts';
+import { lowerValueResume, type Lowering } from './lower.ts';
+import { buildValueTransformSegment } from './barrier-value.ts';
 
 // ---------- reverse() as a value-transform BARRIER — substrate A ----------
 //
@@ -42,25 +41,10 @@ export function reverseBarrierIn(steps: readonly Step[]): number | null {
 
 /**
  * Plan `reverse()` as a SYNC value-transform barrier, or `null` to decline (the fold then lowers reverse
- * its own way — no regression). The head must be a SCALAR `value` read.
+ * its own way — no regression). The head must be a SCALAR `value` read; the reversed values re-inject as
+ * a value stream (`lowerValueResume`). The shared `buildValueTransformSegment` shell is what `split()`
+ * uses too — reverse and split differ only in the transform and the resume lowering.
  */
 export function buildReverseSegment(steps: readonly Step[], at: number, lowering: Lowering): SegmentPlan | null {
-  const lowered = lowerToRel(steps.slice(0, at), lowering);
-  if (!lowered) return null;
-  const head = finishLowering(lowered);
-  if (head.kind !== 'read' || head.shape.kind !== 'value') return null;
-  return {
-    kind: 'segment',
-    mode: 'sync',
-    head,
-    resume: (headRows: readonly BarrierInput[]): Plan => {
-      const reversed = headRows.map((row) => reverseValue(row.injectedValue));
-      const resumed = lowerValueResume(reversed, steps, at + 1, lowering);
-      // A value-source resume cannot decline silently — the values are computed and the stream must go on
-      // — so an unsupported tail (including a further barrier after reverse, not yet chained) RAISES
-      // naming the failure rather than answering a narrower question.
-      if (!resumed) throw new Error('reverse() barrier resume: no lowering covers the traversal after reverse()');
-      return { kind: 'sql', compiled: finishLowering(resumed) };
-    },
-  };
+  return buildValueTransformSegment(steps, at, lowering, reverseValue, lowerValueResume, 'reverse');
 }

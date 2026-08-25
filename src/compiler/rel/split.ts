@@ -1,9 +1,8 @@
 import { isScopeArg, type Step } from '../../gremlin/frontend.ts';
 import { isLocalScope } from '../ir/step.ts';
-import type { BarrierInput } from '../../services/spi/types.ts';
-import type { Plan, SegmentPlan } from '../segment.ts';
-import { lowerListResume, lowerToRel, type Lowering } from './lower.ts';
-import { finishLowering } from './spine.ts';
+import type { SegmentPlan } from '../segment.ts';
+import { lowerListResume, type Lowering } from './lower.ts';
+import { buildValueTransformSegment } from './barrier-value.ts';
 
 // ---------- split() as a value-transform BARRIER — substrate A ----------
 //
@@ -67,22 +66,8 @@ export function splitBarrierIn(steps: readonly Step[]): { at: number; separator:
 export function buildSplitSegment(
   steps: readonly Step[], at: number, separator: string | null, lowering: Lowering,
 ): SegmentPlan | null {
-  const lowered = lowerToRel(steps.slice(0, at), lowering);
-  if (!lowered) return null;
-  const head = finishLowering(lowered);
-  if (head.kind !== 'read' || head.shape.kind !== 'value') return null;
-  return {
-    kind: 'segment',
-    mode: 'sync',
-    head,
-    resume: (headRows: readonly BarrierInput[]): Plan => {
-      const lists = headRows.map((row) => splitValue(row.injectedValue, separator));
-      const resumed = lowerListResume(lists, steps, at + 1, lowering);
-      // The values are computed and the stream must go on — a value-source resume cannot decline
-      // silently — so an unsupported tail (including a further barrier after split, not yet chained)
-      // RAISES naming the failure rather than answering a narrower question.
-      if (!resumed) throw new Error('split() barrier resume: no lowering covers the traversal after split()');
-      return { kind: 'sql', compiled: finishLowering(resumed) };
-    },
-  };
+  // The value twin of `reverse()` on the shared shell: each string splits into a LIST, so the survivors
+  // re-inject through `lowerListResume` (reverse uses `lowerValueResume`). The separator is bound into
+  // the per-value transform here.
+  return buildValueTransformSegment(steps, at, lowering, (value) => splitValue(value, separator), lowerListResume, 'split');
 }
