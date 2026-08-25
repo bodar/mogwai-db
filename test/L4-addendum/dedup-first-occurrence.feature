@@ -45,7 +45,6 @@ Feature: mogwai addendum — dedup() keeps the FIRST occurrence, so an ordered s
       | marko |
 
   @gap:dedup-first-occurrence
-  @Unsupported
   Scenario: g_VX1X_localXout_in_order_byXnameX_dedupX_valuesXnameX
     Given the modern graph
     And the traversal of

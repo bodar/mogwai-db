@@ -67,6 +67,20 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(tail.length).toBe(3); // one per vertex that has out-edges: marko, josh, peter
   });
 
+  test('local(<body>.dedup()) is a per-origin DISTINCT, not a global one', () => {
+    // `dedup()` inside a per-parent body is DISTINCT within each parent: `local(both("created").dedup())`
+    // keeps each vertex's distinct created-neighbours. It lowers to a ranked window PARTITIONed by the
+    // origin (parent) plus the identity key — never a global Distinct that would collapse across parents.
+    const p = read('g.V().local(__.both("created").dedup())');
+    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    // Per-vertex distinct both-created counts: marko 1, josh 2 (lop,ripple), peter 1, lop 3, ripple 1 = 8.
+    const n = run(seededStore(), 'g.V().local(__.both("created").dedup()).count()') as any[];
+    expect(Number(n[0].v)).toBe(8);
+    // Top-level dedup stays GLOBAL (no origin channel): distinct out-neighbours across the whole graph.
+    const g = run(seededStore(), 'g.V().out().dedup().count()') as any[];
+    expect(Number(g[0].v)).toBe(4); // {vadas, josh, lop, ripple} — peter/marko are not out-targets
+  });
+
 
 
 

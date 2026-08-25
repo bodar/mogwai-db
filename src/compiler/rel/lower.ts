@@ -1509,7 +1509,9 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   // table names. So this declines rather than taking an arbitrary alias into the key (path-distinct
   // semantics) — a clean deferral, not a wrong answer. The honest lowering is a ranked window over
   // the identity partition (`dedupBy`'s shape with the id as its key), which is a separate increment.
-  if (!groupableChannels(input.channels)) return null;
+  // `origin` is exempt: in a per-parent body it is the dedup's PARTITION KEY (kept whole), not a value a
+  // grouping would take from an arbitrary member. The other channels still owe a defined N→1 answer.
+  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin'))) return null;
 
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1, childSeam(ctx, fresh));
@@ -1522,6 +1524,12 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   // window keeps ONE member's payload whole, which is what "the first occurrence survives" means when a
   // traverser is more than its identity — the honest lowering this comment block predicted.
   if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
+
+  // PER-ORIGIN (a `local(__.…dedup())` body carries `origin`): the Distinct/Aggregate arms below
+  // collapse the row to `(id, bulk)` and cannot carry `origin` (its group policy is `undefined`), so
+  // route through the ranked window instead — `dedupOn` partitions by `(origin, id)` and keeps the
+  // parent key whole, which is DISTINCT-within-each-parent.
+  if (originOf(input.channels)) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -1625,6 +1633,12 @@ function dedupOn(
   // identity: only `bulk` is rewritten.
   const cols = [...payloadCols(domain), ...carriedCols(domain.channels)];
   const position = encounterOf(domain.channels);
+  // PER-ORIGIN when an `origin` channel is live: a `dedup()` inside a per-parent body
+  // (`local(__.out().dedup())`) is DISTINCT within each parent, not globally — so the parent is the
+  // FIRST partition key. This is the fold-mode rule (a barrier consults the ambient `origin`): at the top
+  // level there is no `origin`, so the dedup stays global exactly as before.
+  const origin = originOf(domain.channels);
+  const partitionBy = origin ? [col(domain.id, origin.col), ...keys] : keys;
   const ranked = make.window({
     // A `Window` may only EXTEND its input (§3.5), so its declared type is the INPUT's columns IN THE
     // INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
@@ -1634,7 +1648,7 @@ function dedupOn(
     specs: [['rn', {
       kind: 'window-expr', fn: 'row_number', args: [],
       spec: {
-        partitionBy: keys,
+        partitionBy,
         orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
           ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
       },
@@ -7095,9 +7109,11 @@ function flatMapRejoin(
   const isTail = last.name === 'tail' && !isLocalScope(last);
   const perOriginSlice = body.length > 1 && (isSlice || isTail);
   const prefix = perOriginSlice ? body.slice(0, -1) : body;
-  // The prefix must be barrier-free EXCEPT for a single trailing `order()` (the per-origin collation).
-  const barriers = prefix.filter(isStreamBarrier);
-  if (barriers.length > 1 || (barriers.length === 1 && !(barriers[0] === prefix[prefix.length - 1] && prefix[prefix.length - 1]!.name === 'order'))) return null;
+  // The prefix's barriers must be ORIGIN-AWARE ones — `order()` (its global sort restricted to a
+  // partition is that origin's order) and `dedup()` (per-origin DISTINCT via `dedupOn`'s origin key).
+  // `childRows` lowers them and each self-scopes to the `origin` it mints; any OTHER barrier (a reduce,
+  // `fold`, `group`) changes the framing and is not this — decline.
+  if (!prefix.filter(isStreamBarrier).every((s) => s.name === 'order' || s.name === 'dedup')) return null;
   // tail(n): n from the arg (default 1); a param count declines (fail closed — no data-sized window).
   const tailN = isTail ? ((): number | null => { const a = argValues(last); return a.length === 0 ? 1 : (typeof a[0] === 'number' ? a[0] : null); })() : null;
   if (isTail && tailN === null) return null;
