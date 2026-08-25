@@ -36,9 +36,13 @@ channel (host rowid) and lowers the body through the ordinary fold.
 
 Generalize to **`perOriginWindow(rows, partitionBy: Expr, order: SortTerm[], slice: Window, fresh)`**:
 
-- **`partitionBy`** — an arbitrary Expr, the ORIGIN KEY. This is the ONLY seam that differs per
-  consumer: an `origin`-channel column (`local`/`flatMap`), a bound alias's id column (`match` start),
-  a `by`-host id, an arm's incoming-traverser id, an unrolled iteration's entering-traverser id.
+- **`partitionBy`** — always the `origin` CHANNEL column now. The origin-key seam differs per consumer
+  only in how the `origin` is MINTED, never in what the window reads: a host rowid (`local`/`flatMap`,
+  `childRows`) or a per-BINDING-ROW number (`match`, `mintRowOrigin`). The earlier design partitioned a
+  match window by the bound alias's id directly; item 4 refuted that — a binding row is not identified by
+  any element it holds (two rows can share the start alias), so the partition must be a per-row origin,
+  and match now reaches the identical `origin`-channel path `local`/`flatMap` do. A `by`-host id, an
+  arm's incoming traverser and an unrolled iteration's entering traverser remain unbuilt consumers.
 - **`order`** — the `SortTerm[]` from the body's own `order().by()` (reuse `sortTerms`/`orderRows`),
   falling back to `encounter`+payload when the body gave no order (an IMPL-DEFINED pick TinkerPop
   allows — the corpus asserts "result should be OF … count N"; a deterministic order keeps
@@ -72,11 +76,12 @@ window op. Decline (never mis-execute) when:
    (lowered inside `childRows`, so the fold's `order` mints the `encounter` the window ranks by) and
    `tail` (reversed collation). Reaps `local(__.out().order().by('name').limit(1))`, `tail`, the
    `properties().order().range()` shape.
-2. ✅ **LANDED (`1dc63b2`, L3 1759→1760) — `match` pattern body.** `splitWindow` finds the mid-body
-   slice; `windowedBody` re-roots the prefix (incl. its `order()`), applies `child.window` PARTITION BY
-   the start-alias id, then continues the suffix (`inV`). Reaps the `outE.order.by.limit.inV` target. The
-   partition-key seam (origin channel → alias id) proved out exactly as designed — one primitive, two
-   consumers, differing only in `partitionBy`.
+2. ✅ **LANDED (`1dc63b2`, L3 1759→1760) — `match` pattern body — then SUPERSEDED by item 4.** The first
+   cut (`splitWindow` + `windowedBody`) re-rooted the prefix, applied `child.window` PARTITION BY the
+   START-ALIAS id, then continued the suffix. It reaped the `outE.order.by.limit.inV` target but carried
+   a latent wrong answer (a partition by alias id collapses binding rows that share it), and item 4
+   replaced it with the per-binding-row `origin` channel. Both `splitWindow` and `windowedBody` are
+   deleted; the lesson kept is that the partition-key seam is a per-consumer MINT, not a per-consumer read.
 
 3. ✅ **LANDED (`d8b6fc4`) — per-origin `dedup()` for `local`/`flatMap`.** `dedupOn` prepends the ambient
    `origin` to its window `PARTITION BY`; the bare-dedup guard exempts `origin` from `groupableChannels`
@@ -85,6 +90,23 @@ window op. Decline (never mis-execute) when:
    `flatMapRejoin` admits `order()`/`dedup()` barriers in the body prefix. Reaps `local(out().dedup())`,
    `local(both().dedup())`, and dropped an `@Unsupported` L4 tag (`local(out().in().order().by(name).dedup())`,
    ordered + perturbation-stable). This is the fold-mode rule in place for the row-preserving barriers.
+
+4. ✅ **LANDED (`cf7a504`) — `match` UNIFIED onto the per-origin substrate (the principled version).**
+   A per-origin barrier in a pattern body now scopes PER BINDING ROW through the SAME mechanism
+   `local`/`flatMap` use, not a hand-rolled window. `child.scopeRows`/`unscopeRows` (`mintRowOrigin`/
+   `dropOrigin`) mint a per-ROW `origin` (`ROW_NUMBER() OVER ()`, unique per binding row) on the binding
+   table and shed it after the body; the whole body runs through `child.chain`, and `sliceOp`/`dedupOn`
+   consult that ambient `origin` and self-scope. **`windowedBody`/`splitWindow` are DELETED** — match
+   "stops being a special-case hand-rolled version" (TinkerPop grounds this: `MatchStep` localizes a
+   barrier pattern body into a `TraversalFlatMapStep`, `MatchStep.java:156-166`, so each pattern runs
+   per-traverser). This FIXED a latent wrong answer the old start-alias partition carried: two `x`
+   reaching one `a` collapsed to one edge (partition by alias id) instead of one each (partition by
+   binding row) — `match(as(x).out('created').as(a), as(a).inE.order.by(weight).limit(1).outV.as(b))`
+   now answers 4 rows, not 2. Reaps match per-origin `dedup()` too. Enablers: `sliceOp` gains the origin
+   path (`sample` deliberately falls through to its global RANDOM window — intercepting it regressed a
+   `by(__.…order().sample(n).fold())` reducer); `dedup`'s guard reordered so the window arms (which carry
+   alias channels + `origin`) precede the `groupableChannels` guard, which now gates only the collapsing
+   Distinct/Aggregate arms. 7 corpus traversals moved deferred→golden (all verified vs the reference).
 
 ### Two semantics corrections found by reading the reference (not reasoning)
 
