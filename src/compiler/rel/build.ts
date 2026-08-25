@@ -168,6 +168,11 @@ export const VALUEMAP_PAIR = { key: 'vmk', values: 'vmv', ord: 'vmo' } as const;
 export const jsonOf = (arg: Expr): Expr => ({ kind: 'call', fn: 'json', args: [arg] });
 export const coalesce = (...args: readonly Expr[]): Expr => ({ kind: 'call', fn: 'COALESCE', args });
 
+/** `json_extract(e, '<path>')` — a compiler-authored path constant (never a bind). The one builder for
+ *  the call so the shape is not re-transcribed per file; `jsonField` is the common `$.<field>` case. */
+export const jsonExtract = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+export const jsonField = (node: Expr, field: string): Expr => jsonExtract(node, `$.${field}`);
+
 /**
  * The EMPTY collection literals, BIND-FREE. A `Lit` renders as a bound parameter (§3.6) and the platform
  * allows a hundred of them, so a compiler-authored constant that has a function spelling takes the

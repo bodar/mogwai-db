@@ -7,7 +7,7 @@ import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, eq, fenced, firstOf, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, eq, fenced, firstOf, jsonField, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -1286,7 +1286,7 @@ export function entrySide(input: Rel, side: 'keys' | 'values', of: MapOf, fresh:
  * it into the SCALAR vocabulary would be lossy. There is no third side — see `sideList`.
  */
 function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
-  const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${name}`)] });
+  const field = (name: string): Expr => jsonField(node, name);
   // A LIST value UNWRAPS its `{t:'list', v:[…]}` node to the raw inner array in `LIST_COL` — the same
   // root encoding `mapSide` collects — so `select(<key>)`/an entry's value side is a LIST stream the
   // caller continues with `listTail` (`docs/archive/2026-08-21-map-value-shape-plan.md`). Without this a list

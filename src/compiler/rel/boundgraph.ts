@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
-import { and, eq, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
 import { storedCompareOn } from './predicate.ts';
@@ -43,7 +43,6 @@ export const landedCols = (kind: Elem): readonly import('../../rel/types.ts').Co
 // `(id, label: JSON name array, props: JSON {t,v} tree)`; a landed EDGE carries
 // `(id, label: TEXT name, src, tgt, props: JSON)`.
 
-const jsonExtract = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
 const jsonKeyPath = (key: string): string => `$."${key.replace(/"/g, '""')}"`;
 
 /** The inline string label names in a movement/label-arg set — the ONLY form a landed edge's TEXT

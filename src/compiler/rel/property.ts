@@ -2,7 +2,7 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
-import { and, byEncounter, carriedCols, eq, jsonOf, keyMembership, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
 import { storedCompareOn, valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
@@ -97,7 +97,6 @@ export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[]
  */
 export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: readonly string[] | null, fresh: Minter): Rel {
   const { owner } = PROPERTIES[elem];
-  const jx = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
   const B = { id: 'bp_id', props: 'bp_props', key: 'bp_key', value: 'bp_value', node: 'bp_node' } as const;
   const pref = make.project({
     id: fresh('bpp'), input: cte, channels: [], type: typeOf(meta(B.id, 'any', true), meta(B.props, 'json', true)),
@@ -129,14 +128,14 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
     exprs: [
       // vpid/meta ride on the landed node (the detached compile emits `{t,v,vpid,meta}`); a lossy
       // landing without them extracts NULL — the framer then synthesises `owner:pk`, the old behaviour.
-      [PROP('id'), elem === 'vertex' ? jx(node, '$.vpid') : compilerNull()],
+      [PROP('id'), elem === 'vertex' ? jsonExtract(node, '$.vpid') : compilerNull()],
       // The element id is carried THROUGH the join/explodes (the join keeps `input`'s columns), so it is
       // read off `nodes` here — `input` itself is not in scope at this projection.
       [PROP(owner), col(nodes.id, 'id')],
       [PROP('key'), col(nodes.id, B.key)],
-      [PROP('value'), jx(node, '$.v')],
-      [PROP('vtype'), jx(node, '$.t')],
-      ...(elem === 'vertex' ? [[PROP('meta'), jx(node, '$.meta')] as const] : []),
+      [PROP('value'), jsonExtract(node, '$.v')],
+      [PROP('vtype'), jsonExtract(node, '$.t')],
+      ...(elem === 'vertex' ? [[PROP('meta'), jsonExtract(node, '$.meta')] as const] : []),
       ...input.channels.map((channel) => [channel.col, col(nodes.id, channel.col)] as const),
     ],
   });
