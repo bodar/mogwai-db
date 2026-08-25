@@ -315,6 +315,12 @@ const COVERED = [
   "g.inject('1').asNumber()", "g.inject('1','2').asNumber(GType.INT)", 'g.inject(1).asNumber(GType.LONG)',
   "g.inject('true').asBool()", "g.inject('2023-08-02T00:00:00Z').asDate()",
   "g.inject('1','2').asNumber(GType.INT).sum()", "g.inject('1').asNumber().is(P.gt(0))",
+  // BARE asNumber() over a RUNTIME stream already framed numeric or datetime is the reference identity
+  // (`AsNumberStep.map`: a Number unchanged, a Date as its epoch-milli Long), so it needs no cast and
+  // cannot raise — where the const-fold path answers only a literal. A bare asNumber() over an UNTYPED
+  // property still declines (it could meet a non-numeric value it must RAISE on).
+  "g.V().count().asNumber()", "g.V().values('birthday').asDate().asNumber()",
+  "g.V().values('birthday').asDate().asNumber().asDate()",
   // `has()`'s three ARGUMENT SHAPES, all of one step. The 3-arg form is the label constraint AND the
   // property one, exactly as `HasStep` composes them; a `T`-token key asks about the ELEMENT rather
   // than a property row. Each was its own decline and each is a composition of clauses already built.

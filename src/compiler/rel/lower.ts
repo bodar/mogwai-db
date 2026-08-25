@@ -1291,7 +1291,11 @@ function scalarTail(
       // `seed.kind === 'values'` IS "the value is a compile-time literal": an `inject()` source is the
       // only one, and it is the population that gets constant-folded. Read off the SEED rather than the
       // current relation, because a preceding transform does not stop a value being literal-derived.
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values');
+      // `out.type` is the framing type of the stream AS IT ENTERS this transform — a preceding
+      // `asDate()`/`count()`/cast leaves a known static tag there, which is what lets a bare
+      // `asNumber()` answer identity over a numeric/datetime stream (§6·7; `transformExpr`).
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values',
+        out.kind === 'scalar' ? out.type : undefined);
       if (!tx) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so

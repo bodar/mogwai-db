@@ -10,9 +10,10 @@ import { test, expect, describe } from 'bun:test';
 import { PER_ROW, SCALAR_MEMBERS, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
-import { decode } from '../support/decode.ts';
-import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { decode, decodeAll } from '../support/decode.ts';
+import { read, run, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -55,6 +56,28 @@ describe('scalar-parent / projection SQL', () => {
     const ints = executeQuery(new GraphStore(new BunSqlite(':memory:')), 'g.inject("1",2,"3",4).asNumber().fold()', {})[0];
     expect(ints[6]).toBe(ioc.DataType.INT);
     expect(await decode(ints)).toEqual([1, 2, 3, 4]);
+  });
+
+  test('bare asNumber() over a known-numeric/datetime stream is the reference identity', async () => {
+    // `AsNumberStep.map` returns a `Number` UNCHANGED and a `Date`/`OffsetDateTime` as its epoch-milli
+    // Long (`vendor/tinkerpop/.../map/AsNumberStep.java:57-72`). Over a runtime stream already framed
+    // numeric or datetime it therefore needs no cast and cannot raise — the value is the same, only the
+    // tag moves (datetime → long). A bare `asNumber()` over an UNTYPED property still declines (it could
+    // meet a non-numeric value it must RAISE on, which SQL cannot do — the runtime-guard increment).
+    expect(read('g.V().count().asNumber()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(read('g.V().values("birthday").asDate().asNumber()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(() => read('g.V().values("age").asNumber()')).toThrow(UnsupportedTraversal);
+
+    // The round-trip the reference pins (AsDate.feature `g_V_valuesXbirthdayX_asDate_asNumber_asDate`):
+    // a date → asDate (datetime) → asNumber (long millis) → asDate recovers the original instant.
+    const store = storeSeededWith([
+      'g.addV("person").property("name","alice").property("birthday","2020-08-02").' +
+        'addV("person").property("name","suzy").property("birthday","1965-10-31")',
+    ]);
+    const round = await decodeAll(executeQuery(store, 'g.V().values("birthday").asDate().asNumber().asDate()', {}));
+    expect(round.every((v) => v instanceof Date)).toBe(true);
+    expect(round.map((v: Date) => v.toISOString()).sort())
+      .toEqual(['1965-10-31T00:00:00.000Z', '2020-08-02T00:00:00.000Z']);
   });
 
   test('inject([...]) is a real list value (not flattened)', () => {

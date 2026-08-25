@@ -318,7 +318,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().values("a
 deferred	The child traversal of is() contains a mutating step (addV) and thus is not read only: a mutating step is not allowed in a value-argument child traversal	g.V().values("age").is(__.addV("x").values("age"))
 unbound	Unbound parameter 'xx1'	g.V().values("age").is(xx1)
 deferred	this traversal is not supported yet: no lowering covers g.V().values("age").where(P.within(__.V(vid1).out("knows").values("age").fold()))	g.V().values("age").where(P.within(__.V(vid1).out("knows").values("age").fold()))
-deferred	this traversal is not supported yet: no lowering covers g.V().values("birthday").asDate().asNumber().asDate()	g.V().values("birthday").asDate().asNumber().asDate()
 deferred	this traversal is not supported yet: no lowering covers g.V().values("birthday").asNumber().asDate().asNumber()	g.V().values("birthday").asNumber().asDate().asNumber()
 deferred	this traversal is not supported yet: no lowering covers g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))	g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))
 deferred	this traversal is not supported yet: no lowering covers g.V().values("foo").inject(9999999999l).min()	g.V().values("foo").inject(9999999999l).min()

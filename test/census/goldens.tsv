@@ -721,6 +721,7 @@ ran	2	2	698bc795af36c8b4	ce850d2e1310de0f	g.V().values("age").where(P.gt(__.cons
 ran	2	2	486df719e3fc7bee	4dc52ddcd1ebb692	g.V().values("age").where(P.lt(__.constant(32)))
 ran	1	1	e625cc667b50d65a	08dff94bd735b264	g.V().values("age").where(__.is(P.gt(33))).fold().all(P.gt(33))
 ran	1	1	e625cc667b50d65a	08dff94bd735b264	g.V().values("age").where(__.is(P.gt(33))).fold().none(P.lte(33))
+ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("birthday").asDate().asNumber().asDate()
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("blob").is(P.typeOf(GType.BINARY))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("datetime").is(P.typeOf(GType.DATETIME))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().values("datetime").is(P.typeOf(GType.DATETIME)).choose(__.is(P.eq(datetime("2023-08-08T00:00:00Z"))), constant("match"), constant("noMatch"))

@@ -49,8 +49,8 @@
   },
   "asDate": {
     "binds": 0,
-    "bytes": 88,
-    "compiler": 2,
+    "bytes": 1371,
+    "compiler": 11,
     "bound": 0
   },
   "asNumber": {

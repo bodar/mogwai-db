@@ -1,8 +1,17 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
-import { STATIC, type ScalarType } from '../../sql/kernel/render.ts';
+import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
+import type { ValueType } from '../../gremlin/types.ts';
 import type { IRStep } from '../ir/step.ts';
+
+// The Number family, as `GremlinValueComparator` treats it — one ordered type (§6·7). Bare
+// `asNumber()` over a value ALREADY in this family is TinkerPop's IDENTITY (`AsNumberStep.map`:
+// `object instanceof Number` returns it unchanged), so over a stream framed with one of these tags
+// it needs no cast and cannot raise — the value is the same, the tag is the same.
+const NUMBER_FAMILY: ReadonlySet<ValueType> = new Set<ValueType>([
+  'byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal',
+]);
 
 // Java's whitespace set — the exact code points `String.trim()`/`strip()`/the Gremlin `trim` family
 // remove. Excludes the non-breaking spaces (U+00A0 NBSP, U+2007 figure, U+202F narrow NBSP), which
@@ -192,7 +201,7 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * semantic fact about this family, not a shortcut; a LIST stream's local transform is a different
  * lowering entirely and never reaches here.
  */
-export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transformed | null {
+export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?: ScalarType): Transformed | null {
   const args = argValues(step);
 
   // OVER A COMPILE-TIME LITERAL, THE CAST SUBFAMILY IS NOT A SQL CAST AT ALL — it is a parse that must
@@ -228,9 +237,20 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transfor
     // so it is caught into a decline (a miss raised as `UnsupportedTraversal`) rather than thrown here.
     let spec;
     try { spec = numericSpec(args[0]); } catch { return null; }
-    // Bare `asNumber()` needs the INPUT literal's declared subtype, which the front end flattened
-    // away; only a constant-folding path can answer it.
-    if (!spec) return null;
+    // Bare `asNumber()` over a compile-time LITERAL needs the input's declared subtype, which the
+    // front end flattened away — the const-fold path (`foldConstantCoercions`) answers that. But over
+    // a RUNTIME stream already framed with a numeric or datetime tag, the answer is the reference's
+    // own identity: `AsNumberStep.map` returns a `Number` unchanged (numeric family → same value, same
+    // type) and a `Date`/`OffsetDateTime` as its epoch-milli Long — and our datetime IS epoch-millis
+    // already, so both are the value UNCHANGED, differing only in the framing tag (datetime → long,
+    // `coerce.ts foldConstantCoercions`' same retype). A non-numeric known type (string/boolean/uuid/…)
+    // could RAISE per value and SQL cannot, so it still declines to the guard's future increment.
+    if (!spec) {
+      const known = staticTypeOf(incoming);
+      if (known && NUMBER_FAMILY.has(known)) return { expr: v, type: STATIC(known, staticIsText(incoming)) };
+      if (known === 'datetime') return { expr: v, type: STATIC('long') };
+      return null;
+    }
     // A `bigdecimal` target keeps its exact TEXT carrier — casting would be the lossy answer.
     const expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' } as Expr;
     return { expr, type: STATIC(spec.as) };
