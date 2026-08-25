@@ -7082,19 +7082,28 @@ function flatMapRejoin(
     const outerReads = labelReads(steps.slice(at + 1), ctx.params);
     if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
   }
-  // A TRAILING GLOBAL SLICE is scoped PER ORIGIN — `local(__.bothE('created').limit(1))` is one edge
-  // per HOST vertex, not one edge total. The prefix must be barrier-free (the slice is the only
-  // barrier), and only `limit`/`skip`/`range` (`sliceOf`) reach here — `tail` counts from the end (a
-  // per-origin total this does not yet compute) and stays declined. Everything before it is the plain
-  // rejoin. `map` is excluded above, so a slice under it (its per-origin WINDOW taking rn=1) is a
-  // separate lowering.
+  // A TRAILING GLOBAL SLICE is scoped PER ORIGIN — `local(__.bothE('created').limit(1))` is one edge per
+  // HOST vertex, not one total; `local(__.out().order().by('name').limit(1))` the first BY NAME per host;
+  // `tail(n)` the last n per host. The trailing window is `[order().by()?] <limit|skip|range|tail>`: the
+  // slice is popped here, and a preceding `order()` stays in the prefix for `childRows` to lower — the
+  // fold's `order` mints the `encounter` the window ranks by, and a total order restricted to a partition
+  // IS that origin's order, so ranking per origin gives the per-origin pick. Any OTHER barrier declines.
   const last = body[body.length - 1]!;
-  const perOriginSlice = body.length > 1 && (last.name === 'limit' || last.name === 'skip' || last.name === 'range') && !isLocalScope(last);
+  const isSlice = (last.name === 'limit' || last.name === 'skip' || last.name === 'range') && !isLocalScope(last);
+  const isTail = last.name === 'tail' && !isLocalScope(last);
+  const perOriginSlice = body.length > 1 && (isSlice || isTail);
   const prefix = perOriginSlice ? body.slice(0, -1) : body;
-  if (prefix.some(isStreamBarrier)) return null;
+  // The prefix must be barrier-free EXCEPT for a single trailing `order()` (the per-origin collation).
+  const barriers = prefix.filter(isStreamBarrier);
+  if (barriers.length > 1 || (barriers.length === 1 && !(barriers[0] === prefix[prefix.length - 1] && prefix[prefix.length - 1]!.name === 'order'))) return null;
+  // tail(n): n from the arg (default 1); a param count declines (fail closed — no data-sized window).
+  const tailN = isTail ? ((): number | null => { const a = argValues(last); return a.length === 0 ? 1 : (typeof a[0] === 'number' ? a[0] : null); })() : null;
+  if (isTail && tailN === null) return null;
   const rows = childRows(prefix, rel, framing.elem, labels, ctx, fresh);
   if (!rows) return null;
-  const window = perOriginSlice ? partitionedSlice(rows.rel, rows.origin, sliceOf(last), fresh) : rows.rel;
+  const window = !perOriginSlice ? rows.rel
+    : isTail ? perOriginWindow(rows.rel, col(rows.rel.id, rows.origin), reverseCollation(rows.rel), { scope: 'global', offset: 0, limit: tailN! }, fresh)
+      : perOriginWindow(rows.rel, col(rows.rel.id, rows.origin), [], sliceOf(last), fresh);
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
   const channels = window.channels.filter((channel) => channel.role !== 'origin');
@@ -7119,30 +7128,56 @@ function flatMapRejoin(
  * but the order is `encounter` then the whole payload so the choice is DETERMINISTIC and survives
  * `test:perturbed`, one valid member of the accepted set rather than a scan-luck row.
  */
-function partitionedSlice(rows: Rel, originCol: string, window: Slice, fresh: Minter): Rel {
+/** The default per-origin collation when the body supplied no `order()`: encounter, then the whole
+ *  payload. TinkerPop leaves an un-ordered per-origin slice IMPL-DEFINED (the corpus asserts "result
+ *  should be OF … count N"), so a deterministic pick from the accepted set is correct and keeps
+ *  `test:perturbed` stable. */
+function defaultCollation(rows: Rel): SortTerm[] {
   const position = encounterOf(rows.channels);
+  return [...(position ? [{ expr: col(rows.id, position.col), dir: 'asc' as const }] : []),
+    ...payloadCols(rows).map((column) => ({ expr: col(rows.id, column.name), dir: 'asc' as const }))];
+}
+
+/** The default collation REVERSED — a `tail(n)` is the last n, i.e. the first n under the flipped order.
+ *  When a body `order()` precedes the tail, its order is baked into the `encounter` channel, so flipping
+ *  the encounter-led default collation yields "last n of the ordered stream". The result multiset is the
+ *  same rows either way (a flattened body is a multiset); only the pick is from the tail end. */
+function reverseCollation(rows: Rel): SortTerm[] {
+  return defaultCollation(rows).map((term) => ({ ...term, dir: term.dir === 'asc' ? 'desc' as const : 'asc' as const }));
+}
+
+/**
+ * THE PER-ORIGIN WINDOW — `ROW_NUMBER() OVER (PARTITION BY <partitionBy> ORDER BY <order>)` filtered to
+ * the slice, then reprojected. The ONE primitive every fan-out body's per-origin slice lands on;
+ * `partitionBy` is the origin-key seam that differs per consumer (an `origin` channel column for
+ * `local`/`flatMap`, a bound alias's id for a `match` pattern, a `by`-host id, an arm's incoming
+ * traverser). `order` empty ⇒ `defaultCollation`.
+ *
+ * `dedupOn`'s shape and Calcite's per-partition top-N EXACTLY: `convertDistinctOn`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`)
+ * projects `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY collation)`, filters the rank, then projects it
+ * away — `ROW_NUMBER` (positional) NOT `rank`, so a `limit` never keeps ties as extra rows. Calcite's
+ * DISTINCT ON keeps `rn = 1`; this keeps `offset < rn ≤ offset+limit` (`limit === null` is the open
+ * `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
+ */
+function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly SortTerm[], slice: Slice, fresh: Minter): Rel {
   const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
   const RN = 'prn';
+  const orderBy = order.length ? order : defaultCollation(rows);
   const ranked = make.window({
     id: fresh('pw'), input: rows, channels: rows.channels, type: typeOf(...rows.type.cols, meta(RN, 'int')),
-    specs: [[RN, {
-      kind: 'window-expr', fn: 'row_number', args: [],
-      spec: {
-        partitionBy: [col(rows.id, originCol)],
-        orderBy: [...(position ? [{ expr: col(rows.id, position.col), dir: 'asc' as const }] : []),
-          ...payloadCols(rows).map((column) => ({ expr: col(rows.id, column.name), dir: 'asc' as const }))],
-      },
-    }]],
+    specs: [[RN, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [partitionBy], orderBy } }]],
   });
-  const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(window.offset) };
-  const pred: Expr = window.limit === null ? lower
-    : and(lower, { kind: 'binary', op: '<=', left: col(ranked.id, RN), right: compilerInt(window.offset + window.limit) });
+  const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(slice.offset) };
+  const pred: Expr = slice.limit === null ? lower
+    : and(lower, { kind: 'binary', op: '<=', left: col(ranked.id, RN), right: compilerInt(slice.offset + slice.limit) });
   const kept = make.filter({ id: fresh('pf'), input: ranked, channels: ranked.channels, type: ranked.type, pred });
   return make.project({
     id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
   });
 }
+
 
 /**
  * A CHILD BODY'S ROWS over a host STREAM — the seam's FOURTH answer (`child.ts` states why).

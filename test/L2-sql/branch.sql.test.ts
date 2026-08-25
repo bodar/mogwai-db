@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { read } from '../support/harness.ts';
+import { read, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -50,6 +50,21 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(c.shape).toEqual({ kind: 'vertex' });
     // malformed (leading/trailing/empty operand) → clear throw
     expect(() => compile('g.V().where(__.and().has("name","x"))', {})).toThrow('empty operand');
+  });
+
+  test('local(<body>.order().by().limit()) is a per-origin WINDOW, not a global slice', () => {
+    // A slice inside a fan-out body is scoped PER HOST: `local(out().order().by('name').limit(1))` is the
+    // first out-neighbour BY NAME of each vertex, so it lowers to ROW_NUMBER() OVER (PARTITION BY origin
+    // ORDER BY <the order key>) filtered to the rank — never a global `LIMIT 1`. The body's `order()` is
+    // lowered inside the window's input, minting the `encounter` the window ranks by.
+    const p = read('g.V().local(__.out().order().by("name").limit(1))');
+    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    const first = run(seededStore(), 'g.V().local(__.out().order().by("name").limit(1)).values("name")') as any[];
+    // marko→{vadas,josh,lop} first=josh; josh→{lop,ripple} first=lop; peter→{lop} first=lop.
+    expect(first.map((r: any) => r.v).sort()).toEqual(['josh', 'lop', 'lop']);
+    // A per-origin `tail(n)` is the same window under the reversed collation (the last n per host).
+    const tail = run(seededStore(), 'g.V().local(__.out().tail(1)).values("name")') as any[];
+    expect(tail.length).toBe(3); // one per vertex that has out-edges: marko, josh, peter
   });
 
 
