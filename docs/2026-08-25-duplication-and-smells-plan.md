@@ -30,7 +30,13 @@ The original audit's higher-value items shipped as their own commits and are on 
   shared base list (B4), the `UND` undirected-adjacency CTE exported from `kernel.ts` (B5).
 - **Theme C** — construction-time structural laws single-sourced so the factory is the sole authority
   (C1), the shared value-transform barrier shell `buildValueTransformSegment` (C2), the drain
-  owner-scoped reads pushed into `drain.ts` (C3).
+  owner-scoped reads pushed into `drain.ts` (C3), `propertyRowFor` for the three property-table reads
+  (C4), `relationHandleSegment`/`idHead` for the path/pair segment shells (C5), `correlatedColumn` for
+  the four edge/vertex correlated reads (C7).
+- **Theme C (continued)** — `mapNestedArgs` for the identity-preserving nested-arg recursion (C8 — the
+  two plain recursions `canonicalizeConnectives`/`markUnrollSuppressed`; the scope walk stays separate by
+  design, it transforms the body and signals unchanged via null), `gatherRepeatRegion` for the
+  repeat-cluster gathering loop shared by `unrollFixedRepeat`/`formRepeatRegions` (C9).
 - **Theme D** — `sameColumns`/`sameNames` hoisted to `rel/types.ts`, the column-preservation
   classification single-sourced, `sizedContainer` for the GraphBinary containers, the composite `Expr`
   builders in `expr.ts`, one `json_extract` builder (`jsonField`) in `build.ts`.
@@ -58,29 +64,13 @@ The original audit's higher-value items shipped as their own commits and are on 
   `lowerValueResume`/`lowerListResume` are near-twins. → a `resume(seed, framing, …)` wrapper owning
   minter/settle/chainCtx/`lowered`.
 
-### Theme C — "extracted for one caller" leftovers (the cleanest, lowest-risk wins)
+### Theme C — "extracted for one caller" leftovers
 
-- **C4 [MED] — property side-table scan reimplemented ×4** (`modulator.ts:482`, `658`, `680`;
-  `property.ts:347`) — the `scan(properties) → filter(owner, key)` relation, differing only in the final
-  projection (`firstOf {value,vtype}` / vtype / `exists`). The module comments already flag these as
-  "the same rows" read three ways. → `propertyRowFor(host, key, fresh)`.
-
-- **C5 [MED] — `segment.ts` async segment shell + `path`/`pair` twin builders** (`segment.ts:231-359`):
-  the 6-field async `SegmentPlan` object ×5, and `pathSegment`/`pairSegment` near-twins (same
-  `Array.isArray(out)` guard + resume + not-supported error, differ only in resume fn + spec). →
-  `barrierShell(...)`, `relationHandleSegment(...)`, `idHead(...)`.
-
-- **C7 [MED] — correlated single-column scalar reads ×5 in `element.ts`** (`element.ts:89`, `112`,
-  `128`, `374`, `386`). `edgeEndpoint` (`112`) and `edgeColumn` (`374`) are literal duplicates. →
-  `correlatedColumn(table, cols, rowid, proj, fresh)`; at minimum delete one of the endpoint/column pair.
-
-- **C8 [MED] — identity-preserving nested-arg recursion hand-rolled ×3** in `strategies.ts` (`1142`,
-  `1245`, `1666`): map chain → map args → `stepChain` → recurse → **return the original arg by
-  reference when unchanged** (load-bearing for `traversal-param.ts`'s `tree.accept`). Error-prone; a 4th
-  copy is a latent regression. → `mapNestedArgs(steps, params, perLevel, {preserveIdentity})`.
-
-- **C9 [MED] — byte-identical repeat-region gathering loop** (`strategies.ts:1340` ≡ `1481`). →
-  `gatherRepeatRegion(steps, i)`.
+All landed (C4/C5/C7/C8/C9 — see "Already landed"). One judgement call recorded for the next sweep: the
+scope walk's per-step arg loop in `strategies.ts` (originally C8's third site) was deliberately NOT
+folded into `mapNestedArgs` — it transforms the body before recursing (the where-variable rewrite) and
+signals "unchanged" with a null return rather than reference identity, so sharing that contract would
+obscure its scope tracking. Do not re-flag it.
 
 ### Theme D — small shared utils (LOW, batchable)
 
@@ -109,10 +99,11 @@ wasted effort.
 Risk-ascending; each is independently shippable and behaviour-preserving. `mise run ci` + the L1–L5
 ladder is the safety net; validate before every push (`bash scripts/ci.sh` for the truthful verdict).
 
-1. **Theme C leftovers** (C4, C5, C7, C8, C9) — clean helper extractions, sister proves each.
-2. **Theme D** — batch the small utils in one pass.
-3. **Theme A** (A2 `explodeMembers`, A4 `projectScalar`, A5 resume wrapper) — largest payoff, touch
+1. **Theme D** — batch the remaining small utils in one pass (most already landed).
+2. **Theme A** (A2 `explodeMembers`, A4 `projectScalar`, A5 resume wrapper) — largest payoff, touch
    last and carefully. Hot path; lean on the conformance ladder.
+
+(Theme C is done — C1/C2/C3/C4/C5/C7/C8/C9 all landed.)
 
 Do not treat this as a rename campaign — each item is a real extraction with a test surface. The value is
 finishing factorings the code already started; the risk is turning a documented-deliberate twin into a
