@@ -7,18 +7,27 @@ const PORT = 8976;
 
 let proc: ReturnType<typeof Bun.spawn> | undefined;
 
-async function waitForReady(url: string, timeoutMs = 50_000): Promise<void> {
+// Readiness must exercise the DURABLE OBJECT path, not just the Worker script. A probe of `/` (or any
+// non-/gremlin path) is served by a plain `Response.redirect`/404 that never instantiates a DO, so it
+// goes green the instant the isolate loads — while the DO namespace is still warming. The first
+// DO-touching request then races that warmup and workerd answers 503, which is the management PUT
+// flake. So probe a real `GET /gremlin/{id}` (auto-creates + touches its DO) and treat a 503 — or any
+// non-2xx — as NOT-yet-ready. A fresh id per probe keeps the warmup graphs off the shared ids the tests
+// use (wrangler dev persists to disk).
+async function waitForReady(origin: string, timeoutMs = 50_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let last = '';
   while (Date.now() < deadline) {
     try {
-      // Any HTTP response (even 404 for a non-/g/ path) means workerd is up.
-      await fetch(url, { signal: AbortSignal.timeout(1_000) });
-      return;
-    } catch {
-      await Bun.sleep(250);
+      const res = await fetch(`${origin}/gremlin/warmup-${Date.now()}`, { signal: AbortSignal.timeout(2_000) });
+      if (res.ok) return; // the DO answered — the subsystem is live, not just the script loaded
+      last = `HTTP ${res.status}`;
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
     }
+    await Bun.sleep(250);
   }
-  throw new Error(`wrangler dev did not become ready on ${url} within ${timeoutMs}ms`);
+  throw new Error(`wrangler dev did not become ready on ${origin} within ${timeoutMs}ms (last: ${last})`);
 }
 
 graphContract('cloudflare', {
@@ -37,7 +46,7 @@ graphContract('cloudflare', {
         stderr: 'inherit',
       },
     );
-    await waitForReady(`http://127.0.0.1:${PORT}/`);
+    await waitForReady(`http://127.0.0.1:${PORT}`);
     // The contract addresses graphs under {origin}/gremlin/{id}; ids are unique per
     // run so DOs stay fresh (wrangler dev persists state on disk).
     return `http://127.0.0.1:${PORT}`;
