@@ -2866,20 +2866,36 @@ const VALUE_RESUME_PARAM = '_mogwai_value_resume';
  * as `detachedTail` continues over a landed element relation. The values frame UNKNOWN (inferred from
  * the JS value) — the same tag the transform's own output carried, so nothing is re-guessed.
  */
-export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+/**
+ * The shell BOTH value-source resumes share (`lowerValueResume`, `lowerListResume`) — the prologue that
+ * mints, settles, derives the chain facts and declines a channel-demanding tail, the ONE `json_each` bind
+ * of the DATA, and the `lowered()` epilogue. Only the SEED shape differs: a scalar `v` column vs a
+ * `LIST_COL`, and the tail that continues over it. The seed is built by `seed(exploded, fresh)` and
+ * threaded into `tail(seed, ctx, fresh)`, so each producer names its own column and re-entry vocabulary.
+ */
+function valueResume(
+  data: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering,
+  seed: (exploded: Rel, fresh: Minter) => Rel,
+  tail: (seed: Rel, ctx: ChainCtx, fresh: Minter) => Tail | null,
+): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
   // No channel crossed the boundary — a tail that DEMANDS an encounter or a path cannot be seeded from a
   // bare value list, so it declines rather than compile a plan with the column silently missing.
   if (facts.demandsEncounter || facts.tracksPath) return null;
-  const exploded = jsonEachSet(VALUE_RESUME_PARAM, values, fresh);
-  const seed = make.project({
-    id: fresh('vrp'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
-    exprs: [['v', col(exploded.id, 'sv')]],
-  });
-  const chain = scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh);
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh);
+  const chain = tail(seed(exploded, fresh), ctx, fresh);
   return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+}
+
+export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  return valueResume(values, steps, from, opts,
+    (exploded, fresh) => make.project({
+      id: fresh('vrp'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', col(exploded.id, 'sv')]],
+    }),
+    (seed, ctx, fresh) => scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh));
 }
 
 /**
@@ -2894,17 +2910,12 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
  * needs its own seed rather than reusing `lowerValueResume`.
  */
 export function lowerListResume(lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
-  const fresh = minter();
-  const settled = settle(opts);
-  const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
-  if (facts.demandsEncounter || facts.tracksPath) return null;
-  const exploded = jsonEachSet(VALUE_RESUME_PARAM, lists, fresh);
-  const seed = make.project({
-    id: fresh('lrp'), input: exploded, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
-    exprs: [[LIST_COL, col(exploded.id, 'sv')]],
-  });
-  const chain = continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return valueResume(lists, steps, from, opts,
+    (exploded, fresh) => make.project({
+      id: fresh('lrp'), input: exploded, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
+      exprs: [[LIST_COL, col(exploded.id, 'sv')]],
+    }),
+    (seed, ctx, fresh) => continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES));
 }
 
 /**
