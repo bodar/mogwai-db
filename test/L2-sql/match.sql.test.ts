@@ -221,6 +221,19 @@ describe('match() SQL', () => {
     expect((run(seededStore(), q) as any[]).map((r: any) => r.v)).toEqual(['marko']);
   });
 
+  // A PER-ORIGIN WINDOW in a pattern body — `as('a').outE('created').order().by('weight',desc).limit(1)
+  // .inV().as('b')` binds the TOP created-edge target per `a`, not one edge globally. The slice lowers
+  // to ROW_NUMBER() OVER (PARTITION BY <the a alias> …), never a global LIMIT; the body's order() rides
+  // the encounter the window ranks by, and the suffix (inV) continues past the window.
+  test('per-origin window in a pattern body (outE.order.by.limit.inV)', () => {
+    const q = 'g.V().match(__.as("a").outE("created").order().by("weight", Order.desc).limit(1).inV().as("b"), __.as("b").has("lang", "java")).select("a", "b").by("name")';
+    const p = read(q);
+    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    const rows = run(seededStore(), q) as any[];
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    expect(pairs).toEqual(['josh->ripple', 'marko->lop', 'peter->lop']);
+  });
+
   // A downstream `where(k1, P.eq/neq(k2))` over two SCALAR aliases compares stored VALUES (not rowids):
   // both bind a's name, so eq keeps all six and neq keeps none.
   test('where(key, P) over two scalar aliases compares stored values', () => {

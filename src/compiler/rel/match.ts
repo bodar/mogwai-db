@@ -1,4 +1,4 @@
-import { arg, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
+import { arg, argValues, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
 import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
@@ -6,7 +6,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import { asLabelsOf } from '../ir/labels.ts';
-import type { IRStep } from '../ir/step.ts';
+import { isLocalScope, isStreamBarrier, sliceOf, type IRStep, type Slice } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
@@ -166,6 +166,51 @@ const PER_ORIGIN_UNSAFE: ReadonlySet<string> = new Set([
  *  seam's job (`child.scalar`, the same correlated read `by(__.out().count())` uses), NOT the row fold,
  *  which drops the empty origins. `fold` is absent — it ends a LIST, a later phase. */
 const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min', 'max']);
+
+/** A PER-ORIGIN WINDOW inside a pattern body: a `<prefix> [order().by()] <limit|range|skip|tail> <suffix>`
+ *  where the slice is scoped to each `start` (`as('a').outE('created').order().by('weight',desc).limit(1)
+ *  .inV().as('b')` is the top edge per `a`, not one globally). The order() stays in `prefix` so the fold
+ *  lowers it (minting the encounter the window ranks by). Declines (⇒ the general per-origin-unsafe
+ *  decline) when the prefix holds any barrier but a trailing order(), when the suffix holds any
+ *  window/order (one window per body — a later phase), or when the slice count is a data-sized param. */
+function splitWindow(body: readonly IRStep[]): { readonly prefix: readonly IRStep[]; readonly slice: Slice; readonly fromEnd: boolean; readonly suffix: readonly IRStep[] } | null {
+  const i = body.findIndex((s) => (s.name === 'limit' || s.name === 'range' || s.name === 'skip' || s.name === 'tail') && !isLocalScope(s));
+  if (i < 0) return null;
+  const sliceStep = body[i]!;
+  const prefix = body.slice(0, i);
+  const suffix = body.slice(i + 1);
+  // The prefix must be barrier-free except a single trailing `order()` — its encounter is what the
+  // window ranks by, so it has to be the last thing before the slice.
+  const preBarriers = prefix.filter(isStreamBarrier);
+  if (preBarriers.length > 1 || (preBarriers.length === 1 && !(preBarriers[0] === prefix[prefix.length - 1] && prefix[prefix.length - 1]!.name === 'order'))) return null;
+  // A second window/order in the suffix is a later phase; the suffix otherwise runs through `child.chain`.
+  if (suffix.some((s) => PER_ORIGIN_UNSAFE.has(s.name) || s.name === 'order')) return null;
+  if (sliceStep.name === 'tail') {
+    const a = argValues(sliceStep);
+    const n = a.length === 0 ? 1 : (typeof a[0] === 'number' ? a[0] : null);
+    return n === null ? null : { prefix, slice: { scope: 'global', offset: 0, limit: n }, fromEnd: true, suffix };
+  }
+  let slice: Slice;
+  try { slice = sliceOf(sliceStep); } catch { return null; }
+  return slice.scope === 'global' ? { prefix, slice, fromEnd: false, suffix } : null;
+}
+
+/** Lower a pattern body that carries a per-origin window (`splitWindow`): re-root at `start` and run the
+ *  prefix (incl. its order()) through the fold, WINDOW partitioned by the start alias's id (the origin),
+ *  then continue the suffix. The window is `child.window` — the ONE primitive `local`/`flatMap` use — so
+ *  a match pattern's per-origin slice is the same relational node, differing only in the partition key. */
+function windowedBody(
+  rel: Rel, framing: RelFraming, start: string, win: NonNullable<ReturnType<typeof splitWindow>>,
+  child: ChildSeam, labels: AliasMap, host: IRStep, fresh: Minter,
+): ChainRead | null {
+  const pre = child.chain(rel, framing, [syn(host, 'select', [start]), ...win.prefix], labels);
+  if (!pre || pre.framing.kind !== 'elements') return null;
+  const proj = aliasProjection(pre.rel, pre.aliases, start, 'last', fresh);
+  if (!proj || proj.read.kind !== 'element') return null;
+  const windowed = child.window(pre.rel, aliasIdAt(col(pre.rel.id, proj.entry.col), 'last'), win.slice, win.fromEnd);
+  return win.suffix.length ? child.chain(windowed, pre.framing, win.suffix, pre.aliases)
+    : { rel: windowed, framing: pre.framing, aliases: pre.aliases };
+}
 
 /** A pattern body that ENDS in a value-reducing barrier, optionally followed by scalar `is(P)` filters:
  *  `as('a').out().count().as('c')` or `as('a').out().count().is(P.gt(10)).as('c')`. Returns the
@@ -788,20 +833,23 @@ export function lowerMatch(
       continue;
     }
 
-    // FAIL CLOSED on a GLOBAL slice/barrier in the body. `child.chain` folds the body over the WHOLE
-    // binding table at once, so a `limit`/`range`/`tail`/`dedup`/`fold`/`group` would apply ACROSS all
-    // origins rather than per-origin — but TinkerPop runs each pattern PER TRAVERSER (`MatchStep`
-    // rewrites a barrier body into a `TraversalFlatMapStep` so it is "locally computable",
-    // `vendor/tinkerpop/gremlin-core/.../MatchStep.java:158-164`). `a.outE.order.by(weight,desc).limit(1).inV.b`
-    // would bind ONE global edge's target instead of one per `a` — a WRONG answer, so decline until a
-    // per-origin windowed lowering exists. A reducing barrier as the END is already handled per-origin
-    // above (`child.scalar`); `order()` alone drops nothing and stays.
-    if (p.body.some((s) => PER_ORIGIN_UNSAFE.has(s.name))) return null;
+    // A PER-ORIGIN WINDOW in the body (`a.outE.order.by(weight,desc).limit(1).inV.b`): the slice is
+    // scoped to each `start`, so split at it and window PARTITION BY the start alias — the top edge per
+    // `a`, not one globally. `windowedBody` re-roots the prefix (incl. its order, which mints the
+    // encounter), applies `child.window` (the shared primitive), then continues the suffix.
+    const win = splitWindow(p.body);
+    // FAIL CLOSED on any OTHER global slice/barrier in the body. `child.chain` folds the body over the
+    // WHOLE binding table at once, so a bare `dedup`/`fold`/`group`/reducer would apply ACROSS all origins
+    // rather than per-origin — a WRONG answer (`MatchStep` runs each pattern PER TRAVERSER,
+    // `vendor/tinkerpop/gremlin-core/.../MatchStep.java:158-164`). A reducing barrier as the END is handled
+    // per-origin above (`child.scalar`); `order()` alone drops nothing and stays.
+    if (!win && p.body.some((s) => PER_ORIGIN_UNSAFE.has(s.name))) return null;
 
     // Re-root at the pattern's start alias, then run the body through the ONE fold. The result relation
     // carries every prior alias channel (movements keep channels) plus a payload at the body's end.
-    const rooted: IRStep[] = [syn(step, 'select', [p.start]), ...p.body];
-    const ran = child.chain(rel, framing, rooted, labels);
+    const ran: ChainRead | null = win
+      ? windowedBody(rel, framing, p.start, win, child, labels, step, fresh)
+      : child.chain(rel, framing, [syn(step, 'select', [p.start]), ...p.body], labels);
     if (!ran) return null;
 
     if (p.kind === 'constraint') {

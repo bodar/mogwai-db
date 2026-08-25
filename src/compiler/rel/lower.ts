@@ -6850,6 +6850,8 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // around: it is the reason the BOUNDED regime unrolls into phases instead.
   chain: (input, framing, body, aliases) =>
     continueAs(input, framing, body, 0, false, inBody(ctx), fresh, aliases),
+  window: (rows, partitionBy, slice, fromEnd) =>
+    perOriginWindow(rows, partitionBy, fromEnd ? reverseCollation(rows) : [], slice, fresh),
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
