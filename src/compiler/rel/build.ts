@@ -17,8 +17,14 @@ import type { Arg } from '../../gremlin/frontend.ts';
  * exporting these from `lower.ts` would make the import graph a cycle. Extracting them keeps it a DAG:
  * `build ◂ {predicate, modulator} ◂ lower ◂ spine`.
  *
- * What belongs here is what more than one module must AGREE on. What stays in `lower.ts` is what only
- * it has an opinion about — the channel lists a chain threads, the element column sets, the hop table.
+ * What belongs here is what more than one module must AGREE on. What stays in the fold is what only it
+ * has an opinion about — the element column sets here, and, since the fold became the `lower/` module,
+ * the channel lists a chain threads (`lower/chain.ts`) and the hop table (`lower/movement.ts`). Those
+ * two moved out of the single `lower.ts` when it was split into `lower/{chain,movement,slice,filter,
+ * reduction,branch}.ts` + the `lower.ts` fold core: once several files in the family needed the channel
+ * vocabulary, it stopped being "what only lower.ts has an opinion about" and became the family's shared
+ * leaf. The DAG rule still holds at the family boundary (`build ◂ {predicate, modulator} ◂ lower/*`);
+ * within the `lower/` family the mutually recursive fold uses function-level import cycles by design.
  */
 
 export const meta = (colName: string, type: SqlType, nullable = false): ColMeta => ({ name: colName, type, nullable });

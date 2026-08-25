@@ -35,11 +35,17 @@ while what they operate on keeps TinkerPop's.
   dependency produced, never the dependency (`RelRequest`). **There are TWO scopes, not three, and
   the missing one is deliberate:** what a single compile owns — its relation-id minter, its plan — is
   per-compile STATE, threaded explicitly. A compile scope only duplicated it into DI.
-- **The lowering is a fold over `Step[]`, not an object graph.** `src/compiler/rel/lower.ts` is the
-  fold; the shape-aware payload builders beside it (`element.ts`, `list.ts`, `map.ts`, `record.ts`,
-  `path.ts`, `foreign.ts`, …) are pure functions it calls. What a lowering gets from the request is a
-  RECORD of settled values (`RelRequest`, `rel/spine.ts`) — never an ambient capability, and never a
-  recursive dispatcher to reach back through.
+- **The lowering is a fold over `Step[]`, not an object graph.** The `src/compiler/rel/lower/` module
+  is the fold — `lower.ts` holds the fold core (the shape tails, `continueAs`, assembly and the
+  `lower*` entry points), and the cohesive clusters live beside it as `lower/{chain,movement,slice,
+  filter,reduction,branch}.ts` (shared vocabulary; physical movement; slice/row algebra; the
+  filter/predicate family; child/correlated reduction; branch/merge). The shape-aware payload builders
+  a level up (`element.ts`, `list.ts`, `map.ts`, `record.ts`, `path.ts`, `foreign.ts`, …) are pure
+  functions it calls. The `lower/` family is mutually recursive (a tail calls `continueAs` which
+  re-dispatches into a cluster which calls back), so it uses function-level import cycles WITHIN the
+  family by design — the clean-DAG rule holds at the family boundary, not inside it. What a lowering
+  gets from the request is a RECORD of settled values (`RelRequest`, `rel/spine.ts`) — never an
+  ambient capability, and never a recursive dispatcher to reach back through.
 - **Fast paths are opt-in, never the semantic authority.** Two survive the single-spine cut and both
   are switches the lowering READS rather than a second lowering: `movementCollapse` (the grouped
   `SUM(bulk)` movement) and `propertySeek` (`src/rel/passes/semijoin.ts`, a physical rewrite over the
