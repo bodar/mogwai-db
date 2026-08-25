@@ -30,7 +30,7 @@ import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
     payloadCols, propertyKeyArgs, renumber,
-    typedNode, typeOf,
+    typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -415,19 +415,25 @@ export const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFr
  * the exception — its declared type IS known, so it frames `STATIC(type, text)` and a following ordering
  * compare can cast it.
  */
+/** Project a per-traverser SCALAR — one or more payload columns replacing the value, every channel
+ *  riding through untouched — and wrap it in its framing. The row shape every per-row retype into the
+ *  scalar vocabulary ends with (`constant`, `label`/`id`, an edge's `labels`, a `call()` value): the
+ *  channel carry is `withPayload`'s (so a projection cannot forget one), and this adds the `FramedRel`
+ *  wrapper the tail returns. The common case is one `['v', expr]` / `meta('v', …)`; a `vtype`-carrying
+ *  value passes both columns. */
+function projectScalar(
+  input: Rel, exprs: readonly (readonly [string, Expr])[], cols: readonly ColMeta[], framing: RelFraming, fresh: Minter,
+): FramedRel {
+  return { rel: withPayload(input, exprs, cols, fresh), framing };
+}
+
 function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | null {
   if ((step.args ?? []).length !== 1 || step.modulators?.length || step.optionArms) return null;
   const literal = constLit(step.args[0]);
   const tail = literal ? null : exactTailConst(step.args[0]);
   if (!literal && !tail) return null;
-  return {
-    rel: make.project({
-      id: fresh('ct'), input, channels: input.channels,
-      type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
-      exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-    }),
-    framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(step.args[0]) },
-  };
+  return projectScalar(input, [['v', literal ?? tail!.expr]], [meta('v', 'any', true)],
+    { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(step.args[0]) }, fresh);
 }
 
 /**
@@ -569,14 +575,8 @@ function terminal(
     const token = step.name === 'label' ? 'label' : 'id';
     const projected = byExpr({ key: { kind: 'token', token } }, elementHost(input, elem, aliases), ctx.source, fresh);
     if (!projected) return null;
-    return {
-      rel: make.project({
-        id: fresh('tok'), input, channels: input.channels,
-        type: typeOf(meta('v', step.name === 'label' ? 'text' : 'any'), ...carriedCols(input.channels)),
-        exprs: [['v', projected], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-      }),
-      framing: { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN },
-    };
+    return projectScalar(input, [['v', projected]], [meta('v', step.name === 'label' ? 'text' : 'any')],
+      { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, fresh);
   }
 
   // `labels()` — `label()`'s FLAT-MAP twin, and the only reader that may join `vertex_labels`.
@@ -600,14 +600,7 @@ function terminal(
     if (elem === 'edge') {
       const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), ctx.source, fresh);
       if (!projected) return null;
-      return {
-        rel: make.project({
-          id: fresh('tok'), input, channels: input.channels,
-          type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
-          exprs: [['v', projected], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-        }),
-        framing: { kind: 'scalar', type: STATIC('string') },
-      };
+      return projectScalar(input, [['v', projected]], [meta('v', 'text')], { kind: 'scalar', type: STATIC('string') }, fresh);
     }
     // The physical FAN-OUT (one name row per label, plus its per-element order key `lord`) is the graph
     // SOURCE's; the emission ORDER is this step's to MINT, because it is a STREAM fact. A vertex may carry
@@ -677,16 +670,10 @@ function midCall(
   const produced = serviceValue(step, elementHost(input, elem, aliases), ctx, fresh);
   if (!produced) return null;
   const { expr, framing, vtype } = produced;
-  const typeCol = vtype ? [meta('vtype', 'text', true)] : [];
-  return {
-    rel: make.project({
-      id: fresh('cv'), input, channels: input.channels,
-      type: typeOf(meta('v', 'any', true), ...typeCol, ...carriedCols(input.channels)),
-      exprs: [['v', expr], ...(vtype ? [['vtype', vtype] as const] : []),
-        ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-    }),
-    framing,
-  };
+  return projectScalar(input,
+    [['v', expr], ...(vtype ? [['vtype', vtype] as const] : [])],
+    [meta('v', 'any', true), ...(vtype ? [meta('vtype', 'text', true)] : [])],
+    framing, fresh);
 }
 
 /**
