@@ -3,7 +3,7 @@ import type { ForeignRow } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
-import { INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
+import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
 // ---------- mogwai.graph.federate — cross-graph query pushdown (async, Barrier) ----------
 //
@@ -57,9 +57,11 @@ const wantsSubgraph = (params: CallParams): boolean => params.subgraph === true;
  * vertices (fetched with a second sibling hop, WITH data). The mixed-kind array IS the signal to the
  * resume that this is a subgraph — a normal federated result is homogeneous (all one element kind).
  *
- * The endpoint fetch is `g.V(<ids>)` on the same sibling: bounded by the edge set, one hop. (The ids
- * inline into the sibling's Gremlin for now; a `json_each`-bound id list is the follow-up when a large
- * subgraph makes the sibling statement text the cost.)
+ * The endpoint fetch is `g.V(<ids>)` on the same sibling: bounded by the edge set, one hop. The ids
+ * cross as ONE bound-collection param (`ENDPOINT_IDS_KEY`), which the sibling's `elementScan` explodes
+ * via `json_each` — the id set never enters the sibling's statement text, for ANY subgraph size (the
+ * data-not-in-text rule applied across the wire). This is the same "data-sized set = one bind" substrate
+ * the mid-traversal value injection below uses, and the base-graph `V($ids)` path (`source.ts`).
  */
 async function withEndpoints(
   ex: { raw(g: string, p: Record<string, unknown>, d: number): Promise<ForeignRow[]> },
@@ -67,7 +69,7 @@ async function withEndpoints(
 ): Promise<ForeignRow[]> {
   const ids = [...new Set(edges.flatMap((e) => (e.kind === 'edge' ? [e.src, e.tgt] : [])))];
   if (ids.length === 0) return [...edges];
-  const vertices = await ex.raw(`g.V(${ids.join(',')})`, {}, depth + 1);
+  const vertices = await ex.raw(`g.V(${ENDPOINT_IDS_KEY})`, { [ENDPOINT_IDS_KEY]: ids }, depth + 1);
   return [...edges, ...vertices];
 }
 

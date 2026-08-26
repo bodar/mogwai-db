@@ -24,6 +24,14 @@
  *  so it can never collide with a user bound-param name. */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
 
+/** The reserved params key under which a `.with("subgraph", true)` federate hop supplies the DISTINCT
+ *  endpoint ids to fetch as a SECOND sibling hop (`g.V(_mogwai_endpoints)`). A plain bound-collection id
+ *  seek — the sibling's `elementScan` explodes it as ONE `json_each` bind for ANY size, so the id set
+ *  never enters the sibling's statement text (the data-not-in-text rule applied across the wire, not
+ *  just local SQL). Kept DISTINCT from `INJECT_VALUES_KEY`: that is a `within(...)` marker substitution;
+ *  this is a bare `V(<ids>)` id lookup — different mechanism, so a different reserved key. */
+export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
+
 /** True iff `operand` is the `T.value` injection marker (the parsed `{token:'value'}` shape) — used
  *  ONLY at a predicate-operand position (has/is/within value), never a by()/order() modulator. */
 export const isInjectionMarker = (operand: unknown): boolean =>

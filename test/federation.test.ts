@@ -5,7 +5,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { createFederateService } from '../src/services/catalog/federate.ts';
-import { INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
+import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
 import { decode } from './support/decode.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
@@ -191,6 +191,36 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
     await expect(mgr.executor('home').framedAsync(
       'g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person").outE("develops")).inV().values("name")', {}))
       .rejects.toThrow(/not supported after a barrier call/);
+  });
+
+  test('the endpoint hop crosses ids as ONE bound param — NOT inline in the sibling Gremlin text', async () => {
+    // Spy the second sibling hop (withEndpoints): the distinct endpoint ids must travel under
+    // ENDPOINT_IDS_KEY (a bound collection the sibling explodes via json_each), and the id set must
+    // NEVER be string-interpolated into the sibling's statement — the data-not-in-text rule, applied
+    // across the wire, for ANY subgraph size (see federate.ts withEndpoints / source.ts elementScan).
+    const hops: Array<{ gremlin: string; params: Record<string, any> }> = [];
+    const edge = (id: number, src: number, tgt: number) =>
+      ({ kind: 'edge' as const, id, label: 'develops', src, tgt, props: {}, ordinal: id });
+    const spySource: any = {
+      executor: () => ({
+        raw: (gremlin: string, params: Record<string, any>) => {
+          hops.push({ gremlin, params });
+          // First hop = the edge-producing sub-traversal; second = the endpoint fetch.
+          return Promise.resolve(hops.length === 1 ? [edge(10, 1, 2), edge(11, 2, 3)] : []);
+        },
+      }),
+    };
+    const contribution: any = createFederateService(spySource).resolve({
+      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      federationDepth: 0,
+    } as any);
+    await contribution.apply([]); // source form → run sub-traversal once, then fetch endpoints
+    expect(hops.length).toBe(2);
+    const endpointHop = hops[1];
+    // distinct endpoints of edges (1→2),(2→3) = {1,2,3}, crossing as ONE bound-collection param.
+    expect([...endpointHop.params[ENDPOINT_IDS_KEY]].sort()).toEqual([1, 2, 3]);
+    expect(endpointHop.gremlin).toBe(`g.V(${ENDPOINT_IDS_KEY})`);
+    expect(endpointHop.gremlin).not.toMatch(/\d/); // no id digits baked into the statement text
   });
 });
 
