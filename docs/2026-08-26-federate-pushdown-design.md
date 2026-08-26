@@ -1,10 +1,27 @@
 # Federate pushdown — inferring what to fetch from the compiled tail (design notes)
 
-**Status: DESIGN NOTES, not a plan. Records the 2026-08-26 discussion.** Nothing here is built. The
-authority is the code (`src/services/catalog/federate.ts`, `src/compiler/rel/lower.ts`'s
-`detachedTail`/`lowerForeignResume`, `src/compiler/rel/boundgraph.ts`,
-`src/compiler/ir/analyze.ts`'s `ChainFacts`). This is the mental model for where federate is going
-AFTER the endpoint-id transport fix (`ENDPOINT_IDS_KEY`, landed 2026-08-26).
+**Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
+`ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
+shape-tagged transport (elements | scalar, a `{t,v}` `ValueNode`); and **win 2a — arg-less pushdown**
+(`pushableTailPrefix` + sibling synthesis from step source text). Still open: mid-traversal reduction
+(split-aggregate), widening the side-effect boundary, and the `call("mogwai.inject")` marker. The
+authority is the code (`src/services/catalog/federate.ts`, `src/compiler/ir/content-demand.ts`,
+`src/compiler/rel/segment.ts`/`lower.ts`).
+
+## Why this matters — federate is the escape hatch from the DO ceiling
+
+A Durable Object is capped at **10 GB of storage** and is **single-threaded**. `federate` is not a
+nice-to-have: it is how mogwai **exceeds those limits** — a graph too big for one DO, or work that would
+pin one object, spreads across SIBLING graphs (one graph = one DO) and composes at query time. So the
+seam has to be GENERIC and have a good developer experience: multi-agent graphs joined together, a graph
+partitioned across DOs, a query that fans out and combines. That is why we push back on shoehorning and
+reuse principled constructs (the OLAP keyed relation, the `{t,v}` typed envelope, the map/group shapes) —
+and IMPROVE them where they are not opinionated enough — rather than bolt on per-case arms.
+
+**Future direction (not yet designed):** injection is scalar-only today (`values(k)`/`id()`/`label()`).
+The parent scope should be able to inject BIGGER things — a list, a map, eventually a whole SUBGRAPH — so
+a parent can hand real context to the sibling. This is the same "data crosses as one typed value" question
+the transport already answers for scalars; generalizing it is a named future slice.
 
 ## The observation that starts it
 
