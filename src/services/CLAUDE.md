@@ -17,6 +17,17 @@ through the ordinary fold — no new orchestrator, and nothing here builds SQL b
   `engineOf(stream).registry`). A `call()` with no injected registry throws "unknown service".
 - **Standard services keep TinkerPop's canonical names** (`--list`, `tinker.search`,
   `tinker.degree.centrality`); our own extensions are `mogwai.*`.
+- **A service closure may only capture what arrived through its declared contract** — construction
+  dependencies (app scope, e.g. `FederationSource`/store), the `CallSite` (`resolve`'s per-call-site
+  facts), and `apply`'s per-execution rows. When `resolve`/`apply` needs a NEW input, EXTEND THE
+  CONTRACT — never smuggle it (a magic-string key in the user `params` map, incidental closure capture).
+  Closures make smuggling *convenient*, which is exactly what rots maintenance: a reader can no longer
+  see a function's full input surface from its signature. Categorize the input first — a dependency
+  (construction), a per-execution value (`apply`'s rows), or a per-call-site fact known once at plan
+  time — and route it to where that category BELONGS. A per-call-site fact about *where the call sits
+  in the chain* (the post-barrier tail's `ContentDemand`) is the same category as `federationDepth`, so
+  it goes on `CallSite` (`CallSite.tailDemand`), read once in `resolve` and captured as a plain typed
+  value. A field you're tempted to route around means `CallSite` is UNDER-SPECIFIED — complete it.
 
 ## Full-text search — `property_fts`
 
