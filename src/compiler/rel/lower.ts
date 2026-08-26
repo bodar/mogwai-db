@@ -2372,6 +2372,10 @@ export interface Lowering {
   readonly propertySeek?: boolean;
   /** May the physical TextP FTS rewrite drive a bare element scan (`semijoin.ts`, `trigramSeek`)? */
   readonly ftsSubstringPredicate?: boolean;
+  /** May a mid-traversal federate reduction PUSH DOWN as a monoid partial (`reducer-monoid.ts`)? Default
+   *  on. Off makes the reducer run LOCALLY over the scattered elements — the semantic AUTHORITY the
+   *  pushed path must equal, which is how the differential (optimized ≡ unoptimized) is checked. */
+  readonly federateReduce?: boolean;
   /** DETACHED-transfer compile (set only by `raw()`): the element leaf emits a fuller property node
    *  `{t, v, vpid, meta?}`. Off for ordinary framing, so base props stay `{t, v}`. */
   readonly detached?: boolean;
@@ -2463,6 +2467,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
+  federateReduce: opts.federateReduce ?? true,
   detached: opts.detached ?? false,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
@@ -2890,6 +2895,59 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
     id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
     rows: [[jsonOf(node)]],
   });
+  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
+}
+
+/** How a mid-traversal reduction's monoid combines partials at an empty parent (see `reducer-monoid.ts`):
+ *  `zero` = a parent with no partial gets the identity 0 (count/sum); `absorbing` = it DROPS (min/max over
+ *  an empty set emits nothing). */
+type CombineIdentity = 'zero' | 'absorbing';
+
+/**
+ * THE MID-TRAVERSAL REDUCTION COMBINE — the monoid applied over a `(key→partial)` map the sibling
+ * returned (`docs/2026-08-26-federate-pushdown-design.md`). A mid `V().call(federate,…,inj).count()` is a
+ * GLOBAL reduction over the whole resumed stream (the element path returns ONE number), so the combine
+ * folds ALL the per-parent partials into one value with the monoid `combine`/`identity`.
+ *
+ * Both the map (`out.value`, a `t:'map'` ValueNode) and the parents (`values`, the distinct injected
+ * values) are KNOWN at resume time, so the fold is pure data: for each parent, look up its partial by key
+ * (a match contributes the partial; a miss contributes the identity — `zero` adds 0, `absorbing`
+ * contributes nothing). Then `combine` folds the contributions: `sum` (count/sum → SUM0, empty ⇒ 0),
+ * `min`/`max` (extremal, empty ⇒ NO value → no traverser, matching TinkerPop's empty min/max). One scalar
+ * out (or none), the SAME answer as scattering the elements and reducing locally — the semantic authority.
+ * Framed as a `typedNode` so the partial's Gremlin type (a `long` count, a numeric sum/min/max) survives.
+ *
+ * Distinct injection means each parent maps to one key, so `combine` folds over the per-parent partials
+ * exactly once each. `matchValue`'s job (which element matched which parent) is subsumed: the sibling
+ * grouped by the same value, so a parent's partial IS its group's reduction.
+ */
+export function lowerReduceCombine(
+  map: ValueNode, values: readonly unknown[],
+  reduce: { readonly identity: CombineIdentity; readonly partial: string; readonly combine: 'sum' | 'min' | 'max' },
+  _steps: readonly IRStep[], _from: number, _opts: Lowering,
+): RelLowering {
+  const fresh = minter();
+  const pairs: readonly (readonly [ValueNode, ValueNode])[] = map.t === 'map' ? map.v : [];
+  const byKey = new Map(pairs.map(([k, v]) => [JSON.stringify((k as { v: unknown }).v), (v as { v: unknown }).v as number]));
+  // The partial's Gremlin type is uniform across groups — read it off any pair, else count → long.
+  const partialT = (pairs[0]?.[1] as { t?: string } | undefined)?.t ?? (reduce.partial === 'count' ? 'long' : null);
+  // Contributions: a matched parent gives its partial; a miss gives the identity (0 for zero; skipped for
+  // absorbing). Fold with the monoid combine.
+  const contribs: number[] = [];
+  for (const parent of values) {
+    const hit = byKey.get(JSON.stringify(parent));
+    if (hit !== undefined) contribs.push(hit);
+    else if (reduce.identity === 'zero') contribs.push(0);
+    // absorbing: an unmatched parent contributes nothing.
+  }
+  const folded: number | null = contribs.length === 0
+    ? (reduce.identity === 'zero' ? 0 : null)                       // empty: SUM0 → 0; extremal → nothing
+    : reduce.combine === 'sum' ? contribs.reduce((a, b) => a + b, 0)
+    : reduce.combine === 'min' ? Math.min(...contribs)
+    : Math.max(...contribs);
+  // A null fold (an all-empty min/max) frames as NO traverser — an empty `Values`.
+  const rows: Expr[][] = folded === null ? [] : [[jsonOf(compilerText(JSON.stringify({ t: partialT, v: folded } as ValueNode)))]];
+  const rel = make.values({ id: fresh('rcv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)), rows });
   return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 

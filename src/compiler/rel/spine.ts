@@ -29,6 +29,10 @@ export interface RelRequest {
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
   readonly ftsSubstringPredicate: boolean;
+  /** Whether a mid-traversal federate reduction may PUSH DOWN as a monoid partial (`reducer-monoid.ts`).
+   *  Off runs the reducer LOCALLY over the scattered elements — the semantic AUTHORITY the pushed path
+   *  must equal (the optimized ≡ unoptimized differential, checked by a federation test). Default on. */
+  readonly federateReduce: boolean;
   /** DETACHED-transfer compile mode (set only by `raw()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -137,6 +141,7 @@ export function loweringOptions(
     labelRegime: request.labelRegime,
     propertySeek: request.propertySeek,
     ftsSubstringPredicate: request.ftsSubstringPredicate,
+    federateReduce: request.federateReduce,
     detached: request.detached,
     services: request.services,
     sack: request.sack,

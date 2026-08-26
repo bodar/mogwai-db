@@ -8,7 +8,7 @@
 //
 // WHAT it measures — three modes over one FIXED working set so every row does identical work:
 //   THREADS — N worker_threads in one process (shared heap/GC), a static slice each.
-//   PROCS   — N child `bun` processes (independent heaps), a static slice each; mirrors `test:shard`.
+//   PROCS   — N child `bun` processes (independent heaps), a static slice each; mirrors `test:bracket`.
 //   HYBRID  — a P×T grid: P child processes, each running T worker threads over its sub-slice.
 // All three partition statically (one message per worker), so the wall is bounded by the slowest
 // slice — the honest number for shard-style parallelism — and threads-vs-procs isolates exactly one

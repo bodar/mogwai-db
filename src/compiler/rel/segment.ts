@@ -4,8 +4,10 @@ import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, Ca
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
 import { FEDERATE_SERVICE } from '../ir/injection.ts';
+import { reducerMonoid } from '../ir/reducer-monoid.ts';
+import { isLocalScope } from '../ir/step.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
+import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
@@ -104,6 +106,26 @@ function inferredPushdown(
   return { siblingGremlin, prefixLength: prefix.length, reduces: prefix.reduces };
 }
 
+/** The MID-TRAVERSAL REDUCTION monoid pushdown, or `null`. Fires when: this is a federate barrier NOT at
+ *  the source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent),
+ *  and the local tail is EXACTLY one bare reducer with a splittable monoid. Then the sibling can compute a
+ *  per-injected-value PARTIAL (`group().by(<groupBy>).by(<partial>())`) and the resume COMBINES per parent
+ *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. `groupBy`
+ *  is the injection read applied element-side (so the group key equals what `matchValue` matches on). Mean
+ *  (`partial:null`, reduce-first to two partials) is a follow-up — declines here for now. */
+function inferredReduce(
+  steps: readonly IRStep[], at: number, spec: CallSpec, injection: InjectionKind | undefined,
+): CallSite['reduce'] | undefined {
+  if (spec.serviceName !== FEDERATE_SERVICE || at === 0 || !injection) return undefined;
+  const tail = steps.slice(at + 1);
+  const only = tail.length === 1 ? tail[0]! : undefined;
+  if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
+  const monoid = reducerMonoid(only.name);
+  if (!monoid || monoid.partial == null || monoid.combine == null) return undefined; // mean/unsplittable → follow-up
+  const groupBy = injection.kind === 'values' ? injection.key : injection.kind; // 'name' | 'id' | 'label'
+  return { reducer: only.name, groupBy, partial: monoid.partial, combine: monoid.combine, identity: monoid.identity };
+}
+
 function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier | null {
   for (let at = 0; at < steps.length; at++) {
     const step = steps[at]!;
@@ -123,6 +145,10 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // run over the SUFFIX, not the whole tail.
     const pushdown = inferredPushdown(steps, at, spec, request.params);
     const suffixFrom = at + 1 + (pushdown?.prefixLength ?? 0);
+    // MID-TRAVERSAL REDUCTION (monoid transport optimization): a mid federate whose tail is a bare reducer
+    // pushes the reduction as a per-injected-value grouped PARTIAL; the resume combines per parent.
+    const injection = spec.injectionTraversal ? injectionKindOf(spec.injectionTraversal, request.params) ?? undefined : undefined;
+    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, spec, injection);
     // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as
     // `federationDepth`. It travels on `CallSite.tailDemand`/`CallSite.pushdown`, the structure that means
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
@@ -130,6 +156,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
       tailDemand: contentDemand(steps, suffixFrom),
       pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
+      reduce,
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
@@ -403,8 +430,15 @@ function resumed(
   steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest, out: BarrierOutput,
   rejoin?: { readonly values: readonly unknown[]; readonly injection: InjectionKind | undefined },
 ): Plan {
-  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-scalar')
+  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-scalar') {
+    // MID-TRAVERSAL REDUCTION combine: the sibling returned a `(key→partial)` map (a `t:'map'` ValueNode).
+    // COMBINE it per parent with the monoid — explode the map, LEFT JOIN each parent to its key, apply the
+    // combine + identity — yielding the same per-parent answer as the element scatter + local reduce.
+    if (barrier.site.reduce && rejoin)
+      return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.values, barrier.site.reduce, steps, barrier.suffixFrom, request.lowering)) };
+    // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
+  }
   const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
   // (`raw()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the

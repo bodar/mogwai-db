@@ -816,7 +816,13 @@ export class Executor implements ExecutorApi {
       // The per-row `vt` is a Gremlin vtype (min/max's winner) OR a SQLite storage class (sum/mean) —
       // the same two disjoint vocabularies `frameTypedNode`'s leaf resolves, so it re-frames exactly.
       return { kind: 'scalar', value: { t: (rows[0]?.vt ?? null) as ValueNode['t'], v: rows[0]?.v ?? null } };
-    throw new Error(`federated traversal must yield vertices, edges, or a reduced scalar, not a ${plan.shape.kind} result`);
+    // A pushed-down mid-traversal REDUCTION returns a `(key→partial)` MAP (`group().by(key).by(partial())`).
+    // `mapValue` already IS the ValueNode `t:'map'` shape — `[[keyNode, valNode],…]` of self-describing
+    // nodes — so it crosses on the scalar arm losslessly (keys and partials keep their Gremlin types). An
+    // empty group set yields no row → an empty map, which the combine reads as "every parent matched 0".
+    if (plan.shape.kind === 'mapValue')
+      return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
+    throw new Error(`federated traversal must yield vertices, edges, a reduced scalar, or a keyed map, not a ${plan.shape.kind} result`);
   }
 
   /** Compile SYNCHRONOUSLY and reject a barrier. A non-federated traversal is ONE SQL statement —

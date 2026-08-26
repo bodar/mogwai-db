@@ -5,19 +5,29 @@ on:
     branches: [trunk]
   pull_request:
 
-# FOUR JOBS, one runner each, because the gate is CPU-bound and a runner has 4 cores.
+# `gates` + `rel-sweep` + a fan-out of `test` runners, one runner each, because the gate is CPU-bound
+# and a runner has 4 cores.
 #
-# Measured on trunk: the whole graph is two long poles that already run concurrently — `test` (117s)
-# and `rel-sweep` (110s) — plus six static gates that finish within 7s of install and hide entirely
+# Measured on trunk: the whole graph is two long poles that already run concurrently — `test` and
+# `rel-sweep` (~110s) — plus static gates that finish within 7s of install and hide entirely
 # underneath them. One `bun test` is a single process using ~1.27 cores, so a single runner sat at
 # roughly half idle while the wall was set by the longer pole. Sharding INSIDE a runner does not fix
 # that (measured: 2 test shards ∥ 2 sweep shards on a 4-core pin took 66.8s against 72.9s unsharded —
 # every extra bun process re-pays JIT warmup); more runners does.
 #
+# The `test` fan-out is by BRACKET, not anonymous shard: the `plan` job runs `test:bracket --matrix`
+# to discover the bracket names (L1, L2, …, other), and the `test` job spins one runner per bracket,
+# named `test (L2)` in the UI. So a red run says WHICH layer broke — `test (L2)` → `mise run L2`
+# locally — without opening a job. Brackets are DERIVED from discovery (`test/L<n>-…` → `L<n>`, else
+# `other`; scripts/test-bracket.ts), so a new test file cannot escape every bracket and a new
+# `test/L6-…/` dir becomes its own `L6` runner with no edit here. `other` is one runner for now —
+# split it (cost-balance) only if it out-runs the largest L bracket, since the brackets run in
+# parallel and the wall is the slowest one regardless.
+#
 # `mise run ci` remains the complete local one-command gate. The coverage here is identical by
-# construction: `ci`'s dependency list is `gates` + `rel-sweep` + `test`, and the three shards
-# partition test discovery so their union IS `test` (scripts/test-shard.ts). Add a job to one and it
-# must be added to the other, or it becomes a gate that only fires on one side.
+# construction: `ci`'s dependency list is `gates` + `rel-sweep` + `test`, and the brackets partition
+# test discovery so their union IS `test`. Add a job to one and it must be added to the other, or it
+# becomes a gate that only fires on one side.
 #
 # Note CI wall time is NOT a reliable measurement of a change: six consecutive runs of near-identical
 # work took 112, 139, 181, 189, 180 and 167s. Compare a task against `check` in the SAME run — a fixed
@@ -45,23 +55,36 @@ jobs:
         env:
           MOGWAI_SKIP_REFERENCE: "1"
 
-  test:
+  # Discover the test brackets and hand them to `test` as a matrix. One extra job on the critical
+  # path (~install + a sub-second script), the price of the bracket names being DERIVED rather than
+  # hard-coded here: add `test/L6-…/` and it appears as a runner with no edit to this file.
+  plan:
     runs-on: ubuntu-latest
-    strategy:
-      # Do not cancel sibling shards on the first failure: the useful output of a red run is WHICH
-      # tests fail, and killing the other shards throws most of that away for ~40s of runner time.
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2]
-    name: test (shard ${{ matrix.shard }})
+    outputs:
+      brackets: ${{ steps.brackets.outputs.list }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/provision
-      - run: mise run test:shard
+      - id: brackets
+        run: echo "list=$(bun scripts/test-bracket.ts --matrix)" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      # Do not cancel sibling brackets on the first failure: the useful output of a red run is WHICH
+      # tests fail, and killing the other brackets throws most of that away for ~40s of runner time.
+      fail-fast: false
+      matrix:
+        bracket: ${{ fromJSON(needs.plan.outputs.brackets) }}
+    name: test (${{ matrix.bracket }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/provision
+      - run: mise run test:bracket
         env:
           MOGWAI_SKIP_REFERENCE: "1"
-          MOGWAI_SHARDS: "3"
-          MOGWAI_SHARD: ${{ matrix.shard }}
+          MOGWAI_BRACKET: ${{ matrix.bracket }}
 
   # The single "did everything pass" signal, kept so there is one check name to read (and to require,
   # if trunk ever gains required checks — today the ruleset only enforces linear history).
@@ -71,15 +94,20 @@ jobs:
   # nothing rather than red.
   ci:
     runs-on: ubuntu-latest
-    needs: [gates, rel-sweep, test]
+    needs: [gates, rel-sweep, plan, test]
     if: always()
     steps:
       - name: Require every job to have succeeded
+        # `plan` is required too: if it fails, the `test` matrix has nothing to run and reports
+        # `skipped`, which is NOT `failure` — without gating on `plan` a broken discovery would let
+        # a suite that ran ZERO tests read as green. A matrix job's `result` is the rollup: it is
+        # `success` only if every bracket succeeded, so this one check covers all of them.
         run: |
-          echo "gates=$GATES sweep=$SWEEP test=$TEST"
-          [ "$GATES" = success ] && [ "$SWEEP" = success ] && [ "$TEST" = success ] || exit 1
+          echo "gates=$GATES sweep=$SWEEP plan=$PLAN test=$TEST"
+          [ "$GATES" = success ] && [ "$SWEEP" = success ] && [ "$PLAN" = success ] && [ "$TEST" = success ] || exit 1
           echo 'CI passed'
         env:
           GATES: ${{ needs.gates.result }}
           SWEEP: ${{ needs['rel-sweep'].result }}
+          PLAN: ${{ needs.plan.result }}
           TEST: ${{ needs.test.result }}

@@ -2,7 +2,7 @@
 // splits into (partial-remote, combine-local, identity) for federate mid-traversal reduction pushdown.
 // Calcite's SqlSplittableAggFunction: count/sum = SUM0, min/max = self-split, mean = reduce-first.
 import { test, expect, describe } from 'bun:test';
-import { REDUCER_MONOIDS, UNCOVERED_REDUCERS, reducerMonoid } from '../../src/compiler/ir/reducer-monoid.ts';
+import { UNCOVERED_REDUCERS, reducerMonoid } from '../../src/compiler/ir/reducer-monoid.ts';
 import { REDUCERS } from '../../src/compiler/ir/step.ts';
 
 describe('reducer monoids', () => {

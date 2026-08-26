@@ -95,6 +95,13 @@ const elementsOf = (r: ForeignResult): readonly ForeignRow[] => {
   return r.rows;
 };
 
+/** The `by()` modulator for the sibling's grouping, from the injection kind. A `values` key is a
+ *  property name (a quoted string arg); `id`/`label` are the T-token reads `by(id)`/`by(label)`. This is
+ *  the ELEMENT-side value each returned element would be matched on, so the group key equals the parent's
+ *  injected value — no marker-subject extraction. */
+const groupByGremlin = (groupBy: string): string =>
+  groupBy === 'id' || groupBy === 'label' ? groupBy : `"${groupBy.replace(/"/g, '\\"')}"`;
+
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
  *  already lived; the per-call values (params, this hop's depth) come from the CallSite
@@ -110,7 +117,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown }) => ({
+  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, reduce }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
@@ -160,6 +167,17 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
       const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
+      // MID-TRAVERSAL REDUCTION (monoid transport optimization): the local tail is a bare reducer, so push
+      // it as a per-injected-value GROUPED PARTIAL — `<sub>.group().by(<groupBy>).by(<partial>())` — and
+      // only a `(key→partial)` map crosses instead of every element. The map rides the SCALAR arm as a
+      // `t:'map'` ValueNode (no new arm); the resume COMBINES per parent with the monoid. Same answer as
+      // the element scatter + local reduce (the authority), fewer bytes.
+      if (reduce) {
+        const grouped = `${gremlin}.group().by(${groupByGremlin(reduce.groupBy)}).by(${reduce.partial}())`;
+        const out = await ex.raw(grouped, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+        if (out.kind !== 'scalar') throw new Error(`mogwai.graph.federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
+        return { kind: 'barrier-scalar', value: out.value };
+      }
       const result = elementsOf(await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;
     },

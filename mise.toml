@@ -216,28 +216,29 @@ description = "Bundle the Cloudflare Worker (dry-run deploy)"
 depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
-# ONE SHARD of the suite, for a CI runner of its own. `bun test` is a single process and bun does not
-# parallelise across files, so the suite is a serial CPU pole (61s locally, 117s on a runner); the
-# only thing that shortens it is more RUNNERS, not more processes on one (measured: 2 test shards ∥ 2
-# sweep shards on a 4-core pin took 66.8s against 72.9s unsharded — every extra bun process re-pays
-# JIT warmup).
+# ONE BRACKET of the suite, for a CI runner of its own. `bun test` is a single process and bun does
+# not parallelise across files, so the suite is a serial CPU pole; the only thing that shortens it is
+# more RUNNERS, not more processes on one (measured: 2 shards ∥ 2 sweep shards on a 4-core pin took
+# 66.8s against 72.9s unsharded — every extra bun process re-pays JIT warmup).
 #
-# The shards PARTITION test discovery rather than naming directories, so their union is the whole
-# suite by construction and a new test file cannot land outside every shard — see scripts/test-shard.ts.
-# Verified on this commit: 3 shards ran 655 + 531 + 636 = 1,822 tests across 26 + 23 + 22 = 71 files,
-# which is exactly what a bare `bun test` collects.
+# The brackets are DERIVED from discovery, not a hand-written path list: `test/L<n>-…` → bracket
+# `L<n>`, everything else → `other`. So their union is the whole suite by construction, a new test
+# file cannot land outside every bracket, and a new `test/L6-…/` dir becomes its own `L6` runner with
+# no edit here — see scripts/test-bracket.ts. The bracket names are the point: a red `test (L2)` in
+# the CI UI says "run `mise run L2` locally" without opening the job. The CI workflow reads the
+# bracket list from `--matrix` (one plan job) and fans a runner out per bracket.
 #
-# NO `check` EDGE, and it is the one task here without one. Every other test task gates on
+# NO `check` EDGE, and it is the one test task without one. Every other test task gates on
 # `tsc --noEmit` because `bun test` runs TS without type-checking, so a type error would otherwise ship
 # green. That reasoning is about the GATE, not about each process: this task exists for CI, where
 # `gates` runs `check` on a runner of its own and the aggregating job refuses to pass unless it
-# succeeded. Keeping the edge here would re-run the type-check on all three shard runners and put it on
+# succeeded. Keeping the edge here would re-run the type-check on every bracket runner and put it on
 # each one's critical path before `bun test` could start, for a property already being proved next door.
 # `mise run test` keeps its edge and remains what a human runs.
-[tasks."test:shard"]
-description = "One shard of the suite for CI (MOGWAI_SHARDS=n MOGWAI_SHARD=i); the shards partition discovery"
+[tasks."test:bracket"]
+description = "One bracket of the suite for CI (MOGWAI_BRACKET=L1|…|other); brackets partition discovery by L-level"
 depends = ["install", "submodule"]
-run = "bun scripts/test-shard.ts"
+run = "bun scripts/test-bracket.ts"
 [tasks.sql-hygiene]
 description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
 depends = ["install"]
@@ -276,11 +277,12 @@ run = "echo 'gates passed'"
 
 # THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.
 #
-# CI no longer invokes this task — it fans the same work across four runners (`gates`, `rel-sweep`,
-# and `test:shard` × 3) because one runner has 4 cores and `test` alone saturates barely more than
-# one of them. The COVERAGE is identical by construction, and this dependency list is where that is
-# checkable: CI's jobs are exactly `gates` + `rel-sweep` + `test` (as shards whose union is `test`).
-# Keep the two in step — a job added here without a job there is a gate that only fires locally.
+# CI no longer invokes this task — it fans the same work across runners (`gates`, `rel-sweep`, and one
+# `test:bracket` per bracket, discovered dynamically) because one runner has 4 cores and `test` alone
+# saturates barely more than one of them. The COVERAGE is identical by construction, and this
+# dependency list is where that is checkable: CI's jobs are exactly `gates` + `rel-sweep` + `test` (as
+# brackets whose union is `test`). Keep the two in step — a job added here without a job there is a
+# gate that only fires locally.
 [tasks.ci]
 description = "CI gate: the static gates + RelIR decline contract + the full suite (locally: all of it, in one command)"
 depends = ["gates", "rel-sweep", "test"]

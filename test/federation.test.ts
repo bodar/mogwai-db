@@ -6,6 +6,7 @@ import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { createFederateService } from '../src/services/catalog/federate.ts';
 import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
+import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
@@ -112,6 +113,22 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
     // count above, asserted explicitly here: exactly one result, not four.)
     const res = await Promise.all((await mgr.executor('home').framedAsync(mid('__.values("name")'), {})).map(dec));
     expect(res.length).toBe(1);
+  });
+
+  test('MONOID PUSHDOWN ≡ element path — a mid-traversal reduction pushed as a partial gives the same answer', async () => {
+    // The correctness obligation: combine(partials) ≡ reduce(elements). `federateReduce:false` runs the
+    // reducer LOCALLY over the scattered elements (the authority); the default pushes it as a grouped
+    // monoid partial. Both must agree, over each reducer. A fresh manager with the switch off is the
+    // element-path oracle (same seeds).
+    const local = new BunGraphManager(undefined, extendedRegistry, undefined, { ...DEFAULT_FAST_PATHS, federateReduce: false });
+    for (const g of MODERN_SEED) await local.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await local.executor('crew').framedAsync(g, {});
+    const num = async (m: BunGraphManager, q: string) =>
+      (await Promise.all((await m.executor('home').framedAsync(q, {})).map(dec))).map((v: any) => Number(v));
+    for (const red of ['count']) {
+      const q = `g.V().hasLabel("person").call("mogwai.graph.federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], __.values("name")).${red}()`;
+      expect(await num(mgr, q)).toEqual(await num(local, q));      // pushed ≡ local
+    }
   });
 
   test('BATCHED: N distinct injected values → exactly ONE sibling hop (apply, spy source)', async () => {

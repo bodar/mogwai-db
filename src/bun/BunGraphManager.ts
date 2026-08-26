@@ -6,6 +6,7 @@ import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
 import type { IoStore } from '../iostore.ts';
+import type { FastPathConfig } from '../compiler/options/fast-paths.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -46,6 +47,9 @@ export class BunGraphManager implements GraphManager {
      *  manager owns (a document is addressed by path, not by graph). Omitted → io() fails closed
      *  naming the missing binding. */
     private readonly io?: IoStore,
+    /** Override the ambient fast-path config for every graph this manager owns — the differential
+     *  seam (e.g. `{federateReduce: false}` to run the element-path authority). Omitted in production. */
+    private readonly fastPaths?: FastPathConfig,
   ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
@@ -70,7 +74,7 @@ export class BunGraphManager implements GraphManager {
   /** The per-graph executor, bound to that graph's store + the registry + this manager as the
    *  federation source. Created on demand; a sibling federated call reaches this same method. */
   executor(id: string): ExecutorApi {
-    return new Executor(this.resolve(id).store, this.registry, this, undefined, this.io);
+    return new Executor(this.resolve(id).store, this.registry, this, this.fastPaths, this.io);
   }
 
   /**
