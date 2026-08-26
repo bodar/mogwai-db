@@ -830,6 +830,18 @@ pattern this whole stage kept finding:
   `NO_ALIASES` (the census cannot see it — the traversal was newly executing). 🚧 LEFT: a `by()` over a
   collection select (a member projection) and a multi-key select mixing a collection name with labels
   (both decline via `selectKeys`).
+- ✅ **A `Scope.local` count/slice over a multi-key `select(k…).by(…)` RECORD — LANDED as `recordToMap` →
+  `mapTail`.** A multi-key select frames as a RECORD; a `Scope.local` op reads it AS A MAP (`SelectStep`
+  yields a `LinkedHashMap`), so `recordTail` COLLAPSES the record to a map (`recordToMap`, the same boundary
+  `fold()` already crossed) and re-enters `mapTail`. `count(Scope.local)` is the entry count and
+  `limit`/`range`/`skip`/`tail`(Scope.local) is an ORDER-PRESERVING ENTRY slice (`mapRange`, `map.ts` —
+  `RangeLocalStep.applyRangeMap` / `TailLocalStep`, the LIST-local slice's shape over the `MAP_COL` pairs
+  array: explode, sort by position, take the window, re-collect ASC). One arm, six corpus traversals
+  (limit/range/tail at both bounds over `select("a","b","c").by("name")`), all row-for-row against the
+  reference. ⚠️ The pair must re-collect through `jsonOf` — `json_group_array` re-encodes a bare `json_each`
+  element as a JSON STRING, which double-encodes the `[key,val]` pair (it produced `{"[":"\""}` before the
+  wrap; the same trap `mapSide` documents). 🚧 LEFT: `order`/`dedup`(Scope.local) over a map (a re-KEY, not
+  a window — a different question), and a `by()` over the local slice.
 - ✅ **`hasId(…)` — LANDED, and it was ENTIRELY unlowered (0 executing, 21 deferrals) despite the algebra
   existing.** `hasId` reads the element's EXTERNAL id (`COALESCE(uid,id)`), the same row `has(T.id,…)`
   does — so `sourceFilter` now routes it straight to `hasTokenClause('id',…)` with the id token supplied,
@@ -874,8 +886,16 @@ pattern this whole stage kept finding:
   (`is(P.gt(__.V(x).values(k)))`, `has(k, P.eq(__.V(9999).values(k)))`, bare `is(__.V(9999)…)` =
   `is(P.eq(…))`): `predicateExpr`'s `resolveScalar` hook (shared with the within/without vararg member)
   returns the operand's FIRST value via `nestedFirstValue` — a ROOTED operand (`__.V(x)…`) as a scalar
-  SUBQUERY over `rootedRead` (SQLite reads the first row = `tv.next()`), a CORRELATED one (`__.values(k)`)
-  via the element-host `scalarChild`. The compare is DIRECT (`binary(cmp, subject, nested)`, not `ordered`'s
+  SUBQUERY over `rootedRead` (the first row = `tv.next()`), a CORRELATED one (`__.values(k)`)
+  via the element-host `scalarChild`. ⚠️ **The first is the operand's ORDERED first, and a bare subquery
+  does NOT give it** — `P.resolve` takes `tv.next()` over the operand's OWN order, so an operand ending in
+  `order()` picks the sorted first, but projecting only `v` let `prune` drop the read's `encounter` channel
+  and a `(SELECT v FROM r0)` took a SCAN-order row (`has("name", __.V(x).out().values("name").order())`
+  picked an arbitrary neighbour — the defect that read as a FLAKY L3 regression, passing only when scan
+  order matched sort order). So the rooted branch now `ORDER BY`s the encounter and `LIMIT 1`s
+  (`nestedFirstValue`, `lower/reduction.ts`) — deterministic and order-faithful; an unordered operand has
+  no encounter and takes one arbitrary-but-single row as before. Pinned in
+  `test/L4-addendum/predicate-operand-scope.feature`. The compare is DIRECT (`binary(cmp, subject, nested)`, not `ordered`'s
   vtype cast — a runtime operand has no compile-time type; SQLite's storage-class order matches
   `GremlinValueComparator` for the same-typed pairs the corpus makes). An unproductive operand is a NULL
   scalar and `subject <cmp> NULL` → not-true, which is the SCALAR predicate's empty-operand SHORT-CIRCUIT

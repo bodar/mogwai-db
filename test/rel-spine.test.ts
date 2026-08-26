@@ -401,6 +401,13 @@ const COVERED = [
   "g.V().groupCount('a').select('a').count(local)",
   "g.V().group('a').by('name').by().select('a').count(local)",
   "g.V().repeat(__.aggregate('x')).times(2).select('x').limit(1).unfold()",
+  // A Scope.local count/slice over a MULTI-KEY select RECORD reads it AS A MAP (`recordToMap` → `mapTail`):
+  // an order-preserving ENTRY slice (`RangeLocalStep.applyRangeMap` / `TailLocalStep`). The record's map
+  // scope is what `SelectStep` yields (a LinkedHashMap), so limit/range/tail(local) keep an entry window.
+  "g.V().as('a').out().as('b').select('a','b').by('name').count(local)",
+  "g.V().as('a').out().as('b').out().as('c').select('a','b','c').by('name').limit(Scope.local, 2)",
+  "g.V().as('a').out().as('b').out().as('c').select('a','b','c').by('name').range(Scope.local, 1, 2)",
+  "g.V().as('a').out().as('b').out().as('c').select('a','b','c').by('name').tail(Scope.local, 1)",
   // …and over a LIST stream, where the whole collection is ONE entry tagged `list`, carrying the
   // member encoding the fold produced so the member frame is re-entered with it rather than a guess.
   'g.V().values("name").fold().as("a").select("a")',

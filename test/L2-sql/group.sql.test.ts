@@ -153,6 +153,26 @@ describe('group / properties SQL', () => {
     expect((await dec('g.V().repeat(__.aggregate("x")).times(2).select("x").limit(1).unfold()')).length).toBe(12);
   });
 
+  test('a Scope.local slice over a multi-key select record is an order-preserving ENTRY slice', async () => {
+    const store = seededStore();
+    const asMap = async (q: string) => (await decodeAll(executeQuery(store, q))).map((m: any) => Object.fromEntries(m));
+    // A multi-key `select(k…).by(…)` frames as a RECORD; a `Scope.local` count/slice reads it AS A MAP
+    // (`Scoping`/`SelectStep` yield a LinkedHashMap), so the record COLLAPSES via `recordToMap` and
+    // re-enters `mapTail`. `limit`/`range`/`tail`(Scope.local) keep a window of the ENTRIES in insertion
+    // order (`RangeLocalStep.applyRangeMap` / `TailLocalStep`), pinned by the corpus:
+    // count(local) — the record's entry count (Group/GroupCount `select(a).count(local)` share the arm).
+    expect(await decodeAll(executeQuery(store,
+      'g.V().as("a").out().as("b").select("a","b").by("name").count(local)'))).toEqual([2, 2, 2, 2, 2, 2]);
+    // Range.feature: limit keeps the FIRST n entries; the `c` label is unbound over a 2-hop `in()`.
+    expect(await asMap('g.V().as("a").in().as("b").in().as("c").select("a","b","c").by("name").limit(Scope.local, 1)'))
+      .toEqual([{ a: 'lop' }, { a: 'ripple' }]);
+    // range(1,2) drops entry 0, keeps entry 1; tail(1) keeps the LAST entry — all in insertion order.
+    expect(await asMap('g.V().as("a").out().as("b").out().as("c").select("a","b","c").by("name").range(Scope.local, 1, 2)'))
+      .toEqual([{ b: 'josh' }, { b: 'josh' }]);
+    expect(await asMap('g.V().as("a").out().as("b").out().as("c").select("a","b","c").by("name").tail(Scope.local, 1)').then((r) => r.sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)))))
+      .toEqual([{ c: 'lop' }, { c: 'ripple' }]);
+  });
+
   test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));

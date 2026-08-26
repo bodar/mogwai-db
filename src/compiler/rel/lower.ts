@@ -42,7 +42,7 @@ import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
@@ -750,6 +750,9 @@ export function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
  * label row, which a scalar traverser does not have.
  */
 const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where']);
+/** The Scope.local POSITION slices over a MAP entry order — the subset of `LIST_LOCAL_TX` that keeps the
+ *  entries in place (a window), NOT `order`/`dedup`, which re-key the map and are a different question. */
+const MAP_LOCAL_SLICE = new Set(['limit', 'range', 'skip', 'tail']);
 
 /** Does any operand of this predicate (at any nesting depth — `P.not(P.eq('a'))`) name a LABEL that
  *  is live on this relation? That is what separates `where(P.neq('a'))`, TinkerPop's alias compare,
@@ -2157,6 +2160,18 @@ function mapTail(
       if (args.length) return null;
       const counted = countTail(rel, fresh);
       return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    // A LOCAL POSITION SLICE over a map is an ORDER-PRESERVING ENTRY slice (`RangeLocalStep.applyRangeMap`
+    // / `TailLocalStep`) — `limit`/`range`/`skip`/`tail`(Scope.local) keep a window of the ENTRIES in
+    // insertion order, the map's own `MAP_COL` pairs array sliced like the list-local slice. The map
+    // shape is preserved, so the tail continues under the SAME framing. `order`/`dedup`(Scope.local) over
+    // a map (by key/value) is a different question and is NOT this arm — it declines below.
+    if (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step)) {
+      const sliced = mapRange(rel, step, fresh);
+      if (!sliced) return null;
+      rel = sliced;
+      continue;
     }
 
     // `constant(c)` DISCARDS the map and emits a literal — the shape-independent retype, shared with
@@ -4156,6 +4171,18 @@ function recordTail(
       if (!ordered) return null;
       rel = ordered;
       continue;
+    }
+
+    // A LOCAL op reads the record AS A MAP — `count(Scope.local)` is its entry count and a
+    // `limit`/`range`/`tail`(Scope.local) is an order-preserving entry slice, both the same question
+    // over the map the record's fields form (`Scoping`/`SelectStep` yield a `LinkedHashMap`). So the
+    // record COLLAPSES to a map (`recordToMap` — the same boundary `fold()`/`select` cross) and re-enters
+    // `mapTail`, which owns that vocabulary. This is why a multi-key `select(k…).by(…)` reaches the map
+    // ops that a single-key select's map value already had. A GLOBAL count/slice stays the row op below.
+    if ((step.name === 'count' && isLocalScope(step)) || (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step))) {
+      const mapped = recordToMap(rel, fields, ctx.source, fresh);
+      if (!mapped) return null;
+      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
     }
 
     // THE ROW-ALGEBRAIC OPS ARE SHAPE-AGNOSTIC, which is the whole reason a record needs no copy of

@@ -326,7 +326,7 @@
   "limit": {
     "binds": 0,
     "bytes": 4513,
-    "compiler": 53,
+    "compiler": 66,
     "bound": 0
   },
   "local": {
@@ -470,7 +470,7 @@
   "range": {
     "binds": 0,
     "bytes": 4093,
-    "compiler": 54,
+    "compiler": 67,
     "bound": 0
   },
   "replace": {
@@ -529,8 +529,8 @@
   },
   "tail": {
     "binds": 0,
-    "bytes": 2494,
-    "compiler": 33,
+    "bytes": 3964,
+    "compiler": 66,
     "bound": 0
   },
   "to": {

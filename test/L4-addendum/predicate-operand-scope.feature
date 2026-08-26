@@ -36,3 +36,20 @@ Feature: mogwai addendum — a predicate operand resolves through the traverser'
       | result |
       | josh |
       | peter |
+
+  # A ROOTED operand ending in order() takes the ORDERED first (`P.resolve` → `tv.next()` over the
+  # sorted stream). marko knows {vadas, josh}; order()ed by name that is [josh, vadas], so the first is
+  # "josh" and has("name", "josh") keeps josh. The pick MUST honour the operand's order() — a scalar
+  # subquery that projected only `v` let `prune` drop the encounter channel, taking a scan-order value
+  # (an arbitrary neighbour), which read as a non-deterministic result. `nestedFirstValue` now ORDER BYs
+  # the encounter and LIMIT 1s, so the pick is deterministic and order-faithful.
+  Scenario: g_V_hasXname_VX1X_outXknowsX_valuesXnameX_orderX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name", __.V(1).out("knows").values("name").order())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | v[josh] |

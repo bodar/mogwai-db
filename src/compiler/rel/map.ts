@@ -4,8 +4,9 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import type { IRStep } from '../ir/step.ts';
+import { sliceOf, type IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
@@ -1232,6 +1233,40 @@ export function mapSide(
 export const mapSize = (input: Rel, fresh: Minter): Rel =>
   withPayload(input, [['v', { kind: 'call', fn: 'json_array_length', args: [jsonOf(col(input.id, MAP_COL))] }]],
     [meta('v', 'int')], fresh);
+
+/**
+ * `limit`/`range`/`skip`/`tail`(Scope.local) over a MAP — an ORDER-PRESERVING ENTRY slice
+ * (`RangeLocalStep.applyRangeMap`, `vendor/tinkerpop/gremlin-core/.../step/filter/RangeLocalStep.java:98-112`:
+ * keep the entries at positions `[low, high)` in insertion order, `high == -1` meaning to the end;
+ * `TailLocalStep` takes the LAST n). The map carries its pairs in `MAP_COL` ordered by insertion, so the
+ * slice is the LIST-local slice's exact shape over the pairs: explode, sort by position (DESC for `tail`),
+ * take the window, re-collect ASC by the original position — a slice of a slice composes because the
+ * members keep their `PAIR.ord`. Collecting the WHOLE pair rather than a side gives a map with the same
+ * key/value shapes, so `mapTail` re-enters its own framing. `null` to decline (an illegal `range` throws a
+ * `ValueParseError` that PROPAGATES, exactly `listMemberOp`'s local slice).
+ */
+export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
+  const window = step.name === 'tail'
+    ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
+    : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
+  if (!window) return null;
+  const rel = fenced(input, fresh);
+  const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
+  const ordered = make.sort({
+    id: fresh('mps'), input: pairs, channels: [], type: pairs.type,
+    terms: [{ expr: col(pairs.id, PAIR.ord), dir: step.name === 'tail' ? 'desc' : 'asc' }],
+  });
+  const taken = make.limit({
+    id: fresh('mpl'), input: ordered, channels: [], type: ordered.type,
+    ...(window.limit === null ? {} : { count: compilerInt(window.limit) }),
+    ...(window.offset ? { offset: compilerInt(window.offset) } : {}),
+  });
+  // Re-collect ASC by the ORIGINAL position, so `tail`'s DESC take comes back in insertion order. The
+  // member is `jsonOf` the pair, exactly as `mapSide` wraps its side node: `json_group_array` re-encodes
+  // a bare `json_each` element as a JSON STRING otherwise, which would double-encode the `[key,val]` pair.
+  const sliced = collectedOf(taken, jsonOf(col(taken.id, PAIR.value)), [{ expr: col(taken.id, PAIR.ord), dir: 'asc' }], MAP_COL, fresh);
+  return withPayload(rel, [[MAP_COL, sliced]], [meta(MAP_COL, 'json', true)], fresh);
+}
 
 /**
  * `unfold()` — one traverser per ENTRY, which is the relation-level explode the side reads are not.

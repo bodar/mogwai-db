@@ -563,9 +563,26 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
+    // `P.resolve(traverser)` takes the operand's FIRST result (`vendor/tinkerpop/.../P.java:328-373`,
+    // `tv.next()`), so where the operand ends in `order()` the first is the ORDERED first. The read
+    // carries the operand's own emission order on its `encounter` channel — but projecting only `v` here
+    // let `prune` drop the channel and with it the order, so a bare scalar subquery took a SCAN-order
+    // value (`has("name", __.V(x).out().values("name").order())` picked an arbitrary neighbour, not the
+    // sorted first — non-deterministic, and the defect that read as a flaky L3 regression). So ORDER BY
+    // the encounter and LIMIT 1: the pick is the operand's true first. Unordered operand → no encounter
+    // channel, one arbitrary-but-single row exactly as before.
+    const enc = encounterOf(read.rel.channels);
+    const ordered = enc
+      ? make.limit({
+        id: fresh('nfl'),
+        input: make.sort({ id: fresh('nfs'), input: read.rel, channels: read.rel.channels, type: read.rel.type,
+          terms: [{ expr: col(read.rel.id, enc.col), dir: 'asc' }] }),
+        channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
+      })
+      : read.rel;
     return { kind: 'scalar', plan: make.project({
-      id: fresh('nfv'), input: read.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-      exprs: [['v', col(read.rel.id, 'v')]],
+      id: fresh('nfv'), input: ordered, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', col(ordered.id, 'v')]],
     }) };
   }
   if (!host) return null;
