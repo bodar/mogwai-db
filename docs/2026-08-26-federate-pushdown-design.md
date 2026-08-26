@@ -134,12 +134,27 @@ stays a permanent primitive for these cases — which is exactly why the endpoin
 however the id set arises (today's `withEndpoints` or a future interleaving barrier), it crosses as one
 `json_each` bind.
 
-**Hard edge (c) — identity collisions across graphs.** Graph A's vertex id `5` and graph B's vertex id
-`5` are different elements, same integer. `BoundGraph` sidesteps this today because there is exactly ONE
-landed graph per federate result. Multi-graph mixing needs identity to become `(graph, id)` (namespaced),
-or `dedup()`/`has(T.id, 5)` conflate elements. This is the strongest reason full general auto-federation
-is a bigger project than win 1: it is gated on namespaced identity, which touches the id-carry model
-everywhere.
+**Hard edge (c) — identity across graphs is ALREADY namespaced STRUCTURALLY; the gap is narrow.**
+Reconsidered 2026-08-26. Each `BoundGraph` is bound to a SPECIFIC CTE (`vertexBinding`/`edgeBinding`,
+`boundgraph.ts:65`), and every rejoin resolves against THAT graph's relation (`cteOf` → `rowById`). So
+an element from graph A is effectively `(bgv_A, id)` — **the CTE binding IS the graph qualifier**, and an
+id is only ever interpreted relative to one bound relation, never globally. The substrate already
+namespaces identity for the SINGLE-SOURCE case, structurally.
+
+The gap is precise: the qualifier is STRUCTURAL (which CTE the read targets), not a VALUE carried in the
+row — `externalId(_kind, id)` returns the BARE id (`boundgraph.ts:222`) and the stream carries `id` as one
+column. That is correct as long as ONE stream flows through ONE `BoundGraph` (today's case). It breaks
+ONLY when two bound graphs' elements share ONE stream — e.g. `federate(A).union(V(), federate(B).V())` then
+`dedup()`/`has(T.id,5)`/`group().by(id)`: rows from two CTEs each carry a bare `id`, so A's `5` and B's `5`
+collapse (the structural qualifier was in `ctx.source`, and a merged stream has no single source).
+
+So (c) is NOT a wall gating all multi-graph work — it is a BOUNDED feature: **promote the structural
+qualifier into the traverser at merge points.** Add an `origin` discriminator column to the bound stream,
+thread it through `externalId` and the identity comparisons (`dedup`/`has(T.id)`/`group().by(id)` compare
+the PAIR), and tag each side where two bound sources `union`. Per-graph CTEs already exist; what is
+missing is carrying origin in the row when streams merge — a localized, measurable change to the id-carry
+model, not a pervasive rewrite. It gates only the MULTI-graph mixing form (win 2b), not the single-graph
+ergonomic API (win 2a) or win 1.
 
 ## The explicit `traversal` arg COMPOSES with pushdown — it does not disable it
 
@@ -161,9 +176,45 @@ to override, and the explicit arg does NOT gate it. Pushdown is unconditional an
 The control question belongs to a DIFFERENT, later win: **boundary inference (win 2) — making the arg
 optional.** THERE, the explicit arg is the ESCAPE HATCH: "I drew the boundary myself, don't infer one",
 and the hard-edge (a) case `federate(A, __.repeat(out()).times(10).values('x'))` is a user manually
-pushing an unbounded traversal we could not infer cleanly. But win 2 is gated behind hard edge (c)
-(namespaced identity) and is out of scope for the pushdown work. So: **win 1 never checks whether the
-arg is present** (it always is); only win 2 would let an explicit arg opt out of inference.
+pushing an unbounded traversal we could not infer cleanly. Win 2 SPLITS (see next section): **2a**
+(single-graph inferred boundary — the ergonomic API) is reachable without the identity work; **2b**
+(multi-graph mixing) needs hard-edge (c)'s origin-in-row. Both are out of scope for the pushdown work
+(win 1). So: **win 1 never checks whether the arg is present** (it always is); only win 2 would let an
+explicit arg opt out of inference.
+
+## Win 2a — the ergonomic arg-less API, and the `T.value` ambiguity it forces
+
+The motivation is ergonomics: a federate call is ALWAYS followed by operations on the sibling, so
+`g.call(federate, "crew").V().hasLabel("person").out().values("name")` — federate returns "the sibling
+graph", keep traversing — reads far better than a serialized `traversal` string arg. This ergonomic API
+IS win 2's single-graph surface: with no `traversal` arg, the compiler must INFER which steps run remote
+vs local (the boundary the arg used to carry). Single-graph (no local/second-sibling mixing) does NOT hit
+hard edge (c), so **2a is reachable independently of the identity work.**
+
+**The GLV constraint shapes the whole design.** We do not modify the `gremlin` client / any GLV, so we
+CANNOT introduce a new step function — that is why injection reused `T.value` (a token every GLV
+serializes verbatim). But `call()` IS the extension point that needs no GLV change: `g.call("some.name",
+{...})` is expressible by every unmodified client.
+
+**The `T.value` ambiguity 2a exposes, and its clean fix.** `T.value` is legitimately a PROPERTY token
+(`by(T.value)`/`order(T.value)` reading a property element's value). Injection REUSES it in a predicate-
+operand position where it is otherwise meaningless (`has('sku', T.value)`) — collision-free ONLY because
+the `traversal` arg draws the boundary that says "this region is the remote sub-traversal, injection
+markers live here" (`injection.ts:6-8`). Remove the arg (2a) and the boundary that disambiguated is gone:
+in `g.V().call(federate,"crew").has("sku", T.value)` you cannot tell whether `has` runs remotely (so
+`T.value` = the parent's injected value) or locally (so `T.value` = the property token) — the SAME token
+means two things depending on a boundary that no longer exists. This is a real hazard, not a nuisance.
+
+**Fix: a self-delimiting marker via `call()`, not `T.value` reuse.** A dedicated marker CALL —
+`call("mogwai.inject", {read: "name"})` (or `"mogwai.parent"`) — needs no GLV change (it is a `call()`)
+AND carries its own meaning regardless of position or boundary: nobody writes that call for any other
+reason, so it is unambiguous with no `traversal` arg to delimit it. `T.value` then keeps meaning ONLY the
+property token, everywhere, always. This KEEPS the injection feature in the ergonomic form (rather than
+"injection unsupported arg-less", which would be a real loss) and arguably reads clearer: the call NAMES
+what to inject (`{read: "name"}` / id / label) in one place, instead of a positional `__.values('name')`
+arg to the outer federate paired with a bare `T.value` marker elsewhere. Cost: one reserved service name
+(honest — it shows in `--list`), vs `T.value`'s zero-new-registry cleverness. Worth it for 2a; the
+`T.value` form stays supported for the explicit-arg (win-1) path where the boundary already disambiguates.
 
 ## `T.value` / mid-traversal: pushdown must be INJECTION-AWARE
 
@@ -203,8 +254,12 @@ input, not a separate mechanism — the injection kind is already on the barrier
 3. **Conditional endpoint fetch** — gate `withEndpoints` on `reachesAdjacency`, so an edges-only or
    reducing subgraph tail skips the second hop entirely.
 4. **Projection pushdown** — fetch only `keys` when `!reachesAdjacency`.
-5. **(Deferred) boundary inference / optional `traversal` arg** — the clean single-graph case only.
-   Gated behind (c) namespaced identity for anything multi-graph. Not in scope until 1–4 measure out.
+5. **(Win 2a — deferred, but reachable) ergonomic arg-less API** — single-graph boundary inference +
+   the self-delimiting `call("mogwai.inject", …)` marker. Independent of the identity work. Not in scope
+   until 1–4 measure out, but NOT gated on (c).
+6. **(Win 2b — deferred) multi-graph mixing** — hard edge (c)'s origin-in-row: an `origin` discriminator
+   carried in the bound stream so `dedup`/`has(T.id)`/`group().by(id)` compare `(graph, id)`. A bounded,
+   measurable change (per-graph CTEs already exist), gating only multi-graph.
 
 ## Non-goals / refuted directions
 
@@ -212,6 +267,10 @@ input, not a separate mechanism — the injection kind is already on the barrier
   "one barrier = one await": the tail would trigger a second federate hop mid-lowering. The compile-time
   demand achieves the same "don't fetch what you don't use" WITHOUT a second round-trip, because the tail
   is statically known. Do not reintroduce laziness as the mechanism.
-- **Multi-graph auto-federation before namespaced identity** — hard edge (c) is a real wall, not an
-  optimization. A `(graph, id)` identity is a prerequisite, and the burden on proposing it is a
-  measurement per `src/compiler/CLAUDE.md`, not a design sketch.
+- **A new STEP function for injection or the ergonomic API** — forbidden by the GLV constraint (we do not
+  modify any GLV). `call()` is the sanctioned extension point; a marker CALL is expressible by every
+  unmodified client. This is why injection reused `T.value` and why 2a's fix is a marker call, not a step.
+- **Treating cross-graph identity as an unsolved wall** — CORRECTED 2026-08-26 (hard edge (c)): identity
+  is ALREADY namespaced structurally by the per-graph CTE binding; only the MERGED-stream case needs origin
+  promoted into the row. Do not re-describe (c) as gating all multi-graph work — it gates only 2b's merged
+  streams, and the substrate is mostly there.
