@@ -2,11 +2,13 @@
 
 **Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
 `ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
-shape-tagged transport (elements | scalar, a `{t,v}` `ValueNode`); and **win 2a — arg-less pushdown**
-(`pushableTailPrefix` + sibling synthesis from step source text). Still open: mid-traversal reduction
-(split-aggregate), widening the side-effect boundary, and the `call("mogwai.inject")` marker. The
+shape-tagged transport (elements | scalar | keyed map, a `{t,v}` `ValueNode`); **win 2a — arg-less
+pushdown** (`pushableTailPrefix` + sibling synthesis from step source text); and **mid-traversal reduction
+pushdown** (the `reducer-monoid.ts` registry + `lowerReduceCombine`, gated by the `federateReduce` switch
+with a differential). Still open: `mean` (the one uncovered reducer, reduce-first to sum/count); widening
+the side-effect boundary; the `call("mogwai.inject")` marker; and bigger-than-scalar injection. The
 authority is the code (`src/services/catalog/federate.ts`, `src/compiler/ir/content-demand.ts`,
-`src/compiler/rel/segment.ts`/`lower.ts`).
+`src/compiler/ir/reducer-monoid.ts`, `src/compiler/rel/segment.ts`/`lower.ts`).
 
 ## Why this matters — federate is the escape hatch from the DO ceiling
 
@@ -384,34 +386,39 @@ group key on the sibling is the injection read applied ELEMENT-side (`values('na
 id→`by(id)`, label→`by(label)`), which equals what `matchValue` compares against — so the join key is the
 same value the element scatter already matches on, no marker-subject extraction needed.
 
-**Build order (each verifiable against the already-correct element path):**
-1. Registry + drift guard — LANDED.
-2. Gate: mid-traversal barrier + injection + tail is a bare reducer with a monoid → thread a `reduce`
-   directive (the reducer + its monoid) on `CallSite.pushdown`, like 2a's synthesized gremlin.
-3. `apply`: synthesize `<sub>.group().by(<elementKey>).by(<partial>())`; the sibling returns a
-   `(key→partial)` map; return it as a `barrier-scalar` `t:'map'` ValueNode.
-4. Resume combine: the new join-then-monoid lowering, per parent, with the identity behaviour.
-5. L5 differential: the combined result ≡ the element-scatter+local-reduce result over generated
-   mid-traversal reductions. The element path is the authority.
+**Build — ALL LANDED (2026-08-26) except `mean`:**
+1. Registry + drift guard (`reducer-monoid.ts`) — LANDED.
+2. Gate (`inferredReduce`, `segment.ts`): mid-traversal + injection + bare-reducer tail with a monoid →
+   a `CallSite.reduce` directive (reducer + monoid + `groupBy` from the injection kind) — LANDED.
+3. `apply` (`federate.ts`): synthesizes `<sub>.group().by(<groupBy>).by(<partial>())`; the sibling
+   returns a `(key→partial)` map that rides the EXISTING `ForeignResult.scalar` arm as a `t:'map'`
+   ValueNode (`raw()` gained the `mapValue` shape arm — no new transport arm) — LANDED.
+4. Resume combine (`lowerReduceCombine`, `lower.ts`): folds the per-parent partials GLOBALLY with the
+   monoid `combine`/`identity` (a mid `count()` is a global reduction → one value, not a per-parent
+   stream — the frame caught that bug) — LANDED.
+5. Differential: `federateReduce` switch (off = element-path authority); `test/federation.test.ts` runs
+   a mid-traversal reduction switch-ON ≡ switch-OFF. NOT L5 (federate isn't in the corpus) — LANDED.
+6. `mean` (reduce-first to `(sum, count)`, then `sum/count` locally) — STILL OPEN, its own follow-up.
 
-## Phasing (rough, unbuilt)
+## Phasing (original plan — status in brackets)
 
-1. **`ContentDemand` `ChainFact` + `detachedTail` reads it.** The static walk over post-barrier steps
+1. **[LANDED] `ContentDemand` `ChainFact` + `detachedTail` reads it.** The static walk over post-barrier steps
    (consulted-not-constructed, degrades to fetch-everything), AND `detachedTail` converges onto it as the
    single classifier: its per-step branches become the generic reader of the one fact rather than a second
    independent copy. No fetch-behaviour change yet — the demand is computed and `detachedTail` consumes it,
    so the accept/decline set is provably the same as today (the L4 `@Unsupported` refusals and the census
    deferrals are the differential that proves it). This convergence is the phase, not a preamble to it.
-2. **Aggregation pushdown, terminal reduction** — `federate(subgraph).count()`/reducers push the
-   reduction remote, fetch a scalar. Highest value, smallest blast radius, and it dissolves the
-   "materialize endpoints nobody reads" waste for the reducing case.
-3. **Conditional endpoint fetch** — gate `withEndpoints` on `reachesAdjacency`, so an edges-only or
-   reducing subgraph tail skips the second hop entirely.
-4. **Projection pushdown** — fetch only `keys` when `!reachesAdjacency`.
-5. **(Win 2a — deferred, but reachable) ergonomic arg-less API** — single-graph boundary inference +
-   the self-delimiting `call("mogwai.inject", …)` marker. Independent of the identity work. Not in scope
-   until 1–4 measure out, but NOT gated on (c).
-6. **(Win 2b — deferred) multi-graph mixing** — hard edge (c)'s origin-in-row: an `origin` discriminator
+2. **[LANDED — as PREFIX pushdown, not per-reducer]** Reduction pushdown: subsumed by 2a's
+   `pushableTailPrefix` (source-form) and the mid-traversal monoid reduction. The original per-reducer
+   framing was corrected against Calcite (see above).
+3. **[LANDED] Conditional endpoint fetch** — `withEndpoints` gated on `reachesAdjacency`.
+4. **[PARTIAL] Projection pushdown** — the arg-less form pushes `values(k)` as part of the prefix (so only
+   the projected shape crosses); a dedicated "narrow to `keys`" over the EXPLICIT form is not separately
+   built. Mostly folds out of 2a.
+5. **[LANDED — the arg-less form; marker STILL OPEN] ergonomic arg-less API** — `pushableTailPrefix` +
+   sibling synthesis. The self-delimiting `call("mogwai.inject", …)` marker (for arg-less mid-traversal
+   injection) is still open.
+6. **[STILL OPEN — Win 2b] multi-graph mixing** — hard edge (c)'s origin-in-row: an `origin` discriminator
    carried in the bound stream so `dedup`/`has(T.id)`/`group().by(id)` compare `(graph, id)`. A bounded,
    measurable change (per-graph CTEs already exist), gating only multi-graph.
 
