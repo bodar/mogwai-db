@@ -3,9 +3,9 @@ import { ARTICLE_RANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
 
-// ---------- mogwai.articleRank — ArticleRank, a MULTI-CHANNEL BSP decorate barrier ----------
+// ---------- articleRank — ArticleRank, a MULTI-CHANNEL BSP decorate barrier ----------
 //
-// `g.call("mogwai.articleRank")` decorates each vertex with its ArticleRank and passes it through.
+// `g.call("articleRank")` decorates each vertex with its ArticleRank and passes it through.
 // ArticleRank is a PageRank variant that damps a node's outgoing influence by (out-degree + AVERAGE
 // degree) rather than just out-degree, so a hub with many out-edges contributes less rank per edge — it
 // suppresses the influence of high-degree nodes relative to PageRank. No native TinkerPop step, so it is

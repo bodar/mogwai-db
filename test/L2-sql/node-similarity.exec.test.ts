@@ -3,8 +3,8 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// Node similarity (Jaccard over out-neighbour sets) — mogwai.nodeSimilarity, the first PAIR-OUTPUT
-// barrier: `g.call("mogwai.nodeSimilarity")` returns a stream of `{node1, node2, similarity}` MAPS, not a
+// Node similarity (Jaccard over out-neighbour sets) — nodeSimilarity, the first PAIR-OUTPUT
+// barrier: `g.call("nodeSimilarity")` returns a stream of `{node1, node2, similarity}` MAPS, not a
 // per-vertex decoration. A new barrier output arm (pairSegment → lowerPairResume → the mapValue wire
 // form). Metric matches GDS's default (Jaccard of out-neighbour sets, pairs with similarity > 0).
 
@@ -20,9 +20,9 @@ const SEED: readonly string[] = [
 ];
 const ID = { a: 1, b: 2, c: 3, d: 4 };
 
-describe('mogwai.nodeSimilarity — Jaccard pairs, a stream of {node1,node2,similarity} maps', () => {
+describe('nodeSimilarity — Jaccard pairs, a stream of {node1,node2,similarity} maps', () => {
   test('returns scored pairs as maps (the new pair-output shape)', async () => {
-    const rows = (await run(seeded(SEED), `g.call("mogwai.nodeSimilarity")`)).map(unmap) as any[];
+    const rows = (await run(seeded(SEED), `g.call("nodeSimilarity")`)).map(unmap) as any[];
     // Every row is a 3-key map with two node ids and a similarity.
     for (const r of rows) {
       expect(new Set(Object.keys(r))).toEqual(new Set(['node1', 'node2', 'similarity']));
@@ -46,7 +46,7 @@ describe('mogwai.nodeSimilarity — Jaccard pairs, a stream of {node1,node2,simi
       ...['p', 'q', 'r', 't'].map((n) => `g.addV('n').property('name','${n}')`),
       ...['p', 'q', 'r'].map((s) => `g.V().has('name','${s}').addE('R').to(__.V().has('name','t'))`),
     ];
-    const rows = (await run(seeded(seed), `g.call("mogwai.nodeSimilarity")`)).map(unmap) as any[];
+    const rows = (await run(seeded(seed), `g.call("nodeSimilarity")`)).map(unmap) as any[];
     expect(rows.length).toBe(6); // 3 sources × 2 others
     for (const r of rows) expect(r.similarity).toBeCloseTo(1, 10);
   });
@@ -57,6 +57,6 @@ describe('mogwai.nodeSimilarity — Jaccard pairs, a stream of {node1,node2,simi
       `g.V().has('name','a').addE('R').to(__.V().has('name','x'))`,
       `g.V().has('name','b').addE('R').to(__.V().has('name','y'))`,
     ];
-    expect((await run(seeded(seed), `g.call("mogwai.nodeSimilarity")`)).length).toBe(0);
+    expect((await run(seeded(seed), `g.call("nodeSimilarity")`)).length).toBe(0);
   });
 });

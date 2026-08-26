@@ -15,7 +15,7 @@ type IdValue = { readonly id: number; readonly value: unknown };
 
 /** Weakly-connected components by union-find over the (undirected) edge list, labelling each component
  *  with the lexicographically-smallest external-id string among its members (the reference's exact
- *  `id().toString()`/string-`compareTo` rule) — the oracle for mogwai.wcc's SQL rounds. */
+ *  `id().toString()`/string-`compareTo` rule) — the oracle for wcc's SQL rounds. */
 function connectedComponents(
   nodes: readonly { readonly id: number; readonly ext: string | number }[],
   edges: readonly { readonly src: number; readonly tgt: number }[],
@@ -43,7 +43,7 @@ function connectedComponents(
   return nodes.map((n) => ({ id: n.id, value: label.get(find(n.id))! }));
 }
 
-/** PageRank (α damping, teleport redistribution of dangling rank) — the oracle for mogwai.pageRank. A
+/** PageRank (α damping, teleport redistribution of dangling rank) — the oracle for pageRank. A
  *  faithful re-derivation of PageRankVertexProgram, so a modern-graph sink ranks correctly. */
 function pageRankScores(
   nodes: readonly { readonly id: number }[],
@@ -84,7 +84,7 @@ function pageRankScores(
 }
 
 /** Peer-pressure clustering: each vertex adopts the max-vote cluster among {itself} ∪ {voters}, ties to
- *  the smallest id string, to a fixpoint — the oracle for mogwai.peerPressure. */
+ *  the smallest id string, to a fixpoint — the oracle for peerPressure. */
 function peerPressureClusters(
   nodes: readonly { readonly id: number; readonly ext: string | number }[],
   edges: readonly { readonly src: number; readonly tgt: number }[],

@@ -4,9 +4,9 @@ import { jsonMember, meta, typeOf, type Minter } from '../../compiler/rel/build.
 import type { Service, RelCallSite, RelContribution } from '../spi/types.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
 
-// ---------- mogwai.schema — reflect the implicit schema as a map stream (pure, Start) ----------
+// ---------- schema — reflect the implicit schema as a map stream (pure, Start) ----------
 //
-// `g.call('mogwai.schema')` reflects a schemaless graph's IMPLICIT schema — the labels, properties
+// `g.call('schema')` reflects a schemaless graph's IMPLICIT schema — the labels, properties
 // and edge shapes the data actually holds — as a STREAM of one self-describing map per schema element.
 // It is the reflection source the GraphQL front end reads to build SDL/introspection
 // (`docs/2026-08-07-graphql-front-end-plan.md` §4), reachable from Gremlin like any other source so the
@@ -24,7 +24,7 @@ import type { Rel, Table } from '../../rel/rel.ts';
 // (`db.schema.visualization()`, `apoc.meta.schema()`) exist only as a secondary, drawing-oriented
 // convenience. Calcite codifies the same instinct at the type level — a field IS a `(name, type)`
 // `Map.Entry` (`RelDataTypeField`) and `INFORMATION_SCHEMA.COLUMNS` is one row per column. So a stream
-// composes with the ordinary map vocabulary (`g.call('mogwai.schema').where(…).groupCount()`), where a
+// composes with the ordinary map vocabulary (`g.call('schema').where(…).groupCount()`), where a
 // blob is opaque to every downstream step. An aggregate `visualization`-style document, if ever wanted,
 // is a SEPARATE service (or a `with('aggregate', true)`), never the default.
 //
@@ -233,7 +233,7 @@ function edgeProperties(fresh: Minter): Rel {
 }
 
 export const schemaService: Service = {
-  name: 'mogwai.schema',
+  name: 'schema',
   type: 'start',
   describeParams: () => ({}),
   resolve: () => ({

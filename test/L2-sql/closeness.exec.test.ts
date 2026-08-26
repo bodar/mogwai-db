@@ -3,7 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// Closeness centrality — mogwai.closeness, a scope-keyed DECORATE barrier reusing relaxShortestPath's
+// Closeness centrality — closeness, a scope-keyed DECORATE barrier reusing relaxShortestPath's
 // per-source distances (scope = source). closeness[v] = reached[v] / farness[v], farness = Σ dist(u→v)
 // over reaching u (GDS DefaultCentralityComputer). IN direction (the algorithm's own — see below).
 //
@@ -22,10 +22,10 @@ const seedOf = (nodes: readonly string[], edges: readonly (readonly [string, str
 
 const scoresByName = async (store: ReturnType<typeof seeded>): Promise<Record<string, number>> =>
   Object.fromEntries(((await run(store,
-    `g.V().call("mogwai.closeness").project("name","closeness").by("name").by("closeness")`)).map(unmap) as any[])
+    `g.V().call("closeness").project("name","closeness").by("name").by("closeness")`)).map(unmap) as any[])
     .map((r) => [r.name, r.closeness]));
 
-describe('mogwai.closeness — closeness centrality (scope-keyed barrier)', () => {
+describe('closeness — closeness centrality (scope-keyed barrier)', () => {
   test('symmetric path a<->b<->c<->d<->e matches GDS (0.4 / 0.571 / 0.667 / 0.571 / 0.4)', async () => {
     // Bidirectional edges, so in ≡ out; farness sums are 10/7/6/7/10 over N-1=4 reached.
     const EDGES: [string, string][] = [
@@ -56,9 +56,9 @@ describe('mogwai.closeness — closeness centrality (scope-keyed barrier)', () =
   test('every vertex is decorated (has(closeness) passes all) and order().by composes', async () => {
     const EDGES: [string, string][] = [['a', 'b'], ['b', 'a'], ['b', 'c'], ['c', 'b'], ['c', 'd'], ['d', 'c'], ['d', 'e'], ['e', 'd']];
     const store = seeded(seedOf(['a', 'b', 'c', 'd', 'e'], EDGES));
-    expect(await run(store, `g.V().call("mogwai.closeness").has("closeness").count()`)).toEqual([5]);
+    expect(await run(store, `g.V().call("closeness").has("closeness").count()`)).toEqual([5]);
     // c is the most central (middle of the path) → sorts first descending.
-    expect(await run(store, `g.V().call("mogwai.closeness").order().by("closeness", Order.desc).limit(1).values("name")`))
+    expect(await run(store, `g.V().call("closeness").order().by("closeness", Order.desc).limit(1).values("name")`))
       .toEqual(['c']);
   });
 });

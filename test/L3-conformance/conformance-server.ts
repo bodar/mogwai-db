@@ -110,7 +110,7 @@ export async function buildConformanceApp(graphs: readonly string[] = Object.key
   // services, NOT our mogwai.* extensions. The official g_call / g_callXlistX scenarios assert
   // --list returns exactly the reference set, so registering our federated service (which --list
   // enumerates live) would break them. Passing a federation-free `standardRegistry()` (no env)
-  // omits mogwai.graph.federate here; production Bun/CF keeps it. See docs feature matrix.
+  // omits federate here; production Bun/CF keeps it. See docs feature matrix.
   // EVERY graph here is multi-label, because every mogwai-db graph is (`src/api.ts`). `gmultilabel`
   // and `gzoo` are the sources the official runner expects for that regime — feature-steps.js routes
   // an @MultiLabel scenario's empty graph to `gmultilabel`, and the zoo graph "requires a graph

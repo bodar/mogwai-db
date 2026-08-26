@@ -3,9 +3,9 @@ import { BETWEENNESS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, nodeCount, stringParam } from './kernel.ts';
 
-// ---------- mogwai.betweenness — Brandes betweenness centrality ----------------------------------------
+// ---------- betweenness — Brandes betweenness centrality ----------------------------------------
 //
-// `g.call("mogwai.betweenness")` decorates each vertex with its betweenness — the number of shortest
+// `g.call("betweenness")` decorates each vertex with its betweenness — the number of shortest
 // (source, target) paths that pass through it. DIRECTED by default (GDS's default orientation; the
 // undirected variant halves and is left for a `direction` param).
 //

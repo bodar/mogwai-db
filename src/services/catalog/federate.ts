@@ -6,9 +6,9 @@ import { isTraversalParam } from '../params/call-params.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
-// ---------- mogwai.graph.federate — cross-graph query pushdown (async, Barrier) ----------
+// ---------- federate — cross-graph query pushdown (async, Barrier) ----------
 //
-// g.call("mogwai.graph.federate", {graph, traversal}) runs `traversal` on a SIBLING graph
+// g.call("federate", {graph, traversal}) runs `traversal` on a SIBLING graph
 // (one graph = one Durable Object; cross-graph = cross-DO) and merges the results back as
 // DETACHED references (foreign.ts). It is the one 'barrier' service: its rows arrive from an
 // awaited sibling call, so it contributes an async `apply` (run by the executor's segment loop,
@@ -28,7 +28,7 @@ import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection
 function graphOf(params: CallParams): string {
   const g = params.graph;
   if (typeof g !== 'string' || g.length === 0)
-    throw new Error('mogwai.graph.federate: a "graph" param (the sibling graph id) is required');
+    throw new Error('federate: a "graph" param (the sibling graph id) is required');
   return g;
 }
 
@@ -41,9 +41,9 @@ function traversalOf(params: CallParams): string {
   const t = params.traversal;
   const gremlin = isTraversalParam(t) ? t.gremlin : typeof t === 'string' && t.length > 0 ? t : null;
   if (gremlin === null)
-    throw new Error('mogwai.graph.federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
+    throw new Error('federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
   if (!gremlin.startsWith('g.V(') && !gremlin.startsWith('g.E('))
-    throw new Error(`mogwai.graph.federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
+    throw new Error(`federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
   return gremlin;
 }
 
@@ -91,7 +91,7 @@ type FederationExecutor = { raw(g: string, p: Record<string, unknown>, d: number
  *  sub-traversal ends vertex/edge, or is the `g.V(<ids>)` endpoint fetch), so a scalar here is a
  *  contract violation, not a user input — fail closed rather than mis-frame. */
 const elementsOf = (r: ForeignResult): readonly ForeignRow[] => {
-  if (r.kind !== 'elements') throw new Error(`mogwai.graph.federate: expected element rows from the sibling, got a ${r.kind} result`);
+  if (r.kind !== 'elements') throw new Error(`federate: expected element rows from the sibling, got a ${r.kind} result`);
   return r.rows;
 };
 
@@ -108,7 +108,7 @@ const groupByGremlin = (groupBy: string): string =>
  *  `resolve` already receives, so `apply` carries only the rows that are genuinely per-call.
  *  The sibling runs one level deeper (depth + 1), guarded first. */
 export const createFederateService = (source: FederationSource | undefined): Service => ({
-  name: 'mogwai.graph.federate',
+  name: 'federate',
   type: 'barrier',
   describeParams: () => ({
     graph: 'string — the sibling graph id to run the sub-traversal on',
@@ -138,7 +138,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       const siblingBinds = pushdown ? boundParams : {};
       // Fail closed rather than answer a different question: a registry carrying this service in a
       // context with no way to reach siblings is a wiring mistake, not an empty result.
-      if (!source) throw new Error('mogwai.graph.federate: no federation source is wired into this graph\'s app scope');
+      if (!source) throw new Error('federate: no federation source is wired into this graph\'s app scope');
       const ex = source.executor(graph);
 
       // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound. The
@@ -149,7 +149,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         // Gremlin type survives, and `apply` returns it as a `barrier-scalar` the resume frames directly.
         if (pushdown?.reduces) {
           const reduced = await ex.raw(gremlin, siblingBinds, depth + 1);
-          if (reduced.kind !== 'scalar') throw new Error(`mogwai.graph.federate: expected a scalar from the pushed reduction, got ${reduced.kind}`);
+          if (reduced.kind !== 'scalar') throw new Error(`federate: expected a scalar from the pushed reduction, got ${reduced.kind}`);
           return { kind: 'barrier-scalar', value: reduced.value };
         }
         const result = elementsOf(await ex.raw(gremlin, siblingBinds, depth + 1));
@@ -175,7 +175,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       if (reduce) {
         const grouped = `${gremlin}.group().by(${groupByGremlin(reduce.groupBy)}).by(${reduce.partial}())`;
         const out = await ex.raw(grouped, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
-        if (out.kind !== 'scalar') throw new Error(`mogwai.graph.federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
+        if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }
       const result = elementsOf(await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));

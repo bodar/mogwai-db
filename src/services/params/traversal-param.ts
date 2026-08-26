@@ -1,7 +1,7 @@
 // ---------- serializing a nested-traversal call() param back to Gremlin ----------
 //
 // A federated call() carries its sub-traversal as a nested __.-traversal PARAM VALUE
-// (`call("mogwai.graph.federate", {graph:'orders', traversal: __.V().out('placed')})`). To run
+// (`call("federate", {graph:'orders', traversal: __.V().out('placed')})`). To run
 // it on the sibling graph we hand it to the existing string-based data-plane seam
 // (query(id, gremlin, params)), so the nested traversal must become a canonical Gremlin STRING.
 //

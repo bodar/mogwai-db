@@ -3,7 +3,7 @@ import { PEER_PRESSURE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, stringParam, type Slot } from './kernel.ts';
 
-// ---------- mogwai.peerPressure — peerPressure(), a DECORATE barrier ----------
+// ---------- peerPressure — peerPressure(), a DECORATE barrier ----------
 //
 // `g.V().peerPressure()` decorates each vertex with its cluster id under
 // `gremlin.peerPressureVertexProgram.cluster` and passes it through. The cluster is a vertex id,

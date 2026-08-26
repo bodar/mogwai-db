@@ -3,7 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// HITS (Kleinberg hubs & authorities) — mogwai.hits, the first MULTI-CHANNEL decorate barrier (hub =
+// HITS (Kleinberg hubs & authorities) — hits, the first MULTI-CHANNEL decorate barrier (hub =
 // barrier_state channel 0, auth = channel 1). Call-only (no native TinkerPop step), GDS-style.
 //
 // Oracle + graph PORTED from GDS's own test (vendor/gds/algo/src/test/java/org/neo4j/gds/hits/HitsTest.java,
@@ -46,11 +46,11 @@ const unmap = (v: any): any => v instanceof Map ? Object.fromEntries([...v].map(
 const run = async (store: ReturnType<typeof seeded>, gremlin: string): Promise<unknown[]> =>
   Promise.all((await exec(store).framedAsync(gremlin, {})).map((f) => decode(f.buf)));
 
-describe('mogwai.hits — HITS hubs & authorities (multi-channel decorate)', () => {
+describe('hits — HITS hubs & authorities (multi-channel decorate)', () => {
   test('hub + auth match the GDS pseudocode oracle at 30 iterations', async () => {
     const store = seeded(HITS_SEED);
     const rows = (await run(store,
-      `g.V().call("mogwai.hits", ["iterations": 30]).project("name","hub","auth").by("name").by("hub").by("auth")`)).map(unmap);
+      `g.V().call("hits", ["iterations": 30]).project("name","hub","auth").by("name").by("hub").by("auth")`)).map(unmap);
     expect(rows.length).toBe(8);
     const oracle = hitsOracle(30);
     for (const r of rows as any[]) {
@@ -63,13 +63,13 @@ describe('mogwai.hits — HITS hubs & authorities (multi-channel decorate)', () 
     const store = seeded(HITS_SEED);
     // c is the strongest authority (5 in-edges: b,d,e,f,g) — its auth is the max.
     const byName = Object.fromEntries(((await run(store,
-      `g.V().call("mogwai.hits", ["iterations": 30]).project("name","auth").by("name").by("auth")`)).map(unmap) as any[])
+      `g.V().call("hits", ["iterations": 30]).project("name","auth").by("name").by("auth")`)).map(unmap) as any[])
       .map((r) => [r.name, r.auth]));
     const maxAuth = Math.max(...Object.values(byName) as number[]);
     expect(byName.c).toBe(maxAuth);
     // e is the strongest hub (5 out-edges) — its hub is the max.
     const byHub = Object.fromEntries(((await run(store,
-      `g.V().call("mogwai.hits", ["iterations": 30]).project("name","hub").by("name").by("hub")`)).map(unmap) as any[])
+      `g.V().call("hits", ["iterations": 30]).project("name","hub").by("name").by("hub")`)).map(unmap) as any[])
       .map((r) => [r.name, r.hub]));
     expect(byHub.e).toBe(Math.max(...Object.values(byHub) as number[]));
   });
@@ -78,14 +78,14 @@ describe('mogwai.hits — HITS hubs & authorities (multi-channel decorate)', () 
     const store = seeded(HITS_SEED);
     // c has the highest authority, so it sorts first descending.
     const names = await run(store,
-      `g.V().call("mogwai.hits", ["iterations": 30]).order().by("auth", Order.desc).limit(1).values("name")`);
+      `g.V().call("hits", ["iterations": 30]).order().by("auth", Order.desc).limit(1).values("name")`);
     expect(names).toEqual(['c']);
   });
 
   test('custom property keys via hubProperty / authProperty', async () => {
     const store = seeded(HITS_SEED);
     expect(await run(store,
-      `g.V().call("mogwai.hits", ["hubProperty": "h", "authProperty": "a", "iterations": 5]).has("h").has("a").count()`))
+      `g.V().call("hits", ["hubProperty": "h", "authProperty": "a", "iterations": 5]).has("h").has("a").count()`))
       .toEqual([8]);
   });
 });

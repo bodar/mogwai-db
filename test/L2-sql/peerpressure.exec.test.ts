@@ -4,7 +4,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
-// peerPressure() (mogwai.peerPressure) — a DECORATE barrier. Peer-pressure label propagation: each
+// peerPressure() (peerPressure) — a DECORATE barrier. Peer-pressure label propagation: each
 // vertex adopts the max-vote cluster among {itself} ∪ {in-neighbours} (default outE, strength 1.0),
 // ties to the smallest id-string, to a fixpoint. Cluster id = a vertex id. Reuses the decorate
 // substrate verbatim (barrier → global compute → decorate resume).
@@ -14,7 +14,7 @@ const unmap = (v: any): any => v instanceof Map ? Object.fromEntries([...v]) : v
 const run = async (store: ReturnType<typeof seeded>, gremlin: string): Promise<unknown[]> =>
   Promise.all((await exec(store).framedAsync(gremlin, {})).map((f) => decode(f.buf)));
 
-describe('peerPressure() — mogwai.peerPressure DECORATE barrier', () => {
+describe('peerPressure() — peerPressure DECORATE barrier', () => {
   test('has(cluster) passes every vertex', async () => {
     const store = seeded(MODERN_SEED);
     // g_V_peerPressure_hasXclusterX

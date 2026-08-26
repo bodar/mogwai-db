@@ -3,7 +3,7 @@ import { TRIANGLE_COUNT_SERVICE_NAME, LCC_SERVICE_NAME } from '../../spi/types.t
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, UND, decorateBarrier, stringParam } from './kernel.ts';
 
-// ---------- mogwai.triangleCount + mogwai.localClusteringCoefficient — ONE-SHOT decorate barriers ------
+// ---------- triangleCount + localClusteringCoefficient — ONE-SHOT decorate barriers ------
 //
 // Unlike the BSP algorithms these need NO iteration: a triangle count is a single undirected self-join,
 // so `apply` runs ONE INSERT..SELECT into `barrier_state` round 0. Both are UNDIRECTED (GDS projects the

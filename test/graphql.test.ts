@@ -351,12 +351,12 @@ describe('reflect → translate → run — the full path over a live graph', ()
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(store, g, {});
 
-  /** Reflect the live schema by draining `mogwai.schema` — each GraphBinary map decodes to a
+  /** Reflect the live schema by draining `schema` — each GraphBinary map decodes to a
    *  `SchemaRow` (the service's row shape IS the row model), then `buildSchema` folds it. This is what
    *  a GraphQL request does before translating (§5·4). */
   const reflect = async () => {
     const rows: SchemaRow[] = [];
-    for (const b of exec(store, extendedRegistry).buffers("g.call('mogwai.schema')", {})) {
+    for (const b of exec(store, extendedRegistry).buffers("g.call('schema')", {})) {
       rows.push(Object.fromEntries([...(await decode(b))]) as SchemaRow);
     }
     return buildSchema(rows);

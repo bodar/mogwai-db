@@ -2774,7 +2774,7 @@ export function lowerForeignResume(
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
   // A SUBGRAPH result is MIXED — edges (the graph, carrying `src`/`tgt` adjacency) plus their incident
-  // vertices, WITH data (`mogwai.graph.federate` `.with("subgraph", true)`). A normal federated result
+  // vertices, WITH data (`federate` `.with("subgraph", true)`). A normal federated result
   // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
   // stream and the vertices become a bound lookup relation the tail's `inV`/`outV`/`bothV` join for the
   // endpoint's data — movement over a bound edge `Ref` (`docs/2026-08-21-barrier-substrate-design.md`).

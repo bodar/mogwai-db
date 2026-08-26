@@ -16,7 +16,7 @@ import { decode, decodeAll } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 
-// io() over the REAL stack: a rooted FileIoStore, the internal mogwai.io service, and the barrier
+// io() over the REAL stack: a rooted FileIoStore, the internal io service, and the barrier
 // seam it desugars onto. `io()` is TinkerPop's own step; what makes it work here is entirely DI —
 // the service takes the IoStore and this graph's store at construction, so the barrier contract
 // (`apply(rows)`) never widened. See docs/archive/2026-07-31-di-scopes-and-services-plan.md.
@@ -40,7 +40,7 @@ describe('io() desugars to a call() on the internal service', () => {
     const [call, ...rest] = steps('g.io("data/modern.json").read()');
     expect(rest).toEqual([]);                       // read() is consumed — it WAS the direction
     expect(call.name).toBe('call');
-    expect(call.args[0].value).toBe('mogwai.io');
+    expect(call.args[0].value).toBe('io');
     expect(call.args[1].value).toEqual(new Map<string, any>([['path', 'data/modern.json'], ['direction', 'read']]));
   });
 
@@ -206,7 +206,7 @@ describe('FileIoStore is ROOTED', () => {
 describe('the io service is INTERNAL', () => {
   test('resolvable by name, absent from --list, in BOTH registries', async () => {
     const registry = createAppScope({ registry: standardRegistry }).registry;
-    expect(registry.get('mogwai.io')?.name).toBe('mogwai.io');
+    expect(registry.get('io')?.name).toBe('io');
     // the reference surface the official g_call/g_callXlistX scenarios assert is unchanged
     expect(registry.list().map((s) => s.name).sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
   });

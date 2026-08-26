@@ -90,50 +90,50 @@ function olapContract(getOrigin: () => string) {
         const comps = await g.V().connectedComponent().project('name', CC_KEY).by('name').by(CC_KEY).toList();
         expect(new Set(comps.map((m: any) => String(m.get(CC_KEY)))).size).toBe(1);
 
-        // mogwai.hits — the MULTI-CHANNEL decorate barrier (hub=channel 0, auth=channel 1). Proves the
+        // hits — the MULTI-CHANNEL decorate barrier (hub=channel 0, auth=channel 1). Proves the
         // two-channel barrier_state read AND the in-place UPDATE normalisation run on the real DO store.
         // lop is the strongest authority (in-edges from marko+josh); marko the strongest hub (out only).
-        expect((await g.V().call('mogwai.hits').has('hub').has('auth').count().next()).value).toBe(3);
-        const topAuth = await g.V().call('mogwai.hits').order().by('auth', gremlin.process.order.desc).limit(1).values('name').next();
+        expect((await g.V().call('hits').has('hub').has('auth').count().next()).value).toBe(3);
+        const topAuth = await g.V().call('hits').order().by('auth', gremlin.process.order.desc).limit(1).values('name').next();
         expect(topAuth.value).toBe('lop');
-        const topHub = await g.V().call('mogwai.hits').order().by('hub', gremlin.process.order.desc).limit(1).values('name').next();
+        const topHub = await g.V().call('hits').order().by('hub', gremlin.process.order.desc).limit(1).values('name').next();
         expect(topHub.value).toBe('marko');
 
-        // mogwai.closeness — a SCOPE-keyed barrier (reuses relaxShortestPath's per-source distances).
+        // closeness — a SCOPE-keyed barrier (reuses relaxShortestPath's per-source distances).
         // IN direction: lop & josh are reached (closeness 1 each), marko is a pure source (0). Proves the
         // all-source relaxation + the per-scope aggregation write (scope 0) run on the real DO store.
-        expect((await g.V().call('mogwai.closeness').has('closeness').count().next()).value).toBe(3);
-        const closeness = await g.V().call('mogwai.closeness').values('closeness').toList() as number[];
+        expect((await g.V().call('closeness').has('closeness').count().next()).value).toBe(3);
+        const closeness = await g.V().call('closeness').values('closeness').toList() as number[];
         expect(closeness.reduce((a, b) => a + b, 0)).toBeCloseTo(2.0, 10);
 
-        // mogwai.betweenness (Brandes) — the MULTI-SOURCE + KEEP-ALL-ROUNDS barrier. Proves the forward
+        // betweenness (Brandes) — the MULTI-SOURCE + KEEP-ALL-ROUNDS barrier. Proves the forward
         // level-BFS, the reverse dependency pass and the per-source aggregation all run on the real DO.
         // On this graph every shortest path is a direct edge, so all betweenness is 0 — but all three
         // vertices are decorated, which exercises the full compute end to end.
-        expect((await g.V().call('mogwai.betweenness').has('betweenness').count().next()).value).toBe(3);
+        expect((await g.V().call('betweenness').has('betweenness').count().next()).value).toBe(3);
 
-        // mogwai.nodeSimilarity — the PAIR-OUTPUT barrier (a stream of {node1,node2,similarity} maps, a
+        // nodeSimilarity — the PAIR-OUTPUT barrier (a stream of {node1,node2,similarity} maps, a
         // new output shape). Out-neighbours: marko→{josh,lop}, josh→{lop}; Jaccard(marko,josh)=1/2, both
         // directions → 2 pairs. Proves the pair compute + map framing run on the real DO.
-        const sims = await g.call('mogwai.nodeSimilarity').toList();
+        const sims = await g.call('nodeSimilarity').toList();
         expect(sims.length).toBe(2);
         for (const m of sims as Map<string, unknown>[]) expect(m.get('similarity')).toBeCloseTo(0.5, 10);
 
-        // mogwai.scc — DIRECTED strongly connected components (one-shot mutual-reachability CTE). This
+        // scc — DIRECTED strongly connected components (one-shot mutual-reachability CTE). This
         // graph is a DAG (marko→josh→lop, marko→lop; no back edges), so every vertex is its OWN SCC —
         // 3 distinct component ids, the exact opposite of connectedComponent's single undirected one.
         // Proves the recursive closure + the decorate read run on the real DO store.
-        expect((await g.V().call('mogwai.scc').has('componentId').count().next()).value).toBe(3);
-        const scc = await g.V().call('mogwai.scc').values('componentId').toList();
+        expect((await g.V().call('scc').has('componentId').count().next()).value).toBe(3);
+        const scc = await g.V().call('scc').values('componentId').toList();
         expect(new Set(scc.map((c) => String(c))).size).toBe(3);
 
-        // mogwai.articleRank — the SECOND multi-channel barrier (rank=channel 0, delta=channel 1). lop is
+        // articleRank — the SECOND multi-channel barrier (rank=channel 0, delta=channel 1). lop is
         // the only sink (fed by marko+josh), so it ranks highest; every vertex is decorated with a positive
         // rank. Proves the two-channel delta-accumulation loop runs end to end on the real DO store.
-        expect((await g.V().call('mogwai.articleRank').has('articleRank').count().next()).value).toBe(3);
-        const arRanks = await g.V().call('mogwai.articleRank').values('articleRank').toList() as number[];
+        expect((await g.V().call('articleRank').has('articleRank').count().next()).value).toBe(3);
+        const arRanks = await g.V().call('articleRank').values('articleRank').toList() as number[];
         expect(arRanks.every((r) => typeof r === 'number' && r > 0)).toBe(true);
-        expect((await g.V().call('mogwai.articleRank').order().by('articleRank', gremlin.process.order.desc).by('name').values('name').next()).value)
+        expect((await g.V().call('articleRank').order().by('articleRank', gremlin.process.order.desc).by('name').values('name').next()).value)
           .toBe('lop');
       } finally { await conn.close(); }
     }, 40_000);
@@ -163,7 +163,7 @@ function federationContract(getOrigin: () => string) {
         await gc.addV('person').property('name', 'zeta').iterate();
         await gc.addV('person').property('name', 'theta').iterate();
         // home is empty of persons; the names below can only have come from the crew sibling.
-        const fed = (await gh.call('mogwai.graph.federate')
+        const fed = (await gh.call('federate')
           .with_('graph', crewId).with_('traversal', __.V().hasLabel('person'))
           .values('name').toList()).sort();
         expect(fed).toEqual(['theta', 'zeta']);
@@ -183,7 +183,7 @@ function federationContract(getOrigin: () => string) {
         await gc.addV('person').property('name', 'onlycrew').iterate();
         // For each home person, hop to crew matching on the injected name; only "marko" is shared.
         const fed = await gh.V().hasLabel('person')
-          .call('mogwai.graph.federate', { graph: crewId, traversal: __.V().has('name', gremlin.process.t.value) }, __.values('name'))
+          .call('federate', { graph: crewId, traversal: __.V().has('name', gremlin.process.t.value) }, __.values('name'))
           .values('name').toList();
         expect(fed).toEqual(['marko']);
       } finally { await home.close(); await crew.close(); }

@@ -383,7 +383,7 @@ export interface ServiceRegistry {
 /** The service name `io()` desugars to (services/catalog/io.ts). Lives here for the same reason
  *  DIRECTORY_SERVICE_NAME does — a dependency-free leaf both the desugaring Pass (compiler core)
  *  and the service impl can import, without the compiler core importing a service module. */
-export const IO_SERVICE_NAME = 'mogwai.io';
+export const IO_SERVICE_NAME = 'io';
 
 /** The directory command name. A service registered under it is resolvable by name but
  *  excluded from its own list() (TinkerPop's rule — expressed as `internal: true`). Lives here
@@ -397,43 +397,43 @@ export const DIRECTORY_SERVICE_NAME = '--list';
  *  the STEP keeps TinkerPop's word, the SERVICE takes the algorithm's (root CLAUDE.md, Naming).
  *  All four are `internal: true` services: they back native TinkerPop steps rather than extending the
  *  reference provider surface, so they are served by both registries yet absent from `--list`, exactly
- *  as `mogwai.io` is. See `docs/2026-07-24-graph-algorithms-plan.md`. */
-export const PAGERANK_SERVICE_NAME = 'mogwai.pageRank';
-export const WCC_SERVICE_NAME = 'mogwai.wcc';
-export const PEER_PRESSURE_SERVICE_NAME = 'mogwai.peerPressure';
-export const SHORTEST_PATH_SERVICE_NAME = 'mogwai.shortestPath';
+ *  as `io` is. See `docs/2026-07-24-graph-algorithms-plan.md`. */
+export const PAGERANK_SERVICE_NAME = 'pageRank';
+export const WCC_SERVICE_NAME = 'wcc';
+export const PEER_PRESSURE_SERVICE_NAME = 'peerPressure';
+export const SHORTEST_PATH_SERVICE_NAME = 'shortestPath';
 /** HITS (Kleinberg hubs & authorities) — a GDS-style algorithm with NO native TinkerPop step, so it is
- *  call-only (`g.call("mogwai.hits", …)`) and the FIRST multi-channel decorate consumer (hub + auth).
+ *  call-only (`g.call("hits", …)`) and the FIRST multi-channel decorate consumer (hub + auth).
  *  `internal: true` like the others: served by both registries, absent from `--list`, so it cannot shift
  *  the reference provider surface the conformance `--list`/g_call scenarios assert. */
-export const HITS_SERVICE_NAME = 'mogwai.hits';
+export const HITS_SERVICE_NAME = 'hits';
 /** Closeness centrality — a GDS-style call-only algorithm, `internal: true` like the rest. Reuses the
  *  scope-keyed `barrier_state` (`relaxShortestPath`, scope = source) that weighted shortestPath already
  *  writes: the first pair-keyed-state consumer beyond shortestPath (reshape plan item 5). */
-export const CLOSENESS_SERVICE_NAME = 'mogwai.closeness';
+export const CLOSENESS_SERVICE_NAME = 'closeness';
 /** Harmonic centrality — closeness's sibling (Σ 1/dist over reaching nodes, / (N−1)); shares the same
  *  scope-keyed distance relaxation. Call-only, `internal: true`. */
-export const HARMONIC_SERVICE_NAME = 'mogwai.harmonic';
+export const HARMONIC_SERVICE_NAME = 'harmonic';
 /** Triangle count + local clustering coefficient — ONE-SHOT decorate barriers (no BSP iteration, a single
  *  undirected self-join), call-only, `internal: true`. */
-export const TRIANGLE_COUNT_SERVICE_NAME = 'mogwai.triangleCount';
-export const LCC_SERVICE_NAME = 'mogwai.localClusteringCoefficient';
+export const TRIANGLE_COUNT_SERVICE_NAME = 'triangleCount';
+export const LCC_SERVICE_NAME = 'localClusteringCoefficient';
 /** k-core decomposition — each vertex's coreness, a BSP fixpoint (the Montresor h-index update).
  *  Call-only, `internal: true`. */
-export const KCORE_SERVICE_NAME = 'mogwai.kcore';
+export const KCORE_SERVICE_NAME = 'kcore';
 /** Betweenness centrality (Brandes) — the first KEEP-ALL-round, multi-source (scope-keyed) consumer:
  *  a per-level forward BFS accumulating shortest-path counts, then a reverse-level dependency pass.
  *  Call-only, `internal: true`. */
-export const BETWEENNESS_SERVICE_NAME = 'mogwai.betweenness';
+export const BETWEENNESS_SERVICE_NAME = 'betweenness';
 /** Node similarity (Jaccard over neighbour sets) — the first PAIR-OUTPUT barrier: a stream of
  *  `{node1, node2, similarity}` maps rather than a per-vertex decoration. Call-only, `internal: true`. */
-export const NODE_SIMILARITY_SERVICE_NAME = 'mogwai.nodeSimilarity';
+export const NODE_SIMILARITY_SERVICE_NAME = 'nodeSimilarity';
 /** Strongly connected components — a ONE-SHOT decorate barrier over the DIRECTED graph: two vertices
  *  share a component iff they are mutually reachable, computed as a directed transitive-closure CTE.
  *  Call-only, `internal: true` (no native TinkerPop step; connectedComponent() is the UNDIRECTED wcc). */
-export const SCC_SERVICE_NAME = 'mogwai.scc';
+export const SCC_SERVICE_NAME = 'scc';
 /** ArticleRank — a PageRank variant that damps a node's influence by (out-degree + average degree),
  *  so a high-degree node spreads less rank per neighbour. A MULTI-CHANNEL BSP decorate barrier (rank =
  *  channel 0, the per-round delta = channel 1, GDS's delta-accumulation formulation). Call-only,
  *  `internal: true` (no native TinkerPop step). */
-export const ARTICLE_RANK_SERVICE_NAME = 'mogwai.articleRank';
+export const ARTICLE_RANK_SERVICE_NAME = 'articleRank';

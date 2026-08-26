@@ -3,9 +3,9 @@ import { CLOSENESS_SERVICE_NAME, HARMONIC_SERVICE_NAME } from '../../spi/types.t
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, relaxShortestPath, stringParam } from './kernel.ts';
 
-// ---------- mogwai.closeness — closeness centrality, a scope-keyed DECORATE barrier ----------
+// ---------- closeness — closeness centrality, a scope-keyed DECORATE barrier ----------
 //
-// `g.call("mogwai.closeness")` decorates each vertex with its closeness centrality — the first
+// `g.call("closeness")` decorates each vertex with its closeness centrality — the first
 // pair-keyed-state consumer beyond shortestPath, reusing the SAME scope-keyed `barrier_state` that
 // `relaxShortestPath` writes (scope = source, channel 0 = distance). GDS's DefaultCentralityComputer:
 // closeness[v] = reached[v] / farness[v], where farness[v] = Σ dist(u→v) over all u that REACH v and

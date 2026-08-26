@@ -5,11 +5,11 @@ import type { GraphStore } from '../../storage.ts';
 import { loadGraphsonStreaming, writeGraphsonToSink } from '../../formats/graphson.ts';
 import { csvPaths, loadCsvStreaming, writeCsvEdgesToSink, writeCsvVerticesToSink } from '../../formats/csv.ts';
 
-// ---------- mogwai.io — what io() desugars to (async, Barrier, INTERNAL) ----------
+// ---------- io — what io() desugars to (async, Barrier, INTERNAL) ----------
 //
 // `g.io("data/modern.json").read()` is not new machinery: it is async, it collects, and it lowers
 // to nothing at compile time — which is exactly `Contribution {kind:'barrier'}`, the shape
-// mogwai.graph.federate already occupies, run by the executor's one await. So io() desugars to a
+// federate already occupies, run by the executor's one await. So io() desugars to a
 // call() on THIS service (ir/strategies.ts desugarIo) and inherits the whole async seam. The
 // alternative — a second async step kind in the compiler — is the thing to avoid.
 //

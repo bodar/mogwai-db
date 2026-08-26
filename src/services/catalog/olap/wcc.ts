@@ -3,7 +3,7 @@ import { WCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
 
-// ---------- mogwai.wcc — connectedComponent(), a DECORATE barrier ----------
+// ---------- wcc — connectedComponent(), a DECORATE barrier ----------
 //
 // `g.V().connectedComponent()` decorates each vertex with its connected-component id under
 // `gremlin.connectedComponentVertexProgram.component` and passes it through. The component id is the

@@ -1,5 +1,17 @@
 # Federate pushdown — inferring what to fetch from the compiled tail (design notes)
 
+**NAMING UPDATE (2026-08-26).** Our extensions dropped the `mogwai.` namespace: the service is now
+`federate` (not `mogwai.graph.federate`), and every other extension of ours is root-level too
+(`schema`, and the internal OLAP desugar targets `pageRank`/`wcc`/…). Rationale: TinkerPop namespaces
+to avoid PROVIDER collisions; there is one provider here — us — so the namespace bought nothing and
+cost ergonomics. Only TinkerPop's own reference names keep a namespace (`tinker.search`,
+`tinker.degree.centrality`), because those are the surface the conformance corpus asserts verbatim.
+Mentions of `mogwai.graph.federate` below are historical; read them as `federate`. **The injection
+marker is also changing** — `T.value` is being REPLACED by a self-delimiting `call("parent", <read>)`
+(the `parent` marker, §"Win 2a" below), which is more explicit (the read names `values`/`id`/`label`)
+and needs no boundary to disambiguate. This makes `call("mogwai.inject")` (open item #1) moot — the
+mechanism is `parent`, not a separate `inject` service.
+
 **Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
 `ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
 shape-tagged transport (elements | scalar | keyed map, a `{t,v}` `ValueNode`); **win 2a — arg-less

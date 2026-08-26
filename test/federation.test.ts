@@ -10,7 +10,7 @@ import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
-// federating into the other via mogwai.graph.federate — the real service, real env, real depth
+// federating into the other via federate — the real service, real env, real depth
 // guard, real GraphBinary framing at the client edge. A graph = a Durable Object; the Bun
 // manager is the in-process mirror (sibling = another graph the same manager resolves by id).
 
@@ -25,10 +25,10 @@ beforeAll(async () => {
 
 const runNames = async (g: string) => names(await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec)));
 
-describe('mogwai.graph.federate — source form, real stack', () => {
+describe('federate — source form, real stack', () => {
   test('g.call(federate) runs a sub-traversal on the sibling and returns its vertices detached', async () => {
     // crew graph vertices, fetched from `home` via federation.
-    const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V())');
+    const fed = await runNames('g.call("federate").with("graph", "crew").with("traversal", __.V())');
     const direct = await runNames('g.V()'); // crew, queried directly, for the expected set
     const directCrew = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V()', {})).map(dec)));
     expect(fed).toEqual(directCrew);
@@ -36,20 +36,20 @@ describe('mogwai.graph.federate — source form, real stack', () => {
   });
 
   test('a nested __.V().has(...) sub-traversal is pushed down and filtered on the sibling', async () => {
-    const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person"))');
+    const fed = await runNames('g.call("federate").with("graph", "crew").with("traversal", __.V().hasLabel("person"))');
     const expected = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec)));
     expect(fed).toEqual(expected);
     expect(fed.length).toBeGreaterThan(0);
   });
 
   test('a read tail runs LOCALLY over the detached results (values over landed props)', async () => {
-    const vals = await Promise.all((await mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person")).values("name")', {})).map(dec));
+    const vals = await Promise.all((await mgr.executor('home').framedAsync('g.call("federate").with("graph", "crew").with("traversal", __.V().hasLabel("person")).values("name")', {})).map(dec));
     const expected = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec)));
     expect(vals.sort()).toEqual(expected);
   });
 
   test('federating to an empty/absent sibling graph yields no rows (create-on-demand, empty)', async () => {
-    const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "never-seeded").with("traversal", __.V())');
+    const fed = await runNames('g.call("federate").with("graph", "never-seeded").with("traversal", __.V())');
     expect(fed).toEqual([]);
   });
 });
@@ -58,8 +58,8 @@ describe('mogwai.graph.federate — source form, real stack', () => {
 // and the compiler INFERS what runs on the sibling (`pushableTailPrefix`) vs locally. The pushable
 // prefix's own source text is synthesized into the sibling query; the suffix resumes locally. Oracle:
 // the SAME traversal run directly on crew.
-describe('mogwai.graph.federate — arg-less pushdown (win 2a)', () => {
-  const argless = (tail: string) => `g.call("mogwai.graph.federate").with("graph", "crew")${tail}`;
+describe('federate — arg-less pushdown (win 2a)', () => {
+  const argless = (tail: string) => `g.call("federate").with("graph", "crew")${tail}`;
   const onCrew = async (g: string) =>
     (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec)));
 
@@ -112,11 +112,11 @@ describe('mogwai.graph.federate — arg-less pushdown (win 2a)', () => {
   });
 });
 
-describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () => {
+describe('federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () => {
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
   const mid = (inj: string) =>
-    `g.V().hasLabel("person").call("mogwai.graph.federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], ${inj})`;
+    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], ${inj})`;
 
   test('for each home person, fetch same-named crew vertices (values injection)', async () => {
     const res = await runNames(mid('__.values("name")'));
@@ -141,7 +141,7 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
     const num = async (m: BunGraphManager, q: string) =>
       (await Promise.all((await m.executor('home').framedAsync(q, {})).map(dec))).map((v: any) => Number(v));
     for (const red of ['count']) {
-      const q = `g.V().hasLabel("person").call("mogwai.graph.federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], __.values("name")).${red}()`;
+      const q = `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], __.values("name")).${red}()`;
       expect(await num(mgr, q)).toEqual(await num(local, q));      // pushed ≡ local
     }
   });
@@ -191,12 +191,12 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
 
 describe('federation fails closed', () => {
   test('a missing graph param throws', async () => {
-    await expect(mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("traversal", __.V())', {}))
+    await expect(mgr.executor('home').framedAsync('g.call("federate").with("traversal", __.V())', {}))
       .rejects.toThrow(/"graph" param/);
   });
 
   test('an unrooted sub-traversal throws at compile (must be source-rooted)', async () => {
-    await expect(mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph","crew").with("traversal", __.out())', {}))
+    await expect(mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.out())', {}))
       .rejects.toThrow(/source-rooted/);
   });
 
@@ -204,7 +204,7 @@ describe('federation fails closed', () => {
     // The sub-traversal itself ends in count() but there is no LOCAL reducer to trigger pushdown — so this
     // is not a pushed reduction, it is a scalar sub-traversal, which the element-transfer path rejects.
     // (A local `federate(__.V()).count()` DOES push and returns a scalar — see the pushdown tests.)
-    await expect(mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph","crew").with("traversal", __.V().count())', {}))
+    await expect(mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().count())', {}))
       .rejects.toThrow(/expected element rows from the sibling, got a scalar result/);
   });
 });
@@ -213,7 +213,7 @@ describe('recursive federation + depth guard', () => {
   // One hop (depth 1) against a real sibling works — a self-federate to 'home' whose body is a
   // plain g.V() is a single non-recursive hop, so it resolves.
   test('a single federated hop resolves (depth 1, no recursion)', async () => {
-    const selfFed = 'g.call("mogwai.graph.federate").with("graph","home").with("traversal", __.V())';
+    const selfFed = 'g.call("federate").with("graph","home").with("traversal", __.V())';
     await expect(mgr.executor('home').framedAsync(selfFed, {})).resolves.toBeDefined();
   });
 
@@ -241,9 +241,9 @@ describe('recursive federation + depth guard', () => {
 // bothV join the landed vertices, so the endpoint re-enters detachedTail with full payload and
 // values()/id()/label() compose. A detached element has no live adjacency (TinkerPop) — this is not
 // that; it is a real subgraph, materialised as bound relations and traversed locally.
-describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph locally)', () => {
+describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const vals = async (g: string) =>
     (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).map((v: any) => v).sort();
   // The oracle: the SAME endpoint traversal run DIRECTLY on the sibling.
@@ -267,7 +267,7 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
   });
   test('WITHOUT subgraph:true, movement off a detached edge still fails closed', async () => {
     await expect(mgr.executor('home').framedAsync(
-      'g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person").outE("develops")).inV().values("name")', {}))
+      'g.call("federate").with("graph", "crew").with("traversal", __.V().hasLabel("person").outE("develops")).inV().values("name")', {}))
       .rejects.toThrow(/not supported after a barrier call/);
   });
 
@@ -339,9 +339,9 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
 // SUBGRAPH re-source (TinkerPop's sg.traversal()): `.V()`/`.E()` root a fresh traversal at the fetched
 // subgraph, and out/in/both walk the bound edges to the bound vertices — vertex→vertex movement over a
 // bound edge Ref. The oracle is always the SAME traversal run directly on the sibling.
-describe('mogwai.graph.federate — SUBGRAPH re-source and vertex→vertex movement', () => {
+describe('federate — SUBGRAPH re-source and vertex→vertex movement', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const vals = async (g: string) =>
     (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
   const onCrew = async (g: string) =>
@@ -373,9 +373,9 @@ describe('mogwai.graph.federate — SUBGRAPH re-source and vertex→vertex movem
 // through `source.elementNode` (Mechanism B, the leaf's per-position twin) — no base-table read. A
 // re-source `.V()` starts a FRESH path (`sg.traversal().V()` discards the stream), so a multi-hop walk
 // over the subgraph is structurally identical to the same walk run directly on the sibling.
-describe('mogwai.graph.federate — SUBGRAPH path() (id-carry positions rejoined)', () => {
+describe('federate — SUBGRAPH path() (id-carry positions rejoined)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const nameOf = (o: any) => o?.properties?.find((p: any) => p.label === 'name')?.value;
   const pathNames = (p: any) => (p.objects ?? []).map(nameOf);
   const paths = async (g: string, exec = 'home') =>
@@ -398,9 +398,9 @@ describe('mogwai.graph.federate — SUBGRAPH path() (id-carry positions rejoined
 // has()/hasLabel() FILTER subgraph vertices against their landed {t,v} property tree / label array —
 // an EXISTS over the exploded json (multi-valued membership), so they compose anywhere a vertex is on
 // the bound stream: after .V() and after a movement hop alike.
-describe('mogwai.graph.federate — SUBGRAPH has()/hasLabel filters', () => {
+describe('federate — SUBGRAPH has()/hasLabel filters', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const vals = async (g: string) =>
     (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
   const onCrew = async (g: string) =>
@@ -436,9 +436,9 @@ describe('mogwai.graph.federate — SUBGRAPH has()/hasLabel filters', () => {
 // subgraph. Neither reads the base tables (count reads cardinality, dedup collapses by element id), so
 // both are correct on the landed relation; this also fixes the misattributed "V() not supported" that
 // a following count/dedup used to raise.
-describe('mogwai.graph.federate — count()/dedup() over the landed stream', () => {
+describe('federate — count()/dedup() over the landed stream', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const one = async (g: string) => {
     const r = await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec));
     return Number(r[0]);
@@ -455,7 +455,7 @@ describe('mogwai.graph.federate — count()/dedup() over the landed stream', () 
     expect(await one(sg('.V().out("develops").dedup().count()'))).toBe(2);
   });
   test('count() works over a plain (non-subgraph) detached result too', async () => {
-    const crewCount = await one('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V()).count()');
+    const crewCount = await one('g.call("federate").with("graph", "crew").with("traversal", __.V()).count()');
     const direct = Number((await Promise.all((await mgr.executor('crew').framedAsync('g.V().count()', {})).map(dec)))[0]);
     expect(crewCount).toBe(direct);
   });
@@ -466,9 +466,9 @@ describe('mogwai.graph.federate — count()/dedup() over the landed stream', () 
 // through the landed payload), distinct from the scalar-terminal cases above that end in values()/id()/
 // count(). The oracle is the SAME endpoint traversal run directly on the sibling — compared on the
 // framed name properties AND the labels, so the whole element round-trips, not just a projected value.
-describe('mogwai.graph.federate — SUBGRAPH element-terminal (whole vertices to the wire)', () => {
+describe('federate — SUBGRAPH element-terminal (whole vertices to the wire)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   // Expand each framed element by its `bulk` (a convergent bound walk collapses to compact (vertex, N)
   // pairs on the wire — the RLE the client expands — so the test expands too to see the full multiset).
   const elems = async (g: string) => {
@@ -497,9 +497,9 @@ describe('mogwai.graph.federate — SUBGRAPH element-terminal (whole vertices to
 
 // labels() over a bound vertex — the label FAN-OUT (one row per label), rejoined from the landed relation
 // through the ONE vocabulary (source.labelNames + the shared order-mint), oracled on the crew sibling.
-describe('mogwai.graph.federate — SUBGRAPH labels() fan-out', () => {
+describe('federate — SUBGRAPH labels() fan-out', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const vals = async (g: string) => (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
   const onCrew = async (g: string) => (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec))).sort();
   test('.V().labels() fans out each subgraph vertex\'s labels', async () => {
@@ -515,9 +515,9 @@ describe('mogwai.graph.federate — SUBGRAPH labels() fan-out', () => {
 // AGGREGATION over a bound subgraph — group()/groupCount()/order()/project()/fold() compose through the
 // MAIN FOLD (detachedTail hands off once the source-position steps are done), with every by()/reducer
 // read routed through the BoundGraph. Oracle is always the same traversal run directly on crew.
-describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project via the main fold)', () => {
+describe('federate — SUBGRAPH aggregation (group/order/project via the main fold)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const one = async (g: string, on: 'home' | 'crew' = 'home') =>
     dec((await mgr.executor(on).framedAsync(g, {}))[0]!);
   const list = async (g: string, on: 'home' | 'crew' = 'home') =>
@@ -587,9 +587,9 @@ describe('mogwai.graph.federate — SUBGRAPH aggregation (group/order/project vi
 // foreign id and CRASHED (`TypeError: null is not an object`). Oracle: the same traversal on crew,
 // compared on each embedded vertex's label:name (element identity round-trips; list order may differ
 // between the landed array order and crew's native order, so the member SET is the invariant).
-describe('mogwai.graph.federate — SUBGRAPH element as a MEMBER (list / group value / project field)', () => {
+describe('federate — SUBGRAPH element as a MEMBER (list / group value / project field)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
   const one = async (g: string, on: 'home' | 'crew' = 'home') => dec((await mgr.executor(on).framedAsync(g, {}))[0]!);
   const isVertex = (x: any) => x && typeof x === 'object' && x.label !== undefined && Array.isArray(x.properties);
@@ -630,9 +630,9 @@ describe('mogwai.graph.federate — SUBGRAPH element as a MEMBER (list / group v
 // V(ids)/E(ids) filtering the bound source by id.
 // valueMap()/elementMap() over a bound subgraph — the per-key value arrays read from the landed {t,v}
 // tree (source.valueMapPairs), the map/token shaping shared with the base graph. Oracled on crew.
-describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
+describe('federate — SUBGRAPH valueMap()/elementMap()', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
   // Maps compared as a sorted set of JSON strings — key order in a map is not part of the value.
   const maps = async (g: string, on: 'home' | 'crew' = 'home') =>
@@ -672,9 +672,9 @@ describe('mogwai.graph.federate — SUBGRAPH valueMap()/elementMap()', () => {
 // tree (source.propertyStream), with value()/key()/id()/terminal framing. The DETACHED compile lands
 // each property's own id (vpid) and its meta-properties, so .id() and meta-property framing now match
 // the source graph rather than failing closed. Oracled on crew.
-describe('mogwai.graph.federate — SUBGRAPH properties() stream', () => {
+describe('federate — SUBGRAPH properties() stream', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
   const vals = async (g: string, on: 'home' | 'crew' = 'home') =>
     (await Promise.all((await mgr.executor(on).framedAsync(g, {})).map((f: any) => decode(f.buf)))).sort();
@@ -709,9 +709,9 @@ describe('mogwai.graph.federate — SUBGRAPH properties() stream', () => {
   });
 });
 
-describe('mogwai.graph.federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
+describe('federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
   const sg = (tail: string) =>
-    `g.call("mogwai.graph.federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
   const vals = async (g: string) =>
     (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec))).sort();
 

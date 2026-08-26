@@ -4,7 +4,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
-// connectedComponent() (mogwai.wcc) — a DECORATE barrier. The compute is global (union-find over the
+// connectedComponent() (wcc) — a DECORATE barrier. The compute is global (union-find over the
 // undirected edge list); the decorate resume keeps the element stream LIVE and reads the component id as
 // a synthetic property under the canonical key, so has()/order().by()/project().by() compose. These
 // mirror the reference ConnectedComponent.feature scenarios that use the DEFAULT (bothE) edge scope; the
@@ -15,7 +15,7 @@ const unmap = (v: any): any => v instanceof Map ? Object.fromEntries([...v].map(
 const run = async (store: ReturnType<typeof seeded>, gremlin: string): Promise<unknown[]> =>
   Promise.all((await exec(store).framedAsync(gremlin, {})).map((f) => decode(f.buf)));
 
-describe('connectedComponent() — mogwai.wcc DECORATE barrier', () => {
+describe('connectedComponent() — wcc DECORATE barrier', () => {
   test('has(component) passes every vertex (modern graph is one undirected component)', async () => {
     const store = seeded(MODERN_SEED);
     // g_V_connectedComponent_hasXcomponentX / g_V_dedup_connectedComponent_hasXcomponentX

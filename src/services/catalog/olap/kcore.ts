@@ -3,9 +3,9 @@ import { KCORE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, UND, changedCount, decorateBarrier, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
 
-// ---------- mogwai.kcore — k-core decomposition (coreness), a BSP fixpoint decorate barrier ----------
+// ---------- kcore — k-core decomposition (coreness), a BSP fixpoint decorate barrier ----------
 //
-// `g.call("mogwai.kcore")` decorates each vertex with its CORENESS: the largest k such that the vertex
+// `g.call("kcore")` decorates each vertex with its CORENESS: the largest k such that the vertex
 // belongs to a maximal subgraph in which every vertex has degree ≥ k. UNDIRECTED.
 //
 // Coreness is a well-defined VALUE, independent of algorithm. GDS computes it by stateful peeling

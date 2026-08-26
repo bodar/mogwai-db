@@ -351,10 +351,10 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
 
   test('each step names its canonical service and its native-step mode', () => {
     const cases: Array<[string, string, string]> = [
-      ['g.V().pageRank()', 'mogwai.pageRank', 'decorate'],
-      ['g.V().connectedComponent()', 'mogwai.wcc', 'decorate'],
-      ['g.V().peerPressure()', 'mogwai.peerPressure', 'decorate'],
-      ['g.V().shortestPath()', 'mogwai.shortestPath', 'path'],
+      ['g.V().pageRank()', 'pageRank', 'decorate'],
+      ['g.V().connectedComponent()', 'wcc', 'decorate'],
+      ['g.V().peerPressure()', 'peerPressure', 'decorate'],
+      ['g.V().shortestPath()', 'shortestPath', 'path'],
     ];
     for (const [gremlin, name, mode] of cases) {
       const call = callOf(gremlin);
@@ -379,8 +379,8 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
   });
 
   test('all four native OLAP steps are built as BARRIERS — shortestPath included', () => {
-    // Every native OLAP step is now a barrier (mogwai.pageRank/.wcc/.peerPressure DECORATE barriers;
-    // mogwai.shortestPath a BSP relaxation + path-reconstruction barrier — the recursive-CTE walk is
+    // Every native OLAP step is now a barrier (pageRank/.wcc/.peerPressure DECORATE barriers;
+    // shortestPath a BSP relaxation + path-reconstruction barrier — the recursive-CTE walk is
     // gone, docs/archive/2026-08-23-barrier-substrate-reshape-plan.md §5). So bare compile() cannot drive it —
     // it must go through an Executor (a barrier's `apply` runs at runtime against the store). L2/L3
     // cover the values; this pins that shortestPath is on the barrier substrate, not a compile-time rel.

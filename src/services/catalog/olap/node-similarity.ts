@@ -3,9 +3,9 @@ import { NODE_SIMILARITY_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, syncBarrier } from './kernel.ts';
 
-// ---------- mogwai.nodeSimilarity — Jaccard node similarity, the first PAIR-OUTPUT barrier ------------
+// ---------- nodeSimilarity — Jaccard node similarity, the first PAIR-OUTPUT barrier ------------
 //
-// `g.call("mogwai.nodeSimilarity")` returns a stream of `{node1, node2, similarity}` MAPS — a NEW output
+// `g.call("nodeSimilarity")` returns a stream of `{node1, node2, similarity}` MAPS — a NEW output
 // shape (a stream of maps), unlike the per-vertex `decorate` barriers, the stream-replacing `path`
 // barrier, or the detached `federate`/`io`. `apply` computes the scored pairs into `barrier_state`
 // (scope = node1, id = node2, channel 0 = similarity) and returns the `(run, round)` handle; the pair

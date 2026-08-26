@@ -3,10 +3,10 @@ import { SCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
 
-// ---------- mogwai.scc — strongly connected components, a ONE-SHOT decorate barrier ----------
+// ---------- scc — strongly connected components, a ONE-SHOT decorate barrier ----------
 //
-// `g.V().call("mogwai.scc")` decorates each vertex with its strongly-connected-component id and passes
-// it through. Unlike connectedComponent() (mogwai.wcc, UNDIRECTED union-find), an SCC respects edge
+// `g.V().call("scc")` decorates each vertex with its strongly-connected-component id and passes
+// it through. Unlike connectedComponent() (wcc, UNDIRECTED union-find), an SCC respects edge
 // DIRECTION: u and v share a component iff u reaches v AND v reaches u over the directed edges. The
 // partition is algorithm-independent (any correct SCC yields the same grouping — the property GDS's own
 // SccTest asserts, `vendor/gds/algo/src/test/java/org/neo4j/gds/scc/SccTest.java`, GPLv3 — re-expressed),

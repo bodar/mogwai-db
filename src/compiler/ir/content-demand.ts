@@ -129,7 +129,7 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
 
 // ---------- pushdown: split the post-barrier tail into a REMOTE prefix and a LOCAL suffix ----------
 //
-// For the ARG-LESS federate form (`g.call(mogwai.graph.federate, {graph}).V()…` — no `traversal` arg,
+// For the ARG-LESS federate form (`g.call(federate, {graph}).V()…` — no `traversal` arg,
 // win 2a in `docs/2026-08-26-federate-pushdown-design.md`), the whole tail after the barrier is a
 // CANDIDATE to run on the sibling. Pushdown finds the longest PREFIX of the tail that is remote-safe and
 // hands it to the sibling; the rest stays local. This is Calcite's convention/boundary model

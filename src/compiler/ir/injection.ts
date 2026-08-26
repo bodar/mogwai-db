@@ -1,6 +1,6 @@
 // ---------- mid-traversal federate value injection (Phase 6b) ----------
 //
-// A mid-traversal V().call("mogwai.graph.federate", …, __.values('k')) injects each parent's scalar
+// A mid-traversal V().call("federate", …, __.values('k')) injects each parent's scalar
 // into the sibling sub-traversal. The user marks the injection point with the SHIPPED GLV enum token
 // `T.value` in a PREDICATE OPERAND position — `__.V().has('sku', T.value)` — which the stock JS/other
 // GLVs serialize verbatim (no custom binding, no raw string). `T.value` is otherwise meaningless as a
@@ -26,7 +26,7 @@ export const INJECT_VALUES_KEY = '_mogwai_inject';
 
 /** The federate service name — a leaf constant so the segment planner can recognize a federate barrier
  *  (to infer pushdown for the arg-less form) without importing the service impl. */
-export const FEDERATE_SERVICE = 'mogwai.graph.federate';
+export const FEDERATE_SERVICE = 'federate';
 
 /** The reserved params key under which a `.with("subgraph", true)` federate hop supplies the DISTINCT
  *  endpoint ids to fetch as a SECOND sibling hop (`g.V(_mogwai_endpoints)`). A plain bound-collection id

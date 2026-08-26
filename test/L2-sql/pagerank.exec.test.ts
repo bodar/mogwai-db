@@ -4,7 +4,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
-// pageRank() (mogwai.pageRank) — a DECORATE barrier faithfully replaying PageRankVertexProgram's BSP
+// pageRank() (pageRank) — a DECORATE barrier faithfully replaying PageRankVertexProgram's BSP
 // (default outE scope, α=0.85, ε=1e-5, ≤20 iters, dangling-node teleport redistribution). The decorate
 // resume keeps the vertex stream LIVE and reads the score under the canonical key, so has()/order().by()
 // compose. Mirrors the default-scope PageRank.feature scenarios; the custom-edge-scope / times /
@@ -14,7 +14,7 @@ const KEY = 'gremlin.pageRankVertexProgram.pageRank';
 const run = async (store: ReturnType<typeof seeded>, gremlin: string): Promise<unknown[]> =>
   Promise.all((await exec(store).framedAsync(gremlin, {})).map((f) => decode(f.buf)));
 
-describe('pageRank() — mogwai.pageRank DECORATE barrier', () => {
+describe('pageRank() — pageRank DECORATE barrier', () => {
   test('has(pageRank) passes every vertex', async () => {
     const store = seeded(MODERN_SEED);
     // g_V_pageRank_hasXpageRankX

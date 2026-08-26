@@ -5,7 +5,7 @@
 // translation needs no store, and the one store touch — reflecting the schema — crosses the ordinary
 // executor seam exactly as a Gremlin query does. The flow is §5·4's:
 //
-//   reflect schema (run mogwai.schema) → build the graphql-js schema → parse+validate the document
+//   reflect schema (run schema) → build the graphql-js schema → parse+validate the document
 //     → introspection? answer via graphql-js : translate to Gremlin, run, shape as {data}.
 //
 // graphql-js OWNS parse, validation and introspection (§7·4 — it is the authoritative artefact, the role
@@ -121,12 +121,12 @@ function complete(value: unknown, shape: ResponseShape): unknown {
   return out;
 }
 
-/** The graph's reflected schema rows, fetched by running `mogwai.schema` across the executor and decoding
+/** The graph's reflected schema rows, fetched by running `schema` across the executor and decoding
  *  each map row (the row shape IS `SchemaRow`). This is the first of §5·4's two round trips; both the
  *  native `GraphSchema` (for translation) and the graphql-js schema (for parse/validate/introspection) are
  *  built from these same rows. */
 async function reflectRows(executor: GraphQLExecutor): Promise<SchemaRow[]> {
-  const framed = await executor.framedAsync("g.call('mogwai.schema')", {});
+  const framed = await executor.framedAsync("g.call('schema')", {});
   const rows: SchemaRow[] = [];
   for (const f of framed) rows.push(toJson(await decode(f.buf)) as SchemaRow);
   return rows;

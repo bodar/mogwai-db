@@ -3,9 +3,9 @@ import { HITS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
 
-// ---------- mogwai.hits — HITS (Kleinberg hubs & authorities), a MULTI-CHANNEL DECORATE barrier ----------
+// ---------- hits — HITS (Kleinberg hubs & authorities), a MULTI-CHANNEL DECORATE barrier ----------
 //
-// `g.call("mogwai.hits")` decorates each vertex with TWO scores — a hub and an authority — the first
+// `g.call("hits")` decorates each vertex with TWO scores — a hub and an authority — the first
 // consumer of the multi-channel decorate substrate (barrier_state channel 0 = hub, channel 1 = auth;
 // docs/archive/2026-08-23-barrier-substrate-reshape-plan.md item 2). HITS has no native TinkerPop step, so it is
 // call-only, GDS-style. A faithful replay of the Wikipedia iteration GDS itself asserts against

@@ -3,7 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// ArticleRank — mogwai.articleRank, a MULTI-CHANNEL BSP decorate barrier (rank = channel 0, per-round
+// ArticleRank — articleRank, a MULTI-CHANNEL BSP decorate barrier (rank = channel 0, per-round
 // delta = channel 1). A PageRank variant that damps influence by (out-degree + average degree). Graphs +
 // EXACT expected ranks PORTED from GDS's own PageRankTest.ArticleRank (vendor/gds/.../pagerank/, GPLv3 —
 // re-expressed), run with the same config the test uses: dampingFactor 0.85, tolerance 0, run to
@@ -22,7 +22,7 @@ const seedOf = (nodes: readonly string[], edges: readonly (readonly [string, str
 
 const ranksOf = async (store: ReturnType<typeof seeded>, maxIterations: number): Promise<Record<string, number>> =>
   Object.fromEntries(((await run(store,
-    `g.V().call("mogwai.articleRank", ["maxIterations": ${maxIterations}, "tolerance": 0, "dampingFactor": 0.85])`
+    `g.V().call("articleRank", ["maxIterations": ${maxIterations}, "tolerance": 0, "dampingFactor": 0.85])`
     + `.project("name","articleRank").by("name").by("articleRank")`)).map(unmap) as any[])
     .map((r) => [r.name, r.articleRank]));
 
@@ -30,7 +30,7 @@ const expectRanks = (got: Record<string, number>, expected: Record<string, numbe
   for (const [k, v] of Object.entries(expected)) expect(Math.abs(got[k] - v)).toBeLessThanOrEqual(1e-5);
 };
 
-describe('mogwai.articleRank — GDS ArticleRankComputation (delta accumulation)', () => {
+describe('articleRank — GDS ArticleRankComputation (delta accumulation)', () => {
   test('GDS 10-node graph: exact ranks, isolated g..j stay at alpha=0.15', async () => {
     const seed = seedOf(
       ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'],
@@ -56,10 +56,10 @@ describe('mogwai.articleRank — GDS ArticleRankComputation (delta accumulation)
   test('every vertex decorated; has()/order().by(articleRank) compose over the stream', async () => {
     const seed = seedOf(['a', 'b', 'c', 'd'], [['a', 'b'], ['b', 'c'], ['c', 'a'], ['a', 'd']]);
     const store = seeded(seed);
-    expect(await run(store, `g.V().call("mogwai.articleRank").has("articleRank").count()`)).toEqual([4]);
+    expect(await run(store, `g.V().call("articleRank").has("articleRank").count()`)).toEqual([4]);
     // d is a pure sink fed only by a; b/c/d/a form a small cycle+pendant. Just assert order() composes and
     // returns all four vertices ranked (values are graph-specific; the exact-value graphs above pin them).
-    const ordered = await run(store, `g.V().call("mogwai.articleRank").order().by("articleRank").by("name").values("name")`);
+    const ordered = await run(store, `g.V().call("articleRank").order().by("articleRank").by("name").values("name")`);
     expect(new Set(ordered)).toEqual(new Set(['a', 'b', 'c', 'd']));
   });
 });

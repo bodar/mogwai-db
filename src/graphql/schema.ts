@@ -2,7 +2,7 @@
 //
 // The schema is REFLECTED, not declared (`docs/2026-08-07-graphql-front-end-plan.md` §4): a mogwai
 // graph is schemaless (interned labels + typed properties), and this is the structured view the
-// translator reads to decide how each GraphQL field lowers. It is the SAME facts `mogwai.schema`
+// translator reads to decide how each GraphQL field lowers. It is the SAME facts `schema`
 // streams (`src/services/catalog/schema.ts`) — labels, per-label property→type, edge triples — gathered
 // into one addressable object rather than a row stream, because a translator walks a document top-down
 // and needs random access to "what edge does field X on type Y traverse", which a stream does not give.
@@ -68,7 +68,7 @@ export const edgeFieldName = (label: string, direction: 'out' | 'in'): string =>
 export const EDGE_COMPANION_SUFFIX = '_edges';
 export const edgeCompanionFieldName = (edgeFieldName: string): string => `${edgeFieldName}${EDGE_COMPANION_SUFFIX}`;
 
-/** One `mogwai.schema` row, as the decoded map the service streams. The translator/consumer decodes the
+/** One `schema` row, as the decoded map the service streams. The translator/consumer decodes the
  *  GraphBinary maps to these plain records; `buildSchema` folds them into the addressable model. */
 export type SchemaRow =
   | { readonly kind: 'vertexLabel'; readonly name: string; readonly count: number }
@@ -77,7 +77,7 @@ export type SchemaRow =
   | { readonly kind: 'edgeProperty'; readonly label: string; readonly key: string; readonly type: string };
 
 /**
- * Fold the `mogwai.schema` row stream into the addressable `GraphSchema`.
+ * Fold the `schema` row stream into the addressable `GraphSchema`.
  *
  * Order-independent (the UNION ALL row order is not guaranteed): an `edgeProperty` may arrive before its
  * `edge`, so edge properties are collected by edge-label FIRST, then attached when the edge fields are

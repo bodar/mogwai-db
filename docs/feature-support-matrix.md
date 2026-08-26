@@ -33,8 +33,8 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `--list` | ✅ | |
 | `tinker.degree.centrality` | ✅ | |
 | `tinker.search` | ✅ | ❌ `type=VertexProperty`, `<3`-char term, `regex` |
-| `mogwai.io` | ✅ | internal; what `io()` desugars to. Coverage as `io()` above |
-| `mogwai.graph.federate` | ✅ | cross-graph pushdown (async barrier); `.with("subgraph", true)` brings back a traversable subgraph. ❌ `has(key, without/textP/composed)`, bound-parameter/`null` movement labels, `limit`/`order` over the bound stream, `path()`/`as()` spanning the call, and local movement over a NON-subgraph detached result |
+| `io` (service) | ✅ | internal; what `io()` desugars to. Coverage as `io()` above |
+| `federate` | ✅ | cross-graph pushdown (async barrier); `.with("subgraph", true)` brings back a traversable subgraph. ❌ `has(key, without/textP/composed)`, bound-parameter/`null` movement labels, `limit`/`order` over the bound stream, `path()`/`as()` spanning the call, and local movement over a NON-subgraph detached result |
 
 ## 2. Filters & predicates
 

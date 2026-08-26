@@ -487,7 +487,7 @@ export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
   return out;
 }
 
-/** `g.io(path)[.with(k,v)…].read()|.write()` → `g.call("mogwai.io", {path, direction})[.with(k,v)…]`.
+/** `g.io(path)[.with(k,v)…].read()|.write()` → `g.call("io", {path, direction})[.with(k,v)…]`.
  *
  *  io() is a barrier service, not a step: it is async, it collects, and it lowers to nothing at
  *  compile time — the shape `Contribution {kind:'barrier'}` already has. Desugaring here means the

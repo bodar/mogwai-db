@@ -4,7 +4,7 @@ import type { GraphStore } from '../../../storage.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
 import { edgeScopeOf, parseAnonBodyIR, relaxShortestPath, syncBarrier } from './kernel.ts';
 
-// ---------- mogwai.shortestPath — shortestPath(), a recursive-CTE path walk (Template B) ----------
+// ---------- shortestPath — shortestPath(), a recursive-CTE path walk (Template B) ----------
 //
 // `g.V().shortestPath()` emits, from each incoming source vertex, its shortest path(s) to every
 // reachable target. Unlike the three DECORATE algorithms it is NOT a barrier: an unweighted all-pairs

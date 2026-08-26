@@ -67,9 +67,9 @@ describe('ServiceRegistry', () => {
     // What constraint 3 of docs/archive/2026-07-31-di-scopes-and-services-plan.md buys: a service that
     // backs a sugar step (io()) can exist in the production registry and stay out of the
     // reference provider surface the official g_call/g_callXlistX scenarios assert.
-    const r = createRegistry([stubService('mogwai.io', true), stubService('tinker.search')]);
+    const r = createRegistry([stubService('io', true), stubService('tinker.search')]);
     expect(r.list().map((s) => s.name)).toEqual(['tinker.search']);
-    expect(r.get('mogwai.io')?.name).toBe('mogwai.io');
+    expect(r.get('io')?.name).toBe('io');
   });
 
   test('EMPTY_REGISTRY is the cycle-free compiler default (no services)', () => {
@@ -89,7 +89,7 @@ describe('ServiceRegistry', () => {
 
   test('extendedRegistry.list() is the reference surface PLUS our mogwai.* extensions', () => {
     expect(resolved(extendedRegistry).list().map((s) => s.name).sort())
-      .toEqual(['mogwai.graph.federate', 'mogwai.schema', 'tinker.degree.centrality', 'tinker.search']);
+      .toEqual(['federate', 'schema', 'tinker.degree.centrality', 'tinker.search']);
     expect(resolved(extendedRegistry).get('--list')?.name).toBe('--list');
   });
 });
@@ -148,13 +148,13 @@ describe('call/with fold + param resolution', () => {
     // federate's alone (it runs the traversal on a sibling), so it lives in federate now, not here —
     // an OLAP edge scope (`~tinkerpop.<algo>.edges`) carries an anonymous body through this same seam.
     // federate's own rejection of an unrooted body is federation.test.ts.
-    expect(spec('g.call("mogwai.graph.federate").with("traversal", __.out().values("name"))').params.traversal)
+    expect(spec('g.call("federate").with("traversal", __.out().values("name"))').params.traversal)
       .toEqual({ kind: 'traversal', gremlin: '__.out().values("name")' });
   });
 
   test('a rooted nested-traversal param value serializes to a canonical Gremlin string', () => {
-    const s = spec('g.call("mogwai.graph.federate").with("graph", "orders").with("traversal", __.V().has("age", gt(30)))');
-    expect(s.serviceName).toBe('mogwai.graph.federate');
+    const s = spec('g.call("federate").with("graph", "orders").with("traversal", __.V().has("age", gt(30)))');
+    expect(s.serviceName).toBe('federate');
     expect(s.params.graph).toBe('orders');
     expect(s.params.traversal).toEqual({ kind: 'traversal', gremlin: 'g.V().has("age", P.gt(30))' });
   });
@@ -163,7 +163,7 @@ describe('call/with fold + param resolution', () => {
 
   test('a values(k)/id()/label() 3rd arg (beside a map) is captured as the injection', () => {
     for (const inj of ['__.values("name")', '__.id()', '__.label()']) {
-      const s = spec(`g.call("mogwai.graph.federate", ["graph":"crew"], ${inj})`);
+      const s = spec(`g.call("federate", ["graph":"crew"], ${inj})`);
       expect(s.injectionTraversal).toBeDefined();          // captured
       expect(s.params).toEqual({ graph: 'crew' });         // map still wins as params
     }
@@ -212,7 +212,7 @@ describe('call() routing (seedCall)', () => {
 
   test('compile() on a barrier source throws — it needs the async segment executor', () => {
     const federate: Service = {
-      name: 'mogwai.graph.federate',
+      name: 'federate',
       type: 'barrier',
       describeParams: () => ({}),
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
@@ -220,32 +220,32 @@ describe('call() routing (seedCall)', () => {
     const reg = createRegistry([federate]);
     // compile() only produces the plan; a barrier segment must be DRIVEN against a store, which bare
     // compile() has no access to. compilePlan yields a segment instead of throwing.
-    expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: () => reg }))
+    expect(() => compile('g.call("federate")', {}, { registry: () => reg }))
       .toThrow(/must be DRIVEN against a store/);
   });
 
   test('compilePlan() on a barrier source yields a segment plan (head=null for a source)', () => {
     const federate: Service = {
-      name: 'mogwai.graph.federate',
+      name: 'federate',
       type: 'barrier',
       describeParams: () => ({}),
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
-    const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: () => reg });
+    const plan = compilePlan('g.call("federate")', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') expect(plan.head).toBeNull();
   });
 
   test('compilePlan() on a MID-TRAVERSAL barrier yields a segment whose head reads the INJECTED VALUE', () => {
     const federate: Service = {
-      name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
+      name: 'federate', type: 'barrier', describeParams: () => ({}),
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     // The head's shape asserted directly — see the note just below on what it is and why.
     const plan = compilePlan(
-      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
+      'g.V().call("federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') {
       expect(plan.head).not.toBeNull();
@@ -260,12 +260,12 @@ describe('call() routing (seedCall)', () => {
 
   test('a mid-traversal barrier with an UNSUPPORTED injection fails closed', () => {
     const federate: Service = {
-      name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
+      name: 'federate', type: 'barrier', describeParams: () => ({}),
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
     expect(() => compilePlan(
-      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: () => reg }))
+      'g.V().call("federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: () => reg }))
       .toThrow(/injection must be a direct value read/);
   });
 });
@@ -402,7 +402,7 @@ describe('barrier source form via Executor (stub source → drive → land → f
   // The stub takes its source at CONSTRUCTION off the app scope (exactly as the real federate
   // does) and reads params/depth off the call ctx, so `apply` takes only rows.
   const stubFederate = (source: FederationSource | undefined): Service => ({
-    name: 'mogwai.graph.federate',
+    name: 'federate',
     type: 'barrier',
     describeParams: () => ({}),
     resolve: ({ params, federationDepth }) => ({
@@ -422,23 +422,23 @@ describe('barrier source form via Executor (stub source → drive → land → f
   const run = async (g: string) => decodeAll((await ex.framedAsync(g, {})).map((f: any) => f.buf));
 
   test('g.call(federate) lands the sibling vertices as detached references', async () => {
-    const vs: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders")');
+    const vs: any[] = await run('g.call("federate").with("graph", "orders")');
     expect(vs.map((v) => v.constructor.name)).toEqual(['Vertex', 'Vertex']);
     expect(vs.map((v) => v.properties?.find((p: any) => p.label === 'name')?.value).sort()).toEqual(['alice', 'bob']);
   });
 
   test('a read tail on the federated result runs locally (values over the landed props)', async () => {
-    const names: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders").values("name")');
+    const names: any[] = await run('g.call("federate").with("graph", "orders").values("name")');
     expect(names.sort()).toEqual(['alice', 'bob']);
   });
 
   test('id() over the federated result reads the landed id', async () => {
-    const ids: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders").id()');
+    const ids: any[] = await run('g.call("federate").with("graph", "orders").id()');
     expect(ids.map(String).sort()).toEqual(['1', '2']);
   });
 
   test('the sync path fails closed on a barrier (use framedAsync)', () => {
-    expect(() => ex.framed('g.call("mogwai.graph.federate").with("graph","x")', {}))
+    expect(() => ex.framed('g.call("federate").with("graph","x")', {}))
       .toThrow(/use the async path/);
   });
 });
@@ -461,14 +461,14 @@ describe('barrier residency', () => {
   });
 });
 
-describe('mogwai.schema — reflect the implicit schema as a map stream', () => {
+describe('schema — reflect the implicit schema as a map stream', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(store, g, {});
   // Decode the stream to plain objects: each row is a GraphBinary Map. Collect into an array of
   // plain-object records so the assertions read as the schema, not the framing.
   const schema = async (): Promise<Record<string, unknown>[]> => {
     const out: Record<string, unknown>[] = [];
-    for (const b of exec(store, extendedRegistry).buffers("g.call('mogwai.schema')", {})) {
+    for (const b of exec(store, extendedRegistry).buffers("g.call('schema')", {})) {
       const m: any = await decode(b);
       out.push(Object.fromEntries([...m]));
     }
@@ -497,19 +497,19 @@ describe('mogwai.schema — reflect the implicit schema as a map stream', () => 
   });
 
   test('the stream is composable — count() reaches every element', async () => {
-    const [n] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').count()", {}));
+    const [n] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('schema').count()", {}));
     expect(Number(n)).toBe(10); // 2 labels + 4 vertex props + 2 edge triples + 2 edge props
   });
 
   test('fold() collects the whole schema into one list — the list-of-maps substrate', async () => {
-    const [list] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('mogwai.schema').fold()", {}));
+    const [list] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('schema').fold()", {}));
     expect((list as unknown[]).length).toBe(10);
   });
 
-  test('mogwai.schema is an EXTENSION — absent from the reference registry', () => {
+  test('schema is an EXTENSION — absent from the reference registry', () => {
     // In `standardRegistry` (the reference-exact surface the L3 corpus asserts) it must NOT appear, or
     // `--list` would enumerate a non-reference service and fail the official g_call scenarios.
-    expect(resolved(standardRegistry).get('mogwai.schema')).toBeUndefined();
-    expect(resolved(extendedRegistry).get('mogwai.schema')?.name).toBe('mogwai.schema');
+    expect(resolved(standardRegistry).get('schema')).toBeUndefined();
+    expect(resolved(extendedRegistry).get('schema')?.name).toBe('schema');
   });
 });

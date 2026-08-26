@@ -39,11 +39,11 @@ const mgr = new BunGraphManager(undefined, extendedRegistry);
 const router = makeRouter(mgr);
 const seeded = (async () => { for (const g of MODERN_SEED) await mgr.executor('g').framedAsync(g, {}); })();
 
-/** Reflect the live schema by draining `mogwai.schema` — what a GraphQL request does before translating
+/** Reflect the live schema by draining `schema` — what a GraphQL request does before translating
  *  (§5·4). Each GraphBinary map decodes to a `SchemaRow`. */
 const reflectRows = async (): Promise<SchemaRow[]> => {
   const rows: SchemaRow[] = [];
-  for (const b of exec(store, extendedRegistry).buffers("g.call('mogwai.schema')", {}))
+  for (const b of exec(store, extendedRegistry).buffers("g.call('schema')", {}))
     rows.push(Object.fromEntries([...(await decode(b))]) as SchemaRow);
   return rows;
 };

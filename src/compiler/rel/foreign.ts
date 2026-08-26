@@ -9,7 +9,7 @@ import { meta, typeOf, type Minter } from './build.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
 //
-// A barrier service (`mogwai.graph.federate`, `io()`) answers on a Promise, so its rows exist only
+// A barrier service (`federate`, `io()`) answers on a Promise, so its rows exist only
 // AFTER the segment boundary the executor drives. What comes back is a detached REFERENCE — an id, a
 // label set and a property snapshot — never a row of this graph's `nodes`/`edges`. This module lands
 // that array as a relation the ordinary fold can continue from.

@@ -23,7 +23,7 @@ export function injectionKindOf(nested: any, params: Record<string, any>): Injec
 
 /** A call() param VALUE that is a nested traversal (`.with('traversal', __.V().out('x'))` or a
  *  map entry), already serialized to a canonical rooted Gremlin string. Distinct from a plain
- *  string so a service that expects a sub-traversal (mogwai.graph.federate) can tell it apart
+ *  string so a service that expects a sub-traversal (federate) can tell it apart
  *  from a literal string param, and a service that does NOT expect one can reject it rather than
  *  silently mis-reading a serialized traversal as text. Kept generic (any service *could* take a
  *  traversal param) — the resolver never hardcodes a service name. */

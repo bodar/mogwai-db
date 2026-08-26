@@ -3,7 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// Strongly connected components — mogwai.scc, a ONE-SHOT decorate barrier over the DIRECTED graph. Two
+// Strongly connected components — scc, a ONE-SHOT decorate barrier over the DIRECTED graph. Two
 // vertices share a component iff they are mutually reachable (u→…→v AND v→…→u), computed as a directed
 // transitive-closure CTE. Graph + partition PORTED from GDS's own SccTest
 // (vendor/gds/algo/src/test/java/org/neo4j/gds/scc/SccTest.java, GPLv3 — re-expressed): three size-3
@@ -23,7 +23,7 @@ const seedOf = (nodes: readonly string[], edges: readonly (readonly [string, str
 /** name → componentId over a graph. */
 const componentsOf = async (store: ReturnType<typeof seeded>): Promise<Record<string, string>> =>
   Object.fromEntries(((await run(store,
-    `g.V().call("mogwai.scc").project("name","componentId").by("name").by("componentId")`)).map(unmap) as any[])
+    `g.V().call("scc").project("name","componentId").by("name").by("componentId")`)).map(unmap) as any[])
     .map((r) => [r.name, r.componentId]));
 
 /** Assert `names` all share ONE component and NO other vertex is in it (GDS's assertBelongSameComponent). */
@@ -33,7 +33,7 @@ const sameComponent = (comp: Record<string, string>, names: readonly string[]): 
   for (const [n, c] of Object.entries(comp)) if (!names.includes(n)) expect(c).not.toBe(id);
 };
 
-describe('mogwai.scc — strongly connected components (directed mutual reachability)', () => {
+describe('scc — strongly connected components (directed mutual reachability)', () => {
   test('GDS SccTest graph: three size-3 cycles, a→d bridge does NOT merge them', async () => {
     const comp = await componentsOf(seeded(seedOf(
       ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'],
@@ -62,9 +62,9 @@ describe('mogwai.scc — strongly connected components (directed mutual reachabi
   test('every vertex decorated; has()/order().by(componentId) compose over the stream', async () => {
     const store = seeded(seedOf(
       ['a', 'b', 'c', 'd'], [['a', 'b'], ['b', 'c'], ['c', 'a'], ['a', 'd']]));
-    expect(await run(store, `g.V().call("mogwai.scc").has("componentId").count()`)).toEqual([4]);
+    expect(await run(store, `g.V().call("scc").has("componentId").count()`)).toEqual([4]);
     // {a,b,c} one SCC, {d} singleton → 2 distinct component ids; order().by composes.
-    const ids = await run(store, `g.V().call("mogwai.scc").order().by("componentId").by("name").values("name")`);
+    const ids = await run(store, `g.V().call("scc").order().by("componentId").by("name").values("name")`);
     expect(new Set(ids)).toEqual(new Set(['a', 'b', 'c', 'd']));
   });
 });

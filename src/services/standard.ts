@@ -37,13 +37,19 @@ import { createArticleRankService } from './catalog/olap/articlerank.ts';
 //   • standardRegistry — the TinkerPop REFERENCE provider surface: --list + tinker.search +
 //     tinker.degree.centrality, exactly what the official corpus asserts, no extensions. The L3
 //     conformance host (reference-exact) uses THIS.
-//   • extendedRegistry — standard PLUS our mogwai.* extensions (the federated barrier). Production
-//     uses this. Because --list enumerates the live registry, mogwai.graph.federate shows up here
+//   • extendedRegistry — standard PLUS our own extensions (the `federate` barrier). Production
+//     uses this. Because --list enumerates the live registry, `federate` shows up here
 //     — correct in production, absent in the reference host (so the official g_call/g_callXlistX
-//     scenarios, which assert the exact reference set, stay green there).
+//     scenarios, which assert the exact reference set, stay green there). Our extensions are
+//     UN-namespaced (`federate`, not `mogwai.graph.federate`): there is one implementation of this
+//     provider — us — so the namespace TinkerPop uses to avoid provider collisions buys nothing and
+//     only costs ergonomics. This holds for EVERY extension of ours — `federate`, `schema`, and the
+//     internal OLAP desugar targets (`pageRank`/`wcc`/…) are all root-level. Only TinkerPop's own
+//     reference names keep a namespace (`tinker.search`, `tinker.degree.centrality`), because those
+//     are the surface the conformance corpus asserts verbatim.
 
 /** The reference provider surface — the three canonical TinkerPop services, plus the INTERNAL
- *  services native steps desugar to. `mogwai.io` is in the REFERENCE registry deliberately: `io()` is
+ *  services native steps desugar to. `io` is in the REFERENCE registry deliberately: `io()` is
  *  TinkerPop's own step, so a reference-exact context must serve it, and `internal: true` keeps it
  *  out of `--list` so the exact provider surface the official scenarios assert is unchanged. The four
  *  OLAP services (pageRank/wcc/peerPressure/shortestPath) back native steps for the same reason and
@@ -63,8 +69,8 @@ const olapServices = (app: AppScope): Service[] =>
 export const standardRegistry: RegistryProvider = (app) =>
   createRegistry([...coreServices(app), ...olapServices(app)]);
 
-/** The reference services PLUS our mogwai.* extensions (federation, schema reflection). Production.
- *  `mogwai.schema` is an EXTENSION, so it lives here and NOT in `standardRegistry`: `--list` enumerates
+/** The reference services PLUS our own extensions (federation, schema reflection). Production.
+ *  `federate` and `schema` are EXTENSIONS, so they live here and NOT in `standardRegistry`: `--list` enumerates
  *  the live registry, and the reference-exact conformance host asserts the exact TinkerPop provider set,
  *  so a `mogwai.*` service in the reference registry would fail the official `g_call`/`g_V_callXlistX`
  *  scenarios. Production (`extendedRegistry`) is where our surface belongs. */

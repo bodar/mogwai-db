@@ -3,7 +3,7 @@ import { PAGERANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, VEC, adjacencyCte, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, sumAbsDelta, type Slot } from './kernel.ts';
 
-// ---------- mogwai.pageRank — pageRank(), a DECORATE barrier ----------
+// ---------- pageRank — pageRank(), a DECORATE barrier ----------
 //
 // `g.V().pageRank()` decorates each vertex with its PageRank under
 // `gremlin.pageRankVertexProgram.pageRank` and passes it through. It is a faithful replay of the

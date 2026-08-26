@@ -5,7 +5,7 @@ import { decode } from '../support/decode.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 
-// shortestPath() (mogwai.shortestPath) — Template B: a single recursive-CTE enumerating every simple
+// shortestPath() (shortestPath) — Template B: a single recursive-CTE enumerating every simple
 // path, keeping the shortest per (source, target) with all ties, landed in the path channel. It is a
 // PURE `rel` contribution (no barrier). These mirror the reference ShortestPath.feature scenarios that
 // the UNWEIGHTED family covers: the default bothE scope, the Direction.IN / __.outE() overrides,
@@ -32,7 +32,7 @@ const DEFAULT_36 = [
   'vadas', 'vadas,marko', 'vadas,marko,josh', 'vadas,marko,josh,ripple', 'vadas,marko,lop', 'vadas,marko,lop,peter',
 ].sort();
 
-describe('shortestPath() — mogwai.shortestPath recursive-CTE (unweighted)', () => {
+describe('shortestPath() — shortestPath recursive-CTE (unweighted)', () => {
   test('g_V_shortestPath — all-pairs shortest paths, default bothE scope', async () => {
     const store = seeded(MODERN_SEED);
     expect(seqs(await run(store, `g.V().shortestPath()`))).toEqual(DEFAULT_36);

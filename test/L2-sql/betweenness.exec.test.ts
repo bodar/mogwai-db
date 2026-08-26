@@ -3,7 +3,7 @@ import { seeded } from '../support/graph.ts';
 import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
-// Betweenness centrality (Brandes) — mogwai.betweenness. The first barrier that is BOTH multi-source
+// Betweenness centrality (Brandes) — betweenness. The first barrier that is BOTH multi-source
 // (scope = source vertex) AND keep-all-rounds (round = BFS level, walked in reverse for the dependency
 // pass). DIRECTED (GDS default orientation). Graphs + expected values PORTED from GDS's own
 // BetweennessCentralityTest full-selection cases (vendor/gds/.../betweenness/, GPLv3 — re-expressed).
@@ -20,14 +20,14 @@ const seedD = (nodes: readonly string[], edges: readonly (readonly [string, stri
 
 const scores = async (seed: readonly string[]): Promise<Record<string, number>> =>
   Object.fromEntries(((await run(seeded(seed),
-    `g.V().call("mogwai.betweenness").project("name","betweenness").by("name").by("betweenness")`)).map(unmap) as any[])
+    `g.V().call("betweenness").project("name","betweenness").by("name").by("betweenness")`)).map(unmap) as any[])
     .map((r) => [r.name, r.betweenness]));
 
 const near = (got: Record<string, number>, want: Record<string, number>) => {
   for (const [k, v] of Object.entries(want)) expect(got[k]).toBeCloseTo(v, 10);
 };
 
-describe('mogwai.betweenness — Brandes (directed, full source set)', () => {
+describe('betweenness — Brandes (directed, full source set)', () => {
   test('line a→b→c→d→e', async () => {
     near(await scores(seedD(['a', 'b', 'c', 'd', 'e'], [['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'e']])),
       { a: 0, b: 3, c: 4, d: 3, e: 0 });
@@ -60,8 +60,8 @@ describe('mogwai.betweenness — Brandes (directed, full source set)', () => {
   test('every vertex decorated; order().by(betweenness) composes', async () => {
     const seed = seedD(['a', 'b', 'c', 'd', 'e'], [['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'e']]);
     const store = seeded(seed);
-    expect(await run(store, `g.V().call("mogwai.betweenness").has("betweenness").count()`)).toEqual([5]);
-    expect(await run(store, `g.V().call("mogwai.betweenness").order().by("betweenness", Order.desc).limit(1).values("name")`))
+    expect(await run(store, `g.V().call("betweenness").has("betweenness").count()`)).toEqual([5]);
+    expect(await run(store, `g.V().call("betweenness").order().by("betweenness", Order.desc).limit(1).values("name")`))
       .toEqual(['c']);
   });
 });
