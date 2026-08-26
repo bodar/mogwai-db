@@ -3,12 +3,32 @@
 **Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
 `ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
 shape-tagged transport (elements | scalar | keyed map, a `{t,v}` `ValueNode`); **win 2a — arg-less
-pushdown** (`pushableTailPrefix` + sibling synthesis from step source text); and **mid-traversal reduction
-pushdown** (the `reducer-monoid.ts` registry + `lowerReduceCombine`, gated by the `federateReduce` switch
-with a differential). Still open: `mean` (the one uncovered reducer, reduce-first to sum/count); widening
-the side-effect boundary; the `call("mogwai.inject")` marker; and bigger-than-scalar injection. The
-authority is the code (`src/services/catalog/federate.ts`, `src/compiler/ir/content-demand.ts`,
-`src/compiler/ir/reducer-monoid.ts`, `src/compiler/rel/segment.ts`/`lower.ts`).
+pushdown** (`pushableTailPrefix` + sibling synthesis from step source text), which already covers
+`count`/`sum`/`min`/`max`/`mean` on the arg-less form (the whole `values(k).mean()` prefix pushes, the
+sibling returns a scalar); **mid-traversal `count()` reduction pushdown** (the `reducers.ts` table +
+`lowerReduceCombine`, gated by `federateReduce` with a differential); and the **empty-reduction
+semantics** (a semigroup reduction over empty emits NOTHING, the monoid `count` emits 0 — see below).
+Still open: the `call("mogwai.inject")` marker; widening the side-effect boundary; bigger-than-scalar
+injection; and multi-graph mixing (2b). The authority is the code (`src/services/catalog/federate.ts`,
+`src/compiler/ir/content-demand.ts`, `src/compiler/ir/reducers.ts`, `src/compiler/rel/segment.ts`/`lower.ts`).
+
+## Reducer algebra — most are SEMIGROUPS, not monoids (settled 2026-08-26)
+
+A `ReducingBarrierStep` is a SEMIGROUP fold by default (seeds from the FIRST traverser,
+`generateSeedFromStarts`); a subclass becomes a MONOID only by installing an explicit identity. So:
+`count` is the LONE monoid (`ConstantSupplier(0L)` → empty count is **0**); `sum`/`min`/`max`/`mean` are
+SEMIGROUPS (each overrides `processAllStarts` with `if (starts.hasNext())` → empty emits **NOTHING**,
+matching direct execution). This is TinkerPop by design — TINKERPOP-1777, a deliberate `breaking` change
+in 3.4.0 (the old behaviour returned `Integer.MIN_VALUE`/`NaN`); the sanctioned "I want 0 over empty"
+idiom is a user `coalesce(…, constant(0))`, NOT an engine-supplied identity. Cross-provider research
+(2026-08-26): no provider differs — JVM providers share `gremlin-core`; Neptune is silent (inherits);
+Cosmos omits sum/min/max/mean. So `reducers.ts` models the family as `(partial, combine, empty)` where
+`empty ∈ {'zero' (monoid count), 'nothing' (semigroup)}`, NOT a universal monoid identity.
+
+**Mid-traversal mean is NOT a case** — `mean`/`sum`/`min`/`max` need a preceding `values(k)` (you cannot
+`mean()` elements), so they are 2+-step tails the single-reducer mid gate rejects. Only `count()` is a
+valid bare reducer directly on federate elements. `mean` et al. push via the arg-less 2a prefix instead,
+which already works. So the mid-traversal reduction pushdown is `count`-only by construction, not a gap.
 
 ## Why this matters — federate is the escape hatch from the DO ceiling
 
@@ -358,15 +378,17 @@ prefix walk) changes.
 distinct injected values, the flat element pool scatters back per parent (`foreignRejoin`, `foreign.ts`),
 and the local `count()` reduces the resumed stream. So split-aggregate is NOT new capability — it is a
 TRANSPORT OPTIMIZATION: cross a `(key→partial)` map instead of every element, combine locally, SAME
-answer. The correctness obligation is the MONOID LAW `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`,
-which is what makes "partial remote, combine local" valid — so it is gated with an L5-style differential
+answer. The correctness obligation is the SPLIT LAW `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`,
+which is what makes "partial remote, combine local" valid — so it is gated with a differential
 (optimized ≡ the element path, which is the semantic authority that already works).
 
-**The monoid registry** (`src/compiler/ir/reducer-monoid.ts`, landed): each reducer is
-`(partial, combine, identity)`, from Calcite's `SqlSplittableAggFunction` — count/sum are SUM0
-(`CountSplitter`, empty→0), min/max self-split (`SelfSplitter`, absorbing identity → empty drops), mean
-reduce-firsts to `(sum, count)` (`AggregateReduceFunctionsRule`). The registry is the authority; the
-lowering picks the monoid by reducer name.
+**The reducer table** (`src/compiler/ir/reducers.ts`, landed): each reducer is `(partial, combine, empty)`,
+from Calcite's `SqlSplittableAggFunction` — count/sum combine with SUM0 (`CountSplitter`), min/max
+self-split (`SelfSplitter`), mean reduce-firsts to `(sum, count)` (`AggregateReduceFunctionsRule`). NOTE
+the algebra (see the Reducer algebra section above): `count` is the MONOID (`empty:'zero'` → 0), the rest
+are SEMIGROUPS (`empty:'nothing'`). The table is the authority; the lowering picks by reducer name. Only
+`count` actually reaches the mid gate (the rest need a preceding `values(k)`), so this table's other rows
+are exercised by the arg-less 2a scalar path, not the mid combine.
 
 **Reuse decided (investigation 2026-08-26), sympathetic to existing arms:**
 - **NOT `barrier_state`/`BarrierRelation`** — local-SQL-scratch by construction; federate is store-free
@@ -379,26 +401,32 @@ lowering picks the monoid by reducer name.
   already frames any `ValueNode`. **No new `ForeignResult` arm.**
 
 **The one genuinely NEW piece — the per-parent COMBINE** (sits beside `foreignRejoin`, does not replace
-it): explode the landed `(key→partial)` map, LEFT JOIN each parent to its key
-(`parent.injectedValue = partial.key`), and apply the monoid — `COALESCE(partial, 0)` for SUM0
-(count/sum), `WHERE partial IS NOT NULL` (drop) for the absorbing min/max, `sum/count` for mean. The
-group key on the sibling is the injection read applied ELEMENT-side (`values('name')`→`by('name')`,
-id→`by(id)`, label→`by(label)`), which equals what `matchValue` compares against — so the join key is the
-same value the element scatter already matches on, no marker-subject extraction needed.
+it): the resume folds the `(key→partial)` map GLOBALLY per the reducer's `combine`/`empty` — SUM0 for
+count/sum (empty → 0 for the monoid count, nothing for the sum semigroup), extremal for min/max (empty →
+nothing). The group key on the sibling is the injection read applied ELEMENT-side (`values('name')`→
+`by('name')`, id→`by(id)`, label→`by(label)`), which equals what `matchValue` compares against — so the
+join key is the same value the element scatter already matches on, no marker-subject extraction needed.
 
-**Build — ALL LANDED (2026-08-26) except `mean`:**
-1. Registry + drift guard (`reducer-monoid.ts`) — LANDED.
-2. Gate (`inferredReduce`, `segment.ts`): mid-traversal + injection + bare-reducer tail with a monoid →
-   a `CallSite.reduce` directive (reducer + monoid + `groupBy` from the injection kind) — LANDED.
+**Build — ALL LANDED (2026-08-26); mid gate is `count`-only by construction (not a gap):**
+1. Reducer table + drift guard (`reducers.ts`) — LANDED. Models `(partial, combine, empty)`; `count` is
+   the monoid, the rest semigroups.
+2. Gate (`inferredReduce`, `segment.ts`): mid-traversal + injection + a single bare splittable reducer →
+   a `CallSite.reduce` directive — LANDED. In practice only `count` qualifies (sum/min/max/mean need a
+   preceding `values(k)`, a 2-step tail the single-reducer gate rejects).
 3. `apply` (`federate.ts`): synthesizes `<sub>.group().by(<groupBy>).by(<partial>())`; the sibling
    returns a `(key→partial)` map that rides the EXISTING `ForeignResult.scalar` arm as a `t:'map'`
    ValueNode (`raw()` gained the `mapValue` shape arm — no new transport arm) — LANDED.
-4. Resume combine (`lowerReduceCombine`, `lower.ts`): folds the per-parent partials GLOBALLY with the
-   monoid `combine`/`identity` (a mid `count()` is a global reduction → one value, not a per-parent
-   stream — the frame caught that bug) — LANDED.
+4. Resume combine (`lowerReduceCombine`, `lower.ts`): folds the per-parent partials GLOBALLY with
+   `combine`/`empty` (a mid `count()` is a global reduction → one value, not a per-parent stream — the
+   frame caught that bug) — LANDED.
 5. Differential: `federateReduce` switch (off = element-path authority); `test/federation.test.ts` runs
    a mid-traversal reduction switch-ON ≡ switch-OFF. NOT L5 (federate isn't in the corpus) — LANDED.
-6. `mean` (reduce-first to `(sum, count)`, then `sum/count` locally) — STILL OPEN, its own follow-up.
+6. Empty-reduction semantics: an empty scalar reduction frames as NOTHING for a semigroup, 0 for the
+   monoid count (`lowerScalarResume`/`lowerReduceCombine` via a `Filter(false)` empty relation) — LANDED.
+
+`mean` is NOT a mid-traversal follow-up (it is not a valid bare-reducer mid tail — see the Reducer
+algebra section); it already pushes via arg-less 2a. The `reduceFirst` field in `reducers.ts` is declared
+but unused, kept for the day a compound-accumulator mid case appears.
 
 ## Phasing (original plan — status in brackets)
 
