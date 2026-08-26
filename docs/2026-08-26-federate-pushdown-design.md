@@ -284,18 +284,54 @@ The actual duplication is the BESPOKE barrier specs (`DecorateSpec`/`PathSpec`/`
 shape vocabulary); expressing barrier output in `RelFraming` terms is the longer-horizon cleanup, not a
 Phase-2 blocker.
 
-**Phase 2 build (all bare reducers: count/sum/max/min/mean):**
-1. `raw()` (sibling side) stops throwing on `Shape.value`/`Shape.scalar` for a bare reducer; instead
-   it builds a `{t,v}` `ValueNode` (type from `shape` for count, from the `vt` column for the others)
-   and returns it as a new transfer arm beside `ForeignRow[]`.
-2. The federated transfer type widens: `ForeignRow[]` → `ForeignRow[] | { scalar: ValueNode }` (a small
-   typed result). The barrier `apply` passes it through.
-3. The resume constitutes the scalar as a 1-ROW relation and frames it as `RelFraming.scalar` (the
-   existing arm), `frameTypedNode` on the wire.
-4. Gated on `ContentDemand.terminalReduction` (phase 1's bit), and INJECTION-AWARE (per the section
-   above): mid-traversal pushes a GROUPED reduction keyed by the injected value, never a global one.
-   First slice may do SOURCE-form only and leave mid-traversal grouped-reduction as a follow-up, since
-   the grouped form is a distinct (and wrong-answer-if-missed) mechanism.
+### Phase 2 is a PREFIX/BOUNDARY split, not per-reducer special-casing (corrected 2026-08-26 vs Calcite)
+
+The first cut special-cased a terminal reducer ("if the tail ends in `count()`, push it"). That was
+WRONG — it broke `federate(t).out().dedup().count()` (pushed only `count()`, reducing the sibling's
+un-walked rows → 5 not 2) and UNDER-pushed `federate(t).has('x',1).count()` (should push both). The
+lesson, validated against Calcite (`vendor/calcite`, studied 2026-08-26): **pushdown is a BOUNDARY
+between a remote-executable region and a local one, and the region grows UPWARD from the source.** Calcite
+finds the maximal cut with a cost-based planner (a `Convention` trait per operator + a costed
+boundary-crossing converter — `plan/Convention.java`, `rel/convert/ConverterRule.java`); we do NOT need
+that machinery, because our cost model is degenerate: **the sibling runs the SAME engine, so pushing is
+always cheaper and almost every step is pushable.** The maximal cut is therefore a simple PREFIX WALK.
+
+**`pushableTailPrefix(tail)` — split the post-barrier tail into `[remote prefix] [local suffix]` at the
+first LOCAL-DEPENDENT step** (blocklist, optimistic: push unless a step is proven local). A step is
+LOCAL-DEPENDENT iff it:
+1. **references a label / path position bound BEFORE the barrier** — a backtrack that reaches ACROSS the
+   boundary (`g.V().as('x').call(federate,…).where(eq('x'))`). A backtrack CONTAINED in the prefix
+   (`federate(…).as('a').out().where(eq('a')).count()`) is fully pushable — the sibling runs it whole.
+   So the walk tracks labels BOUND within the prefix so far; a step referencing a label NOT in that set
+   ends the prefix. (This is Calcite's "a converter fires only if its input is already in the remote
+   convention", specialized to label scope.)
+2. **is the mid-traversal INJECTION SCATTER** — the per-parent `T.value` fan-out needs the local parent
+   rows. A pushed aggregate here is the SPLIT-AGGREGATE case (below), not a global one.
+3. **mixes ANOTHER graph** — a nested `call(federate,…)` to a different sibling, or a local-graph read.
+4. **is a WRITE / local side-effect** feeding a later local read (`aggregate('x')`/`store('x')`/`cap`,
+   `MUTATING_STEPS`).
+
+Everything else pushes: `has`/`hasLabel`, `out`/`in`/`both`, `dedup`, `order`, `limit`/`range`, the
+reducers, and a SELF-CONTAINED `where`/`union`/`match`. This SUBSUMES every case and INCREASES scope:
+`federate(t).out().dedup().count()` pushes the WHOLE prefix (correct AND cheaper — the sibling has the
+adjacency), and `federate(t).values('name')` pushes `[values]` (Phase 4 projection falls out for free).
+
+**Result shape follows the pushed prefix's ROOT — no scalar-vs-elements special-casing** (Calcite's
+`RelToSqlConverter` rule: the pushed subtree's root type IS the RPC return type). If the prefix ends in a
+reducer → `ForeignResult.scalar`; else → `ForeignResult.elements`. This is EXACTLY what the `ForeignResult`
+tagged union already models — the transport work is right and general; only the DECISION (special-case →
+prefix walk) changes.
+
+**Build:**
+1. `raw()` returns a shape-tagged `ForeignResult` (elements OR scalar) — DONE. A scalar crosses as a
+   `{t,v}` `ValueNode` (measured facts above), re-framed by `frameTypedNode`.
+2. `pushableTailPrefix(tail)` computes `{prefix, suffix}` at the boundary. The barrier appends the whole
+   `prefix` to the sibling gremlin; the resume lowers only the `suffix` (`barrier.at + 1 + prefix.length`).
+3. The resume frames the result by its `ForeignResult` tag: `lowerScalarResume` for a scalar (a 1-row
+   `typedNode`), the element resume for elements.
+4. SOURCE-form first. MID-traversal is the SPLIT-AGGREGATE slice — Calcite's `SqlSplittableAggFunction`
+   (`CountSplitter`: partial `COUNT` remote + local `SUM0` combine; `AVG → SUM/COUNT` reduce-first;
+   MIN/MAX self-split). A named relational pattern, not an ad-hoc worry — its own follow-up.
 
 ## Phasing (rough, unbuilt)
 
