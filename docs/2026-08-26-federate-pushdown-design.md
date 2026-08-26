@@ -350,6 +350,50 @@ prefix walk) changes.
    (`CountSplitter`: partial `COUNT` remote + local `SUM0` combine; `AVG → SUM/COUNT` reduce-first;
    MIN/MAX self-split). A named relational pattern, not an ad-hoc worry — its own follow-up.
 
+## Mid-traversal reduction — a MONOID transport optimization (registry landed 2026-08-26)
+
+**Mid-traversal `.count()` ALREADY produces the right answer** (measured): the sibling runs once over the
+distinct injected values, the flat element pool scatters back per parent (`foreignRejoin`, `foreign.ts`),
+and the local `count()` reduces the resumed stream. So split-aggregate is NOT new capability — it is a
+TRANSPORT OPTIMIZATION: cross a `(key→partial)` map instead of every element, combine locally, SAME
+answer. The correctness obligation is the MONOID LAW `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`,
+which is what makes "partial remote, combine local" valid — so it is gated with an L5-style differential
+(optimized ≡ the element path, which is the semantic authority that already works).
+
+**The monoid registry** (`src/compiler/ir/reducer-monoid.ts`, landed): each reducer is
+`(partial, combine, identity)`, from Calcite's `SqlSplittableAggFunction` — count/sum are SUM0
+(`CountSplitter`, empty→0), min/max self-split (`SelfSplitter`, absorbing identity → empty drops), mean
+reduce-firsts to `(sum, count)` (`AggregateReduceFunctionsRule`). The registry is the authority; the
+lowering picks the monoid by reducer name.
+
+**Reuse decided (investigation 2026-08-26), sympathetic to existing arms:**
+- **NOT `barrier_state`/`BarrierRelation`** — local-SQL-scratch by construction; federate is store-free
+  `'worker'` residency. (Its correlation JOIN is a good *model* for the combine, but its source is a local
+  table `Ref`, not landed JSON.)
+- **NOT the `groupMap` builders** — those are the SIBLING's own lowering; the sibling already produces the
+  map via `group().by(<key>).by(<partial>())`.
+- **REUSE the `ValueNode` `t:'map'` arm** (`gremlin/types.ts`) — a `(key→partial)` map is a map-valued
+  scalar, type-faithful both sides, and rides the EXISTING `ForeignResult.scalar` arm; `lowerScalarResume`
+  already frames any `ValueNode`. **No new `ForeignResult` arm.**
+
+**The one genuinely NEW piece — the per-parent COMBINE** (sits beside `foreignRejoin`, does not replace
+it): explode the landed `(key→partial)` map, LEFT JOIN each parent to its key
+(`parent.injectedValue = partial.key`), and apply the monoid — `COALESCE(partial, 0)` for SUM0
+(count/sum), `WHERE partial IS NOT NULL` (drop) for the absorbing min/max, `sum/count` for mean. The
+group key on the sibling is the injection read applied ELEMENT-side (`values('name')`→`by('name')`,
+id→`by(id)`, label→`by(label)`), which equals what `matchValue` compares against — so the join key is the
+same value the element scatter already matches on, no marker-subject extraction needed.
+
+**Build order (each verifiable against the already-correct element path):**
+1. Registry + drift guard — LANDED.
+2. Gate: mid-traversal barrier + injection + tail is a bare reducer with a monoid → thread a `reduce`
+   directive (the reducer + its monoid) on `CallSite.pushdown`, like 2a's synthesized gremlin.
+3. `apply`: synthesize `<sub>.group().by(<elementKey>).by(<partial>())`; the sibling returns a
+   `(key→partial)` map; return it as a `barrier-scalar` `t:'map'` ValueNode.
+4. Resume combine: the new join-then-monoid lowering, per parent, with the identity behaviour.
+5. L5 differential: the combined result ≡ the element-scatter+local-reduce result over generated
+   mid-traversal reductions. The element path is the authority.
+
 ## Phasing (rough, unbuilt)
 
 1. **`ContentDemand` `ChainFact` + `detachedTail` reads it.** The static walk over post-barrier steps
