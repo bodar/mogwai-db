@@ -141,16 +141,53 @@ or `dedup()`/`has(T.id, 5)` conflate elements. This is the strongest reason full
 is a bigger project than win 1: it is gated on namespaced identity, which touches the id-carry model
 everywhere.
 
-## What the explicit `traversal` arg is, once pushdown exists
+## The explicit `traversal` arg COMPOSES with pushdown — it does not disable it
 
-The arg does two jobs: (i) WHAT to run remotely, (ii) WHERE the boundary is. Job (ii) is the smell —
-inferable for the clean case. Job (i) is not a smell — it is the pushed-down plan, which pushdown would
-COMPUTE. But the arg is also the ESCAPE HATCH for the hard edges (a): a user writing
-`federate(A, __.repeat(out()).times(10).values('x'))` is manually pushing an unbounded traversal we
-could not infer cleanly. So the goal is **make the arg optional, not remove it** — keep it as the
-"I know better, run exactly this remotely" override (the way a SQL engine takes a hint), and as the
-target the inferred plan compiles INTO. That framing is strictly additive: win 1 lands without solving
-(c), and the explicit form keeps working unchanged.
+The `traversal` arg is REQUIRED today (`traversalOf`, `federate.ts:42` throws if absent). It is not
+optional, and win 1 does not make it optional. The two operate on DIFFERENT halves and compose:
+
+- The `traversal` arg is **what runs remotely** — the sub-traversal. The user always writes it.
+- **Pushdown (win 1)** operates on the **local tail AFTER the barrier** — how much of the fetched
+  result to materialize, and whether to push a terminal reduction back. It never touches the arg.
+
+So `federate("crew", __.V().outE("develops")).count()`: the user's sub-traversal runs remotely exactly
+as written; pushdown sees the local tail is `.count()` and pushes the reduction, so the sibling runs
+`…outE("develops").count()` and returns a scalar rather than a bag of edges the local `count()` would
+discard. **The remote result set the user asked for is unchanged** — pushdown only NARROWS what crosses
+the wire, never what the sibling computes over. A correct pushdown is semantically invisible
+(`federate(t).count()` returns the same number counted locally or remotely), so there is no user control
+to override, and the explicit arg does NOT gate it. Pushdown is unconditional and always safe.
+
+The control question belongs to a DIFFERENT, later win: **boundary inference (win 2) — making the arg
+optional.** THERE, the explicit arg is the ESCAPE HATCH: "I drew the boundary myself, don't infer one",
+and the hard-edge (a) case `federate(A, __.repeat(out()).times(10).values('x'))` is a user manually
+pushing an unbounded traversal we could not infer cleanly. But win 2 is gated behind hard edge (c)
+(namespaced identity) and is out of scope for the pushdown work. So: **win 1 never checks whether the
+arg is present** (it always is); only win 2 would let an explicit arg opt out of inference.
+
+## `T.value` / mid-traversal: pushdown must be INJECTION-AWARE
+
+The mid-traversal form (`V().call(federate, …, __.V().has('sku', T.value))`) already does INPUT-side
+pushdown — the good kind: it collects the DISTINCT injected values, sends ONE sibling hop binding them
+under `INJECT_VALUES_KEY`, and the sibling filters remotely (`federate.ts:119-120`, a SPARQL bound-join).
+So `T.value` is not a barrier to pushdown; it is an existing instance of it, on the input side.
+
+But it constrains OUTPUT-side (result) pushdown, and getting this wrong is a WRONG ANSWER, not a missed
+optimization. A mid-traversal result is SCATTERED BACK over the parents — each returned element re-matches
+the parent whose injected value it satisfies (`federate.ts:113-118`), in `lowerForeignResume`'s resume
+SQL. So a terminal reduction pushed in the mid-traversal case must be a **per-parent GROUPED reduction
+keyed by the injected value**, never a single global one: `V().call(federate,…,has('sku',T.value)).count()`
+means "for each parent, how many sibling matches", and a global `…count()` on the sibling would collapse
+all parents into one number. Therefore:
+
+- **Source-form pushdown** (no injection): a terminal reduction pushes as a plain global reduction; fetch
+  a scalar.
+- **Mid-traversal pushdown** (`T.value` present): a terminal reduction pushes as a GROUPED reduction over
+  the injected-value key, matching the per-parent fan-out the resume already performs.
+
+So the `ContentDemand` analysis (phase 1) must know **whether the barrier is a mid-traversal injection
+barrier**, and gate terminal-reduction pushdown to the grouped form there. This is a demand-analysis
+input, not a separate mechanism — the injection kind is already on the barrier (the resume reads it).
 
 ## Phasing (rough, unbuilt)
 
