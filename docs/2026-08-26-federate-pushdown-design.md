@@ -240,6 +240,63 @@ So the `ContentDemand` analysis (phase 1) must know **whether the barrier is a m
 barrier**, and gate terminal-reduction pushdown to the grouped form there. This is a demand-analysis
 input, not a separate mechanism — the injection kind is already on the barrier (the resume reads it).
 
+## Phase 2 — terminal-reduction pushdown, and the transport/framing generalization
+
+**The measured facts (2026-08-26, real runs over the modern fixture):**
+- `count()` → `Shape.value`, `ScalarType = static long` (type known at COMPILE time).
+- `sum()/max()/min()/mean()` → `Shape.scalar`, type carried PER-ROW in a `vt` column (min/max = the
+  winning row's Gremlin vtype; sum/mean = a SQLite storage class). Neither is `vertex`/`edge`, so the
+  sibling `raw()` THROWS today (`execute.ts:805`, "must yield vertices or edges").
+- Every reducer DECODES to a plain JS `number` (6, 123, 30.75) — no bigint at the decoded layer, so
+  JSON survives mechanically.
+- **The loss is SILENT TYPE ERASURE, not a throw.** A `count()` is a Gremlin **Long**; a bare JSON
+  `number` cannot say Long-vs-Integer (GraphBinary keeps Int64 `0x02` vs Int32 `0x01`; JSON has one
+  number type). Crossing as a raw number re-frames with the wrong Gremlin type. `program.ts`'s
+  `transportable` guard would ACCEPT the number and erase the Long — the wrong outcome, confirming a
+  scalar must carry its type.
+
+**The correction already exists — reuse, no new format.** The `{t,v}` `ValueNode` envelope
+(`src/gremlin/types.ts:393`) is ALREADY how federated element props cross `raw()` type-faithfully
+(`propsOf` → `ForeignRow.props`), already JSON-safe (`t` a string tag, `v` a plain value), already
+re-framed by ONE rule (`frameTypedNode`, `execute.ts`). A pushed-down `count()` crosses as
+`{t:'long', v:6}`, not `6`. The scalar's type is known where the ValueNode is built (sibling-side in
+`raw()`, where BOTH `shape` and the row `vt` are in hand — exactly where `propsOf` builds `{t,v}` today):
+`long` for count (static), the `vt` column for sum/max/min/mean.
+
+**This is federate adopting the transport/framing split OLAP already embodies — NOT a new abstraction,
+and specifically NOT "everything becomes a `json_each` bind."** The barrier landscape (measured
+2026-08-26) is: federate carries HOST JSON (it crossed RPC), OLAP carries a `barrier_state` HANDLE (the
+vector never leaves SQL — this REPLACED an older per-round `json_each` vector bind precisely to stop
+re-serializing O(V) each round, `types.ts:147`/`kernel.ts:74`), value barriers carry a `json_each` bind.
+Reverting federate scalars to a universal `json_each`/JSON-number path would RE-INTRODUCE both costs OLAP
+escaped (per-round serialization AND this type-erasure). The right generalization is the one OLAP shows:
+**a barrier returns a typed RESULT + a SHAPE; the shape is the EXISTING `RelFraming` vocabulary
+(`lowerPairResume` already emits `{kind:'map'}`, `lowerPathResume` `{kind:'path'}`), not a bespoke spec.**
+
+**`Shape` vs `RelFraming` — settled, keep both (measured split, not duplication).** `Shape` (byte
+framing, `render.ts`) answers the framer's ONE question "what bytes"; `RelFraming` (fold-internal,
+`framing.ts`) answers the bigger "what does the relation HOLD, so a step can compose." They are two
+PROJECTIONS of "what is this stream", neither a subset: `Shape` MERGES `elements`/`detached` (byte-
+identical) which `RelFraming` SPLITS (routes `elementTail` vs `detachedTail`); `RelFraming` merges the
+`jsonbList`/`jsonbSet`/`jsonbElementList` framers into one `list`. A unified crossing-vocabulary was TRIED
+(`layoutOf`/`TraverserLayout`) and produced a real bug (blocked the path channel — `framing.ts:19-22`).
+The actual duplication is the BESPOKE barrier specs (`DecorateSpec`/`PathSpec`/`PairSpec` — a fourth
+shape vocabulary); expressing barrier output in `RelFraming` terms is the longer-horizon cleanup, not a
+Phase-2 blocker.
+
+**Phase 2 build (all bare reducers: count/sum/max/min/mean):**
+1. `raw()` (sibling side) stops throwing on `Shape.value`/`Shape.scalar` for a bare reducer; instead
+   it builds a `{t,v}` `ValueNode` (type from `shape` for count, from the `vt` column for the others)
+   and returns it as a new transfer arm beside `ForeignRow[]`.
+2. The federated transfer type widens: `ForeignRow[]` → `ForeignRow[] | { scalar: ValueNode }` (a small
+   typed result). The barrier `apply` passes it through.
+3. The resume constitutes the scalar as a 1-ROW relation and frames it as `RelFraming.scalar` (the
+   existing arm), `frameTypedNode` on the wire.
+4. Gated on `ContentDemand.terminalReduction` (phase 1's bit), and INJECTION-AWARE (per the section
+   above): mid-traversal pushes a GROUPED reduction keyed by the injected value, never a global one.
+   First slice may do SOURCE-form only and leave mid-traversal grouped-reduction as a follow-up, since
+   the grouped form is a distinct (and wrong-answer-if-missed) mechanism.
+
 ## Phasing (rough, unbuilt)
 
 1. **`ContentDemand` `ChainFact` + `detachedTail` reads it.** The static walk over post-barrier steps
