@@ -222,6 +222,40 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
     expect(endpointHop.gremlin).toBe(`g.V(${ENDPOINT_IDS_KEY})`);
     expect(endpointHop.gremlin).not.toMatch(/\d/); // no id digits baked into the statement text
   });
+
+  test('PUSHDOWN: a tail that does not reach endpoints SKIPS the endpoint hop (one sibling call)', async () => {
+    // The endpoint fetch is gated on the call-site tailDemand (ContentDemand): a reducing/edges-only tail
+    // (reachesAdjacency:false) skips the second hop entirely. Same spy, but resolve() now carries a demand.
+    let rawCalls = 0;
+    const spySource: any = {
+      executor: () => ({
+        raw: () => { rawCalls++; return Promise.resolve([{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }]); },
+      }),
+    };
+    const contribution: any = createFederateService(spySource).resolve({
+      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      federationDepth: 0,
+      tailDemand: { reachesElements: false, reachesAdjacency: false, keys: new Set(), terminalReduction: true, handoffDenied: false },
+    } as any);
+    await contribution.apply([]);
+    expect(rawCalls).toBe(1); // ONLY the sub-traversal hop — no endpoint fetch
+  });
+
+  test('PUSHDOWN: a tail that DOES reach endpoints still fetches them (two sibling calls)', async () => {
+    let rawCalls = 0;
+    const spySource: any = {
+      executor: () => ({
+        raw: () => { rawCalls++; return Promise.resolve(rawCalls === 1 ? [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] : []); },
+      }),
+    };
+    const contribution: any = createFederateService(spySource).resolve({
+      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      federationDepth: 0,
+      tailDemand: { reachesElements: true, reachesAdjacency: true, keys: 'all', terminalReduction: false, handoffDenied: false },
+    } as any);
+    await contribution.apply([]);
+    expect(rawCalls).toBe(2); // sub-traversal + endpoint fetch
+  });
 });
 
 // SUBGRAPH re-source (TinkerPop's sg.traversal()): `.V()`/`.E()` root a fresh traversal at the fetched

@@ -1,6 +1,7 @@
 import type { Service, CallParams } from '../spi/types.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
+import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
@@ -52,6 +53,17 @@ function traversalOf(params: CallParams): string {
  *  the movement-over-a-bound-`Ref` substrate (`docs/2026-08-21-barrier-substrate-design.md`). */
 const wantsSubgraph = (params: CallParams): boolean => params.subgraph === true;
 
+/** Whether to actually FETCH the subgraph's endpoint vertices — decided ONCE at plan time in `resolve`,
+ *  from the call-site's `tailDemand`. A `.with("subgraph", true)` asks for a traversable subgraph, but the
+ *  endpoint hop only pays off if the LOCAL TAIL reaches the endpoint vertices (a movement/endpoint hop or a
+ *  `.V()` re-source or an edge `elementMap()` — `ContentDemand.reachesAdjacency`). An edges-only or reducing
+ *  tail (`…count()`, `.E()…`) does not, so we skip the second sibling hop and the wasted vertex
+ *  materialization (`docs/2026-08-26-federate-pushdown-design.md`, phase 3). No `tailDemand` (a caller that
+ *  planned no segment tail) = assume it is needed — the safe over-fetch. The demand only ever NARROWS, so a
+ *  wrong analysis over-fetches, never under-fetches (the wrong-answer direction). */
+const fetchEndpoints = (params: CallParams, tailDemand: ContentDemand | undefined): boolean =>
+  wantsSubgraph(params) && (tailDemand ? tailDemand.reachesAdjacency : true);
+
 /**
  * A subgraph result: the edges the sub-traversal produced, followed by their DISTINCT incident
  * vertices (fetched with a second sibling hop, WITH data). The mixed-kind array IS the signal to the
@@ -87,13 +99,16 @@ export const createFederateService = (source: FederationSource | undefined): Ser
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, federationDepth: depth }) => ({
+  resolve: ({ params, federationDepth: depth, tailDemand }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
     // FederationSource, never the store — which is the fail-closed half of that residency.
     residency: 'worker',
     apply: async (rows: readonly ForeignRow[]): Promise<ForeignRow[]> => {
+      // Whether the subgraph endpoint hop pays off — decided ONCE here from the call-site tail demand
+      // (a typed dependency of `resolve`), captured by `apply` as a plain value, not smuggled via params.
+      const wantEndpoints = fetchEndpoints(params, tailDemand);
       const graph = graphOf(params);
       guardFederationDepth(depth + 1, graph);
       const gremlin = traversalOf(params);
@@ -105,7 +120,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound.
       if (rows.length === 0) {
         const result = await ex.raw(gremlin, {}, depth + 1);
-        return wantsSubgraph(params) ? withEndpoints(ex, result, depth) : result;
+        return wantEndpoints ? withEndpoints(ex, result, depth) : result;
       }
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar
@@ -120,7 +135,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
       const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
       const result = await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
-      return wantsSubgraph(params) ? withEndpoints(ex, result, depth) : result;
+      return wantEndpoints ? withEndpoints(ex, result, depth) : result;
     },
   }),
 });

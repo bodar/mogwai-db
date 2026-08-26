@@ -77,6 +77,25 @@ describe('contentDemand — what the tail consumes', () => {
     expect(d.reachesElements).toBe(true);
   });
 
+  test('.V() re-source reaches adjacency (needs the landed endpoint vertices) even before count()', () => {
+    // A subgraph `.V().count()` re-roots at the fetched vertices, so the endpoint fetch must NOT be
+    // skipped — reachesAdjacency guards exactly that.
+    const { steps, from } = tailOf('g.E().V().count()');
+    expect(contentDemand(steps, from).reachesAdjacency).toBe(true);
+  });
+
+  test('.E() re-source does NOT reach adjacency (edges are always fetched)', () => {
+    const { steps, from } = tailOf('g.V().E().count()');
+    expect(contentDemand(steps, from).reachesAdjacency).toBe(false);
+  });
+
+  test('elementMap() reaches adjacency — an edge elementMap rejoins endpoint vertices', () => {
+    // Conservative: elementMap over an edge stream emits IN/OUT endpoint entries needing the landed
+    // vertices. We do not track the stream elem, so elementMap always reaches adjacency (safe over-fetch).
+    const { steps, from } = tailOf('g.E().elementMap()');
+    expect(contentDemand(steps, from).reachesAdjacency).toBe(true);
+  });
+
   test('a write tail is handoff-denied', () => {
     const { steps, from } = tailOf('g.V().property("x", 1)');
     expect(contentDemand(steps, from).handoffDenied).toBe(true);

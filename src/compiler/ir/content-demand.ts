@@ -32,7 +32,11 @@ export interface ContentDemand {
   /** Does any step read an element's DATA (a property/label/token/payload)? `false` for a tail that
    *  only counts or dedups by identity — those need no element payload fetched. */
   readonly reachesElements: boolean;
-  /** Does any movement/endpoint step run? → the landed EDGES (adjacency) are needed. */
+  /** Does the tail need the landed ENDPOINT VERTICES — via a movement/endpoint hop (`out`/`inV`/…) OR a
+   *  `.V()` re-source (`sg.traversal().V()`, which re-roots at the fetched vertices)? This is the bit a
+   *  subgraph federate reads to decide whether the second endpoint hop pays off: `false` for an edges-only
+   *  or reducing tail (`…count()`, `.E()…`), so the endpoint fetch is skipped. A `.E()` re-source needs
+   *  only the edges (always fetched), so it does NOT set this. */
   readonly reachesAdjacency: boolean;
   /** The property keys the tail reads (`values(k…)`/`has(k,…)`/`by(k)`), or `'all'` when a whole-payload
    *  read is present (`valueMap`/`elementMap`/an element-terminal leaf/`properties`) or a key is not a
@@ -90,6 +94,16 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
   for (const step of tail) {
     if (BOUND_HANDOFF_DENY.has(step.name)) handoffDenied = true;
     if (ADJACENCY_STEPS.has(step.name)) { reachesAdjacency = true; reachesElements = true; }
+    // A `.V()` re-source re-roots at the landed VERTICES (`sg.traversal().V()`), so it needs the endpoint
+    // fetch exactly as a movement does — even a `…V().count()` reads the vertex relation. `.E()` re-roots
+    // at the edges (always fetched), so it does not. Only a re-source is `V`/`E` in a subgraph tail — a
+    // leading `V()`/`E()` at index 0 is the source itself, never in a tail slice.
+    if (step.name === 'V') { reachesAdjacency = true; reachesElements = true; }
+    // `elementMap()` over an EDGE stream emits IN/OUT endpoint entries that REJOIN the landed vertices, so
+    // it needs the endpoint fetch. We do not track the stream elem here, so `elementMap` conservatively
+    // reaches adjacency — an over-fetch for a vertex `elementMap` (where the "endpoints" are the vertices
+    // themselves, so it costs nothing), never an under-fetch (the wrong-answer direction).
+    if (step.name === 'elementMap') { reachesAdjacency = true; reachesElements = true; }
     if (WHOLE_PAYLOAD_READS.has(step.name)) { reachesElements = true; keysAll = true; }
     // Key readers (values/has) contribute keys; a non-literal key widens to 'all'.
     if (step.name === 'values' || step.name === 'has' || step.name === 'hasNot') {

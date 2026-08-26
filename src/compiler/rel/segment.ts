@@ -2,6 +2,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
+import { contentDemand } from '../ir/content-demand.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
@@ -88,8 +89,15 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // and a name that resolves to nothing is a question about the traversal's own text.
     const service = request.services.get(spec.serviceName);
     if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
+    // The local tail AFTER this barrier is a fact ABOUT this call site — the same category as
+    // `federationDepth` (known once, at plan time, from where the call sits in the chain), not a
+    // per-execution value and not a user param. So its content demand travels on `CallSite.tailDemand`,
+    // the structure that means "facts about this call site" — a service that shapes its fetch (federate's
+    // endpoint hop) reads it; one that does not ignores it. It is NOT threaded through `params` (a user
+    // channel) nor captured incidentally by the `apply` closure.
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
+      tailDemand: contentDemand(steps, at + 1),
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary

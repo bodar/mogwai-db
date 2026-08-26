@@ -6,6 +6,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../../compiler/elem.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
 import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
+import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -69,6 +70,15 @@ export interface CallSite {
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
+  /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
+   *  known once at plan time (the tail is right there in the chain), the same category as
+   *  `federationDepth`. A barrier that shapes its fetch by the downstream demand (federate skipping the
+   *  endpoint hop when nothing walks to an endpoint — `docs/2026-08-26-federate-pushdown-design.md`,
+   *  phase 3) reads it; one that does not ignores it. It is a call-site property so the fetch decision
+   *  arrives as a typed dependency of `resolve`, not smuggled through `params` or captured incidentally.
+   *  Optional so a caller that plans a barrier WITHOUT a segment tail (a test, a future non-segment path)
+   *  need not synthesize one — absent = "assume the tail needs everything", the safe over-fetch. */
+  readonly tailDemand?: ContentDemand;
 }
 
 /**
