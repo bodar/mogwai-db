@@ -153,6 +153,19 @@ describe('group / properties SQL', () => {
     expect((await dec('g.V().repeat(__.aggregate("x")).times(2).select("x").limit(1).unfold()')).length).toBe(12);
   });
 
+  test('a by() body ending in a filter NULLs the value where the predicate fails (both strategies)', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+    // Aggregate.feature `g_V_aggregateXxX_byXvaluesXageX_isXgtX29XXX_capXxX`: the by-body contributes the
+    // age only where it exceeds 29 (`is(P.gt(29))` NULLs it otherwise). The default DROPS the null member
+    // (BulkSet omits it); the two software vertices have no age and drop too, so x = [32, 35].
+    expect((await dec('g.V().aggregate("x").by(__.values("age").is(P.gt(29))).cap("x")'))[0]).toEqual([32, 35]);
+    // `ProductiveByStrategy` KEEPS the null for every unproductive traverser (marko/vadas < 30, the two
+    // software with no age) — the same 4 nulls plus the two survivors.
+    const productive = (await dec('g.withStrategies(ProductiveByStrategy).V().aggregate("x").by(__.values("age").is(P.gt(29))).cap("x")'))[0] as unknown[];
+    expect([...productive].sort((a, b) => String(a).localeCompare(String(b)))).toEqual([32, 35, null, null, null, null].sort((a, b) => String(a).localeCompare(String(b))));
+  });
+
   test('a Scope.local slice over a multi-key select record is an order-preserving ENTRY slice', async () => {
     const store = seededStore();
     const asMap = async (q: string) => (await decodeAll(executeQuery(store, q))).map((m: any) => Object.fromEntries(m));

@@ -830,6 +830,18 @@ pattern this whole stage kept finding:
   `NO_ALIASES` (the census cannot see it — the traversal was newly executing). 🚧 LEFT: a `by()` over a
   collection select (a member projection) and a multi-key select mixing a collection name with labels
   (both decline via `selectKeys`).
+- ✅ **A `by()` child body ending in an `is(<P>)` FILTER — LANDED across every `by()` host.** `valueRun`
+  (`lower/reduction.ts`, the scalar child body's transform run) handled projectors and transforms but
+  declined a trailing `is()`, so `aggregate("x").by(__.values("age").is(P.gt(29)))` — the age only where
+  it exceeds 29 — declined. The filtered-out value is UNPRODUCTIVE, which the `by()` vocabulary already
+  carries as a NULL value (dropped by the host's productivity filter, or kept under
+  `ProductiveByStrategy`), so the fix NULLs the value (`CASE WHEN pred THEN value END`) rather than adding
+  a productivity-PREDICATE channel `ByField` does not have (`ByField.optional` is a boolean null-check,
+  not an arbitrary predicate — routing the predicate there would be the larger change). Both strategy
+  variants fall out: default drops the null member (`[32,35]`), ProductiveBy keeps it
+  (`[32,35,null,null,null,null]`). ⚠️ Because `valueRun` is the ONE scalar-child-body engine, this
+  generalises for free to `project`/`order`/`group`/`dedup` hosts — any `by(__.values(k).is(P))`. Only a
+  value-`P` `is`; a `typeOf`/gtype assert or a nested-traversal `is` operand declines.
 - ✅ **A `Scope.local` count/slice over a multi-key `select(k…).by(…)` RECORD — LANDED as `recordToMap` →
   `mapTail`.** A multi-key select frames as a RECORD; a `Scope.local` op reads it AS A MAP (`SelectStep`
   yields a `LinkedHashMap`), so `recordTail` COLLAPSES the record to a map (`recordToMap`, the same boundary

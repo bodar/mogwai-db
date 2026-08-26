@@ -31,6 +31,7 @@ import { PATH_CHANNEL, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
+import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { continueAs, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
@@ -1174,7 +1175,8 @@ export function valueRun(
   let type = seed.type;
   let vtype = seed.vtype;
   // A value TRANSFORM does not change WHETHER the body produced — `toUpper()` of nothing is still
-  // nothing — so the leading step's answer rides through the whole run unchanged.
+  // nothing — so the leading step's answer rides through the whole run unchanged. A trailing `is(pred)`
+  // NULLs the value where the predicate fails, which the host's own productivity filter then drops.
   const present = seed.present;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
@@ -1185,6 +1187,23 @@ export function valueRun(
       value = projected.value;
       type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
       vtype = undefined;
+      continue;
+    }
+    // A trailing `is(pred)` FILTERS the child value: `by(__.values('age').is(P.gt(29)))` contributes the
+    // age only where it exceeds 29 (`FilterStep` drops the traverser otherwise). A filtered-out value
+    // becomes UNPRODUCTIVE, which the `by()` vocabulary already carries as a NULL value dropped by the
+    // host's productivity filter (or kept as a null under `ProductiveByStrategy`) — so the predicate
+    // NULLs the value (`CASE WHEN pred THEN value END`) rather than needing a second productivity
+    // channel `ByField` does not have. The type tag rides through unchanged (a filter narrows, never
+    // retypes). Only a value-`P` `is`; a `typeOf`/gtype assert or a nested-traversal `is` declines.
+    if (step.name === 'is' && !step.modulators?.length) {
+      const pred = step.args[0]?.value;
+      if (pred == null || isNested(pred)) return null;
+      const subjType: SubjectType = vtype ? { kind: 'perRow', vtype }
+        : type.kind === 'static' ? { kind: 'static', type: type.type, text: type.text } : SUBJECT_UNKNOWN;
+      const test = predicateExpr(value, pred, subjType, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
+      if (!test) return null;
+      value = { kind: 'case', whens: [[test, value]], else: compilerNull() };
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;

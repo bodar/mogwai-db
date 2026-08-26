@@ -1761,6 +1761,11 @@ describe('the RelIR spine', () => {
         'g.V().aggregate("a").has("person","age", P.gte(30)).cap("a")',
         // a SCALAR host — the members are the values
         'g.V().values("name").aggregate("x").cap("x")',
+        // a `by()` body ending in a FILTER: the member is the value only where the predicate holds
+        // (`is(P.gt(29))` NULLs it otherwise), which the productivity filter then drops (default) or
+        // keeps as a null (ProductiveByStrategy). Generalizes to every by() host through `valueRun`.
+        'g.V().aggregate("x").by(__.values("age").is(P.gt(29))).cap("x")',
+        'g.withStrategies(ProductiveByStrategy).V().aggregate("x").by(__.values("age").is(P.gt(29))).cap("x")',
       ]) {
         expect(read(gremlin).kind, gremlin).toBe('read');
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
