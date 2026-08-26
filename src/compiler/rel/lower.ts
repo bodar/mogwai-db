@@ -24,6 +24,7 @@ import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/typ
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
+import { contentDemand } from '../ir/content-demand.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
@@ -3378,22 +3379,13 @@ function detachedTail(
   // genuine wall, not merely unrouted.
   // Only a SUBGRAPH (adjacency + vertices landed) hands off — a homogeneous detached list has no live
   // graph to aggregate a `group().by(__.out()…)` over, and its movement must keep failing closed with
-  // the barrier message rather than reaching a half-present `BoundGraph`.
-  if (!subgraph || steps.slice(from).some((s) => BOUND_HANDOFF_DENY.has(s.name))) return null;
+  // the barrier message rather than reaching a half-present `BoundGraph`. The decline set
+  // (`BOUND_HANDOFF_DENY`: writes — a detached snapshot is immutable — and element-bag reads that scan
+  // base tables by a foreign id) is owned by the ONE tail classifier (`contentDemand`, ir/content-demand.ts):
+  // the same fact a future fetch decision reads, so the two provably agree.
+  if (!subgraph || contentDemand(steps, from).handoffDenied) return null;
   return continueAs(seed, { kind: 'elements', elem }, steps, from, bulked, ctx, fresh, NO_ALIASES);
 }
-
-/** Steps a bound element stream may NOT hand off to the main fold with, for two DIFFERENT reasons:
- *  - **WRITES** (`MUTATING_STEPS`) — OUT OF SCOPE by design, not merely unrouted. A landed subgraph is a
- *    DETACHED snapshot, and a detached element is immutable (TinkerPop's `DetachedVertex` is "not
- *    traversable or mutable"); a write through it would mutate a local ephemeral copy that reaches
- *    nothing. Mutating the source graph is a separate federate command, not a write on this stream.
- *  - **element-bag / property reads** (`elementValueMap`, `propertyRelation`) — scan the base tables by
- *    id, which over a bound (foreign) id is a wrong answer; they decline UNTIL routed through `GraphSource`.
- *  Both fail closed here rather than reaching a half-present read. */
-const BOUND_HANDOFF_DENY: ReadonlySet<string> = new Set<string>([
-  ...MUTATING_STEPS, 'propertyMap',
-]);
 
 function elementTail(
   seed: Rel, elem0: Elem, steps: readonly IRStep[], from: number, bulked0: boolean,
