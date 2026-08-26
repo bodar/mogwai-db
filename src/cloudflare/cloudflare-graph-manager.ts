@@ -1,4 +1,4 @@
-import type { GraphManager, GraphInfo, RemoteExecutor, ForeignRow } from '../api.ts';
+import type { GraphManager, GraphInfo, RemoteExecutor, ForeignResult } from '../api.ts';
 import { type Framed } from '../execute.ts';
 import type { TypeNode } from '../gremlin/types.ts';
 import { compilePlan } from '../compiler/compiler.ts';
@@ -8,7 +8,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import type { Compiled } from '../sql/kernel/render.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
 import type { GraphDatabase } from './graph-store-do.ts';
-import { rpcUnwrap, type RpcResult } from './rpc.ts';
+import { rpcUnwrap, type RpcFailure, type RpcResult } from './rpc.ts';
 
 /** The edge-side executor for one DO: compile (and render) at the Worker (edge-compilation), then run
  *  the plan on the DO. A non-segment plan (read or write) ships to `runFramed`; a federation segment is
@@ -55,10 +55,14 @@ class EdgeExecutor implements RemoteExecutor {
     return this.runOnDo(gremlin, params, paramTypes);
   }
 
-  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignRow[]> {
+  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignResult> {
     // A federated hop INTO a sibling: ships the string; the sibling DO runs its own (possibly nested)
     // traversal. Only the TOP loop is Worker-driven — a deeper hop is a self-contained sibling request.
-    return rpcUnwrap(await this.stub.raw(gremlin, params, depth) as RpcResult<ForeignRow[]>);
+    // The DO stub's RPC-proxy type expands `ForeignResult`'s nested unions past tsc's instantiation
+    // depth limit (a Cloudflare-types limitation, not ours), so this ONE call goes through `any` and we
+    // re-assert the real result shape — `rpcUnwrap` needs only the failure-brand discriminant.
+    const r = await (this.stub as any).raw(gremlin, params, depth) as ForeignResult | RpcFailure;
+    return rpcUnwrap<ForeignResult>(r);
   }
 
   /** Run a barrier segment's head on the DO — the one store touch a Worker-driven loop needs mid-flight. */

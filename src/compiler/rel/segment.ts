@@ -2,9 +2,10 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
-import { contentDemand } from '../ir/content-demand.ts';
+import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
+import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
+import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
@@ -57,6 +58,10 @@ interface Barrier {
    *  `barrier_state` (scope = node1, id = node2, channel 0 = score) and the resume frames each pair as a
    *  MAP — a stream of `{key1, key2, valueKey}` maps, a new output shape. */
   readonly pairs?: PairSpec;
+  /** Where the LOCAL suffix resumes: `at + 1`, PLUS any tail steps a pushdown pushed to the sibling
+   *  (win 2a). The resume lowers from here; `site.pushdown` (if present) carries the synthesized sibling
+   *  Gremlin `apply` runs and whether it `reduces` (a scalar result). */
+  readonly suffixFrom: number;
 }
 
 /** What a segment needs from the enclosing request — the same settled values the RelIR route takes,
@@ -78,6 +83,27 @@ export interface SegmentRequest {
  * that throw is the ANSWER rather than a decline (§6·5): the user asked for something the service
  * refuses, and swallowing it would hand the traversal on as if it were merely uncovered.
  */
+/** The pushdown inferred for the ARG-LESS federate form, or `null`. Only fires when the barrier is
+ *  federate AND the user gave NO `traversal` arg (an explicit arg means they drew the boundary — no
+ *  inference). Synthesizes the sibling Gremlin from the pushable prefix's OWN SOURCE TEXT: each step
+ *  carries its `ctx` (the ANTLR parse node), so `ctx.getText()` gives back re-parseable Gremlin
+ *  (`V()`, `hasLabel("person")`, `has("age",gt(x))` — a bound `$x` stays a param the sibling resolves),
+ *  re-rooted at `g`. No un-parser (locked decision). `null` when nothing pushes (an empty prefix). */
+function inferredPushdown(
+  steps: readonly IRStep[], at: number, spec: CallSpec, params: Record<string, any>,
+): { siblingGremlin: string; prefixLength: number; reduces: boolean } | null {
+  if (spec.serviceName !== FEDERATE_SERVICE || spec.params.traversal != null) return null;
+  const prefix = pushableTailPrefix(steps, at, params);
+  if (prefix.length === 0) return null;
+  const pushed = steps.slice(at + 1, at + 1 + prefix.length);
+  const siblingGremlin = 'g.' + pushed.map((s) => s.ctx.getText()).join('.');
+  // A source-rooted sibling query (the first pushed step is the tail's `.V()`/`.E()` re-source) — the
+  // same shape the explicit `traversal` arg must have. A tail that does not re-source cannot be pushed as
+  // a source query, so it declines to push (stays local) rather than synthesize an unrooted `g.…`.
+  if (!siblingGremlin.startsWith('g.V(') && !siblingGremlin.startsWith('g.E(')) return null;
+  return { siblingGremlin, prefixLength: prefix.length, reduces: prefix.reduces };
+}
+
 function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier | null {
   for (let at = 0; at < steps.length; at++) {
     const step = steps[at]!;
@@ -89,19 +115,25 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // and a name that resolves to nothing is a question about the traversal's own text.
     const service = request.services.get(spec.serviceName);
     if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
-    // The local tail AFTER this barrier is a fact ABOUT this call site — the same category as
-    // `federationDepth` (known once, at plan time, from where the call sits in the chain), not a
-    // per-execution value and not a user param. So its content demand travels on `CallSite.tailDemand`,
-    // the structure that means "facts about this call site" — a service that shapes its fetch (federate's
-    // endpoint hop) reads it; one that does not ignores it. It is NOT threaded through `params` (a user
-    // channel) nor captured incidentally by the `apply` closure.
+    // PUSHDOWN (win 2a): the ARG-LESS federate form (`call(federate,{graph}).V()…`, no `traversal` arg)
+    // INFERS what runs on the sibling. `pushableTailPrefix` finds the longest remote-safe prefix of the
+    // tail; the sibling Gremlin is that prefix's OWN SOURCE TEXT (`ctx.getText()` per step — no un-parser,
+    // per the locked decision), re-rooted at `g`. When the user gave an explicit `traversal`, they drew
+    // the boundary and nothing is inferred (`pushdown` stays undefined). The LOCAL demand + resume then
+    // run over the SUFFIX, not the whole tail.
+    const pushdown = inferredPushdown(steps, at, spec, request.params);
+    const suffixFrom = at + 1 + (pushdown?.prefixLength ?? 0);
+    // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as
+    // `federationDepth`. It travels on `CallSite.tailDemand`/`CallSite.pushdown`, the structure that means
+    // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
-      tailDemand: contentDemand(steps, at + 1),
+      tailDemand: contentDemand(steps, suffixFrom),
+      pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path, pairs: contribution.pairs };
+    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path, pairs: contribution.pairs, suffixFrom };
   }
   return null;
 }
@@ -215,7 +247,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     applySync: barrier.applySync,
     residency: barrier.residency,
     resume: (out: BarrierOutput, headRows: readonly BarrierInput[]): Plan =>
-      resumed(steps, barrier, request, out as ForeignRow[], {
+      resumed(steps, barrier, request, out, {
         values: headRows.map((row) => row.injectedValue), injection,
       }),
   };
@@ -359,28 +391,34 @@ function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: Segm
     apply: barrier.apply,
     applySync: barrier.applySync,
     residency: barrier.residency,
-    resume: (out: BarrierOutput): Plan => resumed(steps, barrier, request, out as ForeignRow[]),
+    resume: (out: BarrierOutput): Plan => resumed(steps, barrier, request, out),
   };
 }
 
 /** The half of both forms that is the same: land what came back, continue the chain, and refuse
- *  clearly if the rest of it needs something a detached element does not have. */
+ *  clearly if the rest of it needs something a detached element does not have. A PUSHED-DOWN REDUCER
+ *  returns a `barrier-scalar` instead of rows — the reduction already ran on the sibling and its typed
+ *  value is the whole result, so frame it directly (`lowerScalarResume`), no tail to continue. */
 function resumed(
-  steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest, foreign: ForeignRow[],
+  steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest, out: BarrierOutput,
   rejoin?: { readonly values: readonly unknown[]; readonly injection: InjectionKind | undefined },
 ): Plan {
+  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-scalar')
+    return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
+  const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
   // (`raw()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the
   // arbitrary-but-total answer there, and it is unobservable: a zero-row relation frames as no
   // traversers whichever tuple it declares.
   const elem: Elem = foreign[0]?.kind ?? 'vertex';
-  const lowered = lowerForeignResume(foreign, elem, steps, barrier.at + 1, request.lowering, rejoin);
+  // Resume from the SUFFIX — after any prefix a pushdown pushed to the sibling (win 2a), else `at + 1`.
+  const lowered = lowerForeignResume(foreign, elem, steps, barrier.suffixFrom, request.lowering, rejoin);
   // A RESUME CANNOT DECLINE — there is no other route to hand the traversal to, and the rows have
   // already been fetched. So an unsupported step after a barrier is an ERROR naming the step, not a
   // silent different answer: a detached element has no live adjacency, and the fix is to push the step
   // into the sub-traversal the barrier runs on the far side.
   if (!lowered) {
-    const next = steps[barrier.at + 1];
+    const next = steps[barrier.suffixFrom];
     throw new Error(
       next
         ? `${next.name}() is not supported after a barrier call() — its results are DETACHED references `

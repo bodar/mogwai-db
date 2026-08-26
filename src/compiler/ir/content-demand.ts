@@ -1,6 +1,7 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, REDUCERS } from './step.ts';
+import { labelReads, labelsBoundBefore } from './labels.ts';
 
 // ---------- content demand: what a POST-BARRIER tail consumes from the fetched result ----------
 //
@@ -43,9 +44,6 @@ export interface ContentDemand {
    *  compile-time literal. `'all'` is the conservative default; a bare key set is what projection
    *  pushdown may narrow the fetch to. */
   readonly keys: ReadonlySet<string> | 'all';
-  /** Does the tail END in a bare reducer (`count`/`sum`/… global, no arg)? Then the reduction itself may
-   *  push to the sibling and only a scalar need cross. */
-  readonly terminalReduction: boolean;
   /** A step the tail may NOT hand off to the main fold over a bound graph — a WRITE (out of scope: a
    *  detached snapshot is immutable) or an element-bag read not yet routed through `GraphSource`
    *  (`propertyMap`). Present here so the ONE classifier owns the decline set `detachedTail` reads. */
@@ -121,14 +119,63 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
   // `reachesElements`, the tail needs only cardinality/identity — no payload fetch. A bare reducer /
   // dedup does not set it, so this is exactly the "count/dedup only" case.
 
-  const last = tail[tail.length - 1];
-  const terminalReduction = !!last && REDUCERS.has(last.name) && argValues(last).length === 0 && !isLocalScope(last);
-
   return {
     reachesElements,
     reachesAdjacency,
     keys: keysAll ? 'all' : keys,
-    terminalReduction,
     handoffDenied,
   };
+}
+
+// ---------- pushdown: split the post-barrier tail into a REMOTE prefix and a LOCAL suffix ----------
+//
+// For the ARG-LESS federate form (`g.call(mogwai.graph.federate, {graph}).V()…` — no `traversal` arg,
+// win 2a in `docs/2026-08-26-federate-pushdown-design.md`), the whole tail after the barrier is a
+// CANDIDATE to run on the sibling. Pushdown finds the longest PREFIX of the tail that is remote-safe and
+// hands it to the sibling; the rest stays local. This is Calcite's convention/boundary model
+// (`vendor/calcite`), specialized: because the sibling runs the SAME engine, pushing is always cheaper
+// and almost every step pushes, so the "maximal cut" is a simple prefix walk — no cost-based planner.
+//
+// A step ENDS the pushable prefix (is LOCAL-DEPENDENT) when it needs LOCAL state the sibling never had.
+// Optimistic blocklist — push unless proven local:
+//   1. it READS a label bound BEFORE the barrier — a backtrack across the boundary
+//      (`as('x') … call(federate) … where(eq('x'))`). A backtrack CONTAINED in the prefix pushes fine
+//      (the sibling binds and reads its own `as('a')`), which falls out because `labelsBoundBefore` at the
+//      barrier position is barrier-CLEARED, so it holds only the PRE-barrier binds.
+//   2. it is a WRITE (`MUTATING_STEPS`) — a detached snapshot is immutable; a write lands nothing.
+//   3. it is a nested/second barrier `call()` — its own boundary; treat conservatively as local.
+//   4. `labelReads(...).all` — a `path()`-family or unparseable body that observes EVERY label.
+
+/** The reducing steps whose presence as the LAST pushed step means the sibling returns a SCALAR (so the
+ *  resume frames a value, not elements). `REDUCERS` = count + the numeric reducers. */
+const isBareReducer = (s: IRStep): boolean =>
+  REDUCERS.has(s.name) && argValues(s).length === 0 && !isLocalScope(s);
+
+export interface PushablePrefix {
+  /** How many tail steps (from `barrier.at + 1`) run on the SIBLING. 0 = nothing pushes. */
+  readonly length: number;
+  /** Does the pushed prefix END in a bare reducer? Then the sibling returns a SCALAR. */
+  readonly reduces: boolean;
+}
+
+/** The longest remote-safe prefix of the tail `steps.slice(barrier + 1)`. `params` resolves label reads
+ *  faithfully (`labels.ts`). A step that is local-dependent (see above) and everything after it stays
+ *  local. Pure `Step[]` reasoning — the correct layer for a plan-time boundary (`src/compiler/CLAUDE.md`). */
+export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, params: Record<string, any>): PushablePrefix {
+  const from = barrier + 1;
+  // Labels bound before the barrier — a prefix step reading one of these backtracks ACROSS the boundary
+  // and cannot push. `labelsBoundBefore` clears at the barrier, so this is exactly the pre-barrier set.
+  const preBarrier = labelsBoundBefore(steps, from, params);
+  let length = 0;
+  for (let i = from; i < steps.length; i++) {
+    const step = steps[i]!;
+    if (MUTATING_STEPS.has(step.name)) break;      // (2) writes stay local
+    if (step.name === 'call') break;               // (3) a nested/second barrier — conservative boundary
+    const reads = labelReads([step], params);
+    if (reads.all) break;                          // (4) path-family / unparseable — observes all labels
+    if (preBarrier.size && [...reads.labels].some((l) => preBarrier.has(l))) break; // (1) cross-boundary backtrack
+    length++;
+  }
+  const last = length > 0 ? steps[from + length - 1]! : undefined;
+  return { length, reduces: !!last && isBareReducer(last) };
 }

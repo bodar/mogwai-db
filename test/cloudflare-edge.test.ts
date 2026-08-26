@@ -5,7 +5,7 @@ import { compilePlan, type Executable } from '../src/compiler/compiler.ts';
 import { createAppScope, createCompileScope } from '../src/scopes.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { frameResolved, readSegmentHead, type Framed } from '../src/execute.ts';
-import type { ForeignRow } from '../src/api.ts';
+import type { ForeignResult, ForeignRow } from '../src/api.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { seededStore } from './support/harness.ts';
@@ -33,7 +33,7 @@ function fakeManager(store: GraphStore, siblingRows: ForeignRow[] = []) {
       calls.framed++; calls.lastGremlin = gremlin;
       return []; // routing sentinel — the real DO compiles here; we only assert the path was taken
     },
-    raw: async (): Promise<ForeignRow[]> => { calls.raw++; return siblingRows; },
+    raw: async (): Promise<ForeignResult> => { calls.raw++; return { kind: 'elements', rows: siblingRows }; },
   };
   const ns = { getByName: () => stub } as unknown as DurableObjectNamespace<GraphDatabase>;
   return { mgr: new CloudflareGraphManager(ns), calls };

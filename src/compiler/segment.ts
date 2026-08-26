@@ -23,7 +23,7 @@
 // description of a plan, importing only leaf types, never the store / framing / engine.
 
 import type { Compiled, Executable } from '../sql/kernel/render.ts';
-import type { ForeignRow } from '../api.ts';
+import type { ForeignResult } from '../api.ts';
 import type { BarrierInput, BarrierOutput, BarrierResidency, CallParams } from '../services/spi/types.ts';
 
 /** The capability a barrier's `apply` needs to reach OTHER graphs: get an executor for a graph
@@ -31,7 +31,7 @@ import type { BarrierInput, BarrierOutput, BarrierResidency, CallParams } from '
  *  the API's Executor/GraphManager — the GraphManager structurally satisfies it (it IS the
  *  executor factory). Kept here (not imported from api.ts) so segment.ts stays a leaf. */
 export interface FederationSource {
-  executor(id: string): { raw(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, unknown>): Promise<ForeignRow[]> };
+  executor(id: string): { raw(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, unknown>): Promise<ForeignResult> };
 }
 
 // ---------- a barrier is SYNC or ASYNC, and the distinction is a CORRECTNESS contract ----------

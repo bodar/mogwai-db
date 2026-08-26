@@ -20,7 +20,7 @@ import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPa
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, flatType, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
@@ -28,7 +28,7 @@ import { contentDemand } from '../ir/content-demand.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, elementCols, eq, jsonEachSet,
+    and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
     payloadCols, propertyKeyArgs, renumber,
     typedNode, typeOf, withPayload,
@@ -2872,6 +2872,25 @@ export function lowerForeignResume(
     });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
   return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+}
+
+/**
+ * THE SCALAR RESUME — a pushed-down federate reducer's tail. The reducer (`count`/`sum`/…) already ran
+ * on the SIBLING and its one typed `{t,v}` value crossed back (`BarrierScalar`); the reduction was the
+ * TERMINAL step, so there is nothing left to compose — this is a pure framing of one value. The `{t,v}`
+ * node is emitted as a single `Values` row in the `NODE_COL`, framed by the `typedNode` shape's ONE rule
+ * (`frameTypedNode`), so the scalar's Gremlin type (a `long` for count, the reducer's own for sum/max)
+ * survives EXACTLY — a bare number would erase Long-vs-Integer. A null value (SUM over an empty stream)
+ * frames as no result, matching TinkerPop's empty aggregation. No chain, no `lowered()`: a terminal
+ * 1-row plan, `nameBindings` to a `Plan`. */
+export function lowerScalarResume(value: ValueNode): RelLowering {
+  const fresh = minter();
+  const node: Expr = compilerText(JSON.stringify(value));
+  const rel = make.values({
+    id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
+    rows: [[jsonOf(node)]],
+  });
+  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 
 /**

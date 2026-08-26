@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo } from '../manager.ts';
-import type { GraphInfo, Executor, ForeignRow } from '../api.ts';
+import type { GraphInfo, Executor, ForeignResult } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
@@ -10,7 +10,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { R2IoStore } from './R2IoStore.ts';
-import { rpcTry, type RpcResult } from './rpc.ts';
+import { rpcTry, type RpcFailure, type RpcResult } from './rpc.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
@@ -105,10 +105,11 @@ export class GraphDatabase extends DurableObject<Env> {
     });
   }
 
-  /** Data-plane RPC: the INTERNAL raw-row path — a federated hop FROM a sibling DO lands here.
-   *  Returns detached ForeignRow[] (no GraphBinary; the client edge frames only the final
-   *  result). `depth` is the federation recursion depth of this hop (guarded in the service). */
-  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<RpcResult<ForeignRow[]>> {
+  /** Data-plane RPC: the INTERNAL raw-result path — a federated hop FROM a sibling DO lands here.
+   *  Returns a detached `ForeignResult` (no GraphBinary; the client edge frames only the final result) —
+   *  elements or a pushed-down reduced scalar. `depth` is the federation recursion depth of this hop
+   *  (guarded in the service). */
+  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignResult | RpcFailure> {
     return rpcTry(() => this.executor().raw(gremlin, params, depth));
   }
 

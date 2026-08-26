@@ -1,4 +1,4 @@
-import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
+import type { Executor as ExecutorApi, ForeignResult } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
@@ -784,14 +784,17 @@ export class Executor implements ExecutorApi {
     return [...frameResolved(this.store, plan)];
   }
 
-  /** The INTERNAL (non-GraphBinary) row projection — the raw-row transfer a federated hop uses
-   *  (a sibling's result crosses as decoded JS rows, framed to GraphBinary only at the CLIENT
-   *  edge; never encode→decode→re-encode). `depth` is MANDATORY: this hop's federation depth, so
-   *  a federated call can never forget to thread it (a nested federate hops at depth+1). The
-   *  federate contract is detached ELEMENT references, so the traversal MUST end vertex/edge — any
-   *  other terminal fails closed, not a silent different answer. props/src/tgt arrive in the shape
-   *  rowVertex/rowEdge read; propsOf parses the JSON props into the {t,v}-node object. */
-  async raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}): Promise<ForeignRow[]> {
+  /** The INTERNAL (non-GraphBinary) result transfer a federated hop uses (a sibling's result crosses as
+   *  decoded JS, framed to GraphBinary only at the CLIENT edge; never encode→decode→re-encode). `depth`
+   *  is MANDATORY: this hop's federation depth, so a federated call can never forget to thread it (a
+   *  nested federate hops at depth+1). Returns a `ForeignResult` tagged by the SIBLING'S shape: ELEMENTS
+   *  (vertex/edge detached references — props/src/tgt in the shape rowVertex/rowEdge read, `propsOf`
+   *  parsing the JSON props into {t,v} nodes), or a SCALAR for a pushed-down bare reducer
+   *  (count/sum/max/min/mean). A scalar crosses as a `{t,v}` `ValueNode` so its Gremlin type survives the
+   *  JSON transfer (a Long stays a Long) — `count`'s type is the plan's static `ScalarType`, the numeric
+   *  reducers' is the per-row `vt` column (a Gremlin vtype or a SQLite storage class, the same two the
+   *  local `scalar` framer resolves). Any OTHER terminal still fails closed — a clear query failure. */
+  async raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}): Promise<ForeignResult> {
     // DETACHED compile: a federated fetch lands the subgraph, so its element props carry the extra
     // facts a landed element needs to reconstruct a full detached form — property ids and meta-properties.
     const plan = await this.drive(gremlin, params, paramTypes, depth, true);
@@ -799,10 +802,21 @@ export class Executor implements ExecutorApi {
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     if (plan.shape.kind === 'vertex')
-      return rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) }));
+      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) })) };
     if (plan.shape.kind === 'edge')
-      return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) }));
-    throw new Error(`federated traversal must yield vertices or edges (detached references), not a ${plan.shape.kind} result`);
+      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) })) };
+    // A pushed-down bare reducer. `count()` is `value` (static ScalarType — a Long); sum/max/min/mean are
+    // `scalar` (per-row `vt`). One row over the whole stream; SUM of an empty stream is NULL → no value,
+    // which TinkerPop yields as an empty result, so carry a null scalar and let the resume frame nothing.
+    if (plan.shape.kind === 'value')
+      // `ValueType` is a subset of `CanonicalType` (`gremlin/types.ts`), so the static type IS the
+      // ValueNode `t` tag directly — no conversion. `count()` → `{t:'long', v}`, framed as a Long.
+      return { kind: 'scalar', value: { t: staticTypeOf(plan.shape.type) ?? null, v: rows[0]?.v ?? null } };
+    if (plan.shape.kind === 'scalar')
+      // The per-row `vt` is a Gremlin vtype (min/max's winner) OR a SQLite storage class (sum/mean) —
+      // the same two disjoint vocabularies `frameTypedNode`'s leaf resolves, so it re-frames exactly.
+      return { kind: 'scalar', value: { t: (rows[0]?.vt ?? null) as ValueNode['t'], v: rows[0]?.v ?? null } };
+    throw new Error(`federated traversal must yield vertices, edges, or a reduced scalar, not a ${plan.shape.kind} result`);
   }
 
   /** Compile SYNCHRONOUSLY and reject a barrier. A non-federated traversal is ONE SQL statement —

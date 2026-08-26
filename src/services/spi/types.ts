@@ -7,6 +7,7 @@ import type { Elem } from '../../compiler/elem.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
 import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
+import type { ValueNode } from '../../gremlin/types.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -79,6 +80,18 @@ export interface CallSite {
    *  Optional so a caller that plans a barrier WITHOUT a segment tail (a test, a future non-segment path)
    *  need not synthesize one — absent = "assume the tail needs everything", the safe over-fetch. */
   readonly tailDemand?: ContentDemand;
+  /** PUSHDOWN — present only for the ARG-LESS federate form (`call(federate,{graph}).V()…`, win 2a),
+   *  where the compiler INFERS what runs on the sibling instead of the user supplying a `traversal` arg.
+   *  A fact about this call site (the tail is right there in the chain): the sibling Gremlin SYNTHESIZED
+   *  from the pushable prefix of the local tail (`pushableTailPrefix` + the steps' own source text), and
+   *  where the LOCAL suffix resumes. `apply` runs `siblingGremlin`; the resume lowers from `suffixFrom`.
+   *  Absent when the user gave an explicit `traversal` (they drew the boundary — no push) or when nothing
+   *  pushes. `reduces` = the pushed prefix ends in a reducer, so the sibling returns a SCALAR. */
+  readonly pushdown?: {
+    readonly siblingGremlin: string;
+    readonly suffixFrom: number;
+    readonly reduces: boolean;
+  };
 }
 
 /**
@@ -155,10 +168,21 @@ export interface BarrierRelation {
   readonly round: number;
 }
 
-/** What a barrier's `apply` may return: detached elements (`federate`/`io`) OR a keyed relation (an
- *  OLAP algorithm). The resume that consumes it is chosen at PLAN time by the presence of `decorate`
- *  on the barrier contribution, so the two never mismatch. */
-export type BarrierOutput = readonly ForeignRow[] | BarrierRelation;
+/** A pushed-down REDUCED SCALAR — a bare reducer (`count`/`sum`/…) evaluated on the far side of a
+ *  federate barrier, crossing as a typed `{t,v}` `ValueNode` so its Gremlin type survives (a Long stays
+ *  a Long). The resume frames it as a one-row `RelFraming.scalar`. A separate `BarrierOutput` arm from
+ *  the element/relation ones because it is neither detached elements nor a keyed relation — it is the
+ *  whole stream collapsed to one typed value (`docs/2026-08-26-federate-pushdown-design.md`, phase 2). */
+export interface BarrierScalar {
+  readonly kind: 'barrier-scalar';
+  readonly value: ValueNode;
+}
+
+/** What a barrier's `apply` may return: detached elements (`federate`/`io`), a keyed relation (an OLAP
+ *  algorithm), or a pushed-down reduced scalar (a federate reducer). The resume that consumes it is
+ *  chosen at PLAN time (contribution flags for the relation; the returned tag for a scalar), so the two
+ *  never mismatch. */
+export type BarrierOutput = readonly ForeignRow[] | BarrierRelation | BarrierScalar;
 
 /** A DECORATE barrier's element-preserving descriptor. When present on a barrier contribution, the
  *  segment builds a DECORATE resume: it re-lowers the LIVE element prefix and reads the barrier's

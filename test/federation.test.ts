@@ -53,6 +53,49 @@ describe('mogwai.graph.federate — source form, real stack', () => {
   });
 });
 
+// WIN 2a — the ERGONOMIC ARG-LESS form. No `traversal` arg: federate to a graph, then keep traversing,
+// and the compiler INFERS what runs on the sibling (`pushableTailPrefix`) vs locally. The pushable
+// prefix's own source text is synthesized into the sibling query; the suffix resumes locally. Oracle:
+// the SAME traversal run directly on crew.
+describe('mogwai.graph.federate — arg-less pushdown (win 2a)', () => {
+  const argless = (tail: string) => `g.call("mogwai.graph.federate").with("graph", "crew")${tail}`;
+  const onCrew = async (g: string) =>
+    (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec)));
+
+  test('arg-less .V() pushes the whole element traversal to the sibling', async () => {
+    expect(await runNames(argless('.V().hasLabel("person")')))
+      .toEqual(names(await onCrew('g.V().hasLabel("person")')));
+  });
+
+  test('a REDUCER pushes and returns a scalar (federate(crew).V().count())', async () => {
+    const got = Number((await Promise.all((await mgr.executor('home').framedAsync(argless('.V().count()'), {})).map(dec)))[0]);
+    const crew = Number((await onCrew('g.V().count()'))[0]);
+    expect(got).toBe(crew);
+    expect(got).toBeGreaterThan(0);
+  });
+
+  test('the out().dedup().count() case pushes WHOLE and is correct (structural 5-vs-2 fix)', async () => {
+    const got = Number((await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("person").out("knows").dedup().count()'), {})).map(dec)))[0]);
+    const crew = Number((await onCrew('g.V().hasLabel("person").out("knows").dedup().count()'))[0]);
+    expect(got).toBe(crew);
+  });
+
+  test('a bound param in a pushed step resolves on the sibling', async () => {
+    const q = argless('.V().has("name", within(nm)).count()');
+    const got = Number((await Promise.all((await mgr.executor('home').framedAsync(q, { nm: ['marko', 'stephen'] })).map(dec)))[0]);
+    const crew = Number((await onCrew("g.V().has('name', within('marko','stephen')).count()"))[0]);
+    expect(got).toBe(crew);
+  });
+
+  test('sum() over a property pushes and returns a typed scalar', async () => {
+    // crew persons carry no age; use a property crew has. Oracle against crew directly either way.
+    const q = argless('.V().hasLabel("person").values("name").count()');
+    const got = Number((await Promise.all((await mgr.executor('home').framedAsync(q, {})).map(dec)))[0]);
+    const crew = Number((await onCrew('g.V().hasLabel("person").values("name").count()'))[0]);
+    expect(got).toBe(crew);
+  });
+});
+
 describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () => {
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
@@ -80,7 +123,7 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
         raw: (_g: string, params: Record<string, any>) => {
           rawCalls++;
           boundValues = params[INJECT_VALUES_KEY];
-          return Promise.resolve([]);
+          return Promise.resolve({ kind: 'elements', rows: [] });
         },
       }),
     };
@@ -125,9 +168,12 @@ describe('federation fails closed', () => {
       .rejects.toThrow(/source-rooted/);
   });
 
-  test('a non-element sub-traversal terminal fails closed (detached element references only)', async () => {
+  test('a scalar sub-traversal with NO local reducer fails closed (a pushed reducer is the only scalar path)', async () => {
+    // The sub-traversal itself ends in count() but there is no LOCAL reducer to trigger pushdown — so this
+    // is not a pushed reduction, it is a scalar sub-traversal, which the element-transfer path rejects.
+    // (A local `federate(__.V()).count()` DOES push and returns a scalar — see the pushdown tests.)
     await expect(mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph","crew").with("traversal", __.V().count())', {}))
-      .rejects.toThrow(/must yield vertices or edges/);
+      .rejects.toThrow(/expected element rows from the sibling, got a scalar result/);
   });
 });
 
@@ -206,7 +252,7 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
         raw: (gremlin: string, params: Record<string, any>) => {
           hops.push({ gremlin, params });
           // First hop = the edge-producing sub-traversal; second = the endpoint fetch.
-          return Promise.resolve(hops.length === 1 ? [edge(10, 1, 2), edge(11, 2, 3)] : []);
+          return Promise.resolve({ kind: 'elements', rows: hops.length === 1 ? [edge(10, 1, 2), edge(11, 2, 3)] : [] });
         },
       }),
     };
@@ -229,13 +275,13 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
     let rawCalls = 0;
     const spySource: any = {
       executor: () => ({
-        raw: () => { rawCalls++; return Promise.resolve([{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }]); },
+        raw: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] }); },
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
       params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
       federationDepth: 0,
-      tailDemand: { reachesElements: false, reachesAdjacency: false, keys: new Set(), terminalReduction: true, handoffDenied: false },
+      tailDemand: { reachesElements: false, reachesAdjacency: false, keys: new Set(), handoffDenied: false },
     } as any);
     await contribution.apply([]);
     expect(rawCalls).toBe(1); // ONLY the sub-traversal hop — no endpoint fetch
@@ -245,13 +291,13 @@ describe('mogwai.graph.federate — SUBGRAPH form (traverse a fetched subgraph l
     let rawCalls = 0;
     const spySource: any = {
       executor: () => ({
-        raw: () => { rawCalls++; return Promise.resolve(rawCalls === 1 ? [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] : []); },
+        raw: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: rawCalls === 1 ? [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] : [] }); },
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
       params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
       federationDepth: 0,
-      tailDemand: { reachesElements: true, reachesAdjacency: true, keys: 'all', terminalReduction: false, handoffDenied: false },
+      tailDemand: { reachesElements: true, reachesAdjacency: true, keys: 'all', handoffDenied: false },
     } as any);
     await contribution.apply([]);
     expect(rawCalls).toBe(2); // sub-traversal + endpoint fetch

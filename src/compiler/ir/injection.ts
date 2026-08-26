@@ -24,6 +24,10 @@
  *  so it can never collide with a user bound-param name. */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
 
+/** The federate service name — a leaf constant so the segment planner can recognize a federate barrier
+ *  (to infer pushdown for the arg-less form) without importing the service impl. */
+export const FEDERATE_SERVICE = 'mogwai.graph.federate';
+
 /** The reserved params key under which a `.with("subgraph", true)` federate hop supplies the DISTINCT
  *  endpoint ids to fetch as a SECOND sibling hop (`g.V(_mogwai_endpoints)`). A plain bound-collection id
  *  seek — the sibling's `elementScan` explodes it as ONE `json_each` bind for ANY size, so the id set

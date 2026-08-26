@@ -15,16 +15,18 @@
 // diagnosable before stops being diagnosable. Genuine platform faults (a storage error, an OOM)
 // still throw for real, because they are not raised through this path.
 import type { Framed } from '../execute.ts';
-import type { ForeignRow } from '../api.ts';
+import type { ForeignResult } from '../api.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
 
-/** The data-plane payloads that may cross a DO RPC. `Framed[]` (framed()/runFramed()), `ForeignRow[]`
- *  (raw(), a federated hop), and `BarrierInput[]` (readHead(), Worker-driven federation §4·2). A new
- *  RPC that returns something else must add its payload here — the bound is deliberately closed. */
-type RpcPayload = Framed[] | ForeignRow[] | BarrierInput[];
+/** The data-plane payloads that may cross a DO RPC. `Framed[]` (framed()/runFramed()), `ForeignResult`
+ *  (raw(), a federated hop — a shape-tagged result, elements or a reduced scalar), and `BarrierInput[]`
+ *  (readHead(), Worker-driven federation §4·2). A new RPC that returns something else must add its
+ *  payload here — the bound is deliberately closed. */
+type RpcPayload = Framed[] | ForeignResult | BarrierInput[];
 
-/** A failure crossing a DO RPC boundary as data. The brand key is deliberately obscure: the
- *  success arms are arrays, so no legitimate payload can be mistaken for one. */
+/** A failure crossing a DO RPC boundary as data. The brand key (`__rpcError`) is what `rpcUnwrap`
+ *  discriminates on — a success payload never carries it (an array cannot, and `ForeignResult`'s
+ *  `kind` tag is `'elements'`/`'scalar'`, never `__rpcError`). */
 export interface RpcFailure {
   readonly __rpcError: string;
   readonly stack?: string;
@@ -45,9 +47,11 @@ export async function rpcTry<T extends RpcPayload>(body: () => Promise<T>): Prom
   }
 }
 
-/** The caller half: rethrow what {@link rpcTry} captured, DO-side stack and all. */
+/** The caller half: rethrow what {@link rpcTry} captured, DO-side stack and all. Discriminate on the
+ *  failure BRAND, not on shape — a success payload may now be a non-array object (`ForeignResult`), so
+ *  "is it an array?" no longer separates success from failure; only `__rpcError` does. */
 export function rpcUnwrap<T extends RpcPayload>(r: RpcResult<T>): T {
-  if (Array.isArray(r)) return r;
+  if (!(r != null && typeof r === 'object' && '__rpcError' in r)) return r as T;
   const e = new Error(r.__rpcError);
   if (r.stack) e.stack = r.stack;
   throw e;

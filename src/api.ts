@@ -13,7 +13,7 @@
 // file is "how you WIRE and DRIVE the system"; the SPI is "how you AUTHOR a service."
 
 import type { Framed } from './execute.ts';
-import type { TypeNode } from './gremlin/types.ts';
+import type { TypeNode, ValueNode } from './gremlin/types.ts';
 
 // ---- storage transport ----
 
@@ -154,6 +154,20 @@ export type ForeignRow =
   | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly labels: readonly string[]; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown }
   | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown };
 
+/** THE SIBLING'S RESULT, transferred back over a federated hop — ONE operation ("run remotely, return
+ *  the result"), tagged by the SHAPE the sibling produced. `raw()` used to return `ForeignRow[]` bare,
+ *  which was only ever the ELEMENT shape; a pushed-down reducer (`federate(…).count()`) produces a
+ *  SCALAR, so the result shape belongs IN the transferred value, not in the method name. It grows one arm
+ *  per shape the federation learns to push (a list, a map, a record next), switched TOTALLY — the same
+ *  fail-closed tagged-union discipline as `BarrierOutput`/`Shape` (`docs/2026-08-26-federate-pushdown-design.md`).
+ *
+ *  A scalar crosses as a `{t,v}` `ValueNode` (`gremlin/types.ts`) — the SAME typed envelope element props
+ *  already use — so its Gremlin type (Long vs Integer, a stored vtype) survives the JSON transfer and
+ *  re-frames EXACTLY via `frameTypedNode`. A bare JSON number would silently erase Long-vs-Integer. */
+export type ForeignResult =
+  | { readonly kind: 'elements'; readonly rows: readonly ForeignRow[] }
+  | { readonly kind: 'scalar'; readonly value: ValueNode };
+
 // ---- execution ----
 
 /** A per-GRAPH executor: compile + run a traversal against one graph. All methods share ONE
@@ -176,7 +190,7 @@ export interface RemoteExecutor {
   framedAsync(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]>;
   /** Async detached rows — the internal federated-transfer hop. `depth` (MANDATORY) is this hop's
    *  federation depth, so a federated call can never forget to thread it. */
-  raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes?: Record<string, TypeNode>): Promise<ForeignRow[]>;
+  raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes?: Record<string, TypeNode>): Promise<ForeignResult>;
 }
 
 /** A LOCAL-store executor: the async surface PLUS the sync fast path. The sync methods pay no

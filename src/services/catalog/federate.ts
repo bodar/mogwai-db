@@ -1,5 +1,5 @@
-import type { Service, CallParams } from '../spi/types.ts';
-import type { ForeignRow } from '../../api.ts';
+import type { Service, CallParams, BarrierOutput } from '../spi/types.ts';
+import type { ForeignResult, ForeignRow } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
@@ -76,14 +76,24 @@ const fetchEndpoints = (params: CallParams, tailDemand: ContentDemand | undefine
  * the mid-traversal value injection below uses, and the base-graph `V($ids)` path (`source.ts`).
  */
 async function withEndpoints(
-  ex: { raw(g: string, p: Record<string, unknown>, d: number): Promise<ForeignRow[]> },
-  edges: readonly ForeignRow[], depth: number,
+  ex: FederationExecutor, edges: readonly ForeignRow[], depth: number,
 ): Promise<ForeignRow[]> {
   const ids = [...new Set(edges.flatMap((e) => (e.kind === 'edge' ? [e.src, e.tgt] : [])))];
   if (ids.length === 0) return [...edges];
-  const vertices = await ex.raw(`g.V(${ENDPOINT_IDS_KEY})`, { [ENDPOINT_IDS_KEY]: ids }, depth + 1);
+  // The endpoint hop is always an ELEMENT fetch (`g.V(<ids>)`), so its result is the elements arm.
+  const vertices = elementsOf(await ex.raw(`g.V(${ENDPOINT_IDS_KEY})`, { [ENDPOINT_IDS_KEY]: ids }, depth + 1));
   return [...edges, ...vertices];
 }
+
+type FederationExecutor = { raw(g: string, p: Record<string, unknown>, d: number): Promise<ForeignResult> };
+
+/** The elements arm of a `ForeignResult`. A hop this helper drives is always element-shaped (the
+ *  sub-traversal ends vertex/edge, or is the `g.V(<ids>)` endpoint fetch), so a scalar here is a
+ *  contract violation, not a user input — fail closed rather than mis-frame. */
+const elementsOf = (r: ForeignResult): readonly ForeignRow[] => {
+  if (r.kind !== 'elements') throw new Error(`mogwai.graph.federate: expected element rows from the sibling, got a ${r.kind} result`);
+  return r.rows;
+};
 
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
@@ -95,31 +105,47 @@ export const createFederateService = (source: FederationSource | undefined): Ser
   type: 'barrier',
   describeParams: () => ({
     graph: 'string — the sibling graph id to run the sub-traversal on',
-    traversal: 'a nested __.V()… sub-traversal (or a rooted Gremlin string) to run on the sibling',
+    traversal: 'OPTIONAL — a nested __.V()… sub-traversal to run on the sibling (you draw the boundary). '
+      + 'OMIT it to just keep traversing after the call() — the compiler infers what runs on the sibling',
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, federationDepth: depth, tailDemand }) => ({
+  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
     // FederationSource, never the store — which is the fail-closed half of that residency.
     residency: 'worker',
-    apply: async (rows: readonly ForeignRow[]): Promise<ForeignRow[]> => {
+    apply: async (rows: readonly ForeignRow[]): Promise<BarrierOutput> => {
       // Whether the subgraph endpoint hop pays off — decided ONCE here from the call-site tail demand
       // (a typed dependency of `resolve`), captured by `apply` as a plain value, not smuggled via params.
       const wantEndpoints = fetchEndpoints(params, tailDemand);
       const graph = graphOf(params);
       guardFederationDepth(depth + 1, graph);
-      const gremlin = traversalOf(params);
+      // The sibling Gremlin: either the user's explicit `traversal` arg (they drew the boundary — already
+      // serialized with its own params resolved, so it runs with no outer binds), or the one SYNTHESIZED
+      // by pushdown for the arg-less form (win 2a) from the pushable prefix's source text — which may
+      // reference the OUTER traversal's bound params (a pushed `has("age", gt(x))`), so those ride along.
+      // `pushdown` is a call-site fact the segment planner computed where the tail was visible.
+      const gremlin = pushdown ? pushdown.siblingGremlin : traversalOf(params);
+      const siblingBinds = pushdown ? boundParams : {};
       // Fail closed rather than answer a different question: a registry carrying this service in a
       // context with no way to reach siblings is a wiring mistake, not an empty result.
       if (!source) throw new Error('mogwai.graph.federate: no federation source is wired into this graph\'s app scope');
       const ex = source.executor(graph);
 
-      // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound.
+      // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound. The
+      // traversal's own bound params ride along so a pushed `has("age", gt(x))` resolves `x` sibling-side.
       if (rows.length === 0) {
-        const result = await ex.raw(gremlin, {}, depth + 1);
+        // A pushed prefix that ENDS IN A REDUCER makes the sibling return a SCALAR (Calcite's rule: the
+        // result shape follows the pushed subtree's root). It crosses as a typed `{t,v}` ValueNode so its
+        // Gremlin type survives, and `apply` returns it as a `barrier-scalar` the resume frames directly.
+        if (pushdown?.reduces) {
+          const reduced = await ex.raw(gremlin, siblingBinds, depth + 1);
+          if (reduced.kind !== 'scalar') throw new Error(`mogwai.graph.federate: expected a scalar from the pushed reduction, got ${reduced.kind}`);
+          return { kind: 'barrier-scalar', value: reduced.value };
+        }
+        const result = elementsOf(await ex.raw(gremlin, siblingBinds, depth + 1));
         return wantEndpoints ? withEndpoints(ex, result, depth) : result;
       }
 
@@ -134,7 +160,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
       const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
-      const result = await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+      const result = elementsOf(await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;
     },
   }),

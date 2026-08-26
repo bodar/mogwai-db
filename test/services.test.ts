@@ -408,10 +408,13 @@ describe('barrier source form via Executor (stub source → drive → land → f
     resolve: ({ params, federationDepth }) => ({
       kind: 'barrier',
       residency: 'worker',
-      apply: async () => source!.executor(String(params.graph)).raw('g.V()', {}, federationDepth + 1),
+      apply: async () => {
+        const r = await source!.executor(String(params.graph)).raw('g.V()', {}, federationDepth + 1);
+        return r.kind === 'elements' ? r.rows : (() => { throw new Error('unexpected scalar'); })();
+      },
     }),
   });
-  const stubSource: FederationSource = { executor: () => ({ raw: async () => foreignVerts }) };
+  const stubSource: FederationSource = { executor: () => ({ raw: async () => ({ kind: 'elements', rows: foreignVerts }) }) };
   const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
   const reg: RegistryProvider = (app) => createRegistry([stubFederate(app.source)]);
   // The Executor's own `source` is what lands in the app scope the provider reads.
