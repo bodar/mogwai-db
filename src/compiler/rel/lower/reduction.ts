@@ -1007,6 +1007,20 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // way round — the guard exists because an element is not a value, and here there is one.
   if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), ctx.source, fresh);
   if (host.kind === 'list') return listHostChild(body, host, ctx, fresh);
+  // A PROJECTOR body over a RECORD host reads the record's FIELDS as scope variables — `math("a / b")`
+  // resolves `a`/`b` against the record's map (`Scoping.getScopeValue`, the same rule the direct chain
+  // step `project(a,b).math("a / b")` follows). It is one `ScalarMapStep` producing one value per
+  // traverser, so it is a correlated scalar exactly as a value body is — which is what lets
+  // `order().by(__.math("a / b"))` / `by(__.format(...))` over a `project(...)` record become an order
+  // key rather than declining. Only a SINGLE projector step (a tail past it would re-enter over the
+  // projector's scalar result, not the record — a later increment).
+  if (host.kind === 'record') {
+    if (body.length !== 1 || !REL_PROJECTORS.has(first.name)) return null;
+    const projected = projectorValue(first, host, childSeam(ctx, fresh), ctx.source, fresh);
+    return projected && projected.framing.kind === 'scalar'
+      ? { expr: projected.value, framing: projected.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' }
+      : null;
+  }
   if (host.kind !== 'element') return null;
 
   // A REDUCER OVER A CORRELATED BODY, rooted TWO ways through ONE engine (`correlatedReduce`): a

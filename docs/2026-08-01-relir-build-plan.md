@@ -830,6 +830,16 @@ pattern this whole stage kept finding:
   `NO_ALIASES` (the census cannot see it — the traversal was newly executing). 🚧 LEFT: a `by()` over a
   collection select (a member projection) and a multi-key select mixing a collection name with labels
   (both decline via `selectKeys`).
+- ✅ **A PROJECTOR body (`math`/`format`) as an ORDER KEY over a project RECORD — LANDED, one missing arm.**
+  `math("a / b")` reads the record's fields as scope variables (`Scoping.getScopeValue`), so it is a
+  correlated scalar exactly as `project(a,b).math("a / b")` (the direct chain step) already was — but
+  `byExpr`→`scalarChild` had no RECORD-host arm (it declined every host but scalar/list/element), so
+  `order().by(__.math("a / b"), Order.desc)` over a `project(...)` declined. `scalarChild` now routes a
+  single-projector body over a record host to `projectorValue` (the same builder the chain step uses),
+  making the `math` an order key. Result is ORDERED and matches `Math.feature` row-for-row
+  (`[ripple, josh, marko, vadas, lop, peter]`), deterministic under `test:perturbed` (a real `ORDER BY`).
+  🚧 LEFT: a projector body with a TAIL past it over a record (re-enters over the projector's scalar, a
+  later increment).
 - ✅ **A `by()` child body ending in an `is(<P>)` FILTER — LANDED across every `by()` host.** `valueRun`
   (`lower/reduction.ts`, the scalar child body's transform run) handled projectors and transforms but
   declined a trailing `is()`, so `aggregate("x").by(__.values("age").is(P.gt(29)))` — the age only where

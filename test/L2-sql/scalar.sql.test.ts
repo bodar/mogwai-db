@@ -172,6 +172,16 @@ describe('scalar-parent / projection SQL', () => {
     }
   });
 
+  test('a math() order KEY over a project record reads the record fields as scope variables', async () => {
+    // Math.feature `g_V_projectXa_b_cX…_orderXbyXmathXa_bX_descX_selectXcX`: order each record by
+    // `sum(weight) / count(edges)` desc, then select the name field. The order key is a correlated
+    // scalar `math()` that resolves `a`/`b` against the record's map scope (Scoping.getScopeValue) —
+    // the same shape the direct `project(a,b).math("a / b")` step uses. Result is ORDERED.
+    const ordered = await decodeAll(executeQuery(seededStore(),
+      'g.V().project("a","b","c").by(__.bothE().values("weight").sum()).by(__.bothE().count()).by("name").order().by(__.math("a / b"), Order.desc).select("c")', {}));
+    expect(ordered).toEqual(['ripple', 'josh', 'marko', 'vadas', 'lop', 'peter']);
+  });
+
 
 
 

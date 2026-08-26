@@ -385,6 +385,10 @@ const COVERED = [
   // beside the value, and a multi-label select is a RECORD. Both are pinned in
   // `test/L2-sql/scalar.sql.test.ts`.
   "g.V().as('a').out().select('a').by(__.out().count())",
+  // A PROJECTOR body (`math`/`format`) as an order key over a project RECORD reads the record's fields
+  // as scope variables (`Scoping.getScopeValue`), so `order().by(__.math('a / b'))` is a correlated
+  // scalar key — the same shape `project(a,b).math('a / b')` uses one step later.
+  'g.V().project("a","b","c").by(__.bothE().values("weight").sum()).by(__.bothE().count()).by("name").order().by(__.math("a / b"), Order.desc).select("c")',
   'g.V().as("a").out().as("a").select(Pop.first,"a")', 'g.V().as("a").out().as("a").select(Pop.last,"a")',
   // A multi-bound label's history is an ordinary LIST: Pop.all always returns it, and Pop.mixed
   // does too once the linear binding count proves it is not a singleton.
