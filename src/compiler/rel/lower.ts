@@ -2372,7 +2372,7 @@ export interface Lowering {
   readonly propertySeek?: boolean;
   /** May the physical TextP FTS rewrite drive a bare element scan (`semijoin.ts`, `trigramSeek`)? */
   readonly ftsSubstringPredicate?: boolean;
-  /** May a mid-traversal federate reduction PUSH DOWN as a monoid partial (`reducer-monoid.ts`)? Default
+  /** May a mid-traversal federate reduction PUSH DOWN as a per-group partial (`reducers.ts`)? Default
    *  on. Off makes the reducer run LOCALLY over the scattered elements — the semantic AUTHORITY the
    *  pushed path must equal, which is how the differential (optimized ≡ unoptimized) is checked. */
   readonly federateReduce?: boolean;
@@ -2890,32 +2890,49 @@ export function lowerForeignResume(
  * 1-row plan, `nameBindings` to a `Plan`. */
 export function lowerScalarResume(value: ValueNode): RelLowering {
   const fresh = minter();
+  // A NULL scalar frames as NO RESULT (an empty relation), matching TinkerPop's empty aggregation:
+  // `sum`/`min`/`max`/`mean` over an empty stream yield NOTHING (`SumGlobalStep.processAllStarts` emits
+  // no traverser). `count` over empty is a real 0 (`v` is 0, not null), so it still emits its row. Keying
+  // on `v == null` is exactly that distinction — a leaf `{t,v}` with a null value is the empty aggregate.
+  // A NULL scalar frames as NO RESULT (an empty relation). This is a REAL semantics decision, not a
+  // framing shortcut, and it is faithful to TinkerPop by design: a `ReducingBarrierStep` is a SEMIGROUP
+  // fold seeded from the first traverser (`generateSeedFromStarts`), so over an EMPTY stream `sum`/`min`/
+  // `max`/`mean` emit NOTHING — they each override `processAllStarts` with an `if (starts.hasNext())`
+  // guard (`vendor/tinkerpop/gremlin-core/.../step/map/SumGlobalStep.java`). This was TINKERPOP-1777, a
+  // deliberate `breaking` change in 3.4.0 (the prior behaviour returned `Integer.MIN_VALUE`/`NaN`); the
+  // sanctioned "I want 0" idiom is a user `coalesce(…, constant(0))`, NOT an engine-supplied identity.
+  // `count` is the ONE monoid — it installs an explicit `ConstantSupplier(0L)`, so empty count is `0`
+  // (arriving here as `v:0`, emitted), while an empty semigroup fold arrives as `v:null` and is dropped.
+  const empty = value != null && typeof value === 'object' && 't' in value && (value as { v?: unknown }).v == null;
   const node: Expr = compilerText(JSON.stringify(value));
-  const rel = make.values({
+  const one = make.values({
     id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
     rows: [[jsonOf(node)]],
   });
+  // `Values` refuses the empty relation, so the empty aggregate is the honest `Filter(false)` over the one
+  // row (§3.3) — no traverser.
+  const rel = empty ? make.filter({ id: fresh('scf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
   return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 
-/** How a mid-traversal reduction's monoid combines partials at an empty parent (see `reducer-monoid.ts`):
- *  `zero` = a parent with no partial gets the identity 0 (count/sum); `absorbing` = it DROPS (min/max over
- *  an empty set emits nothing). */
-type CombineIdentity = 'zero' | 'absorbing';
+/** What a mid-traversal reduction emits when a parent has no partial (see `reducers.ts`): `zero` = the
+ *  monoid `count`'s identity 0 (contribute 0); `nothing` = a semigroup (`sum`/`min`/`max`) — contribute
+ *  nothing (an empty min/max emits no traverser). */
+type EmptyResult = 'zero' | 'nothing';
 
 /**
- * THE MID-TRAVERSAL REDUCTION COMBINE — the monoid applied over a `(key→partial)` map the sibling
+ * THE MID-TRAVERSAL REDUCTION COMBINE — the reducer applied over a `(key→partial)` map the sibling
  * returned (`docs/2026-08-26-federate-pushdown-design.md`). A mid `V().call(federate,…,inj).count()` is a
  * GLOBAL reduction over the whole resumed stream (the element path returns ONE number), so the combine
- * folds ALL the per-parent partials into one value with the monoid `combine`/`identity`.
+ * folds ALL the per-parent partials into one value with `combine`/`empty`.
  *
  * Both the map (`out.value`, a `t:'map'` ValueNode) and the parents (`values`, the distinct injected
  * values) are KNOWN at resume time, so the fold is pure data: for each parent, look up its partial by key
- * (a match contributes the partial; a miss contributes the identity — `zero` adds 0, `absorbing`
- * contributes nothing). Then `combine` folds the contributions: `sum` (count/sum → SUM0, empty ⇒ 0),
- * `min`/`max` (extremal, empty ⇒ NO value → no traverser, matching TinkerPop's empty min/max). One scalar
- * out (or none), the SAME answer as scattering the elements and reducing locally — the semantic authority.
- * Framed as a `typedNode` so the partial's Gremlin type (a `long` count, a numeric sum/min/max) survives.
+ * (a match contributes the partial; a miss contributes `empty` — the monoid `count` adds 0, a semigroup
+ * contributes nothing). Then `combine` folds the contributions: `sum` (count/sum → SUM0), `min`/`max`
+ * (extremal, empty ⇒ NO value → no traverser, matching TinkerPop's semigroup empty). One scalar out (or
+ * none), the SAME answer as scattering the elements and reducing locally — the semantic authority. Framed
+ * as a `typedNode` so the partial's Gremlin type (a `long` count, a numeric sum/min/max) survives.
  *
  * Distinct injection means each parent maps to one key, so `combine` folds over the per-parent partials
  * exactly once each. `matchValue`'s job (which element matched which parent) is subsumed: the sibling
@@ -2923,7 +2940,7 @@ type CombineIdentity = 'zero' | 'absorbing';
  */
 export function lowerReduceCombine(
   map: ValueNode, values: readonly unknown[],
-  reduce: { readonly identity: CombineIdentity; readonly partial: string; readonly combine: 'sum' | 'min' | 'max' },
+  reduce: { readonly empty: EmptyResult; readonly partial: string; readonly combine: 'sum' | 'min' | 'max' },
   _steps: readonly IRStep[], _from: number, _opts: Lowering,
 ): RelLowering {
   const fresh = minter();
@@ -2931,23 +2948,25 @@ export function lowerReduceCombine(
   const byKey = new Map(pairs.map(([k, v]) => [JSON.stringify((k as { v: unknown }).v), (v as { v: unknown }).v as number]));
   // The partial's Gremlin type is uniform across groups — read it off any pair, else count → long.
   const partialT = (pairs[0]?.[1] as { t?: string } | undefined)?.t ?? (reduce.partial === 'count' ? 'long' : null);
-  // Contributions: a matched parent gives its partial; a miss gives the identity (0 for zero; skipped for
-  // absorbing). Fold with the monoid combine.
+  // Contributions: a matched parent gives its partial; a miss gives `empty` (0 for the monoid `count`,
+  // skipped for a semigroup). Fold with the reducer's combine.
   const contribs: number[] = [];
   for (const parent of values) {
     const hit = byKey.get(JSON.stringify(parent));
     if (hit !== undefined) contribs.push(hit);
-    else if (reduce.identity === 'zero') contribs.push(0);
-    // absorbing: an unmatched parent contributes nothing.
+    else if (reduce.empty === 'zero') contribs.push(0);
+    // 'nothing' (semigroup): an unmatched parent contributes nothing.
   }
   const folded: number | null = contribs.length === 0
-    ? (reduce.identity === 'zero' ? 0 : null)                       // empty: SUM0 → 0; extremal → nothing
+    ? (reduce.empty === 'zero' ? 0 : null)                          // empty: monoid count → 0; semigroup → nothing
     : reduce.combine === 'sum' ? contribs.reduce((a, b) => a + b, 0)
     : reduce.combine === 'min' ? Math.min(...contribs)
     : Math.max(...contribs);
-  // A null fold (an all-empty min/max) frames as NO traverser — an empty `Values`.
-  const rows: Expr[][] = folded === null ? [] : [[jsonOf(compilerText(JSON.stringify({ t: partialT, v: folded } as ValueNode)))]];
-  const rel = make.values({ id: fresh('rcv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)), rows });
+  const node: Expr = compilerText(JSON.stringify({ t: partialT, v: folded } as ValueNode));
+  const one = make.values({ id: fresh('rcv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)), rows: [[jsonOf(node)]] });
+  // A null fold (an all-empty semigroup) frames as NO traverser — `Values` refuses the empty relation, so
+  // it is the honest `Filter(false)` (§3.3), matching `lowerScalarResume`'s empty-aggregate spelling.
+  const rel = folded === null ? make.filter({ id: fresh('rcf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
   return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 

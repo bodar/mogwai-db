@@ -75,6 +75,21 @@ describe('mogwai.graph.federate — arg-less pushdown (win 2a)', () => {
     expect(got).toBeGreaterThan(0);
   });
 
+  test('a scalar reduction over an EMPTY stream yields nothing (sum/min/mean), matching TinkerPop', async () => {
+    // crew persons carry no `age`, so values('age') is empty. sum/min/max/mean over empty emit NOTHING
+    // (SumGlobalStep guards processAllStarts — no seed), NOT null/0. Must match direct-on-crew ([]).
+    for (const red of ['sum', 'min', 'max', 'mean']) {
+      const vals = async (m: string, g: string) => (await Promise.all((await mgr.executor(m).framedAsync(g, {})).map(dec)));
+      expect(await vals('home', argless(`.V().values("age").${red}()`)))
+        .toEqual(await vals('crew', `g.V().values("age").${red}()`));   // both []
+    }
+  });
+
+  test('count over an EMPTY stream is 0 (seeded), NOT dropped — the count/sum asymmetry', async () => {
+    const got = Number((await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("nope").count()'), {})).map(dec)))[0]);
+    expect(got).toBe(0);   // CountGlobalStep seeds 0L; empty count is a real 0, unlike sum/min/max
+  });
+
   test('the out().dedup().count() case pushes WHOLE and is correct (structural 5-vs-2 fix)', async () => {
     const got = Number((await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("person").out("knows").dedup().count()'), {})).map(dec)))[0]);
     const crew = Number((await onCrew('g.V().hasLabel("person").out("knows").dedup().count()'))[0]);

@@ -29,7 +29,7 @@ export interface RelRequest {
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
   readonly ftsSubstringPredicate: boolean;
-  /** Whether a mid-traversal federate reduction may PUSH DOWN as a monoid partial (`reducer-monoid.ts`).
+  /** Whether a mid-traversal federate reduction may PUSH DOWN as a per-group partial (`reducers.ts`).
    *  Off runs the reducer LOCALLY over the scattered elements — the semantic AUTHORITY the pushed path
    *  must equal (the optimized ≡ unoptimized differential, checked by a federation test). Default on. */
   readonly federateReduce: boolean;

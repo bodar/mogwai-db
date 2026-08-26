@@ -92,20 +92,20 @@ export interface CallSite {
     readonly suffixFrom: number;
     readonly reduces: boolean;
   };
-  /** MID-TRAVERSAL REDUCTION pushdown — a MONOID transport optimization. Present only for a mid-traversal
-   *  federate whose local tail is a bare reducer with a monoid (`reducer-monoid.ts`). `apply` runs the
-   *  sibling as a per-injected-value GROUPED partial (`group().by(<groupBy>).by(<partial>())`) so a
-   *  `(key→partial)` map crosses instead of every element; the resume COMBINES the partials per parent
-   *  with the monoid's `combine`/`identity`, yielding the same per-parent answer as the element scatter +
-   *  local reduce (the authority). `groupBy` is the injection read applied element-side
-   *  (`values('name')`→`'name'`, id→`id`, label→`label`) so the key equals what `matchValue` compares.
-   *  `partial`/`combine`/`identity` are the monoid; `reducer` is the original step name (for framing). */
+  /** MID-TRAVERSAL REDUCTION pushdown — a transport optimization (`reducers.ts`). Present only for a
+   *  mid-traversal federate whose local tail is a bare reducer that SPLITS. `apply` runs the sibling as a
+   *  per-injected-value GROUPED partial (`group().by(<groupBy>).by(<partial>())`) so a `(key→partial)` map
+   *  crosses instead of every element; the resume COMBINES the partials per parent with `combine`/`empty`,
+   *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `groupBy`
+   *  is the injection read applied element-side (`values('name')`→`'name'`, id→`id`, label→`label`) so the
+   *  key equals what `matchValue` compares. `empty` is the empty-input answer (`zero` = the monoid `count`;
+   *  `nothing` = a semigroup — `sum`/`min`/`max`); `reducer` is the original step name (for framing). */
   readonly reduce?: {
     readonly reducer: string;
     readonly groupBy: string;
     readonly partial: string;
     readonly combine: 'sum' | 'min' | 'max';
-    readonly identity: 'zero' | 'absorbing';
+    readonly empty: 'zero' | 'nothing';
   };
 }
 

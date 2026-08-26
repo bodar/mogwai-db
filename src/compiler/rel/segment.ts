@@ -4,7 +4,7 @@ import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, Ca
 import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
 import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
 import { FEDERATE_SERVICE } from '../ir/injection.ts';
-import { reducerMonoid } from '../ir/reducer-monoid.ts';
+import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
 import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
@@ -106,9 +106,9 @@ function inferredPushdown(
   return { siblingGremlin, prefixLength: prefix.length, reduces: prefix.reduces };
 }
 
-/** The MID-TRAVERSAL REDUCTION monoid pushdown, or `null`. Fires when: this is a federate barrier NOT at
- *  the source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent),
- *  and the local tail is EXACTLY one bare reducer with a splittable monoid. Then the sibling can compute a
+/** The MID-TRAVERSAL REDUCTION pushdown, or `null`. Fires when: this is a federate barrier NOT at the
+ *  source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent), and
+ *  the local tail is EXACTLY one bare reducer that SPLITS (`reducers.ts`). Then the sibling computes a
  *  per-injected-value PARTIAL (`group().by(<groupBy>).by(<partial>())`) and the resume COMBINES per parent
  *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. `groupBy`
  *  is the injection read applied element-side (so the group key equals what `matchValue` matches on). Mean
@@ -120,10 +120,10 @@ function inferredReduce(
   const tail = steps.slice(at + 1);
   const only = tail.length === 1 ? tail[0]! : undefined;
   if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
-  const monoid = reducerMonoid(only.name);
-  if (!monoid || monoid.partial == null || monoid.combine == null) return undefined; // mean/unsplittable → follow-up
+  const reducer = reducerOf(only.name);
+  if (!reducer || reducer.partial == null || reducer.combine == null) return undefined; // mean/unsplittable → follow-up
   const groupBy = injection.kind === 'values' ? injection.key : injection.kind; // 'name' | 'id' | 'label'
-  return { reducer: only.name, groupBy, partial: monoid.partial, combine: monoid.combine, identity: monoid.identity };
+  return { reducer: only.name, groupBy, partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };
 }
 
 function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier | null {

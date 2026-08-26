@@ -65,9 +65,9 @@ export interface FastPathConfig {
    */
   readonly propertySeek: boolean;
   /**
-   * May a MID-TRAVERSAL federate reduction push down as a MONOID partial (`reducer-monoid.ts`)? Off runs
+   * May a MID-TRAVERSAL federate reduction push down as a per-group partial (`reducers.ts`)? Off runs
    * the reducer LOCALLY over the scattered elements (`foreignRejoin` + a local reduce) — result-equivalent
-   * by the monoid law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`, and the AUTHORITY the pushed path
+   * by the split law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`, and the AUTHORITY the pushed path
    * is checked against.
    *
    * **Federation-specific: its differential is a federation test, NOT the L5 corpus** — L5 generates over
