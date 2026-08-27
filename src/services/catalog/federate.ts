@@ -5,7 +5,7 @@ import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
-import { ENDPOINT_IDS_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
+import { corrKey, ENDPOINT_IDS_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
 // ---------- federate — cross-graph query pushdown (async, Barrier) ----------
 //
@@ -164,7 +164,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // satisfies (by property /
       // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
-      const pairs = rows.map((r, corrId) => [corrId, r.injectedValue] as const);
+      // The injected set crosses as a MAP {corrKey: value} under the reserved key — the correlation id
+      // is the binding KEY (a valid identifier `c0`,`c1`,… via `corrKey`, the same identifier shape every
+      // bound name uses), the injected value the binding VALUE. One `json_each` bind of any size.
+      const pairs = Object.fromEntries(rows.map((r, ordinal) => [corrKey(ordinal), r.injectedValue]));
       // MID-TRAVERSAL REDUCTION (monoid transport optimization): the local tail is a bare reducer, so push
       // it as a per-corrId GROUPED PARTIAL. The corrId is an internal origin CHANNEL, not a Gremlin
       // property, so the ordinary-looking group text is marked for RelIR to replace its key with origin.

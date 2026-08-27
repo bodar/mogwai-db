@@ -72,11 +72,25 @@ export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
 export const isParentMarkerBody = (body: readonly { name: string; args: readonly { value: unknown }[] }[]): boolean =>
   body.length === 1 && body[0]!.name === 'call' && body[0]!.args[0]?.value === PARENT_MARKER;
 
-/** The injected per-parent correlation/value pairs from a params map. `corrId` is a minted per-parent
- *  identity; pairs cross as ONE `json_each` bind of any size. Returns null when the injection is absent
- *  or is not an array of `[corrId, value]` pairs. */
+/** The per-parent correlation id, as a VALID IDENTIFIER (`c0`, `c1`, …) — the same identifier shape every
+ *  other bound name in the system uses, never a bare number dressed as a string. `corrKey(n)` mints it;
+ *  `corrOrdinal(key)` reads the ordinal back. */
+export const CORR_PREFIX = 'c';
+export const corrKey = (ordinal: number): string => `${CORR_PREFIX}${ordinal}`;
+export const corrOrdinal = (key: string): number => Number(key.slice(CORR_PREFIX.length));
+
+/** The injected per-parent correlation/value pairs from a params map. The pairs cross as ONE `json_each`
+ *  bind of any size — a MAP `{corrKey: value}` keyed by the correlation IDENTIFIER (the shape the
+ *  correlation IS: "bindings keyed by correlation id"). `json_each` over that object yields `key`=corrKey,
+ *  `value`=value directly. `corrId` here is the numeric ordinal read back off the identifier key. Returns
+ *  null when the injection is absent or is not that map shape; a `Map` (from the wire) and a plain object
+ *  are both accepted. */
 export const injectedPairs = (params: Record<string, unknown>): { readonly corrId: number; readonly value: unknown }[] | null => {
   const v = params[INJECT_VALUES_KEY];
-  if (!Array.isArray(v) || !v.every((pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'number')) return null;
-  return v.map(([corrId, value]) => ({ corrId, value }));
+  const entries = v instanceof Map ? [...v.entries()]
+    : v != null && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v as Record<string, unknown>)
+      : null;
+  if (!entries) return null;
+  const pairs = entries.map(([k, value]) => ({ corrId: corrOrdinal(String(k)), value }));
+  return pairs.every((p) => Number.isInteger(p.corrId)) ? pairs : null;
 };

@@ -57,7 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { INJECT_VALUES_KEY, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
+import { CORR_PREFIX, INJECT_VALUES_KEY, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -3359,18 +3359,26 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
       id: fresh('ip'), table, alias: fresh('rip'), channels: [],
       type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
     });
-    const pairs = injectedPairs(params)!;
+    // The injected set crosses as a MAP `{corrKey: value}` (one `json_each` bind of any size), keyed by
+    // the correlation IDENTIFIER — the shape the correlation IS. `json_each` over that object exposes
+    // BOTH columns directly: `ic` = the correlation key (corrId), `iv` = the injected value. No positional
+    // `$[0]`/`$[1]` extraction, no re-serialization to a pair array — the map is consumed as-is.
+    const injectMap = params[INJECT_VALUES_KEY];
     const exploded = make.explode({
       id: fresh('ix'), channels: [],
-      expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(pairs.map((pair) => [pair.corrId, pair.value])), INJECT_VALUES_KEY)] },
-      as: { value: 'iv' }, type: typeOf(meta('iv', 'any', true)),
+      expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(injectMap instanceof Map ? Object.fromEntries(injectMap) : injectMap), INJECT_VALUES_KEY)] },
+      // `json_each` over the object exposes `ic`=key (corrId), `iv`=value, and `it`=the member TYPE
+      // ('text'/'integer'/… for a scalar, 'array' for a folded list). The type column is `json_each`'s
+      // own — `json_type(iv)` cannot be used because `iv` is a DECODED scalar (bare `marko`), not a JSON
+      // document, so `json_type` reports malformed JSON on it.
+      as: { key: 'ic', value: 'iv', type: 'it' }, type: typeOf(meta('ic', 'text'), meta('iv', 'any', true), meta('it', 'text')),
     });
     const propertyRows = make.join({
       id: fresh('ij'), left: source, right: props, join: 'inner', channels: [],
       type: typeOf(...source.type.cols, ...props.type.cols),
       on: and(eq(col(source.id, 'id'), col(props.id, owner)), eq(col(props.id, 'key'), compilerText(marker.key))),
     });
-    const injectedValue = { kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'iv'), compilerText('$[1]')] } as Expr;
+    const injectedValue = col(exploded.id, 'iv');
     const listMembers = make.explode({
       id: fresh('ilm'), channels: [], expr: injectedValue, as: { value: 'value' },
       type: typeOf(meta('value', 'any', true)),
@@ -3381,7 +3389,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
       // The pair value's JSON shape decides at runtime: a scalar is equality, while an array is the
       // membership operand that a folded parent read supplies. Never select a compiler arm by shape.
       on: { kind: 'case', whens: [[
-        eq({ kind: 'call', fn: 'json_type', args: [col(exploded.id, 'iv'), compilerText('$[1]')] }, compilerText('array')),
+        eq(col(exploded.id, 'it'), compilerText('array')),
         { kind: 'in-query', expr: storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), plan: listMembers, negated: false },
       ]], else: eq(storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), injectedValue) },
     });
@@ -3392,7 +3400,11 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
       exprs: [['id', col(paired.id, 'id')], ...channels.map((channel) => [channel.col,
         channel.role === 'bulk' ? compilerInt(1)
           : channel.role === 'encounter' ? col(paired.id, 'id')
-            : channel.role === 'origin' ? ({ kind: 'call', fn: 'json_extract', args: [col(paired.id, 'iv'), compilerText('$[0]')] } as Expr)
+            : channel.role === 'origin'
+              // The correlation KEY is the identifier `c<ordinal>` (a valid identifier, not a bare
+              // number); the rejoin correlates on the integer ORDINAL, so strip the one-char prefix and
+              // cast. `CORR_PREFIX.length + 1` because SQLite `substr` is 1-based.
+              ? ({ kind: 'cast', to: 'int', arg: { kind: 'call', fn: 'substr', args: [col(paired.id, 'ic'), compilerInt(CORR_PREFIX.length + 1)] } } as Expr)
               : seedPath({ kind: 'element', elem, id: col(paired.id, 'id') }, facts.demandsPathLabels),
       ] as const)],
     });

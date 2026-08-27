@@ -228,7 +228,7 @@ describe('federate — arg-less MID injection (win 2b, the parent marker in the 
 
 describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
   test('sibling marker lowering returns each matched element with its injected corrId', () => {
-    const pairs = [[41, 'marko'], [42, 'stephen']] as const;
+    const pairs = { c41: 'marko', c42: 'stephen' };
     const plan = compile('g.V().has("name", __.call("parent", __.values("name")))', { [INJECT_VALUES_KEY]: pairs });
     if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
     const rows = storeSeededWith(CREW_SEED).query(plan.sql, plan.binds) as Array<{ corrId: number; id: unknown }>;
@@ -238,11 +238,14 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
 
   test('a list-injection marker lowers to membership against its pair value', () => {
     const plan = compile('g.V().has("name", __.call("parent", __.values("name").fold()))', {
-      [INJECT_VALUES_KEY]: [[41, ['marko', 'not-a-crew-name']]],
+      [INJECT_VALUES_KEY]: { c41: ['marko', 'not-a-crew-name'] },
     });
     if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
     expect(plan.sql).toContain("IN (SELECT");
-    expect(plan.sql).toContain("FROM json_each(json_extract(");
+    // The list branch explodes the value cell directly — `json_each(<iv column>)` — since the injected
+    // set now crosses as a `{corrKey: value}` map and `json_each` exposes value/key/type columns, so no
+    // positional `json_extract($[1])` is needed.
+    expect(plan.sql).toMatch(/FROM json_each\(\w+\.value\)/);
   });
 
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
@@ -360,7 +363,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     ] as const;
     await contribution.apply(head);
     expect(rawCalls).toBe(1);                         // ONE batched hop
-    expect(boundValues).toEqual([[0, 'marko'], [1, 'vadas'], [2, 'marko'], [3, 'josh']]);
+    expect(boundValues).toEqual({ c0: 'marko', c1: 'vadas', c2: 'marko', c3: 'josh' });
   });
 
   test('id() injection matches on the sibling element id', async () => {
