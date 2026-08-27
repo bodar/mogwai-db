@@ -1,505 +1,186 @@
-# Federate pushdown — inferring what to fetch from the compiled tail (design notes)
+# Federate — cross-graph query, and pushing the boundary onto the compiled tail
 
-**NAMING (LANDED 2026-08-26, commit 33e974de).** Our extensions dropped the `mogwai.` namespace: the
-service is `federate` (not `mogwai.graph.federate`), and every other extension of ours is root-level too
-(`schema`, and the internal OLAP desugar targets `pageRank`/`wcc`/…). Rationale: TinkerPop namespaces to
-avoid PROVIDER collisions; there is one provider here — us — so the namespace bought nothing and cost
-ergonomics. Only TinkerPop's own reference names keep a namespace (`tinker.search`,
-`tinker.degree.centrality`), the surface the conformance corpus asserts verbatim. Mentions of
-`mogwai.graph.federate` below are historical; read them as `federate`.
+_Current-state design notes. This is not a changelog — it records what federate IS and what is left to
+build. The authority is the code (`src/services/catalog/federate.ts`, `src/compiler/rel/segment.ts`,
+`src/compiler/ir/content-demand.ts`, `src/compiler/ir/reducers.ts`, `src/execute.ts`'s `runForeign`)._
 
-**INJECTION MARKER (LANDED 2026-08-27, commit 80abbe33).** `T.value` is REPLACED by a self-delimiting
-`call("parent", <read>)` — the `parent` marker (§"Win 2a" below) — in a `has()` operand:
-`has("name", __.call("parent", __.values("name")))`. It carries BOTH the injection site (operand
-position) and the read (`values`/`id`/`label`) in one place, is expressible by every unmodified GLV
-(a `call()` nested in the operand, no client change), and is self-delimiting (needs no boundary to
-disambiguate — which is what makes the arg-less form possible). `T.value` now means ONLY the property
-token. This makes the old `call("mogwai.inject")` idea moot — the mechanism is `parent`.
+## Why federate matters — the escape hatch from the DO ceiling
 
-**SUB-TRAVERSAL AS STEPS (LANDED 2026-08-27, commit 39db6473).** A `call()` sub-traversal (federate's
-`traversal`, an OLAP `edges` scope, shortestPath's `target`) is carried as parsed `IRStep[]`, NOT a
-serialized string. The string was a FAKE requirement from building federate first: the grammar always
-gives a nested traversal, and OLAP was re-parsing federate's serialized string straight back to steps
-(AST→string→AST round-trip). The ONE string conversion is federate's RPC edge (`subTraversalToGremlin`
-= `'g.'+steps.map(s=>s.ctx.getText()).join('.')`), a debuggable contract boundary. Dropped the client
-`Translator` dependency and the bare-string param path. See the memory `federate-subtraversal-as-steps`.
+A Durable Object is capped at **10 GB of storage** and is **single-threaded**. `federate` is how mogwai
+EXCEEDS those limits: a graph too big for one DO, or work that would pin one object, spreads across
+SIBLING graphs (one graph = one DO) and composes at query time — multi-agent graphs joined together, a
+graph partitioned across DOs, a query that fans out and combines. So it goes right to the heart of the
+computation loop, and it is worth touching the core engine for. The seam has to be GENERIC and have a
+good developer experience; we reuse principled constructs (the OLAP keyed relation, the `{t,v}` typed
+envelope, the map/group shapes) and improve them where they are not opinionated enough, rather than bolt
+on per-case arms.
 
-**Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
-`ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
-shape-tagged transport (elements | scalar | keyed map, a `{t,v}` `ValueNode`); **win 2a — arg-less
-pushdown** (`pushableTailPrefix` + sibling synthesis from step source text), which already covers
-`count`/`sum`/`min`/`max`/`mean` on the arg-less form (the whole `values(k).mean()` prefix pushes, the
-sibling returns a scalar); **mid-traversal `count()` reduction pushdown** (the `reducers.ts` table +
-`lowerReduceCombine`, gated by `federateReduce` with a differential); and the **empty-reduction
-semantics** (a semigroup reduction over empty emits NOTHING, the monoid `count` emits 0 — see below).
-**Win 2b — ARG-LESS MID injection LANDED (2026-08-27, commit 142b472e):** a `parent` marker in the pushed
-prefix makes an arg-less federate a mid-traversal injection with no `traversal`/injection arg. It has NO
-parallel branch — `inferredPushdown` caps the prefix at the marker step and returns the read, which
-`barrierIn` folds onto an EFFECTIVE spec's `injectionTraversal`; every downstream reader (classify, route,
-head, scatter, monoid reduce) sees the same fact whether the marker came from an explicit arg or an
-inferred prefix. Still open: widening the side-effect boundary; bigger-than-scalar injection; and
-multi-graph mixing (win 2b's identity work — hard edge (c)). The authority is the code (`src/services/catalog/federate.ts`,
-`src/compiler/ir/content-demand.ts`, `src/compiler/ir/reducers.ts`, `src/compiler/rel/segment.ts`/`lower.ts`).
+## The two forms, and the one boundary decision
 
-## Reducer algebra — most are SEMIGROUPS, not monoids (settled 2026-08-26)
+A federate call has a chain after it. The compiler decides, in ONE place (`barrierIn`,
+`src/compiler/rel/segment.ts`), what runs on the sibling (the SUB-TRAVERSAL) and what runs locally
+(the SUFFIX). Two forms feed that decision and are handled identically downstream:
+
+- **Explicit** — the user writes the boundary: `call("federate", [graph, traversal: __.V()…])`. The
+  `traversal` param carries the sub-traversal.
+- **Arg-less** — `call("federate", [graph]).V()…`, no `traversal` arg. Pushdown INFERS the boundary:
+  `pushableTailPrefix` finds the longest remote-safe prefix of the tail, and THAT prefix is the
+  sub-traversal.
+
+Both hand `barrierIn` a sub-traversal as **`IRStep[]`** (never a string — see "Representation" below).
+The injection read, the mid-vs-source routing, the head projection and the scatter all read those steps,
+so the arg-less form is not a parallel branch: `inferredPushdown` returns the pushed prefix's marker read,
+and `barrierIn` folds it onto an EFFECTIVE `CallSpec`'s `injectionTraversal`, after which every reader
+sees the same fact whichever form produced it.
+
+## Representation — a sub-traversal is `IRStep[]`, a string ONLY at the RPC edge
+
+A `call()` sub-traversal (federate's `traversal`, an OLAP `edges` scope, shortestPath's `target`) is
+carried as parsed `IRStep[]` on the `CallSpec`. The grammar always delivers a nested traversal; a raw
+string never genuinely arrives. The ONE place it becomes a string is federate's RPC edge (`runForeign`
+crosses to another DO), synthesized verbatim from the steps' own source text
+(`subTraversalToGremlin(steps)` = `'g.'+steps.map(s=>s.ctx.getText()).join('.')`). This is a debuggable
+contract boundary and the only string conversion; everything else keeps the steps. (Memory:
+`federate-subtraversal-as-steps`.)
+
+## Injection — the `parent` marker
+
+A mid-traversal federate injects each parent's scalar into the sibling sub-traversal. The user marks the
+site with a self-delimiting marker CALL in a predicate operand:
+
+    V().call("federate", [graph:"crew", traversal:
+      __.V().has("name", __.call("parent", __.values("name")))])
+
+`call("parent", <read>)` carries BOTH the site (its operand position) and the read
+(`__.values('k')`/`__.id()`/`__.label()`, classified by `injectionKindOf`). It is expressible by every
+unmodified GLV (a `call()` nested in the operand — grammar form `has_String_Traversal`), self-delimiting
+(nobody writes `call("parent")` for any other reason, so it needs no boundary to disambiguate — which is
+what makes the arg-less form work), and identical across the explicit and arg-less forms.
+
+Mechanics: `PARENT_MARKER`/`isParentMarkerBody` (`ir/injection.ts`, leaf); `parentMarkerReadIn`/
+`parentMarkerStepIndex` (`call-params.ts`) walk the sub-traversal for the marker; `substituteInjectionMarker`
+(`strategies.ts`, a Pass) rewrites the marker operand → `within(INJECT_VALUES_KEY)` on the SIBLING compile.
+A bare `call("parent")` with no read fails closed at parse. `call("parent")` never reaches a registry —
+there is no `parent` service. (Memory: `federate-parent-marker`.)
+
+The sibling runs ONE batched hop over the DISTINCT injected values (a SPARQL bound-join), and results
+SCATTER back over the parents (`foreignRejoin`, `src/compiler/rel/foreign.ts`): each returned element
+re-matches the injected value it satisfies, in the resume SQL.
+
+## Pushdown is a boundary walk, not per-step special-casing (Calcite prefix model)
+
+`pushableTailPrefix` (`ir/content-demand.ts`) splits the post-barrier tail into `[remote prefix] [local
+suffix]` at the first LOCAL-DEPENDENT step. Validated against Calcite's convention/boundary model
+(`vendor/calcite`): because the sibling runs the SAME engine, pushing is always cheaper and almost every
+step pushes, so the maximal cut is a simple PREFIX WALK — no cost-based planner. Optimistic blocklist —
+push unless a step is proven local. A step ENDS the prefix when it:
+
+1. **reads a label bound BEFORE the barrier** — a backtrack across the boundary. A backtrack CONTAINED in
+   the prefix pushes fine (the sibling binds and reads its own `as('a')`), which falls out because
+   `labelsBoundBefore` clears at the barrier.
+2. **is a WRITE** (`MUTATING_STEPS`) — a detached snapshot is immutable.
+3. **is a nested/second barrier `call()`** — its own boundary.
+4. **observes EVERY label** (`labelReads(...).all` — a `path()`-family or unparseable body).
+5. **reads a NAMED COLLECTION bound before the barrier** — `cap('x')` over an `aggregate('x')` the PARENT
+   accumulated, which the sibling never saw. Tracked in the collection namespace (`aggregate`/`group`/
+   `groupCount` write a key, `cap` reads one), which `labels.ts` does not cover — so it is guarded
+   directly, growing a "written within the prefix" set exactly like (1). A self-contained
+   `aggregate('a')…cap('a')` inside the prefix pushes fine.
+
+An arg-less INJECTION prefix additionally ENDS AT the marker step: the marker is a per-parent filter on
+the sibling, so anything after it (a reducer, a `values`) is LOCAL processing of the scattered result —
+the same split the explicit form has.
+
+## Output transport — `ForeignResult` and the `{t,v}` ValueNode arm
+
+`runForeign(gremlin, params, depth)` (`src/execute.ts`, the federation RPC primitive — runs a
+sub-traversal on a sibling DO and returns a typed `ForeignResult`) maps the sibling traversal's TERMINAL
+SHAPE to a transport arm:
+
+- **elements** — vertex/edge detached references (`ForeignRow[]`, framed by `lowerForeignResume`).
+- **a `{t,v}` `ValueNode`** — everything else: a pushed reducer (`count`→`{t:'long'}`, `sum`/`min`/`max`/
+  `mean`→ the per-row `vt`), a mid-traversal reduction `(key→partial)` map (`t:'map'`), and — the next
+  slice — a pushed `cap`/`fold` COLLECTION (`t:'list'`). The `{t,v}` envelope (`gremlin/types.ts`)
+  carries scalars, maps, and lists losslessly and JSON-safely, so a scalar's Gremlin type survives the
+  transfer (a Long stays a Long). The resume frames ANY ValueNode via `lowerScalarResume` — already
+  shape-agnostic (a null value frames as the empty relation; a monoid `count` keeps its `0`).
+
+**The compounding rule: output-side pushdown of shape X = `runForeign` recognizes the sibling's terminal
+shape X and encodes it as a ValueNode; the resume needs no per-shape change.** No new substrate per
+shape — the envelope and the resume already exist. This is what keeps `ForeignResult` from growing an
+ad-hoc arm per pushed feature.
+
+## Reducer algebra — most are SEMIGROUPS, not monoids
 
 A `ReducingBarrierStep` is a SEMIGROUP fold by default (seeds from the FIRST traverser,
-`generateSeedFromStarts`); a subclass becomes a MONOID only by installing an explicit identity. So:
-`count` is the LONE monoid (`ConstantSupplier(0L)` → empty count is **0**); `sum`/`min`/`max`/`mean` are
-SEMIGROUPS (each overrides `processAllStarts` with `if (starts.hasNext())` → empty emits **NOTHING**,
-matching direct execution). This is TinkerPop by design — TINKERPOP-1777, a deliberate `breaking` change
-in 3.4.0 (the old behaviour returned `Integer.MIN_VALUE`/`NaN`); the sanctioned "I want 0 over empty"
-idiom is a user `coalesce(…, constant(0))`, NOT an engine-supplied identity. Cross-provider research
-(2026-08-26): no provider differs — JVM providers share `gremlin-core`; Neptune is silent (inherits);
-Cosmos omits sum/min/max/mean. So `reducers.ts` models the family as `(partial, combine, empty)` where
-`empty ∈ {'zero' (monoid count), 'nothing' (semigroup)}`, NOT a universal monoid identity.
-
-**Mid-traversal mean is NOT a case** — `mean`/`sum`/`min`/`max` need a preceding `values(k)` (you cannot
-`mean()` elements), so they are 2+-step tails the single-reducer mid gate rejects. Only `count()` is a
-valid bare reducer directly on federate elements. `mean` et al. push via the arg-less 2a prefix instead,
-which already works. So the mid-traversal reduction pushdown is `count`-only by construction, not a gap.
-
-## Why this matters — federate is the escape hatch from the DO ceiling
-
-A Durable Object is capped at **10 GB of storage** and is **single-threaded**. `federate` is not a
-nice-to-have: it is how mogwai **exceeds those limits** — a graph too big for one DO, or work that would
-pin one object, spreads across SIBLING graphs (one graph = one DO) and composes at query time. So the
-seam has to be GENERIC and have a good developer experience: multi-agent graphs joined together, a graph
-partitioned across DOs, a query that fans out and combines. That is why we push back on shoehorning and
-reuse principled constructs (the OLAP keyed relation, the `{t,v}` typed envelope, the map/group shapes) —
-and IMPROVE them where they are not opinionated enough — rather than bolt on per-case arms.
-
-**Future direction (not yet designed):** injection is scalar-only today (`values(k)`/`id()`/`label()`).
-The parent scope should be able to inject BIGGER things — a list, a map, eventually a whole SUBGRAPH — so
-a parent can hand real context to the sibling. This is the same "data crosses as one typed value" question
-the transport already answers for scalars; generalizing it is a named future slice.
-
-## The observation that starts it
-
-`federate` today does **manual, explicit pushdown**: the user writes the `traversal` argument, which
-hand-draws the remote/local boundary — "run *this* on the sibling, return *that*, and I'll process the
-result locally." That is good: the boundary is explicit and the pushed-down plan is exactly what the
-user asked to run remotely.
-
-But we know the WHOLE query at compile time — the `traversal` arg AND the local tail after the barrier
-are both in hand when `compile()` runs. So "how much do we fetch" is an **optimization problem over a
-statically-known plan**, not a runtime/laziness problem. Two wins hide in that:
-
-1. **Projection / aggregation pushdown — fetch only what the local tail consumes.**
-   `federate(subgraph).count()` should fetch a scalar, not a bag of vertices nobody reads.
-   `…values('name')` should fetch names, not whole elements. This is the high-value, tractable win.
-2. **Boundary inference — make the explicit `traversal` arg OPTIONAL.** For a large class of queries
-   (single remote graph, bounded movement) the boundary is inferable from the compiled tail, so the
-   user need not draw it. This is the harder, second-order win.
-
-## The subgraph endpoint fetch is win 1 in miniature — and shows the shape
-
-The eager two-hop subgraph fetch (`withEndpoints`, `federate.ts`) fetches endpoint vertices WITH data
-on every `.with("subgraph", true)`, so that IF the tail walks to endpoints (`inV`/`outV`/`bothV`/`.V()`)
-the data is local. It is **completeness, not necessity**: `federate(subgraph).count()` or an edges-only
-read fetches those vertices, materializes them as a CTE, and never reads them. The endpoint fetch
-matters only in the rejoin scenario, but is paid unconditionally.
-
-So even the endpoint fetch is a projection-pushdown question: fetch endpoints only when the tail's
-demand reaches them. That is the smallest instance of the general win.
-
-## The load-bearing insight: the demand classification ALREADY EXISTS
-
-`detachedTail` (`lower.ts:3251-3383`) already classifies every post-barrier step by what it needs from
-the fetched result — it just consults that classification AFTER the fetch (to decide how to lower),
-not BEFORE (to decide what to fetch):
-
-| tail step class | what it needs from the sibling | `detachedTail` branch |
-|---|---|---|
-| `count()` (global, no arg) | cardinality only — NO elements, NO adjacency | `lower.ts:3326` |
-| `dedup()` (channel-less) | element identity (id) only | `lower.ts:3335` |
-| `id()` / `label()` | the element token — rejoin, no movement | `lower.ts:3341` |
-| `values(k…)` | those property keys | `lower.ts:3349` |
-| `has`/`hasLabel`/`is` (subgraph) | the element's data (filter) | `lower.ts:3318` |
-| `out`/`in`/`both`/`inV`/`outV`/`bothV` | ADJACENCY (edges) + endpoint data | `lower.ts:3296` |
-| `group`/`project`/`order`/`fold`/reducers | hand off to the fold over `BoundGraph` | `lower.ts:3383` |
-| writes, `properties()`/`valueMap` bag reads | out of scope / unrouted → fail closed | `BOUND_HANDOFF_DENY` |
-
-**Pushdown = hoist this classification ahead of the barrier.** Walk `steps.slice(from)`, accumulate a
-**content demand**, and let that demand shape (a) what the sibling runs and (b) what it returns. Same
-analysis SHAPE as `computeDemandsEncounter` (`analyze.ts`) — a static walk over the post-`from` steps
-accumulating a fact. The knowledge exists; it is consulted one phase too late.
-
-**ONE classifier, consumed twice — this is a plan requirement, not a side effect.** The end state is a
-SINGLE demand analysis that BOTH the fetch decision AND `detachedTail` read. `detachedTail` today
-re-decides "what does this step need" inline, branch by branch; after pushdown it must consume the
-same `ContentDemand` the fetch was shaped by, so the tail's per-step handling is the generic reader of
-one fact rather than a second, independent copy of the classification. Two copies would DRIFT, and a
-drift here is the silent-wrong-answer class `src/compiler/CLAUDE.md` names: if the fetch analysis says
-"no adjacency needed" but `detachedTail` independently admits a movement step, the tail lowers a hop
-over a subgraph whose edges were never fetched. Convergence is what makes the fetch decision and the
-tail PROVABLY agree — they are the same function of the same steps. So "make `detachedTail` the generic
-reader of `ContentDemand`" is an explicit deliverable (phase 1 below), not an implied cleanup.
-
-## The seam constraint — pushdown is a COMPILE-TIME fact, not a runtime one
-
-`apply` fetches, but `apply` **cannot see the tail**: `CallSite` (`spi/types.ts:64`) hands the service
-only `params` + `federationDepth`. The post-barrier steps live downstream in the lowering
-(`lowerForeignResume`), which runs AFTER `apply` has fetched. So the content demand:
-
-- must be computed at COMPILE time from the post-barrier steps (a `ChainFact`-shaped analysis), and
-- must be threaded to what the barrier fetches — either by shaping the sibling `traversal` string that
-  `apply` sends, or by a fetch-shape parameter the barrier reads.
-
-It CANNOT be a runtime decision inside `apply` (no tail visibility there), and it must not become a
-second lazy round-trip (that fights the "one barrier = one await" model — see below). This is the
-central architectural fact any implementation has to respect.
-
-## A new `ChainFact`: the content demand
-
-The missing fact is a CONTENT demand — orthogonal to the existing traverser-mechanics demands
-(`tracksPath`/`demandsEncounter`/`demandsSlice`/`demandsPathLabels`, which are all about channels, not
-data). Rough shape:
-
-```
-interface ContentDemand {
-  reachesElements: boolean;     // does any step read an element's data at all? (count/dedup: false)
-  reachesAdjacency: boolean;    // does any movement step run? → needs edges
-  keys: ReadonlySet<string> | 'all';  // property keys read (values/has/by/order/project); 'all' = valueMap/elementMap/leaf
-  terminalReduction: boolean;   // ends in count/sum/…: push the reduction, fetch a scalar
-}
-```
-
-Computed once over `steps.slice(from)`, exactly where `chainCtxOf`/`analyzeChain` already runs
-(`lower.ts:2769`). Then:
-
-- `terminalReduction && !reachesElements` → push the reduction to the sibling; fetch a scalar. No
-  vertices, no edges. (`federate(subgraph).count()` becomes a remote `…count()`.)
-- `reachesAdjacency` → fetch the subgraph (edges + endpoints) as today. This is the ONLY case that
-  needs `withEndpoints`, so the eager endpoint fetch becomes conditional on this bit.
-- `!reachesAdjacency && keys ≠ 'all'` → fetch only `keys`, not whole element payloads.
-
-The bright line from `src/compiler/CLAUDE.md` applies: this fact is **consulted, never constructed** —
-a Pass/analysis may READ it and DECLINE on it (fall back to fetching everything, which is always
-correct if wasteful), but it is not a shape representation the lowering consumes. Fetching-everything
-is the safe default the demand only NARROWS; a wrong demand analysis must degrade to over-fetching, never
-to a wrong answer.
-
-## Where it stays clean, and where it doesn't (the hard edges)
-
-**Clean — single remote graph, bounded movement.** Because element identity is an id and every read is
-a rejoin-by-id (`boundgraph.ts:26-33`, the id-carry model — the same act `BaseGraph` performs against
-`nodes`/`edges`), the reachable set and the keys read are STATICALLY computable. This is the case
-win-1 fully covers and win-2 (optional `traversal` arg) is achievable for.
-
-**Hard edge (a) — unbounded movement (`repeat`/`until`).** The reachable set's size/shape is not known
-at compile time, so "fetch exactly these N vertices" is not available; you fetch the whole reachable
-subgraph or push the `repeat` itself remote. Bounded traversals are analyzable; unbounded ones force
-whole-subgraph transport or full remote execution.
-
-**Hard edge (b) — genuine local↔remote interleaving (the multi-graph case).** `federate(A).out().where(<needs
-local/graph-B data>).out()` cannot be one clean cut: it is remote → local → remote. The mixing is always
-DECIPHERABLE (which step reads which graph is static, in the step, not runtime-dependent) but not always
-COLLAPSIBLE to one hop. Each remote↔local transition IS a barrier, and each barrier is a round-trip —
-"if I hit another barrier, that forces a second call." So even with pushdown, `g.V(ids)`-into-a-remote-graph
-stays a permanent primitive for these cases — which is exactly why the endpoint-id transport fix
-(bound param → `json_each`, not inline text) had to land regardless of pushdown, and why it COMPOSES:
-however the id set arises (today's `withEndpoints` or a future interleaving barrier), it crosses as one
-`json_each` bind.
-
-**Hard edge (c) — identity across graphs is ALREADY namespaced STRUCTURALLY; the gap is narrow.**
-Reconsidered 2026-08-26. Each `BoundGraph` is bound to a SPECIFIC CTE (`vertexBinding`/`edgeBinding`,
-`boundgraph.ts:65`), and every rejoin resolves against THAT graph's relation (`cteOf` → `rowById`). So
-an element from graph A is effectively `(bgv_A, id)` — **the CTE binding IS the graph qualifier**, and an
-id is only ever interpreted relative to one bound relation, never globally. The substrate already
-namespaces identity for the SINGLE-SOURCE case, structurally.
-
-The gap is precise: the qualifier is STRUCTURAL (which CTE the read targets), not a VALUE carried in the
-row — `externalId(_kind, id)` returns the BARE id (`boundgraph.ts:222`) and the stream carries `id` as one
-column. That is correct as long as ONE stream flows through ONE `BoundGraph` (today's case). It breaks
-ONLY when two bound graphs' elements share ONE stream — e.g. `federate(A).union(V(), federate(B).V())` then
-`dedup()`/`has(T.id,5)`/`group().by(id)`: rows from two CTEs each carry a bare `id`, so A's `5` and B's `5`
-collapse (the structural qualifier was in `ctx.source`, and a merged stream has no single source).
-
-So (c) is NOT a wall gating all multi-graph work — it is a BOUNDED feature: **promote the structural
-qualifier into the traverser at merge points.** Add an `origin` discriminator column to the bound stream,
-thread it through `externalId` and the identity comparisons (`dedup`/`has(T.id)`/`group().by(id)` compare
-the PAIR), and tag each side where two bound sources `union`. Per-graph CTEs already exist; what is
-missing is carrying origin in the row when streams merge — a localized, measurable change to the id-carry
-model, not a pervasive rewrite. It gates only the MULTI-graph mixing form (win 2b), not the single-graph
-ergonomic API (win 2a) or win 1.
-
-## The explicit `traversal` arg COMPOSES with pushdown — it does not disable it
-
-The `traversal` arg is REQUIRED today (`traversalOf`, `federate.ts:42` throws if absent). It is not
-optional, and win 1 does not make it optional. The two operate on DIFFERENT halves and compose:
-
-- The `traversal` arg is **what runs remotely** — the sub-traversal. The user always writes it.
-- **Pushdown (win 1)** operates on the **local tail AFTER the barrier** — how much of the fetched
-  result to materialize, and whether to push a terminal reduction back. It never touches the arg.
-
-So `federate("crew", __.V().outE("develops")).count()`: the user's sub-traversal runs remotely exactly
-as written; pushdown sees the local tail is `.count()` and pushes the reduction, so the sibling runs
-`…outE("develops").count()` and returns a scalar rather than a bag of edges the local `count()` would
-discard. **The remote result set the user asked for is unchanged** — pushdown only NARROWS what crosses
-the wire, never what the sibling computes over. A correct pushdown is semantically invisible
-(`federate(t).count()` returns the same number counted locally or remotely), so there is no user control
-to override, and the explicit arg does NOT gate it. Pushdown is unconditional and always safe.
-
-The control question belongs to a DIFFERENT, later win: **boundary inference (win 2) — making the arg
-optional.** THERE, the explicit arg is the ESCAPE HATCH: "I drew the boundary myself, don't infer one",
-and the hard-edge (a) case `federate(A, __.repeat(out()).times(10).values('x'))` is a user manually
-pushing an unbounded traversal we could not infer cleanly. Win 2 SPLITS (see next section): **2a**
-(single-graph inferred boundary — the ergonomic API) is reachable without the identity work; **2b**
-(multi-graph mixing) needs hard-edge (c)'s origin-in-row. Both are out of scope for the pushdown work
-(win 1). So: **win 1 never checks whether the arg is present** (it always is); only win 2 would let an
-explicit arg opt out of inference.
-
-## Win 2a — the ergonomic arg-less API, and the `T.value` ambiguity it forces
-
-The motivation is ergonomics: a federate call is ALWAYS followed by operations on the sibling, so
-`g.call(federate, "crew").V().hasLabel("person").out().values("name")` — federate returns "the sibling
-graph", keep traversing — reads far better than a serialized `traversal` string arg. This ergonomic API
-IS win 2's single-graph surface: with no `traversal` arg, the compiler must INFER which steps run remote
-vs local (the boundary the arg used to carry). Single-graph (no local/second-sibling mixing) does NOT hit
-hard edge (c), so **2a is reachable independently of the identity work.**
-
-**The GLV constraint shapes the whole design.** We do not modify the `gremlin` client / any GLV, so we
-CANNOT introduce a new step function — that is why injection reused `T.value` (a token every GLV
-serializes verbatim). But `call()` IS the extension point that needs no GLV change: `g.call("some.name",
-{...})` is expressible by every unmodified client.
-
-**The `T.value` ambiguity 2a exposes, and its clean fix.** `T.value` is legitimately a PROPERTY token
-(`by(T.value)`/`order(T.value)` reading a property element's value). Injection REUSES it in a predicate-
-operand position where it is otherwise meaningless (`has('sku', T.value)`) — collision-free ONLY because
-the `traversal` arg draws the boundary that says "this region is the remote sub-traversal, injection
-markers live here" (`injection.ts:6-8`). Remove the arg (2a) and the boundary that disambiguated is gone:
-in `g.V().call(federate,"crew").has("sku", T.value)` you cannot tell whether `has` runs remotely (so
-`T.value` = the parent's injected value) or locally (so `T.value` = the property token) — the SAME token
-means two things depending on a boundary that no longer exists. This is a real hazard, not a nuisance.
-
-**Fix (LANDED 2026-08-27): the `call("parent", <read>)` marker, not `T.value` reuse.** The marker is
-`__.call("parent", __.values("name"))` in the `has()` operand — a `call()` (no GLV change) whose read is a
-nested VALUE-READ TRAVERSAL (`__.values('k')`/`__.id()`/`__.label()`), classified by the same
-`injectionKindOf` the explicit form used. It carries its own meaning regardless of position or boundary
-(nobody writes `call("parent")` for any other reason), so it is unambiguous with no `traversal` arg to
-delimit it, and it works IDENTICALLY for the explicit and arg-less forms. `T.value` now means ONLY the
-property token, everywhere.
-
-Two refinements vs the first sketch above: (1) the read is a nested TRAVERSAL, not a `{read:"name"}` map —
-it reuses the existing value-read classifier verbatim and reads correctly in the operand slot
-(`has("name", parent("name"))` ≈ `where(eq("a"))` referencing a context; `parent` is GraphQL's word for
-the enclosing scope). (2) There is NO reserved service and NO `--list` entry: `call("parent")` never
-reaches a registry — the `substituteInjectionMarker` Pass rewrites it to `within(INJECT_VALUES_KEY)` on
-the SIBLING compile before any resolve. A bare `call("parent")` with no read fails closed at parse. And
-`T.value` is NOT kept as a second injection spelling — it was DELETED (one mechanism, not two).
-
-## The marker / mid-traversal: pushdown must be INJECTION-AWARE
-
-(The marker below is written `T.value` in this section's original prose; read it as the landed
-`__.call("parent", <read>)` — the mechanism is identical, only the spelling changed.)
-
-The mid-traversal form (`V().call(federate, …, __.V().has('sku', T.value))`) already does INPUT-side
-pushdown — the good kind: it collects the DISTINCT injected values, sends ONE sibling hop binding them
-under `INJECT_VALUES_KEY`, and the sibling filters remotely (`federate.ts:119-120`, a SPARQL bound-join).
-So `T.value` is not a barrier to pushdown; it is an existing instance of it, on the input side.
-
-But it constrains OUTPUT-side (result) pushdown, and getting this wrong is a WRONG ANSWER, not a missed
-optimization. A mid-traversal result is SCATTERED BACK over the parents — each returned element re-matches
-the parent whose injected value it satisfies (`federate.ts:113-118`), in `lowerForeignResume`'s resume
-SQL. So a terminal reduction pushed in the mid-traversal case must be a **per-parent GROUPED reduction
-keyed by the injected value**, never a single global one: `V().call(federate,…,has('sku',T.value)).count()`
-means "for each parent, how many sibling matches", and a global `…count()` on the sibling would collapse
-all parents into one number. Therefore:
-
-- **Source-form pushdown** (no injection): a terminal reduction pushes as a plain global reduction; fetch
-  a scalar.
-- **Mid-traversal pushdown** (`T.value` present): a terminal reduction pushes as a GROUPED reduction over
-  the injected-value key, matching the per-parent fan-out the resume already performs.
-
-So the `ContentDemand` analysis (phase 1) must know **whether the barrier is a mid-traversal injection
-barrier**, and gate terminal-reduction pushdown to the grouped form there. This is a demand-analysis
-input, not a separate mechanism — the injection kind is already on the barrier (the resume reads it).
-
-## Phase 2 — terminal-reduction pushdown, and the transport/framing generalization
-
-**The measured facts (2026-08-26, real runs over the modern fixture):**
-- `count()` → `Shape.value`, `ScalarType = static long` (type known at COMPILE time).
-- `sum()/max()/min()/mean()` → `Shape.scalar`, type carried PER-ROW in a `vt` column (min/max = the
-  winning row's Gremlin vtype; sum/mean = a SQLite storage class). Neither is `vertex`/`edge`, so the
-  sibling `raw()` THROWS today (`execute.ts:805`, "must yield vertices or edges").
-- Every reducer DECODES to a plain JS `number` (6, 123, 30.75) — no bigint at the decoded layer, so
-  JSON survives mechanically.
-- **The loss is SILENT TYPE ERASURE, not a throw.** A `count()` is a Gremlin **Long**; a bare JSON
-  `number` cannot say Long-vs-Integer (GraphBinary keeps Int64 `0x02` vs Int32 `0x01`; JSON has one
-  number type). Crossing as a raw number re-frames with the wrong Gremlin type. `program.ts`'s
-  `transportable` guard would ACCEPT the number and erase the Long — the wrong outcome, confirming a
-  scalar must carry its type.
-
-**The correction already exists — reuse, no new format.** The `{t,v}` `ValueNode` envelope
-(`src/gremlin/types.ts:393`) is ALREADY how federated element props cross `raw()` type-faithfully
-(`propsOf` → `ForeignRow.props`), already JSON-safe (`t` a string tag, `v` a plain value), already
-re-framed by ONE rule (`frameTypedNode`, `execute.ts`). A pushed-down `count()` crosses as
-`{t:'long', v:6}`, not `6`. The scalar's type is known where the ValueNode is built (sibling-side in
-`raw()`, where BOTH `shape` and the row `vt` are in hand — exactly where `propsOf` builds `{t,v}` today):
-`long` for count (static), the `vt` column for sum/max/min/mean.
-
-**This is federate adopting the transport/framing split OLAP already embodies — NOT a new abstraction,
-and specifically NOT "everything becomes a `json_each` bind."** The barrier landscape (measured
-2026-08-26) is: federate carries HOST JSON (it crossed RPC), OLAP carries a `barrier_state` HANDLE (the
-vector never leaves SQL — this REPLACED an older per-round `json_each` vector bind precisely to stop
-re-serializing O(V) each round, `types.ts:147`/`kernel.ts:74`), value barriers carry a `json_each` bind.
-Reverting federate scalars to a universal `json_each`/JSON-number path would RE-INTRODUCE both costs OLAP
-escaped (per-round serialization AND this type-erasure). The right generalization is the one OLAP shows:
-**a barrier returns a typed RESULT + a SHAPE; the shape is the EXISTING `RelFraming` vocabulary
-(`lowerPairResume` already emits `{kind:'map'}`, `lowerPathResume` `{kind:'path'}`), not a bespoke spec.**
-
-**`Shape` vs `RelFraming` — settled, keep both (measured split, not duplication).** `Shape` (byte
-framing, `render.ts`) answers the framer's ONE question "what bytes"; `RelFraming` (fold-internal,
-`framing.ts`) answers the bigger "what does the relation HOLD, so a step can compose." They are two
-PROJECTIONS of "what is this stream", neither a subset: `Shape` MERGES `elements`/`detached` (byte-
-identical) which `RelFraming` SPLITS (routes `elementTail` vs `detachedTail`); `RelFraming` merges the
-`jsonbList`/`jsonbSet`/`jsonbElementList` framers into one `list`. A unified crossing-vocabulary was TRIED
-(`layoutOf`/`TraverserLayout`) and produced a real bug (blocked the path channel — `framing.ts:19-22`).
-The actual duplication is the BESPOKE barrier specs (`DecorateSpec`/`PathSpec`/`PairSpec` — a fourth
-shape vocabulary); expressing barrier output in `RelFraming` terms is the longer-horizon cleanup, not a
-Phase-2 blocker.
-
-### Phase 2 is a PREFIX/BOUNDARY split, not per-reducer special-casing (corrected 2026-08-26 vs Calcite)
-
-The first cut special-cased a terminal reducer ("if the tail ends in `count()`, push it"). That was
-WRONG — it broke `federate(t).out().dedup().count()` (pushed only `count()`, reducing the sibling's
-un-walked rows → 5 not 2) and UNDER-pushed `federate(t).has('x',1).count()` (should push both). The
-lesson, validated against Calcite (`vendor/calcite`, studied 2026-08-26): **pushdown is a BOUNDARY
-between a remote-executable region and a local one, and the region grows UPWARD from the source.** Calcite
-finds the maximal cut with a cost-based planner (a `Convention` trait per operator + a costed
-boundary-crossing converter — `plan/Convention.java`, `rel/convert/ConverterRule.java`); we do NOT need
-that machinery, because our cost model is degenerate: **the sibling runs the SAME engine, so pushing is
-always cheaper and almost every step is pushable.** The maximal cut is therefore a simple PREFIX WALK.
-
-**`pushableTailPrefix(tail)` — split the post-barrier tail into `[remote prefix] [local suffix]` at the
-first LOCAL-DEPENDENT step** (blocklist, optimistic: push unless a step is proven local). A step is
-LOCAL-DEPENDENT iff it:
-1. **references a label / path position bound BEFORE the barrier** — a backtrack that reaches ACROSS the
-   boundary (`g.V().as('x').call(federate,…).where(eq('x'))`). A backtrack CONTAINED in the prefix
-   (`federate(…).as('a').out().where(eq('a')).count()`) is fully pushable — the sibling runs it whole.
-   So the walk tracks labels BOUND within the prefix so far; a step referencing a label NOT in that set
-   ends the prefix. (This is Calcite's "a converter fires only if its input is already in the remote
-   convention", specialized to label scope.)
-2. **is the mid-traversal INJECTION SCATTER** — the per-parent `T.value` fan-out needs the local parent
-   rows. A pushed aggregate here is the SPLIT-AGGREGATE case (below), not a global one.
-3. **mixes ANOTHER graph** — a nested `call(federate,…)` to a different sibling, or a local-graph read.
-4. **is a WRITE / local side-effect** feeding a later local read (`aggregate('x')`/`store('x')`/`cap`,
-   `MUTATING_STEPS`).
-
-Everything else pushes: `has`/`hasLabel`, `out`/`in`/`both`, `dedup`, `order`, `limit`/`range`, the
-reducers, and a SELF-CONTAINED `where`/`union`/`match`. This SUBSUMES every case and INCREASES scope:
-`federate(t).out().dedup().count()` pushes the WHOLE prefix (correct AND cheaper — the sibling has the
-adjacency), and `federate(t).values('name')` pushes `[values]` (Phase 4 projection falls out for free).
-
-**Result shape follows the pushed prefix's ROOT — no scalar-vs-elements special-casing** (Calcite's
-`RelToSqlConverter` rule: the pushed subtree's root type IS the RPC return type). If the prefix ends in a
-reducer → `ForeignResult.scalar`; else → `ForeignResult.elements`. This is EXACTLY what the `ForeignResult`
-tagged union already models — the transport work is right and general; only the DECISION (special-case →
-prefix walk) changes.
-
-**Build:**
-1. `raw()` returns a shape-tagged `ForeignResult` (elements OR scalar) — DONE. A scalar crosses as a
-   `{t,v}` `ValueNode` (measured facts above), re-framed by `frameTypedNode`.
-2. `pushableTailPrefix(tail)` computes `{prefix, suffix}` at the boundary. The barrier appends the whole
-   `prefix` to the sibling gremlin; the resume lowers only the `suffix` (`barrier.at + 1 + prefix.length`).
-3. The resume frames the result by its `ForeignResult` tag: `lowerScalarResume` for a scalar (a 1-row
-   `typedNode`), the element resume for elements.
-4. SOURCE-form first. MID-traversal is the SPLIT-AGGREGATE slice — Calcite's `SqlSplittableAggFunction`
-   (`CountSplitter`: partial `COUNT` remote + local `SUM0` combine; `AVG → SUM/COUNT` reduce-first;
-   MIN/MAX self-split). A named relational pattern, not an ad-hoc worry — its own follow-up.
-
-## Mid-traversal reduction — a MONOID transport optimization (registry landed 2026-08-26)
-
-**Mid-traversal `.count()` ALREADY produces the right answer** (measured): the sibling runs once over the
-distinct injected values, the flat element pool scatters back per parent (`foreignRejoin`, `foreign.ts`),
-and the local `count()` reduces the resumed stream. So split-aggregate is NOT new capability — it is a
-TRANSPORT OPTIMIZATION: cross a `(key→partial)` map instead of every element, combine locally, SAME
-answer. The correctness obligation is the SPLIT LAW `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`,
-which is what makes "partial remote, combine local" valid — so it is gated with a differential
-(optimized ≡ the element path, which is the semantic authority that already works).
-
-**The reducer table** (`src/compiler/ir/reducers.ts`, landed): each reducer is `(partial, combine, empty)`,
-from Calcite's `SqlSplittableAggFunction` — count/sum combine with SUM0 (`CountSplitter`), min/max
-self-split (`SelfSplitter`), mean reduce-firsts to `(sum, count)` (`AggregateReduceFunctionsRule`). NOTE
-the algebra (see the Reducer algebra section above): `count` is the MONOID (`empty:'zero'` → 0), the rest
-are SEMIGROUPS (`empty:'nothing'`). The table is the authority; the lowering picks by reducer name. Only
-`count` actually reaches the mid gate (the rest need a preceding `values(k)`), so this table's other rows
-are exercised by the arg-less 2a scalar path, not the mid combine.
-
-**Reuse decided (investigation 2026-08-26), sympathetic to existing arms:**
-- **NOT `barrier_state`/`BarrierRelation`** — local-SQL-scratch by construction; federate is store-free
-  `'worker'` residency. (Its correlation JOIN is a good *model* for the combine, but its source is a local
-  table `Ref`, not landed JSON.)
-- **NOT the `groupMap` builders** — those are the SIBLING's own lowering; the sibling already produces the
-  map via `group().by(<key>).by(<partial>())`.
-- **REUSE the `ValueNode` `t:'map'` arm** (`gremlin/types.ts`) — a `(key→partial)` map is a map-valued
-  scalar, type-faithful both sides, and rides the EXISTING `ForeignResult.scalar` arm; `lowerScalarResume`
-  already frames any `ValueNode`. **No new `ForeignResult` arm.**
-
-**The one genuinely NEW piece — the per-parent COMBINE** (sits beside `foreignRejoin`, does not replace
-it): the resume folds the `(key→partial)` map GLOBALLY per the reducer's `combine`/`empty` — SUM0 for
-count/sum (empty → 0 for the monoid count, nothing for the sum semigroup), extremal for min/max (empty →
-nothing). The group key on the sibling is the injection read applied ELEMENT-side (`values('name')`→
-`by('name')`, id→`by(id)`, label→`by(label)`), which equals what `matchValue` compares against — so the
-join key is the same value the element scatter already matches on, no marker-subject extraction needed.
-
-**Build — ALL LANDED (2026-08-26); mid gate is `count`-only by construction (not a gap):**
-1. Reducer table + drift guard (`reducers.ts`) — LANDED. Models `(partial, combine, empty)`; `count` is
-   the monoid, the rest semigroups.
-2. Gate (`inferredReduce`, `segment.ts`): mid-traversal + injection + a single bare splittable reducer →
-   a `CallSite.reduce` directive — LANDED. In practice only `count` qualifies (sum/min/max/mean need a
-   preceding `values(k)`, a 2-step tail the single-reducer gate rejects).
-3. `apply` (`federate.ts`): synthesizes `<sub>.group().by(<groupBy>).by(<partial>())`; the sibling
-   returns a `(key→partial)` map that rides the EXISTING `ForeignResult.scalar` arm as a `t:'map'`
-   ValueNode (`raw()` gained the `mapValue` shape arm — no new transport arm) — LANDED.
-4. Resume combine (`lowerReduceCombine`, `lower.ts`): folds the per-parent partials GLOBALLY with
-   `combine`/`empty` (a mid `count()` is a global reduction → one value, not a per-parent stream — the
-   frame caught that bug) — LANDED.
-5. Differential: `federateReduce` switch (off = element-path authority); `test/federation.test.ts` runs
-   a mid-traversal reduction switch-ON ≡ switch-OFF. NOT L5 (federate isn't in the corpus) — LANDED.
-6. Empty-reduction semantics: an empty scalar reduction frames as NOTHING for a semigroup, 0 for the
-   monoid count (`lowerScalarResume`/`lowerReduceCombine` via a `Filter(false)` empty relation) — LANDED.
-
-`mean` is NOT a mid-traversal follow-up (it is not a valid bare-reducer mid tail — see the Reducer
-algebra section); it already pushes via arg-less 2a. The `reduceFirst` field in `reducers.ts` is declared
-but unused, kept for the day a compound-accumulator mid case appears.
-
-## Phasing (original plan — status in brackets)
-
-1. **[LANDED] `ContentDemand` `ChainFact` + `detachedTail` reads it.** The static walk over post-barrier steps
-   (consulted-not-constructed, degrades to fetch-everything), AND `detachedTail` converges onto it as the
-   single classifier: its per-step branches become the generic reader of the one fact rather than a second
-   independent copy. No fetch-behaviour change yet — the demand is computed and `detachedTail` consumes it,
-   so the accept/decline set is provably the same as today (the L4 `@Unsupported` refusals and the census
-   deferrals are the differential that proves it). This convergence is the phase, not a preamble to it.
-2. **[LANDED — as PREFIX pushdown, not per-reducer]** Reduction pushdown: subsumed by 2a's
-   `pushableTailPrefix` (source-form) and the mid-traversal monoid reduction. The original per-reducer
-   framing was corrected against Calcite (see above).
-3. **[LANDED] Conditional endpoint fetch** — `withEndpoints` gated on `reachesAdjacency`.
-4. **[PARTIAL] Projection pushdown** — the arg-less form pushes `values(k)` as part of the prefix (so only
-   the projected shape crosses); a dedicated "narrow to `keys`" over the EXPLICIT form is not separately
-   built. Mostly folds out of 2a.
-5. **[LANDED] ergonomic arg-less API** — `pushableTailPrefix` + sibling synthesis (source form), AND the
-   arg-less MID injection (2b): the self-delimiting marker is `call("parent", <read>)`, NOT a separate
-   `mogwai.inject` service (that idea is dropped — see the header). `inferredPushdown` caps the pushed
-   prefix at the marker step and folds its read onto an effective `injectionTraversal`, so the arg-less and
-   explicit forms share one code path.
-6. **[STILL OPEN — multi-graph mixing] origin-in-row** — hard edge (c)'s `origin` discriminator carried in
-   the bound stream so `dedup`/`has(T.id)`/`group().by(id)` compare `(graph, id)`. A bounded, measurable
-   change (per-graph CTEs already exist), gating only multi-graph. (This was labelled "win 2b" in earlier
-   drafts; 2b's ergonomic arg-less injection has landed, so this identity work is what remains.)
-
-## Non-goals / refuted directions
-
-- **Lazy runtime endpoint fetch** (fetch endpoints only when the tail reaches them AT RUNTIME) — breaks
-  "one barrier = one await": the tail would trigger a second federate hop mid-lowering. The compile-time
-  demand achieves the same "don't fetch what you don't use" WITHOUT a second round-trip, because the tail
-  is statically known. Do not reintroduce laziness as the mechanism.
-- **A new STEP function for injection or the ergonomic API** — forbidden by the GLV constraint (we do not
-  modify any GLV). `call()` is the sanctioned extension point; a marker CALL is expressible by every
-  unmodified client. This is why injection reused `T.value` and why 2a's fix is a marker call, not a step.
-- **Treating cross-graph identity as an unsolved wall** — CORRECTED 2026-08-26 (hard edge (c)): identity
-  is ALREADY namespaced structurally by the per-graph CTE binding; only the MERGED-stream case needs origin
-  promoted into the row. Do not re-describe (c) as gating all multi-graph work — it gates only 2b's merged
-  streams, and the substrate is mostly there.
+`generateSeedFromStarts`); a subclass becomes a MONOID only by installing an explicit identity. So `count`
+is the LONE monoid (`ConstantSupplier(0L)` → empty count is **0**); `sum`/`min`/`max`/`mean` are SEMIGROUPS
+(each guards `processAllStarts` with `if (starts.hasNext())` → empty emits **NOTHING**, matching direct
+execution). TinkerPop by design — TINKERPOP-1777, a deliberate breaking change in 3.4.0; the sanctioned
+"I want 0 over empty" idiom is a user `coalesce(…, constant(0))`, not an engine identity. `reducers.ts`
+models the family as `(partial, combine, empty)` with `empty ∈ {'zero' (monoid count), 'nothing'
+(semigroup)}` — the authority the lowering picks by reducer name. Cite `vendor/tinkerpop/gremlin-core`
+`SumGlobalStep`/`CountGlobalStep` for the guard-vs-seed split.
+
+## Mid-traversal reduction — a monoid transport optimization
+
+A mid federate whose local tail is a bare reducer pushes the reduction as a per-injected-value GROUPED
+PARTIAL — `<sub>.group().by(<groupBy>).by(<partial>())` — so only a `(key→partial)` map crosses instead of
+every element; the resume COMBINES per parent (`lowerReduceCombine`) with the reducer's `combine`/`empty`.
+Same answer as the element scatter + local reduce (the authority), fewer bytes. Gated by the
+`federateReduce` switch with a differential (`test/federation.test.ts`: switch-ON ≡ switch-OFF). The split
+law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)` is what makes it valid. `groupBy` is the injection
+read applied element-side, so the group key equals what the element scatter matches on. In practice only
+`count` reaches this gate (sum/min/max/mean need a preceding `values(k)`, a 2-step tail the single-reducer
+gate rejects — they push via the arg-less prefix instead); the table's other rows are exercised by that
+path. The reducer partials from Calcite's `SqlSplittableAggFunction` (count/sum → SUM0, min/max
+self-split, mean reduce-firsts to `(sum, count)`).
+
+## The hard edges
+
+- **Unbounded movement (`repeat`/`until`)** — the reachable set's size is not known at compile time, so
+  "fetch exactly these N vertices" is unavailable; you fetch the whole reachable subgraph or push the
+  `repeat` itself remote.
+- **Genuine local↔remote interleaving (multi-graph)** — `federate(A).out().where(<needs graph-B data>)`
+  is remote→local→remote. The mixing is always DECIPHERABLE (which step reads which graph is static) but
+  not always COLLAPSIBLE to one hop; each transition is a barrier, and each barrier is a round-trip. So
+  `g.V(ids)`-into-a-remote-graph stays a permanent primitive — which is why the endpoint-id transport
+  (bound param → `json_each`, not inline text) had to land regardless, and why it COMPOSES: however an id
+  set arises, it crosses as one `json_each` bind.
+- **Identity across graphs** — each `BoundGraph` is bound to a SPECIFIC CTE (`vertexBinding`/`edgeBinding`),
+  and every rejoin resolves against THAT graph's relation, so an element from graph A is effectively
+  `(bgv_A, id)` — the CTE binding IS the graph qualifier, structurally. The gap is narrow: the qualifier is
+  STRUCTURAL (which CTE), not a VALUE carried in the row, so it breaks ONLY when two bound graphs' elements
+  share ONE stream (`federate(A).union(V(), federate(B).V())` then `dedup`/`has(T.id)`/`group().by(id)` —
+  A's `5` and B's `5` collapse). The fix is bounded: promote the structural qualifier into the traverser at
+  merge points — an `origin` discriminator carried in the bound stream, threaded through `externalId` and
+  the identity comparisons. Per-graph CTEs already exist; what is missing is carrying origin in the row
+  when streams merge.
+
+## Landed
+
+Endpoint-id transport (`ENDPOINT_IDS_KEY`); the `ContentDemand` tail classifier and conditional endpoint
+fetch (skip the endpoint hop unless the tail reaches an endpoint); the `ForeignResult` shape-tagged
+transport (elements | scalar | keyed map); arg-less pushdown (source + reducers); mid-traversal `count`
+reduction pushdown with its differential; empty-reduction semantics; the `parent` marker (replacing
+`T.value`); the mogwai.* namespace drop; the sub-traversal-as-steps refactor (string only at the RPC
+edge); arg-less MID injection (the marker in the pushed prefix); and the cross-boundary collection-read
+guard (a `cap` reading a pre-barrier collection stays local).
+
+## Open, in rough priority
+
+1. **Pushed-collection output framing** — `runForeign` grows a `t:'list'` ValueNode arm for a sibling
+   `cap`/`fold` terminal, so a self-contained `aggregate('a').cap('a')` (which already PUSHES per the
+   boundary walk) frames end-to-end instead of failing "expected element rows, got a scalar/list". Small:
+   one shape arm using the existing envelope; the resume (`lowerScalarResume`) already frames it. Also the
+   natural moment to rename `raw()` → `runForeign` if not already done. This is the "same wall the scalar
+   reducers hit", one shape further.
+2. **Bigger-than-scalar INJECTION (input side)** — the parent injects a LIST/MAP (eventually a SUBGRAPH),
+   not just a scalar `values`/`id`/`label`, so it can hand real context to the sibling. Orthogonal to (1)
+   — (1) is what the sibling returns OUT, this is what the parent sends IN — but shares the `{t,v}`
+   envelope. The strategic slice; larger; best done in a clear context.
+3. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
+   `union`-of-two-siblings + identity comparisons.
+4. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
+   could be threaded through the resume (today `cap` over a pre-barrier collection fails closed locally).
+   Lower value.
