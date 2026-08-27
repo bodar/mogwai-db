@@ -173,14 +173,18 @@ describe('call/with fold + param resolution', () => {
     }
   });
 
-  test('injectionKindOf classifies the supported direct value reads and rejects others', () => {
+  test('injectionKindOf classifies direct scalar/list reads and rejects unshaped streams', () => {
     // Classifies the marker's READ body (`call("parent", <read>)`'s 2nd arg). Feed the read directly.
     const kind = (read: string) => injectionKindOf(callStep(`g.call("parent", ${read})`).args[1].value.nested, {});
     expect(kind('__.values("name")')).toEqual({ kind: 'values', key: 'name' });
     expect(kind('__.id()')).toEqual({ kind: 'id' });
     expect(kind('__.label()')).toEqual({ kind: 'label' });
+    expect(kind('__.values("name").fold()')).toEqual({ kind: 'values', key: 'name', fold: true });
+    expect(kind('__.id().fold()')).toEqual({ kind: 'id', fold: true });
+    expect(kind('__.label().fold()')).toEqual({ kind: 'label', fold: true });
     // Computed / non-direct → null (the caller fails closed with a clear deferral).
-    expect(kind('__.values("name").fold()')).toBeNull();
+    expect(kind('__.out("knows").values("name")')).toBeNull();
+    expect(kind('__.union(__.values("name"),__.values("age")).fold()')).toBeNull();
     expect(kind('__.out().count()')).toBeNull();
     expect(kind('__.constant(1)')).toBeNull();
   });
@@ -274,9 +278,9 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
-    // The parent marker's read is a computed scalar (`values(k).fold()`) — not a direct value read.
+    // The parent marker's read is a multi-valued stream with no explicit fold — never collapse it implicitly.
     expect(() => compilePlan(
-      'g.V().call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name").fold()))])', {}, { registry: () => reg }))
+      'g.V().call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.out("knows").values("name")))])', {}, { registry: () => reg }))
       .toThrow(/must be a direct value read/);
   });
 });

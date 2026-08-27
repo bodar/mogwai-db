@@ -181,6 +181,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
+      injection,
       tailDemand: contentDemand(steps, suffixFrom),
       pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
       reduce,
@@ -279,13 +280,13 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
   // With no injection the sub-traversal is a constant, and the head exists only to COUNT the parents —
   // `id()` is the cheapest one-row-per-traverser read, and its value is never matched on.
   const call = steps[barrier.at]!;
-  // The injection READ is the user's own one-step body, taken verbatim rather than re-synthesized from
+  // The injection READ is the user's own body, taken verbatim rather than re-synthesized from
   // the classification — `injectionKindOf` already parsed it, and re-minting a `values(k)` step would be
   // a second spelling of the same read for the classifier to drift from.
-  const read: IRStep = injection && barrier.spec.injectionTraversal
-    ? stepChain(barrier.spec.injectionTraversal, request.params)[0]! as IRStep
-    : { name: 'id', args: [], ctx: call.ctx };
-  const lowered = lowerToRel([...steps.slice(0, barrier.at), read], request.lowering);
+  const read: readonly IRStep[] = injection && barrier.spec.injectionTraversal
+    ? stepChain(barrier.spec.injectionTraversal, request.params) as IRStep[]
+    : [{ name: 'id', args: [], ctx: call.ctx }];
+  const lowered = lowerToRel([...steps.slice(0, barrier.at), ...read], request.lowering);
   if (!lowered) return null;
   const head = finishLowering(lowered);
   // A head is ONE statement the executor drains before the await. A program (a write in the prefix)

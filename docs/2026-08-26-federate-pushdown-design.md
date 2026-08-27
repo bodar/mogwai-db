@@ -67,10 +67,35 @@ The sibling runs ONE batched hop over the DISTINCT injected values (a SPARQL bou
 SCATTER back over the parents (`foreignRejoin`, `src/compiler/rel/foreign.ts`): each returned element
 re-matches the injected value it satisfies, in the resume SQL.
 
-## Bigger-than-scalar injection — a BIND of any shape, correlated by a minted `origin` (DESIGN, building)
+## Bigger-than-scalar injection — a BIND of any shape, correlated by a minted `origin`
 
-_The settled architecture for widening injection past a scalar (open item 1). Decided 2026-08-27; the
-build is in progress. Memory: `federate-injection-value-as-key`._
+_The architecture for widening injection past a scalar (open item 1). Decided + built 2026-08-27. Memory:
+`federate-injection-value-as-key`._
+
+**SCOPE — where this sits in the two federate axes.** Federate pushdown has two ORTHOGONAL directions,
+easy to conflate:
+- **OUTPUT-side** (what the sibling returns OUT, how it frames locally) — the value-stream work: pushed
+  `values`/`fold`/`cap`, the mid cross-scatter. **Landed** (see "Landed" below).
+- **INPUT-side** (what the parent sends IN per parent) — THIS section. What the corrId work primarily did
+  was a **correlation-mechanism REFACTOR**: it replaced "re-match the returned element's value" with
+  "carry a minted corrId (`origin`) through the sibling and join on it". A scalar injection worked before
+  and works now; the refactor made correlation CORRECT (distinct parents with equal values) and, crucially,
+  **value-SHAPE-agnostic** — which is the prerequisite for injecting anything bigger than a matchable
+  scalar. The old value-match rejoin fundamentally could not scale (you cannot re-match a list/map against a
+  returned element); the corrId decouples correlation from the value's shape entirely.
+
+Input-side injectable-shape status:
+
+| shape | read | status |
+|---|---|---|
+| **scalar** | `values('k')` / `id()` / `label()` | ✅ (now via corrId) |
+| **list** | `<scalar-read>.fold()` — set MEMBERSHIP | ✅ |
+| **map** | `valueMap` / `project` | ❌ not built |
+| **subgraph** | a projected neighbourhood | ❌ not built |
+
+Map and subgraph now generalize CLEANLY (no correlation rework): a map/subgraph injects as a bind of that
+shape; the corrId join is identical; only what the sibling DOES with the injected value (filter on a map's
+keys, traverse an injected subgraph) is new per shape. Those remain under this same open item.
 
 **Injection is a BIND spliced at the marker, of ANY explicit shape.** The marker read produces a per-parent
 value — a scalar (`__.values('k')`/`__.id()`/`__.label()`), a LIST (`<read>.fold()`), eventually a map or

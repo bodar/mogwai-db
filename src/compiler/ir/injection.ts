@@ -33,6 +33,15 @@
  *  name, so it keeps its prefix.) */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
 
+/** An internal shape flag paired with `INJECT_VALUES_KEY`. True means every injected pair's value is
+ * an explicitly folded list, so the sibling marker uses list membership rather than scalar equality.
+ * It is a settled compiler fact, never inferred from the JSON value's runtime shape. */
+export const INJECT_LIST_KEY = '_mogwai_inject_list';
+
+/** True iff this sibling hop carries explicitly folded list injection values. */
+export const injectedList = (params: Record<string, unknown>): boolean =>
+  params[INJECT_LIST_KEY] === true;
+
 /** An internal marker on the sibling request for federate's grouped reduction transport.  Its GROUP
  * key is the injected correlation channel, which is not a Gremlin property and therefore must be
  * selected by the RelIR lowering rather than by the synthesized Gremlin text. */

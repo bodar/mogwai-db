@@ -5,7 +5,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { createFederateService } from '../src/services/catalog/federate.ts';
-import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
+import { ENDPOINT_IDS_KEY, INJECT_LIST_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
@@ -236,6 +236,15 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     expect(plan.sql).toContain('json_each(jsonb(?))');
   });
 
+  test('a list-injection marker lowers to membership against its pair value', () => {
+    const plan = compile('g.V().has("name", __.call("parent", __.values("name").fold()))', {
+      [INJECT_VALUES_KEY]: [[41, ['marko', 'not-a-crew-name']]], [INJECT_LIST_KEY]: true,
+    });
+    if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
+    expect(plan.sql).toContain("IN (SELECT");
+    expect(plan.sql).toContain("FROM json_each(json_extract(");
+  });
+
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
   // The injection is the `parent` marker in a predicate operand: has("name", __.call("parent", <read>)).
@@ -245,6 +254,32 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
   test('for each home person, fetch same-named crew vertices (values injection)', async () => {
     const res = await runNames(mid('__.values("name")'));
     expect(res).toEqual(['marko']);                 // only the shared name matches
+  });
+
+  test('a one-member folded injection is the scalar injection', async () => {
+    expect(await runNames(mid('__.values("name").fold()')))
+      .toEqual(await runNames(mid('__.values("name")')));
+  });
+
+  test('a folded multi-valued property matches by membership, not list equality', async () => {
+    // Keep the shared fixture untouched: this manager gets the one deliberate Cardinality.list mutation,
+    // and the finally removes it even though the manager is about to fall out of scope.
+    const multi = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of MODERN_SEED) await multi.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await multi.executor('crew').framedAsync(g, {});
+    await multi.executor('home').framedAsync('g.V().has("name","marko").property(Cardinality.list,"name","not-a-crew-name")', {});
+    try {
+      const q = 'g.V().hasLabel("person").has("name","not-a-crew-name").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name").fold()))])';
+      const result = await Promise.all((await multi.executor('home').framedAsync(q, {})).map(dec));
+      expect(names(result)).toEqual(['marko']);
+    } finally {
+      await multi.executor('home').framedAsync('g.V().has("name","not-a-crew-name").properties("name").drop()', {});
+    }
+  });
+
+  test('a bare multi-valued marker read fails closed instead of implicitly folding', async () => {
+    await expect(mgr.executor('home').framedAsync(mid('__.out("knows").values("name")'), {}))
+      .rejects.toThrow(/must be a direct value read/);
   });
 
   test('TWO parents injecting the SAME value both get the match (corrId keeps distinct parents distinct)', async () => {
@@ -336,7 +371,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
   });
 
   test('an unsupported injection (computed scalar) fails closed with a clear deferral', async () => {
-    await expect(mgr.executor('home').framedAsync(mid('__.values("name").fold()'), {}))
+    await expect(mgr.executor('home').framedAsync(mid('__.values("name").count()'), {}))
       .rejects.toThrow(/must be a direct value read/);
   });
 });

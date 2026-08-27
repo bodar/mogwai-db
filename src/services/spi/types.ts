@@ -24,16 +24,16 @@ import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
  *  into one representation. A service reads it oblivious to how the value arrived. */
 export type CallParams = Record<string, unknown>;
 
-/** How a mid-traversal call()'s per-parent SCALAR value is projected — the classification of the
- *  injection traversal (the THIRD positional arg of `V().call(name, params, __.values('k'))`).
- *  Restricted to a DIRECT value read (Phase 6b): a property value, the element id, or its label —
+/** How a mid-traversal call()'s per-parent value is projected — the classification of the
+ *  injection traversal. Restricted to a DIRECT value read, optionally with an explicit trailing
+ *  `.fold()`: a property value, the element id, or its label —
  *  each of which also lands on the returned foreign row (fprops/fid/flabel), so the federate
  *  rejoin can match a result against the injected value in SQL. A computed injection
  *  (math/format/transforms) is out of scope and fails closed with a clear deferral. */
 export type InjectionKind =
-  | { readonly kind: 'values'; readonly key: string }
-  | { readonly kind: 'id' }
-  | { readonly kind: 'label' };
+  | { readonly kind: 'values'; readonly key: string; readonly fold?: boolean }
+  | { readonly kind: 'id'; readonly fold?: boolean }
+  | { readonly kind: 'label'; readonly fold?: boolean };
 
 /** What a call() site parsed to before registry lookup — the service name plus its
  *  resolved constant params. Shared by the source form (g.call(...)) and the
@@ -71,6 +71,10 @@ export interface CallSite {
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
+  /** The explicit shape of this mid-traversal federate injection, if it has one. `fold:true` is
+   *  carried to the sibling as an internal flag so marker lowering chooses membership without
+   *  inspecting the JSON pair value. */
+  readonly injection?: InjectionKind;
   /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
    *  known once at plan time (the tail is right there in the chain), the same category as
    *  `federationDepth`. A barrier that shapes its fetch by the downstream demand (federate skipping the
@@ -299,9 +303,9 @@ export type Contribution =
  * passes none.
  */
 export interface BarrierInput {
-  /** The per-parent scalar the call injects: `values(k)`, `id()` or `label()` over the parent, as
-   *  `injectionKindOf` classified it. Absent when the call names no injection (the sub-traversal is a
-   *  constant), which is the case the rejoin answers with a cross join. */
+  /** The per-parent scalar or explicitly-folded list the call injects: `values(k)`, `id()` or
+   *  `label()` over the parent, as `injectionKindOf` classified it. Absent when the call names no
+   *  injection (the sub-traversal is a constant), which is the case the rejoin answers with a cross join. */
   readonly injectedValue?: unknown;
 }
 

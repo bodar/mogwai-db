@@ -5,19 +5,21 @@ import type { CallSpec, CallParams, InjectionKind, Service, ServiceRegistry } fr
 import { isParentMarkerBody, PARENT_MARKER } from '../../compiler/ir/injection.ts';
 
 /** Classify a mid-traversal call()'s per-parent INJECTION READ into an InjectionKind — the DIRECT value
- *  read the `parent` marker supports: `__.values('k')` (a property value), `__.id()`, or `__.label()`.
+ *  read the `parent` marker supports: `__.values('k')` (a property value), `__.id()`, or `__.label()`;
+ *  an explicit trailing `.fold()` turns one of those reads into a LIST injection.
  *  Each also lands on the returned foreign row (fprops/fid/flabel), so the federate rejoin can match a
  *  result against the injected value in SQL. Returns null for any other shape (a computed/transformed
  *  scalar, movement, etc.) — the caller fails closed with a clear deferral, never a silent mis-rejoin.
  *  `nested` is the marker's READ body (`call('parent', <read>)`'s second arg), NOT the whole marker. */
 export function injectionKindOf(nested: any, params: Record<string, any>): InjectionKind | null {
   const body = stepChain(nested, params);
-  if (body.length !== 1) return null;
-  const s = body[0];
+  const fold = body.length === 2 && body[1]?.name === 'fold' && body[1].args.length === 0;
+  if (body.length !== (fold ? 2 : 1)) return null;
+  const s = body[0]!;
   if (s.name === 'values' && s.args.length === 1 && typeof s.args[0]?.value === 'string')
-    return { kind: 'values', key: s.args[0].value };
-  if (s.name === 'id' && s.args.length === 0) return { kind: 'id' };
-  if (s.name === 'label' && s.args.length === 0) return { kind: 'label' };
+    return { kind: 'values', key: s.args[0].value, ...(fold ? { fold: true } : {}) };
+  if (s.name === 'id' && s.args.length === 0) return { kind: 'id', ...(fold ? { fold: true } : {}) };
+  if (s.name === 'label' && s.args.length === 0) return { kind: 'label', ...(fold ? { fold: true } : {}) };
   return null;
 }
 

@@ -969,6 +969,7 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
   // materialized the whole parent tuple to reach the same one field.
   if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
+  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list) }));
   // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
   // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
   // not framed). `injVal` is absent on a source-form head (which never reaches this method).
