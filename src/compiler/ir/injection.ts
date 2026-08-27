@@ -17,14 +17,11 @@
 // — it NAMES `values`/`id`/`label` rather than relying on a separate positional `__.values('k')` arg.
 //
 // The sibling receives the sub-traversal as an ordinary query PLUS a params entry under the reserved
-// key below holding per-parent correlation/value pairs. A Pass (`substituteInjectionMarker`, strategies.ts)
-// temporarily extracts their values and rewrites the marker operand to a `within([...], INJECT_VALUES_KEY)`
-// — ONE named-collection operand,
-// so it lowers to a single `json_each` bind (`predicate.ts` `jsonEachInSet`), the same data-sized-set
-// re-injection the regex/split barriers use. One batched sibling hop over the parent-value set (a SPARQL
-// bound-join), the injection payload crossing as one bind of any size rather than inline literals baked
-// into the statement text. No string surgery: apply just supplies a params value, and N marker sites
-// share ONE bind via the kernel's reuse-key dedup (they name the same key).
+// key below holding per-parent correlation/value pairs. The sibling's source lowering explodes those
+// pairs as ONE `json_each` bind and joins its value cell to the host `has()` property, projecting the
+// correlation cell as an origin channel. One batched sibling hop over the parent-value set (a SPARQL
+// bound-join), with no inline values baked into statement text. The flat legacy payload still uses the
+// Pass (`substituteInjectionMarker`, strategies.ts) to become a `within()` predicate.
 //
 // This module is a dependency-free leaf (string constants + pure predicates over an ALREADY-PARSED
 // body, never `stepChain` itself) so both the compiler (strategies.ts) and the service (federate.ts)

@@ -10,6 +10,8 @@ import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { pushableTailPrefix } from '../src/compiler/ir/content-demand.ts';
+import { compile } from '../src/compiler/compiler.ts';
+import { storeSeededWith } from './support/harness.ts';
 
 // A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
 // IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
@@ -225,6 +227,15 @@ describe('federate — arg-less MID injection (win 2b, the parent marker in the 
 });
 
 describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
+  test('sibling marker lowering returns each matched element with its injected corrId', () => {
+    const pairs = [[41, 'marko'], [42, 'stephen']] as const;
+    const plan = compile('g.V().has("name", __.call("parent", __.values("name")))', { [INJECT_VALUES_KEY]: pairs });
+    if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
+    const rows = storeSeededWith(CREW_SEED).query(plan.sql, plan.binds) as Array<{ corrId: number; id: unknown }>;
+    expect(rows.map((row) => row.corrId).sort()).toEqual([41, 42]);
+    expect(plan.sql).toContain('json_each(jsonb(?))');
+  });
+
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
   // The injection is the `parent` marker in a predicate operand: has("name", __.call("parent", <read>)).

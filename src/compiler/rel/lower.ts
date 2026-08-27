@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -19,7 +19,7 @@ import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, argValues, arg, stepChain, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -29,9 +29,9 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
-    jsonMemberByTypeof, labelSetArgs, meta, minter,
+    jsonMemberByTypeof, labelSetArgs, meta, minter, PROPERTIES,
     payloadCols, propertyKeyArgs, renumber,
-    typedNode, typeOf, withPayload,
+    typedNode, typeOf, withPayload, storedValueOn,
     type Minter
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -57,6 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
+import { INJECT_VALUES_KEY, injectedPairs, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -2582,7 +2583,10 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
     // vocabulary each may reach (`continueAs` → `elementTail` vs `detachedTail`), never in the wire payload.
     case 'elements':
     case 'detached': return {
-      rel: source.leafPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain), detached }, fresh),
+      rel: source.leafPayload(chain.rel, framing.elem, {
+        bulk: carriesMultiplicity(chain), detached,
+        origin: chain.rel.channels.find((channel) => channel.role === 'origin')?.col,
+      }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -3319,15 +3323,63 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     pred = and(pred, clause);
   }
 
+  // A federated sibling's `has(key, __.call('parent', …))` is not a predicate evaluated on
+  // this graph: its parent read already happened. Land the transmitted [corrId,value] rows once,
+  // join their value cell to the sibling property row, and mint corrId as the rejoin identity.
+  // This must happen while the source's physical property row is available; an EXISTS predicate
+  // would deliberately discard both the multiplicity and the corrId we need downstream.
+  const marker = injectedPairs(params) ? parentMarkerProperty(steps[at], params) : null;
+  // Keep fused filters on the source whether the marker supplies a join or the ordinary seed does.
+  const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
+  let rel: Rel;
+  if (marker) {
+    if (steps.slice(at + 1).some(isStreamBarrier))
+      throw new Error('federated parent marker cannot be followed by a sibling stream barrier: correlation origin would be consumed');
+    if (ctx.source !== BaseGraph)
+      throw new Error('federated parent marker currently requires the base graph source');
+    const { table, owner } = PROPERTIES[elem0];
+    const props = make.scan({
+      id: fresh('ip'), table, alias: fresh('rip'), channels: [],
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    const pairs = injectedPairs(params)!;
+    const exploded = make.explode({
+      id: fresh('ix'), channels: [],
+      expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(pairs.map((pair) => [pair.corrId, pair.value])), INJECT_VALUES_KEY)] },
+      as: { value: 'iv' }, type: typeOf(meta('iv', 'any', true)),
+    });
+    const propertyRows = make.join({
+      id: fresh('ij'), left: source, right: props, join: 'inner', channels: [],
+      type: typeOf(...source.type.cols, ...props.type.cols),
+      on: and(eq(col(source.id, 'id'), col(props.id, owner)), eq(col(props.id, 'key'), compilerText(marker.key))),
+    });
+    const paired = make.join({
+      id: fresh('ij'), left: propertyRows, right: exploded, join: 'inner', channels: [],
+      type: typeOf(...propertyRows.type.cols, ...exploded.type.cols),
+      on: eq(storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), { kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'iv'), compilerText('$[1]')] }),
+    });
+    const origin: Channel = { col: fresh('origin'), role: 'origin' };
+    const channels = withChannel(seedChannels, origin);
+    rel = make.project({
+      id: fresh('c'), input: paired, channels, type: typeOf(...elementCols(channels)),
+      exprs: [['id', col(paired.id, 'id')], ...channels.map((channel) => [channel.col,
+        channel.role === 'bulk' ? compilerInt(1)
+          : channel.role === 'encounter' ? col(paired.id, 'id')
+            : channel.role === 'origin' ? ({ kind: 'call', fn: 'json_extract', args: [col(paired.id, 'iv'), compilerText('$[0]')] } as Expr)
+              : seedPath({ kind: 'element', elem, id: col(paired.id, 'id') }, facts.demandsPathLabels),
+      ] as const)],
+    });
+    at++;
+  } else {
+
   // The `Filter` this builds over a bare element scan is what `src/rel/passes/semijoin.ts` reads: a
   // selective property predicate here can only be CHECKED, and the pass is what turns it into the
   // relation the plan is driven from. Deliberately not decided here — recognising it on the ALGEBRA
   // means it cannot drift with which STEPS happen to fold into this run.
-  const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   // The seed of the emission order is the ROWID: a scan's
   // natural order is the only order a bare source has, and naming it makes every later slice ask
   // the same question of the same column instead of of whatever SQLite happened to produce.
-  let rel: Rel = make.project({
+  rel = make.project({
     id: fresh('c'), input: source, channels: seedChannels, type: typeOf(...elementCols(seedChannels)),
     exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
       channel.role === 'bulk' ? compilerInt(1)
@@ -3335,9 +3387,20 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
           : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }, facts.demandsPathLabels),
     ] as const)],
   });
+  }
 
   const withSack = sacked(rel);
   return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
+}
+
+/** The one sibling-side marker shape this seam owns. Token operands remain deferred until their
+ * physical joins can be expressed without duplicating BaseGraph's id/label access paths. */
+function parentMarkerProperty(step: IRStep | undefined, params: Record<string, unknown>): { readonly key: string } | null {
+  if (!step || step.name !== 'has' || step.args.length !== 2 || typeof step.args[0]?.value !== 'string') return null;
+  const operand = step.args[1]?.value;
+  return isNested(operand) && isParentMarkerBody(stepChain((operand as { nested: any }).nested, params))
+    ? { key: step.args[0].value }
+    : null;
 }
 
 /**
