@@ -123,7 +123,8 @@ describe('federate — arg-less pushdown (win 2a)', () => {
     // the sibling never saw. Pushing it would run `g.V().cap("x")` on the sibling against an undefined
     // collection. The boundary must end the pushable prefix at the cap: only `.V()` pushes, the cap stays
     // local. (End-to-end it then fails closed as "cap() unsupported after a barrier" — the RIGHT reason,
-    // local — until pushed-collection framing lands; the point here is it is not shipped to the sibling.)
+    // local: the collection lives on the PARENT and no resume can reach it; the point here is it is not
+    // shipped to the sibling. A SELF-CONTAINED cap within the prefix DOES push and frame — see below.)
     const q = 'g.V().aggregate("x").call("federate", ["graph":"crew"]).V().cap("x")';
     const steps = stepChain(parseGremlin(q), {});
     const at = steps.findIndex((s) => s.name === 'call');
@@ -139,6 +140,47 @@ describe('federate — arg-less pushdown (win 2a)', () => {
     const at = steps.findIndex((s) => s.name === 'call');
     const p = pushableTailPrefix(steps, at, {});
     expect(steps.slice(at + 1, at + 1 + p.length).map((s) => s.name)).toEqual(['V', 'aggregate', 'cap', 'unfold']);
+  });
+
+  // Pushed-collection OUTPUT framing (open item 1): a self-contained collection push that ends in a VALUE
+  // stream frames end-to-end. The whole tail runs on the sibling and the N values cross back as typed
+  // nodes, each re-emitted as its own traverser — oracled against the SAME traversal run directly on crew.
+  test('a self-contained aggregate.cap.unfold.values() STREAM frames end-to-end (== direct on crew)', async () => {
+    const tail = '.V().hasLabel("person").aggregate("a").cap("a").unfold().values("name")';
+    const got = (await Promise.all((await mgr.executor('home').framedAsync(argless(tail), {})).map(dec))).sort();
+    const crew = (await onCrew(`g${tail}`)).sort();
+    expect(got).toEqual(crew);
+    expect(got.length).toBeGreaterThan(0);   // really ran (not an empty pass)
+  });
+
+  test('a pushed values() STREAM frames each value as its own traverser (== direct on crew)', async () => {
+    const got = (await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("person").values("name")'), {})).map(dec))).sort();
+    expect(got).toEqual((await onCrew('g.V().hasLabel("person").values("name")')).sort());
+  });
+
+  test('a pushed fold() OF ELEMENTS returns ONE list of detached vertices (== direct on crew)', async () => {
+    const got = await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("person").fold()'), {})).map(dec));
+    const crew = await onCrew('g.V().hasLabel("person").fold()');
+    // ONE traverser, a list; the members are detached vertices, compared by name (id spaces differ across graphs).
+    expect(got.length).toBe(1);
+    expect(names(got[0] as any[])).toEqual(names(crew[0] as any[]));
+  });
+
+  test('a pushed values().fold() returns ONE list of scalars (== direct on crew)', async () => {
+    const got = await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("person").values("name").fold()'), {})).map(dec));
+    const crew = await onCrew('g.V().hasLabel("person").values("name").fold()');
+    expect(got.length).toBe(1);
+    expect((got[0] as any[]).sort()).toEqual((crew[0] as any[]).sort());
+  });
+
+  test('an EMPTY value stream is NO traversers; an EMPTY fold is ONE empty list', async () => {
+    // A value STREAM over no elements yields nothing (`Values` refuses the empty relation → a Filter(false),
+    // the same empty spelling the scalar resume takes). A `fold()` over no elements is still ONE traverser,
+    // the empty list — the fold's own identity, unchanged by federation.
+    const emptyStream = await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("nope").values("name")'), {})).map(dec));
+    expect(emptyStream).toEqual([]);
+    const emptyFold = await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("nope").fold()'), {})).map(dec));
+    expect(emptyFold).toEqual([[]]);
   });
 });
 
@@ -219,11 +261,11 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
 
   test('BATCHED: N distinct injected values → exactly ONE sibling hop (apply, spy source)', async () => {
     // Unit-test apply directly with a spy FederationSource: 4 distinct parent values must produce
-    // exactly ONE raw() call (the batched hop binding the distinct-value array), not one per value.
+    // exactly ONE runForeign() call (the batched hop binding the distinct-value array), not one per value.
     let rawCalls = 0; let boundValues: any = null;
     const spySource: any = {
       executor: () => ({
-        raw: (_g: string, params: Record<string, any>) => {
+        runForeign: (_g: string, params: Record<string, any>) => {
           rawCalls++;
           boundValues = params[INJECT_VALUES_KEY];
           return Promise.resolve({ kind: 'elements', rows: [] });
@@ -261,6 +303,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
 });
 
 describe('federation fails closed', () => {
+  const onCrew = async (g: string) => (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec)));
   test('a missing graph param throws', async () => {
     await expect(mgr.executor('home').framedAsync('g.call("federate").with("traversal", __.V())', {}))
       .rejects.toThrow(/"graph" param/);
@@ -271,12 +314,15 @@ describe('federation fails closed', () => {
       .rejects.toThrow(/source-rooted/);
   });
 
-  test('a scalar sub-traversal with NO local reducer fails closed (a pushed reducer is the only scalar path)', async () => {
-    // The sub-traversal itself ends in count() but there is no LOCAL reducer to trigger pushdown — so this
-    // is not a pushed reduction, it is a scalar sub-traversal, which the element-transfer path rejects.
-    // (A local `federate(__.V()).count()` DOES push and returns a scalar — see the pushdown tests.)
-    await expect(mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().count())', {}))
-      .rejects.toThrow(/expected element rows from the sibling, got a scalar result/);
+  test('an EXPLICIT scalar/value sub-traversal frames end-to-end (== direct on crew)', async () => {
+    // The explicit `traversal` form now shares the pushed-terminal output framing: a sub-traversal that ends
+    // in a VALUE (a reducer scalar or a `values(k)` stream) crosses back on the typed-node transport and
+    // frames, rather than being rejected by the old element-only path. `runForeign` classifies the sibling
+    // shape AUTHORITATIVELY, so the explicit form needs no pushdown to reach a value result.
+    const cnt = (await Promise.all((await mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().count())', {})).map(dec)));
+    expect(cnt.map(Number)).toEqual((await onCrew('g.V().count()')).map(Number));   // a reduced scalar
+    const nms = (await Promise.all((await mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().hasLabel("person").values("name"))', {})).map(dec))).sort();
+    expect(nms).toEqual((await onCrew('g.V().hasLabel("person").values("name")')).sort());   // a value stream
   });
 });
 
@@ -352,7 +398,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
       ({ kind: 'edge' as const, id, label: 'develops', src, tgt, props: {}, ordinal: id });
     const spySource: any = {
       executor: () => ({
-        raw: (gremlin: string, params: Record<string, any>) => {
+        runForeign: (gremlin: string, params: Record<string, any>) => {
           hops.push({ gremlin, params });
           // First hop = the edge-producing sub-traversal; second = the endpoint fetch.
           return Promise.resolve({ kind: 'elements', rows: hops.length === 1 ? [edge(10, 1, 2), edge(11, 2, 3)] : [] });
@@ -378,7 +424,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
     let rawCalls = 0;
     const spySource: any = {
       executor: () => ({
-        raw: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] }); },
+        runForeign: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] }); },
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
@@ -394,7 +440,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
     let rawCalls = 0;
     const spySource: any = {
       executor: () => ({
-        raw: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: rawCalls === 1 ? [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] : [] }); },
+        runForeign: () => { rawCalls++; return Promise.resolve({ kind: 'elements', rows: rawCalls === 1 ? [{ kind: 'edge', id: 10, label: 'develops', src: 1, tgt: 2, props: {}, ordinal: 10 }] : [] }); },
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({

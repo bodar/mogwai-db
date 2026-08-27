@@ -7,7 +7,7 @@ import type { Elem } from '../../compiler/elem.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
 import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
-import type { ValueNode } from '../../gremlin/types.ts';
+import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -193,11 +193,23 @@ export interface BarrierScalar {
   readonly value: ValueNode;
 }
 
+/** A pushed-down VALUE STREAM — a federate terminal that produced N values on the far side (`values(k)`,
+ *  `unfold()`, `fold()`, `cap('a')`, a `fold()` of elements), not a single reduced scalar. Each rides the
+ *  self-describing `FrameNode` the local framer consumes (the `BarrierScalar` node one cardinality up,
+ *  plus the detached element arm), so the resume re-emits each as its own traverser (`lowerTypedNodeStream`)
+ *  keeping every member's Gremlin type. A SEPARATE arm from `barrier-scalar` because a stream of N is not a
+ *  collapsed one: the reducer's empty→0/nothing framing does not apply, an empty stream is simply no
+ *  traversers (`docs/2026-08-26-federate-pushdown-design.md`, open item 1). */
+export interface BarrierValues {
+  readonly kind: 'barrier-values';
+  readonly values: readonly FrameNode[];
+}
+
 /** What a barrier's `apply` may return: detached elements (`federate`/`io`), a keyed relation (an OLAP
- *  algorithm), or a pushed-down reduced scalar (a federate reducer). The resume that consumes it is
- *  chosen at PLAN time (contribution flags for the relation; the returned tag for a scalar), so the two
- *  never mismatch. */
-export type BarrierOutput = readonly ForeignRow[] | BarrierRelation | BarrierScalar;
+ *  algorithm), a pushed-down reduced scalar (a federate reducer), or a pushed-down value STREAM (a federate
+ *  value terminal). The resume that consumes it is chosen at PLAN time (contribution flags for the
+ *  relation) or by the RETURNED TAG (scalar vs values), so the two never mismatch. */
+export type BarrierOutput = readonly ForeignRow[] | BarrierRelation | BarrierScalar | BarrierValues;
 
 /** A DECORATE barrier's element-preserving descriptor. When present on a barrier contribution, the
  *  segment builds a DECORATE resume: it re-lowers the LIVE element prefix and reads the barrier's

@@ -19,7 +19,7 @@ import type { ForeignResult } from '../api.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
 
 /** The data-plane payloads that may cross a DO RPC. `Framed[]` (framed()/runFramed()), `ForeignResult`
- *  (raw(), a federated hop — a shape-tagged result, elements or a reduced scalar), and `BarrierInput[]`
+ *  (runForeign(), a federated hop — a shape-tagged result, elements or a reduced scalar), and `BarrierInput[]`
  *  (readHead(), Worker-driven federation §4·2). A new RPC that returns something else must add its
  *  payload here — the bound is deliberately closed. */
 type RpcPayload = Framed[] | ForeignResult | BarrierInput[];

@@ -543,7 +543,7 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
  * landed subgraph needs to reconstruct a full `DetachedVertexProperty`: the property's own id (`vpid`
  * = the `vertex_properties` rowid, TinkerPop's `Property` handle) and its meta-properties (`meta`).
  *
- * Emitted ONLY on the `detached` compile path (`raw()`), so an ordinary read's property stays `{t,v}`.
+ * Emitted ONLY on the `detached` compile path (`runForeign()`), so an ordinary read's property stays `{t,v}`.
  * `meta` rides as `json(...)` — a BLOB cannot cross the JSON transport (root `CLAUDE.md`), and a null
  * meta column becomes JSON null, which the decoder reads as no meta-properties.
  */

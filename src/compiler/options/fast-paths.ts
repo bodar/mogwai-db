@@ -97,7 +97,7 @@ export interface CompileOptions {
    *  are the legacy path (still honoured for callers that haven't adopted the scope). The
    *  store tier builds this once per Executor; see src/scopes.ts. */
   readonly app?: import('../../scopes.ts').AppScope;
-  /** DETACHED-transfer compile mode. Set ONLY by `raw()` — the federated snapshot path — so the leaf
+  /** DETACHED-transfer compile mode. Set ONLY by `runForeign()` — the federated snapshot path — so the leaf
    *  emits a FULLER property node (`{t, v, vpid, meta?}`) that carries the VertexProperty's own id and
    *  meta-properties, which a bound `properties().id()` / meta read then consumes. Off (the default) for
    *  ordinary wire framing, so base props stay `{t, v}` and the base plan is unchanged by construction. */

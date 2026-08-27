@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo } from '../manager.ts';
-import type { GraphInfo, Executor, ForeignResult } from '../api.ts';
+import type { GraphInfo, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
@@ -105,12 +105,13 @@ export class GraphDatabase extends DurableObject<Env> {
     });
   }
 
-  /** Data-plane RPC: the INTERNAL raw-result path — a federated hop FROM a sibling DO lands here.
+  /** Data-plane RPC: the INTERNAL runForeign-result path — a federated hop FROM a sibling DO lands here.
    *  Returns a detached `ForeignResult` (no GraphBinary; the client edge frames only the final result) —
-   *  elements or a pushed-down reduced scalar. `depth` is the federation recursion depth of this hop
-   *  (guarded in the service). */
-  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignResult | RpcFailure> {
-    return rpcTry(() => this.executor().raw(gremlin, params, depth));
+   *  elements, a pushed-down reduced scalar, or a pushed-down value stream. `depth` is the federation
+   *  recursion depth of this hop; `terminal` is the reducer-vs-values-stream hint (`ForeignTerminal`),
+   *  threaded from the calling Worker so the sibling frames the pushed terminal correctly. */
+  async runForeign(gremlin: string, params: Record<string, any>, depth: number, terminal?: ForeignTerminal): Promise<ForeignResult | RpcFailure> {
+    return rpcTry(() => this.executor().runForeign(gremlin, params, depth, {}, terminal));
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----

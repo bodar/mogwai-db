@@ -33,7 +33,7 @@ export interface RelRequest {
    *  Off runs the reducer LOCALLY over the scattered elements — the semantic AUTHORITY the pushed path
    *  must equal (the optimized ≡ unoptimized differential, checked by a federation test). Default on. */
   readonly federateReduce: boolean;
-  /** DETACHED-transfer compile mode (set only by `raw()`): the leaf emits a fuller property node
+  /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
   readonly detached: boolean;

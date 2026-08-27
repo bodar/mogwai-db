@@ -13,7 +13,7 @@ import type { FastPathConfig } from '../../src/compiler/compiler.ts';
 // (test/federation.test.ts). This replaces the old free executeQuery/executeFramed helpers with a
 // single bound object so no test threads store/registry through per-call args.
 //
-// `exec(...).raw(...)` (the async federation path) is unavailable here (no siblings); a test that
+// `exec(...).runForeign(...)` (the async federation path) is unavailable here (no siblings); a test that
 // needs it uses a BunGraphManager. Calling the sync helpers on a FEDERATED traversal throws a
 // clear "use the async path" error (correct — this fixture is the sync, non-federated seam).
 

@@ -31,7 +31,10 @@ import type { BarrierInput, BarrierOutput, BarrierResidency, CallParams } from '
  *  the API's Executor/GraphManager — the GraphManager structurally satisfies it (it IS the
  *  executor factory). Kept here (not imported from api.ts) so segment.ts stays a leaf. */
 export interface FederationSource {
-  executor(id: string): { raw(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, unknown>): Promise<ForeignResult> };
+  // `terminal` ('reduce' — kept as a bare literal so this leaf need not import `ForeignTerminal` from
+  // api.ts) disambiguates a pushed reducer from a pushed value stream (a `count()` and a `values(k)`
+  // both compile to `value`); absent → the sibling shape is authoritative (elements vs a value stream).
+  executor(id: string): { runForeign(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, unknown>, terminal?: 'reduce'): Promise<ForeignResult> };
 }
 
 // ---------- a barrier is SYNC or ASYNC, and the distinction is a CORRECTNESS contract ----------

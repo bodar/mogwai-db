@@ -89,7 +89,7 @@ export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[]
  * tree instead of the base tables, in the SAME `PROP`-prefixed row shape, so `value()`/`key()`/the
  * payload framing compose unchanged.
  *
- * The landed snapshot is landed by the DETACHED compile (`raw()`), so each `{t,v}` node also carries
+ * The landed snapshot is landed by the DETACHED compile (`runForeign()`), so each `{t,v}` node also carries
  * `vpid` (the VertexProperty's own rowid) and `meta` (its meta-properties) — read here as `$.vpid`/
  * `$.meta`. A node landed by an older/lossy path without them extracts NULL, which is exactly the
  * pre-detached behaviour: the framer synthesises `owner:pk` for a null vpid. `cte` is the landed

@@ -1,5 +1,5 @@
 import type { Service, CallParams, BarrierOutput } from '../spi/types.ts';
-import type { ForeignResult, ForeignRow } from '../../api.ts';
+import type { ForeignResult, ForeignRow, ForeignTerminal } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
@@ -15,7 +15,7 @@ import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection
 // awaited sibling call, so it contributes an async `apply` (run by the executor's segment loop,
 // the one await) rather than lowering to SQL inline.
 //
-// The projection reuses the EXISTING executor factory: source.executor(graph).raw(subGremlin,
+// The projection reuses the EXISTING executor factory: source.executor(graph).runForeign(subGremlin,
 // {}, depth) IS "run a traversal on another graph, raw." The sub-traversal arrived as a nested
 // __.-traversal param, already serialized to a canonical rooted Gremlin string (call-params.ts →
 // traversal-param.ts). The sibling runs the SAME engine on it — genuine federated pushdown; if
@@ -84,11 +84,11 @@ async function withEndpoints(
   const ids = [...new Set(edges.flatMap((e) => (e.kind === 'edge' ? [e.src, e.tgt] : [])))];
   if (ids.length === 0) return [...edges];
   // The endpoint hop is always an ELEMENT fetch (`g.V(<ids>)`), so its result is the elements arm.
-  const vertices = elementsOf(await ex.raw(`g.V(${ENDPOINT_IDS_KEY})`, { [ENDPOINT_IDS_KEY]: ids }, depth + 1));
+  const vertices = elementsOf(await ex.runForeign(`g.V(${ENDPOINT_IDS_KEY})`, { [ENDPOINT_IDS_KEY]: ids }, depth + 1));
   return [...edges, ...vertices];
 }
 
-type FederationExecutor = { raw(g: string, p: Record<string, unknown>, d: number): Promise<ForeignResult> };
+type FederationExecutor = { runForeign(g: string, p: Record<string, unknown>, d: number, t?: Record<string, unknown>, terminal?: ForeignTerminal): Promise<ForeignResult> };
 
 /** The elements arm of a `ForeignResult`. A hop this helper drives is always element-shaped (the
  *  sub-traversal ends vertex/edge, or is the `g.V(<ids>)` endpoint fetch), so a scalar here is a
@@ -147,16 +147,18 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound. The
       // traversal's own bound params ride along so a pushed `has("age", gt(x))` resolves `x` sibling-side.
       if (rows.length === 0) {
-        // A pushed prefix that ENDS IN A REDUCER makes the sibling return a SCALAR (Calcite's rule: the
-        // result shape follows the pushed subtree's root). It crosses as a typed `{t,v}` ValueNode so its
-        // Gremlin type survives, and `apply` returns it as a `barrier-scalar` the resume frames directly.
-        if (pushdown?.reduces) {
-          const reduced = await ex.raw(gremlin, siblingBinds, depth + 1);
-          if (reduced.kind !== 'scalar') throw new Error(`federate: expected a scalar from the pushed reduction, got ${reduced.kind}`);
-          return { kind: 'barrier-scalar', value: reduced.value };
-        }
-        const result = elementsOf(await ex.raw(gremlin, siblingBinds, depth + 1));
-        return wantEndpoints ? withEndpoints(ex, result, depth) : result;
+        // The pushed terminal's SHAPE decides the result, and `runForeign` reports it AUTHORITATIVELY from
+        // the sibling's own `plan.shape` — `apply` does not predict it. The ONE thing shape cannot express
+        // is reducer-vs-stream semantics (a `count()` and a `values(k)` both compile to `value`), so the
+        // `'reduce'` hint (from `pushdown.reduces`, the plan-time terminal classification) is passed to
+        // disambiguate that single case. Everything else — elements vs a value stream — is read off the
+        // returned tag: a pushed reducer → `barrier-scalar`, a pushed value terminal → `barrier-values`
+        // (each member re-emitted as a traverser), elements → the detached rows (with the optional endpoint
+        // hop for a `.with("subgraph")` tail).
+        const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
+        if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
+        if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
+        return wantEndpoints ? withEndpoints(ex, out.rows, depth) : out.rows;
       }
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar
@@ -177,11 +179,11 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // the element scatter + local reduce (the authority), fewer bytes.
       if (reduce) {
         const grouped = `${gremlin}.group().by(${groupByGremlin(reduce.groupBy)}).by(${reduce.partial}())`;
-        const out = await ex.raw(grouped, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: distinct }, depth + 1, {}, 'reduce');
         if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }
-      const result = elementsOf(await ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));
+      const result = elementsOf(await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;
     },
   }),

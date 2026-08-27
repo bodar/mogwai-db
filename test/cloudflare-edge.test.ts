@@ -33,7 +33,7 @@ function fakeManager(store: GraphStore, siblingRows: ForeignRow[] = []) {
       calls.framed++; calls.lastGremlin = gremlin;
       return []; // routing sentinel — the real DO compiles here; we only assert the path was taken
     },
-    raw: async (): Promise<ForeignResult> => { calls.raw++; return { kind: 'elements', rows: siblingRows }; },
+    runForeign: async (): Promise<ForeignResult> => { calls.raw++; return { kind: 'elements', rows: siblingRows }; },
   };
   const ns = { getByName: () => stub } as unknown as DurableObjectNamespace<GraphDatabase>;
   return { mgr: new CloudflareGraphManager(ns), calls };
@@ -70,7 +70,7 @@ describe('edge compilation — EdgeExecutor routing', () => {
 
   test('a worker-resident FEDERATE (source form) is DRIVEN from the Worker, not full-driven by the DO (Phase 2b)', async () => {
     const store = seededStore();
-    // The sibling "crew" graph returns one detached vertex from its raw() hop.
+    // The sibling "crew" graph returns one detached vertex from its runForeign() hop.
     const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'zeta' }] } }];
     const { mgr, calls } = fakeManager(store, sibling);
     const out = await mgr.executor('g').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V())', {});

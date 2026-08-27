@@ -7,7 +7,7 @@ import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
 import { argValues, stepChain } from '../../gremlin/frontend.ts';
-import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
+import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, lowerTypedNodeStream, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
@@ -467,9 +467,15 @@ function resumed(
     // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
   }
+  // A pushed-down VALUE STREAM (a source-form prefix ending in `values(k)`/`unfold()`/`fold()`/`cap('a')`):
+  // the whole tail ran on the sibling and N typed nodes crossed back, so each re-emits as its own traverser.
+  // The prefix is MAXIMAL, so there is no local suffix to continue — a pure per-member framing, the scalar
+  // resume one cardinality up.
+  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values')
+    return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values)) };
   const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
-  // (`raw()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the
+  // (`runForeign()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the
   // arbitrary-but-total answer there, and it is unobservable: a zero-row relation frames as no
   // traversers whichever tuple it declares.
   const elem: Elem = foreign[0]?.kind ?? 'vertex';

@@ -45,7 +45,7 @@ export const foreignPayloadCols = (elem: Elem): readonly ColMeta[] =>
 
 /** One landed row's cells, in `foreignPayloadCols` order. `props` (and a vertex's label set) are
  *  stringified so each lands as one scalar cell; the framing layer parses them back, which is the
- *  same round trip `raw()` already performs in the other direction. */
+ *  same round trip `runForeign()` already performs in the other direction. */
 const cellsOf = (row: ForeignRow, extra: readonly unknown[]): unknown[] =>
   row.kind === 'edge'
     ? [row.id, row.label, row.src, row.tgt, JSON.stringify(row.props), ...extra]

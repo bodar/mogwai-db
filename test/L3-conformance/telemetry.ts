@@ -68,7 +68,7 @@ export class LoggingGraphManager implements GraphManager {
     const inner = this.inner.executor(id);
     const log = (rec: QueryRecord) => this.log(rec);
     return {
-      raw: (g, p, depth, t) => inner.raw(g, p, depth, t),
+      runForeign: (g, p, depth, t, terminal) => inner.runForeign(g, p, depth, t, terminal),
       async framedAsync(gremlin, params, paramTypes) {
         try {
           const r = await inner.framedAsync(gremlin, params, paramTypes);

@@ -1,4 +1,4 @@
-import type { GraphManager, GraphInfo, RemoteExecutor, ForeignResult } from '../api.ts';
+import type { GraphManager, GraphInfo, RemoteExecutor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { type Framed } from '../execute.ts';
 import type { TypeNode } from '../gremlin/types.ts';
 import { compilePlan } from '../compiler/compiler.ts';
@@ -14,7 +14,7 @@ import { rpcUnwrap, type RpcFailure, type RpcResult } from './rpc.ts';
  *  the plan on the DO. A non-segment plan (read or write) ships to `runFramed`; a federation segment is
  *  DRIVEN from the Worker (§4·2) when its barrier is `worker`-resident; anything else falls back to
  *  shipping the Gremlin string to `framed`. Across a DO RPC boundary everything is async, so it offers
- *  only the RemoteExecutor surface (framedAsync/raw); the sync framed()/buffers() need a local store and
+ *  only the RemoteExecutor surface (framedAsync/runForeign); the sync framed()/buffers() need a local store and
  *  live on the DO's OWN in-process executor. `rpcUnwrap` turns a query failure back into a throw on THIS
  *  side of the boundary — the DO returns it as a value so workerd does not report a user's unsupported
  *  traversal as an uncaught DO exception (src/cloudflare/rpc.ts). */
@@ -36,7 +36,7 @@ class EdgeExecutor implements RemoteExecutor {
     if (plan.kind === 'sql') return rpcUnwrap(await this.stub.runFramed(plan.compiled) as RpcResult<Framed[]>);
 
     // A barrier segment. If it is ASYNC and may LEAVE the DO (`worker` — federate), the WORKER drives the
-    // loop: `apply` fans out to siblings from here (via this manager's `raw`), and the DO runs only the
+    // loop: `apply` fans out to siblings from here (via this manager's `runForeign`), and the DO runs only the
     // brief head read and the final framing (its request closes across the sibling waits). Everything else
     // stays DO-driven via the string fallback: an async `do` barrier (io) needs the store the Worker
     // lacks, and a SYNC barrier (regex) is always local and atomic — the DO runs its no-await segment loop.
@@ -55,13 +55,15 @@ class EdgeExecutor implements RemoteExecutor {
     return this.runOnDo(gremlin, params, paramTypes);
   }
 
-  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignResult> {
+  async runForeign(gremlin: string, params: Record<string, any>, depth: number, _paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {
     // A federated hop INTO a sibling: ships the string; the sibling DO runs its own (possibly nested)
     // traversal. Only the TOP loop is Worker-driven — a deeper hop is a self-contained sibling request.
+    // `terminal` threads the reducer-vs-values-stream hint across the RPC so the sibling DO frames the
+    // pushed terminal correctly (a `count()` scalar vs a `values(k)` stream — see `ForeignTerminal`).
     // The DO stub's RPC-proxy type expands `ForeignResult`'s nested unions past tsc's instantiation
     // depth limit (a Cloudflare-types limitation, not ours), so this ONE call goes through `any` and we
     // re-assert the real result shape — `rpcUnwrap` needs only the failure-brand discriminant.
-    const r = await (this.stub as any).raw(gremlin, params, depth) as ForeignResult | RpcFailure;
+    const r = await (this.stub as any).runForeign(gremlin, params, depth, terminal) as ForeignResult | RpcFailure;
     return rpcUnwrap<ForeignResult>(r);
   }
 

@@ -20,7 +20,7 @@ import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPa
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, flatType, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
@@ -2376,7 +2376,7 @@ export interface Lowering {
    *  on. Off makes the reducer run LOCALLY over the scattered elements — the semantic AUTHORITY the
    *  pushed path must equal, which is how the differential (optimized ≡ unoptimized) is checked. */
   readonly federateReduce?: boolean;
-  /** DETACHED-transfer compile (set only by `raw()`): the element leaf emits a fuller property node
+  /** DETACHED-transfer compile (set only by `runForeign()`): the element leaf emits a fuller property node
    *  `{t, v, vpid, meta?}`. Off for ordinary framing, so base props stay `{t, v}`. */
   readonly detached?: boolean;
   /**
@@ -2912,6 +2912,32 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // `Values` refuses the empty relation, so the empty aggregate is the honest `Filter(false)` over the one
   // row (§3.3) — no traverser.
   const rel = empty ? make.filter({ id: fresh('scf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
+  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
+}
+
+/**
+ * THE VALUE-STREAM RESUME — a pushed-down federate terminal that produced a STREAM of values
+ * (`values(k)`, `unfold()`, a `cap('a')`/`fold()` list), not a single reduced scalar. The whole tail ran
+ * on the SIBLING (the pushable prefix is MAXIMAL, so a value terminal pushes its own downstream too), so
+ * this is a pure framing of the N values that crossed back — the exact `lowerScalarResume` mechanism one
+ * cardinality up: each `{t,v}` node is one `Values` row in `NODE_COL`, framed by the ONE `typedNode` rule
+ * (`frameTypedNode`), so every member keeps its own Gremlin type — a scalar leaf, a detached vertex/edge
+ * (a pushed `fold()` of elements), a nested list/map, each by its own tag. It is the value-stream twin of
+ * `lowerForeignResume` (which lands ELEMENT rows) sharing `lowerScalarResume`'s framing rather than the
+ * `valueResume`/`scalarTail` substrate, because there is NO local suffix to continue: a maximal prefix
+ * leaves the sibling's values AS the result. An EMPTY stream frames as no traversers (`Values` refuses the
+ * empty relation, so a `Filter(false)` stands in — the same spelling `lowerScalarResume` uses for the
+ * empty aggregate).
+ */
+export function lowerTypedNodeStream(nodes: readonly FrameNode[]): RelLowering {
+  const fresh = minter();
+  const type = typeOf(meta(NODE_COL, 'json', true));
+  // `Values` REFUSES an empty relation (`checkValuesShape`), so an empty stream is a one-row `Values`
+  // FILTERED to nothing — the same honest `Filter(false)` `lowerScalarResume` uses for the empty aggregate
+  // (§3.3). A non-empty stream is one `Values` row per node.
+  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(JSON.stringify(node)))]);
+  const one = make.values({ id: fresh('tnv'), channels: [], type, rows: nodes.length > 0 ? rowsOf(nodes) : [[jsonOf(compilerText('null'))]] });
+  const rel = nodes.length > 0 ? one : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
   return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 

@@ -1,8 +1,9 @@
-import type { Executor as ExecutorApi, ForeignResult } from './api.ts';
+import type { Executor as ExecutorApi, ForeignResult, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource } from './compiler/segment.ts';
+import type { Elem } from './compiler/elem.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
@@ -725,13 +726,89 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
  *  N copies. bigint carries the full i64 range (SQLite raises `integer overflow` past it). */
 export type Framed = { buf: Buffer; bulk: bigint };
 
+// ---- federated value-stream transport: a sibling's per-row result as a {t,v} node ----
+//
+// A pushed-down VALUE terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, a project/select record,
+// …) returns a STREAM of values, one per sibling row, that must cross the federated hop LOSSLESSLY and
+// re-frame EXACTLY on the caller side. The transport is the SAME self-describing `{t,v}` FrameNode tree
+// the local framer already consumes (`frameTypedNode`): a scalar leaf, a detached vertex/edge (a pushed
+// `fold()` of elements), a nested list/map — each rides its own tag, so the resume frames every member
+// by the ONE rule with no per-shape wire arm. `foreignValueNodes` is the PRODUCER twin of the framer's
+// per-row arms: where `frameValues` turns a row into a Buffer, this turns the SAME row into the node the
+// Buffer would have encoded, so the two cannot frame a value two different ways.
+
+/** A stored (value, vtype) pair as a leaf ValueNode — the same `valueNodeFromStored` rule the read
+ *  framer uses, so a collection value nests its parsed tree and a scalar rides raw. */
+const foreignLeaf = (v: any, vtype: string | null): ValueNode => valueNodeFromStored(v, vtype);
+
+/** One element row's public payload as a `{t,v}` element FrameNode — the SAME `{id,label,props}` tuple
+ *  `rowVertex`/`rowEdge` consume, so a landed element re-frames byte-identically. A vertex's `label` is
+ *  the JSON labels array; an edge carries `src`/`tgt`. */
+const foreignElementNode = (raw: any, elem: Elem): FrameNode =>
+  elem === 'edge'
+    ? { t: 'edge', v: { id: raw.id, label: raw.label, src: raw.src, tgt: raw.tgt, props: propsOf(raw.props) } }
+    : { t: 'vertex', v: { id: raw.id, label: labelsOf(raw.label), props: propsOf(raw.props) } };
+
+/** A JSON list column's members as FrameNodes, per its `ListOf` — the node twin of `listItemBuffers`.
+ *  Element members ride the element arm; a scalar member with a static tag carries it, an
+ *  envelope-typed member is already a `{t,v}` node, a mixed/map member self-describes; a nested list
+ *  recurses. */
+function foreignListNodes(json: string, of: ListOf): FrameNode[] {
+  const items = JSON.parse(json);
+  if (of.kind === 'elem') return items.map((it: any) => foreignElementNode(it, of.elem));
+  if (of.kind === 'property') return items.map((it: any) => ({ t: 'property' as const, v: it }));
+  if (of.kind === 'scalar') {
+    if (hasTypedMembers(of)) return items; // already self-describing {t,v} nodes
+    const as = staticTypeOf(of.type);
+    return items.map((x: any) => (as !== undefined ? { t: as, v: x } : x));
+  }
+  if (of.kind === 'mixed') return items;   // each member a self-describing {t,v} envelope
+  if (of.kind === 'map') return items.map((pairs: any) => ({ t: 'map' as const, v: pairs }));
+  // list-of-lists: recurse per inner descriptor.
+  return items.map((inner: any) => ({ t: 'list' as const, v: foreignListNodes(JSON.stringify(inner), of.of) }));
+}
+
+/** A sibling's VALUE-shaped result as one `{t,v}` node per row, or `null` if the shape is not a value
+ *  stream this transport carries (fail closed — the caller names the shape). Mirrors `frameValues`'
+ *  per-row arms, producing the node each would frame rather than the Buffer, so a federated value and a
+ *  local one are one encoding. */
+function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: any[]): FrameNode[] | null {
+  switch (shape.kind) {
+    // A per-row scalar: each row its own stored vtype (a per-row column) or the one static tag.
+    case 'value': {
+      const t = shape.type;
+      if (t.kind === 'perRow') {
+        const colName = perRowColumn(t, 'foreignValueNodes');
+        return rows.map((r) => foreignLeaf(r.v, r[colName] ?? null));
+      }
+      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: r.v }));
+    }
+    // A numeric reducer stream that was NOT flagged 'reduce' (e.g. a local-scope reducer terminal): each
+    // row's `vt` is a Gremlin vtype or a storage class, exactly as the scalar framer resolves.
+    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: r.v }));
+    // A list/set VALUE per row (`values(k).fold()`, `cap('a')`, intersect/…): the members convert per the
+    // item descriptor.
+    case 'jsonbList': return rows.map((r) => ({ t: 'list', v: foreignListNodes(r.list, shape.items) }));
+    case 'jsonbSet': return rows.map((r) => ({ t: 'set', v: foreignListNodes(r.list, shape.items) }));
+    // The whole-stream element fold (`fold()` over vertices/edges) — ONE list of element nodes.
+    case 'list': return [{ t: 'list', v: rows.map((r) => foreignElementNode(r, shape.elem)) }];
+    // A relational element-list value per row (element members already expanded to payload objects).
+    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: JSON.parse(r.list).map((it: any) => foreignElementNode(it, shape.elem)) }));
+    // A per-row self-describing node already (`unfold()` over a mixed collection): pass through.
+    case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : JSON.parse(r.node)));
+    // A whole-map VALUE per row (`project`/`valueMap`/`group` folded to a map value).
+    case 'mapValue': return rows.map((r) => ({ t: 'map', v: JSON.parse(r.map) }));
+    default: return null;
+  }
+}
+
 /**
  * Concern B — the per-GRAPH executor: compile + run + frame a traversal against ONE graph's
  * store. Bound at construction to its `store`, the service `registry`, and the `source` (how to
  * reach OTHER graphs for federation — the GraphManager, which is the executor factory). Runs
  * where the store lives (Bun in-process / inside a DO), so only bytes/rows cross the seam;
  * wire parsing (A) and HTTP framing/pacing (C) live at the edge. Two tail projections of the
- * SAME compile+resolve: `framed` → GraphBinary buffers (client wire); `raw` → detached
+ * SAME compile+resolve: `framed` → GraphBinary buffers (client wire); `runForeign` → detached
  * ForeignRow[] (internal federated transfer). Throws on any compile/SQL/framing failure — the
  * edge frames the error.
  */
@@ -794,7 +871,7 @@ export class Executor implements ExecutorApi {
    *  JSON transfer (a Long stays a Long) — `count`'s type is the plan's static `ScalarType`, the numeric
    *  reducers' is the per-row `vt` column (a Gremlin vtype or a SQLite storage class, the same two the
    *  local `scalar` framer resolves). Any OTHER terminal still fails closed — a clear query failure. */
-  async raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}): Promise<ForeignResult> {
+  async runForeign(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}, terminal?: ForeignTerminal): Promise<ForeignResult> {
     // DETACHED compile: a federated fetch lands the subgraph, so its element props carry the extra
     // facts a landed element needs to reconstruct a full detached form — property ids and meta-properties.
     const plan = await this.drive(gremlin, params, paramTypes, depth, true);
@@ -805,24 +882,39 @@ export class Executor implements ExecutorApi {
       return { kind: 'elements', rows: rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) })) };
     if (plan.shape.kind === 'edge')
       return { kind: 'elements', rows: rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) })) };
-    // A pushed-down bare reducer. `count()` is `value` (static ScalarType — a Long); sum/max/min/mean are
-    // `scalar` (per-row `vt`). One row over the whole stream; SUM of an empty stream is NULL → no value,
-    // which TinkerPop yields as an empty result, so carry a null scalar and let the resume frame nothing.
-    if (plan.shape.kind === 'value')
-      // `ValueType` is a subset of `CanonicalType` (`gremlin/types.ts`), so the static type IS the
-      // ValueNode `t` tag directly — no conversion. `count()` → `{t:'long', v}`, framed as a Long.
-      return { kind: 'scalar', value: { t: staticTypeOf(plan.shape.type) ?? null, v: rows[0]?.v ?? null } };
-    if (plan.shape.kind === 'scalar')
-      // The per-row `vt` is a Gremlin vtype (min/max's winner) OR a SQLite storage class (sum/mean) —
-      // the same two disjoint vocabularies `frameTypedNode`'s leaf resolves, so it re-frames exactly.
-      return { kind: 'scalar', value: { t: (rows[0]?.vt ?? null) as ValueNode['t'], v: rows[0]?.v ?? null } };
-    // A pushed-down mid-traversal REDUCTION returns a `(key→partial)` MAP (`group().by(key).by(partial())`).
-    // `mapValue` already IS the ValueNode `t:'map'` shape — `[[keyNode, valNode],…]` of self-describing
-    // nodes — so it crosses on the scalar arm losslessly (keys and partials keep their Gremlin types). An
-    // empty group set yields no row → an empty map, which the combine reads as "every parent matched 0".
-    if (plan.shape.kind === 'mapValue')
-      return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
-    throw new Error(`federated traversal must yield vertices, edges, a reduced scalar, or a keyed map, not a ${plan.shape.kind} result`);
+    // A pushed-down REDUCER collapses the whole stream to ONE value. `count()` is `value` (static
+    // ScalarType — a Long); sum/max/min/mean are `scalar` (per-row `vt`). It arrives here ONLY when the
+    // caller flagged the pushed terminal `'reduce'`, which is the ONE fact that disambiguates a `value`
+    // shape that is a collapsing count from a `value` shape that is a `values(k)` STREAM (both compile to
+    // `value`, differing only in reducer-vs-stream SEMANTICS — count over empty is 0, values over empty is
+    // []). SUM of an empty stream is NULL → no value (TinkerPop yields nothing), so carry a null scalar and
+    // let the resume frame nothing.
+    if (terminal === 'reduce') {
+      if (plan.shape.kind === 'value')
+        // `ValueType` is a subset of `CanonicalType` (`gremlin/types.ts`), so the static type IS the
+        // ValueNode `t` tag directly — no conversion. `count()` → `{t:'long', v}`, framed as a Long.
+        return { kind: 'scalar', value: { t: staticTypeOf(plan.shape.type) ?? null, v: rows[0]?.v ?? null } };
+      if (plan.shape.kind === 'scalar')
+        // The per-row `vt` is a Gremlin vtype (min/max's winner) OR a SQLite storage class (sum/mean) —
+        // the same two disjoint vocabularies `frameTypedNode`'s leaf resolves, so it re-frames exactly.
+        return { kind: 'scalar', value: { t: (rows[0]?.vt ?? null) as ValueNode['t'], v: rows[0]?.v ?? null } };
+      // A pushed-down mid-traversal REDUCTION returns a `(key→partial)` MAP (`group().by(key).by(partial())`).
+      // `mapValue` already IS the ValueNode `t:'map'` shape — `[[keyNode, valNode],…]` of self-describing
+      // nodes — so it crosses on the scalar arm losslessly (keys and partials keep their Gremlin types). An
+      // empty group set yields no row → an empty map, which the combine reads as "every parent matched 0".
+      if (plan.shape.kind === 'mapValue')
+        return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
+      throw new Error(`federate: expected a reduced scalar or keyed map from the pushed reducer, got a ${plan.shape.kind} result`);
+    }
+    // A pushed-down VALUE-PRODUCING terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, …): the whole
+    // tail ran on the sibling and returned a STREAM of N values, each re-framed by its own Gremlin type. It
+    // rides the SAME `{t,v}` envelope the scalar arm uses — one node per member — so the resume unfolds each
+    // into its own traverser (`lowerTypedNodeStream`), the scalar reducer's framing one cardinality up. Every
+    // value-shaped terminal a maximal pushable prefix can end in maps here; a shape not yet covered fails
+    // closed naming itself rather than silently mis-framing.
+    const nodes = foreignValueNodes(plan.shape, rows);
+    if (nodes) return { kind: 'values', values: nodes };
+    throw new Error(`federated traversal must yield vertices, edges, a reduced scalar, a keyed map, or a value stream, not a ${plan.shape.kind} result`);
   }
 
   /** Compile SYNCHRONOUSLY and reject a barrier. A non-federated traversal is ONE SQL statement —
