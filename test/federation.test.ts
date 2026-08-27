@@ -5,7 +5,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { createFederateService } from '../src/services/catalog/federate.ts';
-import { ENDPOINT_IDS_KEY, INJECT_LIST_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
+import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
@@ -238,7 +238,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
 
   test('a list-injection marker lowers to membership against its pair value', () => {
     const plan = compile('g.V().has("name", __.call("parent", __.values("name").fold()))', {
-      [INJECT_VALUES_KEY]: [[41, ['marko', 'not-a-crew-name']]], [INJECT_LIST_KEY]: true,
+      [INJECT_VALUES_KEY]: [[41, ['marko', 'not-a-crew-name']]],
     });
     if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
     expect(plan.sql).toContain("IN (SELECT");

@@ -57,7 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { INJECT_VALUES_KEY, injectedList, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
+import { INJECT_VALUES_KEY, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -3378,9 +3378,12 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     const paired = make.join({
       id: fresh('ij'), left: propertyRows, right: exploded, join: 'inner', channels: [],
       type: typeOf(...propertyRows.type.cols, ...exploded.type.cols),
-      on: injectedList(params)
-        ? { kind: 'in-query', expr: storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), plan: listMembers, negated: false }
-        : eq(storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), injectedValue),
+      // The pair value's JSON shape decides at runtime: a scalar is equality, while an array is the
+      // membership operand that a folded parent read supplies. Never select a compiler arm by shape.
+      on: { kind: 'case', whens: [[
+        eq({ kind: 'call', fn: 'json_type', args: [col(exploded.id, 'iv'), compilerText('$[1]')] }, compilerText('array')),
+        { kind: 'in-query', expr: storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), plan: listMembers, negated: false },
+      ]], else: eq(storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), injectedValue) },
     });
     const origin: Channel = { col: fresh('origin'), role: 'origin' };
     const channels = withChannel(seedChannels, origin);
