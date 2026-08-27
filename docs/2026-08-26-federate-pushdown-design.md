@@ -113,8 +113,12 @@ same: the shape follows the pushed subtree's root.
   `ValueNode` plus the detached element arm `{t:'vertex'|'edge', v: payload}`), so a scalar leaf, a
   detached vertex/edge, and a nested list/map each cross by their own tag. The resume
   (`lowerTypedNodeStream`) re-emits each member as its OWN traverser — `lowerScalarResume` one
-  cardinality up — so an empty stream is no traversers and an empty `fold()` is one empty list. This is
-  LANDED (open item 1 below).
+  cardinality up — so an empty stream is no traversers and an empty `fold()` is one empty list. LANDED,
+  both the source form AND the MID form: a `V().call(federate, <constant sub>)` returning a value stream
+  CROSS-scatters the pool over the P parents (`lowerTypedNodeStream`'s `parents` count → a P×N join, the
+  value analogue of the element rejoin's no-injection cross). A mid value terminal only reaches here
+  CONSTANT — an injection marker caps the pushable prefix before any value terminal, so an injected value
+  terminal stays local and comes back through the element rejoin.
 
 **The compounding rule: output-side pushdown of shape X = `runForeign` recognizes the sibling's terminal
 shape X and encodes it as a `{t,v}`/`FrameNode` tree; the resume needs no per-shape change.** No new
@@ -188,9 +192,10 @@ mid-traversal `count` reduction pushdown with its differential; empty-reduction 
 marker (replacing `T.value`); the mogwai.* namespace drop; the sub-traversal-as-steps refactor (string
 only at the RPC edge); arg-less MID injection (the marker in the pushed prefix); the cross-boundary
 collection-read guard (a `cap` reading a pre-barrier collection stays local); the `raw()` → `runForeign()`
-rename; and **pushed-collection output framing** (open item 1 — a `values(k)`/`unfold()`/`fold()`/`cap()`
-terminal, and a `fold()` of elements, frame end-to-end via the `kind:'values'` `FrameNode` stream +
-`lowerTypedNodeStream`; the explicit `traversal` form frames values too).
+rename; **pushed-collection output framing** (a `values(k)`/`unfold()`/`fold()`/`cap()` terminal, and a
+`fold()` of elements, frame end-to-end via the `kind:'values'` `FrameNode` stream +
+`lowerTypedNodeStream`; the explicit `traversal` form frames values too); and **mid-form value-stream
+cross-scatter** (a `V().call(federate, <constant sub>)` returning values re-emits the pool per parent, P×N).
 
 ## Open, in rough priority
 
