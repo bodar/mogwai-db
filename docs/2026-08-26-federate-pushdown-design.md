@@ -43,100 +43,97 @@ crosses to another DO), synthesized verbatim from the steps' own source text
 contract boundary and the only string conversion; everything else keeps the steps. (Memory:
 `federate-subtraversal-as-steps`.)
 
-## Injection — the `parent` marker
+## Injection — a `{parentId → parentValue}` map and a STANDARD `mapValues` on the sibling
 
-A mid-traversal federate injects each parent's scalar into the sibling sub-traversal. The user marks the
-site with a self-delimiting marker CALL in a predicate operand:
+_This section is the TARGET design (planned 2026-08-28). It SUPERSEDES the `parent`-marker + minted-`origin`
+corrId substrate that shipped first — see "Where the marker substrate went" under Landed. The staged build
+is at the end of this section._
 
-    V().call("federate", [graph:"crew", traversal:
-      __.V().has("name", __.call("parent", __.values("name")))])
+A mid-traversal federate injects each parent traverser's value into the sibling, batches all parents into
+ONE sibling hop, and scatters results back per parent. The load-bearing decision: **the batched injection
+flows as STANDARD Gremlin + standard parameters, and the sibling compiles it with ZERO federate-awareness.**
 
-`call("parent", <read>)` carries BOTH the site (its operand position) and the read
-(`__.values('k')`/`__.id()`/`__.label()`, classified by `injectionKindOf`). It is expressible by every
-unmodified GLV (a `call()` nested in the operand — grammar form `has_String_Traversal`), self-delimiting
-(nobody writes `call("parent")` for any other reason, so it needs no boundary to disambiguate — which is
-what makes the arg-less form work), and identical across the explicit and arg-less forms.
+The batched injection is a **`{parentId → parentValue}` map**, crossing as ONE ordinary bound parameter
+(the parent set is DATA-scaled — one row per parent traverser, unbounded — so it MUST be one `json_each`
+bind of any size, never N per-parent binds, which would breach the DO 100-bind wall; root `CLAUDE.md`'s
+data-not-in-text rule). The sibling runs a STANDARD Gremlin `mapValues`:
 
-Mechanics: `PARENT_MARKER`/`isParentMarkerBody` (`ir/injection.ts`, leaf); `parentMarkerReadIn`/
-`parentMarkerStepIndex` (`call-params.ts`) walk the sub-traversal for the marker; the SIBLING SOURCE
-LOWERING (`lowerChain`, `rel/lower.ts`) consumes the marker `has()` directly, building the correlated join
-below — there is no operand-rewriting Pass. A bare `call("parent")` with no read fails closed at parse.
-`call("parent")` never reaches a registry — there is no `parent` service. (Memory: `federate-parent-marker`,
-`federate-injection-value-as-key`.)
+    inject($map).unfold().group().by(Column.keys).by(<the user's per-parent sub-traversal over the entry value>)
 
-The sibling runs ONE batched hop over the pooled parent values, correlated by a minted per-parent
-CORRELATION ID (an `origin` channel — Calcite `Correlate`). The marker `has(key, <marker>)` lowers to a
-JOIN against the injected `(corrId, value)` pairs (exploded by `json_each`, one bind) that PROJECTS the
-corrId onto each matching element; the results SCATTER back over the parents by that corrId
-(`foreignRejoin`, `src/compiler/rel/foreign.ts` — `pool.corrId = parent.corrId`), NEVER by re-matching the
-returned element's value. This is the whole point of the corrId refactor: correlation is correct for
-distinct parents that inject equal values, and independent of the injected value's SHAPE (scalar or list).
-The detail is in "Bigger-than-scalar injection" below.
+transforming `{parentId → parentValue}` into `{parentId → result}`. **Correlation is the ordinary
+`group().by(Column.keys)` KEY** — not a hidden channel — and it is correct for distinct parents that inject
+EQUAL values, because two parents are two distinct KEYS whatever their values. The shape is legal,
+GLV-portable Gremlin (`vendor/tinkerpop/gremlin-test/.../features/sideEffect/Group.feature:186-201`).
 
-## Bigger-than-scalar injection — a BIND of any shape, correlated by a minted `origin`
+### User syntax — `as()` / `select()`, NOT a marker
 
-_The architecture for widening injection past a scalar (open item 1). Decided + built 2026-08-27. Memory:
-`federate-injection-value-as-key`._
+The user marks the injection point with a standard **`as()` alias in the parent, `select()` in the
+sibling** — a value bound before the barrier, read across it:
 
-**SCOPE — where this sits in the two federate axes.** Federate pushdown has two ORTHOGONAL directions,
-easy to conflate:
-- **OUTPUT-side** (what the sibling returns OUT, how it frames locally) — the value-stream work: pushed
-  `values`/`fold`/`cap`, the mid cross-scatter. **Landed** (see "Landed" below).
-- **INPUT-side** (what the parent sends IN per parent) — THIS section. What the corrId work primarily did
-  was a **correlation-mechanism REFACTOR**: it replaced "re-match the returned element's value" with
-  "carry a minted corrId (`origin`) through the sibling and join on it". A scalar injection worked before
-  and works now; the refactor made correlation CORRECT (distinct parents with equal values) and, crucially,
-  **value-SHAPE-agnostic** — which is the prerequisite for injecting anything bigger than a matchable
-  scalar. The old value-match rejoin fundamentally could not scale (you cannot re-match a list/map against a
-  returned element); the corrId decouples correlation from the value's shape entirely.
+    g.V().hasLabel("person").values("email").as("e")
+      .call("federate", ["graph":"amazon"])
+      .V().has("email", select("e")).count()
 
-Input-side injectable-shape status:
+Pure standard Gremlin with a federate call in the middle — instantly readable, nothing invented. It aligns
+with machinery that ALREADY exists: `content-demand.ts:141`/`labelsBoundBefore` tracks exactly "a label
+bound BEFORE the barrier, read across it" (`as('x') … call(federate) … where(eq('x'))`). The old
+`__.call("parent", <read>)` marker was a bespoke reinvention of this, and is retired.
 
-| shape | read | status |
-|---|---|---|
-| **scalar** | `values('k')` / `id()` / `label()` | ✅ (now via corrId) |
-| **list** | `<scalar-read>.fold()` — set MEMBERSHIP | ✅ |
-| **map** | `valueMap` / `project` | ❌ not built |
-| **subgraph** | a projected neighbourhood | ❌ not built |
+### Inbound — the returned map lands via the EXISTING BoundGraph; downstream stays polymorphic
 
-Map and subgraph now generalize CLEANLY (no correlation rework): a map/subgraph injects as a bind of that
-shape; the corrId join is identical; only what the sibling DOES with the injected value (filter on a map's
-keys, traverse an injected subgraph) is new per shape. Those remain under this same open item.
+`GraphSource`/`BoundGraph` (`src/compiler/rel/source.ts`, `boundgraph.ts`) exists so a foreign graph's
+elements land as a temporary relation and downstream ops (`out()`/`values()`/`has()`) join across them
+WITHOUT knowing they are foreign. The redesign preserves that — a hard requirement.
 
-**Injection is a BIND spliced at the marker, of ANY explicit shape.** The marker read produces a per-parent
-value — a scalar (`__.values('k')`/`__.id()`/`__.label()`), a LIST (`<read>.fold()`), eventually a map or
-subgraph — and it flows across as a BIND (never inlined; the user chose to send it and it may be massive —
-root `CLAUDE.md`'s "a bind serves a user parameter"), dropped where a literal-or-bind is legal Gremlin. The
-sibling compiles ordinary Gremlin; an illegal shape blows up NATURALLY on the sibling — NO upfront
-validation. **No implicit collapse:** Gremlin is an explicit API, so a bare multi-valued read with no
-`.fold()` is ambiguous (stream vs list) and FAILS CLOSED — only explicitly-shaped reads flow across
-(`injectionKindOf`, `call-params.ts`, peels a trailing `.fold()` and rejects anything else).
+- The `t:'map'` FrameNode transport, framing `{t:'vertex'}`/`{t:'edge'}`/`{t:'list'}` values recursively at
+  any depth, already exists (`src/execute.ts`'s `frameTypedNode`/`typedMapBuffer`, the `mapValue` arms in
+  `runForeign`/`foreignValueNodes`). Reused unchanged.
+- The returned map explodes DIRECTLY to `(parentId, element)` rows — ONE entry per parent already (no
+  distinct-value dedup to undo), so FEWER hops than the corrId path: `foreignRelation` explode +
+  `foreignRejoin` re-scatter (two hops) collapses to one map explode. `foreignRelation`
+  (`src/compiler/rel/foreign.ts`, two callers) already carries a per-row correlation column via its `extra`
+  param — parentId rides where corrId rode. Those rows feed a BoundGraph CTE as a source-form pool does.
+- The inbound seam is the result-tag dispatch `resumed` (`src/compiler/rel/segment.ts`), NOT GraphSource —
+  a new arm correlating each entry to its parent by the parentId KEY (an ordinary join replacing
+  `foreignRejoin`'s hidden-corrId join).
 
-**Correlation is by a MINTED per-parent id — the existing `origin` CHANNEL, our Calcite `CorrelationId`.**
-`channels.ts` already documents `origin` as exactly this: "a PROVENANCE/IDENTITY key that a rejoin groups
-by", cross-checked against `vendor/calcite/core/.../rel/core/CorrelationId.java`. So the corrId needs NO new
-substrate — it is an `origin` channel, minted per UNCOLLAPSED parent row at the mid head (the head terminal
-is a per-traverser map, which structurally blocks `movementCollapse`, so one row per parent is guaranteed).
+**A subgraph is not a single value** (`subgraph()` is a top-level side-effect step, never a `by()`-value).
+A neighbourhood-as-value is the idiomatic composite `project('vertices','edges').by(V-list.fold())
+.by(E-list.fold())` — ordinary shapes, existing framing.
 
-**The marker lowers as a correlated JOIN that PROJECTS the corrId, not a `within` FILTER.** This is the
-crux and what deletes the special-cases. Instead of `substituteInjectionMarker` rewriting the operand to
-`within(INJECT_VALUES_KEY)`, the marker becomes a join against the injected `(corrId, value)` pairs that
-carries the `origin` corrId into the sibling's output — Calcite `Correlate` applied literally ("drive rows ×
-sub-query, carry the LEFT identity into every output row"). The corrId then rides through the rest of the
-sibling traversal via the ORDINARY channel machinery (`withChannel`/`carriedCols`/movement/merge), and the
-sibling returns `(corrId, element)` tuples. The rejoin joins parent × result ON the corrId — never
-re-matching by value, never reading a correlation column off the element.
+### The staged build — each stage CI-green and committed to trunk
 
-**What this DELETES:** the `InjectionKind` values/id/label enumeration, `matchValue`'s per-facet column
-mapping (`foreign.ts`), and the operand-position question — all dissolve, because the injected value's SHAPE
-is irrelevant to a corrId join. A scalar, a list, a map, a subgraph all correlate identically; list/map/
-subgraph generalize with NO per-shape rejoin arm.
+The ordering is forced by the largest hidden dependency (Stage 1): the `mapValues` shape is grammatically
+legal but does NOT lower in our engine today.
 
-**The one principled boundary:** `origin`'s barrier policy is `empty` (`CHANNEL_BARRIER_POLICY`), so the
-corrId does NOT survive a sibling-side global BARRIER (a `fold`/`count`/`group` AFTER the marker). Such a
-traversal fails closed — a pre-encoded limit, not a surprise. **The optimization it unlocks:** because
-corrId and value are separate, equal values across parents can share ONE bind entry (dedup the value, map
-several corrIds to it) — a later optimization, not a prerequisite.
+0. **Grammar enablement (`inject($map)`) + parser regen.** `inject()` takes `genericLiteralVarargs`
+   (literals only; `Gremlin.g4:136,629`); loosen to `genericArgumentVarargs` (already includes `variable`)
+   — a strict superset, standard clients unaffected, only OUR sibling query uses `inject($map)`. The parser
+   is generated from `git show origin/master:Gremlin.g4` — a git blob, NOT the on-disk file
+   (`scripts/generate-parser.sh:44`), so the `.g4` edit rides as a `patches/upstream/` patch `git apply`-ed
+   to the exported temp `.g4` before antlr-ng (indexed + paired with an upstream PR). Front-end likely
+   unchanged (`frontend.ts:581-590,642-646` already resolves a bound-Map `VariableContext`). Note the ONE
+   carried grammar delta in root `CLAUDE.md` locked-decision #2.
+1. **Make `group().by(Column.keys).by(<child over entry value>)` lower.** ⚠️ HIGHEST RISK — it is a
+   COMMITTED DEFERRAL today (`deferrals.tsv:718`; `map.ts`'s `groupRows` has no `Column`-token group key
+   over an unfolded-map stream). Standalone-valuable (clears a real deferral). Risk gate: prove all FIVE
+   result shapes lower on the sibling in isolation before Stage 3 — scalar (count), list (fold),
+   map (project/valueMap), element-list (`out().fold()`), composite (`project('vs','es')…`).
+2. **Inbound per-parent-map reception (dormant behind the old path).** A `foreignRelation` variant
+   consuming the `{parentId → [elements]}` map via two-level `json_each` → `(parentId, element)` rows, and a
+   new `resumed` arm landing them into a BoundGraph CTE by the parentId KEY, reusing the existing
+   landing/subgraph/id-carry.
+3. **Outbound synthesis (first end-to-end).** `federate.ts` builds the `{parentId → parentValue}` map and
+   synthesizes the `mapValues` query; `midSegment` still projects the parent's read (via the `as()` alias)
+   to build the map, rewriting the parent's `as("e")` reference to `select("e")` in the synthesized `by()`.
+4. **Reduction-pushdown subsumption.** A per-parent reduction becomes `group().by(Column.keys)
+   .by(<sub>.count())` — but NOT fully (see "Reducer algebra"): the monoid `count`-over-empty→0 for a
+   parent that matched nothing (no group key) still needs a per-parentId LEFT-JOIN completion. Keep a
+   slimmed parentId-keyed empty-completion.
+5. **Delete the old substrate** (only after 3–4 green): the reserved key, the marker + its recognizers, the
+   `if(marker)` sibling block, `ctx.injectionCell` + the two resolver hooks, the `origin`→corrId
+   projection, `foreignRejoin`'s injected arm, `groupBarrierByOrigin`, `InjectionKind`/`injectionTraversal`/
+   the reduction-pushdown flags. `bash scripts/ci.sh` (orphans/refs/arch) is the correctness check.
 
 ## Pushdown is a boundary walk, not per-step special-casing (Calcite prefix model)
 
@@ -219,20 +216,21 @@ models the family as `(partial, combine, empty)` with `empty ∈ {'zero' (monoid
 (semigroup)}` — the authority the lowering picks by reducer name. Cite `vendor/tinkerpop/gremlin-core`
 `SumGlobalStep`/`CountGlobalStep` for the guard-vs-seed split.
 
-## Mid-traversal reduction — a monoid transport optimization
+## Mid-traversal reduction — folding into the standard `by(<sub>.count())`
 
-A mid federate whose local tail is a bare reducer pushes the reduction as a per-corrId GROUPED
-PARTIAL — `<sub>.group().by().by(<partial>())`, with RelIR replacing the unnameable Gremlin key by the
-live `origin` channel — so only a `(corrId→partial)` map crosses instead of
-every element; the resume COMBINES per parent (`lowerReduceCombine`) with the reducer's `combine`/`empty`.
-Same answer as the element scatter + local reduce (the authority), fewer bytes. Gated by the
-`federateReduce` switch with a differential (`test/federation.test.ts`: switch-ON ≡ switch-OFF). The split
-law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)` is what makes it valid. The GROUP BY is the minted
-per-parent corrId, so equal injected values remain distinct groups. In practice only
-`count` reaches this gate (sum/min/max/mean need a preceding `values(k)`, a 2-step tail the single-reducer
-gate rejects — they push via the arg-less prefix instead); the table's other rows are exercised by that
-path. The reducer partials from Calcite's `SqlSplittableAggFunction` (count/sum → SUM0, min/max
-self-split, mean reduce-firsts to `(sum, count)`).
+_SHIPPED FIRST as a per-corrId grouped partial (`<sub>.group().by().by(<partial>())` keyed by the `origin`
+channel, resume `lowerReduceCombine`), gated by the `federateReduce` switch with a differential. Under the
+mapValues redesign (see "Injection", Stage 4) a per-parent reduction is just the ordinary
+`group().by(Column.keys).by(<sub>.count())` — the reducer rides inside the standard `by()` value, no
+`origin` channel and no `groupBarrierByOrigin`._
+
+The subsumption is NOT total, and the reason is the reducer algebra below: `group().by(Column.keys)
+.by(count())` gives the counts for the parents whose KEY survives into the group, but a parent that matched
+NOTHING has no group key. A **monoid** `count` must still emit `0` for that absent parent — a per-parentId
+LEFT-JOIN completion (`empty:'zero'`, the surviving core of `lowerReduceCombine`) — while a **semigroup**
+(sum/min/max/mean) correctly emits nothing. So Stage 4 keeps a slimmed parentId-keyed empty-completion; it
+does not delete the empty semantics. The split law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)` and
+Calcite's `SqlSplittableAggFunction` partials still describe why a pushed partial is valid.
 
 ## The hard edges
 
@@ -273,14 +271,27 @@ by value re-matching; `matchValue` deleted; the reduction groups by corrId per C
 `substituteInjectionMarker`/`injectedValues` removed as dead) **with SCALAR and LIST (`.fold()`, set
 membership) injection**.
 
+### Where the marker substrate went
+
+The `parent`-marker + minted-`origin` corrId substrate above is the FIRST implementation of mid-traversal
+injection and is still on trunk, but it is **being superseded** by the `{parentId → parentValue}` map +
+standard-`mapValues` design (see "Injection" at the top). Two forces drove the redesign: it kept forcing
+per-shape arms (scalar vs list vs map — a drift refuted repeatedly), and it made injection reach into
+SHARED filter code (`nestedFirstValue`/`foldedListSet` via `ctx.injectionCell`) — which violates the rule
+that injection must change no non-federate code. The mapValues design retires the marker, the reserved key,
+the `origin` correlation channel, `injectionCell`, and `foreignRejoin`'s injected arm, replacing all of it
+with correlation as an ordinary `group().by(Column.keys)` key. Do not extend the marker substrate; build
+toward the redesign.
+
 ## Open, in rough priority
 
-1. **Bigger-than-scalar INJECTION — MAP and SUBGRAPH (input side)** — SCALAR and LIST have LANDED (see the
-   "Bigger-than-scalar injection" section's shape table). What remains: the parent injects a MAP
-   (`valueMap`/`project`) or a SUBGRAPH. These now generalize CLEANLY — the corrId correlation is
-   value-shape-agnostic, so only what the SIBLING does with the injected value (filter on a map's keys,
-   traverse an injected subgraph) is new per shape; no correlation rework. This is what the parent sends IN
-   (orthogonal to the landed output framing, which is what the sibling returns OUT).
+1. **The mapValues injection redesign** — replace the marker/corrId substrate with the
+   `{parentId → parentValue}` map + standard-`mapValues` sibling query (the "Injection" section is the full
+   design; its "staged build" is the worklist). Stage 1 (make `group().by(Column.keys).by(<child>)` lower —
+   a committed deferral today) is the highest-risk prerequisite and comes first. This subsumes what the old
+   backlog called "bigger-than-scalar injection (MAP/SUBGRAPH)": under the redesign a map/list/element/
+   composite value is just an ordinary `by()` result shape the sibling produces, no per-shape correlation
+   work.
 2. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
    `union`-of-two-siblings + identity comparisons.
 3. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
