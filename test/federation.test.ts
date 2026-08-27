@@ -259,9 +259,9 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     }
   });
 
-  test('BATCHED: N distinct injected values → exactly ONE sibling hop (apply, spy source)', async () => {
-    // Unit-test apply directly with a spy FederationSource: 4 distinct parent values must produce
-    // exactly ONE runForeign() call (the batched hop binding the distinct-value array), not one per value.
+  test('BATCHED: N parent pairs → exactly ONE sibling hop (apply, spy source)', async () => {
+    // Unit-test apply directly with a spy FederationSource: 4 parent correlation/value pairs must produce
+    // exactly ONE runForeign() call (the batched hop binding the pair array), not one per parent.
     let rawCalls = 0; let boundValues: any = null;
     const spySource: any = {
       executor: () => ({
@@ -286,7 +286,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     ] as const;
     await contribution.apply(head);
     expect(rawCalls).toBe(1);                         // ONE batched hop
-    expect([...boundValues].sort()).toEqual(['josh', 'marko', 'vadas']); // DISTINCT values only
+    expect(boundValues).toEqual([[0, 'marko'], [1, 'vadas'], [2, 'marko'], [3, 'josh']]);
   });
 
   test('id() injection matches on the sibling element id', async () => {

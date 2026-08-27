@@ -17,11 +17,12 @@
 // — it NAMES `values`/`id`/`label` rather than relying on a separate positional `__.values('k')` arg.
 //
 // The sibling receives the sub-traversal as an ordinary query PLUS a params entry under the reserved
-// key below holding the DISTINCT injected values. A Pass (`substituteInjectionMarker`, strategies.ts)
-// rewrites the marker operand to a `within([...], INJECT_VALUES_KEY)` — ONE named-collection operand,
+// key below holding per-parent correlation/value pairs. A Pass (`substituteInjectionMarker`, strategies.ts)
+// temporarily extracts their values and rewrites the marker operand to a `within([...], INJECT_VALUES_KEY)`
+// — ONE named-collection operand,
 // so it lowers to a single `json_each` bind (`predicate.ts` `jsonEachInSet`), the same data-sized-set
-// re-injection the regex/split barriers use. One batched sibling hop over the distinct set (a SPARQL
-// bound-join), the injected values crossing as one bind of any size rather than inline literals baked
+// re-injection the regex/split barriers use. One batched sibling hop over the parent-value set (a SPARQL
+// bound-join), the injection payload crossing as one bind of any size rather than inline literals baked
 // into the statement text. No string surgery: apply just supplies a params value, and N marker sites
 // share ONE bind via the kernel's reuse-key dedup (they name the same key).
 //
@@ -29,7 +30,7 @@
 // body, never `stepChain` itself) so both the compiler (strategies.ts) and the service (federate.ts)
 // import it without a cycle. A caller with a nested operand runs `stepChain` first, then asks here.
 
-/** The reserved params key under which a federate hop supplies the DISTINCT injected values for the
+/** The reserved params key under which a federate hop supplies injected correlation/value pairs for the
  *  sibling compile to bind against a `parent` marker operand. Underscore-prefixed so it can never
  *  collide with a user bound-param name. (An internal reserved key, never user-facing — not a service
  *  name, so it keeps its prefix.) */
@@ -67,4 +68,13 @@ export const isParentMarkerBody = (body: readonly { name: string; args: readonly
 export const injectedValues = (params: Record<string, unknown>): unknown[] | null => {
   const v = params[INJECT_VALUES_KEY];
   return Array.isArray(v) ? v : null;
+};
+
+/** The injected per-parent correlation/value pairs from a params map. `corrId` is a minted per-parent
+ *  identity; pairs cross as ONE `json_each` bind of any size. Returns null when the injection is absent
+ *  or is not an array of `[corrId, value]` pairs. */
+export const injectedPairs = (params: Record<string, unknown>): { readonly corrId: number; readonly value: unknown }[] | null => {
+  const v = params[INJECT_VALUES_KEY];
+  if (!Array.isArray(v) || !v.every((pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'number')) return null;
+  return v.map(([corrId, value]) => ({ corrId, value }));
 };

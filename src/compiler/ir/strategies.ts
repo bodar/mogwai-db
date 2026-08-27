@@ -5,7 +5,7 @@ import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { INJECT_VALUES_KEY, injectedValues, isParentMarkerBody } from './injection.ts';
+import { INJECT_VALUES_KEY, injectedPairs, injectedValues, isParentMarkerBody } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -778,9 +778,9 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
 
 /**
  * THE FEDERATED INJECTION MARKER, substituted — `has(k, __.call('parent', <read>))` becomes
- * `has(k, within(<the distinct injected values>))` on a sibling hop that supplied them.
+ * `has(k, within(<the injected values>))` on a sibling hop that supplied them.
  *
- * A mid-traversal `call(federate, …)` runs the sub-traversal ONCE over the distinct parent values (a
+ * A mid-traversal `call(federate, …)` runs the sub-traversal ONCE over the parent values (a
  * SPARQL bound-join) rather than once per parent, and the `parent` marker is where the user marked the
  * operand those values stand in for. `federate.ts` supplies them under a reserved params key, so the
  * substitution is a pure function of the chain and its params — which is exactly what a `Pass` is, and
@@ -798,7 +798,9 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
  * service and fails closed, rather than being silently reinterpreted as some other operand.
  */
 export function substituteInjectionMarker(steps: IRStep[], params: Record<string, any>): IRStep[] {
-  const values = injectedValues(params);
+  // Seam 1 transports pairs for the forthcoming correlation rejoin; until then this scalar sibling
+  // filter preserves its existing flat-value behavior. Retain flat-form tolerance for existing callers.
+  const values = injectedPairs(params)?.map((pair) => pair.value) ?? injectedValues(params);
   if (!values) return steps;
   // ONE named-collection operand, not N inline literals. The injected set is DATA-SIZED (one distinct
   // parent value per row), so it crosses as a single `json_each` bind — `within([...], INJECT_VALUES_KEY)`

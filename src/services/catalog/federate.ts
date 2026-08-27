@@ -163,15 +163,15 @@ export const createFederateService = (source: FederationSource | undefined): Ser
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar
       // (values(k)/id()/label()) — the value the sub-traversal's `T.value` marker operand stands in
-      // for (e.g. __.V().has('sku', T.value)). BATCH: supply the DISTINCT injected values under the
-      // reserved INJECT_VALUES_KEY params entry and run the sibling ONCE; the sibling's has()/is()
-      // compile substitutes a within(<distinct>) for the marker (see injection.ts). The const/single-
-      // value case is the natural degenerate collapse (a 1- or 0-element set). Results are then
+      // for (e.g. __.V().has('sku', T.value)). BATCH: supply one minted correlation/value pair per
+      // parent under the reserved INJECT_VALUES_KEY params entry and run the sibling ONCE; seam 1's
+      // scalar sibling filter extracts the values for its unchanged within() predicate (see injection.ts).
+      // Results are then
       // SCATTERED back over the parents: each returned element re-matches the injected value it
       // satisfies (by property /
       // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
-      const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
+      const pairs = rows.map((r, corrId) => [corrId, r.injectedValue] as const);
       // MID-TRAVERSAL REDUCTION (monoid transport optimization): the local tail is a bare reducer, so push
       // it as a per-injected-value GROUPED PARTIAL — `<sub>.group().by(<groupBy>).by(<partial>())` — and
       // only a `(key→partial)` map crosses instead of every element. The map rides the SCALAR arm as a
@@ -179,7 +179,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // the element scatter + local reduce (the authority), fewer bytes.
       if (reduce) {
         const grouped = `${gremlin}.group().by(${groupByGremlin(reduce.groupBy)}).by(${reduce.partial}())`;
-        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: distinct }, depth + 1, {}, 'reduce');
+        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: pairs }, depth + 1, {}, 'reduce');
         if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }
@@ -188,7 +188,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // constant, since an injection marker caps the pushable prefix before any value terminal). Elements
       // scatter by the injected value as before. `runForeign` reports which shape the sibling produced;
       // `apply` passes the tag through, no prediction.
-      const out = await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+      const out = await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: pairs }, depth + 1);
       if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
       const result = elementsOf(out);
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;
