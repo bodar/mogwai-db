@@ -67,6 +67,46 @@ The sibling runs ONE batched hop over the DISTINCT injected values (a SPARQL bou
 SCATTER back over the parents (`foreignRejoin`, `src/compiler/rel/foreign.ts`): each returned element
 re-matches the injected value it satisfies, in the resume SQL.
 
+## Bigger-than-scalar injection — a BIND of any shape, correlated by a minted `origin` (DESIGN, building)
+
+_The settled architecture for widening injection past a scalar (open item 1). Decided 2026-08-27; the
+build is in progress. Memory: `federate-injection-value-as-key`._
+
+**Injection is a BIND spliced at the marker, of ANY explicit shape.** The marker read produces a per-parent
+value — a scalar (`__.values('k')`/`__.id()`/`__.label()`), a LIST (`<read>.fold()`), eventually a map or
+subgraph — and it flows across as a BIND (never inlined; the user chose to send it and it may be massive —
+root `CLAUDE.md`'s "a bind serves a user parameter"), dropped where a literal-or-bind is legal Gremlin. The
+sibling compiles ordinary Gremlin; an illegal shape blows up NATURALLY on the sibling — NO upfront
+validation. **No implicit collapse:** Gremlin is an explicit API, so a bare multi-valued read with no
+`.fold()` is ambiguous (stream vs list) and FAILS CLOSED — only explicitly-shaped reads flow across
+(`injectionKindOf`, `call-params.ts`, peels a trailing `.fold()` and rejects anything else).
+
+**Correlation is by a MINTED per-parent id — the existing `origin` CHANNEL, our Calcite `CorrelationId`.**
+`channels.ts` already documents `origin` as exactly this: "a PROVENANCE/IDENTITY key that a rejoin groups
+by", cross-checked against `vendor/calcite/core/.../rel/core/CorrelationId.java`. So the corrId needs NO new
+substrate — it is an `origin` channel, minted per UNCOLLAPSED parent row at the mid head (the head terminal
+is a per-traverser map, which structurally blocks `movementCollapse`, so one row per parent is guaranteed).
+
+**The marker lowers as a correlated JOIN that PROJECTS the corrId, not a `within` FILTER.** This is the
+crux and what deletes the special-cases. Instead of `substituteInjectionMarker` rewriting the operand to
+`within(INJECT_VALUES_KEY)`, the marker becomes a join against the injected `(corrId, value)` pairs that
+carries the `origin` corrId into the sibling's output — Calcite `Correlate` applied literally ("drive rows ×
+sub-query, carry the LEFT identity into every output row"). The corrId then rides through the rest of the
+sibling traversal via the ORDINARY channel machinery (`withChannel`/`carriedCols`/movement/merge), and the
+sibling returns `(corrId, element)` tuples. The rejoin joins parent × result ON the corrId — never
+re-matching by value, never reading a correlation column off the element.
+
+**What this DELETES:** the `InjectionKind` values/id/label enumeration, `matchValue`'s per-facet column
+mapping (`foreign.ts`), and the operand-position question — all dissolve, because the injected value's SHAPE
+is irrelevant to a corrId join. A scalar, a list, a map, a subgraph all correlate identically; list/map/
+subgraph generalize with NO per-shape rejoin arm.
+
+**The one principled boundary:** `origin`'s barrier policy is `empty` (`CHANNEL_BARRIER_POLICY`), so the
+corrId does NOT survive a sibling-side global BARRIER (a `fold`/`count`/`group` AFTER the marker). Such a
+traversal fails closed — a pre-encoded limit, not a surprise. **The optimization it unlocks:** because
+corrId and value are separate, equal values across parents can share ONE bind entry (dedup the value, map
+several corrIds to it) — a later optimization, not a prerequisite.
+
 ## Pushdown is a boundary walk, not per-step special-casing (Calcite prefix model)
 
 `pushableTailPrefix` (`ir/content-demand.ts`) splits the post-barrier tail into `[remote prefix] [local
