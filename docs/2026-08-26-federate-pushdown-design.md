@@ -93,22 +93,44 @@ the same split the explicit form has.
 
 ## Output transport — `ForeignResult` and the `{t,v}` ValueNode arm
 
-`runForeign(gremlin, params, depth)` (`src/execute.ts`, the federation RPC primitive — runs a
-sub-traversal on a sibling DO and returns a typed `ForeignResult`) maps the sibling traversal's TERMINAL
-SHAPE to a transport arm:
+`runForeign(gremlin, params, depth, paramTypes?, terminal?)` (`src/execute.ts`, the federation RPC
+primitive — runs a sub-traversal on a sibling DO and returns a typed `ForeignResult`) maps the sibling
+traversal's TERMINAL SHAPE to a transport arm — **AUTHORITATIVELY, from the sibling's own `plan.shape`,
+never predicted by the caller.** This is Calcite's `SqlImplementor.Result.rowType`
+(`vendor/calcite/core/.../rel/rel2sql/SqlImplementor.java:509` — the pushed subtree's result type is
+`rel.getRowType()`, read off the node, not guessed by whoever pushed it). Our schemaless analogue carries
+the type IN each value (the `{t,v}` node) rather than in a separate rowType, but the principle is the
+same: the shape follows the pushed subtree's root.
 
-- **elements** — vertex/edge detached references (`ForeignRow[]`, framed by `lowerForeignResume`).
-- **a `{t,v}` `ValueNode`** — everything else: a pushed reducer (`count`→`{t:'long'}`, `sum`/`min`/`max`/
-  `mean`→ the per-row `vt`), a mid-traversal reduction `(key→partial)` map (`t:'map'`), and — the next
-  slice — a pushed `cap`/`fold` COLLECTION (`t:'list'`). The `{t,v}` envelope (`gremlin/types.ts`)
-  carries scalars, maps, and lists losslessly and JSON-safely, so a scalar's Gremlin type survives the
-  transfer (a Long stays a Long). The resume frames ANY ValueNode via `lowerScalarResume` — already
-  shape-agnostic (a null value frames as the empty relation; a monoid `count` keeps its `0`).
+- **elements** (`kind:'elements'`) — vertex/edge detached references (`ForeignRow[]`, framed by
+  `lowerForeignResume`).
+- **a `{t,v}` `ValueNode`** (`kind:'scalar'`) — a single COLLAPSED value: a pushed reducer
+  (`count`→`{t:'long'}`, `sum`/`min`/`max`/`mean`→ the per-row `vt`) or a mid-traversal reduction
+  `(key→partial)` map (`t:'map'`). Framed by `lowerScalarResume`, one value (a monoid `count` keeps `0`;
+  a semigroup over empty frames nothing).
+- **a `FrameNode` STREAM** (`kind:'values'`) — N values from a value-producing terminal: `values(k)`,
+  `unfold()`, `fold()`/`cap('a')`, or a `fold()` OF ELEMENTS. Rides the WIDER `FrameNode` (the stored
+  `ValueNode` plus the detached element arm `{t:'vertex'|'edge', v: payload}`), so a scalar leaf, a
+  detached vertex/edge, and a nested list/map each cross by their own tag. The resume
+  (`lowerTypedNodeStream`) re-emits each member as its OWN traverser — `lowerScalarResume` one
+  cardinality up — so an empty stream is no traversers and an empty `fold()` is one empty list. This is
+  LANDED (open item 1 below).
 
 **The compounding rule: output-side pushdown of shape X = `runForeign` recognizes the sibling's terminal
-shape X and encodes it as a ValueNode; the resume needs no per-shape change.** No new substrate per
-shape — the envelope and the resume already exist. This is what keeps `ForeignResult` from growing an
-ad-hoc arm per pushed feature.
+shape X and encodes it as a `{t,v}`/`FrameNode` tree; the resume needs no per-shape change.** No new
+substrate per shape — the envelope, the element arm and the `typedNode`/`scalar` resumes already exist.
+`ForeignValueNodes` (`execute.ts`) is the PRODUCER twin of the framer's per-row arms: where `frameValues`
+turns a row into a Buffer, it turns the SAME row into the node the Buffer would encode, so a federated
+value and a local one are one encoding and cannot diverge. This is what keeps `ForeignResult` from
+growing an ad-hoc arm per pushed feature.
+
+**The one thing shape cannot express — reducer vs value STREAM.** A `count()` and a `values(k)` both
+compile to sibling shape `value`, differing only in SEMANTICS (count over empty → `0`, one row; values
+over empty → `[]`, N rows). `plan.shape` alone cannot separate them, so the ONE prediction that survives
+is `terminal:'reduce'` (`ForeignTerminal`, from `pushableTailPrefix.reduces`) — an intent hint, not a
+shape guess. Everything else (elements vs a value stream) is read off the returned tag. The explicit
+`traversal` form gains the same value framing for free (a `federate(traversal: __.V().count())` now
+frames the count).
 
 ## Reducer algebra — most are SEMIGROUPS, not monoids
 
@@ -161,26 +183,36 @@ self-split, mean reduce-firsts to `(sum, count)`).
 
 Endpoint-id transport (`ENDPOINT_IDS_KEY`); the `ContentDemand` tail classifier and conditional endpoint
 fetch (skip the endpoint hop unless the tail reaches an endpoint); the `ForeignResult` shape-tagged
-transport (elements | scalar | keyed map); arg-less pushdown (source + reducers); mid-traversal `count`
-reduction pushdown with its differential; empty-reduction semantics; the `parent` marker (replacing
-`T.value`); the mogwai.* namespace drop; the sub-traversal-as-steps refactor (string only at the RPC
-edge); arg-less MID injection (the marker in the pushed prefix); and the cross-boundary collection-read
-guard (a `cap` reading a pre-barrier collection stays local).
+transport (elements | scalar | keyed map | value STREAM); arg-less pushdown (source + reducers);
+mid-traversal `count` reduction pushdown with its differential; empty-reduction semantics; the `parent`
+marker (replacing `T.value`); the mogwai.* namespace drop; the sub-traversal-as-steps refactor (string
+only at the RPC edge); arg-less MID injection (the marker in the pushed prefix); the cross-boundary
+collection-read guard (a `cap` reading a pre-barrier collection stays local); the `raw()` → `runForeign()`
+rename; and **pushed-collection output framing** (open item 1 — a `values(k)`/`unfold()`/`fold()`/`cap()`
+terminal, and a `fold()` of elements, frame end-to-end via the `kind:'values'` `FrameNode` stream +
+`lowerTypedNodeStream`; the explicit `traversal` form frames values too).
 
 ## Open, in rough priority
 
-1. **Pushed-collection output framing** — `runForeign` grows a `t:'list'` ValueNode arm for a sibling
-   `cap`/`fold` terminal, so a self-contained `aggregate('a').cap('a')` (which already PUSHES per the
-   boundary walk) frames end-to-end instead of failing "expected element rows, got a scalar/list". Small:
-   one shape arm using the existing envelope; the resume (`lowerScalarResume`) already frames it. Also the
-   natural moment to rename `raw()` → `runForeign` if not already done. This is the "same wall the scalar
-   reducers hit", one shape further.
-2. **Bigger-than-scalar INJECTION (input side)** — the parent injects a LIST/MAP (eventually a SUBGRAPH),
-   not just a scalar `values`/`id`/`label`, so it can hand real context to the sibling. Orthogonal to (1)
-   — (1) is what the sibling returns OUT, this is what the parent sends IN — but shares the `{t,v}`
-   envelope. The strategic slice; larger; best done in a clear context.
-3. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
+1. **Bigger-than-scalar INJECTION (input side)** — the parent injects a LIST/MAP (eventually a SUBGRAPH),
+   not just a scalar `values`/`id`/`label`, so it can hand real context to the sibling. Orthogonal to the
+   landed output framing — that is what the sibling returns OUT, this is what the parent sends IN — but
+   shares the `{t,v}` envelope. The strategic slice; larger; best done in a clear context.
+2. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
    `union`-of-two-siblings + identity comparisons.
-4. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
+3. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
    could be threaded through the resume (today `cap` over a pre-barrier collection fails closed locally).
    Lower value.
+
+## Considered and NOT unified — the value-stream resumes
+
+`lowerTypedNodeStream` (federate's value stream) and `lowerValueResume`/`lowerListResume`
+(`reverse()`/`split()`'s value-transform barrier, `src/compiler/rel/barrier-value.ts`) both seed a
+resumed chain from a data-sized value set, and it is tempting to make split/regex TAG their output with a
+type and route both through ONE typed resume. They stay SEPARATE for a load-bearing reason, not laziness:
+`lowerValueResume` CONTINUES a local tail (`scalarTail`, scalar-only) while `lowerTypedNodeStream` is
+TERMINAL and HETEROGENEOUS (a member may be a detached vertex/edge — a `fold()` of elements — which
+`scalarTail` cannot frame; it needs the `typedNode` framing). A merge would force federate's element case
+back out. If a future federate value stream ever needs a LOCAL SUFFIX (today the pushable prefix is
+maximal, so it never does), the shared shell is `valueResume` with a `PER_ROW_ENVELOPE`-typed seed — that
+is the seam to reuse, not `lowerTypedNodeStream`.
