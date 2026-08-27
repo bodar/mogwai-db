@@ -5,7 +5,7 @@ import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
-import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
+import { ENDPOINT_IDS_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
 // ---------- federate — cross-graph query pushdown (async, Barrier) ----------
 //
@@ -98,13 +98,6 @@ const elementsOf = (r: ForeignResult): readonly ForeignRow[] => {
   return r.rows;
 };
 
-/** The `by()` modulator for the sibling's grouping, from the injection kind. A `values` key is a
- *  property name (a quoted string arg); `id`/`label` are the T-token reads `by(id)`/`by(label)`. This is
- *  the ELEMENT-side value each returned element would be matched on, so the group key equals the parent's
- *  injected value — no marker-subject extraction. */
-const groupByGremlin = (groupBy: string): string =>
-  groupBy === 'id' || groupBy === 'label' ? groupBy : `"${groupBy.replace(/"/g, '\\"')}"`;
-
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
  *  already lived; the per-call values (params, this hop's depth) come from the CallSite
@@ -173,13 +166,15 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
       const pairs = rows.map((r, corrId) => [corrId, r.injectedValue] as const);
       // MID-TRAVERSAL REDUCTION (monoid transport optimization): the local tail is a bare reducer, so push
-      // it as a per-injected-value GROUPED PARTIAL — `<sub>.group().by(<groupBy>).by(<partial>())` — and
+      // it as a per-corrId GROUPED PARTIAL. The corrId is an internal origin CHANNEL, not a Gremlin
+      // property, so the ordinary-looking group text is marked for RelIR to replace its key with origin.
+      // The map crosses as `(corrId → partial)`, never `(injected value → partial)`.
       // only a `(key→partial)` map crosses instead of every element. The map rides the SCALAR arm as a
       // `t:'map'` ValueNode (no new arm); the resume COMBINES per parent with the monoid. Same answer as
       // the element scatter + local reduce (the authority), fewer bytes.
       if (reduce) {
-        const grouped = `${gremlin}.group().by(${groupByGremlin(reduce.groupBy)}).by(${reduce.partial}())`;
-        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: pairs }, depth + 1, {}, 'reduce');
+        const grouped = `${gremlin}.group().by().by(${reduce.partial}())`;
+        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: pairs, [INJECT_REDUCE_KEY]: true }, depth + 1, {}, 'reduce');
         if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }

@@ -130,7 +130,7 @@ function inferredPushdown(
 /** The MID-TRAVERSAL REDUCTION pushdown, or `null`. Fires when: this is a federate barrier NOT at the
  *  source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent), and
  *  the local tail is EXACTLY one bare reducer that SPLITS (`reducers.ts`). Then the sibling computes a
- *  per-injected-value PARTIAL (`group().by(<groupBy>).by(<partial>())`) and the resume COMBINES per parent
+ *  per-corrId PARTIAL (`group().by().by(<partial>())`, keyed by origin in RelIR) and the resume COMBINES per parent
  *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. Mean
  *  (`partial:null`, reduce-first to two partials) is a follow-up — declines here for now. */
 function inferredReduce(
@@ -142,8 +142,7 @@ function inferredReduce(
   if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
   const reducer = reducerOf(only.name);
   if (!reducer || reducer.partial == null || reducer.combine == null) return undefined; // mean/unsplittable → follow-up
-  const groupBy = injection.kind === 'values' ? injection.key : injection.kind; // 'name' | 'id' | 'label'
-  return { reducer: only.name, groupBy, partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };
+  return { reducer: only.name, partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };
 }
 
 function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier | null {
@@ -174,7 +173,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
       ? { ...spec, injectionTraversal: pushdown.injectionRead }
       : spec;
     // MID-TRAVERSAL REDUCTION (monoid transport optimization): a mid federate whose tail is a bare reducer
-    // pushes the reduction as a per-injected-value grouped PARTIAL; the resume combines per parent.
+    // pushes the reduction as a per-corrId grouped PARTIAL; the resume combines per parent.
     const injection = effectiveSpec.injectionTraversal ? injectionKindOf(effectiveSpec.injectionTraversal, request.params) ?? undefined : undefined;
     const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, effectiveSpec, injection);
     // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as

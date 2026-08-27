@@ -33,6 +33,15 @@
  *  name, so it keeps its prefix.) */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
 
+/** An internal marker on the sibling request for federate's grouped reduction transport.  Its GROUP
+ * key is the injected correlation channel, which is not a Gremlin property and therefore must be
+ * selected by the RelIR lowering rather than by the synthesized Gremlin text. */
+export const INJECT_REDUCE_KEY = '_mogwai_inject_reduce';
+
+/** True only for the sibling half of federate's corrId-keyed reduction pushdown. */
+export const injectedReduction = (params: Record<string, unknown>): boolean =>
+  params[INJECT_REDUCE_KEY] === true;
+
 /** The injection MARKER service name — `call("parent", <read>)`. A leaf constant so both the recognizer
  *  (strategies.ts) and the classifier (call-params.ts) name it without importing a service impl. It has
  *  NO registered service: it is a compile-time marker the `substituteInjectionMarker` Pass consumes and

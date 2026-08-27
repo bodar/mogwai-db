@@ -190,13 +190,14 @@ models the family as `(partial, combine, empty)` with `empty ∈ {'zero' (monoid
 
 ## Mid-traversal reduction — a monoid transport optimization
 
-A mid federate whose local tail is a bare reducer pushes the reduction as a per-injected-value GROUPED
-PARTIAL — `<sub>.group().by(<groupBy>).by(<partial>())` — so only a `(key→partial)` map crosses instead of
+A mid federate whose local tail is a bare reducer pushes the reduction as a per-corrId GROUPED
+PARTIAL — `<sub>.group().by().by(<partial>())`, with RelIR replacing the unnameable Gremlin key by the
+live `origin` channel — so only a `(corrId→partial)` map crosses instead of
 every element; the resume COMBINES per parent (`lowerReduceCombine`) with the reducer's `combine`/`empty`.
 Same answer as the element scatter + local reduce (the authority), fewer bytes. Gated by the
 `federateReduce` switch with a differential (`test/federation.test.ts`: switch-ON ≡ switch-OFF). The split
-law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)` is what makes it valid. `groupBy` is the injection
-read applied element-side, so the group key equals what the element scatter matches on. In practice only
+law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)` is what makes it valid. The GROUP BY is the minted
+per-parent corrId, so equal injected values remain distinct groups. In practice only
 `count` reaches this gate (sum/min/max/mean need a preceding `values(k)`, a 2-step tail the single-reducer
 gate rejects — they push via the arg-less prefix instead); the table's other rows are exercised by that
 path. The reducer partials from Calcite's `SqlSplittableAggFunction` (count/sum → SUM0, min/max

@@ -136,6 +136,54 @@ export function groupBarrier(
   return rows && (rows.done ?? groupMap(rows.rel, rows.recipe, source, fresh));
 }
 
+/**
+ * FEDERATE'S CORRELATED REDUCTION GROUP — the sibling's synthetic
+ * `group().by().by(<partial>())` is not ordinary user grouping. Its key is the live `origin`
+ * channel minted from each injected corrId, which no Gremlin property can name. The grouping is
+ * therefore expressed directly in RelIR: Aggregate GROUP BY origin, then fold the typed
+ * `(corrId → partial)` rows to the normal map value transport.
+ *
+ * Only the generated one-step reducer body is admitted. A normal group after an injected marker
+ * remains a different semantic question and is still refused by the marker guard in `lower.ts`.
+ */
+export function groupBarrierByOrigin(
+  input: Rel, step: IRStep, child: ChildSeam, fresh: Minter,
+): GroupedMap | null {
+  if (step.name !== 'group' || step.optionArms || argValues(step).length) return null;
+  const origin = input.channels.find((channel) => channel.role === 'origin');
+  if (!origin) return null;
+  const bys = modulations(step, 2, child);
+  if (!bys || bys[0]?.key.kind !== 'identity' || bys[1]?.key.kind !== 'child') return null;
+  const body = bys[1].key.body;
+  const partial = body.length === 1 && argValues(body[0]!).length === 0 ? body[0]!.name : undefined;
+  if (partial !== 'count' && partial !== 'sum' && partial !== 'min' && partial !== 'max') return null;
+  if (partial !== 'count' && !input.type.cols.some((column) => column.name === 'v')) return null;
+
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  const rows = make.project({
+    id: fresh('ork'), input, channels: [],
+    type: typeOf(meta(KEY_COL, 'int'), meta(VAL_COL, 'any', true)),
+    exprs: [
+      [KEY_COL, col(input.id, origin.col)],
+      [VAL_COL, partial === 'count' ? (bulk ? col(input.id, bulk.col) : compilerInt(1)) : col(input.id, 'v')],
+    ],
+  });
+  const reduced = partial === 'count'
+    ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rows.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
+    : reducerAggregate(col(rows.id, VAL_COL), partial);
+  const grouped = make.aggregate({
+    id: fresh('orb'), input: rows, channels: [],
+    type: typeOf(meta(KEY_COL, 'int'), meta(VAL_COL, 'any', true)),
+    groupBy: [col(rows.id, KEY_COL)], aggs: [[VAL_COL, reduced.value]],
+  });
+  const entry: Entry = {
+    key: typedNode(col(grouped.id, KEY_COL), compilerText('long')),
+    val: typedNode(col(grouped.id, VAL_COL), reduced.type),
+    keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' },
+  };
+  return { rel: mapOfGroups(grouped, entry, col(grouped.id, KEY_COL), fresh), keyOf: entry.keyOf, valOf: entry.valOf };
+}
+
 /** A grouped relation folded into one map value, plus what the framing layer must be told about each
  *  side. `groupBarrier`'s answer, and `groupMap`'s. */
 export interface GroupedMap { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf }

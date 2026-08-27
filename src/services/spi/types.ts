@@ -94,15 +94,13 @@ export interface CallSite {
   };
   /** MID-TRAVERSAL REDUCTION pushdown — a transport optimization (`reducers.ts`). Present only for a
    *  mid-traversal federate whose local tail is a bare reducer that SPLITS. `apply` runs the sibling as a
-   *  per-injected-value GROUPED partial (`group().by(<groupBy>).by(<partial>())`) so a `(key→partial)` map
+   *  per-corrId GROUPED partial (`group().by().by(<partial>())`, whose key is selected in RelIR) so a `(key→partial)` map
    *  crosses instead of every element; the resume COMBINES the partials per parent with `combine`/`empty`,
-   *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `groupBy`
-   *  is the injection read applied element-side (`values('name')`→`'name'`, id→`id`, label→`label`). `empty`
+   *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `empty`
    *  is the empty-input answer (`zero` = the monoid `count`;
    *  `nothing` = a semigroup — `sum`/`min`/`max`); `reducer` is the original step name (for framing). */
   readonly reduce?: {
     readonly reducer: string;
-    readonly groupBy: string;
     readonly partial: string;
     readonly combine: 'sum' | 'min' | 'max';
     readonly empty: 'zero' | 'nothing';

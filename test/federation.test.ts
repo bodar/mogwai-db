@@ -262,6 +262,19 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     expect(res.map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value)).toEqual(['marko', 'marko']);
   });
 
+  test('TWO same-value parents keep separate count partials under reduction pushdown', async () => {
+    // The reduction map is keyed by corrId, not name: each marko parent contributes its OWN partial
+    // count of 1, and the resume combines those two entries to 2. A value-keyed group would merge the
+    // sibling rows before the rejoin and cannot satisfy this per-parent correlation contract.
+    const two = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")'])
+      await two.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
+    const q = `${mid('__.values("name")')}.count()`;
+    const result = (await Promise.all((await two.executor('home').framedAsync(q, {})).map(dec))).map(Number);
+    expect(result).toEqual([2]);
+  });
+
   test('a parent that matches nothing on the sibling contributes no traverser (flatMap)', async () => {
     // vadas/josh/peter have no crew namesake → they drop; only marko survives. (Covered by the
     // count above, asserted explicitly here: exactly one result, not four.)

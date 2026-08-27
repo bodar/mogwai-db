@@ -43,7 +43,7 @@ import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupBarrierByOrigin, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
@@ -57,7 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { INJECT_VALUES_KEY, injectedPairs, isParentMarkerBody } from '../ir/injection.ts';
+import { INJECT_VALUES_KEY, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -986,6 +986,11 @@ function collectionArm(
     // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and the
     // reduction happens at the `cap`, which is where a label filled at N positions can be one grouping
     // over the UNION of them.
+    const originGrouped = injectedReduction(ctx.params) ? groupBarrierByOrigin(rel, step, childSeam(ctx, fresh), fresh) : null;
+    if (injectedReduction(ctx.params)) {
+      if (!originGrouped) return { tail: null };
+      return { tail: continueAs(originGrouped.rel, { kind: 'map', keyOf: originGrouped.keyOf, valOf: originGrouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
+    }
     const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
     if (!rows) return { tail: null };
     // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
@@ -3343,7 +3348,9 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   let rel: Rel;
   if (marker) {
-    if (steps.slice(at + 1).some(isStreamBarrier))
+    const suffix = steps.slice(at + 1);
+    const originGrouping = injectedReduction(params) && suffix.length === 1 && suffix[0]?.name === 'group';
+    if (suffix.some(isStreamBarrier) && !originGrouping)
       throw new Error('federated parent marker cannot be followed by a sibling stream barrier: correlation origin would be consumed');
     if (ctx.source !== BaseGraph)
       throw new Error('federated parent marker currently requires the base graph source');
