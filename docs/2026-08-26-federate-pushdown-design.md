@@ -1,16 +1,28 @@
 # Federate pushdown — inferring what to fetch from the compiled tail (design notes)
 
-**NAMING UPDATE (2026-08-26).** Our extensions dropped the `mogwai.` namespace: the service is now
-`federate` (not `mogwai.graph.federate`), and every other extension of ours is root-level too
-(`schema`, and the internal OLAP desugar targets `pageRank`/`wcc`/…). Rationale: TinkerPop namespaces
-to avoid PROVIDER collisions; there is one provider here — us — so the namespace bought nothing and
-cost ergonomics. Only TinkerPop's own reference names keep a namespace (`tinker.search`,
-`tinker.degree.centrality`), because those are the surface the conformance corpus asserts verbatim.
-Mentions of `mogwai.graph.federate` below are historical; read them as `federate`. **The injection
-marker is also changing** — `T.value` is being REPLACED by a self-delimiting `call("parent", <read>)`
-(the `parent` marker, §"Win 2a" below), which is more explicit (the read names `values`/`id`/`label`)
-and needs no boundary to disambiguate. This makes `call("mogwai.inject")` (open item #1) moot — the
-mechanism is `parent`, not a separate `inject` service.
+**NAMING (LANDED 2026-08-26, commit 33e974de).** Our extensions dropped the `mogwai.` namespace: the
+service is `federate` (not `mogwai.graph.federate`), and every other extension of ours is root-level too
+(`schema`, and the internal OLAP desugar targets `pageRank`/`wcc`/…). Rationale: TinkerPop namespaces to
+avoid PROVIDER collisions; there is one provider here — us — so the namespace bought nothing and cost
+ergonomics. Only TinkerPop's own reference names keep a namespace (`tinker.search`,
+`tinker.degree.centrality`), the surface the conformance corpus asserts verbatim. Mentions of
+`mogwai.graph.federate` below are historical; read them as `federate`.
+
+**INJECTION MARKER (LANDED 2026-08-27, commit 80abbe33).** `T.value` is REPLACED by a self-delimiting
+`call("parent", <read>)` — the `parent` marker (§"Win 2a" below) — in a `has()` operand:
+`has("name", __.call("parent", __.values("name")))`. It carries BOTH the injection site (operand
+position) and the read (`values`/`id`/`label`) in one place, is expressible by every unmodified GLV
+(a `call()` nested in the operand, no client change), and is self-delimiting (needs no boundary to
+disambiguate — which is what makes the arg-less form possible). `T.value` now means ONLY the property
+token. This makes the old `call("mogwai.inject")` idea moot — the mechanism is `parent`.
+
+**SUB-TRAVERSAL AS STEPS (LANDED 2026-08-27, commit 39db6473).** A `call()` sub-traversal (federate's
+`traversal`, an OLAP `edges` scope, shortestPath's `target`) is carried as parsed `IRStep[]`, NOT a
+serialized string. The string was a FAKE requirement from building federate first: the grammar always
+gives a nested traversal, and OLAP was re-parsing federate's serialized string straight back to steps
+(AST→string→AST round-trip). The ONE string conversion is federate's RPC edge (`subTraversalToGremlin`
+= `'g.'+steps.map(s=>s.ctx.getText()).join('.')`), a debuggable contract boundary. Dropped the client
+`Translator` dependency and the bare-string param path. See the memory `federate-subtraversal-as-steps`.
 
 **Status: PART-BUILT.** Landed (2026-08-26): the endpoint-id transport fix (`ENDPOINT_IDS_KEY`); the
 `ContentDemand` tail classifier (phase 1); conditional endpoint fetch (phase 3); the `ForeignResult`
@@ -20,8 +32,13 @@ pushdown** (`pushableTailPrefix` + sibling synthesis from step source text), whi
 sibling returns a scalar); **mid-traversal `count()` reduction pushdown** (the `reducers.ts` table +
 `lowerReduceCombine`, gated by `federateReduce` with a differential); and the **empty-reduction
 semantics** (a semigroup reduction over empty emits NOTHING, the monoid `count` emits 0 — see below).
-Still open: the `call("mogwai.inject")` marker; widening the side-effect boundary; bigger-than-scalar
-injection; and multi-graph mixing (2b). The authority is the code (`src/services/catalog/federate.ts`,
+**Win 2b — ARG-LESS MID injection LANDED (2026-08-27, commit 142b472e):** a `parent` marker in the pushed
+prefix makes an arg-less federate a mid-traversal injection with no `traversal`/injection arg. It has NO
+parallel branch — `inferredPushdown` caps the prefix at the marker step and returns the read, which
+`barrierIn` folds onto an EFFECTIVE spec's `injectionTraversal`; every downstream reader (classify, route,
+head, scatter, monoid reduce) sees the same fact whether the marker came from an explicit arg or an
+inferred prefix. Still open: widening the side-effect boundary; bigger-than-scalar injection; and
+multi-graph mixing (win 2b's identity work — hard edge (c)). The authority is the code (`src/services/catalog/federate.ts`,
 `src/compiler/ir/content-demand.ts`, `src/compiler/ir/reducers.ts`, `src/compiler/rel/segment.ts`/`lower.ts`).
 
 ## Reducer algebra — most are SEMIGROUPS, not monoids (settled 2026-08-26)
@@ -256,18 +273,26 @@ in `g.V().call(federate,"crew").has("sku", T.value)` you cannot tell whether `ha
 `T.value` = the parent's injected value) or locally (so `T.value` = the property token) — the SAME token
 means two things depending on a boundary that no longer exists. This is a real hazard, not a nuisance.
 
-**Fix: a self-delimiting marker via `call()`, not `T.value` reuse.** A dedicated marker CALL —
-`call("mogwai.inject", {read: "name"})` (or `"mogwai.parent"`) — needs no GLV change (it is a `call()`)
-AND carries its own meaning regardless of position or boundary: nobody writes that call for any other
-reason, so it is unambiguous with no `traversal` arg to delimit it. `T.value` then keeps meaning ONLY the
-property token, everywhere, always. This KEEPS the injection feature in the ergonomic form (rather than
-"injection unsupported arg-less", which would be a real loss) and arguably reads clearer: the call NAMES
-what to inject (`{read: "name"}` / id / label) in one place, instead of a positional `__.values('name')`
-arg to the outer federate paired with a bare `T.value` marker elsewhere. Cost: one reserved service name
-(honest — it shows in `--list`), vs `T.value`'s zero-new-registry cleverness. Worth it for 2a; the
-`T.value` form stays supported for the explicit-arg (win-1) path where the boundary already disambiguates.
+**Fix (LANDED 2026-08-27): the `call("parent", <read>)` marker, not `T.value` reuse.** The marker is
+`__.call("parent", __.values("name"))` in the `has()` operand — a `call()` (no GLV change) whose read is a
+nested VALUE-READ TRAVERSAL (`__.values('k')`/`__.id()`/`__.label()`), classified by the same
+`injectionKindOf` the explicit form used. It carries its own meaning regardless of position or boundary
+(nobody writes `call("parent")` for any other reason), so it is unambiguous with no `traversal` arg to
+delimit it, and it works IDENTICALLY for the explicit and arg-less forms. `T.value` now means ONLY the
+property token, everywhere.
 
-## `T.value` / mid-traversal: pushdown must be INJECTION-AWARE
+Two refinements vs the first sketch above: (1) the read is a nested TRAVERSAL, not a `{read:"name"}` map —
+it reuses the existing value-read classifier verbatim and reads correctly in the operand slot
+(`has("name", parent("name"))` ≈ `where(eq("a"))` referencing a context; `parent` is GraphQL's word for
+the enclosing scope). (2) There is NO reserved service and NO `--list` entry: `call("parent")` never
+reaches a registry — the `substituteInjectionMarker` Pass rewrites it to `within(INJECT_VALUES_KEY)` on
+the SIBLING compile before any resolve. A bare `call("parent")` with no read fails closed at parse. And
+`T.value` is NOT kept as a second injection spelling — it was DELETED (one mechanism, not two).
+
+## The marker / mid-traversal: pushdown must be INJECTION-AWARE
+
+(The marker below is written `T.value` in this section's original prose; read it as the landed
+`__.call("parent", <read>)` — the mechanism is identical, only the spelling changed.)
 
 The mid-traversal form (`V().call(federate, …, __.V().has('sku', T.value))`) already does INPUT-side
 pushdown — the good kind: it collects the DISTINCT injected values, sends ONE sibling hop binding them
@@ -455,12 +480,15 @@ but unused, kept for the day a compound-accumulator mid case appears.
 4. **[PARTIAL] Projection pushdown** — the arg-less form pushes `values(k)` as part of the prefix (so only
    the projected shape crosses); a dedicated "narrow to `keys`" over the EXPLICIT form is not separately
    built. Mostly folds out of 2a.
-5. **[LANDED — the arg-less form; marker STILL OPEN] ergonomic arg-less API** — `pushableTailPrefix` +
-   sibling synthesis. The self-delimiting `call("mogwai.inject", …)` marker (for arg-less mid-traversal
-   injection) is still open.
-6. **[STILL OPEN — Win 2b] multi-graph mixing** — hard edge (c)'s origin-in-row: an `origin` discriminator
-   carried in the bound stream so `dedup`/`has(T.id)`/`group().by(id)` compare `(graph, id)`. A bounded,
-   measurable change (per-graph CTEs already exist), gating only multi-graph.
+5. **[LANDED] ergonomic arg-less API** — `pushableTailPrefix` + sibling synthesis (source form), AND the
+   arg-less MID injection (2b): the self-delimiting marker is `call("parent", <read>)`, NOT a separate
+   `mogwai.inject` service (that idea is dropped — see the header). `inferredPushdown` caps the pushed
+   prefix at the marker step and folds its read onto an effective `injectionTraversal`, so the arg-less and
+   explicit forms share one code path.
+6. **[STILL OPEN — multi-graph mixing] origin-in-row** — hard edge (c)'s `origin` discriminator carried in
+   the bound stream so `dedup`/`has(T.id)`/`group().by(id)` compare `(graph, id)`. A bounded, measurable
+   change (per-graph CTEs already exist), gating only multi-graph. (This was labelled "win 2b" in earlier
+   drafts; 2b's ergonomic arg-less injection has landed, so this identity work is what remains.)
 
 ## Non-goals / refuted directions
 
