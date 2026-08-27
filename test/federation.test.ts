@@ -9,6 +9,7 @@ import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injectio
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
+import { pushableTailPrefix } from '../src/compiler/ir/content-demand.ts';
 
 // A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
 // IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
@@ -115,6 +116,29 @@ describe('federate — arg-less pushdown (win 2a)', () => {
     const got = Number((await Promise.all((await mgr.executor('home').framedAsync(q, {})).map(dec)))[0]);
     const crew = Number((await onCrew('g.V().hasLabel("person").values("name").count()'))[0]);
     expect(got).toBe(crew);
+  });
+
+  test('a cap() reading a PRE-BARRIER collection stays LOCAL — not pushed to the sibling (wrong graph)', () => {
+    // `aggregate("x")` accumulates on the PARENT before the barrier; `cap("x")` reads THAT collection, which
+    // the sibling never saw. Pushing it would run `g.V().cap("x")` on the sibling against an undefined
+    // collection. The boundary must end the pushable prefix at the cap: only `.V()` pushes, the cap stays
+    // local. (End-to-end it then fails closed as "cap() unsupported after a barrier" — the RIGHT reason,
+    // local — until pushed-collection framing lands; the point here is it is not shipped to the sibling.)
+    const q = 'g.V().aggregate("x").call("federate", ["graph":"crew"]).V().cap("x")';
+    const steps = stepChain(parseGremlin(q), {});
+    const at = steps.findIndex((s) => s.name === 'call');
+    const p = pushableTailPrefix(steps, at, {});
+    expect(steps.slice(at + 1, at + 1 + p.length).map((s) => s.name)).toEqual(['V']);   // cap NOT pushed
+  });
+
+  test('a SELF-CONTAINED aggregate("a").cap("a") within the prefix is unaffected (the key is written there)', () => {
+    // The cap reads a collection written WITHIN the prefix, so it is self-contained — the guard does not
+    // fire (the key is in the "written within the prefix" set), and the whole side-effect pushes.
+    const q = 'g.call("federate", ["graph":"crew"]).V().aggregate("a").cap("a").unfold()';
+    const steps = stepChain(parseGremlin(q), {});
+    const at = steps.findIndex((s) => s.name === 'call');
+    const p = pushableTailPrefix(steps, at, {});
+    expect(steps.slice(at + 1, at + 1 + p.length).map((s) => s.name)).toEqual(['V', 'aggregate', 'cap', 'unfold']);
   });
 });
 

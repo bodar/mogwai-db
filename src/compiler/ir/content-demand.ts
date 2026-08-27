@@ -145,6 +145,30 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
 //   2. it is a WRITE (`MUTATING_STEPS`) — a detached snapshot is immutable; a write lands nothing.
 //   3. it is a nested/second barrier `call()` — its own boundary; treat conservatively as local.
 //   4. `labelReads(...).all` — a `path()`-family or unparseable body that observes EVERY label.
+//   5. it READS a NAMED COLLECTION bound BEFORE the barrier — `cap('x')` over an `aggregate('x')` the
+//      PARENT accumulated, not the sibling. The sibling never saw that collection, so the read must stay
+//      local. Same principle as (1) but for the collection namespace (`aggregate`/`group`/`groupCount`
+//      write a key, `cap` reads one), which `labels.ts` does not track — so it is guarded here directly.
+//      A SELF-CONTAINED `aggregate('a')…cap('a')` inside the prefix pushes fine: `a` is written within the
+//      prefix, so its `cap` read is satisfied there (the "written within" set), exactly as a contained
+//      `as()` backtrack does.
+
+/** Steps that WRITE a named collection under a string key (arg 0): `aggregate('a')`/`group('a')`/
+ *  `groupCount('a')` retain a relation under that name (`src/compiler/rel/collection.ts`). A bare
+ *  `group()`/`groupCount()` with no key is a reducing barrier, not a retained collection — hence the
+ *  string-arg check at the call site. */
+const COLLECTION_WRITERS: ReadonlySet<string> = new Set(['aggregate', 'group', 'groupCount']);
+
+/** Steps that READ a named collection under a string key (arg 0): `cap('a')` reduces the collection
+ *  `aggregate('a')` retained. This is the collection READER that can reach ACROSS the barrier. */
+const COLLECTION_READERS: ReadonlySet<string> = new Set(['cap']);
+
+/** The string collection KEY a step writes/reads (its first arg), or null when it is not a keyed
+ *  collection step (a bare `group()` reducing barrier, a non-string arg). */
+const collectionKeyOf = (step: IRStep): string | null => {
+  const first = argValues(step)[0];
+  return typeof first === 'string' ? first : null;
+};
 
 /** The reducing steps whose presence as the LAST pushed step means the sibling returns a SCALAR (so the
  *  resume frames a value, not elements). `REDUCERS` = count + the numeric reducers. */
@@ -166,6 +190,10 @@ export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, pa
   // Labels bound before the barrier — a prefix step reading one of these backtracks ACROSS the boundary
   // and cannot push. `labelsBoundBefore` clears at the barrier, so this is exactly the pre-barrier set.
   const preBarrier = labelsBoundBefore(steps, from, params);
+  // Collection keys WRITTEN within the prefix so far — a `cap` reading a key IN this set is self-contained
+  // (the sibling accumulated it too); a `cap` reading a key NOT in it reaches a PRE-barrier collection and
+  // must stay local. Grown as the walk advances, exactly like the "labels bound within the prefix" logic.
+  const writtenInPrefix = new Set<string>();
   let length = 0;
   for (let i = from; i < steps.length; i++) {
     const step = steps[i]!;
@@ -174,6 +202,17 @@ export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, pa
     const reads = labelReads([step], params);
     if (reads.all) break;                          // (4) path-family / unparseable — observes all labels
     if (preBarrier.size && [...reads.labels].some((l) => preBarrier.has(l))) break; // (1) cross-boundary backtrack
+    // (5) a collection read of a key NOT written within the prefix reaches a pre-barrier collection.
+    if (COLLECTION_READERS.has(step.name)) {
+      const key = collectionKeyOf(step);
+      if (key !== null && !writtenInPrefix.has(key)) break;
+    }
+    // Record this step's OWN collection write AFTER the read check (a `cap` never writes; an `aggregate`
+    // before a later `cap` of the same key is what makes the pair self-contained).
+    if (COLLECTION_WRITERS.has(step.name)) {
+      const key = collectionKeyOf(step);
+      if (key !== null) writtenInPrefix.add(key);
+    }
     length++;
   }
   const last = length > 0 ? steps[from + length - 1]! : undefined;
