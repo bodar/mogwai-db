@@ -159,18 +159,19 @@ describe('call/with fold + param resolution', () => {
     expect(s.params.traversal).toEqual({ kind: 'traversal', gremlin: 'g.V().has("age", P.gt(30))' });
   });
 
-  // ---- mid-traversal per-parent INJECTION (the 3rd positional arg) ----
+  // ---- mid-traversal per-parent INJECTION (the `parent` marker inside the traversal) ----
 
-  test('a values(k)/id()/label() 3rd arg (beside a map) is captured as the injection', () => {
-    for (const inj of ['__.values("name")', '__.id()', '__.label()']) {
-      const s = spec(`g.call("federate", ["graph":"crew"], ${inj})`);
-      expect(s.injectionTraversal).toBeDefined();          // captured
-      expect(s.params).toEqual({ graph: 'crew' });         // map still wins as params
+  test('a parent marker inside the traversal is captured as the injection', () => {
+    for (const read of ['__.values("name")', '__.id()', '__.label()']) {
+      const s = spec(`g.call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`);
+      expect(s.injectionTraversal).toBeDefined();          // the marker's READ body, captured
+      expect(s.params.graph).toBe('crew');
     }
   });
 
   test('injectionKindOf classifies the supported direct value reads and rejects others', () => {
-    const kind = (inj: string) => injectionKindOf(callStep(`g.call("s", ["a":"b"], ${inj})`).args[2].value.nested, {});
+    // Classifies the marker's READ body (`call("parent", <read>)`'s 2nd arg). Feed the read directly.
+    const kind = (read: string) => injectionKindOf(callStep(`g.call("parent", ${read})`).args[1].value.nested, {});
     expect(kind('__.values("name")')).toEqual({ kind: 'values', key: 'name' });
     expect(kind('__.id()')).toEqual({ kind: 'id' });
     expect(kind('__.label()')).toEqual({ kind: 'label' });
@@ -178,6 +179,11 @@ describe('call/with fold + param resolution', () => {
     expect(kind('__.values("name").fold()')).toBeNull();
     expect(kind('__.out().count()')).toBeNull();
     expect(kind('__.constant(1)')).toBeNull();
+  });
+
+  test('a bare parent marker (no read) throws at parse — fail closed', () => {
+    expect(() => spec('g.call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent"))])'))
+      .toThrow(/injection marker needs a read/);
   });
 
   test('a NON-injection traversal beside a map is NOT captured (the --list dynamic-params form)', () => {
@@ -264,9 +270,10 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
+    // The parent marker's read is a computed scalar (`values(k).fold()`) — not a direct value read.
     expect(() => compilePlan(
-      'g.V().call("federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: () => reg }))
-      .toThrow(/injection must be a direct value read/);
+      'g.V().call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name").fold()))])', {}, { registry: () => reg }))
+      .toThrow(/must be a direct value read/);
   });
 });
 

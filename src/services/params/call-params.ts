@@ -1,15 +1,16 @@
-import { stepChain, isNested, argValues } from '../../gremlin/frontend.ts';
+import { stepChain, isNested, argValues, type Step } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, InjectionKind, Service, ServiceRegistry } from '../spi/types.ts';
+import { isParentMarkerBody, PARENT_MARKER } from '../../compiler/ir/injection.ts';
 import { nestedTraversalToGremlin } from './traversal-param.ts';
 
-/** Classify a mid-traversal call()'s per-parent INJECTION traversal (the 3rd positional arg) into
- *  an InjectionKind — the DIRECT value read Phase 6b supports: `__.values('k')` (a property value),
- *  `__.id()`, or `__.label()`. Each also lands on the returned foreign row (fprops/fid/flabel), so
- *  the federate rejoin can match a result against the injected value in SQL. Returns null for any
- *  other shape (a computed/transformed scalar, movement, etc.) — the caller fails closed with a
- *  clear deferral, never a silent mis-rejoin. */
+/** Classify a mid-traversal call()'s per-parent INJECTION READ into an InjectionKind — the DIRECT value
+ *  read the `parent` marker supports: `__.values('k')` (a property value), `__.id()`, or `__.label()`.
+ *  Each also lands on the returned foreign row (fprops/fid/flabel), so the federate rejoin can match a
+ *  result against the injected value in SQL. Returns null for any other shape (a computed/transformed
+ *  scalar, movement, etc.) — the caller fails closed with a clear deferral, never a silent mis-rejoin.
+ *  `nested` is the marker's READ body (`call('parent', <read>)`'s second arg), NOT the whole marker. */
 export function injectionKindOf(nested: any, params: Record<string, any>): InjectionKind | null {
   const body = stepChain(nested, params);
   if (body.length !== 1) return null;
@@ -19,6 +20,40 @@ export function injectionKindOf(nested: any, params: Record<string, any>): Injec
   if (s.name === 'id' && s.args.length === 0) return { kind: 'id' };
   if (s.name === 'label' && s.args.length === 0) return { kind: 'label' };
   return null;
+}
+
+/** The READ body of the `parent` injection marker found inside a sub-traversal, or null if the traversal
+ *  carries no marker. A mid-traversal federate marks its per-parent injection with `call('parent', <read>)`
+ *  in a PREDICATE OPERAND position (`has('sku', __.call('parent', __.values('sku')))`); this walks the
+ *  traversal's steps and their nested-operand args to find that marker and hand back its `<read>` body
+ *  (the marker call's SECOND arg), which `injectionKindOf` then classifies. Only ONE marker is expected;
+ *  the FIRST found wins (multi-marker is not a form we mint). Reuses `isParentMarkerBody` (the leaf
+ *  predicate) so the recognizer is one definition, not two.
+ *
+ *  A `parent` marker with NO read arg (a bare `call('parent')`) THROWS here — fail closed at detection,
+ *  where the error is precise, rather than silently returning "no injection" (which would batch the sibling
+ *  once and hand every parent the whole pool — a different question with a plausible answer). The read's
+ *  SHAPE (must be `values`/`id`/`label`) is validated downstream by `injectionKindOf`. */
+export function parentMarkerReadIn(traversal: any, params: Record<string, any>): any {
+  const walk = (steps: readonly Step[]): any => {
+    for (const s of steps) {
+      for (const a of s.args ?? []) {
+        if (!isNested(a.value)) continue;
+        const body = stepChain((a.value as { nested: any }).nested, params);
+        if (isParentMarkerBody(body)) {
+          const read = body[0]!.args[1]?.value;   // the marker call's read arg (a nested __.values/id/label)
+          if (!isNested(read))
+            throw new Error(`call("${PARENT_MARKER}"): the injection marker needs a read — call("${PARENT_MARKER}", __.values(key)) / __.id() / __.label()`);
+          return (read as { nested: any }).nested;
+        }
+        const found = walk(body);                 // a marker could sit in a deeper nested body
+        if (found !== undefined) return found;
+      }
+    }
+    return undefined;
+  };
+  const found = walk(stepChain(traversal, params));
+  return found === undefined ? null : found;
 }
 
 /** A call() param VALUE that is a nested traversal (`.with('traversal', __.V().out('x'))` or a
@@ -99,16 +134,18 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
 }
 
 /** Build the CallSpec (service name + resolved constant params + optional mid-traversal injection)
- *  for a `call` IRStep, from its args (string name, optional Map / project-traversal, optional
- *  injection traversal) and folded withArgs.
+ *  for a `call` IRStep, from its args (string name, optional Map / project-traversal) and folded withArgs.
  *
  *  Arg disambiguation follows the grammar's call() overloads
- *  (call_string / call_string_map / call_string_traversal / call_string_map_traversal). A nested
- *  traversal arg present alongside a Map is TinkerPop's DYNAMIC-PARAMS traversal by default
- *  (project(...).by(constant) → a constant map merged over the static one). It is our per-parent
- *  INJECTION only when it CLASSIFIES as a direct value read (`__.values('k')`/`__.id()`/`__.label()`
- *  — injectionKindOf) — precise so the `--list` 3-arg form (a project-traversal) is untouched and
- *  never captured as an injection (that would both mis-route AND retain a huge cyclic antlr node). */
+ *  (call_string / call_string_map / call_string_traversal / call_string_map_traversal). A lone nested
+ *  traversal arg is TinkerPop's DYNAMIC-PARAMS traversal (`project(...).by(constant)` → a constant map).
+ *
+ *  The per-parent INJECTION is NOT a positional arg any more — it is the `parent` MARKER
+ *  (`call('parent', <read>)`) the user writes INSIDE the `traversal` sub-body, in a predicate operand
+ *  (`has('sku', __.call('parent', __.values('sku')))`). `injectionTraversal` is that marker's READ body,
+ *  extracted from the traversal AST BEFORE it is serialized to a string (`parentMarkerReadIn`). Keeping it
+ *  the read body (not the whole marker) means `injectionKindOf(spec.injectionTraversal)` downstream is
+ *  unchanged — it classifies a `values`/`id`/`label` body exactly as before. */
 export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSpec {
   const [name, ...rest] = argValues(step);
   // Bare g.call() ≡ g.call("--list") (the directory). A missing name defaults to it.
@@ -118,15 +155,17 @@ export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSp
 
   const mapArg = rest.find((a) => a instanceof Map) as Map<any, any> | undefined;
   const travArg = rest.find((a) => isNested(a)) as { nested: any } | undefined;
-  // A nested traversal alongside a Map is an INJECTION only when it is a direct value read; else it
-  // is the ordinary dynamic-params traversal (merged below like the lone-traversal form).
-  const injectionTraversal = mapArg && travArg && injectionKindOf(travArg.nested, params) ? travArg.nested : undefined;
+  // The injection READ comes from the `parent` marker inside the `traversal` sub-body — walk its AST
+  // NOW, before `resolveValueTraversal` serializes it to a string (the marker rides along verbatim to the
+  // sibling). The `traversal` may arrive as a map entry OR a `.with("traversal", …)` pair; check both.
+  const withTraversal = (step.withArgs ?? []).find(([k]) => k === 'traversal')?.[1];
+  const rawTraversal = mapArg?.get('traversal') ?? withTraversal;
+  const traversalValue = isNested(rawTraversal) ? (rawTraversal as { nested: any }).nested : undefined;
+  const injectionTraversal = traversalValue ? parentMarkerReadIn(traversalValue, params) ?? undefined : undefined;
   if (mapArg) {
     // A map value may itself be a nested sub-traversal (federate's `traversal`) — resolve it
     // the same way a .with() value is (constant fold or serialize), so both param-source forms
-    // agree; a plain value passes through. When BOTH a map and a (non-injection) traversal are
-    // given, the MAP WINS (TinkerPop's call_string_map_traversal note) — the traversal is ignored
-    // as a param source; only an INJECTION traversal is captured separately (above), never merged.
+    // agree; a plain value passes through. A lone (non-map) traversal is the dynamic-params form.
     for (const [k, v] of mapArg) merged[String(k)] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
   } else if (travArg) {
     Object.assign(merged, constMapFromTraversal(travArg.nested, params));

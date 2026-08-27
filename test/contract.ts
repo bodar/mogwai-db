@@ -182,8 +182,10 @@ function federationContract(getOrigin: () => string) {
         await gc.addV('person').property('name', 'marko').iterate();   // shared name
         await gc.addV('person').property('name', 'onlycrew').iterate();
         // For each home person, hop to crew matching on the injected name; only "marko" is shared.
+        // The injection is the `parent` marker in a predicate operand — expressible by the STOCK GLV
+        // (a `call()` nested in the has() operand), no client change and no T.value token overload.
         const fed = await gh.V().hasLabel('person')
-          .call('federate', { graph: crewId, traversal: __.V().has('name', gremlin.process.t.value) }, __.values('name'))
+          .call('federate', { graph: crewId, traversal: __.V().has('name', __.call('parent', __.values('name'))) })
           .values('name').toList();
         expect(fed).toEqual(['marko']);
       } finally { await home.close(); await crew.close(); }

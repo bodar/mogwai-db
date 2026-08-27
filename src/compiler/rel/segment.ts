@@ -6,7 +6,7 @@ import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
 import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
-import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
+import { argValues, stepChain } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -167,22 +167,19 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
 
 /**
  * THE INJECTION a mid-traversal call declares — the per-parent value its sub-traversal is run against,
- * as `T.value` stands in for.
+ * as the `parent` marker stands in for.
  *
- * An injection is only ever a DIRECT value read (`__.values(k)`, `__.id()`, `__.label()`), and
- * `parseCallSpec` captures the traversal only when it classifies as one. So a nested traversal supplied
- * in the injection slot that does NOT classify is an ERROR rather than a decline: silently running with
- * no injection would batch the sibling once and hand every parent the whole pool, which is a different
- * question with a plausible answer.
+ * An injection is only ever a DIRECT value read (`__.values(k)`, `__.id()`, `__.label()`). The
+ * `parent` marker's READ body is `spec.injectionTraversal` (set by `parseCallSpec` when a marker is
+ * present — a bare marker with no read already threw). So a marker read that does NOT classify as one of
+ * those is an ERROR rather than a decline: silently running with no injection would batch the sibling
+ * once and hand every parent the whole pool, which is a different question with a plausible answer.
  */
-function injectionOf(step: IRStep, barrier: Barrier, params: Record<string, any>): InjectionKind | undefined {
-  const injection = barrier.spec.injectionTraversal
-    ? injectionKindOf(barrier.spec.injectionTraversal, params) ?? undefined
-    : undefined;
-  const rest = argValues(step).slice(1);
-  const supplied = rest.some((argument: any) => argument instanceof Map) && rest.some(isNested);
-  if (supplied && !injection)
-    throw new Error(`call("${barrier.spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
+function injectionOf(_step: IRStep, barrier: Barrier, params: Record<string, any>): InjectionKind | undefined {
+  if (!barrier.spec.injectionTraversal) return undefined;   // no `parent` marker → constant sub-traversal
+  const injection = injectionKindOf(barrier.spec.injectionTraversal, params) ?? undefined;
+  if (!injection)
+    throw new Error(`call("${barrier.spec.serviceName}"): the parent marker's read must be a direct value read — __.values(key), __.id(), or __.label()`);
   return injection;
 }
 

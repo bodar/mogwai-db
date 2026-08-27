@@ -5,7 +5,7 @@ import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { INJECT_VALUES_KEY, injectedValues, isInjectionMarker } from './injection.ts';
+import { INJECT_VALUES_KEY, injectedValues, isParentMarkerBody } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -777,23 +777,25 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
 }
 
 /**
- * THE FEDERATED INJECTION MARKER, substituted — `has(k, T.value)` becomes `has(k, within(<the
- * distinct injected values>))` on a sibling hop that supplied them.
+ * THE FEDERATED INJECTION MARKER, substituted — `has(k, __.call('parent', <read>))` becomes
+ * `has(k, within(<the distinct injected values>))` on a sibling hop that supplied them.
  *
- * A mid-traversal `call(federate, …, __.values(k))` runs the sub-traversal ONCE over the distinct
- * parent values (a SPARQL bound-join) rather than once per parent, and `T.value` is where the user
- * marked the operand those values stand in for. `federate.ts` supplies them under a reserved params
- * key, so the substitution is a pure function of the chain and its params — which is exactly what a
- * `Pass` is, and why it belongs HERE rather than in a lowering.
+ * A mid-traversal `call(federate, …)` runs the sub-traversal ONCE over the distinct parent values (a
+ * SPARQL bound-join) rather than once per parent, and the `parent` marker is where the user marked the
+ * operand those values stand in for. `federate.ts` supplies them under a reserved params key, so the
+ * substitution is a pure function of the chain and its params — which is exactly what a `Pass` is, and
+ * why it belongs HERE rather than in a lowering.
  *
- * It used to live inside a `has()` compiler, which made it a lowering-private trick: a marker whose
- * meaning was fully settled before lowering was left for a single lowering to resolve. As a rewrite
- * above the lowering it cannot be learned twice or disagreed about (§6·5 — a fact about the
- * traversal's own text belongs to the Pass tier).
+ * As a rewrite above the lowering it cannot be learned twice or disagreed about (§6·5 — a fact about the
+ * traversal's own text belongs to the Pass tier). The marker's own READ body (`__.values('k')`/`id`/
+ * `label`) is IRRELEVANT to the sibling: the parent already applied it to produce the injected values, so
+ * on the sibling the marker is purely a placeholder for the bound set — it is REPLACED wholesale by the
+ * `within`. (The read matters only to the PARENT side — the head projection + rejoin — read there off the
+ * `CallSpec`'s classified injection kind, not here.)
  *
- * Zero-cost for every ordinary query: no injection key, no rewrite. A marker with NO values supplied
- * is left alone deliberately — it then reaches the lowerings as the inert token it is and yields no
- * match, rather than being silently reinterpreted as some other operand.
+ * Zero-cost for every ordinary query: no injection key, no rewrite. A marker with NO values supplied is
+ * left alone deliberately — a `call('parent')` with no bound set reaches the registry as an unknown
+ * service and fails closed, rather than being silently reinterpreted as some other operand.
  */
 export function substituteInjectionMarker(steps: IRStep[], params: Record<string, any>): IRStep[] {
   const values = injectedValues(params);
@@ -801,16 +803,17 @@ export function substituteInjectionMarker(steps: IRStep[], params: Record<string
   // ONE named-collection operand, not N inline literals. The injected set is DATA-SIZED (one distinct
   // parent value per row), so it crosses as a single `json_each` bind — `within([...], INJECT_VALUES_KEY)`
   // lowers through `jsonEachInSet` (`predicate.ts`), the exact re-injection form the regex/split barriers
-  // use. The former `values.map(v => arg(v))` spread every value as an inline literal in the statement
-  // text: correct on bind COUNT (a literal spends no bound param) but data in the plan, and it burned the
-  // 100 KB statement-text budget on a set whose size is a function of the parent population. A named array
-  // operand is fixed text + one bind of any size (root `CLAUDE.md`'s data-sized-set rule).
+  // use. A named array operand is fixed text + one bind of any size (root `CLAUDE.md`'s data-sized-set rule).
   const within = { op: 'within', operands: [arg(values, null, INJECT_VALUES_KEY)] };
+  // The marker is a NESTED operand (`{nested}` whose body is a single `call('parent', …)`) — parse it and
+  // check. `stepChain` is idempotent on an already-lowered `Step[]` payload, so a synthesized body works too.
+  const isMarker = (value: unknown): boolean =>
+    isNested(value) && isParentMarkerBody(stepChain((value as { nested: any }).nested, params));
   return steps.map((s) => {
     const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
     let changed = false;
     const args = (s.args ?? []).map((argObj, i) => {
-      if (!slots.includes(i) || !isInjectionMarker(argObj.value)) return argObj;
+      if (!slots.includes(i) || !isMarker(argObj.value)) return argObj;
       changed = true;
       return arg(within);
     });

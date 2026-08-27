@@ -88,7 +88,7 @@ describe('edge compilation — EdgeExecutor routing', () => {
     const store = seededStore();
     const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: {} }];
     const { mgr, calls } = fakeManager(store, sibling);
-    await mgr.executor('g').framedAsync('g.V().has("name","marko").call("federate", ["graph":"crew","traversal":"g.V()"], __.values("name"))', {});
+    await mgr.executor('g').framedAsync('g.V().has("name","marko").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name")))])', {});
     expect(calls.readHead).toBe(1);   // the per-parent injected value was read on the DO
     expect(calls.raw).toBe(1);        // one batched sibling hop, from the Worker
     expect(calls.framed).toBe(0);     // the DO did not full-drive

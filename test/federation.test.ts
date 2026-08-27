@@ -112,11 +112,12 @@ describe('federate — arg-less pushdown (win 2a)', () => {
   });
 });
 
-describe('federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () => {
+describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
-  const mid = (inj: string) =>
-    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], ${inj})`;
+  // The injection is the `parent` marker in a predicate operand: has("name", __.call("parent", <read>)).
+  const mid = (read: string) =>
+    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`;
 
   test('for each home person, fetch same-named crew vertices (values injection)', async () => {
     const res = await runNames(mid('__.values("name")'));
@@ -141,7 +142,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () 
     const num = async (m: BunGraphManager, q: string) =>
       (await Promise.all((await m.executor('home').framedAsync(q, {})).map(dec))).map((v: any) => Number(v));
     for (const red of ['count']) {
-      const q = `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], __.values("name")).${red}()`;
+      const q = `${mid('__.values("name")')}.${red}()`;
       expect(await num(mgr, q)).toEqual(await num(local, q));      // pushed ≡ local
     }
   });
@@ -162,7 +163,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () 
     // The source is a CONSTRUCTION dependency and params/depth come off the call ctx, so `apply`
     // takes only the rows — this test wires the spy the same way the app scope does.
     const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", T.value)' } },
+      params: { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", __.call("parent", __.values("name")))' } },
       federationDepth: 0,
     } as any);
     const head = [
@@ -185,7 +186,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () 
 
   test('an unsupported injection (computed scalar) fails closed with a clear deferral', async () => {
     await expect(mgr.executor('home').framedAsync(mid('__.values("name").fold()'), {}))
-      .rejects.toThrow(/injection must be a direct value read/);
+      .rejects.toThrow(/must be a direct value read/);
   });
 });
 

@@ -1,11 +1,20 @@
-// ---------- mid-traversal federate value injection (Phase 6b) ----------
+// ---------- mid-traversal federate value injection (the `parent` marker) ----------
 //
-// A mid-traversal V().call("federate", …, __.values('k')) injects each parent's scalar
-// into the sibling sub-traversal. The user marks the injection point with the SHIPPED GLV enum token
-// `T.value` in a PREDICATE OPERAND position — `__.V().has('sku', T.value)` — which the stock JS/other
-// GLVs serialize verbatim (no custom binding, no raw string). `T.value` is otherwise meaningless as a
-// has()/is() value operand (it is only ever legitimately a by()/order() modulator — a DIFFERENT IR
-// field), so recognizing it there is collision-free.
+// A mid-traversal V().call("federate", …) injects each parent's scalar into the sibling sub-traversal.
+// The user marks the injection point with a SELF-DELIMITING marker CALL in a PREDICATE OPERAND position:
+//
+//   __.V().has('sku', __.call('parent', __.values('sku')))
+//
+// The marker is `call("parent", <read>)` where `<read>` is a DIRECT value read of the parent traverser
+// (`__.values('k')` / `__.id()` / `__.label()`). It carries BOTH facts in one place: WHERE to inject
+// (its operand position) and WHAT to read from the parent (its read body). It is expressible by every
+// unmodified GLV (a `call()` is the sanctioned extension point — locked decision #4/the GLV constraint)
+// and is self-delimiting: nobody writes `call("parent", …)` for any other reason, so it is unambiguous
+// with NO surrounding `traversal` arg to delimit it — which is exactly what makes the ARG-LESS form
+// (win 2a) possible. It REPLACED the older `T.value` token, which was collision-free only because the
+// explicit `traversal` arg drew the boundary that said "markers live here"; remove the arg and `T.value`
+// (a legitimate by()/order() property token) becomes ambiguous. The marker's read is also more explicit
+// — it NAMES `values`/`id`/`label` rather than relying on a separate positional `__.values('k')` arg.
 //
 // The sibling receives the sub-traversal as an ordinary query PLUS a params entry under the reserved
 // key below holding the DISTINCT injected values. A Pass (`substituteInjectionMarker`, strategies.ts)
@@ -16,13 +25,22 @@
 // into the statement text. No string surgery: apply just supplies a params value, and N marker sites
 // share ONE bind via the kernel's reuse-key dedup (they name the same key).
 //
-// This module is a dependency-free leaf (a string constant + two pure predicates) so both the compiler
-// (filter.ts) and the service (federate.ts) import it without a cycle.
+// This module is a dependency-free leaf (string constants + pure predicates over an ALREADY-PARSED
+// body, never `stepChain` itself) so both the compiler (strategies.ts) and the service (federate.ts)
+// import it without a cycle. A caller with a nested operand runs `stepChain` first, then asks here.
 
 /** The reserved params key under which a federate hop supplies the DISTINCT injected values for the
- *  sibling compile to bind against a `T.value` marker operand. Underscore-prefixed + mogwai-namespaced
- *  so it can never collide with a user bound-param name. */
+ *  sibling compile to bind against a `parent` marker operand. Underscore-prefixed so it can never
+ *  collide with a user bound-param name. (An internal reserved key, never user-facing — not a service
+ *  name, so it keeps its prefix.) */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
+
+/** The injection MARKER service name — `call("parent", <read>)`. A leaf constant so both the recognizer
+ *  (strategies.ts) and the classifier (call-params.ts) name it without importing a service impl. It has
+ *  NO registered service: it is a compile-time marker the `substituteInjectionMarker` Pass consumes and
+ *  the sibling never sees a `call("parent")` reach a registry (it is rewritten to `within(...)` first),
+ *  and a `parent` marker with no injected values supplied stays inert / fails closed. */
+export const PARENT_MARKER = 'parent';
 
 /** The federate service name — a leaf constant so the segment planner can recognize a federate barrier
  *  (to infer pushdown for the arg-less form) without importing the service impl. */
@@ -36,10 +54,13 @@ export const FEDERATE_SERVICE = 'federate';
  *  this is a bare `V(<ids>)` id lookup — different mechanism, so a different reserved key. */
 export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
 
-/** True iff `operand` is the `T.value` injection marker (the parsed `{token:'value'}` shape) — used
- *  ONLY at a predicate-operand position (has/is/within value), never a by()/order() modulator. */
-export const isInjectionMarker = (operand: unknown): boolean =>
-  operand != null && typeof operand === 'object' && (operand as { token?: string }).token === 'value';
+/** True iff a PARSED nested-operand body is the `parent` marker — a single `call("parent", …)` step.
+ *  The caller runs `stepChain` on a `{nested}` operand first (this module stays a leaf, no parser), then
+ *  asks here. Used ONLY at a predicate-operand position (has/is/within value): a nested body elsewhere is
+ *  an ordinary filter/by traversal. `body[0].args[0]` is the service-name arg (the string `'parent'`);
+ *  the read, if any, is `body[0].args[1]` (a nested `__.values('k')`/`__.id()`/`__.label()`). */
+export const isParentMarkerBody = (body: readonly { name: string; args: readonly { value: unknown }[] }[]): boolean =>
+  body.length === 1 && body[0]!.name === 'call' && body[0]!.args[0]?.value === PARENT_MARKER;
 
 /** The injected distinct-value array from a params map, or null when this compile is not a federate
  *  hop carrying an injection (so the marker, if present, stays inert / fails closed at the caller). */
