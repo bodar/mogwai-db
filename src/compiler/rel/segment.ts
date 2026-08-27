@@ -467,12 +467,16 @@ function resumed(
     // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
   }
-  // A pushed-down VALUE STREAM (a source-form prefix ending in `values(k)`/`unfold()`/`fold()`/`cap('a')`):
-  // the whole tail ran on the sibling and N typed nodes crossed back, so each re-emits as its own traverser.
-  // The prefix is MAXIMAL, so there is no local suffix to continue — a pure per-member framing, the scalar
-  // resume one cardinality up.
+  // A pushed-down VALUE STREAM (a prefix ending in `values(k)`/`unfold()`/`fold()`/`cap('a')`): the whole
+  // tail ran on the sibling and N typed nodes crossed back, so each re-emits as its own traverser. The
+  // prefix is MAXIMAL, so there is no local suffix to continue — a pure per-member framing, the scalar
+  // resume one cardinality up. In the MID form (a `V().call(federate, <constant sub>)`, `rejoin` present)
+  // the sibling ran ONCE and each of the P parents re-emits the whole pool — a CROSS scatter (P×N), the
+  // value-stream analogue of the element rejoin's no-injection cross. A mid form only reaches here when the
+  // sub-traversal is CONSTANT: an injected value terminal caps the pushable prefix AT the marker, so
+  // anything after it (a `values`) is LOCAL and comes back through the element rejoin instead.
   if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values')
-    return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values)) };
+    return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values, rejoin ? rejoin.values.length : undefined)) };
   const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
   // (`runForeign()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the

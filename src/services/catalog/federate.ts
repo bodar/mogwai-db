@@ -183,7 +183,14 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }
-      const result = elementsOf(await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1));
+      // A mid sub-traversal that ends in a VALUE terminal returns a value STREAM; the resume scatters it
+      // over the parents (a CROSS when the sub is constant — a mid value terminal only reaches here
+      // constant, since an injection marker caps the pushable prefix before any value terminal). Elements
+      // scatter by the injected value as before. `runForeign` reports which shape the sibling produced;
+      // `apply` passes the tag through, no prediction.
+      const out = await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
+      if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
+      const result = elementsOf(out);
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;
     },
   }),

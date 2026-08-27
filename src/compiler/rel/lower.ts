@@ -2929,7 +2929,7 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
  * empty relation, so a `Filter(false)` stands in — the same spelling `lowerScalarResume` uses for the
  * empty aggregate).
  */
-export function lowerTypedNodeStream(nodes: readonly FrameNode[]): RelLowering {
+export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: number): RelLowering {
   const fresh = minter();
   const type = typeOf(meta(NODE_COL, 'json', true));
   // `Values` REFUSES an empty relation (`checkValuesShape`), so an empty stream is a one-row `Values`
@@ -2937,7 +2937,20 @@ export function lowerTypedNodeStream(nodes: readonly FrameNode[]): RelLowering {
   // (§3.3). A non-empty stream is one `Values` row per node.
   const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(JSON.stringify(node)))]);
   const one = make.values({ id: fresh('tnv'), channels: [], type, rows: nodes.length > 0 ? rowsOf(nodes) : [[jsonOf(compilerText('null'))]] });
-  const rel = nodes.length > 0 ? one : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
+  // MID-TRAVERSAL CONSTANT SCATTER: a `V().call(federate, <constant sub>)` runs the sibling ONCE and each
+  // of the P parents re-emits the WHOLE pool — the value-stream analogue of the element rejoin's CROSS join
+  // (`foreignRejoin`, no injection). `parents` is the parent count; the pool CROSS-joins a P-row relation so
+  // the result is P×N traversers, exactly `call()`'s flatMap shape. `undefined` = the source form (one
+  // emission, no parents). P=0 (no parents) or an empty pool both yield no traversers.
+  const scattered = parents === undefined ? one
+    : parents === 0 ? make.filter({ id: fresh('tnp'), input: one, channels: [], type, pred: CONSTANT.false })
+    : (() => {
+      // A P-row parent relation (index 0..P-1), crossed with the pool. The indices are a compile-time set
+      // (P is known), so they inline as a `Values` relation rather than a data bind.
+      const parentRows = make.values({ id: fresh('tnpr'), channels: [], type: typeOf(meta('p', 'int')), rows: Array.from({ length: parents }, (_, i) => [compilerInt(i)] as const) });
+      return make.join({ id: fresh('tnj'), left: one, right: parentRows, channels: [], join: 'cross', type: typeOf(meta(NODE_COL, 'json', true), meta('p', 'int')) });
+    })();
+  const rel = nodes.length > 0 ? scattered : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
   return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
 }
 

@@ -302,6 +302,41 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
   });
 });
 
+// A MID federate whose sub-traversal is CONSTANT (no `parent` marker) and ends in a VALUE terminal: the
+// sibling runs ONCE and each of the P parents re-emits the whole pool — a CROSS scatter (P×N), the
+// value-stream analogue of the element rejoin's no-injection cross. (An INJECTED value terminal caps the
+// pushed prefix at the marker, so it stays local and comes back through the element rejoin — covered above.)
+describe('federate — MID constant sub-traversal returning a VALUE stream (cross scatter)', () => {
+  const decAll = async (m: string, g: string) => (await Promise.all((await mgr.executor(m).framedAsync(g, {})).map(dec)));
+  const P = async () => (await decAll('home', 'g.V().hasLabel("person").count()')).map(Number)[0];
+
+  test('each parent re-emits the whole value pool (P×N), both arg-less and explicit forms', async () => {
+    const p = await P();
+    const crewNames = await decAll('crew', 'g.V().hasLabel("person").values("name")');
+    for (const q of [
+      'g.V().hasLabel("person").call("federate",["graph":"crew"]).V().hasLabel("person").values("name")',
+      'g.V().hasLabel("person").call("federate",["graph":"crew","traversal":__.V().hasLabel("person").values("name")])',
+    ]) {
+      const got = await decAll('home', q);
+      expect(got.length).toBe(p * crewNames.length);   // flatMap: P parents × N crew names
+      expect([...new Set(got)].sort()).toEqual([...new Set(crewNames)].sort());   // the same value set, repeated
+    }
+  });
+
+  test('a constant fold() gives each parent ONE list (P traversers, each the whole list)', async () => {
+    const p = await P();
+    const crewNames = await decAll('crew', 'g.V().hasLabel("person").values("name")');
+    const got = await decAll('home', 'g.V().hasLabel("person").call("federate",["graph":"crew","traversal":__.V().hasLabel("person").values("name").fold()])');
+    expect(got.length).toBe(p);                        // one list per parent
+    expect((got[0] as any[]).sort()).toEqual(crewNames.sort());
+  });
+
+  test('NO parents (empty head) → NO traversers (P=0)', async () => {
+    const got = await decAll('home', 'g.V().hasLabel("nope").call("federate",["graph":"crew","traversal":__.V().values("name")])');
+    expect(got).toEqual([]);
+  });
+});
+
 describe('federation fails closed', () => {
   const onCrew = async (g: string) => (await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec)));
   test('a missing graph param throws', async () => {
