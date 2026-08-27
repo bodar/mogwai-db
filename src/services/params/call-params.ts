@@ -36,19 +36,29 @@ export function injectionKindOf(nested: any, params: Record<string, any>): Injec
  *  once and hand every parent the whole pool — a different question with a plausible answer). The read's
  *  SHAPE (must be `values`/`id`/`label`) is validated downstream by `injectionKindOf`. */
 export function parentMarkerReadIn(traversal: any, params: Record<string, any>): any {
+  // Every operand value that could HOLD a marker: a nested traversal directly, OR a PREDICATE operand
+  // (`within(marker)`, `eq(marker)`, …) whose members are themselves operand values. The explicit
+  // membership form `has(k, within(__.call('parent', …)))` puts the marker inside a `within`, so the
+  // walk must descend through predicate operands, not only nested traversals.
+  const markerValues = function* (value: unknown): Generator<{ nested: any }> {
+    if (isNested(value)) { yield value as { nested: any }; return; }
+    const pred = value as { operands?: readonly { value: unknown }[] } | null;
+    if (pred?.operands) for (const o of pred.operands) yield* markerValues(o.value);
+  };
   const walk = (steps: readonly Step[]): any => {
     for (const s of steps) {
       for (const a of s.args ?? []) {
-        if (!isNested(a.value)) continue;
-        const body = stepChain((a.value as { nested: any }).nested, params);
-        if (isParentMarkerBody(body)) {
-          const read = body[0]!.args[1]?.value;   // the marker call's read arg (a nested __.values/id/label)
-          if (!isNested(read))
-            throw new Error(`call("${PARENT_MARKER}"): the injection marker needs a read — call("${PARENT_MARKER}", __.values(key)) / __.id() / __.label()`);
-          return (read as { nested: any }).nested;
+        for (const nestedVal of markerValues(a.value)) {
+          const body = stepChain(nestedVal.nested, params);
+          if (isParentMarkerBody(body)) {
+            const read = body[0]!.args[1]?.value;   // the marker call's read arg (a nested __.values/id/label)
+            if (!isNested(read))
+              throw new Error(`call("${PARENT_MARKER}"): the injection marker needs a read — call("${PARENT_MARKER}", __.values(key)) / __.id() / __.label()`);
+            return (read as { nested: any }).nested;
+          }
+          const found = walk(body);                 // a marker could sit in a deeper nested body
+          if (found !== undefined) return found;
         }
-        const found = walk(body);                 // a marker could sit in a deeper nested body
-        if (found !== undefined) return found;
       }
     }
     return undefined;
@@ -63,9 +73,12 @@ export function parentMarkerReadIn(traversal: any, params: Record<string, any>):
  *  can END the sibling prefix there (a trailing reducer over a scattered result is not a global push — it
  *  scatters + reduces LOCALLY, exactly as the explicit form does). Reuses `isParentMarkerBody`. */
 export function parentMarkerStepIndex(steps: readonly Step[], params: Record<string, any>): number {
-  return steps.findIndex((s) =>
-    (s.args ?? []).some((a) =>
-      isNested(a.value) && isParentMarkerBody(stepChain((a.value as { nested: any }).nested, params))));
+  const holdsMarker = (value: unknown): boolean => {
+    if (isNested(value)) return isParentMarkerBody(stepChain((value as { nested: any }).nested, params));
+    const pred = value as { operands?: readonly { value: unknown }[] } | null;
+    return pred?.operands != null && pred.operands.some((o) => holdsMarker(o.value));
+  };
+  return steps.findIndex((s) => (s.args ?? []).some((a) => holdsMarker(a.value)));
 }
 
 /** A call() param VALUE that is a nested sub-traversal (`.with('traversal', __.V().out('x'))` or a

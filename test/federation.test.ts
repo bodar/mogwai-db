@@ -236,31 +236,38 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     expect(plan.sql).toContain('json_each(jsonb(?))');
   });
 
-  test('a list-injection marker lowers to membership against its pair value', () => {
-    const plan = compile('g.V().has("name", __.call("parent", __.values("name").fold()))', {
+  test('a list-injection marker lowers to membership when the USER writes within()', () => {
+    // LIFT-AND-SHIFT: membership is the USER's `within`, not a `.fold()`-implies-membership inference.
+    // The marker resolves to the injected list value cell; `within` explodes it (json_each) for membership.
+    const plan = compile('g.V().has("name", within(__.call("parent", __.values("name").fold())))', {
       [INJECT_VALUES_KEY]: { c41: ['marko', 'not-a-crew-name'] },
     });
     if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
     expect(plan.sql).toContain("IN (SELECT");
-    // The list branch explodes the value cell directly — `json_each(<iv column>)` — since the injected
-    // set now crosses as a `{corrKey: value}` map and `json_each` exposes value/key/type columns, so no
-    // positional `json_extract($[1])` is needed.
+    // The user's `within` explodes the injected value cell directly — `json_each(<pairs>.value)` —
+    // where the value column is the exploded pair map's `value` (the `iv` cell).
     expect(plan.sql).toMatch(/FROM json_each\(\w+\.value\)/);
   });
 
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
   // The injection is the `parent` marker in a predicate operand: has("name", __.call("parent", <read>)).
-  const mid = (read: string) =>
-    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`;
+  // `read` is the marker READ (wrapped as `__.call("parent", read)`); with `rawOperand`, the argument
+  // IS the whole operand already (e.g. `within(__.call("parent", …))` — the explicit membership form).
+  const mid = (read: string, rawOperand = false) => {
+    const operand = rawOperand ? read : `__.call("parent", ${read})`;
+    return `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", ${operand})])`;
+  };
 
   test('for each home person, fetch same-named crew vertices (values injection)', async () => {
     const res = await runNames(mid('__.values("name")'));
     expect(res).toEqual(['marko']);                 // only the shared name matches
   });
 
-  test('a one-member folded injection is the scalar injection', async () => {
-    expect(await runNames(mid('__.values("name").fold()')))
+  test('a one-member folded injection (within) is the scalar injection', async () => {
+    // A one-member `within([x])` ≡ `eq(x)`: the explicit within-membership over a single-element list
+    // matches the same crew vertex the scalar equality does.
+    expect(await runNames(mid('within(__.call("parent", __.values("name").fold()))', /*rawOperand*/ true)))
       .toEqual(await runNames(mid('__.values("name")')));
   });
 
@@ -272,7 +279,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     for (const g of CREW_SEED) await multi.executor('crew').framedAsync(g, {});
     await multi.executor('home').framedAsync('g.V().has("name","marko").property(Cardinality.list,"name","not-a-crew-name")', {});
     try {
-      const q = 'g.V().hasLabel("person").has("name","not-a-crew-name").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name").fold()))])';
+      const q = 'g.V().hasLabel("person").has("name","not-a-crew-name").call("federate", ["graph":"crew", "traversal": __.V().has("name", within(__.call("parent", __.values("name").fold())))])';
       const result = await Promise.all((await multi.executor('home').framedAsync(q, {})).map(dec));
       expect(names(result)).toEqual(['marko']);
     } finally {

@@ -12,6 +12,7 @@ import { normalize } from '../../ir/passes.ts';
 import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { argValues, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isParentMarkerBody } from '../../ir/injection.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
@@ -520,6 +521,14 @@ export function childRows(
  * `subject IN (SELECT sv FROM json_each(<list>))` is that lowering spelled in SQLite's dialect.
  */
 export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | null {
+  // A federated `within(__.call('parent', read.fold()))` — the EXPLICIT membership form of injection.
+  // The marker operand resolves to the injected list's MEMBERSHIP SET (the pair value exploded by
+  // json_each), so the sibling's own `within` drives membership — no compiler `.fold()`-implies-
+  // membership inference. Checked on the RAW (un-normalized) body: `normalize` runs `parseCallSpec` on
+  // the `call('parent', …)` and throws (it is not a registered service), so this must fire BEFORE
+  // `rootedSteps` normalizes. Present only on a federated sibling chain (`ctx.injectionCell`).
+  if (ctx.injectionCell && isNested(operand) && isParentMarkerBody(stepChain(operand.nested, ctx.params)))
+    return ctx.injectionCell.listSet();
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
   const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!steps) return null;
@@ -561,6 +570,11 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
 export function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES): Expr | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!body?.length) return null;
+  // A federated `parent` MARKER operand resolves to the per-parent injected VALUE cell — the whole
+  // lift-and-shift: the sibling's own `has(k, marker)` then compares the stored value to this cell as
+  // ORDINARY equality (or whatever operator the user wrote), no compiler shape sniff. Present only on a
+  // federated sibling chain (`ctx.injectionCell`), so a non-federated operand falls through unchanged.
+  if (ctx.injectionCell && isParentMarkerBody(body)) return ctx.injectionCell.value;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;

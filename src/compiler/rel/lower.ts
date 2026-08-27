@@ -29,9 +29,9 @@ import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type Subject
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
-    jsonMemberByTypeof, labelSetArgs, meta, minter, PROPERTIES,
+    jsonMemberByTypeof, labelSetArgs, meta, minter,
     payloadCols, propertyKeyArgs, renumber,
-    typedNode, typeOf, withPayload, storedValueOn,
+    typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
@@ -3332,18 +3332,25 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   let pred = seeded.pred;
   let at = 1;
   let elem = elem0;
+  const injecting = injectedPairs(params) != null;
   for (; at < steps.length; at++) {
+    // STOP before a federated `parent` MARKER step: it is not an ordinary source filter (its operand
+    // resolves to the injected value cell), so it is handled by the dedicated block below WITH the
+    // injection cell in scope. Reaching it here would run the marker operand through `sourceFilter`
+    // without the cell — the value would not resolve and a `within(marker)` would throw.
+    if (injecting && markerStep(steps[at], params)) break;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
     if (!clause) break;
     pred = and(pred, clause);
   }
 
-  // A federated sibling's `has(key, __.call('parent', …))` is not a predicate evaluated on
-  // this graph: its parent read already happened. Land the transmitted [corrId,value] rows once,
-  // join their value cell to the sibling property row, and mint corrId as the rejoin identity.
-  // This must happen while the source's physical property row is available; an EXISTS predicate
-  // would deliberately discard both the multiplicity and the corrId we need downstream.
-  const marker = injectedPairs(params) ? parentMarkerProperty(steps[at], params) : null;
+  // A federated sibling's marker step — `has(key, __.call('parent', …))` OR `has(key,
+  // within(__.call('parent', …)))` — is not an ordinary predicate on THIS graph: its parent read
+  // already happened, so the marker operand resolves to the per-parent injected value cell and the
+  // step lowers through the ordinary filter path (below). Detected as "the broken-at step carries a
+  // `parent` marker ANYWHERE in its operands" — the direct form and the `within` form both qualify,
+  // so the operator that wraps it (if any) is the USER's, never the compiler's.
+  const marker = injectedPairs(params) ? markerStep(steps[at], params) : null;
   // Keep fused filters on the source whether the marker supplies a join or the ordinary seed does.
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   let rel: Rel;
@@ -3354,45 +3361,52 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
       throw new Error('federated parent marker cannot be followed by a sibling stream barrier: correlation origin would be consumed');
     if (ctx.source !== BaseGraph)
       throw new Error('federated parent marker currently requires the base graph source');
-    const { table, owner } = PROPERTIES[elem0];
-    const props = make.scan({
-      id: fresh('ip'), table, alias: fresh('rip'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    });
-    // The injected set crosses as a MAP `{corrKey: value}` (one `json_each` bind of any size), keyed by
-    // the correlation IDENTIFIER — the shape the correlation IS. `json_each` over that object exposes
-    // BOTH columns directly: `ic` = the correlation key (corrId), `iv` = the injected value. No positional
-    // `$[0]`/`$[1]` extraction, no re-serialization to a pair array — the map is consumed as-is.
+    // LIFT-AND-SHIFT: the injected value is a per-parent BIND spliced at the marker OPERAND, and the
+    // sibling's OWN operator lowers it through the ORDINARY predicate machinery. The compiler never
+    // inspects the value's shape — `has(k, marker)` → the user's implicit `eq` (scalar equality);
+    // `has(k, within(marker))` → the user's explicit `within` (list membership); a map lands wherever a
+    // map goes. Only the CORRELATION is federate-specific: the `(corrKey, value)` pair table is
+    // CROSS-joined to the source and the corrId rides the `origin` channel.
+    //
+    // The set crosses as a MAP `{corrKey: value}` (one `json_each` bind of any size), keyed by the
+    // correlation IDENTIFIER. `json_each` over that object exposes `ic`=key (corrId) and `iv`=value
+    // directly — no positional extraction.
     const injectMap = params[INJECT_VALUES_KEY];
     const exploded = make.explode({
       id: fresh('ix'), channels: [],
       expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(injectMap instanceof Map ? Object.fromEntries(injectMap) : injectMap), INJECT_VALUES_KEY)] },
-      // `json_each` over the object exposes `ic`=key (corrId), `iv`=value, and `it`=the member TYPE
-      // ('text'/'integer'/… for a scalar, 'array' for a folded list). The type column is `json_each`'s
-      // own — `json_type(iv)` cannot be used because `iv` is a DECODED scalar (bare `marko`), not a JSON
-      // document, so `json_type` reports malformed JSON on it.
-      as: { key: 'ic', value: 'iv', type: 'it' }, type: typeOf(meta('ic', 'text'), meta('iv', 'any', true), meta('it', 'text')),
+      as: { key: 'ic', value: 'iv' }, type: typeOf(meta('ic', 'text'), meta('iv', 'any', true)),
     });
-    const propertyRows = make.join({
-      id: fresh('ij'), left: source, right: props, join: 'inner', channels: [],
-      type: typeOf(...source.type.cols, ...props.type.cols),
-      on: and(eq(col(source.id, 'id'), col(props.id, owner)), eq(col(props.id, 'key'), compilerText(marker.key))),
+    // The source × pairs CROSS join is the INPUT relation the ordinary filter sits over: it carries the
+    // `iv`/`ic` columns so the marker operand can resolve to `iv` (in scope, correlated) and `origin`
+    // can project `ic`. A CROSS (unconditional `inner`) join — every source row against every parent's
+    // value; the marker predicate is what selects the matches.
+    const sourceWithPairs = make.join({
+      id: fresh('ij'), left: source, right: exploded, join: 'inner', channels: [],
+      type: typeOf(...source.type.cols, ...exploded.type.cols), on: compilerInt(1),
     });
-    const injectedValue = col(exploded.id, 'iv');
-    const listMembers = make.explode({
-      id: fresh('ilm'), channels: [], expr: injectedValue, as: { value: 'value' },
-      type: typeOf(meta('value', 'any', true)),
-    });
-    const paired = make.join({
-      id: fresh('ij'), left: propertyRows, right: exploded, join: 'inner', channels: [],
-      type: typeOf(...propertyRows.type.cols, ...exploded.type.cols),
-      // The pair value's JSON shape decides at runtime: a scalar is equality, while an array is the
-      // membership operand that a folded parent read supplies. Never select a compiler arm by shape.
-      on: { kind: 'case', whens: [[
-        eq(col(exploded.id, 'it'), compilerText('array')),
-        { kind: 'in-query', expr: storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), plan: listMembers, negated: false },
-      ]], else: eq(storedValueOn(col(propertyRows.id, 'value'), col(propertyRows.id, 'vtype')), injectedValue) },
-    });
+    // The injection cell the `parent` marker operand resolves against (see `nestedFirstValue`/
+    // `foldedListSet`): the value cell, and the membership set the explicit `within(marker)` explodes.
+    // `iv` is exposed under the JOINED relation (`sourceWithPairs`), so reference it there — the filter
+    // predicate sits over that relation, and a `col(exploded.id, …)` would be out of scope.
+    const ivCell = col(sourceWithPairs.id, 'iv');
+    const injectionCell = {
+      value: ivCell,
+      listSet: (): Rel => make.explode({
+        id: fresh('ilm'), channels: [], expr: ivCell, as: { value: 'value' },
+        type: typeOf(meta('value', 'any', true)),
+      }),
+    };
+    // The marker's OWN `has()` (steps[at]) lowered by the ordinary source-filter path over the joined
+    // relation, with the marker operand resolving to `iv`. The user's operator (eq / within / …) drives
+    // the SQL — this is where the per-shape inference used to live and is now gone.
+    const markerClause = sourceFilter(
+      steps[at]!,
+      { kind: 'element', id: col(sourceWithPairs.id, 'id'), label: elem === 'edge' ? col(sourceWithPairs.id, 'label') : undefined, rel: sourceWithPairs, elem },
+      fresh, { ...ctx, injectionCell },
+    );
+    if (!markerClause) return null;
+    const paired = make.filter({ id: fresh('imf'), input: sourceWithPairs, channels: [], type: sourceWithPairs.type, pred: markerClause });
     const origin: Channel = { col: fresh('origin'), role: 'origin' };
     const channels = withChannel(seedChannels, origin);
     rel = make.project({
@@ -3432,14 +3446,21 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
 }
 
-/** The one sibling-side marker shape this seam owns. Token operands remain deferred until their
- * physical joins can be expressed without duplicating BaseGraph's id/label access paths. */
-function parentMarkerProperty(step: IRStep | undefined, params: Record<string, unknown>): { readonly key: string } | null {
-  if (!step || step.name !== 'has' || step.args.length !== 2 || typeof step.args[0]?.value !== 'string') return null;
-  const operand = step.args[1]?.value;
-  return isNested(operand) && isParentMarkerBody(stepChain((operand as { nested: any }).nested, params))
-    ? { key: step.args[0].value }
-    : null;
+/** Does this step carry a `parent` injection marker ANYWHERE in its operands — the direct form
+ *  `has(key, __.call('parent', …))` or a wrapped form `has(key, within(__.call('parent', …)))`? The
+ *  marker is a nested-traversal operand; the wrapping operator (if any) is the USER's and is lowered by
+ *  the ordinary predicate path, so detection is operator-agnostic — it walks the step's own nested
+ *  operands (one level, plus a predicate's member operands) for the marker body. Returns `true` when
+ *  found; the marker operand itself resolves to the injected value cell via `ctx.injectionCell`. */
+function markerStep(step: IRStep | undefined, params: Record<string, unknown>): boolean {
+  if (!step) return false;
+  const hasMarker = (value: unknown): boolean => {
+    if (isNested(value)) return isParentMarkerBody(stepChain((value as { nested: any }).nested, params));
+    // A predicate operand (`within(marker)`, `eq(marker)`) carries its members in `operands`.
+    const pred = value as { operands?: readonly { value: unknown }[] } | null;
+    return pred?.operands != null && pred.operands.some((o) => hasMarker(o.value));
+  };
+  return (step.args ?? []).some((a) => hasMarker(a.value));
 }
 
 /**
