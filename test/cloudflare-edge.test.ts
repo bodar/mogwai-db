@@ -73,7 +73,7 @@ describe('edge compilation — EdgeExecutor routing', () => {
     // The sibling "crew" graph returns one detached vertex from its raw() hop.
     const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'zeta' }] } }];
     const { mgr, calls } = fakeManager(store, sibling);
-    const out = await mgr.executor('g').framedAsync('g.call("federate").with("graph","crew").with("traversal","g.V()")', {});
+    const out = await mgr.executor('g').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V())', {});
     // The payoff: the top DO did NOT full-drive the loop (framed = 0). The Worker drove it — fanning
     // out to the sibling (raw = 1) and running only the final framing on the DO (runFramed = 1). A
     // source-form federate has a null head, so no readHead.

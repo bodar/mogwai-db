@@ -3,7 +3,6 @@ import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, InjectionKind, Service, ServiceRegistry } from '../spi/types.ts';
 import { isParentMarkerBody, PARENT_MARKER } from '../../compiler/ir/injection.ts';
-import { nestedTraversalToGremlin } from './traversal-param.ts';
 
 /** Classify a mid-traversal call()'s per-parent INJECTION READ into an InjectionKind — the DIRECT value
  *  read the `parent` marker supports: `__.values('k')` (a property value), `__.id()`, or `__.label()`.
@@ -56,34 +55,35 @@ export function parentMarkerReadIn(traversal: any, params: Record<string, any>):
   return found === undefined ? null : found;
 }
 
-/** A call() param VALUE that is a nested traversal (`.with('traversal', __.V().out('x'))` or a
- *  map entry), already serialized to a canonical rooted Gremlin string. Distinct from a plain
- *  string so a service that expects a sub-traversal (federate) can tell it apart
- *  from a literal string param, and a service that does NOT expect one can reject it rather than
- *  silently mis-reading a serialized traversal as text. Kept generic (any service *could* take a
- *  traversal param) — the resolver never hardcodes a service name. */
-export interface TraversalParam { readonly kind: 'traversal'; readonly gremlin: string; }
+/** A call() param VALUE that is a nested sub-traversal (`.with('traversal', __.V().out('x'))` or a
+ *  map entry) — the sub-traversal a barrier/OLAP service runs (federate's `traversal`, an OLAP
+ *  `edges` scope, shortestPath's `target`). Carried as PARSED `IRStep[]`, NOT a serialized Gremlin
+ *  string: every consumer reads STEPS (federate reads the `parent` marker; OLAP reads `{direction,
+ *  labels}`), and the ONLY place it becomes a string is federate's RPC edge (`ex.raw` crosses to
+ *  another DO) — synthesized there from the steps' own source text (each `IRStep` keeps its `ctx`,
+ *  so `ctx.getText()` reconstructs it verbatim). Distinct `kind` so a service that expects a
+ *  sub-traversal can tell it apart from a literal param, and one that does NOT can reject it. Kept
+ *  generic (any service *could* take one) — the resolver never hardcodes a service name.
+ *
+ *  Dropping the eager AST→string→AST round-trip: federate used to serialize every sub-traversal to a
+ *  string and OLAP re-parsed it straight back (`parseAnonBodyIR`), a round-trip born only from
+ *  federate being built first. See the memory `federate-subtraversal-as-steps`. */
+export interface TraversalParam { readonly kind: 'traversal'; readonly steps: readonly IRStep[]; }
 export const isTraversalParam = (v: unknown): v is TraversalParam =>
   v != null && typeof v === 'object' && (v as any).kind === 'traversal';
 
 /** Resolve a nested traversal used as a param VALUE. `__.constant(literal)` folds to its constant
- *  (Phases 1-5 behavior, unchanged). ANY OTHER nested traversal serializes to a rooted Gremlin
- *  string wrapped as a TraversalParam — the sub-traversal a barrier service (federate) runs
- *  elsewhere. Serialization is verbatim structural (no execution), so a non-source-rooted body
- *  fails closed inside nestedTraversalToGremlin.
- *
- *  The constant-fold probe (stepChain) may throw on an UNBOUND variable — legitimate for a
- *  federated sub-traversal that references a value injected at apply time (e.g.
- *  `__.V().has('k', xx1)`, where xx1 binds to the per-parent injected value). A `constant(literal)`
- *  never references an unbound var, so a throw simply means "not a constant" → serialize (the
- *  Translator preserves the xxN reference verbatim; apply supplies its binding). */
+ *  (unchanged). ANY OTHER nested traversal resolves to its `IRStep[]` wrapped as a TraversalParam —
+ *  the sub-traversal a barrier/OLAP service runs. `stepChain` runs the front-end's normal AST→steps
+ *  lowering; a bound param in the body (`has('age', gt(x))`) resolves against `params` here, and no
+ *  federate/OLAP sub-traversal carries a COMPILE-unbound var (the old `xxN`/`T.value` injection that
+ *  did is gone — the `parent` marker replaced it), so `stepChain` does not throw. A constant probe
+ *  runs first (a `constant(literal)` never references a var, so its `stepChain` is safe too). */
 function resolveValueTraversal(nested: any, params: Record<string, any>): unknown {
-  try {
-    const body = stepChain(nested, params);
-    if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
-      return body[0].args[0].value;
-  } catch { /* unbound var → not a constant; fall through to serialize */ }
-  return { kind: 'traversal', gremlin: nestedTraversalToGremlin(nested) } satisfies TraversalParam;
+  const body = stepChain(nested, params);
+  if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
+    return body[0].args[0].value;
+  return { kind: 'traversal', steps: body as IRStep[] } satisfies TraversalParam;
 }
 
 // ---------- call() spec + param resolution ----------

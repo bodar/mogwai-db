@@ -8,6 +8,12 @@ import { createFederateService } from '../src/services/catalog/federate.ts';
 import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { decode } from './support/decode.ts';
+import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
+
+// A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
+// IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
+// `parseCallSpec` actually produces (a string is NOT the param shape; the steps are).
+const subTraversal = (gremlin: string) => ({ kind: 'traversal' as const, steps: stepChain(parseGremlin(gremlin), {}) });
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via federate — the real service, real env, real depth
@@ -112,6 +118,38 @@ describe('federate — arg-less pushdown (win 2a)', () => {
   });
 });
 
+// WIN 2b — ARG-LESS MID injection. No `traversal` arg AND no positional injection: the parent marker
+// (`__.call("parent", <read>)`) sits in the pushed tail, so the compiler infers BOTH that this is a
+// mid-traversal injection AND what to read per parent. Oracle: the explicit-arg mid form, same answer.
+// SKIPPED until win 2b lands (the arg-less path is not yet wired to the mid injection) — the block is the
+// target spec, kept visible in the tree. Re-enable (drop `.skip`) in the 2b commit.
+describe.skip('federate — arg-less MID injection (win 2b, the parent marker in the pushed tail)', () => {
+  // home persons {marko,vadas,josh,peter} vs crew {marko,stephen,matthias,daniel}; only marko is shared.
+  const argMid = (read: string) =>
+    `g.V().hasLabel("person").call("federate", ["graph":"crew"]).V().has("name", __.call("parent", ${read}))`;
+  const explicitMid = (read: string) =>
+    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`;
+
+  test('arg-less mid ≡ explicit mid — for each home person, same-named crew vertices', async () => {
+    expect(await runNames(argMid('__.values("name")')))
+      .toEqual(await runNames(explicitMid('__.values("name")')));
+  });
+
+  test('arg-less mid values injection returns exactly the shared name', async () => {
+    expect(await runNames(argMid('__.values("name")'))).toEqual(['marko']);
+  });
+
+  test('a parent matching nothing on the sibling drops (flatMap), not four results', async () => {
+    const res = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")'), {})).map(dec));
+    expect(res.length).toBe(1);
+  });
+
+  test('id() injection is inferred arg-less too (empty across toy graphs, must not error)', async () => {
+    const res = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.id()'), {})).map(dec));
+    expect(Array.isArray(res)).toBe(true);
+  });
+});
+
 describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
   // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
   // Only "marko" is shared, so a per-parent name match returns exactly marko.
@@ -163,7 +201,7 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     // The source is a CONSTRUCTION dependency and params/depth come off the call ctx, so `apply`
     // takes only the rows — this test wires the spy the same way the app scope does.
     const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", __.call("parent", __.values("name")))' } },
+      params: { graph: 'crew', traversal: subTraversal('g.V().has("name", __.call("parent", __.values("name")))') },
       federationDepth: 0,
     } as any);
     const head = [
@@ -290,7 +328,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
       federationDepth: 0,
     } as any);
     await contribution.apply([]); // source form → run sub-traversal once, then fetch endpoints
@@ -312,7 +350,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
       federationDepth: 0,
       tailDemand: { reachesElements: false, reachesAdjacency: false, keys: new Set(), handoffDenied: false },
     } as any);
@@ -328,7 +366,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
       }),
     };
     const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', subgraph: true, traversal: { kind: 'traversal', gremlin: 'g.V().hasLabel("person").outE("develops")' } },
+      params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
       federationDepth: 0,
       tailDemand: { reachesElements: true, reachesAdjacency: true, keys: 'all', handoffDenied: false },
     } as any);

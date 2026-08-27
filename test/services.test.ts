@@ -10,6 +10,7 @@ import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../s
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
 import { parseCallSpec, injectionKindOf } from '../src/services/params/call-params.ts';
+import { subTraversalToGremlin } from '../src/services/params/traversal-param.ts';
 import { compile, compilePlan } from '../src/compiler/compiler.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { FederationSource } from '../src/compiler/segment.ts';
@@ -142,21 +143,24 @@ describe('call/with fold + param resolution', () => {
       .toEqual({ direction: { direction: 'out' } });
   });
 
-  test('an unrooted nested-traversal param value is CARRIED verbatim (rooted-check moved to federate)', () => {
-    // A nested traversal as a param VALUE serializes to a Gremlin string: a source-rooted body to
-    // `g.…`, an anonymous body to its `__.…` form verbatim. The source-rooted REQUIREMENT is
-    // federate's alone (it runs the traversal on a sibling), so it lives in federate now, not here —
-    // an OLAP edge scope (`~tinkerpop.<algo>.edges`) carries an anonymous body through this same seam.
-    // federate's own rejection of an unrooted body is federation.test.ts.
-    expect(spec('g.call("federate").with("traversal", __.out().values("name"))').params.traversal)
-      .toEqual({ kind: 'traversal', gremlin: '__.out().values("name")' });
+  test('a nested-traversal param value is CARRIED as parsed IRStep[] (not a serialized string)', () => {
+    // A nested traversal as a param VALUE resolves to a TraversalParam carrying its IRStep[] — the ONLY
+    // string conversion is federate's RPC edge. An anonymous body (`__.out()…`) keeps its own steps; the
+    // source-rooted REQUIREMENT is federate's alone (federation.test.ts), so an anonymous body is carried
+    // here (an OLAP edge scope reads its steps through this same seam).
+    const t = spec('g.call("federate").with("traversal", __.out().values("name"))').params.traversal as { kind: string; steps: any[] };
+    expect(t.kind).toBe('traversal');
+    expect(t.steps.map((s) => s.name)).toEqual(['out', 'values']);
   });
 
-  test('a rooted nested-traversal param value serializes to a canonical Gremlin string', () => {
+  test('a rooted nested-traversal param carries steps that synthesize back to a rooted query', () => {
     const s = spec('g.call("federate").with("graph", "orders").with("traversal", __.V().has("age", gt(30)))');
     expect(s.serviceName).toBe('federate');
     expect(s.params.graph).toBe('orders');
-    expect(s.params.traversal).toEqual({ kind: 'traversal', gremlin: 'g.V().has("age", P.gt(30))' });
+    const t = s.params.traversal as { kind: string; steps: any[] };
+    expect(t.kind).toBe('traversal');
+    // The RPC-edge synthesis (steps → rooted gremlin) reconstructs the sibling query verbatim.
+    expect(subTraversalToGremlin(t.steps)).toBe('g.V().has("age",gt(30))');
   });
 
   // ---- mid-traversal per-parent INJECTION (the `parent` marker inside the traversal) ----

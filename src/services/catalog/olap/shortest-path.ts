@@ -25,15 +25,12 @@ const SP_DISTANCE = '~tinkerpop.shortestPath.distance';
 const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
 
 /** Parse a `~tinkerpop.shortestPath.target` value — an anonymous vertex traversal used as an ENDPOINT
- *  predicate — to its body IR (the steps after the source root), or `undefined` when no target is set.
- *  Same read as `edgeScopeOf`: a `TraversalParam` carries the serialized gremlin; our parser roots at a
- *  source, so an anonymous body is prepended one and the source step dropped. */
+ *  predicate — to its body IR (the anonymous body's steps), or `undefined` when no target is set. Same
+ *  read as `edgeScopeOf`: a `TraversalParam` carries the PARSED steps directly. */
 function targetBody(value: unknown): readonly IRStep[] | undefined {
   if (value === undefined) return undefined;
-  return parseAnonBodyIR(value, (kind, g) => {
-    throw new Error(kind === 'notTraversal'
-      ? `${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${g}`
-      : `${SHORTEST_PATH_SERVICE_NAME}: could not read the target "${g}"`);
+  return parseAnonBodyIR(value, (_kind, g) => {
+    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${g}`);
   }).steps;
 }
 

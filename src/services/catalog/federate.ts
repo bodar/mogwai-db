@@ -3,6 +3,7 @@ import type { ForeignResult, ForeignRow } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
+import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
@@ -32,16 +33,18 @@ function graphOf(params: CallParams): string {
   return g;
 }
 
-/** Read the required `traversal` param — a nested sub-traversal serialized to a Gremlin string (a
- *  TraversalParam), or a bare Gremlin string. A federated call runs it as a fresh SOURCE query on a
- *  sibling, so it MUST be source-rooted (`g.V()…`/`g.E()…`); the serializer no longer enforces that
- *  (an OLAP edge scope carries an anonymous body through the same seam), so federate enforces its own
- *  need here — an anonymous `__.…` body fails closed rather than becoming an invalid `g.…` query. */
+/** Read the required `traversal` param and SYNTHESIZE its sibling Gremlin string — the RPC edge, the one
+ *  place a sub-traversal becomes a string. `params.traversal` is a `TraversalParam` carrying PARSED
+ *  `IRStep[]` (call-params.ts); `subTraversalToGremlin` reconstructs the rooted text from the steps' own
+ *  `ctx`. A federated call runs it as a fresh SOURCE query on a sibling, so it MUST be source-rooted
+ *  (`g.V()…`/`g.E()…`) — federate enforces that here (an anonymous body, e.g. an OLAP edge scope, is not a
+ *  valid federate traversal). A raw STRING param is not a thing (the grammar always gives a nested
+ *  traversal → steps); only a `TraversalParam` is accepted. */
 function traversalOf(params: CallParams): string {
   const t = params.traversal;
-  const gremlin = isTraversalParam(t) ? t.gremlin : typeof t === 'string' && t.length > 0 ? t : null;
-  if (gremlin === null)
-    throw new Error('federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
+  if (!isTraversalParam(t))
+    throw new Error('federate: a "traversal" param (a nested __.V()… sub-traversal) is required');
+  const gremlin = subTraversalToGremlin(t.steps);
   if (!gremlin.startsWith('g.V(') && !gremlin.startsWith('g.E('))
     throw new Error(`federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
   return gremlin;

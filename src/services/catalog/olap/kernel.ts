@@ -2,7 +2,6 @@ import type { BarrierInput, BarrierRelation, CallParams, DecorateChannel, Servic
 import type { GraphStore } from '../../../storage.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
 import { isTraversalParam } from '../../params/call-params.ts';
-import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 
 // The shared OLAP BARRIER KERNEL — the substrate every graph algorithm in `olap/` builds on: the edge
 // message scope, the `barrier_state` scratch fragments + the in-SQL fixpoint driver (`iterateInSql`),
@@ -22,22 +21,19 @@ import { parseGremlin, stepChain } from '../../../gremlin/frontend.ts';
 /** `out`: rank/label flows src→tgt. `in`: tgt→src. `both`: both. */
 export type EdgeScope = { readonly direction: 'out' | 'in' | 'both'; readonly labels: readonly string[] };
 
-/** Read an ANONYMOUS sub-traversal PARAM to its body IR — the steps after the source root. A
- *  `TraversalParam` carries the serialized gremlin; a bare string is taken as-is; our parser roots at a
- *  source, so an anonymous `__.…` body is prepended `g.V().` and the `V`/`E` source step dropped. Throws
- *  a `label`-prefixed message when the value is neither (`kind: 'notTraversal'`) or does not parse
- *  (`kind: 'unparseable'`), so each caller phrases its own refusal. The `undefined` case stays the
- *  caller's — `edgeScopeOf` maps it to its default direction, `targetBody` to "no target". */
+/** Read an ANONYMOUS sub-traversal PARAM to its body IR — the steps of the anonymous body
+ *  (`__.outE("knows")` → `[outE("knows")]`). A `TraversalParam` carries PARSED `IRStep[]` directly
+ *  (call-params.ts), so this READS them — no `parseGremlin`/`stepChain` re-parse (the old AST→string→AST
+ *  round-trip is gone; see the memory `federate-subtraversal-as-steps`). A raw STRING param is not a thing
+ *  (the grammar always gives a nested traversal → steps), so anything that is not a `TraversalParam` fails
+ *  `notTraversal`; the caller phrases its own refusal. The `undefined` case stays the caller's. `gremlin`
+ *  is a display string for error messages, synthesized from the steps' own source text. */
 export function parseAnonBodyIR(
-  value: unknown, fail: (kind: 'notTraversal' | 'unparseable', gremlin: string) => never,
+  value: unknown, fail: (kind: 'notTraversal', gremlin: string) => never,
 ): { readonly steps: readonly IRStep[]; readonly gremlin: string } {
-  const gremlin = isTraversalParam(value) ? value.gremlin : typeof value === 'string' ? value : null;
-  if (gremlin === null) fail('notTraversal', String(value));
-  const rooted = gremlin.startsWith('__.') ? 'g.V().' + gremlin.slice(3) : gremlin;
-  try {
-    const steps = stepChain(parseGremlin(rooted), {}).filter((s) => s.name !== 'V' && s.name !== 'E') as IRStep[];
-    return { steps, gremlin };
-  } catch { fail('unparseable', gremlin); }
+  if (!isTraversalParam(value)) fail('notTraversal', String(value));
+  const steps = value.steps as IRStep[];
+  return { steps, gremlin: '__.' + steps.map((s) => s.ctx.getText()).join('.') };
 }
 
 /** Parse an edges-scope param into `{direction, labels}`. `undefined` → the algorithm's default
@@ -49,10 +45,8 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
     const d = String((value as { direction: unknown }).direction).toLowerCase();
     if (d === 'out' || d === 'in' || d === 'both') return { direction: d, labels: [] };
   }
-  const { steps, gremlin } = parseAnonBodyIR(value, (kind, g) => {
-    throw new Error(kind === 'notTraversal'
-      ? `${algo}: unsupported edges scope ${g}`
-      : `${algo}: could not read the edges scope "${g}"`);
+  const { steps, gremlin } = parseAnonBodyIR(value, (_kind, g) => {
+    throw new Error(`${algo}: unsupported edges scope ${g}`);
   });
   const dir = steps.length === 1
     ? ({ outE: 'out', inE: 'in', bothE: 'both' } as const)[steps[0].name as 'outE' | 'inE' | 'bothE']
