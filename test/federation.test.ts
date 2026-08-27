@@ -121,9 +121,7 @@ describe('federate — arg-less pushdown (win 2a)', () => {
 // WIN 2b — ARG-LESS MID injection. No `traversal` arg AND no positional injection: the parent marker
 // (`__.call("parent", <read>)`) sits in the pushed tail, so the compiler infers BOTH that this is a
 // mid-traversal injection AND what to read per parent. Oracle: the explicit-arg mid form, same answer.
-// SKIPPED until win 2b lands (the arg-less path is not yet wired to the mid injection) — the block is the
-// target spec, kept visible in the tree. Re-enable (drop `.skip`) in the 2b commit.
-describe.skip('federate — arg-less MID injection (win 2b, the parent marker in the pushed tail)', () => {
+describe('federate — arg-less MID injection (win 2b, the parent marker in the pushed tail)', () => {
   // home persons {marko,vadas,josh,peter} vs crew {marko,stephen,matthias,daniel}; only marko is shared.
   const argMid = (read: string) =>
     `g.V().hasLabel("person").call("federate", ["graph":"crew"]).V().has("name", __.call("parent", ${read}))`;
@@ -147,6 +145,16 @@ describe.skip('federate — arg-less MID injection (win 2b, the parent marker in
   test('id() injection is inferred arg-less too (empty across toy graphs, must not error)', async () => {
     const res = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.id()'), {})).map(dec));
     expect(Array.isArray(res)).toBe(true);
+  });
+
+  test('a LOCAL suffix after the marker scatters then reduces/reads locally (the prefix ends AT the marker)', async () => {
+    // The marker caps the pushed prefix — a trailing `values`/`count` is NOT pushed as a global reduction
+    // (which would collapse all parents); it stays LOCAL over the scattered per-parent result, matching the
+    // explicit form. `…values("name")` → the matched name; `…count()` → one per surviving parent.
+    const vals = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")') + '.values("name")', {})).map(dec));
+    expect(vals).toEqual(['marko']);
+    const cnt = Number((await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")') + '.count()', {})).map(dec)))[0]);
+    expect(cnt).toBe(1);   // one surviving parent (marko), counted locally
   });
 });
 

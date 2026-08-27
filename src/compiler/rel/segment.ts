@@ -1,7 +1,7 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
-import { injectionKindOf, parseCallSpec } from '../../services/params/call-params.ts';
+import { injectionKindOf, parentMarkerReadIn, parentMarkerStepIndex, parseCallSpec } from '../../services/params/call-params.ts';
 import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
 import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { reducerOf } from '../ir/reducers.ts';
@@ -87,23 +87,44 @@ export interface SegmentRequest {
  */
 /** The pushdown inferred for the ARG-LESS federate form, or `null`. Only fires when the barrier is
  *  federate AND the user gave NO `traversal` arg (an explicit arg means they drew the boundary — no
- *  inference). Synthesizes the sibling Gremlin from the pushable prefix's OWN SOURCE TEXT: each step
- *  carries its `ctx` (the ANTLR parse node), so `ctx.getText()` gives back re-parseable Gremlin
- *  (`V()`, `hasLabel("person")`, `has("age",gt(x))` — a bound `$x` stays a param the sibling resolves),
- *  re-rooted at `g`. No un-parser (locked decision). `null` when nothing pushes (an empty prefix). */
+ *  inference).
+ *
+ *  **Pushdown finds the boundary, then the pushed prefix IS the sub-traversal — treated identically to an
+ *  explicit `traversal` arg.** `pushableTailPrefix` finds the longest remote-safe prefix; its steps become
+ *  the sibling query, synthesized from their OWN source text (`ctx.getText()` per step — a bound `$x` stays
+ *  a param the sibling resolves — re-rooted at `g`; no un-parser, locked decision). The prefix's steps are
+ *  ALSO where the `parent` injection marker is found (`injectionRead`), so the arg-less MID form (win 2b)
+ *  needs no separate branch — `barrierIn` folds `injectionRead` into `spec.injectionTraversal`, and every
+ *  downstream reader (injection classify, mid/source route, head, scatter) sees the SAME fact whether the
+ *  marker came from an explicit arg or an inferred prefix.
+ *
+ *  THE BREAK POINT for an injection is AT the marker step: a marker is a per-parent FILTER on the sibling,
+ *  so anything AFTER it (a reducer, a `values`) is LOCAL processing of the scattered result — exactly the
+ *  explicit form's split (its `traversal` ends at the marker; the reducer is the local tail). So a
+ *  marker-bearing prefix ends right after the marker, `reduces:false`. Without a marker the whole prefix
+ *  pushes (source form), reducer included. `null` when nothing pushes (an empty prefix). */
 function inferredPushdown(
   steps: readonly IRStep[], at: number, spec: CallSpec, params: Record<string, any>,
-): { siblingGremlin: string; prefixLength: number; reduces: boolean } | null {
+): { siblingGremlin: string; prefixLength: number; reduces: boolean; injectionRead: any } | null {
   if (spec.serviceName !== FEDERATE_SERVICE || spec.params.traversal != null) return null;
   const prefix = pushableTailPrefix(steps, at, params);
   if (prefix.length === 0) return null;
-  const pushed = steps.slice(at + 1, at + 1 + prefix.length);
+  // Cap the prefix at the `parent` marker step (the injection filter boundary), if any — the arg-less MID
+  // form. `parentMarkerStepIndex` looks only at each step's own operand args (which pushed step is the
+  // filter). A marker → the prefix ends there and cannot end in a reducer; no marker → the whole prefix.
+  const full = steps.slice(at + 1, at + 1 + prefix.length);
+  const markerAt = parentMarkerStepIndex(full, params);
+  const prefixLength = markerAt >= 0 ? markerAt + 1 : prefix.length;
+  const pushed = steps.slice(at + 1, at + 1 + prefixLength);
   const siblingGremlin = 'g.' + pushed.map((s) => s.ctx.getText()).join('.');
   // A source-rooted sibling query (the first pushed step is the tail's `.V()`/`.E()` re-source) — the
   // same shape the explicit `traversal` arg must have. A tail that does not re-source cannot be pushed as
   // a source query, so it declines to push (stays local) rather than synthesize an unrooted `g.…`.
   if (!siblingGremlin.startsWith('g.V(') && !siblingGremlin.startsWith('g.E(')) return null;
-  return { siblingGremlin, prefixLength: prefix.length, reduces: prefix.reduces };
+  // The injection read from the pushed prefix's marker (win 2b), classified downstream exactly like the
+  // explicit form's `injectionTraversal`. `null` when the prefix has no marker (a plain arg-less push).
+  const injectionRead = markerAt >= 0 ? parentMarkerReadIn(pushed, params) : null;
+  return { siblingGremlin, prefixLength, reduces: markerAt >= 0 ? false : prefix.reduces, injectionRead };
 }
 
 /** The MID-TRAVERSAL REDUCTION pushdown, or `null`. Fires when: this is a federate barrier NOT at the
@@ -145,10 +166,18 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // run over the SUFFIX, not the whole tail.
     const pushdown = inferredPushdown(steps, at, spec, request.params);
     const suffixFrom = at + 1 + (pushdown?.prefixLength ?? 0);
+    // UNIFY the two forms: the sub-traversal's injection read is `spec.injectionTraversal` for the explicit
+    // form (set by `parseCallSpec`) OR `pushdown.injectionRead` for the arg-less form (the marker found in
+    // the pushed prefix, win 2b). Fold the arg-less read onto an EFFECTIVE spec so every downstream reader
+    // — injection classify, mid/source route, head projection, scatter — is identical for both forms. At
+    // most one is set (an explicit `traversal` disables pushdown, so no inferred read can arise beside it).
+    const effectiveSpec: CallSpec = pushdown?.injectionRead
+      ? { ...spec, injectionTraversal: pushdown.injectionRead }
+      : spec;
     // MID-TRAVERSAL REDUCTION (monoid transport optimization): a mid federate whose tail is a bare reducer
     // pushes the reduction as a per-injected-value grouped PARTIAL; the resume combines per parent.
-    const injection = spec.injectionTraversal ? injectionKindOf(spec.injectionTraversal, request.params) ?? undefined : undefined;
-    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, spec, injection);
+    const injection = effectiveSpec.injectionTraversal ? injectionKindOf(effectiveSpec.injectionTraversal, request.params) ?? undefined : undefined;
+    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, effectiveSpec, injection);
     // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as
     // `federationDepth`. It travels on `CallSite.tailDemand`/`CallSite.pushdown`, the structure that means
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
@@ -160,7 +189,9 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
-    return { at, site, spec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path, pairs: contribution.pairs, suffixFrom };
+    // Carry the EFFECTIVE spec (with the arg-less injection folded in) so `midSegment`/`injectionOf` read
+    // the injection identically for both forms.
+    return { at, site, spec: effectiveSpec, apply: contribution.apply, applySync: contribution.applySync, residency: contribution.residency, decorate: contribution.decorate, path: contribution.path, pairs: contribution.pairs, suffixFrom };
   }
   return null;
 }

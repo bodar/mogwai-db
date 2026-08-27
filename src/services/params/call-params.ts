@@ -55,6 +55,17 @@ export function parentMarkerReadIn(traversal: any, params: Record<string, any>):
   return found === undefined ? null : found;
 }
 
+/** The index (within `steps`) of the TOP-LEVEL step whose operand holds a `parent` marker, or -1. Unlike
+ *  `parentMarkerReadIn` (which recurses into nested bodies to CLASSIFY the read), this looks only at each
+ *  step's OWN operand args — it answers "which pushed step is the injection filter", so arg-less pushdown
+ *  can END the sibling prefix there (a trailing reducer over a scattered result is not a global push — it
+ *  scatters + reduces LOCALLY, exactly as the explicit form does). Reuses `isParentMarkerBody`. */
+export function parentMarkerStepIndex(steps: readonly Step[], params: Record<string, any>): number {
+  return steps.findIndex((s) =>
+    (s.args ?? []).some((a) =>
+      isNested(a.value) && isParentMarkerBody(stepChain((a.value as { nested: any }).nested, params))));
+}
+
 /** A call() param VALUE that is a nested sub-traversal (`.with('traversal', __.V().out('x'))` or a
  *  map entry) — the sub-traversal a barrier/OLAP service runs (federate's `traversal`, an OLAP
  *  `edges` scope, shortestPath's `target`). Carried as PARSED `IRStep[]`, NOT a serialized Gremlin
