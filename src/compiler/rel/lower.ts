@@ -48,7 +48,7 @@ import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
-import type { InjectionKind, PairSpec } from '../../services/spi/types.ts';
+import type { PairSpec } from '../../services/spi/types.ts';
 import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
@@ -2772,7 +2772,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  */
 export function lowerForeignResume(
   rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering = {},
-  rejoin?: { readonly values: readonly unknown[]; readonly injection: InjectionKind | undefined },
+  rejoin?: { readonly parentCount: number; readonly injected: boolean },
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -2782,8 +2782,15 @@ export function lowerForeignResume(
   // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
   // stream and the vertices become a bound lookup relation the tail's `inV`/`outV`/`bothV` join for the
   // endpoint's data — movement over a bound edge `Ref` (`docs/2026-08-21-barrier-substrate-design.md`).
-  const vertexRows = rows.filter((r) => r.kind === 'vertex');
-  const edgeRows = rows.filter((r) => r.kind === 'edge');
+  // The BoundGraph payload binding (`bgv`/`bge`) is a per-ELEMENT lookup, so it must hold each landed
+  // element ONCE. When a mid-injection pool carries the SAME element under several corrIds (two parents
+  // injecting equal values both match one sibling element — the case the corrId scatter exists to keep
+  // distinct), the raw rows repeat that element per corrId; deduping by id here keeps the payload table
+  // one-row-per-element while the corrId-tagged `pool` below retains the duplicates for the scatter. Without
+  // this the id-rejoin multiplies (N corrIds × N payload rows).
+  const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
+  const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
+  const edgeRows = dedupById(rows.filter((r) => r.kind === 'edge'));
   const isSubgraph = edgeRows.length > 0 && vertexRows.length > 0;
   const streamElem: Elem = isSubgraph ? 'edge' : elem;
   // A landed relation carries no channels by default — the rows crossed a segment boundary as detached
@@ -2816,7 +2823,8 @@ export function lowerForeignResume(
     const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
     // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
     // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
-    const materialized = make.materialize({ id: fresh('bgm'), input: foreignRelation(landedRows, kind, fresh, [], undefined, true), channels: [], type: typeOf(...landedCols(kind)), name, fenced: true });
+    const landedRelation = foreignRelation(landedRows, kind, fresh, [], undefined, true);
+    const materialized = make.materialize({ id: fresh('bgm'), input: landedRelation, channels: [], type: landedRelation.type, name, fenced: true });
     bindings.push({ name, node: materialized });
     return name;
   };
@@ -2832,7 +2840,10 @@ export function lowerForeignResume(
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
-  const rejoined = rejoin ? foreignRejoin(landed, streamElem, rejoin.values, rejoin.injection, fresh) : landed;
+  const pool = rejoin?.injected
+    ? foreignRelation(rows.filter((row) => row.kind === streamElem), streamElem, fresh, [meta('corrId', 'int', true)], (row) => [row.corrId])
+    : landed;
+  const rejoined = rejoin ? foreignRejoin(pool, streamElem, rejoin.parentCount, rejoin.injected, fresh) : landed;
   // ID-CARRY: the stream carries the element ID (+ channels) — the payload is REJOINED at each read
   // through the `BoundGraph`. The landed payload columns are projected AWAY; the shared movement/leaf
   // builders assume an id-carrying stream, and a stream still holding the landed payload would widen
@@ -2969,20 +2980,19 @@ type EmptyResult = 'zero' | 'nothing';
  * GLOBAL reduction over the whole resumed stream (the element path returns ONE number), so the combine
  * folds ALL the per-parent partials into one value with `combine`/`empty`.
  *
- * Both the map (`out.value`, a `t:'map'` ValueNode) and the parents (`values`, the distinct injected
- * values) are KNOWN at resume time, so the fold is pure data: for each parent, look up its partial by key
+ * Both the map (`out.value`, a `t:'map'` ValueNode) and the parent corrId range are KNOWN at resume time,
+ * so the fold is pure data: for each parent, look up its partial by corrId
  * (a match contributes the partial; a miss contributes `empty` — the monoid `count` adds 0, a semigroup
  * contributes nothing). Then `combine` folds the contributions: `sum` (count/sum → SUM0), `min`/`max`
  * (extremal, empty ⇒ NO value → no traverser, matching TinkerPop's semigroup empty). One scalar out (or
  * none), the SAME answer as scattering the elements and reducing locally — the semantic authority. Framed
  * as a `typedNode` so the partial's Gremlin type (a `long` count, a numeric sum/min/max) survives.
  *
- * Distinct injection means each parent maps to one key, so `combine` folds over the per-parent partials
- * exactly once each. `matchValue`'s job (which element matched which parent) is subsumed: the sibling
- * grouped by the same value, so a parent's partial IS its group's reduction.
+ * Each parent maps to one corrId, so `combine` folds over the per-parent partials exactly once each.
+ * The sibling must group by corrId before returning the map.
  */
 export function lowerReduceCombine(
-  map: ValueNode, values: readonly unknown[],
+  map: ValueNode, parentCount: number,
   reduce: { readonly empty: EmptyResult; readonly partial: string; readonly combine: 'sum' | 'min' | 'max' },
   _steps: readonly IRStep[], _from: number, _opts: Lowering,
 ): RelLowering {
@@ -2994,8 +3004,8 @@ export function lowerReduceCombine(
   // Contributions: a matched parent gives its partial; a miss gives `empty` (0 for the monoid `count`,
   // skipped for a semigroup). Fold with the reducer's combine.
   const contribs: number[] = [];
-  for (const parent of values) {
-    const hit = byKey.get(JSON.stringify(parent));
+  for (let corrId = 0; corrId < parentCount; corrId++) {
+    const hit = byKey.get(JSON.stringify(corrId));
     if (hit !== undefined) contribs.push(hit);
     else if (reduce.empty === 'zero') contribs.push(0);
     // 'nothing' (semigroup): an unmatched parent contributes nothing.

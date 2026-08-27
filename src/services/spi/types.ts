@@ -97,8 +97,8 @@ export interface CallSite {
    *  per-injected-value GROUPED partial (`group().by(<groupBy>).by(<partial>())`) so a `(key→partial)` map
    *  crosses instead of every element; the resume COMBINES the partials per parent with `combine`/`empty`,
    *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `groupBy`
-   *  is the injection read applied element-side (`values('name')`→`'name'`, id→`id`, label→`label`) so the
-   *  key equals what `matchValue` compares. `empty` is the empty-input answer (`zero` = the monoid `count`;
+   *  is the injection read applied element-side (`values('name')`→`'name'`, id→`id`, label→`label`). `empty`
+   *  is the empty-input answer (`zero` = the monoid `count`;
    *  `nothing` = a semigroup — `sum`/`min`/`max`); `reducer` is the original step name (for framing). */
   readonly reduce?: {
     readonly reducer: string;

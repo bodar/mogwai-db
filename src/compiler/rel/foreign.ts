@@ -4,7 +4,6 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
-import type { InjectionKind } from '../../services/spi/types.ts';
 import { meta, typeOf, type Minter } from './build.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
@@ -95,34 +94,29 @@ const cellAt = (row: Expr, at: number): Expr =>
 /**
  * SCATTER a batched barrier's pooled results back over the parents that asked for them.
  *
- * A mid-traversal `call()` runs the sibling ONCE over the DISTINCT injected values and gets back a flat
- * POOL — the far side does not echo which parent each element answers. So the rejoin re-matches each
- * landed element's OWN value (the property, id or label the injection named) against each parent's
- * injected value, in SQL. Two properties fall out of making it a JOIN rather than a lookup, and both
- * are required: N parents sharing one value each get the whole matching set (`call()` is flatMap-shaped,
- * so a parent contributes as many traversers as it matched), and a parent that matched NOTHING
- * contributes no row at all rather than a null one.
+ * A mid-traversal injected `call()` runs the sibling once over parent `(corrId, value)` pairs. The
+ * sibling carries each matching pair's corrId back, so this resume joins the landed pool to its parent
+ * identity — never re-matching a returned element's value. This preserves distinct parents that inject
+ * equal values and works independently of the injected value's shape.
  *
  * With no injection the sub-traversal is a constant, so every parent gets the whole pool — a CROSS join,
- * which is the same statement with the ON dropped. `values` is then read for its LENGTH alone.
+ * which is the same statement with the ON dropped. `parentCount` supplies that relation's size.
  */
-export function foreignRejoin(
-  pool: Rel, elem: Elem, values: readonly unknown[], injection: InjectionKind | undefined, fresh: Minter,
-): Rel {
+export function foreignRejoin(pool: Rel, elem: Elem, parentCount: number, injected: boolean, fresh: Minter): Rel {
   // ONE parent per row, the same one-bind rule the pool itself lands under: a parent set is data-sized.
   const parents = make.explode({
-    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify([...values]), 'text'), as: { value: 'fdv' },
-    type: typeOf(meta('fdv', 'any', true)),
+    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, corrId) => corrId)), 'text'), as: { value: 'fdv' },
+    type: typeOf(meta('fdv', 'int')),
   });
   const payload = foreignPayloadCols(elem);
   // A single parent with no injection takes the pool unchanged — the join would multiply by one, and
   // skipping it keeps the ordinary one-parent federate plan as small as it was.
-  if (!injection && values.length <= 1) return pool;
+  if (!injected && parentCount <= 1) return pool;
   const joined = make.join({
     id: fresh('fgj'), left: pool, right: parents, channels: [],
-    join: injection ? 'inner' : 'cross',
-    type: typeOf(...pool.type.cols, meta('fdv', 'any', true)),
-    ...(injection ? { on: { kind: 'binary' as const, op: '=' as const, left: matchValue(pool, elem, injection), right: col(parents.id, 'fdv') } } : {}),
+    join: injected ? 'inner' : 'cross',
+    type: typeOf(...pool.type.cols, meta('fdv', 'int')),
+    ...(injected ? { on: { kind: 'binary' as const, op: '=' as const, left: col(pool.id, 'corrId'), right: col(parents.id, 'fdv') } } : {}),
   });
   return make.project({
     id: fresh('fgr'), input: joined, channels: [], type: typeOf(...payload),
@@ -130,27 +124,7 @@ export function foreignRejoin(
   });
 }
 
-/**
- * A landed element's OWN value under the injection kind — what a parent's injected value is matched
- * against. `values(key)` reads the logical value at that key out of the landed `{t,v}` tree: a vertex's
- * key holds an array of nodes, an edge's holds one, and a MISSING key yields NULL, which matches
- * nothing — correct, since the element simply lacks the injected property.
- */
-function matchValue(pool: Rel, elem: Elem, injection: InjectionKind): Expr {
-  if (injection.kind === 'id') return col(pool.id, 'id');
-  if (injection.kind === 'label') return foreignLabelValue(pool, elem);
-  const key = `$."${injection.key.replace(/"/g, '""')}"`;
-  return {
-    kind: 'call', fn: 'COALESCE',
-    args: [
-      { kind: 'call', fn: 'json_extract', args: [col(pool.id, 'props'), compilerText(`${key}[0].v`)] },
-      { kind: 'call', fn: 'json_extract', args: [col(pool.id, 'props'), compilerText(`${key}.v`)] },
-    ],
-  };
-}
-
 /** A landed element's `label()` — the SCALAR the step promises. A vertex's payload column holds the
  *  whole label set, so the step reads its first member; an edge's is already the name. */
 export const foreignLabelValue = (landed: Rel, elem: Elem): Expr =>
   elem === 'edge' ? col(landed.id, 'label') : cellAt(col(landed.id, 'label'), 0);
-

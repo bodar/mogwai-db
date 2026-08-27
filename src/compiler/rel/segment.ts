@@ -131,8 +131,7 @@ function inferredPushdown(
  *  source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent), and
  *  the local tail is EXACTLY one bare reducer that SPLITS (`reducers.ts`). Then the sibling computes a
  *  per-injected-value PARTIAL (`group().by(<groupBy>).by(<partial>())`) and the resume COMBINES per parent
- *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. `groupBy`
- *  is the injection read applied element-side (so the group key equals what `matchValue` matches on). Mean
+ *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. Mean
  *  (`partial:null`, reduce-first to two partials) is a follow-up — declines here for now. */
 function inferredReduce(
   steps: readonly IRStep[], at: number, spec: CallSpec, injection: InjectionKind | undefined,
@@ -303,7 +302,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     residency: barrier.residency,
     resume: (out: BarrierOutput, headRows: readonly BarrierInput[]): Plan =>
       resumed(steps, barrier, request, out, {
-        values: headRows.map((row) => row.injectedValue), injection,
+        parentCount: headRows.length, injected: injection !== undefined,
       }),
   };
 }
@@ -456,14 +455,14 @@ function sourceSegment(steps: readonly IRStep[], barrier: Barrier, request: Segm
  *  value is the whole result, so frame it directly (`lowerScalarResume`), no tail to continue. */
 function resumed(
   steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest, out: BarrierOutput,
-  rejoin?: { readonly values: readonly unknown[]; readonly injection: InjectionKind | undefined },
+  rejoin?: { readonly parentCount: number; readonly injected: boolean },
 ): Plan {
   if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-scalar') {
     // MID-TRAVERSAL REDUCTION combine: the sibling returned a `(key→partial)` map (a `t:'map'` ValueNode).
     // COMBINE it per parent with the monoid — explode the map, LEFT JOIN each parent to its key, apply the
     // combine + identity — yielding the same per-parent answer as the element scatter + local reduce.
     if (barrier.site.reduce && rejoin)
-      return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.values, barrier.site.reduce, steps, barrier.suffixFrom, request.lowering)) };
+      return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.parentCount, barrier.site.reduce, steps, barrier.suffixFrom, request.lowering)) };
     // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
   }
@@ -476,7 +475,7 @@ function resumed(
   // sub-traversal is CONSTANT: an injected value terminal caps the pushable prefix AT the marker, so
   // anything after it (a `values`) is LOCAL and comes back through the element rejoin instead.
   if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values')
-    return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values, rejoin ? rejoin.values.length : undefined)) };
+    return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values, rejoin?.parentCount)) };
   const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
   // (`runForeign()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the

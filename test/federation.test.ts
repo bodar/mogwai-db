@@ -247,6 +247,21 @@ describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` ma
     expect(res).toEqual(['marko']);                 // only the shared name matches
   });
 
+  test('TWO parents injecting the SAME value both get the match (corrId keeps distinct parents distinct)', async () => {
+    // The correctness heart of the corrId scatter: two home parents both named "marko" each inject "marko";
+    // the sibling returns crew marko tagged with BOTH corrIds; the rejoin correlates by corrId, so EACH
+    // marko parent contributes one traverser — 2 results, not 1 (collapsed) nor 4 (a payload cross-product,
+    // the bug the id-dedup of the bound payload binding fixes). A separate manager so the fixture is isolated.
+    const two = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")', 'g.addV("person").property("name","vadas")'])
+      await two.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
+    const q = 'g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name")))])';
+    const res = await Promise.all((await two.executor('home').framedAsync(q, {})).map(dec));
+    expect(res.length).toBe(2);   // each marko parent gets crew marko; vadas drops
+    expect(res.map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value)).toEqual(['marko', 'marko']);
+  });
+
   test('a parent that matches nothing on the sibling contributes no traverser (flatMap)', async () => {
     // vadas/josh/peter have no crew namesake → they drop; only marko survives. (Covered by the
     // count above, asserted explicitly here: exactly one result, not four.)
