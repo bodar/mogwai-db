@@ -2,7 +2,7 @@ import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
     stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
-    canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels, substituteInjectionMarker,
+    canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
@@ -138,9 +138,6 @@ const FOLD: Pass[] = group('canonicalize', [
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.
   { name: 'foldConstantPredicateOperands', run: (steps, ctx) => foldConstantPredicateOperands(steps, ctx.params) },
-  // A FEDERATED SIBLING HOP substitutes its injected values for the `T.value` marker the user wrote.
-  // Both lowerings then see an ordinary `within()`, so neither has to know what a federate hop is.
-  { name: 'substituteInjectionMarker', run: (steps, ctx) => substituteInjectionMarker(steps, ctx.params) },
   { name: 'absorbValueMapWith', run: (steps) => absorbValueMapWith(steps) },
   { name: 'absorbModulators', run: (steps) => absorbModulators(steps) },
   { name: 'absorbOptionArms', run: (steps) => absorbOptionArms(steps) },

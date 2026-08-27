@@ -51,11 +51,13 @@ its own header says "any future barrier service returns this shape" (`segment.ts
 [ SQL segment: everything downstream, still compiled SQL ]
 ```
 
-The re-injection is not new plumbing either. `mogwai.graph.federate` already pushes a distinct value
-set into a following segment under `INJECT_VALUES_KEY`, where `has()`/`is()` compilation substitutes a
-`within(<values>)` for a `T.value` marker operand (`src/compiler/ir/injection.ts:11-14`,
-`src/services/catalog/federate.ts:81-82`). injection.ts calls this a **SPARQL bound-join**
-(`injection.ts:13`): N inputs collapse to the distinct set, one batched hop, results scattered back by
+The re-injection is not new plumbing either. `federate` already pushes a per-parent value set into a
+following segment under `INJECT_VALUES_KEY` (`src/compiler/ir/injection.ts`,
+`src/services/catalog/federate.ts`). (Note: the mechanism has since evolved — the marker is
+`call("parent", <read>)`, not the old `T.value` token, and the sibling lowers it to a correlated
+`(corrId, value)`-pairs JOIN rather than a `within(<values>)` substitution; see
+`docs/2026-08-26-federate-pushdown-design.md`. The RE-INJECTION-as-a-bind point below still stands.)
+injection.ts calls this a **SPARQL bound-join**: N inputs cross as one batched hop, results scattered back by
 a SQL join in `resume`. A regex barrier is the same bound-join with a JS predicate in the middle
 instead of a sibling-graph hop.
 

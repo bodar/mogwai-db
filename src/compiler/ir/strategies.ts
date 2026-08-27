@@ -5,7 +5,6 @@ import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { INJECT_VALUES_KEY, injectedPairs, injectedValues, isParentMarkerBody } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -771,56 +770,6 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
       const folded = foldPredOperands(a, params);
       if (folded !== a) { changed = true; return arg(folded, argObj.type, argObj.name); }
       return argObj;
-    });
-    return changed ? { ...s, args } : s;
-  });
-}
-
-/**
- * THE FEDERATED INJECTION MARKER, substituted — `has(k, __.call('parent', <read>))` becomes
- * `has(k, within(<the injected values>))` on a sibling hop that supplied them.
- *
- * A mid-traversal `call(federate, …)` runs the sub-traversal ONCE over the parent values (a
- * SPARQL bound-join) rather than once per parent, and the `parent` marker is where the user marked the
- * operand those values stand in for. `federate.ts` supplies them under a reserved params key, so the
- * substitution is a pure function of the chain and its params — which is exactly what a `Pass` is, and
- * why it belongs HERE rather than in a lowering.
- *
- * As a rewrite above the lowering it cannot be learned twice or disagreed about (§6·5 — a fact about the
- * traversal's own text belongs to the Pass tier). The marker's own READ body (`__.values('k')`/`id`/
- * `label`) is IRRELEVANT to the sibling: the parent already applied it to produce the injected values, so
- * on the sibling the marker is purely a placeholder for the bound set — it is REPLACED wholesale by the
- * `within`. (The read matters only to the PARENT side — the head projection + rejoin — read there off the
- * `CallSpec`'s classified injection kind, not here.)
- *
- * Zero-cost for every ordinary query: no injection key, no rewrite. A marker with NO values supplied is
- * left alone deliberately — a `call('parent')` with no bound set reaches the registry as an unknown
- * service and fails closed, rather than being silently reinterpreted as some other operand.
- */
-export function substituteInjectionMarker(steps: IRStep[], params: Record<string, any>): IRStep[] {
-  // A pair payload is consumed by RelIR source lowering, which joins its value cell to the sibling
-  // element and carries its correlation cell as the origin channel. Keep the raw marker intact for
-  // that route. The flat legacy form remains a within() substitution for callers that do not carry
-  // correlation yet.
-  if (injectedPairs(params)) return steps;
-  const values = injectedValues(params);
-  if (!values) return steps;
-  // ONE named-collection operand, not N inline literals. The injected set is DATA-SIZED (one distinct
-  // parent value per row), so it crosses as a single `json_each` bind — `within([...], INJECT_VALUES_KEY)`
-  // lowers through `jsonEachInSet` (`predicate.ts`), the exact re-injection form the regex/split barriers
-  // use. A named array operand is fixed text + one bind of any size (root `CLAUDE.md`'s data-sized-set rule).
-  const within = { op: 'within', operands: [arg(values, null, INJECT_VALUES_KEY)] };
-  // The marker is a NESTED operand (`{nested}` whose body is a single `call('parent', …)`) — parse it and
-  // check. `stepChain` is idempotent on an already-lowered `Step[]` payload, so a synthesized body works too.
-  const isMarker = (value: unknown): boolean =>
-    isNested(value) && isParentMarkerBody(stepChain((value as { nested: any }).nested, params));
-  return steps.map((s) => {
-    const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
-    let changed = false;
-    const args = (s.args ?? []).map((argObj, i) => {
-      if (!slots.includes(i) || !isMarker(argObj.value)) return argObj;
-      changed = true;
-      return arg(within);
     });
     return changed ? { ...s, args } : s;
   });

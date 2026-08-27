@@ -17,11 +17,12 @@
 // — it NAMES `values`/`id`/`label` rather than relying on a separate positional `__.values('k')` arg.
 //
 // The sibling receives the sub-traversal as an ordinary query PLUS a params entry under the reserved
-// key below holding per-parent correlation/value pairs. The sibling's source lowering explodes those
-// pairs as ONE `json_each` bind and joins its value cell to the host `has()` property, projecting the
-// correlation cell as an origin channel. One batched sibling hop over the parent-value set (a SPARQL
-// bound-join), with no inline values baked into statement text. The flat legacy payload still uses the
-// Pass (`substituteInjectionMarker`, strategies.ts) to become a `within()` predicate.
+// key below holding per-parent `(corrId, value)` pairs. The sibling's SOURCE LOWERING (`lowerChain`,
+// `lower.ts`) explodes those pairs as ONE `json_each` bind and JOINS its value cell to the host `has()`
+// property, projecting the correlation cell (`corrId`) as an `origin` channel — Calcite `Correlate`, so a
+// returned element carries the id of every parent it matched and the rejoin correlates by that id, NEVER
+// by re-matching the value. One batched sibling hop over the pooled parent values (a SPARQL bound-join),
+// with no inline values baked into statement text.
 //
 // This module is a dependency-free leaf (string constants + pure predicates over an ALREADY-PARSED
 // body, never `stepChain` itself) so both the compiler (strategies.ts) and the service (federate.ts)
@@ -52,10 +53,11 @@ export const injectedReduction = (params: Record<string, unknown>): boolean =>
   params[INJECT_REDUCE_KEY] === true;
 
 /** The injection MARKER service name — `call("parent", <read>)`. A leaf constant so both the recognizer
- *  (strategies.ts) and the classifier (call-params.ts) name it without importing a service impl. It has
- *  NO registered service: it is a compile-time marker the `substituteInjectionMarker` Pass consumes and
- *  the sibling never sees a `call("parent")` reach a registry (it is rewritten to `within(...)` first),
- *  and a `parent` marker with no injected values supplied stays inert / fails closed. */
+ *  (`call-params.ts`) and the sibling SOURCE LOWERING (`lower.ts`, which builds the correlated
+ *  `(corrId, value)`-pairs join at the marker) name it without importing a service impl. It has NO
+ *  registered service: it is a compile-time marker the lowering consumes, so the sibling never sees a
+ *  `call("parent")` reach a registry — the marker `has()` becomes the correlated join, not an operand
+ *  rewrite. A `parent` marker with no injected pairs supplied stays inert / fails closed. */
 export const PARENT_MARKER = 'parent';
 
 /** The federate service name — a leaf constant so the segment planner can recognize a federate barrier
@@ -66,8 +68,9 @@ export const FEDERATE_SERVICE = 'federate';
  *  endpoint ids to fetch as a SECOND sibling hop (`g.V(_mogwai_endpoints)`). A plain bound-collection id
  *  seek — the sibling's `elementScan` explodes it as ONE `json_each` bind for ANY size, so the id set
  *  never enters the sibling's statement text (the data-not-in-text rule applied across the wire, not
- *  just local SQL). Kept DISTINCT from `INJECT_VALUES_KEY`: that is a `within(...)` marker substitution;
- *  this is a bare `V(<ids>)` id lookup — different mechanism, so a different reserved key. */
+ *  just local SQL). Kept DISTINCT from `INJECT_VALUES_KEY`: that carries per-parent `(corrId, value)`
+ *  pairs the sibling correlates on; this is a bare `V(<ids>)` id lookup — different mechanism, so a
+ *  different reserved key. */
 export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
 
 /** True iff a PARSED nested-operand body is the `parent` marker — a single `call("parent", …)` step.
@@ -77,13 +80,6 @@ export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
  *  the read, if any, is `body[0].args[1]` (a nested `__.values('k')`/`__.id()`/`__.label()`). */
 export const isParentMarkerBody = (body: readonly { name: string; args: readonly { value: unknown }[] }[]): boolean =>
   body.length === 1 && body[0]!.name === 'call' && body[0]!.args[0]?.value === PARENT_MARKER;
-
-/** The injected distinct-value array from a params map, or null when this compile is not a federate
- *  hop carrying an injection (so the marker, if present, stays inert / fails closed at the caller). */
-export const injectedValues = (params: Record<string, unknown>): unknown[] | null => {
-  const v = params[INJECT_VALUES_KEY];
-  return Array.isArray(v) ? v : null;
-};
 
 /** The injected per-parent correlation/value pairs from a params map. `corrId` is a minted per-parent
  *  identity; pairs cross as ONE `json_each` bind of any size. Returns null when the injection is absent

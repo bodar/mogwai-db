@@ -58,14 +58,20 @@ unmodified GLV (a `call()` nested in the operand — grammar form `has_String_Tr
 what makes the arg-less form work), and identical across the explicit and arg-less forms.
 
 Mechanics: `PARENT_MARKER`/`isParentMarkerBody` (`ir/injection.ts`, leaf); `parentMarkerReadIn`/
-`parentMarkerStepIndex` (`call-params.ts`) walk the sub-traversal for the marker; `substituteInjectionMarker`
-(`strategies.ts`, a Pass) rewrites the marker operand → `within(INJECT_VALUES_KEY)` on the SIBLING compile.
-A bare `call("parent")` with no read fails closed at parse. `call("parent")` never reaches a registry —
-there is no `parent` service. (Memory: `federate-parent-marker`.)
+`parentMarkerStepIndex` (`call-params.ts`) walk the sub-traversal for the marker; the SIBLING SOURCE
+LOWERING (`lowerChain`, `rel/lower.ts`) consumes the marker `has()` directly, building the correlated join
+below — there is no operand-rewriting Pass. A bare `call("parent")` with no read fails closed at parse.
+`call("parent")` never reaches a registry — there is no `parent` service. (Memory: `federate-parent-marker`,
+`federate-injection-value-as-key`.)
 
-The sibling runs ONE batched hop over the DISTINCT injected values (a SPARQL bound-join), and results
-SCATTER back over the parents (`foreignRejoin`, `src/compiler/rel/foreign.ts`): each returned element
-re-matches the injected value it satisfies, in the resume SQL.
+The sibling runs ONE batched hop over the pooled parent values, correlated by a minted per-parent
+CORRELATION ID (an `origin` channel — Calcite `Correlate`). The marker `has(key, <marker>)` lowers to a
+JOIN against the injected `(corrId, value)` pairs (exploded by `json_each`, one bind) that PROJECTS the
+corrId onto each matching element; the results SCATTER back over the parents by that corrId
+(`foreignRejoin`, `src/compiler/rel/foreign.ts` — `pool.corrId = parent.corrId`), NEVER by re-matching the
+returned element's value. This is the whole point of the corrId refactor: correlation is correct for
+distinct parents that inject equal values, and independent of the injected value's SHAPE (scalar or list).
+The detail is in "Bigger-than-scalar injection" below.
 
 ## Bigger-than-scalar injection — a BIND of any shape, correlated by a minted `origin`
 
@@ -260,15 +266,21 @@ only at the RPC edge); arg-less MID injection (the marker in the pushed prefix);
 collection-read guard (a `cap` reading a pre-barrier collection stays local); the `raw()` → `runForeign()`
 rename; **pushed-collection output framing** (a `values(k)`/`unfold()`/`fold()`/`cap()` terminal, and a
 `fold()` of elements, frame end-to-end via the `kind:'values'` `FrameNode` stream +
-`lowerTypedNodeStream`; the explicit `traversal` form frames values too); and **mid-form value-stream
-cross-scatter** (a `V().call(federate, <constant sub>)` returning values re-emits the pool per parent, P×N).
+`lowerTypedNodeStream`; the explicit `traversal` form frames values too); **mid-form value-stream
+cross-scatter** (a `V().call(federate, <constant sub>)` returning values re-emits the pool per parent, P×N);
+and the **corrId injection refactor** (input side — the marker correlates by a minted `origin` corrId, not
+by value re-matching; `matchValue` deleted; the reduction groups by corrId per Calcite decorrelate;
+`substituteInjectionMarker`/`injectedValues` removed as dead) **with SCALAR and LIST (`.fold()`, set
+membership) injection**.
 
 ## Open, in rough priority
 
-1. **Bigger-than-scalar INJECTION (input side)** — the parent injects a LIST/MAP (eventually a SUBGRAPH),
-   not just a scalar `values`/`id`/`label`, so it can hand real context to the sibling. Orthogonal to the
-   landed output framing — that is what the sibling returns OUT, this is what the parent sends IN — but
-   shares the `{t,v}` envelope. The strategic slice; larger; best done in a clear context.
+1. **Bigger-than-scalar INJECTION — MAP and SUBGRAPH (input side)** — SCALAR and LIST have LANDED (see the
+   "Bigger-than-scalar injection" section's shape table). What remains: the parent injects a MAP
+   (`valueMap`/`project`) or a SUBGRAPH. These now generalize CLEANLY — the corrId correlation is
+   value-shape-agnostic, so only what the SIBLING does with the injected value (filter on a map's keys,
+   traverse an injected subgraph) is new per shape; no correlation rework. This is what the parent sends IN
+   (orthogonal to the landed output framing, which is what the sibling returns OUT).
 2. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
    `union`-of-two-siblings + identity comparisons.
 3. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
