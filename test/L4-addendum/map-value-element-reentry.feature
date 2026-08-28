@@ -72,3 +72,17 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
     Then the result should be unordered
       | result |
       | m[{"josh":[["v[lop]","v[ripple]"]],"marko":[["v[vadas]","v[lop]","v[josh]"]],"peter":[["v[lop]"]],"vadas":[[]]}] |
+
+  # `valueMap()` is a per-traverser Map, not one of Grouping's shorthand value traversals that
+  # receives an injected fold (`Grouping.java:92-101`). A group value-by therefore carries the bare
+  # map for each person, with valueMap's vertex property lists intact.
+  Scenario: g_V_hasLabelXpersonX_group_byXnameX_byXvalueMap_nameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.valueMap("name"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"marko":{"name":["marko"]},"vadas":{"name":["vadas"]},"josh":{"name":["josh"]},"peter":{"name":["peter"]}}] |

@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, meta, payloadCols, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, jsonOf, meta, payloadCols, propertyKeyArgs, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -25,7 +25,7 @@ import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
 import { isReducer } from '../reducer.ts';
 import { LIST_COL, correlatedListMembers } from '../list.ts';
-import { elementHost } from '../map.ts';
+import { elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, subPathMembers } from '../path.ts';
@@ -966,6 +966,30 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
     const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     // `project()` is a `ScalarMapStep` — one map per traverser, never several.
     return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, yields: 'one' };
+  }
+
+  // `valueMap()`/`elementMap()` are the other per-traverser map producers. Reuse the ordinary map
+  // builder so its key filtering, tokens, flat elementMap values and true `MapOf` descriptor cannot
+  // diverge from the top-level step. `PropertyMapStep` is a ScalarMapStep — one map per element
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/PropertyMapStep.java`).
+  if ((first.name === 'valueMap' || first.name === 'elementMap') && body.length === 1 && host.kind === 'element') {
+    const args = argValues(first);
+    const tokens = args.includes(true);
+    const asked = propertyKeyArgs(args.filter((arg) => !(tokens && arg === true)));
+    if (!asked || first.modulators?.length || first.optionArms || (first.name === 'elementMap' && tokens)) return null;
+    const unit = make.values({ id: fresh('vm'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
+    const self = make.project({
+      id: fresh('vs'), input: unit, channels: [], type: typeOf(meta('id', 'int')),
+      exprs: [['id', host.id]],
+    });
+    const mapped = elementValueMap(self, host.elem, asked.all ? null : asked.keys,
+      first.name === 'elementMap' || tokens, ctx.labelRegime, ctx.source, fresh,
+      first.name === 'elementMap' ? { flat: true, endpoints: true } : {});
+    const scalar = make.project({
+      id: fresh('vn'), input: mapped.rel, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
+      exprs: [[MAP_COL, col(mapped.rel.id, MAP_COL)]],
+    });
+    return { expr: jsonOf({ kind: 'scalar', plan: scalar }), framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf }, yields: 'one' };
   }
 
   // THE RE-ROOTING ARM — a step that turns this traverser into exactly ONE other traverser, so the
