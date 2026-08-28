@@ -158,7 +158,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
         if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
         if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
-        if (out.kind === 'map') throw new Error('federate: source traversal returned an internal mapValues result');
+        if (out.kind === 'map') return { kind: 'barrier-scalar', value: out.value };
         return wantEndpoints ? withEndpoints(ex, out.rows, depth) : out.rows;
       }
 

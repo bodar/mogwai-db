@@ -41,6 +41,18 @@ describe('federate — source form, real stack', () => {
     expect(fed).not.toEqual(direct); // it really came from crew, not home
   });
 
+  test('a MAP-TERMINAL sibling (group/groupCount/project) returns its map, not an error', async () => {
+    // Regression: the mapValues rewrite's `out.kind === 'map'` guard once conflated a USER's map terminal
+    // with the internal mapValues injection result and threw. A source-form sibling ending in a map step
+    // must FRAME its map and return it (pre-rewrite behaviour restored).
+    const grp = await Promise.all((await mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().group().by(T.label).by(__.count()))', {})).map(dec));
+    expect(grp.length).toBe(1);
+    expect(Object.fromEntries(grp[0] as Map<string, unknown>)).toEqual({ person: 4, software: 2 });
+    const proj = await Promise.all((await mgr.executor('home').framedAsync('g.call("federate").with("graph","crew").with("traversal", __.V().hasLabel("person").limit(1).project("n").by("name"))', {})).map(dec));
+    expect(proj.length).toBe(1);
+    expect(Object.fromEntries(proj[0] as Map<string, unknown>)).toHaveProperty('n');
+  });
+
   test('a nested __.V().has(...) sub-traversal is pushed down and filtered on the sibling', async () => {
     const fed = await runNames('g.call("federate").with("graph", "crew").with("traversal", __.V().hasLabel("person"))');
     const expected = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec)));

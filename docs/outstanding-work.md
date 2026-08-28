@@ -13,6 +13,12 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   collections, member variants, maps, aliases, paths, and format adapters. This also
   covers meta-property value typing. The rules are the RelIR plan §6·7; the live gaps
   are its §10. See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
+- **Map support — the finishing piece.** A 2026-08-28 audit catalogued every map producer/
+  consumer against the live lowering: most work (project/valueMap/elementMap/group/groupCount,
+  select(key)/select(Column.*)/unfold, re-group, map-valued groups). Five gaps remain, two being
+  fixed now (a federate map-terminal regression, a re-group rowid leak) and three tracked
+  (project().unfold, select(m).select(k), a map literal as a produced value). Full catalogue +
+  reproductions + priority: [the map-support finishing plan](./2026-08-28-map-support-finishing-plan.md).
 - **Set-based writes.** The row-at-a-time write driver is GONE — the runtime write path is now
   one relational `Insert`/`Delete` over `json_each` (`src/setwrite.ts`), the bulk loader and IO
   drains ride it, and format reads cross a page's owners as one `json_each(?)` membership
