@@ -28,6 +28,14 @@ explicitly when checking (a naive `JSON.stringify` shows `{}`, which masked one 
   `82434fcc`, `9fec4146`); `within(select(Column.values))` over a list entry does membership (Stage E fix).
 - Map-valued group `select(Column.values).unfold().select(<innerkey>)` — re-enters the inner map.
 
+## Status (2026-08-28): G1, G3, G4, G5 all LANDED; G2 deferred (exotic double-group element-list value).
+The finishing work is COMPLETE except the one exotic nested shape G2 names. Map support now covers every
+producer→consumer path the audit catalogued, including the three that needed new substrate: `project()`
+map unfold (G3, via a unified `{t:'string'}` map-key encoding), a map bound to an `as()` label and read
+back (G4, via a `map` arm on the alias vocabulary + static key sets for the map-key-vs-alias precedence),
+and a map literal as a produced value (G5). See `[[g4-map-key-vs-alias-precedence]]` for the one design
+decision (static key sets, user-approved).
+
 ## GAPS (the finishing work), in priority order
 
 ### G1 — a map-terminal federate sibling ERRORS  ✅ FIXED (2026-08-28)
@@ -80,10 +88,14 @@ precedence (`Scoping.java`). A key provably not in the set re-enters the alias u
 or unknown-key case stays FAIL-CLOSED. Also unblocks the federate map-injection-via-alias case (see
 `[[federate-mapvalues-rewrite-plan]]`). No SQL/wire change. L4 gains `map-alias-select.feature`.
 
-### G5 — a map LITERAL as a constant/inject value declines
-`g.inject(1).constant(["a":1,"b":2])` and `constant([a:1])` → DECLINE. A `[k:v]` map literal as a produced
-VALUE (constant/inject) does not lower, though a map literal AS AN ARGUMENT (`inject([k:v])` unfolded) does.
-Lowest priority.
+### G5 — a map LITERAL as a constant/inject value declines  ✅ FIXED (2026-08-28, commit 1cbd9039)
+`g.inject(1).constant(["a":1,"b":2])` and `constant([a:1])` → DECLINED. **Fixed:** `constant([k:v])` is
+now the per-row twin of `inject([k:v])` (`injectMap`) — `constantRetype` builds the pairs blob
+(`mapLiteralBlob`) and produces a `{kind:'map'}` framing with the literal's string keys as the static key
+set, so the whole re-enterable map tail composes (unfold/select/count(local)/as-select). Fixing it also
+surfaced a LATENT scalar-tail bug: `scalarTail`'s `constant` continued the scalar loop even on a
+non-scalar retype (only reachable now that a constant can be a map) — it now hands off to `continueAs`.
+L4 gains `map-literal-constant.feature`. (`inject([k:v])` as an argument already worked.)
 
 ## Sequencing
 - **G1 + G2 first** — G1 is a rewrite regression (a lost capability), G2 a silent wrong answer. Both are
