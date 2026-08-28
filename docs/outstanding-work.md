@@ -64,7 +64,14 @@ per-step support; closed work belongs in git history or `docs/archive/`.
 - **Services and graph movement:** federation tails, bulk materialization, and IO formats. The
   `GraphSource` abstraction (one traversal vocabulary over base + injected/federated subgraphs) is DONE
   and its plan is archived
-  ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md)). Three by-design deferrals
+  ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md)). **Federate mid-traversal
+  INJECTION is DONE (2026-08-28)** — pure standard-Gremlin `as('e')`/`select('e')` + a `{parentId→parentValue}`
+  mapValues transport, the bespoke `parent` marker deleted; design archived
+  ([injection-mapvalues](./archive/2026-08-28-federate-injection-mapvalues.md)). Scalar/list/element inject
+  and all four output shapes (elements/scalar/value-stream/keyed-map) + the subgraph form work; the two
+  remaining federate items are **multi-graph mixing** (`union` of two siblings + cross-graph identity) and a
+  low-value **side-effect-boundary** widening (`docs/2026-08-26-federate-pushdown-design.md` Open). Reaching
+  a KEY out of an aliased MAP (`select('e').select('n')`) is a base-compiler gap, not federate. Three by-design deferrals
   remain, all fail closed today, none an engine wall: **bound WRITES** (a fetched subgraph is an
   immutable snapshot), **FTS/`trigramSeek` over a bound graph** (no landed FTS index — build when a use
   case reaches it), and one **path+encounter combo** (a bound path chain that also demands an emission
