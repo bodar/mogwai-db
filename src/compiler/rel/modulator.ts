@@ -7,7 +7,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
@@ -422,8 +422,19 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
 export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
-  if (key.kind === 'column')
-    return host.kind === 'scalar' && host.entry ? (key.column === 'keys' ? host.entry.key : host.entry.val) : null;
+  if (key.kind === 'column') {
+    if (host.kind !== 'scalar' || !host.entry) return null;
+    if (key.column === 'keys') return host.entry.key;
+    // A retained element list carries rowids for re-entry.  Here it becomes a member of ANOTHER
+    // typed tree, so expand only this framing copy; the entry relation itself remains rowid-backed.
+    // Column/Select pass the live value through (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:57-68`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`).
+    if (host.entry.valOf.kind === 'list') {
+      const members = listNodeExpr(jsonField(host.entry.val, 'v'), host.entry.valOf.of, source, fresh);
+      return members && listNode(members);
+    }
+    return host.entry.val;
+  }
 
   if (key.kind === 'child') {
     if (!child) return null;

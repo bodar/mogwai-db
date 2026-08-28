@@ -3666,6 +3666,13 @@ function elementTail(
       const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
       return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
     }
+    // `UnfoldStep` yields a non-container object itself (`IteratorUtils.of(s)`), so the second
+    // `unfold()` after an entry value's element-list expansion is an identity, not a deferral.
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/UnfoldStep.java:42-53`.)
+    if (step.name === 'unfold') {
+      if (argValues(step).length) return null;
+      continue;
+    }
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live

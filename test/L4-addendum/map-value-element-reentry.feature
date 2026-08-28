@@ -45,3 +45,30 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
       | result |
       | ripple |
       | lop |
+
+  # AN ENTRY VALUE CROSSES ONE MORE MAP BOUNDARY in the nested group. Its retained list members are
+  # still rowids in the relation, but the new map's typed-tree member must expand them to vertices.
+  Scenario: g_V_hasLabelXpersonX_group_byXnameX_byXout_foldX_unfold_group_byXkeysX_byXvaluesX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys).by(Column.values)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"josh":[["v[lop]","v[ripple]"]],"marko":[["v[vadas]","v[lop]","v[josh]"]],"peter":[["v[lop]"]],"vadas":[[]]}] |
+
+  # The equivalent entry-side child read is a collecting member too, not an assignment scalar.
+  # `Column.values` passes the live value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/
+  # org/apache/tinkerpop/gremlin/structure/Column.java:57-68`), so it frames identically to the token form.
+  Scenario: g_V_hasLabelXpersonX_group_byXnameX_byXout_foldX_unfold_group_byXkeysX_byXselect_valuesX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys).by(select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"josh":[["v[lop]","v[ripple]"]],"marko":[["v[vadas]","v[lop]","v[josh]"]],"peter":[["v[lop]"]],"vadas":[[]]}] |

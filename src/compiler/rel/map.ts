@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
-import { argValues } from '../../gremlin/frontend.ts';
+import { argValues, isColumnArg } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
@@ -397,11 +397,27 @@ export function groupRows(
   // encoding is identical to `byNode`'s (both `producedMemberNode`), so only the shape is new.
   let member: Expr | undefined;
   let singleOf: MapOf = { kind: 'scalar' };
+  let entryListMember = false;
   if (valueBy && !lastOnly) {
     if (valueBy.key.kind === 'child') {
       const produced = child.scalar(valueBy.key.body, host);
       if (!produced) return null;
-      const node = producedMemberNode(produced.expr, produced.framing, source, fresh);
+      // A child list is already the root-encoded member array. Keep that retained form under its
+      // list node: the map's `valOf` routes the direct framing projection through `listNodeExpr`,
+      // while an entry-side read keeps the rowids for `unfoldList` to re-enter. Expanding here would
+      // make a single list value look like raw rowids to that later projection and frame nulls.
+      const terminal = valueBy.key.body.length === 1 ? valueBy.key.body[0] : undefined;
+      entryListMember = host.kind === 'scalar' && !!host.entry && produced.framing.kind === 'list'
+        && terminal?.name === 'select' && argValues(terminal).length === 1
+        && isColumnArg(argValues(terminal)[0]) && argValues(terminal)[0].column === 'values';
+      const node = entryListMember
+        // The entry's list is the member of the new collecting group, like `by(Column.values)`.
+        // Its typed-tree copy expands the retained rowids, while the entry relation remains suitable
+        // for a following `unfold()` child body.
+        ? producedMemberNode(produced.expr, produced.framing, source, fresh)
+        : produced.framing.kind === 'list'
+          ? listNode(produced.expr)
+          : producedMemberNode(produced.expr, produced.framing, source, fresh);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
@@ -515,7 +531,7 @@ export function groupRows(
       counting: !collecting,
       keyElem: elementKey?.elem,
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
-      single: lastOnly || valueBy?.key.kind === 'child',
+      single: lastOnly || (valueBy?.key.kind === 'child' && !entryListMember),
       singleOf,
       memberDrop: !!member,
       bulkCol: bulked && bulk ? bulk.col : undefined,
