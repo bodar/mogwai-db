@@ -13,12 +13,14 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   collections, member variants, maps, aliases, paths, and format adapters. This also
   covers meta-property value typing. The rules are the RelIR plan §6·7; the live gaps
   are its §10. See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
-- **Map support — the finishing piece.** A 2026-08-28 audit catalogued every map producer/
-  consumer against the live lowering: most work (project/valueMap/elementMap/group/groupCount,
-  select(key)/select(Column.*)/unfold, re-group, map-valued groups). Five gaps remain, two being
-  fixed now (a federate map-terminal regression, a re-group rowid leak) and three tracked
-  (project().unfold, select(m).select(k), a map literal as a produced value). Full catalogue +
-  reproductions + priority: [the map-support finishing plan](./2026-08-28-map-support-finishing-plan.md).
+- **Map + collection shape — ✅ LANDED (2026-08-28), archived.** The 2026-08-28 map audit's five gaps
+  are all fixed (G1–G5), and the same audit-lesson (a nesting bug is a PRODUCER flattening the member
+  shape at a barrier; the deep substrate is `ListOf` + recursive `listNodeExpr`) drove the parallel LIST
+  gaps: `constant([list])`, `foldLists`, nested-list position slices, and `order/dedup(Scope.local)` over
+  a nested SCALAR list (a JS ORDERABILITY barrier). ONE thing declines fail-closed and is NOT tracked as
+  active work: `order/dedup(Scope.local)` over an ELEMENT-membered nested list (needs federate-grade
+  detached-element re-entry; rare, non-corpus). Archived:
+  [map-support finishing plan](./archive/2026-08-28-map-support-finishing-plan.md).
 - **Set-based writes.** The row-at-a-time write driver is GONE — the runtime write path is now
   one relational `Insert`/`Delete` over `json_each` (`src/setwrite.ts`), the bulk loader and IO
   drains ride it, and format reads cross a page's owners as one `json_each(?)` membership

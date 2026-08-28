@@ -1,5 +1,29 @@
 # Map support — the finishing plan (2026-08-28)
 
+✅ **LANDED AND ARCHIVED (2026-08-28).** All five map gaps are fixed: G1 (federate map-terminal
+sibling), G3 (`project().unfold()` via a unified `{t:'string'}` map-key encoding), G4 (a map bound to
+an `as()` label + read back, with static key sets for the map-key-vs-alias precedence — see
+`[[g4-map-key-vs-alias-precedence]]`), G5 (`constant([k:v])`), and G2 (the double-group of an element-list
+value, via `GroupRecipe.memberOf` through the already-recursive `listNodeExpr`). The map producer→consumer
+matrix the audit catalogued is complete.
+
+The work SPILLED OVER into the parallel LIST-shape gaps the same audit-lesson exposed (a nesting bug is a
+PRODUCER flattening the member shape at a barrier, never the framer — the deep substrate is `ListOf` +
+recursive `listNodeExpr`): `constant([list])`, `foldLists` (`fold().fold()`), position slices over a nested
+list, and `order/dedup(Scope.local)` over a nested SCALAR list (a faithful JS ORDERABILITY barrier). Those
+are tracked in `[[collection-shape-works-everywhere]]`, not here.
+
+The ONE thing deliberately NOT done, and not coming back without a real need: `order/dedup(Scope.local)`
+over an ELEMENT-membered nested list — it declines fail-closed, because the value-transform barrier ships
+materialized vertices to JS and the rowid is gone, so the result cannot re-enter the graph. That needs
+federate-grade detached-element substrate for a rare, non-corpus shape. Everything else composes.
+
+The architectural lesson (kept because it is the reusable part): the nested-shape substrate is generic and
+DEEP — it is LIST's, and map borrowed it. Below is the original audit as it stood; the per-gap ✅ markers
+record where each landed.
+
+---
+
 A systematic audit of MAP support in the current lowering, independent of federate. Every map producer and
 consumer was tested against the live compiler over the modern graph; this doc catalogs what WORKS and
 every gap that remains, so map support can be finished as one tracked body of work.

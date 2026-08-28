@@ -162,7 +162,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
   # a LIST-OF-LISTS with the vertices expanded: the group recipe carries the entry's own valOf (`memberOf`)
   # and routes it through the ALREADY-recursive `listNodeExpr`, the same "the member IS the value's shape"
   # identity `by(Column.values)` uses — so this frames vertices, not raw rowids
-  # (docs/2026-08-28-map-support-finishing-plan.md §G2). Each key's value is a single-member outer list
+  # (docs/archive/2026-08-28-map-support-finishing-plan.md §G2). Each key's value is a single-member outer list
   # whose one member is that key's out-neighbours list.
   @gap:map-unfold
   Scenario: g_V_group_byXnameX_byXoutFoldX_unfold_group_byXkeysX
