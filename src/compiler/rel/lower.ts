@@ -430,11 +430,29 @@ function projectScalar(
 
 function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | null {
   if ((step.args ?? []).length !== 1 || step.modulators?.length || step.optionArms) return null;
-  const literal = constLit(step.args[0]);
-  const tail = literal ? null : exactTailConst(step.args[0]);
+  const arg = step.args[0]!;
+  // `constant([k:v, …])` — a MAP LITERAL, the per-row twin of `injectMap`. It REPLACES each traverser's
+  // value with the same compile-time map (`mapLiteralBlob`, the self-describing pairs blob every map
+  // producer shares), so the whole re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold`,
+  // a slice, `as()`) composes over it. The literal's string keys are the map's STATIC key set (framing
+  // `keys`), so a `constant([…]).as(m).select(m).select(k)` resolves like every other aliased map (G4).
+  if (arg.value instanceof Map) {
+    const blob = mapLiteralBlob(arg.value, arg.type ?? null, arg.name);
+    if (!blob) return null;
+    const keys = [...(arg.value as Map<unknown, unknown>).keys()];
+    if (!keys.every((k): k is string => typeof k === 'string')) return null;
+    const rel = make.project({
+      id: fresh('cm'), input, channels: input.channels,
+      type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(input.channels)),
+      exprs: [[MAP_COL, blob], ...input.channels.map((ch) => [ch.col, col(input.id, ch.col)] as const)],
+    });
+    return { rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, keys } };
+  }
+  const literal = constLit(arg);
+  const tail = literal ? null : exactTailConst(arg);
   if (!literal && !tail) return null;
   return projectScalar(input, [['v', literal ?? tail!.expr]], [meta('v', 'any', true)],
-    { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(step.args[0]) }, fresh);
+    { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(arg) }, fresh);
 }
 
 /**
@@ -1386,9 +1404,14 @@ function scalarTail(
     // `constant(c)` over a value stream is the same replacement as over an element one, minus the shape
     // change — `constantRetype` DROPS the per-row `vtype` (it projects only `v` plus channels), for the
     // reason every transform does: the stored type no longer describes the value that is there now.
+    // A scalar constant stays in THIS loop; a MAP-literal constant (`constant([k:v])`) retypes to a map,
+    // which the scalar tail cannot continue — hand the rest of the chain to `continueAs` so it re-enters
+    // `mapTail` (`select`/`unfold`/`count(local)`/`as` over the constant map compose).
     if (step.name === 'constant') {
       const c = constantRetype(rel, step, fresh);
       if (!c) return null;
+      if (c.framing.kind !== 'scalar')
+        return continueAs(c.rel, c.framing, steps, at + 1, false, ctx, fresh, labels);
       rel = c.rel;
       out = c.framing;
       continue;
