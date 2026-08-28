@@ -112,6 +112,11 @@ const memberPayload = (of: ListOf, members: Rel): Expr => {
  *  node addresses its own INPUT. */
 const memberNode = (of: ListOf, members: Rel): Expr => {
   const value = col(members.id, MEMBER.value);
+  // A NESTED member (a list-of-lists or a list-of-maps) is itself a JSONB collection, so it rides back
+  // under `json()` for `collectedArray`'s reason — otherwise `json_group_array` re-encodes the inner
+  // array/pairs as a quoted STRING. This is what lets a slice/order over a nested list keep its members
+  // whole rather than stringifying them (the same `json()` `unfoldMap`/`mapSide` apply one container out).
+  if (of.kind === 'list' || of.kind === 'map') return { kind: 'call', fn: 'json', args: [value] };
   return isTypedList(of)
     ? {
       kind: 'case',
@@ -354,7 +359,15 @@ export function listMemberOp(
   // states one layer up). A single door therefore refused `g.V().fold().order(local).by('age')` as
   // inexpressible when the projection is an ordinary child-seam question about the member.
   const elemOf = of.kind === 'elem' ? of.elem : null;
-  if (!isBareList(of) && !elemOf) return null;
+  // A NESTED member (a list-of-lists, a list-of-maps) reads only by POSITION for the slice family and
+  // `reverse()` — `RangeLocalStep.applyRangeIterable`/`ReverseStep` keep each member WHOLE whatever it is
+  // (`vendor/tinkerpop/.../step/map/RangeLocalStep.java`, `ReverseStep.java`) — so those admit it. The
+  // VALUE-reading arms (a string transform, `order`/`dedup`, a numeric reducer) each re-guard below: a
+  // string transform and a reducer need a scalar, and `order`/`dedup` over a collection member need the
+  // recursive comparator/equality this door does not yet build. So the door admits a nested list and the
+  // value arms decline it, rather than the door refusing every op over one.
+  const nested = of.kind === 'list' || of.kind === 'map';
+  if (!isBareList(of) && !elemOf && !nested) return null;
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
@@ -415,6 +428,11 @@ export function listMemberOp(
   // `order(Scope.local)` SORTS THE MEMBERS IN PLACE, and `dedup(Scope.local)` collapses them —
   // both re-aggregate the same list through the same frame, so they sit together.
   if ((step.name === 'order' || step.name === 'dedup') && isLocalScope(step)) {
+    // A NESTED member (a list/map) needs a RECURSIVE compare key (`order`, lexicographic via
+    // `ORDERABILITY.iterableComparator`) or a collection-equality key (`dedup`) that the scalar/element
+    // `memberCompareKey` does not build — so decline for now (a fail-closed gap, a `works-everywhere`
+    // follow-up), while the position-slice family and `reverse()` admit the nested member above.
+    if (nested) return null;
     const members = membersOf(list, fresh);
     // THE COMPARE KEY IS `byExpr`'S, not a second policy. A member is a value with a type, which is
     // exactly a SCALAR host — so the vtype-aware cast the row-level `order()` spends comes for free,
