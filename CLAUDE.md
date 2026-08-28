@@ -209,7 +209,9 @@ property.
    library — different package, don't confuse them). Grammar source is the submodule's
    **`origin/master`** ref — as is everything else now (the old beta.2 conformance pin is gone,
    see `test/CLAUDE.md`). Track upstream by
-   regenerating (`mise run generate`, byte-stable). If you find yourself editing generated files,
+   regenerating (`mise run generate`, byte-stable). We carry one grammar delta in
+   `patches/upstream/tinkerpop-06-inject-generic-argument-varargs.patch`: `inject()` admits an already
+   supported bound `genericArgument`, so federate can synthesize `inject($map)`. If you find yourself editing generated files,
    stop.
 3. **Compile to SQL, never interpret.** Each read step lowers to CTE-chained SQL;
    SQLite's planner + covering indexes do the traversal. Row-at-a-time JS

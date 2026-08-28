@@ -116,3 +116,10 @@ until this lands rather than filtering it, because the warning is CORRECT.
   `test/support/undici-shim.ts`; report upstream to Bun. Do NOT "fix" it by making the client call
   `close?.()` — that would silently skip real connection-pool teardown wherever a dispatcher
   genuinely lacked it.
+
+### 06 — `inject()` rejects bound variables
+
+`tinkerpop-06-inject-generic-argument-varargs.patch` changes both `inject` productions from
+`genericLiteralVarargs` to `genericArgumentVarargs`. A bound variable is already a generic argument in
+the grammar, so this is a strict additive superset: `inject($map)` is needed by federate's standard
+map-values transport while existing literal calls are unchanged. **Pending upstream PR.**

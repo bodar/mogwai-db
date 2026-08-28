@@ -42,6 +42,9 @@ git -C "$SM" fetch --filter=blob:none --quiet origin master
 generate() {
   local name="$1" path="$2" out="$3"
   git -C "$SM" show "$REF:$path" > "$TMP/$name.g4"
+  if [[ "$name" == Gremlin ]]; then
+    git -C "$TMP" apply "$ROOT/patches/upstream/tinkerpop-06-inject-generic-argument-varargs.patch"
+  fi
   bunx antlr-ng -Dlanguage=TypeScript --generate-visitor --generate-listener \
     --exact-output-dir -o "$out" "$TMP/$name.g4"
   echo "$out/ regenerated from tinkerpop $REF ($name.g4)"

@@ -1,0 +1,22 @@
+diff --git a/Gremlin.g4 b/Gremlin.g4
+index 000000000..000000000 100644
+--- a/Gremlin.g4
++++ b/Gremlin.g4
+@@ -133,7 +133,7 @@ traversalSourceSpawnMethod_V
+     ;
+ 
+ traversalSourceSpawnMethod_inject
+-    : K_INJECT LPAREN genericLiteralVarargs RPAREN
++    : K_INJECT LPAREN genericArgumentVarargs RPAREN
+     ;
+ 
+ traversalSourceSpawnMethod_io
+@@ -626,7 +626,7 @@ traversalMethod_index
+     ;
+ 
+ traversalMethod_inject
+-    : K_INJECT LPAREN genericLiteralVarargs RPAREN
++    : K_INJECT LPAREN genericArgumentVarargs RPAREN
+     ;
+ 
+ traversalMethod_is

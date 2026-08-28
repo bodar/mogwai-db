@@ -2010,7 +2010,7 @@ export class GremlinParser extends antlr.Parser {
             this.state = 875;
             this.match(GremlinParser.LPAREN);
             this.state = 876;
-            this.genericLiteralVarargs();
+            this.genericArgumentVarargs();
             this.state = 877;
             this.match(GremlinParser.RPAREN);
             }
@@ -6551,7 +6551,7 @@ export class GremlinParser extends antlr.Parser {
             this.state = 1814;
             this.match(GremlinParser.LPAREN);
             this.state = 1815;
-            this.genericLiteralVarargs();
+            this.genericArgumentVarargs();
             this.state = 1816;
             this.match(GremlinParser.RPAREN);
             }
@@ -20316,7 +20316,7 @@ export class GremlinParser extends antlr.Parser {
         0,864,865,3,548,274,0,865,866,5,314,0,0,866,873,1,0,0,0,867,868,
         5,284,0,0,868,869,5,313,0,0,869,870,3,54,27,0,870,871,5,314,0,0,
         871,873,1,0,0,0,872,862,1,0,0,0,872,867,1,0,0,0,873,37,1,0,0,0,874,
-        875,5,131,0,0,875,876,5,313,0,0,876,877,3,570,285,0,877,878,5,314,
+        875,5,131,0,0,875,876,5,313,0,0,876,877,3,548,274,0,877,878,5,314,
         0,0,878,39,1,0,0,0,879,880,5,138,0,0,880,881,5,313,0,0,881,882,3,
         592,296,0,882,883,5,314,0,0,883,41,1,0,0,0,884,885,5,167,0,0,885,
         886,5,313,0,0,886,887,3,552,276,0,887,888,5,314,0,0,888,895,1,0,
@@ -20654,7 +20654,7 @@ export class GremlinParser extends antlr.Parser {
         1804,179,1,0,0,0,1805,1806,5,136,0,0,1806,1807,5,313,0,0,1807,1808,
         5,314,0,0,1808,181,1,0,0,0,1809,1810,5,129,0,0,1810,1811,5,313,0,
         0,1811,1812,5,314,0,0,1812,183,1,0,0,0,1813,1814,5,131,0,0,1814,
-        1815,5,313,0,0,1815,1816,3,570,285,0,1816,1817,5,314,0,0,1817,185,
+        1815,5,313,0,0,1815,1816,3,548,274,0,1816,1817,5,314,0,0,1817,185,
         1,0,0,0,1818,1819,5,139,0,0,1819,1820,5,313,0,0,1820,1821,3,546,
         273,0,1821,1822,5,314,0,0,1822,1829,1,0,0,0,1823,1824,5,139,0,0,
         1824,1825,5,313,0,0,1825,1826,3,376,188,0,1826,1827,5,314,0,0,1827,
@@ -22516,8 +22516,8 @@ export class TraversalSourceSpawnMethod_injectContext extends antlr.ParserRuleCo
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public genericLiteralVarargs(): GenericLiteralVarargsContext {
-        return this.getRuleContext(0, GenericLiteralVarargsContext)!;
+    public genericArgumentVarargs(): GenericArgumentVarargsContext {
+        return this.getRuleContext(0, GenericArgumentVarargsContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
@@ -28373,8 +28373,8 @@ export class TraversalMethod_injectContext extends antlr.ParserRuleContext {
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public genericLiteralVarargs(): GenericLiteralVarargsContext {
-        return this.getRuleContext(0, GenericLiteralVarargsContext)!;
+    public genericArgumentVarargs(): GenericArgumentVarargsContext {
+        return this.getRuleContext(0, GenericArgumentVarargsContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
