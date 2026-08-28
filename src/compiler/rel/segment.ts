@@ -144,14 +144,17 @@ function explicitInjectionLabel(steps: readonly IRStep[], at: number, spec: Call
 /** The MID-TRAVERSAL REDUCTION pushdown, or `null`. Fires when: this is a federate barrier NOT at the
  *  source (a mid-traversal `V().call(…)`), it carries an INJECTION (so results scatter per parent), and
  *  the local tail is EXACTLY one bare reducer that SPLITS (`reducers.ts`). Then the sibling computes a
- *  per-corrId PARTIAL (`group().by().by(<partial>())`, keyed by origin in RelIR) and the resume COMBINES per parent
+ *  per-parent PARTIAL (`group().by().by(<partial>())`, keyed by origin for the marker route or by the
+ *  ordinary map key for mapValues) and the resume COMBINES per parent
  *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. Mean
  *  (`partial:null`, reduce-first to two partials) is a follow-up — declines here for now. */
 function inferredReduce(
-  steps: readonly IRStep[], at: number, spec: CallSpec, injection: InjectionKind | undefined,
+  steps: readonly IRStep[], at: number, spec: CallSpec, injection: InjectionKind | undefined, suffixFrom: number,
 ): CallSite['reduce'] | undefined {
   if (spec.serviceName !== FEDERATE_SERVICE || at === 0 || !injection) return undefined;
-  const tail = steps.slice(at + 1);
+  // Pushdown has already moved the remote V()/E() prefix to the sibling. Only the remaining LOCAL
+  // suffix decides whether this is a per-parent reduction.
+  const tail = steps.slice(suffixFrom);
   const only = tail.length === 1 ? tail[0]! : undefined;
   if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
   const reducer = reducerOf(only.name);
@@ -190,9 +193,9 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
         ? { ...spec, injectionLabel }
         : spec;
     // MID-TRAVERSAL REDUCTION (monoid transport optimization): a mid federate whose tail is a bare reducer
-    // pushes the reduction as a per-corrId grouped PARTIAL; the resume combines per parent.
+    // pushes the reduction as a per-parent grouped PARTIAL; the resume combines per parent.
     const injection = injectionOf(effectiveSpec, request.params);
-    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, effectiveSpec, injection);
+    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, effectiveSpec, injection, suffixFrom);
     // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as
     // `federationDepth`. It travels on `CallSite.tailDemand`/`CallSite.pushdown`, the structure that means
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.

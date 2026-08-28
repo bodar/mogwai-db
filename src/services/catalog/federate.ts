@@ -7,11 +7,11 @@ import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { corrKey, ENDPOINT_IDS_KEY, INJECT_LABEL_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
-const mapValuesGremlin = (gremlin: string, label: string, param: string): string | null => {
+const mapValuesGremlin = (gremlin: string, label: string, param: string, reducer?: string): string | null => {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const rewritten = gremlin.replace(new RegExp(`select\\(\\s*(['"])${escaped}\\1\\s*\\)`, 'g'), 'select(Column.values)');
   if (rewritten === gremlin || !rewritten.startsWith('g.')) return null;
-  return `g.inject(${param}).unfold().group().by(Column.keys).by(__.${rewritten.slice(2)})`;
+  return `g.inject(${param}).unfold().group().by(Column.keys).by(__.${rewritten.slice(2)}${reducer ? `.${reducer}()` : ''})`;
 };
 
 // ---------- federate — cross-graph query pushdown (async, Barrier) ----------
@@ -168,13 +168,17 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // ordinary entry-value scope supplies the rewritten `select(Column.values)` operand.
       // `SelectStep` passes a scoped value through unchanged
       // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`).
-      if (injection?.kind === 'alias' && mapValues && !reduce) {
-        const sibling = mapValuesGremlin(gremlin, injection.label, mapValues.param);
+      if (injection?.kind === 'alias' && mapValues) {
+        const sibling = mapValuesGremlin(gremlin, injection.label, mapValues.param, reduce?.partial);
         if (!sibling) throw new Error(`federate: could not rewrite select("${injection.label}") for mapValues injection`);
         const values = new Map(rows.map((row, ordinal) => [String(ordinal), row.injectedValue]));
         const out = await ex.runForeign(sibling, { ...siblingBinds, [mapValues.param]: values }, depth + 1);
         if (out.kind !== 'map') throw new Error(`federate: expected a keyed map from mapValues injection, got ${out.kind}`);
-        return { kind: 'barrier-map', value: out.value };
+        // A bare reducer is the group's value traversal, so the ordinary map is already
+        // `(parentId -> partial)`. Count supplies its 0 identity while sum/min/max emit nothing on
+        // empty input (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CountGlobalStep.java:41-42`,
+        // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SumGlobalStep.java:66-68`).
+        return reduce ? { kind: 'barrier-scalar', value: out.value } : { kind: 'barrier-map', value: out.value };
       }
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar

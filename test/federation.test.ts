@@ -246,6 +246,41 @@ describe('federate — standard as()/select() MID injection', () => {
     expect(result.length).toBe(2);
   });
 
+  test('a mapValues count reduces each parent key before the global combine', async () => {
+    const two = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")', 'g.addV("person").property("name","vadas")'])
+      await two.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
+    const query = `${argless}.count()`;
+    const result = await Promise.all((await two.executor('home').framedAsync(query, {})).map(dec));
+    expect(result.map(Number)).toEqual([2]); // two distinct parent keys, each with crew marko once
+  });
+
+  test('mapValues count pushdown equals the element-scatter authority', async () => {
+    const pushed = new BunGraphManager(undefined, extendedRegistry);
+    const local = new BunGraphManager(undefined, extendedRegistry, undefined, { ...DEFAULT_FAST_PATHS, federateReduce: false });
+    for (const graph of [pushed, local]) {
+      for (const g of MODERN_SEED) await graph.executor('home').framedAsync(g, {});
+      for (const g of CREW_SEED) await graph.executor('crew').framedAsync(g, {});
+    }
+    const query = `${argless}.count()`;
+    const read = async (graph: BunGraphManager) =>
+      (await Promise.all((await graph.executor('home').framedAsync(query, {})).map(dec))).map(Number);
+    expect(await read(pushed)).toEqual(await read(local));
+  });
+
+  test('mapValues reducer empties follow the declared monoid/semigroup algebra', async () => {
+    const empty = new BunGraphManager(undefined, extendedRegistry);
+    await empty.executor('home').framedAsync('g.addV("person").property("name","nobody")', {});
+    for (const g of CREW_SEED) await empty.executor('crew').framedAsync(g, {});
+    const head = 'g.V().values("name").as("e").call("federate", ["graph":"crew", "traversal": __.V().has("name", select("e"))])';
+    const count = await Promise.all((await empty.executor('home').framedAsync(`${head}.count()`, {})).map(dec));
+    expect(count.map(Number)).toEqual([0]);
+    const sumHead = 'g.V().values("name").as("e").call("federate", ["graph":"crew", "traversal": __.V().has("name", select("e")).values("missing")])';
+    const sum = await Promise.all((await empty.executor('home').framedAsync(`${sumHead}.sum()`, {})).map(dec));
+    expect(sum).toEqual([]);
+  });
+
   test('mapValues batches the alias values under one ordinary bound Map', async () => {
     let calls = 0; let gremlin = ''; let bound: unknown;
     const contribution: any = createFederateService({
@@ -267,6 +302,28 @@ describe('federate — standard as()/select() MID injection', () => {
     expect(calls).toBe(1);
     expect(gremlin).toBe('g.inject(injectedMap).unfold().group().by(Column.keys).by(__.V().has("name",select(Column.values)))');
     expect(bound).toEqual(new Map([['0', 'marko'], ['1', 'marko']]));
+  });
+
+  test('mapValues places a bare reducer inside the group value traversal', async () => {
+    let gremlin = '';
+    const contribution: any = createFederateService({
+      executor: () => ({
+        runForeign: (g: string) => {
+          gremlin = g;
+          return Promise.resolve({ kind: 'map', value: { t: 'map', v: [] } });
+        },
+      }),
+    } as any).resolve({
+      params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
+      boundParams: {}, federationDepth: 0, injection: { kind: 'alias', label: 'e' },
+      mapValues: { param: 'injectedMap' },
+      reduce: { reducer: 'count', partial: 'count', combine: 'sum', empty: 'zero' },
+    });
+    const result = await contribution.apply([
+      { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: {}, injectedValue: 'marko' },
+    ]);
+    expect(gremlin).toBe('g.inject(injectedMap).unfold().group().by(Column.keys).by(__.V().has("name",select(Column.values)).count())');
+    expect(result.kind).toBe('barrier-scalar');
   });
 });
 

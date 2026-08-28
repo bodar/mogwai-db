@@ -1259,7 +1259,18 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     // The mapValues transport supplies scalar parent values, so another value shape remains an
     // honest decline until its corresponding entry-side decoder is needed here.
     if (host.entry.valOf.kind !== 'scalar') return null;
-    const entryValue: Expr = { kind: 'call', fn: 'json_extract', args: [col(joined.id, 'mv'), compilerText('$.v')] };
+    // Keep the entry value as a one-row scalar subquery, then drop the entry columns before the
+    // ordinary element tail. Property/movement builders own the element scan's payload schema and
+    // correctly reject a widened `(entry, element)` join as an element relation.
+    const entryRow = make.project({
+      id: fresh('evv'), input: root, channels: [], type: typeOf(meta('v', 'json', true)),
+      exprs: [['v', { kind: 'call', fn: 'json_extract', args: [col(root.id, 'mv'), compilerText('$.v')] }]],
+    });
+    const entryValue: Expr = { kind: 'scalar', plan: entryRow };
+    const scoped = make.project({
+      id: fresh('evp'), input: joined, channels: [], type: typeOf(...elementCols([])),
+      exprs: [['id', col(joined.id, 'id')]],
+    });
     const entryCtx: ChainCtx = {
       ...inBody(ctx),
       injectionCell: {
@@ -1270,7 +1281,12 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
         }),
       },
     };
-    const tail = continueAs(joined, { kind: 'elements', elem }, body, 1, false, entryCtx, fresh, NO_ALIASES);
+    // A terminal reducer belongs to this entry-correlated rooted read, not to the outer group
+    // pool. Reuse the correlated reducer so count keeps its seed while numeric reducers retain
+    // their productivity distinction over an empty sibling stream.
+    const reduced = correlatedReduce(scoped, elem, body, 1, entryCtx, fresh);
+    if (reduced) return reduced;
+    const tail = continueAs(scoped, { kind: 'elements', elem }, body, 1, false, entryCtx, fresh, NO_ALIASES);
     if (!tail || tail.effects || tail.framing.kind !== 'elements') return null;
     const members = make.aggregate({
       id: fresh('evl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)), groupBy: [],

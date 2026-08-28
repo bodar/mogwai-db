@@ -3036,8 +3036,11 @@ export function lowerReduceCombine(
   // Contributions: a matched parent gives its partial; a miss gives `empty` (0 for the monoid `count`,
   // skipped for a semigroup). Fold with the reducer's combine.
   const contribs: number[] = [];
-  for (let corrId = 0; corrId < parentCount; corrId++) {
-    const hit = byKey.get(JSON.stringify(corrId));
+  for (let parentId = 0; parentId < parentCount; parentId++) {
+    // The legacy corrId group uses numeric keys; standard mapValues uses its ordinary Map's
+    // string parent IDs. Both are the same parent range, and the reducer algebra is independent
+    // of the transport key.
+    const hit = byKey.get(JSON.stringify(parentId)) ?? byKey.get(JSON.stringify(String(parentId)));
     if (hit !== undefined) contribs.push(hit);
     else if (reduce.empty === 'zero') contribs.push(0);
     // 'nothing' (semigroup): an unmatched parent contributes nothing.

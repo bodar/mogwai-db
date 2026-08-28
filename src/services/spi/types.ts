@@ -109,7 +109,8 @@ export interface CallSite {
   };
   /** MID-TRAVERSAL REDUCTION pushdown — a transport optimization (`reducers.ts`). Present only for a
    *  mid-traversal federate whose local tail is a bare reducer that SPLITS. `apply` runs the sibling as a
-   *  per-corrId GROUPED partial (`group().by().by(<partial>())`, whose key is selected in RelIR) so a `(key→partial)` map
+   *  per-parent GROUPED partial (`group().by().by(<partial>())`, keyed by origin for the marker route
+   *  or by the ordinary map key for mapValues) so a `(key→partial)` map
    *  crosses instead of every element; the resume COMBINES the partials per parent with `combine`/`empty`,
    *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `empty`
    *  is the empty-input answer (`zero` = the monoid `count`;
