@@ -114,11 +114,21 @@ legal but does NOT lower in our engine today.
    to the exported temp `.g4` before antlr-ng (indexed + paired with an upstream PR). Front-end likely
    unchanged (`frontend.ts:581-590,642-646` already resolves a bound-Map `VariableContext`). Note the ONE
    carried grammar delta in root `CLAUDE.md` locked-decision #2.
-1. **Make `group().by(Column.keys).by(<child over entry value>)` lower.** ⚠️ HIGHEST RISK — it is a
-   COMMITTED DEFERRAL today (`deferrals.tsv:718`; `map.ts`'s `groupRows` has no `Column`-token group key
-   over an unfolded-map stream). Standalone-valuable (clears a real deferral). Risk gate: prove all FIVE
-   result shapes lower on the sibling in isolation before Stage 3 — scalar (count), list (fold),
-   map (project/valueMap), element-list (`out().fold()`), composite (`project('vs','es')…`).
+1. **Make `group().by(Column.keys).by(<child over entry value>)` lower.** ⚠️ HIGHEST RISK — was a
+   COMMITTED DEFERRAL (`map.ts`'s `groupRows` had no `Column`-token group key over an unfolded-map
+   stream). **✅ MOSTLY LANDED (commit `0986f359`, 2026-08-28):** `Column.keys` is admitted as a `by()`
+   projection resolving against an unfolded map entry, entry-value `by()` bodies route through the
+   ordinary map-entry/list/scalar tail, and the entry host reaches `group()`/`groupCount()`. Verified:
+   scalar (`by(select(Column.values).count(Scope.local))` → `{josh:2,marko:3,…}`), list-valued child,
+   the re-group by `Column.keys`/`Column.values`. THE LOAD-BEARING SUBSTRATE THAT UNBLOCKED IT:
+   **element-list map values now retain rowids** (`{kind:'list', of:{kind:'elem'}}`), so
+   `select(Column.values).unfold()…out()` re-enters element traversal at ANY depth (see the top-level
+   `map-value-element-reentry.feature` oracle), and `dedup()` in a group value-fold scopes per group key.
+   **ONE remaining sub-case (a NEW increment, not a regression):** element re-entry NESTED inside the
+   re-group's value-by — `…unfold().group().by(Column.keys).by(select(Column.values).unfold().unfold().values('name').fold())`
+   still declines; the top-level element re-entry works but the entry-host child seam does not yet thread
+   it. The other four result shapes (map/project, composite `project('vs','es')`) still need their
+   isolation proof before Stage 3.
 2. **Inbound per-parent-map reception (dormant behind the old path).** A `foreignRelation` variant
    consuming the `{parentId → [elements]}` map via two-level `json_each` → `(parentId, element)` rows, and a
    new `resumed` arm landing them into a BoundGraph CTE by the parentId KEY, reusing the existing
