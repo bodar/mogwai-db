@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
-import { argValues, isColumnArg } from '../../gremlin/frontend.ts';
+import { argValues } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
@@ -398,6 +398,7 @@ export function groupRows(
   let member: Expr | undefined;
   let singleOf: MapOf = { kind: 'scalar' };
   let entryListMember = false;
+  let entryRootedList = false;
   if (valueBy && !lastOnly) {
     if (valueBy.key.kind === 'child') {
       const produced = child.scalar(valueBy.key.body, host);
@@ -406,11 +407,17 @@ export function groupRows(
       // list node: the map's `valOf` routes the direct framing projection through `listNodeExpr`,
       // while an entry-side read keeps the rowids for `unfoldList` to re-enter. Expanding here would
       // make a single list value look like raw rowids to that later projection and frame nulls.
-      const terminal = valueBy.key.body.length === 1 ? valueBy.key.body[0] : undefined;
-      entryListMember = host.kind === 'scalar' && !!host.entry && produced.framing.kind === 'list'
-        && terminal?.name === 'select' && argValues(terminal).length === 1
-        && isColumnArg(argValues(terminal)[0]) && argValues(terminal)[0].column === 'values';
-      const node = entryListMember
+      entryListMember = host.kind === 'scalar' && !!host.entry && produced.framing.kind === 'list';
+      // A re-sourced entry child (`by(__.V()…)`) itself produces the group's folded List.
+      // Unlike `by(select(values))`, that list is not one member to collect again: GroupStep's
+      // value traversal owns the fan-out, so retain the one list node as the value.
+      entryRootedList = entryListMember && (valueBy.key.body[0]?.name === 'V' || valueBy.key.body[0]?.name === 'E');
+      const node = entryRootedList
+        // The rooted child already aggregated its fan-out to retained rowids. Keep those rowids
+        // under the list node; `producedMemberNode` would expand them one container too early,
+        // and the map framer would then (correctly) reject the node as a rowid list.
+        ? listNode(produced.expr)
+        : entryListMember
         // The entry's list is the member of the new collecting group, like `by(Column.values)`.
         // Its typed-tree copy expands the retained rowids, while the entry relation remains suitable
         // for a following `unfold()` child body.
@@ -531,7 +538,7 @@ export function groupRows(
       counting: !collecting,
       keyElem: elementKey?.elem,
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
-      single: lastOnly || (valueBy?.key.kind === 'child' && !entryListMember),
+      single: lastOnly || (valueBy?.key.kind === 'child' && (!entryListMember || entryRootedList)),
       singleOf,
       memberDrop: !!member,
       bulkCol: bulked && bulk ? bulk.col : undefined,

@@ -86,3 +86,17 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
     Then the result should be unordered
       | result |
       | m[{"marko":{"name":["marko"]},"vadas":{"name":["vadas"]},"josh":{"name":["josh"]},"peter":{"name":["peter"]}}] |
+
+  # A map entry remains the correlated scope of a V()-rooted group value body. The rooted scan fans
+  # out, and the group's value is that entry's List of matches, not a global source result or a
+  # scalar assignment. `Column.values` supplies the entry value unchanged (Column.java:57-68).
+  Scenario: g_injectXmapX_unfold_group_byXkeysX_byXV_hasXname_select_valuesXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(["marko":"marko","josh":"josh"]).unfold().group().by(Column.keys).by(__.V().has("name", select(Column.values)))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"josh":["v[josh]"],"marko":["v[marko]"]}] |

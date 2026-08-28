@@ -11,7 +11,7 @@ import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
-import { argValues, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { argValues, isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isInjectedAliasBody, isParentMarkerBody } from '../../ir/injection.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
@@ -574,7 +574,14 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   // lift-and-shift: the sibling's own `has(k, marker)` then compares the stored value to this cell as
   // ORDINARY equality (or whatever operator the user wrote), no compiler shape sniff. Present only on a
   // federated sibling chain (`ctx.injectionCell`), so a non-federated operand falls through unchanged.
-  if (ctx.injectionCell && (isParentMarkerBody(body) || isInjectedAliasBody(body, ctx.injectionCell.label))) return ctx.injectionCell.value;
+  if (ctx.injectionCell && (isParentMarkerBody(body)
+    || isInjectedAliasBody(body, ctx.injectionCell.label)
+    // A map-entry value is the ordinary scope value of `select(Column.values)`: Column returns
+    // the entry's value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/
+    // tinkerpop/gremlin/structure/Column.java`).  The entry-rooted V()/E() arm below supplies that
+    // value through the same correlated cell the federated injection path already uses.
+    || (body.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
+      && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values'))) return ctx.injectionCell.value;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
@@ -1216,6 +1223,66 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
   // This is structurally one row, so `collapsedToOneRow` can prove a non-barrier local collection is
   // still a valid correlated scalar result.
   const root = make.limit({ id: fresh('el'), input: seeded, channels: [], type: seeded.type, count: compilerInt(1) });
+
+  // A GraphStep in a map-entry value body re-sources the graph, but the entry remains its correlated
+  // scope: `inject(m).unfold().group().by(keys).by(__.V().has(k, select(values)))` runs one rooted
+  // read per entry and GroupStep collects that fan-out into the key's List value. `Grouping` leaves a
+  // step traversal intact rather than wrapping it as a scalar ValueTraversal
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/Grouping.java`;
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`).
+  // The list retains rowids here; the existing list-node framer expands them at the map boundary.
+  const first = body[0]!;
+  if (first.name === 'V' || first.name === 'E') {
+    // A reducing rooted read has one value independently of the entry, exactly the ordinary
+    // scalar-child V()/E() arm. Keep it scalar; only the unreduced fan-out below becomes the
+    // group's List value.
+    const rooted = rootedRead(body, ctx, fresh);
+    if (rooted?.framing.kind === 'scalar' && rooted.framing.result === 'count' && collapsedToOneRow(rooted.rel)) {
+      const scalar = make.project({
+        id: fresh('evc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+        exprs: [['v', col(rooted.rel.id, 'v')]],
+      });
+      return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    }
+    const elem = first.name === 'V' ? 'vertex' : 'edge';
+    const scanned = ctx.source.elementScan(elem, first.args, fresh);
+    if (!scanned) return null;
+    const source = scanned.pred
+      ? make.filter({ id: fresh('evf'), input: scanned.scan, channels: [], type: scanned.scan.type, pred: scanned.pred })
+      : scanned.scan;
+    const joined = make.join({
+      id: fresh('evj'), left: root, right: source, join: 'inner', channels: [],
+      type: typeOf(...root.type.cols, ...source.type.cols), on: compilerInt(1),
+    });
+    // `unfold()` keeps a map entry's stored typed node in `mv`; a scalar `Column.values`
+    // read is its payload, exactly as `entrySide` restores it for the ordinary entry loop.
+    // The mapValues transport supplies scalar parent values, so another value shape remains an
+    // honest decline until its corresponding entry-side decoder is needed here.
+    if (host.entry.valOf.kind !== 'scalar') return null;
+    const entryValue: Expr = { kind: 'call', fn: 'json_extract', args: [col(joined.id, 'mv'), compilerText('$.v')] };
+    const entryCtx: ChainCtx = {
+      ...inBody(ctx),
+      injectionCell: {
+        value: entryValue,
+        listSet: () => make.explode({
+          id: fresh('evx'), channels: [], expr: entryValue, as: { value: 'value' },
+          type: typeOf(meta('value', 'any', true)),
+        }),
+      },
+    };
+    const tail = continueAs(joined, { kind: 'elements', elem }, body, 1, false, entryCtx, fresh, NO_ALIASES);
+    if (!tail || tail.effects || tail.framing.kind !== 'elements') return null;
+    const members = make.aggregate({
+      id: fresh('evl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)), groupBy: [],
+      aggs: [[LIST_COL, { kind: 'agg', fn: 'json_group_array', args: [col(tail.rel.id, 'id')] }]],
+    });
+    return {
+      expr: { kind: 'scalar', plan: members },
+      framing: { kind: 'list', of: { kind: 'elem', elem } },
+      present: ALWAYS_PRODUCTIVE,
+      yields: 'one',
+    };
+  }
   const tail = continueAs(root, { kind: 'mapEntry', keyOf: host.entry.keyOf, valOf: host.entry.valOf }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
   if (!tail || !collapsedToOneRow(tail.rel)) return null;
   const scalarOf = (column: string): Expr => ({ kind: 'scalar', plan: make.project({
