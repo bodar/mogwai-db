@@ -1,5 +1,5 @@
 import { type Elem } from './elem.ts';
-import { PER_ROW_ENVELOPE, type ListOf, type ScalarType } from '../sql/kernel/render.ts';
+import { PER_ROW_ENVELOPE, type ListOf, type MapOf, type ScalarType } from '../sql/kernel/render.ts';
 
 // ---------- the as() alias channel — COMPILE-TIME description ----------
 //
@@ -37,6 +37,11 @@ export type AliasEntry = {
   /** Member descriptor for a list value held in history. Deliberately alias-local: it says how to
    *  re-enter THIS JSON list, not what a Stream is. */
   listOf?: ListOf;
+  /** Key/value shape for a MAP value held in history — how to re-enter THIS map's pairs array
+   *  (`mapTail`'s `keyOf`/`valOf`, plus the static `keys` where the producer knew them), the `listOf`
+   *  analogue one collection along. `keys` lets a `select(m).select(k)` resolve `k` against the map's
+   *  compile-time key set (the map-key-vs-alias precedence). */
+  mapOf?: { readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
   /** Compile-time binding count along the traverser's path: 1 for a once-bound label, >1 after rebinds.
    *  `undefined` = dynamic depth (bound inside repeat()/a branch arm), where the count is only known at
    *  runtime and Pop must resolve via SQL. Lets Pop.all/mixed/first/last resolve statically for the

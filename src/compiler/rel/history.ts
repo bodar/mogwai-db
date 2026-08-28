@@ -1,5 +1,5 @@
 import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
-import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
+import type { ListOf, MapOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../alias.ts';
 
@@ -26,10 +26,16 @@ import { SHAPE_K, elemShape, type AliasShape } from '../alias.ts';
 export type TraverserObject =
   | { readonly kind: 'element'; readonly elem: Elem; readonly id: Expr }
   | { readonly kind: 'value'; readonly value: Expr; readonly type: ScalarType; readonly vtype?: Expr }
-  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf };
+  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf }
+  // A MAP traverser (a `group()`/`valueMap()`/`project()`/`select(k…)` result bound to a label). Its
+  // blob is the self-describing pairs array (`MAP_COL`), stored like a list's — the re-entry shape
+  // (`keyOf`/`valOf`, and the static `keys` where known) rides on the alias entry so `select(label)`
+  // restores the right map vocabulary and can resolve a nested `select(k)` against the right key set.
+  | { readonly kind: 'map'; readonly map: Expr; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
 
 export const shapeOf = (object: TraverserObject): AliasShape =>
-  object.kind === 'element' ? elemShape(object.elem) : object.kind === 'list' ? 'list' : 'value';
+  object.kind === 'element' ? elemShape(object.elem)
+    : object.kind === 'list' ? 'list' : object.kind === 'map' ? 'map' : 'value';
 
 /**
  * ONE tagged history entry — `jsonb_object('k', <k>, 'v', <value>[, 't', <type>])`.
@@ -49,6 +55,13 @@ export const objectEntry = (object: TraverserObject, withLabels = false): Expr =
     return {
       kind: 'json-object', binary: true,
       entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [object.list] }], ...labels],
+    };
+  // A MAP's pairs array stored AS json (the list arm's reason — otherwise a quoted string), read back
+  // by `aliasMapAt` for `mapTail` re-entry. The `keyOf`/`valOf` shape lives on the alias entry, not here.
+  if (object.kind === 'map')
+    return {
+      kind: 'json-object', binary: true,
+      entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [object.map] }], ...labels],
     };
   // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
   // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.

@@ -4,10 +4,11 @@ import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../r
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, withMemberType, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, withMemberType, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
 import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../alias.ts';
+import { MAP_COL } from './map.ts';
 import { carriedCols, collectedOf, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
@@ -100,6 +101,10 @@ export const aliasTypeAt = (column: Expr, end: 'first' | 'last'): Expr => fieldA
 export const aliasListAt = (column: Expr, end: 'first' | 'last'): Expr =>
   ({ kind: 'call', fn: 'json', args: [fieldAt(column, end, 'v')] });
 
+/** The pairs array a MAP label holds, back as a `MAP_COL` value (`json()` for `aliasListAt`'s reason). */
+export const aliasMapAt = (column: Expr, end: 'first' | 'last'): Expr =>
+  ({ kind: 'call', fn: 'json', args: [fieldAt(column, end, 'v')] });
+
 /**
  * `as(label…)` — bind each label to the current traverser, whatever shape it is.
  *
@@ -139,6 +144,7 @@ export function bindAliases(
       binds: (existing?.binds ?? 0) + 1,
       ...(bound.kind === 'value' ? { scalarType: aliasScalarTypeOf(bound.type) } : {}),
       ...(bound.kind === 'list' ? { listOf: bound.of } : {}),
+      ...(bound.kind === 'map' ? { mapOf: { keyOf: bound.keyOf, valOf: bound.valOf, ...(bound.keys ? { keys: bound.keys } : {}) } } : {}),
     });
     if (!existing) channels = withChannel(channels, { col: column, role: 'alias' });
     set.set(column, existing ? historyAppend(col(rel.id, column), entry) : historySeed(entry));
@@ -168,11 +174,12 @@ export function bindAliases(
 export type AliasRead =
   | { readonly kind: 'element'; readonly elem: Elem }
   | { readonly kind: 'value'; readonly type: ScalarType }
-  | { readonly kind: 'list'; readonly of: ListOf };
+  | { readonly kind: 'list'; readonly of: ListOf }
+  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
 
 /** A single-shape history, read. A MIXED history declines: it has no single re-entry — it would be a
- *  VARIANT stream, a shape this route does not produce. `map` and `property` decline for the same
- *  reason — the shape exists above RelIR and the framing arm is not there. */
+ *  VARIANT stream, a shape this route does not produce. `property` declines for the same reason — the
+ *  shape exists above RelIR and the framing arm is not there. `map` re-enters via `mapTail`. */
 const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
   if (entry.shapes.size !== 1) return null;
   const [shape] = entry.shapes;
@@ -180,6 +187,7 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
     case 'vertex': case 'edge': return { kind: 'element', elem: shape };
     case 'value': return { kind: 'value', type: scalarTypeOfAlias(entry, vtype) };
     case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
+    case 'map': return entry.mapOf ? { kind: 'map', keyOf: entry.mapOf.keyOf, valOf: entry.mapOf.valOf, ...(entry.mapOf.keys ? { keys: entry.mapOf.keys } : {}) } : null;
     default: return null;
   }
 };
@@ -301,6 +309,7 @@ export function aliasProjection(
   const column = col(rel.id, entry.col);
   if (read.kind === 'element') return { entry, read, payload: [[meta('id', 'int', true), aliasIdAt(column, end)]] };
   if (read.kind === 'list') return { entry, read, payload: [[meta('list', 'json', true), aliasListAt(column, end)]] };
+  if (read.kind === 'map') return { entry, read, payload: [[meta(MAP_COL, 'json', true), aliasMapAt(column, end)]] };
   // A per-row type comes back as a COLUMN, because that is the only form the scalar tail's
   // `carries('vtype')` reads — the same channel name `values()` produces, so a following
   // `is(P.gt(…))` gets the vtype-aware compare key with no further plumbing.
@@ -319,8 +328,9 @@ export function aliasProjection(
 export const readFraming = (read: AliasRead): RelFraming =>
   read.kind === 'element' ? { kind: 'elements', elem: read.elem }
     : read.kind === 'list' ? { kind: 'list', of: read.of }
-      // The label's own recorded type, restored by `aliasProjection` (a per-row type lands in `vtype`).
-      : { kind: 'scalar', type: read.type };
+      : read.kind === 'map' ? { kind: 'map', keyOf: read.keyOf, valOf: read.valOf, ...(read.keys ? { keys: read.keys } : {}) }
+        // The label's own recorded type, restored by `aliasProjection` (a per-row type lands in `vtype`).
+        : { kind: 'scalar', type: read.type };
 
 /**
  * THE KEYS A `select()` NAMES, and which end of each label's history it reads.

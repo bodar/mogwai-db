@@ -69,8 +69,17 @@ export type RelFraming =
    *  `[[keyNode, valNode], …]` pairs array, which is the same self-describing tree a stored map
    *  property uses. The LIST arm's twin, deliberately: `keyOf`/`valOf` describe each side's shape for
    *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
-   *  what keeps the entry order ours to state and lets a key be something other than a string. */
-  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf }
+   *  what keeps the entry order ours to state and lets a key be something other than a string.
+   *
+   *  `keys` — the map's STATIC key set where the producer knows it (`valueMap(a,b)→[a,b]`,
+   *  `project(n)→[n]`, `select(k…)`). It is the compile-time answer to `map.containsKey(k)`, which is
+   *  exactly what `select(k)` needs to resolve TinkerPop's map-key-vs-alias precedence
+   *  (`Scoping.getScopeValue`: map first, then the label): a key NOT in this set cannot be a map key, so
+   *  a live-alias `select` re-enters the alias unambiguously rather than declining. `undefined` = keys
+   *  not statically known (a stored map property, `valueMap()` all-keys), where the ambiguity stands and
+   *  a live-alias select stays fail-closed. Advisory ONLY — it narrows a DECLINE to a re-entry, never
+   *  widens what a map means, so a Pass that drops it is safe (the bright line in `compiler/CLAUDE.md`). */
+  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] }
   /** ONE ENTRY of a map, as the traverser — what `unfold()` over a map produces. A separate arm from
    *  `map` and not a one-entry map value, because the two sides are their own COLUMNS here: that is
    *  what makes `select(Column.keys)` after it a column read rather than a second JSON walk, and it is

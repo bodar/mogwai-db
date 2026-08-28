@@ -532,7 +532,13 @@ function terminal(
     const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
       needsTokens, ctx.labelRegime, ctx.source, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
-    return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
+    // The STATIC key set, for `select(k)`'s map-key-vs-alias precedence (framing.ts `keys`). Known only
+    // for the explicit-key form: `valueMap()`/`valueMap(true)` (`asked.all`) reads every property, so
+    // the set is data-dependent and stays undefined (the ambiguity holds). Token keys (`T.id`/`T.label`)
+    // are never string-equal to an alias name, so the string key set is a sound answer to "can this map
+    // contain string key k" even when tokens are also present.
+    const keys = asked.all ? undefined : (asked.keys as readonly string[]);
+    return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf, ...(keys ? { keys } : {}) } };
   }
 
   // `constant(c)` REPLACES the traverser's value with a literal — a shape boundary like `values()` and
@@ -2128,14 +2134,26 @@ function pathTail(
  */
 function mapTail(
   seed: Rel, keyOf: MapOf, valOf: MapOf, steps: readonly IRStep[], from: number,
-  ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+  ctx: ChainCtx, fresh: Minter, aliases: AliasMap, keys?: readonly string[],
 ): Tail | null {
   let rel = seed;
-  const labels = aliases;
+  let labels = aliases;
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     const args = argValues(step);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+
+    // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
+    // `keyOf`/`valOf` recorded on the entry so `select(label)` re-enters `mapTail` with the same
+    // vocabulary. Shape-preserving, exactly like `as()` over an element/list/scalar (`bindAliases`).
+    if (step.name === 'as') {
+      const bound = bindAliases(step, rel, labels, { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}) }, fresh);
+      if (!bound) return null;
+      rel = bound.rel;
+      labels = bound.aliases;
+      continue;
+    }
+
     if (step.modulators?.length || step.optionArms) return null;
 
     if (step.name === 'is') {
@@ -2206,7 +2224,20 @@ function mapTail(
     if (step.name === 'select') {
       const key = selectedKey(step);
       if (key !== null) {
-        if (liveAliases(labels, rel).has(key)) return null;
+        // TinkerPop's precedence (`Scoping.getScopeValue`): the map is consulted FIRST, the label only
+        // if the map has no such key. A key that also names a LIVE alias is therefore ambiguous ONLY
+        // when it could be a map key — and `keys` is the compile-time answer to that. If we KNOW the
+        // static key set and `key` isn't in it, the map cannot resolve it, so the alias wins
+        // unambiguously and re-enters via `selectKeys` (the ordinary alias read). Where the keys are not
+        // known (a stored map property), the ambiguity stands and we keep the fail-closed decline.
+        if (liveAliases(labels, rel).has(key)) {
+          if (keys && !keys.includes(key)) {
+            const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+              { framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, named: namedElsewhere(ctx) });
+            return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
+          }
+          return null;
+        }
         const keyed = mapKey(rel, key, valOf, fresh);
         if (!keyed) return null;
         // A LIST value continues as a LIST stream (its members have shape `valOf.of`), so
@@ -2248,7 +2279,7 @@ function mapTail(
     if (!sliced) return null;
     rel = sliced;
   }
-  return { rel, framing: { kind: 'map', keyOf, valOf }, aliases: labels, bulked: false };
+  return { rel, framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, aliases: labels, bulked: false };
 }
 
 /**
@@ -3908,7 +3939,7 @@ export function continueAs(
     case 'path': return pathTail(rel, framing.of, framing.scalars, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
-    case 'map': return mapTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
+    case 'map': return mapTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels, framing.keys);
     case 'mapEntry': return mapEntryTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
     case 'record': return recordTail(rel, framing.fields, steps, from, bulked, ctx, fresh, labels);
     // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
@@ -4305,9 +4336,14 @@ function recordTail(
     if (step.name === 'identity' || step.name === 'barrier') { if (argValues(step).length) return null; continue; }
 
     if (step.name === 'as') {
-      // A record is not a `TraverserObject` this route can bind: the alias history encodes an element
-      // rowid, a value or a list, and a MAP binding declines at `readOf` on the way back out anyway.
-      return null;
+      // `as(label…)` binds the record AS THE MAP it is — collapse it (recordToMap, the same boundary
+      // fold()/unfold()/local-slice cross) and re-enter `mapTail` at THIS step, where the map's own `as`
+      // handler binds the blob to each label. The record's field names ARE the map's static key set, so
+      // a later `select(label).select(k)` resolves `k` against them (the map-key-vs-alias precedence).
+      const mapped = recordToMap(rel, fields, ctx.source, fresh);
+      if (!mapped) return null;
+      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels,
+        fields.map((f) => f.key));
     }
 
     if (step.name === 'select') {
