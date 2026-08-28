@@ -12,7 +12,7 @@ import { normalize } from '../../ir/passes.ts';
 import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { argValues, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { isParentMarkerBody } from '../../ir/injection.ts';
+import { isInjectedAliasBody, isParentMarkerBody } from '../../ir/injection.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
@@ -574,7 +574,7 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   // lift-and-shift: the sibling's own `has(k, marker)` then compares the stored value to this cell as
   // ORDINARY equality (or whatever operator the user wrote), no compiler shape sniff. Present only on a
   // federated sibling chain (`ctx.injectionCell`), so a non-federated operand falls through unchanged.
-  if (ctx.injectionCell && isParentMarkerBody(body)) return ctx.injectionCell.value;
+  if (ctx.injectionCell && (isParentMarkerBody(body) || isInjectedAliasBody(body, ctx.injectionCell.label))) return ctx.injectionCell.value;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;

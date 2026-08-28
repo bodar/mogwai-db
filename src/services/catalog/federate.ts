@@ -5,7 +5,7 @@ import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
-import { corrKey, ENDPOINT_IDS_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
+import { corrKey, ENDPOINT_IDS_KEY, INJECT_LABEL_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
 // ---------- federate — cross-graph query pushdown (async, Barrier) ----------
 //
@@ -113,7 +113,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, reduce }) => ({
+  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, reduce, injection }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
@@ -177,7 +177,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // the element scatter + local reduce (the authority), fewer bytes.
       if (reduce) {
         const grouped = `${gremlin}.group().by().by(${reduce.partial}())`;
-        const out = await ex.runForeign(grouped, { [INJECT_VALUES_KEY]: pairs, [INJECT_REDUCE_KEY]: true }, depth + 1, {}, 'reduce');
+        const out = await ex.runForeign(grouped, {
+          [INJECT_VALUES_KEY]: pairs, [INJECT_REDUCE_KEY]: true,
+          ...(injection?.kind === 'alias' ? { [INJECT_LABEL_KEY]: injection.label } : {}),
+        }, depth + 1, {}, 'reduce');
         if (out.kind !== 'scalar') throw new Error(`federate: expected a keyed map from the pushed ${reduce.reducer}(), got ${out.kind}`);
         return { kind: 'barrier-scalar', value: out.value };
       }
@@ -186,7 +189,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // constant, since an injection marker caps the pushable prefix before any value terminal). Elements
       // scatter by the injected value as before. `runForeign` reports which shape the sibling produced;
       // `apply` passes the tag through, no prediction.
-      const out = await ex.runForeign(gremlin, { [INJECT_VALUES_KEY]: pairs }, depth + 1);
+      const out = await ex.runForeign(gremlin, {
+        [INJECT_VALUES_KEY]: pairs,
+        ...(injection?.kind === 'alias' ? { [INJECT_LABEL_KEY]: injection.label } : {}),
+      }, depth + 1);
       if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
       const result = elementsOf(out);
       return wantEndpoints ? withEndpoints(ex, result, depth) : result;

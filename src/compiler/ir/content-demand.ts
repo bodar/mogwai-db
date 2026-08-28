@@ -1,7 +1,7 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, REDUCERS } from './step.ts';
-import { labelReads, labelsBoundBefore } from './labels.ts';
+import { labelReads, labelsBoundBefore, preBarrierSelectRead } from './labels.ts';
 
 // ---------- content demand: what a POST-BARRIER tail consumes from the fetched result ----------
 //
@@ -180,6 +180,8 @@ export interface PushablePrefix {
   readonly length: number;
   /** Does the pushed prefix END in a bare reducer? Then the sibling returns a SCALAR. */
   readonly reduces: boolean;
+  /** A pre-barrier alias read by the pushed sibling operand, which turns this prefix into injection. */
+  readonly injectionLabel?: string;
 }
 
 /** The longest remote-safe prefix of the tail `steps.slice(barrier + 1)`. `params` resolves label reads
@@ -201,7 +203,12 @@ export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, pa
     if (step.name === 'call') break;               // (3) a nested/second barrier — conservative boundary
     const reads = labelReads([step], params);
     if (reads.all) break;                          // (4) path-family / unparseable — observes all labels
-    if (preBarrier.size && [...reads.labels].some((l) => preBarrier.has(l))) break; // (1) cross-boundary backtrack
+    const crossBoundary = [...reads.labels].filter((l) => preBarrier.has(l));
+    const injectionLabel = crossBoundary.length ? preBarrierSelectRead([step], preBarrier, params) : null;
+    // A direct `select(label)` operand is federate's standard per-parent injection spelling. It pushes
+    // exactly this filter, then ends the prefix like the legacy marker does; every other cross-boundary
+    // label read remains local.
+    if (crossBoundary.length && (!injectionLabel || crossBoundary.some((label) => label !== injectionLabel))) break;
     // (5) a collection read of a key NOT written within the prefix reaches a pre-barrier collection.
     if (COLLECTION_READERS.has(step.name)) {
       const key = collectionKeyOf(step);
@@ -214,6 +221,7 @@ export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, pa
       if (key !== null) writtenInPrefix.add(key);
     }
     length++;
+    if (injectionLabel) return { length, reduces: false, injectionLabel };
   }
   const last = length > 0 ? steps[from + length - 1]! : undefined;
   return { length, reduces: !!last && isBareReducer(last) };

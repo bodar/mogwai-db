@@ -79,6 +79,7 @@ function collectStrings(value: any, into: Set<string>): void {
   }
   if (value == null || typeof value !== 'object') return;
   if (isNested(value)) return; // a nested body is walked as a body, not scraped as a value
+  if (value instanceof Map) { for (const [key, member] of value) { collectStrings(key, into); collectStrings(member, into); } return; }
   if (Array.isArray(value)) { for (const v of value) collectStrings(v, into); return; }
   // An `Arg` ({value,…}) and a `Pred` ({op, operands}) are the two shapes a label rides inside.
   if ('value' in value) collectStrings((value as any).value, into);
@@ -105,6 +106,7 @@ function descend(value: any, params: Record<string, any>, acc: Acc): void {
     return;
   }
   if (value == null || typeof value !== 'object') return;
+  if (value instanceof Map) { for (const member of value.values()) descend(member, params, acc); return; }
   if (Array.isArray(value)) { for (const v of value) descend(v, params, acc); return; }
   if ('value' in value) descend((value as any).value, params, acc);
   if ('operands' in value) descend((value as any).operands, params, acc);
@@ -174,6 +176,40 @@ export function labelReads(steps: readonly Step[], params: Record<string, any>):
   const acc: Acc = { labels: new Set<string>(), all: false };
   walkReads(steps, params, acc);
   return acc;
+}
+
+/** A direct `select(label)` operand that reads a label bound before a barrier, or null. This is narrower
+ * than `labelReads`: federation needs the operand itself, while liveness deliberately over-approximates
+ * every string. Nested predicate operands are walked because `has(k, select('x'))` stores its select as
+ * a nested traversal there. */
+export function preBarrierSelectRead(
+  steps: readonly Step[], bound: ReadonlySet<string>, params: Record<string, any>,
+): string | null {
+  let found: string | null = null;
+  let ambiguous = false;
+  const visit = (value: unknown): void => {
+    if (isNested(value)) {
+      let body: Step[];
+      try { body = stepChain(value.nested, params); } catch { ambiguous = true; return; }
+      const first = body[0];
+      const label = body.length === 1 && first?.name === 'select' && !(first as IRStep).modulators?.length
+        && first.args.length === 1 && typeof first.args[0]?.value === 'string'
+        ? first.args[0].value
+        : null;
+      if (label && bound.has(label)) {
+        if (found && found !== label) ambiguous = true;
+        else found = label;
+      }
+      for (const step of body) for (const arg of step.args ?? []) visit(arg.value);
+      return;
+    }
+    if (value == null || typeof value !== 'object') return;
+    if (Array.isArray(value)) { for (const member of value) visit(member); return; }
+    if ('value' in value) visit((value as any).value);
+    if ('operands' in value) visit((value as any).operands);
+  };
+  for (const step of steps) for (const arg of step.args ?? []) visit(arg.value);
+  return ambiguous ? null : found;
 }
 
 /** Does this step, or anything nested at any depth inside it, BARRIER the stream? Conservative on

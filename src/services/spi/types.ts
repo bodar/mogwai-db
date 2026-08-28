@@ -24,11 +24,11 @@ import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
  *  into one representation. A service reads it oblivious to how the value arrived. */
 export type CallParams = Record<string, unknown>;
 
-/** How a mid-traversal call()'s per-parent value is READ — the classification of the injection marker's
- *  read body. A DIRECT value read (a property value, the element id, or its label), optionally with an
- *  explicit trailing `.fold()` that widens the per-parent value from a scalar to a LIST (`fold: true`). A
- *  computed injection, or a bare MULTI-VALUED read with no `.fold()`, is out of scope and fails closed
- *  with a clear deferral (Gremlin is explicit — an un-folded stream at a single-value site is ambiguous).
+/** How a mid-traversal call()'s per-parent value is READ — either the legacy marker's direct read body,
+ *  or a standard pre-barrier `as(label)` read by `select(label)` in the sibling. A DIRECT marker read (a
+ *  property value, the element id, or its label) may end in `.fold()` to widen the per-parent value from a
+ *  scalar to a LIST (`fold: true`). A computed marker injection, or a bare MULTI-VALUED marker read with
+ *  no `.fold()`, is out of scope and fails closed with a clear deferral.
  *
  *  The read produces the per-parent VALUE; correlation back to the parent is by a minted CORRID (an
  *  `origin` channel the sibling marker join projects), NEVER by re-matching this value against the returned
@@ -37,7 +37,9 @@ export type CallParams = Record<string, unknown>;
 export type InjectionKind =
   | { readonly kind: 'values'; readonly key: string; readonly fold?: boolean }
   | { readonly kind: 'id'; readonly fold?: boolean }
-  | { readonly kind: 'label'; readonly fold?: boolean };
+  | { readonly kind: 'label'; readonly fold?: boolean }
+  /** A standard `as(label)` before the barrier, read by `select(label)` in its sibling. */
+  | { readonly kind: 'alias'; readonly label: string };
 
 /** What a call() site parsed to before registry lookup — the service name plus its
  *  resolved constant params. Shared by the source form (g.call(...)) and the
@@ -50,6 +52,8 @@ export interface CallSpec {
   readonly serviceName: string;
   readonly params: CallParams;
   readonly injectionTraversal?: any;
+  /** The pre-barrier alias a sibling `select(label)` reads as its injected value. */
+  readonly injectionLabel?: string;
 }
 
 /** ONE call() occurrence, with everything a service needs to lower into it: this call's resolved
@@ -308,8 +312,9 @@ export type Contribution =
  */
 export interface BarrierInput {
   /** The per-parent scalar or explicitly-folded list the call injects: `values(k)`, `id()` or
-   *  `label()` over the parent, as `injectionKindOf` classified it. Absent when the call names no
-   *  injection (the sub-traversal is a constant), which is the case the rejoin answers with a cross join. */
+ *  `label()` over the parent, or the value selected from its standard pre-barrier alias. Absent when the
+ *  call names no injection (the sub-traversal is a constant), which is the case the rejoin answers with
+ *  a cross join. */
   readonly injectedValue?: unknown;
 }
 

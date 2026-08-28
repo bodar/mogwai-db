@@ -57,7 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { CORR_PREFIX, INJECT_VALUES_KEY, injectedPairs, injectedReduction, isParentMarkerBody } from '../ir/injection.ts';
+import { CORR_PREFIX, INJECT_LABEL_KEY, INJECT_VALUES_KEY, injectedPairs, injectedReduction, isInjectedAliasBody, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -3340,23 +3340,20 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   let elem = elem0;
   const injecting = injectedPairs(params) != null;
   for (; at < steps.length; at++) {
-    // STOP before a federated `parent` MARKER step: it is not an ordinary source filter (its operand
-    // resolves to the injected value cell), so it is handled by the dedicated block below WITH the
-    // injection cell in scope. Reaching it here would run the marker operand through `sourceFilter`
-    // without the cell — the value would not resolve and a `within(marker)` would throw.
-    if (injecting && markerStep(steps[at], params)) break;
+    // STOP before a federated injection operand: the legacy marker or a standard sibling `select()` is
+    // not an ordinary source filter because its operand resolves to the injected value cell. The dedicated
+    // block below supplies that cell before lowering the user's filter.
+    if (injecting && injectionStep(steps[at], params)) break;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
     if (!clause) break;
     pred = and(pred, clause);
   }
 
-  // A federated sibling's marker step — `has(key, __.call('parent', …))` OR `has(key,
-  // within(__.call('parent', …)))` — is not an ordinary predicate on THIS graph: its parent read
-  // already happened, so the marker operand resolves to the per-parent injected value cell and the
-  // step lowers through the ordinary filter path (below). Detected as "the broken-at step carries a
-  // `parent` marker ANYWHERE in its operands" — the direct form and the `within` form both qualify,
-  // so the operator that wraps it (if any) is the USER's, never the compiler's.
-  const marker = injectedPairs(params) ? markerStep(steps[at], params) : null;
+  // A federated sibling's injection step — `has(key, __.call('parent', …))`, `has(key, select('e'))`,
+  // or either inside `within()` — is not an ordinary predicate on THIS graph: its parent read already
+  // happened, so the operand resolves to the per-parent injected value cell and the step lowers through
+  // the ordinary filter path below. The wrapping operator is the USER's, never the compiler's.
+  const marker = injectedPairs(params) ? injectionStep(steps[at], params) : null;
   // Keep fused filters on the source whether the marker supplies a join or the ordinary seed does.
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   let rel: Rel;
@@ -3402,6 +3399,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
         id: fresh('ilm'), channels: [], expr: ivCell, as: { value: 'value' },
         type: typeOf(meta('value', 'any', true)),
       }),
+      ...(typeof params[INJECT_LABEL_KEY] === 'string' ? { label: params[INJECT_LABEL_KEY] as string } : {}),
     };
     // The marker's OWN `has()` (steps[at]) lowered by the ordinary source-filter path over the joined
     // relation, with the marker operand resolving to `iv`. The user's operator (eq / within / …) drives
@@ -3452,16 +3450,16 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
 }
 
-/** Does this step carry a `parent` injection marker ANYWHERE in its operands — the direct form
- *  `has(key, __.call('parent', …))` or a wrapped form `has(key, within(__.call('parent', …)))`? The
- *  marker is a nested-traversal operand; the wrapping operator (if any) is the USER's and is lowered by
- *  the ordinary predicate path, so detection is operator-agnostic — it walks the step's own nested
- *  operands (one level, plus a predicate's member operands) for the marker body. Returns `true` when
- *  found; the marker operand itself resolves to the injected value cell via `ctx.injectionCell`. */
-function markerStep(step: IRStep | undefined, params: Record<string, unknown>): boolean {
+/** Does this step carry either injection operand anywhere in its nested values — the legacy
+ * `call('parent', …)` marker or the standard `select(label)`? The wrapping operator is the USER's and
+ * lowers through the ordinary predicate path, so detection walks predicate member operands too. */
+function injectionStep(step: IRStep | undefined, params: Record<string, unknown>): boolean {
   if (!step) return false;
   const hasMarker = (value: unknown): boolean => {
-    if (isNested(value)) return isParentMarkerBody(stepChain((value as { nested: any }).nested, params));
+    if (isNested(value)) {
+      const body = stepChain((value as { nested: any }).nested, params);
+      return isParentMarkerBody(body) || isInjectedAliasBody(body, params[INJECT_LABEL_KEY]);
+    }
     // A predicate operand (`within(marker)`, `eq(marker)`) carries its members in `operands`.
     const pred = value as { operands?: readonly { value: unknown }[] } | null;
     return pred?.operands != null && pred.operands.some((o) => hasMarker(o.value));

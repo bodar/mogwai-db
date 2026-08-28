@@ -226,6 +226,27 @@ describe('federate — arg-less MID injection (win 2b, the parent marker in the 
   });
 });
 
+describe('federate — standard as()/select() MID injection', () => {
+  const argless =
+    'g.V().hasLabel("person").values("name").as("e").call("federate", ["graph":"crew"]).V().has("name", select("e"))';
+  const explicit =
+    'g.V().hasLabel("person").values("name").as("e").call("federate", ["graph":"crew", "traversal": __.V().has("name", select("e"))])';
+
+  test('arg-less and explicit forms inject the pre-barrier alias into the sibling select operand', async () => {
+    expect(await runNames(argless)).toEqual(['marko']);
+    expect(await runNames(explicit)).toEqual(await runNames(argless));
+  });
+
+  test('the standard spelling preserves distinct parents carrying the same injected value', async () => {
+    const two = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")', 'g.addV("person").property("name","vadas")'])
+      await two.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
+    const result = await Promise.all((await two.executor('home').framedAsync(argless, {})).map(dec));
+    expect(result.length).toBe(2);
+  });
+});
+
 describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
   test('sibling marker lowering returns each matched element with its injected corrId', () => {
     const pairs = { c41: 'marko', c42: 'stephen' };

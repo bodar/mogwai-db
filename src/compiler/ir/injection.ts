@@ -34,6 +34,11 @@
  *  name, so it keeps its prefix.) */
 export const INJECT_VALUES_KEY = '_mogwai_inject';
 
+/** The standard alias name whose sibling `select()` reads the injected pair value. This is compiler
+ * metadata alongside the existing pair map while the marker transport remains live; it is never a user
+ * binding and does not change the pair representation. */
+export const INJECT_LABEL_KEY = '_mogwai_inject_label';
+
 /** An internal marker on the sibling request for federate's grouped reduction transport.  Its GROUP
  * key is the injected correlation channel, which is not a Gremlin property and therefore must be
  * selected by the RelIR lowering rather than by the synthesized Gremlin text. */
@@ -71,6 +76,13 @@ export const ENDPOINT_IDS_KEY = '_mogwai_endpoints';
  *  the read, if any, is `body[0].args[1]` (a nested `__.values('k')`/`__.id()`/`__.label()`). */
 export const isParentMarkerBody = (body: readonly { name: string; args: readonly { value: unknown }[] }[]): boolean =>
   body.length === 1 && body[0]!.name === 'call' && body[0]!.args[0]?.value === PARENT_MARKER;
+
+/** True for the standard sibling operand that reads the injected alias value. */
+export const isInjectedAliasBody = (
+  body: readonly { name: string; args: readonly { value: unknown }[] }[], label: unknown,
+): boolean =>
+  typeof label === 'string' && body.length === 1 && body[0]!.name === 'select'
+    && body[0]!.args.length === 1 && body[0]!.args[0]?.value === label;
 
 /** The per-parent correlation id, as a VALID IDENTIFIER (`c0`, `c1`, …) — the same identifier shape every
  *  other bound name in the system uses, never a bare number dressed as a string. `corrKey(n)` mints it;

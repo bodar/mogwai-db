@@ -152,7 +152,7 @@ export interface ChainCtx extends FilterCtx {
    * category as `collections`/`sideEffects`: a chain-global binding the resolvers consult, not a
    * property of the relation. Absent for every non-federated chain.
    */
-  readonly injectionCell?: { readonly value: import('../../../rel/expr.ts').Expr; readonly listSet: () => import('../../../rel/rel.ts').Rel };
+  readonly injectionCell?: { readonly value: import('../../../rel/expr.ts').Expr; readonly listSet: () => import('../../../rel/rel.ts').Rel; readonly label?: string };
 }
 
 /**
