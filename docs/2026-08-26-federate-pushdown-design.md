@@ -128,9 +128,15 @@ legal but does NOT lower in our engine today.
    Map.Entry value and is re-read in `…unfold().group().by(Column.keys).by(<...>)` now expands correctly —
    the token `by(Column.values)`, the bare `by(select(Column.values))`, and the deep
    `by(select(Column.values).unfold().unfold().values('name').fold())` all frame vertex nodes / re-enter
-   the element loop (was a rowid-leak + null before). The remaining Stage-1 work before Stage 3 is the
-   isolation proof for the OTHER result shapes on the sibling: map/project value, composite
-   `project('vs','es')`.
+   the element loop (was a rowid-leak + null before).
+
+   **✅ ALL FIVE RESULT SHAPES now lower as a group value-by (commit `6c61756f`):** scalar (count), list
+   (fold), element-list (`out().fold()`), MAP (`project`/`valueMap`/`elementMap` — valueMap/elementMap
+   added last, framing a bare correlated map per traverser, `Grouping.java:92-101` confirms no fold
+   injection for a valueMap step traversal), and composite (`project('vs','es')`). **The five-shape
+   isolation gate for Stage 3 is MET** — the group-value-shape substrate is complete. Remaining Stage-1
+   work is now only the sibling-synthesis stages (2 inbound map reception, 3 outbound synthesis), which
+   consume this substrate rather than extending it.
 2. **Inbound per-parent-map reception (dormant behind the old path).** A `foreignRelation` variant
    consuming the `{parentId → [elements]}` map via two-level `json_each` → `(parentId, element)` rows, and a
    new `resumed` arm landing them into a BoundGraph CTE by the parentId KEY, reusing the existing
