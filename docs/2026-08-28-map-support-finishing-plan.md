@@ -28,13 +28,15 @@ explicitly when checking (a naive `JSON.stringify` shows `{}`, which masked one 
   `82434fcc`, `9fec4146`); `within(select(Column.values))` over a list entry does membership (Stage E fix).
 - Map-valued group `select(Column.values).unfold().select(<innerkey>)` — re-enters the inner map.
 
-## Status (2026-08-28): G1, G3, G4, G5 all LANDED; G2 deferred (exotic double-group element-list value).
-The finishing work is COMPLETE except the one exotic nested shape G2 names. Map support now covers every
-producer→consumer path the audit catalogued, including the three that needed new substrate: `project()`
-map unfold (G3, via a unified `{t:'string'}` map-key encoding), a map bound to an `as()` label and read
-back (G4, via a `map` arm on the alias vocabulary + static key sets for the map-key-vs-alias precedence),
-and a map literal as a produced value (G5). See `[[g4-map-key-vs-alias-precedence]]` for the one design
-decision (static key sets, user-approved).
+## Status (2026-08-28): G1, G3, G4, G5 LANDED; G2 now FAIL-CLOSED (was a silent wrong answer).
+The finishing work is COMPLETE. Map support covers every producer→consumer path the audit catalogued,
+including the three that needed new substrate: `project()` map unfold (G3, via a unified `{t:'string'}`
+map-key encoding), a map bound to an `as()` label and read back (G4, via a `map` arm on the alias
+vocabulary + static key sets for the map-key-vs-alias precedence), and a map literal as a produced value
+(G5). See `[[g4-map-key-vs-alias-precedence]]` for the one design decision (static key sets, user-approved).
+**G2 no longer mis-executes** — the double-group of an element-list value now DECLINES (commit f157d6d6)
+rather than leaking rowids; the full nested-shape fix (carry the entry's `valOf`, expand recursively) is
+the one remaining task, tracked below, and an L4 `@Unsupported` scenario fails loudly the day it lands.
 
 ## GAPS (the finishing work), in priority order
 
@@ -46,7 +48,12 @@ source-form branch's `out.kind==='map'` guard conflated a USER's map terminal wi
 injection result. **Fixed:** the source-form branch now resumes `out.kind==='map'` as a typed scalar map
 traverser instead of throwing. Verified: group/groupCount/project siblings return their maps.
 
-### G2 — re-group element-list value with NO value-by leaks raw ROWIDS  ⚠️ WRONG ANSWER (silent, uncensused)
+### G2 — re-group element-list value with NO value-by leaks raw ROWIDS  ✅ FAIL-CLOSED (2026-08-28, f157d6d6); full nested fix still TODO
+**No longer a silent wrong answer** — `groupRows` now DECLINES a by()-less collecting arm over an entry
+host whose `entry.valOf` is non-scalar, so this raises `UnsupportedTraversal` instead of leaking rowids.
+The full fix (below) — carry the entry's `valOf` on the `GroupRecipe`, collect at root encoding, expand
+recursively via `listNodeExpr` — is the one remaining map-support task. An L4 `@Unsupported` scenario
+pins the refusal and fails loudly when it lands.
 `g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys)`
 → `{josh:[{t:'list',v:[3,5]}], …}` — raw rowids. Should be `{josh:[[v[ripple],v[lop]]], …}`.
 Same rowid-leak class as `ecff2eb9`, on the NO-VALUE-BY default-fold re-group path: `group().by(Column.keys)`
