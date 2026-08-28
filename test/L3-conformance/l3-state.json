@@ -1,5 +1,5 @@
 {
-  "passing": 1791,
+  "passing": 1793,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1388,6 +1388,8 @@
     "g_injectXhelloX_asBool",
     "g_injectXhello_worldX_spiltXnullX",
     "g_injectXinvalidstrX_asDate",
+    "g_injectXlist1_list2X_fold",
+    "g_injectXlist1_list2_list3X_fold",
     "g_injectXlistX1_2_3XX_limitXlocal_1X",
     "g_injectXlistX1_2_3XX_rangeXlocal_1_2X",
     "g_injectXlistX1_2_3XX_tailXlocal_1X",
@@ -2184,8 +2186,6 @@
     "g_injectXhello_hiX_concatXV_values_order_byXnameX_valuesXnameXX",
     "g_injectXlabel_person_name_marko_label_person_name_stephenX_mergeV",
     "g_injectXlabel_person_name_marko_label_person_name_stephenX_mergeVXidentityX",
-    "g_injectXlist1_list2X_fold",
-    "g_injectXlist1_list2_list3X_fold",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_create",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_match",
     "g_injectXlistX_isXtypeOfXGType_LISTXX_groupCount",

@@ -1281,6 +1281,8 @@ ran	1	1	0ef7f83975c844d2	6565523f75999b85	g.inject([1, 2, 3]).tail(Scope.local, 
 ran	2	2	a61933f34952a696	9258c237677afd09	g.inject([1, 2, 3], [4, 5, 6]).range(Scope.local, 1, 2)
 ran	2	2	5b3dcf3c60318d1d	d32f8334e4fe65cf	g.inject([1, 2, 3], [4, 5, 6]).tail(Scope.local, 1)
 ran	2	2	aa090cef998daa77	ed3188a0ec417e85	g.inject([1, 2], [3, 4, 5]).limit(Scope.local, 1)
+ran	1	1	76a56f7e06335aa9	7768c076f49a106a	g.inject([1, 2], [3, 4]).fold()
+ran	1	1	b30bb982a52b828f	c95022cab6238352	g.inject([1, 2], [3, 4], [5, 6]).fold()
 ran	1	1	677ab0b1f8525ba6	4f1369c80a2ba7fd	g.inject([1, 3, 100, 300])
 ran	1	1	c3070bd4d04ed405	35ac86a546fe8442	g.inject([1,2]).asString(Scope.local)
 ran	1	1	a495475abbcf65dc	29eaf882103c4444	g.inject([1,null]).asString(Scope.local)

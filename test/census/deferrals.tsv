@@ -615,8 +615,6 @@ deferred	The substring() step can only take string as argument, encountered clas
 deferred	this traversal is not supported yet: no lowering covers g.inject(["test"]).is(P.typeOf(GType.LIST)).groupCount()	g.inject(["test"]).is(P.typeOf(GType.LIST)).groupCount()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2, 3, 4]).asNumber()	g.inject([1, 2, 3, 4]).asNumber()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2, 3, 4]).unfold().asNumber()	g.inject([1, 2, 3, 4]).unfold().asNumber()
-deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2], [3, 4]).fold()	g.inject([1, 2], [3, 4]).fold()
-deferred	this traversal is not supported yet: no lowering covers g.inject([1, 2], [3, 4], [5, 6]).fold()	g.inject([1, 2], [3, 4], [5, 6]).fold()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1,2]).asBool()	g.inject([1,2]).asBool()
 deferred	this traversal is not supported yet: no lowering covers g.inject([1,2]).asDate()	g.inject([1,2]).asDate()
 deferred	The lTrim(local) step can only take string or list of strings	g.inject([1,2]).lTrim(Scope.local)

@@ -1066,6 +1066,35 @@ export function foldMaps(
   };
 }
 
+/**
+ * `foldScalars`/`foldElements`/`foldMaps`' twin for the LIST shape: `fold().fold()`,
+ * `map(__.out().fold()).fold()`, `local(__.out().fold()).fold()` — folding a stream whose traverser is
+ * already a list, into a list-of-lists. The member is the traverser's OWN list value, so this is the
+ * "the member IS the value's shape" identity one container up: each `LIST_COL` value rides in whole under
+ * `json()` (the `foldMaps` double-encoding reason — a raw JSONB member would re-encode as a quoted
+ * string) and the result `of` is `{kind:'list', of: inputOf}`, which `listNodeExpr`/`listPayloadExpr`
+ * already recurse over. So the nesting frames correctly at any depth with zero new framing.
+ *
+ * The input list is kept at its ROOT encoding — a `{kind:'elem'}`/`{kind:'list'}` inner list is already
+ * the raw array `LIST_COL` holds, so no unwrap is needed (unlike a map value's `{t,v}` envelope). Member
+ * order is `foldMaps`' exactly: the caller's encounter, always present for a `fold()`.
+ */
+export function foldLists(
+  input: Rel, of: ListOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } {
+  const order: readonly SortTerm[] = opts.order?.length
+    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
+    : [{ expr: col(input.id, LIST_COL), dir: 'asc' as const }];
+  return {
+    rel: make.aggregate({
+      id: fresh('fl'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [],
+      aggs: [[LIST_COL, collectedArray(jsonOf(col(input.id, LIST_COL)), order)]],
+    }),
+    of: { kind: 'list', of },
+  };
+}
+
 /** The storage-class-determined types a bare member infers back to EXACTLY — `string` and `int`, the two
  *  whose JS value round-trips its own type and precision through the JSON channel. `double` is NOT one:
  *  a whole-number double (`1.0`) infers back as an Int, and a 16-17 digit double loses a bit through

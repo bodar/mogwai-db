@@ -42,7 +42,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldLists, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -2040,6 +2040,27 @@ function listTail(
         type: unfolded.typed ? PER_ROW('vtype') : memberTypeOf(items) ?? UNKNOWN,
         ...(items.kind === 'scalar' && items.productiveNull ? { productiveNull: true } : {}),
       }, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    // GLOBAL `count()` counts the LIST TRAVERSERS — a list is ONE traverser, so this is the ordinary
+    // `countTail` (the same barrier the element/map streams use), the complement of the `count(Scope.local)`
+    // that counts a list's MEMBERS (`listRetype`). Without it `fold().count()` — and the `fold().fold()
+    // .count(Scope.local)` that `collapseFoldCountLocal` rewrites INTO `fold().count()` — declined.
+    if (step.name === 'count' && !isLocalScope(step)) {
+      if ((step.args ?? []).length) return null;
+      const counted = countTail(rel, fresh);
+      return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    // `fold()` over a LIST stream — fold every list traverser into ONE list-of-lists (`fold().fold()`,
+    // `map(__.out().fold()).fold()`, `local(__.out().fold()).fold()`). The member IS the traverser's own
+    // list, so `foldLists` collects each `LIST_COL` value whole and the result `of` is
+    // `{kind:'list', of: items}` — the nested shape the already-recursive framer expands. A GLOBAL fold
+    // only (a `fold(Scope.local)` is not a step); the encounter orders the members.
+    if (step.name === 'fold' && !(step.args ?? []).length && !isLocalScope(step)) {
+      const encounter = encounterOf(rel.channels);
+      const folded = foldLists(rel, items, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
     // A GLOBAL row op slices the stream's rows, not one traverser's members.
