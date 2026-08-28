@@ -203,9 +203,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // Each field is a correlated read of the CURRENT traverser (`rn.id`), and the pairs array carries
-    // the key beside the value's own `{t,v}` node — the same encoding `group()` emits.
-    expect(p.sql).toContain("json_array('n', json_object('t'");
-    expect(p.sql).toContain("json_array('a', json_object('t'");
+    // a `{t:'string'}` KEY node beside the value's own `{t,v}` node — the same encoding `group()` emits,
+    // now including the key (so `project().unfold()` frames its entries).
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'n'), json_object('t'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'a'), json_object('t'");
     expect(p.sql).toContain("rp3.key = 'name'");
     expect(p.sql).toContain("rp17.key = 'age'");
     // BOTH fields are droppable (a property `by()` can be unproductive), so the array is ACCUMULATED
@@ -224,8 +225,9 @@ describe('scalar-parent / projection SQL', () => {
    */
   test('select() at every arity is one lowering — RelIR', () => {
     const store = seededStore();
+    // The key is a `{t:'string', v:<label>}` node now (unified map-key encoding), so read `k.v`.
     const entries = (row: any): [string, any][] =>
-      (JSON.parse(row.map) as [string, any][]).map(([k, v]) => [k, v && typeof v === 'object' && 't' in v
+      (JSON.parse(row.map) as [any, any][]).map(([k, v]) => [k.v, v && typeof v === 'object' && 't' in v
         ? (v.t === 'vertex' || v.t === 'edge' ? v.v.props.name[0].v : v.v) : v]);
 
     // ONE key with a `by()` — `SelectOneStep`: the label's value, then the by() applied to IT. The

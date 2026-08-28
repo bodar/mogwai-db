@@ -1229,13 +1229,13 @@ const PAIR = { value: 'ev', ord: 'eo' } as const;
 /**
  * Does this pair's KEY equal `key` — tolerant of BOTH key encodings the map vocabulary carries.
  *
- * A map key is a string here (a property name, a `project()` label), but the two producers spell it
- * differently: `group()`/`valueMap()` emit a `{t,v}` node key (`[{"t":"string","v":"name"},…]`), while
- * `project()` emits a BARE string key (`["n",…]` — `record.ts`'s deliberate choice, since a project key
- * is never in question and the wire framer infers a bare member). Both frame identically, so it was a
- * latent split until `project().fold().unfold().select(k)` made a bare-key map re-enter `mapTail`. So
- * the match reads `$[0].v` (the enveloped key) and falls back to `$[0]` (the bare key) — one comparison
- * that both encodings satisfy, rather than a producer-specific reader.
+ * A map key is a string here (a property name, a `project()` label), and every producer now emits it as
+ * a `{t,v}` node key (`[{"t":"string","v":"name"},…]`) — `record.ts` was the last BARE-string holdout
+ * (`["n",…]`) and moved to the node encoding so `project().unfold()` frames its entries and reads
+ * `select(Column.keys)` (both need `$.v`/a valid-JSON key). The fallback to `$[0]` is kept as belt-and-
+ * braces for any older bare-key blob still in flight (a stored map property predates this), so the match
+ * reads `$[0].v` (the enveloped key) and falls back to `$[0]` (a bare key) — one comparison that both
+ * encodings satisfy, rather than a producer-specific reader.
  */
 const keyMatches = (pair: Expr, key: string): Expr => eq(
   { kind: 'call', fn: 'COALESCE', args: [

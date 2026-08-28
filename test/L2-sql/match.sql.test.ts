@@ -18,8 +18,8 @@ describe('match() SQL', () => {
     // The binding table is the root scan; the pattern is a join onto it.
     expect(p.sql).toMatch(/FROM nodes rn[^]*edges/);
     // Both declared variables are projected into the bindings map.
-    expect(p.sql).toContain("json_array('a'");
-    expect(p.sql).toContain("json_array('b'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'a'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'b'");
   });
 
   // A two-pattern chain: two hops, so two edge joins, and the second pattern's start re-roots on the
@@ -27,7 +27,7 @@ describe('match() SQL', () => {
   test('chained patterns → a join per hop', () => {
     const p = read('g.V().match(__.as("a").out("knows").as("b"), __.as("b").out("created").as("c"))');
     expect((p.sql.match(/edges rme\d+/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    expect(p.sql).toContain("json_array('c'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'c'");
     // Both hop labels are filtered on the labels table.
     expect(p.sql).toContain("'knows'");
     expect(p.sql).toContain("'created'");
@@ -41,8 +41,8 @@ describe('match() SQL', () => {
     // Two hops (out, in) → two edge joins.
     expect((p.sql.match(/edges rme\d+/g) ?? []).length).toBeGreaterThanOrEqual(2);
     // The map declares only a and b (a is not re-bound to a fresh column by the back edge).
-    expect(p.sql).toContain("json_array('a'");
-    expect(p.sql).toContain("json_array('b'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'a'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'b'");
     // The constraint ties the second hop back to the root row — a WHERE comparing to rn.
     expect(p.sql).toMatch(/WHERE[^]*rn\.id/);
   });
@@ -52,9 +52,9 @@ describe('match() SQL', () => {
   test('constraint pattern → a re-rooted filter, no new binding', () => {
     const p = read('g.V().match(__.as("d").in("knows").as("a"), __.as("d").has("name","vadas"))');
     // Only d and a are declared (the has() pattern binds nothing).
-    expect(p.sql).toContain("json_array('d'");
-    expect(p.sql).toContain("json_array('a'");
-    expect(p.sql).not.toContain("json_array('c'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'd'");
+    expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'a'");
+    expect(p.sql).not.toContain("json_array(json_object('t', 'string', 'v', 'c'");
     // The has() lands as a property existence filter, not a join that widens the row.
     expect(p.sql).toContain("'vadas'");
   });
@@ -145,7 +145,8 @@ describe('match() SQL', () => {
     expect(rows.length).toBe(1);
     // The terminal bindings map, one row: {a:marko, b:lop, c:josh}.
     const map = (rows[0] as { map: string }).map;
-    for (const [k, v] of [['a', 'marko'], ['b', 'lop'], ['c', 'josh']]) expect(map).toContain(`["${k}",{"t":"string","v":"${v}"}]`);
+    // The key is a `{t:'string'}` node now (unified map-key encoding), so the pair is [keyNode, valNode].
+    for (const [k, v] of [['a', 'marko'], ['b', 'lop'], ['c', 'josh']]) expect(map).toContain(`[{"t":"string","v":"${k}"},{"t":"string","v":"${v}"}]`);
   });
 
   // An `or(<branch>, <branch>)` match argument whose branches BIND NOTHING (existence tests over an
@@ -162,7 +163,7 @@ describe('match() SQL', () => {
     expect(p.sql).not.toContain('UNION');
     // Creators satisfying the or: marko (out-knows vadas) and josh (in-knows from marko, is a person).
     const rows = run(seededStore(), q + '.select("a","b").by("name")') as any[];
-    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['josh->lop', 'josh->ripple', 'marko->lop']);
   });
 
@@ -172,7 +173,7 @@ describe('match() SQL', () => {
   test('or() composes with wpred, bindings and a reducing constraint (corpus scenario)', () => {
     const q = 'g.V().match(__.where("a", P.neq("c")), __.as("a").out("created").as("b"), __.or(__.as("a").out("knows").has("name", "vadas"), __.as("a").in("knows").and().as("a").has(T.label, "person")), __.as("b").in("created").as("c"), __.as("b").in("created").count().is(P.gt(1))).select("a", "b", "c").by(T.id)';
     const rows = run(seededStore(), q) as any[];
-    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a},${g.b},${g.c}`; }).sort();
+    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.a},${g.b},${g.c}`; }).sort();
     expect(triples).toEqual(['1,3,4', '1,3,6', '4,3,1', '4,3,6']);
   });
 
@@ -183,7 +184,7 @@ describe('match() SQL', () => {
   test('or() over scalar/element back-edges in the zero-root regime (corpus scenario)', () => {
     const q = 'g.V().as("a").out().as("b").match(__.as("a").out().count().as("c"), __.or(__.as("a").out("knows").as("b"),__.as("b").in().count().as("c").and().as("c").is(P.gt(2)))).select("a","b").by("name")';
     const rows = run(seededStore(), q) as any[];
-    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['marko->josh', 'marko->lop', 'marko->vadas']);
   });
 
@@ -198,7 +199,7 @@ describe('match() SQL', () => {
     // brings its own UNION, so the connective's shape is asserted by the EXISTS count, not absence of one).
     expect((p.sql.match(/EXISTS \(SELECT/g) ?? []).length).toBeGreaterThanOrEqual(2);
     const rows = run(seededStore(), q + '.select("a","b").by("name")') as any[];
-    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['josh->lop', 'marko->lop', 'peter->lop']);
   });
 
@@ -230,7 +231,7 @@ describe('match() SQL', () => {
     const p = read(q);
     expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
     const rows = run(seededStore(), q) as any[];
-    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.a}->${g.b}`; }).sort();
+    const pairs = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.a}->${g.b}`; }).sort();
     expect(pairs).toEqual(['josh->ripple', 'marko->lop', 'peter->lop']);
   });
 
@@ -245,7 +246,7 @@ describe('match() SQL', () => {
     const p = read(q);
     expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
     const rows = run(seededStore(), q) as any[];
-    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k, v.v])); return `${g.x}->${g.a}->${g.b}`; }).sort();
+    const triples = rows.map((r: any) => { const g: any = Object.fromEntries(JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v])); return `${g.x}->${g.a}->${g.b}`; }).sort();
     // lop's lowest-weight in-edge is peter-created->lop (0.2); ripple's only in-edge is josh (1.0).
     expect(triples).toEqual(['josh->lop->peter', 'josh->ripple->josh', 'marko->lop->peter', 'peter->lop->peter']);
   });

@@ -10,7 +10,9 @@ import { test, expect, describe } from 'bun:test';
 import { run, seededStore } from '../support/harness.ts';
 
 const pairs = (rows: any[]) => JSON.parse(rows[0].map) as [any, any][];
-const field = (rows: any[], key: string) => pairs(rows).find(([k]) => k === key)?.[1];
+// A record's map key is now a `{t:'string', v:<label>}` node (unified with every other map producer so
+// `project().unfold()` frames), so match on `k.v` rather than the old bare `k` string.
+const field = (rows: any[], key: string) => pairs(rows).find(([k]) => k?.v === key)?.[1];
 
 describe('by(<numeric reducer>) carries its type into fields and members', () => {
   test('project().by(sum()) frames the field by the reducer type, not inference', () => {

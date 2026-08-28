@@ -374,8 +374,11 @@ describe('group / properties SQL', () => {
     const pairs = JSON.parse(run(store, gremlin)[0]!.map) as [any, any][];
     expect(pairs).toHaveLength(6); // 6 distinct (out-name, label, in-name) triples in the modern graph
     const marko = pairs.find(([k]) => k.v[0][1].v === 'marko' && k.v[2][1].v === 'lop');
+    // The record key's own inner keys are `{t:'string'}` nodes now (unified map-key encoding — see
+    // record.ts / map-unfold), so a record-as-group-key frames its pairs the same way every map does.
     expect(marko![0]).toEqual({ t: 'map', v: [
-      ['o', { t: 'string', v: 'marko' }], ['l', { t: 'string', v: 'created' }], ['i', { t: 'string', v: 'lop' }],
+      [{ t: 'string', v: 'o' }, { t: 'string', v: 'marko' }], [{ t: 'string', v: 'l' }, { t: 'string', v: 'created' }],
+      [{ t: 'string', v: 'i' }, { t: 'string', v: 'lop' }],
     ] });
     // The VALUE is the last edge routed to that key — one edge, framed as a typed element member.
     expect(marko![1].t).toBe('edge');
@@ -405,7 +408,8 @@ describe('group / properties SQL', () => {
     // harness can stringify these keys and get upstream's own `n-k->v` back.
     const markoAge = pairs.find(([k]) => k.v[0][1].v === 'marko' && k.v[1][1].v === 'age');
     expect(markoAge![0]).toEqual({ t: 'map', v: [
-      ['n', { t: 'string', v: 'marko' }], ['k', { t: 'string', v: 'age' }], ['v', { t: 'int', v: 29 }],
+      [{ t: 'string', v: 'n' }, { t: 'string', v: 'marko' }], [{ t: 'string', v: 'k' }, { t: 'string', v: 'age' }],
+      [{ t: 'string', v: 'v' }, { t: 'int', v: 29 }],
     ] });
     // The VALUE is the VertexProperty itself — the typed tree's third element kind.
     expect(markoAge![1]).toEqual({ t: 'property', v: { vpid: 2, owner: 1, pk: 'age', pv: 29, pvtype: 'int', pmeta: null } });

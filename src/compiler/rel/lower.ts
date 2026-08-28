@@ -4404,10 +4404,21 @@ function recordTail(
       }
     }
 
-    // Everything else DECLINES. A record is an ordinary per-row traverser, so a bare `dedup()`, a
-    // local-scope slice over its ENTRIES and `unfold()` to `Map.Entry` rows are all expressible and
-    // simply not built yet — declining is the honest answer rather than dropping the record's fields
-    // silently.
+    // `unfold()` — the record BECOMES a map and emits one `Map.Entry` traverser per field, exactly the
+    // symmetry `valueMap().unfold()` already has. The collapse is `recordToMap` (the same boundary
+    // `fold()`/local-slice cross above), and `mapTail` owns the `unfold` vocabulary (`unfoldMap` →
+    // `mapEntryTail`), so re-entering it at THIS step reaches its own `unfold` handler with the map's
+    // self-describing pairs — no record-specific entry machinery needed. `SelectStep`/`Scoping` yield a
+    // `LinkedHashMap`, so the entry order is the field declaration order the record already carries.
+    if (step.name === 'unfold' && !argValues(step).length) {
+      const mapped = recordToMap(rel, fields, ctx.source, fresh);
+      if (!mapped) return null;
+      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
+    }
+
+    // Everything else DECLINES. A record is an ordinary per-row traverser, so a bare `dedup()` and a
+    // local-scope slice over its ENTRIES are expressible and simply not built yet — declining is the
+    // honest answer rather than dropping the record's fields silently.
     return null;
   }
   return { rel, framing: { kind: 'record', fields }, aliases: labels, bulked: false };

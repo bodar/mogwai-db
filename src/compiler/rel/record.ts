@@ -311,10 +311,17 @@ function recordPairs(read: FieldRead, fields: readonly RecordField[], source: Gr
     if (!node) return null;
     const present = field.optional ? presence(read, field) : null;
     if (field.optional && !present) return null;
-    // The KEY is a bare string, not a `{t,v}` node: `frameTypedNode` reads a non-object member as an
-    // inferred value, which for a project key is exactly the String it must be. Tagging it would be a
-    // second encoding of the one thing about a record that is never in question.
-    pairs.push({ pair: { kind: 'json-array', items: [compilerText(field.key), node], binary: false }, present });
+    // The KEY is a `{t:'string', v:…}` node, the SAME self-describing encoding every other map producer
+    // (`group()`/`valueMap()`/`elementMap()`) emits. It COULD be a bare string — `frameTypedNode` infers a
+    // non-object member's type, which for a project key is the String it must be — and that was the
+    // original choice. But a bare key is not valid JSON on its own (`json('n')` throws `malformed JSON`),
+    // and reads through `$.v`/`$.t` as null: so `project().unfold()`'s entry framer AND its
+    // `select(Column.keys)` both need the node. Encoding it here is lossless for the fold/select-value
+    // paths (`frameTypedNode` frames `{t:'string',v:'n'}` identically to `'n'`) and lets a record→map
+    // collapse re-enter the map vocabulary with ONE key encoding rather than a record-special one. Costs
+    // a small per-field SQL-byte rise wherever a record collapses (the sql-hygiene ratchet) — the honest
+    // price of the unified encoding. `keyMatches` (map.ts) still tolerates both, so old maps are unaffected.
+    pairs.push({ pair: { kind: 'json-array', items: [typedNode(compilerText(field.key), compilerText('string')), node], binary: false }, present });
   }
   if (pairs.every((entry) => !entry.present))
     return { kind: 'json-array', items: pairs.map((entry) => entry.pair), binary: false };

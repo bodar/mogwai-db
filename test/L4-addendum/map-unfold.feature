@@ -51,6 +51,54 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | result |
       | m[{"person":"d[4].i"}] |
       | m[{"software":"d[2].i"}] |
+  # ---- project().unfold() → per-field Map.Entry stream (symmetry with valueMap) ----
+
+  # A project-produced record unfolds to one Map.Entry per field, exactly as valueMap does. The
+  # record COLLAPSES to a map (recordToMap) and re-enters mapTail's own unfold vocabulary, so its
+  # key is the {t:'string'} node every map producer uses (never a bare string — that would not be
+  # valid JSON for the entry-key framer). GraphQL to-one object fields as an entry stream.
+  @gap:map-unfold
+  Scenario: g_V_hasLabelXpersonX_limitX1X_projectXn_aX_byXnameX_byXageX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"n":"marko"}] |
+      | m[{"a":"d[29].i"}] |
+
+  # Entry-level select(keys) after a project unfold reads each field name.
+  @gap:map-unfold
+  Scenario: g_V_hasLabelXpersonX_limitX1X_projectXn_aX_unfold_selectXkeysX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold().select(keys)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | n |
+      | a |
+
+  # A project field whose by() body folds to a LIST unfolds with the element list expanded — the
+  # value side re-enters listTail, so the vertices frame as vertices (not raw rowids).
+  @gap:map-unfold
+  Scenario: g_V_hasLabelXpersonX_limitX1X_projectXn_oX_byXnameX_byXoutFoldX_unfold_selectXvaluesX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("person","name","marko").project("n","o").by("name").by(__.out().count()).unfold().select(values)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | d[3].l |
+
   # ---- Commit A: valueMap().unfold() → per-element Map.Entry stream ----
 
   # The canonical driver (map/Unfold.feature g_V_valueMap_unfold_mapXselectXkeysXX): each
