@@ -448,6 +448,20 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
     });
     return { rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, keys } };
   }
+  // `constant([a, b, …])` — a LIST LITERAL, the per-row twin of `injectList` (the SAME `listLiteralBlob`).
+  // It replaces each traverser's value with the compile-time list, so the whole re-enterable list tail
+  // (`unfold()`, `count(Scope.local)`, a local slice/reducer, a member predicate, `as()`/`select()`)
+  // composes over it — the list analogue of the map arm above, framed `{kind:'list', of: BARE_LIST}`.
+  if (Array.isArray(arg.value)) {
+    const blob = listLiteralBlob(arg, arg.value);
+    if (!blob) return null;
+    const rel = make.project({
+      id: fresh('cl'), input, channels: input.channels,
+      type: typeOf(meta(LIST_COL, 'json', true), ...carriedCols(input.channels)),
+      exprs: [[LIST_COL, blob], ...input.channels.map((ch) => [ch.col, col(input.id, ch.col)] as const)],
+    });
+    return { rel, framing: { kind: 'list', of: BARE_LIST } };
+  }
   const literal = constLit(arg);
   const tail = literal ? null : exactTailConst(arg);
   if (!literal && !tail) return null;
@@ -1852,24 +1866,31 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
  * MIXED arguments decline: `inject([1,2], 3)` is a list traverser and a scalar traverser in one
  * stream, which is the VARIANT shape rather than either of them.
  */
+/** One `[…]` literal argument as the `LIST_COL` pairs blob a list-valued relation carries, or `null` to
+ *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row) and
+ *  `constant([…])` (a per-row retype) — the two are one literal, produced at different positions. */
+function listLiteralBlob(listArg: Arg, values: readonly unknown[]): Expr | null {
+  // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
+  // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
+  // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
+  const members = listArg.members;
+  const items = values.map((value, mi) => {
+    const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
+    // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
+    // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
+    // the repair. `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
+    return item && typeof value === 'number' && !Number.isInteger(value) ? jsonMemberByTypeof(item) : item;
+  });
+  return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
+}
+
 function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
   const args = argValues(step);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
   const rows = (args as readonly unknown[][]).map((values, ai) => {
-    const listArg = step.args[ai]!;
-    // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
-    // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
-    // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
-    const members = listArg.members;
-    const items = values.map((value, mi) => {
-      const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
-      // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
-      // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
-      // the repair. `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
-      return item && typeof value === 'number' && !Number.isInteger(value) ? jsonMemberByTypeof(item) : item;
-    });
-    return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
+    const blob = listLiteralBlob(step.args[ai]!, values);
+    return blob ? [blob] : null;
   });
   if (rows.some((row) => !row)) return null;
   return {
