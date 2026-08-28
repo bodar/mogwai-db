@@ -50,27 +50,16 @@ injection result. **Fixed:** the source-form branch now resumes `out.kind==='map
 traverser instead of throwing. Verified: group/groupCount/project siblings return their maps.
 
 ### G2 — double-group of an element-list value  ✅ FIXED (2026-08-28, commit f220283e)
-**No longer a silent wrong answer** — `groupRows` now DECLINES a by()-less collecting arm over an entry
-host whose `entry.valOf` is non-scalar, so this raises `UnsupportedTraversal` instead of leaking rowids.
-The full fix (below) — carry the entry's `valOf` on the `GroupRecipe`, collect at root encoding, expand
-recursively via `listNodeExpr` — is the one remaining map-support task. An L4 `@Unsupported` scenario
-pins the refusal and fails loudly when it lands.
-`g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys)`
-→ `{josh:[{t:'list',v:[3,5]}], …}` — raw rowids. Should be `{josh:[[v[ripple],v[lop]]], …}`.
-Same rowid-leak class as `ecff2eb9`, on the NO-VALUE-BY default-fold re-group path: `group().by(Column.keys)`
-with no explicit value-by injects a default `fold()` whose value framing over an element-list entry value
-does not expand rowids via `listNodeExpr` (the `by(Column.values)` token path does). **Not in the census**
-(0 hits) — a genuine uncaught deferral→wrong-answer. **Root cause (fully traced 2026-08-28 — deeper than it
-first looked; TWO failed quick attempts):** the collecting arm's `MEMBER_COL` holds the ENTRY'S WHOLE VALUE
-— a `{t:'list', v:[rowids]}` node (`traverserMember` → `host.entry.val`, map.ts:434) — NOT a single element
-rowid. So the correct value shape is a LIST-OF-LISTS: `{kind:'list', of:host.entry.valOf}` =
-`{kind:'list', of:{kind:'list', of:{kind:'elem'}}}`, and the member is that entry list kept at ROOT encoding
-and expanded RECURSIVELY by `listNodeExpr`. The `elementMembers`/`memberElem` single-element shortcut is
-WRONG BY ONE LEVEL — the framer then reads a list node as a rowid (→ null). **Correct fix:** `groupMap` sets
-the no-value-by re-group's `valOf` to `{kind:'list', of:<entryValOf>}` (nested) and collects the entry-value
-node at root encoding, letting `listNodeExpr` recurse. `by(Column.values)` works because it reads the value
-through `mapSide`/`sideList`, not a fresh `groupBarrier` — the two build the value differently. DEFERRED
-pending careful nested-shape work (exotic: a double-group of an element-list value; low frequency).
+`g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys)` once
+leaked raw rowids (`{josh:[{t:'list',v:[3,5]}], …}`), a silent wrong answer; briefly fail-closed (f157d6d6);
+now frames the correct list-of-lists of vertices (`{josh:[[v[ripple],v[lop]]], …}`). **The fix was a
+descriptor, not machinery** — the nesting substrate (`ListOf` + recursive `listNodeExpr`) already existed
+(it is LIST's; map borrowed it). The group recipe now carries the entry's own shape on a new
+`GroupRecipe.memberOf` (`= sideList(entry.valOf)`, the "the member IS the value's shape" identity
+`by(Column.values)` uses) and collects the entry value at ROOT encoding (`$.v`), so `groupMap` frames
+`{kind:'list', of: memberOf}` and `listNodeExpr` recurses. The `by(Column.values)` variant now AGREES with
+it. **Architectural lesson:** a nesting bug is a PRODUCER flattening the member shape at a barrier — this
+same lesson drives the LIST finishing work (`[[collection-shape-works-everywhere]]`).
 
 ### G3 — `project(k…).unfold()` declines  (asymmetry with valueMap)  ✅ FIXED (2026-08-28, commit a12957ce)
 `g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold()` → DECLINED, while
