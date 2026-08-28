@@ -56,11 +56,18 @@ node at root encoding, letting `listNodeExpr` recurse. `by(Column.values)` works
 through `mapSide`/`sideList`, not a fresh `groupBarrier` — the two build the value differently. DEFERRED
 pending careful nested-shape work (exotic: a double-group of an element-list value; low frequency).
 
-### G3 — `project(k…).unfold()` declines  (asymmetry with valueMap)
-`g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold()` → DECLINES, while
-`valueMap("name").unfold()` WORKS. A project-produced map does not unfold; a valueMap-produced one does.
-**Likely** the two map producers frame their `unfold()` re-entry differently — project's map-entry stream
-isn't wired to `unfoldMap`. Base-compiler gap, unrelated to federate.
+### G3 — `project(k…).unfold()` declines  (asymmetry with valueMap)  ✅ FIXED (2026-08-28, commit a12957ce)
+`g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold()` → DECLINED, while
+`valueMap("name").unfold()` WORKED. **Fixed** by wiring `recordTail`'s `unfold()` through the same
+`recordToMap` → `mapTail` collapse that `fold()`/local-slice already use, so it reaches `mapTail`'s own
+`unfold` handler (`unfoldMap` → `mapEntryTail`). The enabler was a UNIFICATION rather than a project
+special-case: a record's map KEY was the last BARE-STRING holdout — every other producer emits a
+`{t:'string'}` node key, and a bare key is not valid JSON so the entry framer's `json(mk)` threw
+`malformed JSON` (and read null through `select(Column.keys)`). Encoding the record key as a node is
+lossless for the fold/select paths and unifies the map-key encoding across all producers. **Compounding:**
++8 census traversals now execute (group/groupCount/select().by(…fold()) map producers whose unfold +
+downstream ops lower over the unified key). Small SQL-byte rise banked in sql-hygiene; wire bytes and all
+existing answers unchanged. Three L4 `map-unfold` scenarios added.
 
 ### G4 — `select(m).select(k)` — a key OUT of an aliased map declines
 `g.V()…project("n").by("name").as("m").select("m").select("n")` → DECLINES (also without federate — this
@@ -75,8 +82,8 @@ Lowest priority.
 ## Sequencing
 - **G1 + G2 first** — G1 is a rewrite regression (a lost capability), G2 a silent wrong answer. Both are
   references-settled and being fixed now (2026-08-28).
-- **G3/G4/G5** — general map-shape completeness, no federate coupling. G3 (project unfold) and G4 (nested
-  select) are the higher-value pair (both are natural GraphQL-shaped reads); G5 is a corner.
+- **G3/G4/G5** — general map-shape completeness, no federate coupling. G3 (project unfold) ✅ landed
+  2026-08-28. G4 (nested select) is next — the other natural GraphQL-shaped read; G5 is a corner.
 
 ## Verification discipline
 Every fix: `bun test test/L4-addendum/l4.test.ts test/federation.test.ts test/services.test.ts` + `census`
