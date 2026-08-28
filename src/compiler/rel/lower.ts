@@ -44,7 +44,7 @@ import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupBarrierByOrigin, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
-import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
+import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
@@ -2783,7 +2783,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  */
 export function lowerForeignResume(
   rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering = {},
-  rejoin?: { readonly parentCount: number; readonly injected: boolean },
+  rejoin?: { readonly parentCount: number; readonly injected: boolean } | { readonly parentCount: number; readonly mapValues: Extract<ValueNode, { readonly t: 'map' }> },
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -2799,6 +2799,7 @@ export function lowerForeignResume(
   // distinct), the raw rows repeat that element per corrId; deduping by id here keeps the payload table
   // one-row-per-element while the corrId-tagged `pool` below retains the duplicates for the scatter. Without
   // this the id-rejoin multiplies (N corrIds × N payload rows).
+  const mapValues = rejoin && 'mapValues' in rejoin ? rejoin.mapValues : null;
   const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
   const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
   const edgeRows = dedupById(rows.filter((r) => r.kind === 'edge'));
@@ -2834,7 +2835,23 @@ export function lowerForeignResume(
     const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
     // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
     // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
-    const landedRelation = foreignRelation(landedRows, kind, fresh, [], undefined, true);
+    const raw = mapValues
+      ? foreignMapRelation(mapValues, kind, fresh)
+      : foreignRelation(landedRows, kind, fresh, [], undefined, true);
+    // The bound payload is one row per element. A mapValues result may carry the same sibling
+    // element under several parent keys; parent multiplicity belongs to the rejoin pool below.
+    const landedRelation = mapValues
+      ? (() => {
+          const deduped = make.distinct({ id: fresh('fmd'), input: raw, channels: [], type: raw.type });
+          return make.project({
+            id: fresh('fmo'), input: deduped, channels: [], type: typeOf(...landedCols(kind)),
+            exprs: [
+              ...foreignPayloadCols(kind).map((column) => [column.name, col(deduped.id, column.name)] as const),
+              [FOREIGN_ORD, compilerInt(0)],
+            ],
+          });
+        })()
+      : raw;
     const materialized = make.materialize({ id: fresh('bgm'), input: landedRelation, channels: [], type: landedRelation.type, name, fenced: true });
     bindings.push({ name, node: materialized });
     return name;
@@ -2851,10 +2868,14 @@ export function lowerForeignResume(
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
-  const pool = rejoin?.injected
+  const pool = mapValues
+    ? foreignMapRelation(mapValues, streamElem, fresh, [meta('parentId', 'text')])
+    : rejoin && 'injected' in rejoin && rejoin.injected
     ? foreignRelation(rows.filter((row) => row.kind === streamElem), streamElem, fresh, [meta('corrId', 'int', true)], (row) => [row.corrId])
     : landed;
-  const rejoined = rejoin ? foreignRejoin(pool, streamElem, rejoin.parentCount, rejoin.injected, fresh) : landed;
+  const rejoined = mapValues
+    ? foreignMapRejoin(pool, streamElem, rejoin!.parentCount, fresh)
+    : rejoin && 'injected' in rejoin ? foreignRejoin(pool, streamElem, rejoin.parentCount, rejoin.injected, fresh) : landed;
   // ID-CARRY: the stream carries the element ID (+ channels) — the payload is REJOINED at each read
   // through the `BoundGraph`. The landed payload columns are projected AWAY; the shared movement/leaf
   // builders assume an id-carrying stream, and a stream still holding the landed payload would widen

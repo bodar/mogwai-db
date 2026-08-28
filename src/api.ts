@@ -178,6 +178,8 @@ export type ForeignRow =
 export type ForeignResult =
   | { readonly kind: 'elements'; readonly rows: readonly ForeignRow[] }
   | { readonly kind: 'scalar'; readonly value: ValueNode }
+  /** A keyed typed map, used by federate's standard mapValues injection transport. */
+  | { readonly kind: 'map'; readonly value: Extract<ValueNode, { readonly t: 'map' }> }
   | { readonly kind: 'values'; readonly values: readonly FrameNode[] };
 
 /** WHICH pushed terminal a federated sub-traversal ends in, when the sibling's `plan.shape` alone is

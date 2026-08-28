@@ -245,6 +245,29 @@ describe('federate — standard as()/select() MID injection', () => {
     const result = await Promise.all((await two.executor('home').framedAsync(argless, {})).map(dec));
     expect(result.length).toBe(2);
   });
+
+  test('mapValues batches the alias values under one ordinary bound Map', async () => {
+    let calls = 0; let gremlin = ''; let bound: unknown;
+    const contribution: any = createFederateService({
+      executor: () => ({
+        runForeign: (g: string, params: Record<string, unknown>) => {
+          calls++; gremlin = g; bound = params.injectedMap;
+          return Promise.resolve({ kind: 'map', value: { t: 'map', v: [] } });
+        },
+      }),
+    } as any).resolve({
+      params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
+      boundParams: {}, federationDepth: 0, injection: { kind: 'alias', label: 'e' },
+      mapValues: { param: 'injectedMap' },
+    });
+    await contribution.apply([
+      { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: {}, injectedValue: 'marko' },
+      { kind: 'vertex', id: 2, label: 'person', labels: ['person'], props: {}, injectedValue: 'marko' },
+    ]);
+    expect(calls).toBe(1);
+    expect(gremlin).toBe('g.inject(injectedMap).unfold().group().by(Column.keys).by(__.V().has("name",select(Column.values)))');
+    expect(bound).toEqual(new Map([['0', 'marko'], ['1', 'marko']]));
+  });
 });
 
 describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {

@@ -7,6 +7,13 @@ import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { corrKey, ENDPOINT_IDS_KEY, INJECT_LABEL_KEY, INJECT_REDUCE_KEY, INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
+const mapValuesGremlin = (gremlin: string, label: string, param: string): string | null => {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rewritten = gremlin.replace(new RegExp(`select\\(\\s*(['"])${escaped}\\1\\s*\\)`, 'g'), 'select(Column.values)');
+  if (rewritten === gremlin || !rewritten.startsWith('g.')) return null;
+  return `g.inject(${param}).unfold().group().by(Column.keys).by(__.${rewritten.slice(2)})`;
+};
+
 // ---------- federate — cross-graph query pushdown (async, Barrier) ----------
 //
 // g.call("federate", {graph, traversal}) runs `traversal` on a SIBLING graph
@@ -113,7 +120,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, reduce, injection }) => ({
+  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, reduce, injection, mapValues }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
@@ -151,7 +158,23 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
         if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
         if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
+        if (out.kind === 'map') throw new Error('federate: source traversal returned an internal mapValues result');
         return wantEndpoints ? withEndpoints(ex, out.rows, depth) : out.rows;
+      }
+
+      // STANDARD mapValues injection for `as()/select()`: the parent identity is the ordinary map
+      // KEY, so equal injected values remain distinct without the legacy corrId channel. The sibling
+      // sees only standard Gremlin — `inject($map).unfold().group().by(Column.keys).by(...)` — and its
+      // ordinary entry-value scope supplies the rewritten `select(Column.values)` operand.
+      // `SelectStep` passes a scoped value through unchanged
+      // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`).
+      if (injection?.kind === 'alias' && mapValues && !reduce) {
+        const sibling = mapValuesGremlin(gremlin, injection.label, mapValues.param);
+        if (!sibling) throw new Error(`federate: could not rewrite select("${injection.label}") for mapValues injection`);
+        const values = new Map(rows.map((row, ordinal) => [String(ordinal), row.injectedValue]));
+        const out = await ex.runForeign(sibling, { ...siblingBinds, [mapValues.param]: values }, depth + 1);
+        if (out.kind !== 'map') throw new Error(`federate: expected a keyed map from mapValues injection, got ${out.kind}`);
+        return { kind: 'barrier-map', value: out.value };
       }
 
       // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar

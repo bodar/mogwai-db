@@ -83,6 +83,9 @@ export interface CallSite {
    *  carried to the sibling as an internal flag so marker lowering chooses membership without
    *  inspecting the JSON pair value. */
   readonly injection?: InjectionKind;
+  /** Standard bound parameter used by federate's mapValues injection. It is a call-site input,
+   *  rather than a service-private params entry: the synthesized sibling Gremlin names it directly. */
+  readonly mapValues?: { readonly param: string };
   /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
    *  known once at plan time (the tail is right there in the chain), the same category as
    *  `federationDepth`. A barrier that shapes its fetch by the downstream demand (federate skipping the
@@ -215,11 +218,18 @@ export interface BarrierValues {
   readonly values: readonly FrameNode[];
 }
 
+/** A keyed map returned by a barrier. Federate's mapValues path keeps parent correlation as the
+ * ordinary map key, so the typed map crosses intact instead of being re-keyed through a private channel. */
+export interface BarrierMap {
+  readonly kind: 'barrier-map';
+  readonly value: Extract<ValueNode, { readonly t: 'map' }>;
+}
+
 /** What a barrier's `apply` may return: detached elements (`federate`/`io`), a keyed relation (an OLAP
  *  algorithm), a pushed-down reduced scalar (a federate reducer), or a pushed-down value STREAM (a federate
  *  value terminal). The resume that consumes it is chosen at PLAN time (contribution flags for the
  *  relation) or by the RETURNED TAG (scalar vs values), so the two never mismatch. */
-export type BarrierOutput = readonly ForeignRow[] | BarrierRelation | BarrierScalar | BarrierValues;
+export type BarrierOutput = readonly ForeignRow[] | BarrierRelation | BarrierScalar | BarrierValues | BarrierMap;
 
 /** A DECORATE barrier's element-preserving descriptor. When present on a barrier contribution, the
  *  segment builds a DECORATE resume: it re-lowers the LIVE element prefix and reads the barrier's

@@ -4,6 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
+import type { ValueNode } from '../../gremlin/types.ts';
 import { meta, typeOf, type Minter } from './build.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
@@ -33,6 +34,8 @@ import { meta, typeOf, type Minter } from './build.ts';
 /** The exploded cell relation's columns — one landed ROW per `json_each` member, its cells read by
  *  position. `ord` is `json_each.key`, the array index, which is the order the sibling emitted. */
 const CELL = { value: 'fcv', ord: 'fco' } as const;
+const MAP_PAIR = { value: 'fmp' } as const;
+const MAP_MEMBER = { value: 'fmm' } as const;
 
 /** The payload tuple a landed element carries, in `elementPayload`'s own order. A vertex's `label` is
  *  the JSON labels array (the wire carries the SET and derives `.label` from `labels[0]`); an edge's
@@ -80,6 +83,62 @@ export function foreignRelation(
       ...cols.map((column, at) => [column.name, cellAt(col(exploded.id, CELL.value), at)] as const),
       ...(withOrder ? [[CELL.ord, col(exploded.id, CELL.ord)] as const] : []),
     ],
+  });
+}
+
+/** Land the standard mapValues result without flattening it in JavaScript. The outer `json_each`
+ * reads the ordinary `{parentId -> List<element>}` map pairs; the inner one reads that entry's list,
+ * retaining the key as the correlation column until the ordinary parent join consumes it. */
+export function foreignMapRelation(
+  map: Extract<ValueNode, { readonly t: 'map' }>, elem: Elem, fresh: Minter,
+  extra: readonly ColMeta[] = [], withOrder = false,
+): Rel {
+  const pairs = make.explode({
+    id: fresh('fmx'), channels: [], expr: lit(JSON.stringify(map.v), 'text'), as: { value: MAP_PAIR.value },
+    type: typeOf(meta(MAP_PAIR.value, 'json')),
+  });
+  const members = make.explode({
+    id: fresh('fmy'), input: pairs, channels: [],
+    expr: { kind: 'call', fn: 'json_extract', args: [col(pairs.id, MAP_PAIR.value), compilerText('$[1].v')] },
+    as: { value: MAP_MEMBER.value, ord: CELL.ord },
+    type: typeOf(...pairs.type.cols, meta(MAP_MEMBER.value, 'json'), meta(CELL.ord, 'int')),
+  });
+  const filtered = make.filter({
+    id: fresh('fmf'), input: members, channels: [], type: members.type,
+    pred: { kind: 'binary', op: '=', left: nodeField(col(members.id, MAP_MEMBER.value), 't'), right: compilerText(elem) },
+  });
+  const payload = foreignPayloadCols(elem);
+  const parentId = { kind: 'call' as const, fn: 'json_extract', args: [col(filtered.id, MAP_PAIR.value), compilerText('$[0].v')] };
+  return make.project({
+    id: fresh('fmp'), input: filtered, channels: [], type: typeOf(...payload, ...extra, ...(withOrder ? [meta(CELL.ord, 'int')] : [])),
+    exprs: [
+      ...payload.map((column) => [column.name, nodeField(col(filtered.id, MAP_MEMBER.value), column.name)] as const),
+      ...extra.map((column) => [column.name, parentId] as const),
+      ...(withOrder ? [[CELL.ord, col(filtered.id, CELL.ord)] as const] : []),
+    ],
+  });
+}
+
+const nodeField = (node: Expr, field: string): Expr =>
+  ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(field === 't' ? '$.t' : `$.v.${field}`)] });
+
+/** The standard mapValues parent IDs are map keys, not a hidden transport channel. Joining the
+ * per-entry rows to this parent relation preserves two equal values under two different keys. */
+export function foreignMapRejoin(pool: Rel, elem: Elem, parentCount: number, fresh: Minter): Rel {
+  const parents = make.explode({
+    id: fresh('fmd'), channels: [],
+    expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, parentId) => String(parentId))), 'text'),
+    as: { value: 'fmdv' }, type: typeOf(meta('fmdv', 'text')),
+  });
+  const joined = make.join({
+    id: fresh('fmj'), left: pool, right: parents, channels: [],
+    join: 'inner', type: typeOf(...pool.type.cols, meta('fmdv', 'text')),
+    on: { kind: 'binary', op: '=', left: col(pool.id, 'parentId'), right: col(parents.id, 'fmdv') },
+  });
+  const payload = foreignPayloadCols(elem);
+  return make.project({
+    id: fresh('fmr'), input: joined, channels: [], type: typeOf(...payload),
+    exprs: payload.map((column) => [column.name, col(joined.id, column.name)] as const),
   });
 }
 

@@ -16,6 +16,7 @@ import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
 import type { Elem } from '../elem.ts';
+import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
 //
@@ -198,6 +199,7 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
       injection,
+      mapValues: injection?.kind === 'alias' ? { param: freshMapValuesParam(request.params) } : undefined,
       tailDemand: contentDemand(steps, suffixFrom),
       pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
       reduce,
@@ -228,6 +230,15 @@ function injectionOf(spec: CallSpec, params: Record<string, any>): InjectionKind
   if (!injection)
     throw new Error(`call("${spec.serviceName}"): the parent marker's read must be a direct value read — __.values(key), __.id(), or __.label()`);
   return injection;
+}
+
+/** Pick an ordinary sibling variable that cannot shadow a user binding carried into the pushed tail. */
+function freshMapValuesParam(params: Record<string, any>): string {
+  // `map` itself is a Gremlin GType token, not a VariableContext, so use an ordinary identifier
+  // that cannot be parsed as a grammar keyword.
+  let param = 'injectedMap';
+  while (Object.hasOwn(params, param)) param += '_';
+  return param;
 }
 
 /**
@@ -495,6 +506,14 @@ function resumed(
   // anything after it (a `values`) is LOCAL and comes back through the element rejoin instead.
   if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values')
     return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values, rejoin?.parentCount)) };
+  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-map') {
+    const elem = mapValueElem(out.value);
+    const lowered = lowerForeignResume([], elem, steps, barrier.suffixFrom, request.lowering, {
+      parentCount: rejoin?.parentCount ?? 0, mapValues: out.value,
+    });
+    if (!lowered) throw new Error('federate: mapValues result cannot resume the local traversal');
+    return { kind: 'sql', compiled: finishLowering(lowered) };
+  }
   const foreign = out as ForeignRow[];
   // The landed element KIND comes from the rows themselves — a sibling traversal ends vertex or edge
   // (`runForeign()` fails closed on anything else), and an EMPTY pool has no kind to read. Vertex is the
@@ -519,3 +538,28 @@ function resumed(
   }
   return { kind: 'sql', compiled: finishLowering(lowered) };
 }
+
+/** Validate the existing typed map transport while retaining its data for relational landing. */
+function mapValueElem(map: Extract<ValueNode, { readonly t: 'map' }>): Elem {
+  let elem: Elem | undefined;
+  for (const pair of map.v as readonly [ValueNode, FrameNode][]) {
+    const key = pair[0]; const value = pair[1];
+    if ((typeof key.v !== 'string' && typeof key.v !== 'number') || !isTaggedFrame(value) || value.t !== 'list' || !Array.isArray(value.v))
+      throw new Error('federate: mapValues result must map a scalar parent key to an element list');
+    for (const node of value.v as readonly FrameNode[]) {
+      if (!isTaggedFrame(node)) throw new Error('federate: mapValues list contains a non-element result');
+      if (node.t === 'vertex') {
+        if (elem && elem !== 'vertex') throw new Error('federate: mapValues result mixes element kinds');
+        elem = 'vertex';
+      } else if (node.t === 'edge') {
+        if (elem && elem !== 'edge') throw new Error('federate: mapValues result mixes element kinds');
+        elem = 'edge';
+      } else throw new Error('federate: mapValues list contains a non-element result');
+    }
+  }
+  return elem ?? 'vertex';
+}
+
+type TaggedFrame = Extract<FrameNode, { readonly t: string; readonly v: unknown }>;
+const isTaggedFrame = (node: FrameNode): node is TaggedFrame =>
+  node !== null && typeof node === 'object' && !Array.isArray(node) && 't' in node && 'v' in node;
