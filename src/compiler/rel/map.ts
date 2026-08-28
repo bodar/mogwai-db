@@ -192,6 +192,13 @@ export interface GroupRecipe {
    *  a nested `by(__.group())`), `{kind:'scalar'}` otherwise. What makes a `Map<K,Map>`'s `valOf` carry
    *  the inner map instead of collapsing to an opaque scalar. Unused when `single` is false. */
   readonly singleOf?: MapOf;
+  /** The COLLECTED members' own shape, when each member is a self-describing node carrying a NON-scalar
+   *  shape — a re-group of unfolded map ENTRIES whose value is itself a list/map/element
+   *  (`…group().by(k).by(__.out().fold()).unfold().group().by(Column.keys)`). The value's `valOf` becomes
+   *  `{kind:'list', of: memberOf}`, and `listNodeExpr` (already recursive) expands it at every depth — the
+   *  same "the member IS the value's shape" identity `sideList` uses for `by(Column.values)`. `undefined`
+   *  = ordinary scalar/element members (the `elementMembers`/`TYPED_MEMBERS` default). */
+  readonly memberOf?: ListOf;
   /** The value `by()` owes a productivity drop, applied as the aggregate's own `FILTER (WHERE …)` so the
    *  GROUP survives with an empty list rather than the key vanishing. */
   readonly memberDrop: boolean;
@@ -219,6 +226,7 @@ export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
   a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single
   && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
   && JSON.stringify(a.singleOf) === JSON.stringify(b.singleOf)
+  && JSON.stringify(a.memberOf) === JSON.stringify(b.memberOf)
   && a.member?.kind === b.member?.kind
   && (a.member?.kind !== 'rowid' || (b.member as { host: ChildHost }).host.kind === a.member.host.kind);
 
@@ -392,17 +400,29 @@ export function groupRows(
   // which `member` already covers, and a record's are not addressable at all.
   if (lastOnly && (!collecting || !ROWID_HOSTS.has(host.kind))) return null;
 
-  // FAIL CLOSED on a re-group with NO value-by over an ENTRY whose value is itself a COLLECTION or an
-  // ELEMENT (`…group().by(k).by(__.out().fold()).unfold().group().by(Column.keys)` — the double-group of
-  // an element-list value). The member would be the entry's whole `{t:'list',v:[rowids]}` node, but the
-  // collecting arm's `valOf` is `{kind:'list', of: TYPED_MEMBERS}` — a FLAT list of scalar members — so
-  // the framer reads the retained rowids as literal numbers (`[3,5]` instead of the vertices) and the
-  // nesting (a list-of-lists) is lost. The correct answer needs the recipe to carry the entry's own
-  // `valOf` and expand it RECURSIVELY through `listNodeExpr` (`docs/2026-08-28-map-support-finishing-plan.md`
-  // §G2 — a `GroupRecipe` extension). Until that lands, DECLINE rather than leak rowids: a silent wrong
-  // answer is the one failure mode this project exists to avoid. A SCALAR entry value re-groups fine.
-  if (collecting && !valueBy && !lastOnly && host.kind === 'scalar' && host.entry && host.entry.valOf.kind !== 'scalar')
-    return null;
+  // A re-group with NO value-by over an ENTRY whose value is itself a COLLECTION or an ELEMENT
+  // (`…group().by(k).by(__.out().fold()).unfold().group().by(Column.keys)` — the double-group of an
+  // element-list value). The member is the entry's OWN value node, already the self-describing
+  // `{t:'list',v:[rowids]}` tree, so it is collected AS-IS (root encoding) rather than wrapped again by
+  // `traverserMember` — and `memberOf` carries the entry's real shape (`sideList` translates the entry
+  // `valOf`, one container out) so `groupMap` frames the value as `{kind:'list', of: memberOf}` and
+  // `listNodeExpr` — already recursive — expands the rowids at every depth. This is `by(Column.values)`'s
+  // identity ("the member IS the value's shape") applied at the group barrier instead of the map side, so
+  // the double-group of an element list now frames a list-of-lists of vertices rather than leaking rowids.
+  let memberOf: ListOf | undefined;
+  if (collecting && !member && !lastOnly && host.kind === 'scalar' && host.entry && host.entry.valOf.kind !== 'scalar') {
+    const entryValOf = host.entry.valOf;
+    memberOf = sideList(entryValOf) ?? undefined;
+    if (!memberOf) return null;
+    // The member is the entry's value collected at the SAME ROOT ENCODING `mapSide` uses (`map.ts`): a
+    // `list`/`map` value UNWRAPS its `{t:'list'|'map', v:…}` envelope to the raw inner array/pairs (`$.v`),
+    // which is what `memberOf` describes and `listNodeExpr` recurses over. Without the unwrap the collected
+    // member is the whole node and the framer reads a node where a list belongs (→ null leaves). Stored
+    // RAW here; `collectedValue`'s node arm applies the `json()` the collection needs.
+    member = entryValOf.kind === 'list' || entryValOf.kind === 'map'
+      ? { kind: 'call', fn: 'json_extract', args: [col(input.id, ENTRY.val), compilerText('$.v')] }
+      : col(input.id, ENTRY.val);
+  }
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
@@ -504,7 +524,10 @@ export function groupRows(
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
       single: lastOnly || (valueBy?.key.kind === 'child' && (!entryListMember || entryRootedList)),
       singleOf,
-      memberDrop: !!member,
+      ...(memberOf ? { memberOf } : {}),
+      // A by()-less entry re-group (`memberOf` set) has no value `by()` to be unproductive, and its member
+      // — the entry's own value — is always present (an empty-list value is a valid member, not a drop).
+      memberDrop: !!member && !memberOf,
       bulkCol: bulked && bulk ? bulk.col : undefined,
       step,
     },
@@ -586,9 +609,13 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
     keyOf: keyElem ? { kind: 'elem', elem: keyElem } : { kind: 'scalar' },
     valOf: counting ? { kind: 'scalar' }
       : recipe.single ? (recipe.singleOf ?? { kind: 'scalar' })
-        : { kind: 'list', of: collectedElem
-          ? { kind: 'elem', elem: collectedElem }
-          : TYPED_MEMBERS },
+        // `memberOf` — a re-group of unfolded entries whose value is itself a collection/element: the
+        // members carry the entry's own shape, so the list value is `{kind:'list', of: memberOf}` and
+        // `listNodeExpr` recurses (the double-group of an element list frames a list-of-lists of
+        // vertices). Else the ordinary flat arm: an element-membered list keeps rowids (`{kind:'elem'}`),
+        // a scalar-membered one is `TYPED_MEMBERS`.
+        : { kind: 'list', of: recipe.memberOf
+          ?? (collectedElem ? { kind: 'elem', elem: collectedElem } : TYPED_MEMBERS) },
   };
   return {
     // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
@@ -1281,8 +1308,10 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  * `mapSide`), so `unfoldNested`/`listPayloadExpr` serve them unchanged. An `elem` side is an expanded
  * element node whose decode into the SCALAR vocabulary would be lossy, so it declines.
  */
-const sideList = (of: MapOf): ListOf | null =>
-  of.kind === 'scalar' ? TYPED_MEMBERS
+// A `function` (not an arrow) so it HOISTS to `groupRows`, which uses the identical translation for the
+// re-group-of-entries `memberOf` — a member IS a collected map SIDE, one container along.
+function sideList(of: MapOf): ListOf | null {
+  return of.kind === 'scalar' ? TYPED_MEMBERS
     // A `list` or `map` VALUE becomes a select(values) member of the SAME kind — the translation is the
     // identity (`{kind:'list'|'map', of}` describes both the value and the member), and both collect at
     // the ROOT encoding in `mapSide` so the existing `unfoldNested`/`unfoldMapMembers`/`listPayloadExpr`
@@ -1291,6 +1320,7 @@ const sideList = (of: MapOf): ListOf | null =>
     : of.kind === 'list' || of.kind === 'map' ? of
       : of.kind === 'elem' ? { kind: 'mixed', arms: [{ kind: 'elem', elem: of.elem }] }
         : null;
+}
 
 /**
  * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.
