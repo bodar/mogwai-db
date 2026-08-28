@@ -8,8 +8,8 @@ import { sliceOf, type IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
-import { inferredVtype, LIST_COL } from './list.ts';
+import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { inferredVtype, LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -251,6 +251,16 @@ export interface GroupRecipe {
   readonly step: IRStep;
 }
 
+/** A non-single element collecting arm keeps its members as rowids in the retained map tree.
+ * `unfoldList` restores those ids to the ordinary element relation; `mapPayload` expands them only
+ * for the typed tree framer. A `tail()` value is ONE element, not a re-enterable list, so it expands
+ * at the aggregate through `rowidMember` as before. That is the same live-element behaviour as `FoldStep`/`VertexStep`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:60-64`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/VertexStep.java:71-75`). */
+const elementMembers = (recipe: GroupRecipe): Elem | undefined =>
+  !recipe.single && recipe.member?.kind === 'rowid' && recipe.member.host.kind === 'element'
+    ? recipe.member.host.elem : undefined;
+
 /** May two sites' rows be grouped together? Structural over everything the aggregation reads, and it
  *  deliberately does NOT compare `step` — that is the strategy carrier, and one traversal has one. */
 export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
@@ -355,7 +365,10 @@ export function groupRows(
   // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
   // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
   // expression would be a plausible-looking wrong value rather than a decline.
-  if (valueBy?.key.kind === 'child' && !lastOnly) {
+  // An entry host is the one exception to group-scoped pooling: its value `by()` is a normal
+  // per-entry child (the mapValues idiom), so a terminal count/fold belongs INSIDE that child rather
+  // than reducing every row that shares the new group key.
+  if (valueBy?.key.kind === 'child' && !lastOnly && !(host.kind === 'scalar' && host.entry)) {
     const terminal = valueBy.key.body.at(-1)?.name;
     // A `by(<pre>.fold())` COLLECTS the pooled child rows into a LIST per key — the same pool
     // `groupReduced` builds, folded rather than reduced. `fold()` is a reducing barrier that SEEDS `[]`,
@@ -365,6 +378,10 @@ export function groupRows(
     if (terminal === 'fold') {
       const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, source, fresh);
       if (pooled) return { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
+      // A value-body `dedup()` must never fall through to `scalar`, whose whole-child DISTINCT has
+      // no outer key in scope.  `groupCollected` serves the bare form below; an unsupported keyed or
+      // repeated form remains an honest deferral rather than a globally deduplicated map value.
+      if (valueBy.key.body.slice(0, -1).some((bodyStep) => bodyStep.name === 'dedup')) return null;
     }
     if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
       const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, source, fresh);
@@ -388,6 +405,7 @@ export function groupRows(
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
+      if (produced.framing.kind === 'list') singleOf = { kind: 'list', of: produced.framing.of };
     } else {
       const node = byNode(valueBy, host, source, fresh, child);
       if (!node) return null;
@@ -556,6 +574,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
   // rather than letting magnitude inference pick Int for a small count. A COLLECTED
   // group needs no envelope added: a collecting value is already a typed list node, while the child
   // assignment arm extracts the child's typed scalar node unchanged.
+  const collectedElem = elementMembers(recipe);
   const entry: Entry = {
     // The KEY NODE is built HERE for an element-identity key — once per surviving group, off the rowid
     // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
@@ -566,9 +585,9 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
     val: counting ? typedNode(col(productive.id, VAL_COL), compilerText('long')) : col(productive.id, VAL_COL),
     // THE VALUE'S TRUE SHAPE (`docs/archive/2026-08-21-map-value-shape-plan.md`): the COLLECTING arm's value is
     // a `List` (TinkerPop injects `fold()` into every non-reducing value traversal — `GroupStep.java:61`,
-    // `Grouping.java:92-101`), whose members are all self-describing `{t,v}` nodes (a rowid is expanded
-    // to an `elementNode` at the aggregate, so both element and scalar members frame the same way) —
-    // hence `{kind:'list', of: TYPED_MEMBERS}`. A COUNT (`groupCount`) is a scalar `long`; a SINGLE
+    // `Grouping.java:92-101`). Scalar members are self-describing `{t,v}` nodes; element members stay
+    // rowids until the framing projection, so their ListOf says `{kind:'elem'}`. A COUNT (`groupCount`)
+    // is a scalar `long`; a SINGLE
     // value (`by(__.tail())`, an anonymous child) is one member, a scalar. The map still frames
     // byte-identically — only the DESCRIPTOR a consumer (`select(values)`/`select(<key>)`/`unfold`) reads
     // becomes precise, so those compose over a list value instead of mis-shaping it as a scalar.
@@ -580,7 +599,9 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
     keyOf: keyElem ? { kind: 'elem', elem: keyElem } : { kind: 'scalar' },
     valOf: counting ? { kind: 'scalar' }
       : recipe.single ? (recipe.singleOf ?? { kind: 'scalar' })
-        : { kind: 'list', of: TYPED_MEMBERS },
+        : { kind: 'list', of: collectedElem
+          ? { kind: 'elem', elem: collectedElem }
+          : TYPED_MEMBERS },
   };
   return {
     // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
@@ -608,7 +629,12 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
     // `by()`-less member is that same node. `json()` around it for the list module's own reason: without
     // it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
-    : jsonOf(rowidMember((member as { readonly host: ChildHost }).host, col(rows.id, MEMBER_COL), source, fresh));
+    // An element list retains rowids, not detached payload nodes.  The map framing projection expands
+    // this exact ListOf arm through `listNodeExpr`; keeping the id here is what lets a later unfold
+    // re-enter `out()` as a full element relation.
+    : elementMembers(recipe)
+      ? col(rows.id, MEMBER_COL)
+      : jsonOf(rowidMember((member as { readonly host: ChildHost }).host, col(rows.id, MEMBER_COL), source, fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
   // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
   // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
@@ -817,14 +843,25 @@ function groupCollected(
   // exists for a pre-fold body. THE POOLING needs a rowid to name each child row's parent, so only an
   // ELEMENT host reaches it — `origin` is typed `int` and a value stream has none.
   if (!pre.length || host.kind !== 'element') return null;
-  const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
+  // A `dedup()` in the value traversal belongs to the OUTER group key, not to the whole child stream.
+  // `GroupStep.projectTraverser` resets its dedup state per value traversal and the barrier accumulates
+  // per key (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:113,127-128,205-216`;
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:216-265,276-278`).
+  // Remove the one bare barrier before lowering the child, then restore it below once KEY_COL is a real
+  // partition column.  A by()-keyed or repeated dedup needs its own key projection and declines here.
+  const dedups = pre.filter((bodyStep) => bodyStep.name === 'dedup');
+  if (dedups.length > 1 || dedups.some((bodyStep) => argValues(bodyStep).length || bodyStep.modulators?.length)) return null;
+  const pooledPre = dedups.length ? pre.filter((bodyStep) => bodyStep.name !== 'dedup') : pre;
+  const rows = child.rows(pooledPre, input, host.elem, host.row?.aliases ?? NO_LABELS);
   // A body that lost the origin (a barrier BEFORE the fold — `by(__.out().order().fold())`) is a
   // different first barrier and declines here rather than folding the wrong pool.
   if (!rows) return null;
   // The MEMBER, encoded exactly as a value `by()` member is: an element row's rowid → `{t:'vertex',…}`,
   // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
   const valueCol = rows.framing.kind === 'elements' ? col(rows.rel.id, 'id') : col(rows.rel.id, 'v');
-  const member = producedMemberNode(valueCol, rows.framing, source, fresh);
+  const member = rows.framing.kind === 'elements'
+    ? valueCol
+    : producedMemberNode(valueCol, rows.framing, source, fresh);
   if (!member) return null;
 
   const elementKey = !keyBy;
@@ -844,11 +881,15 @@ function groupCollected(
     id: fresh('ck'), input: rows.rel, channels: [], type: cols,
     exprs: [[KEY_COL, key], [MEMBER_COL, member], [ORD_COL, enc ? col(rows.rel.id, enc.col) : col(rows.rel.id, rows.origin)]],
   });
+  // DISTINCT ON (group key, child value), retaining the first row in the child encounter order.  This
+  // is deliberately after the key projection: using the child's `origin` would dedup per parent
+  // traverser, while the GroupStep barrier's map scopes the set per GROUP KEY.
+  const members = dedups.length ? dedupGroupMembers(real, cols, fresh) : real;
   const seed = make.project({
     id: fresh('cz'), input, channels: [], type: cols,
     exprs: [[KEY_COL, seedKey], [MEMBER_COL, compilerNull()], [ORD_COL, compilerInt(0)]],
   });
-  const arms = make.union({ id: fresh('cu'), all: true, channels: [], type: cols, inputs: [seed, real] });
+  const arms = make.union({ id: fresh('cu'), all: true, channels: [], type: cols, inputs: [seed, members] });
   const keyed = make.materialize({ id: fresh('cm'), input: arms, channels: [], type: cols });
   // TinkerPop drops an unproductive KEY rather than grouping under null, the same rule (and the same
   // `ProductiveByStrategy` exception) the barrier's own key obeys — asked here because the seed can
@@ -858,11 +899,32 @@ function groupCollected(
   // The COLLECTING arm frames the list, drops the seed (`memberDrop`), orders by encounter and wraps the
   // members in a `{t:'list', v}` node — a `by(<pre>.fold())` is that arm over a pooled row set.
   const recipe: GroupRecipe = {
-    counting: false, keyElem: elementKey ? host.elem : undefined, member: { kind: 'node' },
+    counting: false, keyElem: elementKey ? host.elem : undefined,
+    member: rows.framing.kind === 'elements' ? { kind: 'rowid', host: { kind: 'element', id: valueCol, elem: rows.framing.elem } } : { kind: 'node' },
     single: false, memberDrop: true, bulkCol: undefined, step,
   };
   const grouped = groupMap(rowsIn, recipe, source, fresh);
   return grouped;
+}
+
+/** The pooled `dedup().fold()` barrier: one first member per `(KEY_COL, MEMBER_COL)`.  It is a window
+ * rather than an aggregate because the fold needs the surviving member's encounter position intact. */
+function dedupGroupMembers(input: Rel, cols: ReturnType<typeof typeOf>, fresh: Minter): Rel {
+  const ranked = make.window({
+    id: fresh('gd'), input, channels: [], type: typeOf(...cols.cols, meta('gr', 'int')),
+    specs: [['gr', { kind: 'window-expr', fn: 'row_number', args: [], spec: {
+      partitionBy: [col(input.id, KEY_COL), col(input.id, MEMBER_COL)],
+      orderBy: [{ expr: col(input.id, ORD_COL), dir: 'asc' }],
+    } }]],
+  });
+  const first = make.filter({
+    id: fresh('gf'), input: ranked, channels: [], type: ranked.type,
+    pred: eq(col(ranked.id, 'gr'), compilerInt(1)),
+  });
+  return make.project({
+    id: fresh('gp'), input: first, channels: [], type: cols,
+    exprs: cols.cols.map((column) => [column.name, col(first.id, column.name)] as const),
+  });
 }
 
 /** The hosts whose traverser is addressed by a ROWID, so a collecting group can carry it as an integer
@@ -1179,6 +1241,12 @@ const vertexLabelName = (rowid: Expr, source: GraphSource, fresh: Minter): Expr 
  *  `mk`/`mv`), declared once here for `LIST_COL`/`MAP_COL`'s reason: the framing layer reads them too. */
 export const ENTRY = { key: 'mk', val: 'mv' } as const;
 
+/** The entry-shaped child host used when a grouping applies a `by()` to an unfolded map. The two
+ * typed sides stay separate so a nested child starts at the ordinary Map.Entry tail. */
+export const entryHost = (rel: Rel, keyOf: MapOf, valOf: MapOf, aliases?: AliasMap): ChildHost =>
+  ({ kind: 'scalar', value: col(rel.id, ENTRY.val), entry: { key: col(rel.id, ENTRY.key), val: col(rel.id, ENTRY.val), keyOf, valOf },
+    ...(aliases ? { row: { rel, aliases } } : {}) });
+
 /** One PAIR as `json_each` hands it back: the two-element `[keyNode, valNode]` array, and its position
  *  in the map (`json_each.key`, which for a JSON array IS the index). */
 const PAIR = { value: 'ev', ord: 'eo' } as const;
@@ -1475,7 +1543,8 @@ export function mapSelect(
  * projection is `json(map)` and nothing else — the relational column is JSONB and `json()` is what turns it
  * into the text the framer parses. A LIST value side needs no conversion either: the blob's value side is a
  * naked array, and the typed framer treats a bare array as a list of bare members exactly as it treats a
- * bare scalar as an inferred value. ONE blob encoding, not two with a rebuild between them.
+ * bare scalar as an inferred value. The one exception is a descriptor-known element list: its retained
+ * members are rowids for re-entry, so this final projection rebuilds just that list through `listNodeExpr`.
  *
  * AN ELEMENT SIDE NEEDS NOTHING SPECIAL HERE, and it used to decline. What changed is not this function
  * but what a producer puts in the blob: `elementNode` makes an element a MEMBER of the self-describing
@@ -1489,15 +1558,32 @@ export function mapSelect(
  * hold. Keeping the parameters "for symmetry" with `mapEntryPayload` would be keeping the two arguments
  * whose only job was the decline that is now wrong.
  */
-export function mapPayload(rel: Rel, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } {
+export function mapPayload(rel: Rel, valOf: MapOf, source: GraphSource, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } {
   const ordered = byEncounter(rel, fresh);
+  const map = mapNodePayload(col(ordered.id, MAP_COL), valOf, source, fresh);
   return {
     rel: make.project({
       id: fresh('mw'), input: ordered, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
-      exprs: [[MAP_COL, jsonOf(col(ordered.id, MAP_COL))]],
+      exprs: [[MAP_COL, map]],
     }),
     shape: { kind: 'mapValue' },
   };
+}
+
+/** Rebuild a retained map only when its value descriptor says a list contains element rowids.  The
+ * retained relation stays rowid-addressable; this projection is solely the direct wire path, where
+ * `frameTypedNode` needs `{t:'vertex'|'edge',v:…}` members. */
+function mapNodePayload(map: Expr, valOf: MapOf, source: GraphSource, fresh: Minter): Expr {
+  if (valOf.kind !== 'list') return jsonOf(map);
+  const pairs = pairsOf(map, fresh);
+  const node = pairSide(col(pairs.id, PAIR.value), 'values');
+  const members = listNodeExpr({ kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] }, valOf.of, source, fresh);
+  if (!members) throw new Error('RelIR lowering: map list value has no typed-node framing');
+  const rebuilt = make.aggregate({
+    id: fresh('mn'), input: pairs, channels: [], type: typeOf(meta(MAP_COL, 'json', true)), groupBy: [],
+    aggs: [[MAP_COL, collectedArray(pairOf(pairSide(col(pairs.id, PAIR.value), 'keys'), listNode(members)), [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }])]],
+  });
+  return jsonOf({ kind: 'scalar', plan: rebuilt });
 }
 
 /**

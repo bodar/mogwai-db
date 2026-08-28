@@ -217,14 +217,14 @@
   },
   "group": {
     "binds": 0,
-    "bytes": 3682,
+    "bytes": 4527,
     "compiler": 87,
     "bound": 0
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 2337,
-    "compiler": 32,
+    "bytes": 3286,
+    "compiler": 40,
     "bound": 0
   },
   "has": {
@@ -589,7 +589,7 @@
   },
   "values": {
     "binds": 12,
-    "bytes": 2789,
+    "bytes": 4255,
     "compiler": 95,
     "bound": 29
   },

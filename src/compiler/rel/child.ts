@@ -222,7 +222,9 @@ export type BodyScope = 'child' | 'rooted';
  */
 export type ChildHost =
   | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow }
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow;
+      /** Present only for a child rooted at an unfolded Map.Entry. */
+      readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
   /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an
    *  element host is addressed by its element rowid. Its three projections (`key()`, `value()`,
    *  `element()`) are correlated reads of that row (`propertyReadOf`, `property.ts`), which is what

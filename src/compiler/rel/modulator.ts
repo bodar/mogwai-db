@@ -1,12 +1,13 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import * as make from '../../rel/factory.ts';
-import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
+import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { and, eq, firstOf, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
@@ -68,6 +69,7 @@ type ByKey =
   | { readonly kind: 'identity' }
   | { readonly kind: 'property'; readonly key: string }
   | { readonly kind: 'token'; readonly token: TokenKey }
+  | { readonly kind: 'column'; readonly column: 'keys' | 'values' }
   /** `by(__.select(label))` — an ALIAS read, not a correlated child. Spelled as a nested traversal and
    *  therefore parsed as one, but the answer is a column on the host's own row rather than a subquery
    *  over the traverser, so it is its own projection kind. Recognized HERE so every by() host gains it
@@ -140,6 +142,12 @@ export function modulations(step: IRStep, max: number, child: ChildSeam): readon
         projected = true;
         continue;
       }
+      if (isColumnArg(arg)) {
+        if (projected || (arg.column !== 'keys' && arg.column !== 'values')) return null;
+        key = { kind: 'column', column: arg.column };
+        projected = true;
+        continue;
+      }
       if (isNested(arg)) {
         // A second projection in one `by()` is not a form Gremlin has; declining beats picking one.
         if (projected) return null;
@@ -199,6 +207,8 @@ export function byExpr(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
 ): Expr | null {
   const { key } = modulation;
+
+  if (key.kind === 'column') return null;
 
   if (key.kind === 'child') {
     if (!child) return null;
@@ -284,7 +294,7 @@ export function byExpr(
   // SOURCE (the same `propertyScalar` the base tables and a bound `{t,v}` tree both answer), so
   // `group().by(k)`/`order().by(k)` compose over either graph. INSERTION ORDER names the first value
   // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare.
-  return source.propertyScalar(host.elem, host.id, key.key, ordering, fresh);
+  return key.kind === 'property' ? source.propertyScalar(host.elem, host.id, key.key, ordering, fresh) : null;
 }
 
 /**
@@ -395,6 +405,10 @@ const staticTagExpr = (type: ScalarType): Expr => {
 export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter): Expr | null {
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
+      : framing.kind === 'list' ? (() => {
+        const members = listNodeExpr(value, framing.of, source, fresh);
+        return members && listNode(members);
+      })()
       : framing.kind === 'scalar' ? typedNode(value, staticTagExpr(framing.type))
         : null;
   if (!member) return null;
@@ -407,6 +421,9 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
 
 export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
+
+  if (key.kind === 'column')
+    return host.kind === 'scalar' && host.entry ? (key.column === 'keys' ? host.entry.key : host.entry.val) : null;
 
   if (key.kind === 'child') {
     if (!child) return null;
@@ -481,6 +498,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
   }
 
   // ONE subquery for both halves: the tag IS the row the value came from.
+  if (key.kind !== 'property') return null;
   const mine = propertyRowFor(host, key.key, fresh);
   return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
 }
@@ -633,6 +651,7 @@ export function byField(
   // shape is a LEFT JOIN carrying both columns, and it is a later optimization rather than this
   // increment's: every other `by()` host already emits the correlated form, so this matches the SQL
   // the spine already produces instead of introducing a second access path for one caller.
+  if (key.kind !== 'property') return null;
   const value = byExpr(modulation, host, source, fresh);
   const vtype = propertyVtype(key.key, host, fresh);
   if (!value) return null;

@@ -933,6 +933,11 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   if (!body.length) return null;
   const first = body[0]!;
 
+  // An unfolded map entry is a real child host, not a special `select(Column.values)` pattern. Seed a
+  // one-row entry relation with its two correlated sides and hand the WHOLE body to the normal framing
+  // dispatcher. Thus every map-entry/list/scalar tail composes here at arbitrary depth.
+  if (host.kind === 'scalar' && host.entry) return mapEntryChild(body, { ...host, entry: host.entry }, ctx, fresh);
+
   // A GraphStep inside a per-traverser child still splits each host traverser, but a reducing tail
   // has one answer independent of which host triggered it. Lower that source chain once as an
   // ordinary rooted read and embed its one-row result as the correlated scalar value. This is the
@@ -1176,6 +1181,30 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   if (at === 0) return null;
 
   return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
+}
+
+function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const unit = make.values({ id: fresh('eu'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
+  const seeded = make.project({
+    id: fresh('es'), input: unit, channels: [], type: typeOf(meta('mk', 'json', true), meta('mv', 'json', true)),
+    exprs: [['mk', host.entry.key], ['mv', host.entry.val]],
+  });
+  // This is structurally one row, so `collapsedToOneRow` can prove a non-barrier local collection is
+  // still a valid correlated scalar result.
+  const root = make.limit({ id: fresh('el'), input: seeded, channels: [], type: seeded.type, count: compilerInt(1) });
+  const tail = continueAs(root, { kind: 'mapEntry', keyOf: host.entry.keyOf, valOf: host.entry.valOf }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
+  if (!tail || !collapsedToOneRow(tail.rel)) return null;
+  const scalarOf = (column: string): Expr => ({ kind: 'scalar', plan: make.project({
+    id: fresh('ev'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)), exprs: [[column, col(tail.rel.id, column)]],
+  }) });
+  if (tail.framing.kind === 'list') return { expr: scalarOf(LIST_COL), framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  if (tail.framing.kind === 'map') return { expr: scalarOf('map'), framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  if (tail.framing.kind === 'scalar') return {
+    expr: scalarOf('v'), framing: tail.framing,
+    ...(tail.framing.type.kind === 'perRow' && tail.framing.type.carrier.kind === 'column' ? { vtype: scalarOf(tail.framing.type.carrier.name) } : {}),
+    present: ALWAYS_PRODUCTIVE, yields: 'one',
+  };
+  return null;
 }
 
 /**

@@ -366,7 +366,7 @@ export function recordPayload(
   // The fence that de-duplicates the field-column reads lives in `recordToMap` (gated on
   // self-containment), so both the wire payload and the top-level fold get it.
   const mapped = recordToMap(rel, fields, source, fresh);
-  return mapped && mapPayload(mapped, fresh);
+  return mapped && mapPayload(mapped, { kind: 'scalar' }, source, fresh);
 }
 
 /**

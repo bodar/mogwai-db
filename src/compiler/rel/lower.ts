@@ -43,7 +43,7 @@ import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupBarrierByOrigin, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupBarrierByOrigin, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
@@ -2326,12 +2326,18 @@ function mapEntryTail(
     const step = steps[at];
     const args = argValues(step);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
-    if (step.modulators?.length || step.optionArms) return null;
+    if ((step.modulators?.length && step.name !== 'group' && step.name !== 'groupCount') || step.optionArms) return null;
 
     if (step.name === 'count' && !isLocalScope(step)) {
       if (args.length) return null;
       const counted = countTail(rel, fresh);
       return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    if (step.name === 'group' || step.name === 'groupCount') {
+      const grouped = groupBarrier(rel, entryHost(rel, keyOf, valOf, labels), step, false, childSeam(ctx, fresh), ctx.source, fresh);
+      if (!grouped) return null;
+      return mapTail(grouped.rel, grouped.keyOf, grouped.valOf, steps, at + 1, ctx, fresh, labels);
     }
 
     const column = selectedColumn(step);
@@ -2597,7 +2603,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, source, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
-    case 'map': return mapPayload(chain.rel, fresh);
+    case 'map': return mapPayload(chain.rel, framing.valOf, source, fresh);
     case 'mapEntry': return mapEntryPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
     case 'record': return recordPayload(chain.rel, framing.fields, source, fresh);
     case 'property': return {
