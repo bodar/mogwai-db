@@ -124,11 +124,13 @@ legal but does NOT lower in our engine today.
    **element-list map values now retain rowids** (`{kind:'list', of:{kind:'elem'}}`), so
    `select(Column.values).unfold()…out()` re-enters element traversal at ANY depth (see the top-level
    `map-value-element-reentry.feature` oracle), and `dedup()` in a group value-fold scopes per group key.
-   **ONE remaining sub-case (a NEW increment, not a regression):** element re-entry NESTED inside the
-   re-group's value-by — `…unfold().group().by(Column.keys).by(select(Column.values).unfold().unfold().values('name').fold())`
-   still declines; the top-level element re-entry works but the entry-host child seam does not yet thread
-   it. The other four result shapes (map/project, composite `project('vs','es')`) still need their
-   isolation proof before Stage 3.
+   **Nested-re-group element value ✅ LANDED (commit `ecff2eb9`):** an element-list value that becomes a
+   Map.Entry value and is re-read in `…unfold().group().by(Column.keys).by(<...>)` now expands correctly —
+   the token `by(Column.values)`, the bare `by(select(Column.values))`, and the deep
+   `by(select(Column.values).unfold().unfold().values('name').fold())` all frame vertex nodes / re-enter
+   the element loop (was a rowid-leak + null before). The remaining Stage-1 work before Stage 3 is the
+   isolation proof for the OTHER result shapes on the sibling: map/project value, composite
+   `project('vs','es')`.
 2. **Inbound per-parent-map reception (dormant behind the old path).** A `foreignRelation` variant
    consuming the `{parentId → [elements]}` map via two-level `json_each` → `(parentId, element)` rows, and a
    new `resumed` arm landing them into a BoundGraph CTE by the parentId KEY, reusing the existing
