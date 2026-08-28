@@ -1884,17 +1884,23 @@ function listLiteralBlob(listArg: Arg, values: readonly unknown[]): Expr | null 
   return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
 }
 
-function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
+function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
   const args = argValues(step);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
-  const rows = (args as readonly unknown[][]).map((values, ai) => {
-    const blob = listLiteralBlob(step.args[ai]!, values);
-    return blob ? [blob] : null;
-  });
-  if (rows.some((row) => !row)) return null;
+  const blobs = (args as readonly unknown[][]).map((values, ai) => listLiteralBlob(step.args[ai]!, values));
+  if (blobs.some((blob) => !blob)) return null;
+  // The ENCOUNTER ordinal — `injectMap`'s rule, and the fix for a real order bug: `inject([…],[…]).fold()`
+  // folds SEVERAL list traversers into a list-of-lists, and `foldLists` orders the members by this channel;
+  // WITHOUT it the fallback ordered by the list VALUE and returned them SORTED rather than in inject order.
+  // Gated on MULTIPLE arguments: a single `inject([…])` is ONE traverser whose members' order is intrinsic
+  // to the list (no encounter needed), and adding one there broke the member ops that do not thread it
+  // (`inject([…]).toLower(Scope.local)` — the explode dropped the extra channel).
+  const wantOrder = ordered && blobs.length > 1;
+  const channels = wantOrder ? withChannel([], ENCOUNTER) : [];
+  const rows = (blobs as Expr[]).map((blob, i) => (wantOrder ? [blob, compilerInt(i + 1)] : [blob]));
   return {
-    rel: make.values({ id: fresh('inl'), rows: rows as readonly (readonly Expr[])[], channels: [], type: typeOf(meta(LIST_COL, 'json')) }),
+    rel: make.values({ id: fresh('inl'), rows, channels, type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(channels)) }),
     framing: { kind: 'list', of: BARE_LIST },
   };
 }
@@ -3341,7 +3347,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     }
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
-    const listed = injectList(first, fresh);
+    const listed = injectList(first, ordered, fresh);
     if (listed) {
       const withSack = sacked(listed.rel);
       return withSack && listTail(withSack, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);

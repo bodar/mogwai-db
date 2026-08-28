@@ -18,6 +18,22 @@ Feature: mogwai addendum — folding a LIST stream into a list-of-lists (foldLis
       | result |
       | l[l[d[1].i,d[2].i],l[d[3].i,d[4].i]] |
 
+  # ORDER PRESERVED: folding several list traversers keeps INJECT order — the members are NOT sorted.
+  # `injectList` carries an encounter ordinal (like injectSource/injectMap), so `foldLists` orders by it
+  # rather than falling back to the list VALUE (which returned `[[1,9],[5,2]]` — sorted, a real bug). The
+  # descending input is the assertion: only inject-order preservation gives `[[5,2],[1,9]]`.
+  @gap:fold-nested
+  Scenario: g_injectXlists_descending_X_fold_preserves_order
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([5,2],[1,9]).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[l[d[5].i,d[2].i],l[d[1].i,d[9].i]] |
+
   @gap:fold-nested
   Scenario: g_V_mapXoutFoldX_fold
     Given the modern graph
