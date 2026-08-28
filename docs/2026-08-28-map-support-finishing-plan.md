@@ -69,10 +69,16 @@ lossless for the fold/select paths and unifies the map-key encoding across all p
 downstream ops lower over the unified key). Small SQL-byte rise banked in sql-hygiene; wire bytes and all
 existing answers unchanged. Three L4 `map-unfold` scenarios added.
 
-### G4 — `select(m).select(k)` — a key OUT of an aliased map declines
-`g.V()…project("n").by("name").as("m").select("m").select("n")` → DECLINES (also without federate — this
-is why the map-injection-via-alias federate case declines: it's the base gap, not federate). A nested
-`select` that reaches into an aliased map value is not a lowered shape. Base-compiler gap.
+### G4 — `select(m).select(k)` — a key OUT of an aliased map declines  ✅ FIXED (2026-08-28, commit 78f86c07)
+`g.V()…project("n").by("name").as("m").select("m").select("n")` → DECLINED (also without federate — this
+is why the map-injection-via-alias federate case declines: it's the base gap, not federate). **Fixed** in
+two parts: (1) a `map` arm across the alias vocabulary (`TraverserObject`/`AliasRead`/`AliasEntry.mapOf`,
+history stores the pairs blob, `mapTail`/`recordTail` grow an `as` handler) so a map binds to a label and
+`select(m)` re-enters the map; (2) STATIC KEY SETS on the map framing (`keys?: string[]`, user-approved)
+so `select(m).select(k)` resolves `k` against the map's compile-time key set — TinkerPop's map-first
+precedence (`Scoping.java`). A key provably not in the set re-enters the alias unambiguously; an ambiguous
+or unknown-key case stays FAIL-CLOSED. Also unblocks the federate map-injection-via-alias case (see
+`[[federate-mapvalues-rewrite-plan]]`). No SQL/wire change. L4 gains `map-alias-select.feature`.
 
 ### G5 — a map LITERAL as a constant/inject value declines
 `g.inject(1).constant(["a":1,"b":2])` and `constant([a:1])` → DECLINE. A `[k:v]` map literal as a produced
@@ -82,8 +88,9 @@ Lowest priority.
 ## Sequencing
 - **G1 + G2 first** — G1 is a rewrite regression (a lost capability), G2 a silent wrong answer. Both are
   references-settled and being fixed now (2026-08-28).
-- **G3/G4/G5** — general map-shape completeness, no federate coupling. G3 (project unfold) ✅ landed
-  2026-08-28. G4 (nested select) is next — the other natural GraphQL-shaped read; G5 is a corner.
+- **G3/G4/G5** — general map-shape completeness, no federate coupling. G3 (project unfold) ✅ and
+  G4 (aliased-map select) ✅ both landed 2026-08-28. G5 (map literal as a constant/inject value) is the
+  last, lowest-priority corner. G2 (double-group element-list value) remains DEFERRED (exotic nested shape).
 
 ## Verification discipline
 Every fix: `bun test test/L4-addendum/l4.test.ts test/federation.test.ts test/services.test.ts` + `census`
