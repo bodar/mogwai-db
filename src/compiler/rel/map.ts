@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -1001,16 +1001,16 @@ export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost
 // ORDERED PAIRS — which IS the blob. Re-spelling the encoding here would be a second chance to disagree
 // with the framer about how a scalar leaf stores, the mistake the shared authority exists to prevent.
 
-/** A map LITERAL as the pairs-array blob a map-valued relation carries (`MAP_COL`), or `null` to
- *  decline. A COMPILE-TIME constant, so it inlines as a typed literal and spends none of the parameter
- *  budget — the bind rule's "a constant the compiler holds inlines" (root `CLAUDE.md`).
+/** A map argument as the pairs-array blob a map-valued relation carries (`MAP_COL`), or `null` to
+ *  decline. A COMPILE-TIME literal inlines; a named parameter carries the complete encoded map as ONE
+ *  JSON bind, so a data-sized map never becomes SQL text or one bind per entry.
  *
  *  Two fail-closed guards keep the blast radius to what the framer already reads: a NON-STRING key (a
  *  `(T.label)` token, whose node `valueNodeOf` cannot yet spell — its key comes back `{t:null, v:{token}}`)
  *  and any value the JSON encoder cannot carry (a bigint leaf throws). Both are the "not learned yet"
  *  `null`, so a map with one such entry declines whole rather than seeding a corrupt blob — the token
  *  keys and exact tails arrive with the write substrate that owns `mergeV`/`mergeE`. */
-export function mapLiteralBlob(value: unknown, type: TypeNode | null): Expr | null {
+export function mapLiteralBlob(value: unknown, type: TypeNode | null, paramName: string | null = null): Expr | null {
   if (!(value instanceof Map)) return null;
   const node = valueNodeOf(value, type);
   if (node.t !== 'map') return null;
@@ -1021,9 +1021,9 @@ export function mapLiteralBlob(value: unknown, type: TypeNode | null): Expr | nu
   if (!pairs.every(([key]) => key.t === 'string' && typeof key.v === 'string')) return null;
   let json: string;
   try { json = JSON.stringify(pairs); } catch { return null; }
-  // `jsonb('…')` over the inlined text: `MAP_COL` is JSONB, exactly what `mapPayload` reads back through
-  // `json()`, so a literal map and a `group()` map reach the wire through one column and one framer.
-  return { kind: 'call', fn: 'jsonb', args: [compilerText(json)] };
+  // `MAP_COL` is JSONB, exactly what `mapPayload` reads back through `json()`. A bound map uses the
+  // same pairs encoding, but the whole data-sized document is one user bind before `json_each` reads it.
+  return { kind: 'call', fn: 'jsonb', args: [paramName == null ? compilerText(json) : param(json, paramName)] };
 }
 
 // ---------- the PER-ROW producer: `valueMap()`, an element's properties AS a map ----------

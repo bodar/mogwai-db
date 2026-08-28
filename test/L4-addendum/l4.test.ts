@@ -311,3 +311,18 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
     });
   }
 });
+
+test('L4 oracle — a bound inject map unfolds through one JSON parameter', async () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const write of MODERN_SEED) executeQuery(store, write, {});
+  const params = { m: new Map([['marko', 'marko'], ['josh', 'josh']]) };
+  const result = await decodeAll(executeQuery(
+    store,
+    'g.inject(m).unfold().group().by(Column.keys).by(__.V().has("name", select(Column.values)))',
+    params,
+    {},
+    standardRegistry,
+  ));
+  const refs = elementRefs(store);
+  expect(result.map(canon)).toEqual([expectedCanon('m[{"josh":["v[josh]"],"marko":["v[marko]"]}]', refs)]);
+});

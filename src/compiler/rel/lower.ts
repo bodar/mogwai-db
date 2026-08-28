@@ -1876,7 +1876,7 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
 function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
   if (step.modulators?.length || step.optionArms || !step.args.length) return null;
   if (!step.args.every((a) => a.value instanceof Map)) return null;
-  const blobs = step.args.map((a) => mapLiteralBlob(a.value, a.type ?? null));
+  const blobs = step.args.map((a) => mapLiteralBlob(a.value, a.type ?? null, a.name));
   if (blobs.some((blob) => !blob)) return null;
   const channels = ordered ? withChannel([], ENCOUNTER) : [];
   const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
