@@ -392,6 +392,18 @@ export function groupRows(
   // which `member` already covers, and a record's are not addressable at all.
   if (lastOnly && (!collecting || !ROWID_HOSTS.has(host.kind))) return null;
 
+  // FAIL CLOSED on a re-group with NO value-by over an ENTRY whose value is itself a COLLECTION or an
+  // ELEMENT (`…group().by(k).by(__.out().fold()).unfold().group().by(Column.keys)` — the double-group of
+  // an element-list value). The member would be the entry's whole `{t:'list',v:[rowids]}` node, but the
+  // collecting arm's `valOf` is `{kind:'list', of: TYPED_MEMBERS}` — a FLAT list of scalar members — so
+  // the framer reads the retained rowids as literal numbers (`[3,5]` instead of the vertices) and the
+  // nesting (a list-of-lists) is lost. The correct answer needs the recipe to carry the entry's own
+  // `valOf` and expand it RECURSIVELY through `listNodeExpr` (`docs/2026-08-28-map-support-finishing-plan.md`
+  // §G2 — a `GroupRecipe` extension). Until that lands, DECLINE rather than leak rowids: a silent wrong
+  // answer is the one failure mode this project exists to avoid. A SCALAR entry value re-groups fine.
+  if (collecting && !valueBy && !lastOnly && host.kind === 'scalar' && host.entry && host.entry.valOf.kind !== 'scalar')
+    return null;
+
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
   // A COLLECTING group states its member order, and only an ELEMENT relation has the `id` column the

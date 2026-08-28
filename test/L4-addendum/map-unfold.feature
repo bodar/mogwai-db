@@ -155,6 +155,28 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | m[{"name":"l[lop]"}] |
       | m[{"name":"l[ripple]"}] |
 
+  # ---- G2: a DOUBLE-GROUP of an element-list value — fail-closed until the nested shape lands ----
+
+  # `group().by(k).by(__.out().fold()).unfold().group().by(Column.keys)` re-groups the unfolded
+  # entries with NO value-by, so each new member is the entry's whole `{t:'list', v:[rowids]}` value.
+  # The correct answer is a LIST-OF-LISTS with the vertices expanded; the collecting arm's flat
+  # `{list of scalar}` valOf would instead leak the raw rowids (a silent wrong answer). So we DECLINE
+  # rather than mis-execute — the full fix carries the entry's own valOf and expands it recursively
+  # (docs/2026-08-28-map-support-finishing-plan.md §G2). @Unsupported: the day it lowers, this fails
+  # loudly as the prompt to drop the tag. The by(Column.values) variant already works (map-value-list).
+  @gap:map-unfold
+  @Unsupported
+  Scenario: g_V_group_byXnameX_byXoutFoldX_unfold_group_byXkeysX_declines
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).unfold().group().by(Column.keys)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"josh":"l[l[v[ripple],v[lop]]]"}] |
+
   # ---- Commit C: is(typeOf(MAP)) over a STORED map property → MapStream retype ----
 
   # A stored map property, retyped by is(typeOf(MAP)), frames whole (terminal) and its
