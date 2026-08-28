@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -19,7 +19,7 @@ import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, argValues, arg, stepChain, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -43,7 +43,7 @@ import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupBarrierByOrigin, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, landedCols } from './boundgraph.ts';
@@ -57,7 +57,6 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { CORR_PREFIX, INJECT_LABEL_KEY, INJECT_VALUES_KEY, injectedPairs, injectedReduction, isInjectedAliasBody, isParentMarkerBody } from '../ir/injection.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -693,7 +692,6 @@ function serviceRelation(
   if (step.modulators?.length || step.optionArms) return null;
   let spec: ReturnType<typeof parseCallSpec>;
   try { spec = parseCallSpec(step, ctx.params); } catch { return null; }
-  if (spec.injectionTraversal !== undefined) return null;
   const service = ctx.services.get(spec.serviceName);
   if (!service) return null;
   const site: RelCallSite = {
@@ -729,7 +727,6 @@ export function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   // An INJECTION traversal is the federated per-parent value read (`fprops`/`fid`/`flabel` rejoin),
   // which belongs to a `barrier` contribution and not to this arm at all. Declining on its presence
   // keeps the two apart rather than silently ignoring the argument.
-  if (spec.injectionTraversal !== undefined) return null;
   const service = ctx.services.get(spec.serviceName);
   if (!service) return null;
   const site: RelCallSite = {
@@ -986,11 +983,6 @@ function collectionArm(
     // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and the
     // reduction happens at the `cap`, which is where a label filled at N positions can be one grouping
     // over the UNION of them.
-    const originGrouped = injectedReduction(ctx.params) ? groupBarrierByOrigin(rel, step, childSeam(ctx, fresh), fresh) : null;
-    if (injectedReduction(ctx.params)) {
-      if (!originGrouped) return { tail: null };
-      return { tail: continueAs(originGrouped.rel, { kind: 'map', keyOf: originGrouped.keyOf, valOf: originGrouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
-    }
     const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
     if (!rows) return { tail: null };
     // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
@@ -2384,10 +2376,6 @@ export interface Lowering {
   readonly propertySeek?: boolean;
   /** May the physical TextP FTS rewrite drive a bare element scan (`semijoin.ts`, `trigramSeek`)? */
   readonly ftsSubstringPredicate?: boolean;
-  /** May a mid-traversal federate reduction PUSH DOWN as a per-group partial (`reducers.ts`)? Default
-   *  on. Off makes the reducer run LOCALLY over the scattered elements — the semantic AUTHORITY the
-   *  pushed path must equal, which is how the differential (optimized ≡ unoptimized) is checked. */
-  readonly federateReduce?: boolean;
   /** DETACHED-transfer compile (set only by `runForeign()`): the element leaf emits a fuller property node
    *  `{t, v, vpid, meta?}`. Off for ordinary framing, so base props stay `{t, v}`. */
   readonly detached?: boolean;
@@ -2479,7 +2467,6 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
-  federateReduce: opts.federateReduce ?? true,
   detached: opts.detached ?? false,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
@@ -2596,7 +2583,6 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
     case 'detached': return {
       rel: source.leafPayload(chain.rel, framing.elem, {
         bulk: carriesMultiplicity(chain), detached,
-        origin: chain.rel.channels.find((channel) => channel.role === 'origin')?.col,
       }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
@@ -2783,7 +2769,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  */
 export function lowerForeignResume(
   rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering = {},
-  rejoin?: { readonly parentCount: number; readonly injected: boolean } | { readonly parentCount: number; readonly mapValues: Extract<ValueNode, { readonly t: 'map' }> },
+  rejoin?: { readonly parentCount: number } | { readonly parentCount: number; readonly mapValues: Extract<ValueNode, { readonly t: 'map' }> },
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -2794,11 +2780,8 @@ export function lowerForeignResume(
   // stream and the vertices become a bound lookup relation the tail's `inV`/`outV`/`bothV` join for the
   // endpoint's data — movement over a bound edge `Ref` (`docs/2026-08-21-barrier-substrate-design.md`).
   // The BoundGraph payload binding (`bgv`/`bge`) is a per-ELEMENT lookup, so it must hold each landed
-  // element ONCE. When a mid-injection pool carries the SAME element under several corrIds (two parents
-  // injecting equal values both match one sibling element — the case the corrId scatter exists to keep
-  // distinct), the raw rows repeat that element per corrId; deduping by id here keeps the payload table
-  // one-row-per-element while the corrId-tagged `pool` below retains the duplicates for the scatter. Without
-  // this the id-rejoin multiplies (N corrIds × N payload rows).
+  // element ONCE. A mapValues result can contain one sibling element under several parent keys; the
+  // payload binding stays distinct while the keyed pool below preserves that multiplicity for its join.
   const mapValues = rejoin && 'mapValues' in rejoin ? rejoin.mapValues : null;
   const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
   const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
@@ -2870,12 +2853,10 @@ export function lowerForeignResume(
   // rejoin the relation is the same landed shape a source-form call produces.
   const pool = mapValues
     ? foreignMapRelation(mapValues, streamElem, fresh, [meta('parentId', 'text')])
-    : rejoin && 'injected' in rejoin && rejoin.injected
-    ? foreignRelation(rows.filter((row) => row.kind === streamElem), streamElem, fresh, [meta('corrId', 'int', true)], (row) => [row.corrId])
     : landed;
   const rejoined = mapValues
     ? foreignMapRejoin(pool, streamElem, rejoin!.parentCount, fresh)
-    : rejoin && 'injected' in rejoin ? foreignRejoin(pool, streamElem, rejoin.parentCount, rejoin.injected, fresh) : landed;
+    : rejoin ? foreignRejoin(pool, streamElem, rejoin.parentCount, fresh) : landed;
   // ID-CARRY: the stream carries the element ID (+ channels) — the payload is REJOINED at each read
   // through the `BoundGraph`. The landed payload columns are projected AWAY; the shared movement/leaf
   // builders assume an id-carrying stream, and a stream still holding the landed payload would widen
@@ -3012,16 +2993,16 @@ type EmptyResult = 'zero' | 'nothing';
  * GLOBAL reduction over the whole resumed stream (the element path returns ONE number), so the combine
  * folds ALL the per-parent partials into one value with `combine`/`empty`.
  *
- * Both the map (`out.value`, a `t:'map'` ValueNode) and the parent corrId range are KNOWN at resume time,
- * so the fold is pure data: for each parent, look up its partial by corrId
+ * Both the map (`out.value`, a `t:'map'` ValueNode) and the parent-id range are KNOWN at resume time,
+ * so the fold is pure data: for each parent, look up its partial by parent id
  * (a match contributes the partial; a miss contributes `empty` — the monoid `count` adds 0, a semigroup
  * contributes nothing). Then `combine` folds the contributions: `sum` (count/sum → SUM0), `min`/`max`
  * (extremal, empty ⇒ NO value → no traverser, matching TinkerPop's semigroup empty). One scalar out (or
  * none), the SAME answer as scattering the elements and reducing locally — the semantic authority. Framed
  * as a `typedNode` so the partial's Gremlin type (a `long` count, a numeric sum/min/max) survives.
  *
- * Each parent maps to one corrId, so `combine` folds over the per-parent partials exactly once each.
- * The sibling must group by corrId before returning the map.
+ * Each parent maps to one key, so `combine` folds over the per-parent partials exactly once each.
+ * The sibling groups by those map keys before returning the map.
  */
 export function lowerReduceCombine(
   map: ValueNode, parentCount: number,
@@ -3037,10 +3018,7 @@ export function lowerReduceCombine(
   // skipped for a semigroup). Fold with the reducer's combine.
   const contribs: number[] = [];
   for (let parentId = 0; parentId < parentCount; parentId++) {
-    // The legacy corrId group uses numeric keys; standard mapValues uses its ordinary Map's
-    // string parent IDs. Both are the same parent range, and the reducer algebra is independent
-    // of the transport key.
-    const hit = byKey.get(JSON.stringify(parentId)) ?? byKey.get(JSON.stringify(String(parentId)));
+    const hit = byKey.get(JSON.stringify(String(parentId)));
     if (hit !== undefined) contribs.push(hit);
     else if (reduce.empty === 'zero') contribs.push(0);
     // 'nothing' (semigroup): an unmatched parent contributes nothing.
@@ -3362,97 +3340,13 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   let pred = seeded.pred;
   let at = 1;
   let elem = elem0;
-  const injecting = injectedPairs(params) != null;
   for (; at < steps.length; at++) {
-    // STOP before a federated injection operand: the legacy marker or a standard sibling `select()` is
-    // not an ordinary source filter because its operand resolves to the injected value cell. The dedicated
-    // block below supplies that cell before lowering the user's filter.
-    if (injecting && injectionStep(steps[at], params)) break;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
     if (!clause) break;
     pred = and(pred, clause);
   }
 
-  // A federated sibling's injection step — `has(key, __.call('parent', …))`, `has(key, select('e'))`,
-  // or either inside `within()` — is not an ordinary predicate on THIS graph: its parent read already
-  // happened, so the operand resolves to the per-parent injected value cell and the step lowers through
-  // the ordinary filter path below. The wrapping operator is the USER's, never the compiler's.
-  const marker = injectedPairs(params) ? injectionStep(steps[at], params) : null;
-  // Keep fused filters on the source whether the marker supplies a join or the ordinary seed does.
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
-  let rel: Rel;
-  if (marker) {
-    const suffix = steps.slice(at + 1);
-    const originGrouping = injectedReduction(params) && suffix.length === 1 && suffix[0]?.name === 'group';
-    if (suffix.some(isStreamBarrier) && !originGrouping)
-      throw new Error('federated parent marker cannot be followed by a sibling stream barrier: correlation origin would be consumed');
-    if (ctx.source !== BaseGraph)
-      throw new Error('federated parent marker currently requires the base graph source');
-    // LIFT-AND-SHIFT: the injected value is a per-parent BIND spliced at the marker OPERAND, and the
-    // sibling's OWN operator lowers it through the ORDINARY predicate machinery. The compiler never
-    // inspects the value's shape — `has(k, marker)` → the user's implicit `eq` (scalar equality);
-    // `has(k, within(marker))` → the user's explicit `within` (list membership); a map lands wherever a
-    // map goes. Only the CORRELATION is federate-specific: the `(corrKey, value)` pair table is
-    // CROSS-joined to the source and the corrId rides the `origin` channel.
-    //
-    // The set crosses as a MAP `{corrKey: value}` (one `json_each` bind of any size), keyed by the
-    // correlation IDENTIFIER. `json_each` over that object exposes `ic`=key (corrId) and `iv`=value
-    // directly — no positional extraction.
-    const injectMap = params[INJECT_VALUES_KEY];
-    const exploded = make.explode({
-      id: fresh('ix'), channels: [],
-      expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(injectMap instanceof Map ? Object.fromEntries(injectMap) : injectMap), INJECT_VALUES_KEY)] },
-      as: { key: 'ic', value: 'iv' }, type: typeOf(meta('ic', 'text'), meta('iv', 'any', true)),
-    });
-    // The source × pairs CROSS join is the INPUT relation the ordinary filter sits over: it carries the
-    // `iv`/`ic` columns so the marker operand can resolve to `iv` (in scope, correlated) and `origin`
-    // can project `ic`. A CROSS (unconditional `inner`) join — every source row against every parent's
-    // value; the marker predicate is what selects the matches.
-    const sourceWithPairs = make.join({
-      id: fresh('ij'), left: source, right: exploded, join: 'inner', channels: [],
-      type: typeOf(...source.type.cols, ...exploded.type.cols), on: compilerInt(1),
-    });
-    // The injection cell the `parent` marker operand resolves against (see `nestedFirstValue`/
-    // `foldedListSet`): the value cell, and the membership set the explicit `within(marker)` explodes.
-    // `iv` is exposed under the JOINED relation (`sourceWithPairs`), so reference it there — the filter
-    // predicate sits over that relation, and a `col(exploded.id, …)` would be out of scope.
-    const ivCell = col(sourceWithPairs.id, 'iv');
-    const injectionCell = {
-      value: ivCell,
-      listSet: (): Rel => make.explode({
-        id: fresh('ilm'), channels: [], expr: ivCell, as: { value: 'value' },
-        type: typeOf(meta('value', 'any', true)),
-      }),
-      ...(typeof params[INJECT_LABEL_KEY] === 'string' ? { label: params[INJECT_LABEL_KEY] as string } : {}),
-    };
-    // The marker's OWN `has()` (steps[at]) lowered by the ordinary source-filter path over the joined
-    // relation, with the marker operand resolving to `iv`. The user's operator (eq / within / …) drives
-    // the SQL — this is where the per-shape inference used to live and is now gone.
-    const markerClause = sourceFilter(
-      steps[at]!,
-      { kind: 'element', id: col(sourceWithPairs.id, 'id'), label: elem === 'edge' ? col(sourceWithPairs.id, 'label') : undefined, rel: sourceWithPairs, elem },
-      fresh, { ...ctx, injectionCell },
-    );
-    if (!markerClause) return null;
-    const paired = make.filter({ id: fresh('imf'), input: sourceWithPairs, channels: [], type: sourceWithPairs.type, pred: markerClause });
-    const origin: Channel = { col: fresh('origin'), role: 'origin' };
-    const channels = withChannel(seedChannels, origin);
-    rel = make.project({
-      id: fresh('c'), input: paired, channels, type: typeOf(...elementCols(channels)),
-      exprs: [['id', col(paired.id, 'id')], ...channels.map((channel) => [channel.col,
-        channel.role === 'bulk' ? compilerInt(1)
-          : channel.role === 'encounter' ? col(paired.id, 'id')
-            : channel.role === 'origin'
-              // The correlation KEY is the identifier `c<ordinal>` (a valid identifier, not a bare
-              // number); the rejoin correlates on the integer ORDINAL, so strip the one-char prefix and
-              // cast. `CORR_PREFIX.length + 1` because SQLite `substr` is 1-based.
-              ? ({ kind: 'cast', to: 'int', arg: { kind: 'call', fn: 'substr', args: [col(paired.id, 'ic'), compilerInt(CORR_PREFIX.length + 1)] } } as Expr)
-              : seedPath({ kind: 'element', elem, id: col(paired.id, 'id') }, facts.demandsPathLabels),
-      ] as const)],
-    });
-    at++;
-  } else {
-
   // The `Filter` this builds over a bare element scan is what `src/rel/passes/semijoin.ts` reads: a
   // selective property predicate here can only be CHECKED, and the pass is what turns it into the
   // relation the plan is driven from. Deliberately not decided here — recognising it on the ALGEBRA
@@ -3460,7 +3354,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   // The seed of the emission order is the ROWID: a scan's
   // natural order is the only order a bare source has, and naming it makes every later slice ask
   // the same question of the same column instead of of whatever SQLite happened to produce.
-  rel = make.project({
+  const rel = make.project({
     id: fresh('c'), input: source, channels: seedChannels, type: typeOf(...elementCols(seedChannels)),
     exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
       channel.role === 'bulk' ? compilerInt(1)
@@ -3468,27 +3362,9 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
           : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }, facts.demandsPathLabels),
     ] as const)],
   });
-  }
 
   const withSack = sacked(rel);
   return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
-}
-
-/** Does this step carry either injection operand anywhere in its nested values — the legacy
- * `call('parent', …)` marker or the standard `select(label)`? The wrapping operator is the USER's and
- * lowers through the ordinary predicate path, so detection walks predicate member operands too. */
-function injectionStep(step: IRStep | undefined, params: Record<string, unknown>): boolean {
-  if (!step) return false;
-  const hasMarker = (value: unknown): boolean => {
-    if (isNested(value)) {
-      const body = stepChain((value as { nested: any }).nested, params);
-      return isParentMarkerBody(body) || isInjectedAliasBody(body, params[INJECT_LABEL_KEY]);
-    }
-    // A predicate operand (`within(marker)`, `eq(marker)`) carries its members in `operands`.
-    const pred = value as { operands?: readonly { value: unknown }[] } | null;
-    return pred?.operands != null && pred.operands.some((o) => hasMarker(o.value));
-  };
-  return (step.args ?? []).some((a) => hasMarker(a.value));
 }
 
 /**

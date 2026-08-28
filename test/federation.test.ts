@@ -5,13 +5,10 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { createFederateService } from '../src/services/catalog/federate.ts';
-import { ENDPOINT_IDS_KEY, INJECT_VALUES_KEY } from '../src/compiler/ir/injection.ts';
-import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
+import { ENDPOINT_IDS_KEY } from '../src/compiler/ir/injection.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { pushableTailPrefix } from '../src/compiler/ir/content-demand.ts';
-import { compile } from '../src/compiler/compiler.ts';
-import { storeSeededWith } from './support/harness.ts';
 
 // A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
 // IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
@@ -186,45 +183,6 @@ describe('federate — arg-less pushdown (win 2a)', () => {
   });
 });
 
-// WIN 2b — ARG-LESS MID injection. No `traversal` arg AND no positional injection: the parent marker
-// (`__.call("parent", <read>)`) sits in the pushed tail, so the compiler infers BOTH that this is a
-// mid-traversal injection AND what to read per parent. Oracle: the explicit-arg mid form, same answer.
-describe('federate — arg-less MID injection (win 2b, the parent marker in the pushed tail)', () => {
-  // home persons {marko,vadas,josh,peter} vs crew {marko,stephen,matthias,daniel}; only marko is shared.
-  const argMid = (read: string) =>
-    `g.V().hasLabel("person").call("federate", ["graph":"crew"]).V().has("name", __.call("parent", ${read}))`;
-  const explicitMid = (read: string) =>
-    `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`;
-
-  test('arg-less mid ≡ explicit mid — for each home person, same-named crew vertices', async () => {
-    expect(await runNames(argMid('__.values("name")')))
-      .toEqual(await runNames(explicitMid('__.values("name")')));
-  });
-
-  test('arg-less mid values injection returns exactly the shared name', async () => {
-    expect(await runNames(argMid('__.values("name")'))).toEqual(['marko']);
-  });
-
-  test('a parent matching nothing on the sibling drops (flatMap), not four results', async () => {
-    const res = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")'), {})).map(dec));
-    expect(res.length).toBe(1);
-  });
-
-  test('id() injection is inferred arg-less too (empty across toy graphs, must not error)', async () => {
-    const res = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.id()'), {})).map(dec));
-    expect(Array.isArray(res)).toBe(true);
-  });
-
-  test('a LOCAL suffix after the marker scatters then reduces/reads locally (the prefix ends AT the marker)', async () => {
-    // The marker caps the pushed prefix — a trailing `values`/`count` is NOT pushed as a global reduction
-    // (which would collapse all parents); it stays LOCAL over the scattered per-parent result, matching the
-    // explicit form. `…values("name")` → the matched name; `…count()` → one per surviving parent.
-    const vals = await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")') + '.values("name")', {})).map(dec));
-    expect(vals).toEqual(['marko']);
-    const cnt = Number((await Promise.all((await mgr.executor('home').framedAsync(argMid('__.values("name")') + '.count()', {})).map(dec)))[0]);
-    expect(cnt).toBe(1);   // one surviving parent (marko), counted locally
-  });
-});
 
 describe('federate — standard as()/select() MID injection', () => {
   const argless =
@@ -235,6 +193,36 @@ describe('federate — standard as()/select() MID injection', () => {
   test('arg-less and explicit forms inject the pre-barrier alias into the sibling select operand', async () => {
     expect(await runNames(argless)).toEqual(['marko']);
     expect(await runNames(explicit)).toEqual(await runNames(argless));
+  });
+
+  test('a parent with no sibling match drops from the flatMap result', async () => {
+    const result = await Promise.all((await mgr.executor('home').framedAsync(argless, {})).map(dec));
+    expect(result).toHaveLength(1);
+  });
+
+  test('a folded alias uses the user-authored within membership predicate', async () => {
+    const query = 'g.V().hasLabel("person").values("name").fold().as("e").call("federate", ["graph":"crew"]).V().has("name", within(select("e")))';
+    expect(await runNames(query)).toEqual(['marko']);
+  });
+
+  test('a multi-valued alias matches by membership rather than list equality', async () => {
+    const multi = new BunGraphManager(undefined, extendedRegistry);
+    for (const g of MODERN_SEED) await multi.executor('home').framedAsync(g, {});
+    for (const g of CREW_SEED) await multi.executor('crew').framedAsync(g, {});
+    await multi.executor('home').framedAsync('g.V().has("name","marko").property(Cardinality.list,"name","not-a-crew-name")', {});
+    try {
+      const query = 'g.V().hasLabel("person").has("name","not-a-crew-name").values("name").fold().as("e").call("federate", ["graph":"crew"]).V().has("name", within(select("e")))';
+      const result = await Promise.all((await multi.executor('home').framedAsync(query, {})).map(dec));
+      expect(names(result)).toEqual(['marko']);
+    } finally {
+      await multi.executor('home').framedAsync('g.V().has("name","not-a-crew-name").properties("name").drop()', {});
+    }
+  });
+
+  test('an id alias can be injected arg-less', async () => {
+    const query = 'g.V().hasLabel("person").id().as("e").call("federate", ["graph":"crew"]).V().has(T.id, select("e"))';
+    const result = await Promise.all((await mgr.executor('home').framedAsync(query, {})).map(dec));
+    expect(Array.isArray(result)).toBe(true);
   });
 
   test('the standard spelling preserves distinct parents carrying the same injected value', async () => {
@@ -258,7 +246,7 @@ describe('federate — standard as()/select() MID injection', () => {
 
   test('mapValues count pushdown equals the element-scatter authority', async () => {
     const pushed = new BunGraphManager(undefined, extendedRegistry);
-    const local = new BunGraphManager(undefined, extendedRegistry, undefined, { ...DEFAULT_FAST_PATHS, federateReduce: false });
+    const local = new BunGraphManager(undefined, extendedRegistry);
     for (const graph of [pushed, local]) {
       for (const g of MODERN_SEED) await graph.executor('home').framedAsync(g, {});
       for (const g of CREW_SEED) await graph.executor('crew').framedAsync(g, {});
@@ -292,8 +280,8 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: {}, federationDepth: 0, injection: { kind: 'alias', label: 'e' },
-      mapValues: { param: 'injectedMap' },
+      boundParams: {}, federationDepth: 0,
+      mapValues: { param: 'injectedMap', label: 'e' },
     });
     await contribution.apply([
       { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: {}, injectedValue: 'marko' },
@@ -315,9 +303,8 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: {}, federationDepth: 0, injection: { kind: 'alias', label: 'e' },
-      mapValues: { param: 'injectedMap' },
-      reduce: { reducer: 'count', partial: 'count', combine: 'sum', empty: 'zero' },
+      boundParams: {}, federationDepth: 0,
+      mapValues: { param: 'injectedMap', label: 'e', reduce: { partial: 'count', combine: 'sum', empty: 'zero' } },
     });
     const result = await contribution.apply([
       { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: {}, injectedValue: 'marko' },
@@ -327,165 +314,6 @@ describe('federate — standard as()/select() MID injection', () => {
   });
 });
 
-describe('federate — MID-TRAVERSAL per-parent value injection (the `parent` marker)', () => {
-  test('sibling marker lowering returns each matched element with its injected corrId', () => {
-    const pairs = { c41: 'marko', c42: 'stephen' };
-    const plan = compile('g.V().has("name", __.call("parent", __.values("name")))', { [INJECT_VALUES_KEY]: pairs });
-    if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
-    const rows = storeSeededWith(CREW_SEED).query(plan.sql, plan.binds) as Array<{ corrId: number; id: unknown }>;
-    expect(rows.map((row) => row.corrId).sort()).toEqual([41, 42]);
-    expect(plan.sql).toContain('json_each(jsonb(?))');
-  });
-
-  test('a list-injection marker lowers to membership when the USER writes within()', () => {
-    // LIFT-AND-SHIFT: membership is the USER's `within`, not a `.fold()`-implies-membership inference.
-    // The marker resolves to the injected list value cell; `within` explodes it (json_each) for membership.
-    const plan = compile('g.V().has("name", within(__.call("parent", __.values("name").fold())))', {
-      [INJECT_VALUES_KEY]: { c41: ['marko', 'not-a-crew-name'] },
-    });
-    if (plan.kind !== 'read') throw new Error('expected sibling marker read plan');
-    expect(plan.sql).toContain("IN (SELECT");
-    // The user's `within` explodes the injected value cell directly — `json_each(<pairs>.value)` —
-    // where the value column is the exploded pair map's `value` (the `iv` cell).
-    expect(plan.sql).toMatch(/FROM json_each\(\w+\.value\)/);
-  });
-
-  // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
-  // Only "marko" is shared, so a per-parent name match returns exactly marko.
-  // The injection is the `parent` marker in a predicate operand: has("name", __.call("parent", <read>)).
-  // `read` is the marker READ (wrapped as `__.call("parent", read)`); with `rawOperand`, the argument
-  // IS the whole operand already (e.g. `within(__.call("parent", …))` — the explicit membership form).
-  const mid = (read: string, rawOperand = false) => {
-    const operand = rawOperand ? read : `__.call("parent", ${read})`;
-    return `g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", ${operand})])`;
-  };
-
-  test('for each home person, fetch same-named crew vertices (values injection)', async () => {
-    const res = await runNames(mid('__.values("name")'));
-    expect(res).toEqual(['marko']);                 // only the shared name matches
-  });
-
-  test('a one-member folded injection (within) is the scalar injection', async () => {
-    // A one-member `within([x])` ≡ `eq(x)`: the explicit within-membership over a single-element list
-    // matches the same crew vertex the scalar equality does.
-    expect(await runNames(mid('within(__.call("parent", __.values("name").fold()))', /*rawOperand*/ true)))
-      .toEqual(await runNames(mid('__.values("name")')));
-  });
-
-  test('a folded multi-valued property matches by membership, not list equality', async () => {
-    // Keep the shared fixture untouched: this manager gets the one deliberate Cardinality.list mutation,
-    // and the finally removes it even though the manager is about to fall out of scope.
-    const multi = new BunGraphManager(undefined, extendedRegistry);
-    for (const g of MODERN_SEED) await multi.executor('home').framedAsync(g, {});
-    for (const g of CREW_SEED) await multi.executor('crew').framedAsync(g, {});
-    await multi.executor('home').framedAsync('g.V().has("name","marko").property(Cardinality.list,"name","not-a-crew-name")', {});
-    try {
-      const q = 'g.V().hasLabel("person").has("name","not-a-crew-name").call("federate", ["graph":"crew", "traversal": __.V().has("name", within(__.call("parent", __.values("name").fold())))])';
-      const result = await Promise.all((await multi.executor('home').framedAsync(q, {})).map(dec));
-      expect(names(result)).toEqual(['marko']);
-    } finally {
-      await multi.executor('home').framedAsync('g.V().has("name","not-a-crew-name").properties("name").drop()', {});
-    }
-  });
-
-  test('a bare multi-valued marker read fails closed instead of implicitly folding', async () => {
-    await expect(mgr.executor('home').framedAsync(mid('__.out("knows").values("name")'), {}))
-      .rejects.toThrow(/must be a direct value read/);
-  });
-
-  test('TWO parents injecting the SAME value both get the match (corrId keeps distinct parents distinct)', async () => {
-    // The correctness heart of the corrId scatter: two home parents both named "marko" each inject "marko";
-    // the sibling returns crew marko tagged with BOTH corrIds; the rejoin correlates by corrId, so EACH
-    // marko parent contributes one traverser — 2 results, not 1 (collapsed) nor 4 (a payload cross-product,
-    // the bug the id-dedup of the bound payload binding fixes). A separate manager so the fixture is isolated.
-    const two = new BunGraphManager(undefined, extendedRegistry);
-    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")', 'g.addV("person").property("name","vadas")'])
-      await two.executor('home').framedAsync(g, {});
-    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
-    const q = 'g.V().hasLabel("person").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name")))])';
-    const res = await Promise.all((await two.executor('home').framedAsync(q, {})).map(dec));
-    expect(res.length).toBe(2);   // each marko parent gets crew marko; vadas drops
-    expect(res.map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value)).toEqual(['marko', 'marko']);
-  });
-
-  test('TWO same-value parents keep separate count partials under reduction pushdown', async () => {
-    // The reduction map is keyed by corrId, not name: each marko parent contributes its OWN partial
-    // count of 1, and the resume combines those two entries to 2. A value-keyed group would merge the
-    // sibling rows before the rejoin and cannot satisfy this per-parent correlation contract.
-    const two = new BunGraphManager(undefined, extendedRegistry);
-    for (const g of ['g.addV("person").property("name","marko")', 'g.addV("person").property("name","marko")'])
-      await two.executor('home').framedAsync(g, {});
-    for (const g of CREW_SEED) await two.executor('crew').framedAsync(g, {});
-    const q = `${mid('__.values("name")')}.count()`;
-    const result = (await Promise.all((await two.executor('home').framedAsync(q, {})).map(dec))).map(Number);
-    expect(result).toEqual([2]);
-  });
-
-  test('a parent that matches nothing on the sibling contributes no traverser (flatMap)', async () => {
-    // vadas/josh/peter have no crew namesake → they drop; only marko survives. (Covered by the
-    // count above, asserted explicitly here: exactly one result, not four.)
-    const res = await Promise.all((await mgr.executor('home').framedAsync(mid('__.values("name")'), {})).map(dec));
-    expect(res.length).toBe(1);
-  });
-
-  test('MONOID PUSHDOWN ≡ element path — a mid-traversal reduction pushed as a partial gives the same answer', async () => {
-    // The correctness obligation: combine(partials) ≡ reduce(elements). `federateReduce:false` runs the
-    // reducer LOCALLY over the scattered elements (the authority); the default pushes it as a grouped
-    // monoid partial. Both must agree, over each reducer. A fresh manager with the switch off is the
-    // element-path oracle (same seeds).
-    const local = new BunGraphManager(undefined, extendedRegistry, undefined, { ...DEFAULT_FAST_PATHS, federateReduce: false });
-    for (const g of MODERN_SEED) await local.executor('home').framedAsync(g, {});
-    for (const g of CREW_SEED) await local.executor('crew').framedAsync(g, {});
-    const num = async (m: BunGraphManager, q: string) =>
-      (await Promise.all((await m.executor('home').framedAsync(q, {})).map(dec))).map((v: any) => Number(v));
-    for (const red of ['count']) {
-      const q = `${mid('__.values("name")')}.${red}()`;
-      expect(await num(mgr, q)).toEqual(await num(local, q));      // pushed ≡ local
-    }
-  });
-
-  test('BATCHED: N parent pairs → exactly ONE sibling hop (apply, spy source)', async () => {
-    // Unit-test apply directly with a spy FederationSource: 4 parent correlation/value pairs must produce
-    // exactly ONE runForeign() call (the batched hop binding the pair array), not one per parent.
-    let rawCalls = 0; let boundValues: any = null;
-    const spySource: any = {
-      executor: () => ({
-        runForeign: (_g: string, params: Record<string, any>) => {
-          rawCalls++;
-          boundValues = params[INJECT_VALUES_KEY];
-          return Promise.resolve({ kind: 'elements', rows: [] });
-        },
-      }),
-    };
-    // The source is a CONSTRUCTION dependency and params/depth come off the call ctx, so `apply`
-    // takes only the rows — this test wires the spy the same way the app scope does.
-    const contribution: any = createFederateService(spySource).resolve({
-      params: { graph: 'crew', traversal: subTraversal('g.V().has("name", __.call("parent", __.values("name")))') },
-      federationDepth: 0,
-    } as any);
-    const head = [
-      { kind: 'vertex', id: 1, label: 'person', props: {}, ordinal: 1, injectedValue: 'marko' },
-      { kind: 'vertex', id: 2, label: 'person', props: {}, ordinal: 2, injectedValue: 'vadas' },
-      { kind: 'vertex', id: 3, label: 'person', props: {}, ordinal: 3, injectedValue: 'marko' }, // dup
-      { kind: 'vertex', id: 4, label: 'person', props: {}, ordinal: 4, injectedValue: 'josh' },
-    ] as const;
-    await contribution.apply(head);
-    expect(rawCalls).toBe(1);                         // ONE batched hop
-    expect(boundValues).toEqual({ c0: 'marko', c1: 'vadas', c2: 'marko', c3: 'josh' });
-  });
-
-  test('id() injection matches on the sibling element id', async () => {
-    // No shared external ids across the two toy graphs → empty, but must not error (exercises the
-    // id() injection kind + its rejoin JOIN on fid).
-    const res = await Promise.all((await mgr.executor('home').framedAsync(mid('__.id()'), {})).map(dec));
-    expect(Array.isArray(res)).toBe(true);
-  });
-
-  test('an unsupported injection (computed scalar) fails closed with a clear deferral', async () => {
-    await expect(mgr.executor('home').framedAsync(mid('__.values("name").count()'), {}))
-      .rejects.toThrow(/must be a direct value read/);
-  });
-});
 
 // A MID federate whose sub-traversal is CONSTANT (no `parent` marker) and ends in a VALUE terminal: the
 // sibling runs ONCE and each of the P parents re-emits the whole pool — a CROSS scatter (P×N), the

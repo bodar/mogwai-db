@@ -142,19 +142,11 @@ export const DEFAULT_VERTEX_CARDINALITY: VertexCardinality = 'list';
  *  mid-traversal rejoin matches on; `labels` is the full set the wire element frames. An edge's
  *  label cardinality is ONE by spec, so it has only the scalar.
  *
- *  Two mid-traversal-only optional fields (both undefined for a source-form g.call(...), exactly
- *  like `ordinal`'s existing convention):
- *  - `ordinal` — a per-parent result can stamp its originating traverser's ordinal. It remains
- *    reserved scaffolding; federated injection correlation uses `corrId`.
- *  - `corrId` — the injected parent's correlation identity. A sibling marker result carries it
- *    back so the local resume can rejoin by identity, never by the injected value. Undefined for
- *    source-form and no-injection results.
- *  - `injectedValue` — set on a HEAD row (the barrier's INPUT side): the per-parent scalar
- *    (values(key)/id()/label()) `apply` batches on. It crosses to the sibling beside its corrId;
- *    the local rejoin never reads it. */
+ *  Mid-traversal inputs may carry an `ordinal` and an `injectedValue`: the latter is set on a HEAD
+ *  row for a barrier service to batch. Both are absent for a source-form `g.call(...)`. */
 export type ForeignRow =
-  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly labels: readonly string[]; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly corrId?: number; readonly injectedValue?: unknown }
-  | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly corrId?: number; readonly injectedValue?: unknown };
+  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly labels: readonly string[]; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown }
+  | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown };
 
 /** THE SIBLING'S RESULT, transferred back over a federated hop — ONE operation ("run remotely, return
  *  the result"), tagged by the SHAPE the sibling produced. `runForeign()` used to return `ForeignRow[]` bare,

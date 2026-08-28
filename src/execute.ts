@@ -879,9 +879,9 @@ export class Executor implements ExecutorApi {
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     if (plan.shape.kind === 'vertex')
-      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props), ...(r.corrId === undefined ? {} : { corrId: r.corrId }) })) };
+      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) })) };
     if (plan.shape.kind === 'edge')
-      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ...(r.corrId === undefined ? {} : { corrId: r.corrId }) })) };
+      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) })) };
     // A pushed-down REDUCER collapses the whole stream to ONE value. `count()` is `value` (static
     // ScalarType — a Long); sum/max/min/mean are `scalar` (per-row `vt`). It arrives here ONLY when the
     // caller flagged the pushed terminal `'reduce'`, which is the ONE fact that disambiguates a `value`

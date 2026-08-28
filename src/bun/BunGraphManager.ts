@@ -48,7 +48,7 @@ export class BunGraphManager implements GraphManager {
      *  naming the missing binding. */
     private readonly io?: IoStore,
     /** Override the ambient fast-path config for every graph this manager owns — the differential
-     *  seam (e.g. `{federateReduce: false}` to run the element-path authority). Omitted in production. */
+     *  seam. Omitted in production. */
     private readonly fastPaths?: FastPathConfig,
   ) {
     if (dir) mkdirSync(dir, { recursive: true });

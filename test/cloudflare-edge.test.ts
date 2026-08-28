@@ -33,7 +33,14 @@ function fakeManager(store: GraphStore, siblingRows: ForeignRow[] = []) {
       calls.framed++; calls.lastGremlin = gremlin;
       return []; // routing sentinel — the real DO compiles here; we only assert the path was taken
     },
-    runForeign: async (): Promise<ForeignResult> => { calls.raw++; return { kind: 'elements', rows: siblingRows }; },
+    runForeign: async (gremlin: string): Promise<ForeignResult> => {
+      calls.raw++;
+      // `runForeign` reports the sibling plan's terminal shape. The mapValues sibling ends in
+      // `group()` and therefore returns its typed map tree, while ordinary federation returns elements.
+      return gremlin.startsWith('g.inject(')
+        ? { kind: 'map', value: { t: 'map', v: [] } }
+        : { kind: 'elements', rows: siblingRows };
+    },
   };
   const ns = { getByName: () => stub } as unknown as DurableObjectNamespace<GraphDatabase>;
   return { mgr: new CloudflareGraphManager(ns), calls };
@@ -88,7 +95,7 @@ describe('edge compilation — EdgeExecutor routing', () => {
     const store = seededStore();
     const sibling: ForeignRow[] = [{ kind: 'vertex', id: 99, label: 'person', labels: ['person'], props: {} }];
     const { mgr, calls } = fakeManager(store, sibling);
-    await mgr.executor('g').framedAsync('g.V().has("name","marko").call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.values("name")))])', {});
+    await mgr.executor('g').framedAsync('g.V().has("name","marko").values("name").as("e").call("federate", ["graph":"crew", "traversal": __.V().has("name", select("e"))])', {});
     expect(calls.readHead).toBe(1);   // the per-parent injected value was read on the DO
     expect(calls.raw).toBe(1);        // one batched sibling hop, from the Worker
     expect(calls.framed).toBe(0);     // the DO did not full-drive

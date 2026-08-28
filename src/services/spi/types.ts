@@ -24,34 +24,10 @@ import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
  *  into one representation. A service reads it oblivious to how the value arrived. */
 export type CallParams = Record<string, unknown>;
 
-/** How a mid-traversal call()'s per-parent value is READ — either the legacy marker's direct read body,
- *  or a standard pre-barrier `as(label)` read by `select(label)` in the sibling. A DIRECT marker read (a
- *  property value, the element id, or its label) may end in `.fold()` to widen the per-parent value from a
- *  scalar to a LIST (`fold: true`). A computed marker injection, or a bare MULTI-VALUED marker read with
- *  no `.fold()`, is out of scope and fails closed with a clear deferral.
- *
- *  The read produces the per-parent VALUE; correlation back to the parent is by a minted CORRID (an
- *  `origin` channel the sibling marker join projects), NEVER by re-matching this value against the returned
- *  element. So `kind`/`key` drive the HEAD projection (which value to read per parent) and, via `fold`, the
- *  sibling join's predicate (equality vs `json_each` membership) — not the rejoin. */
-export type InjectionKind =
-  | { readonly kind: 'values'; readonly key: string; readonly fold?: boolean }
-  | { readonly kind: 'id'; readonly fold?: boolean }
-  | { readonly kind: 'label'; readonly fold?: boolean }
-  /** A standard `as(label)` before the barrier, read by `select(label)` in its sibling. */
-  | { readonly kind: 'alias'; readonly label: string };
-
-/** What a call() site parsed to before registry lookup — the service name plus its
- *  resolved constant params. Shared by the source form (g.call(...)) and the
- *  mid-traversal form (V().call(...)). `injectionTraversal` is the raw (un-lowered) nested-
- *  traversal AST of a mid-traversal call's per-parent injection arg (the third positional arg);
- *  undefined for a source-form call or a mid call with no injection (a constant sub-traversal —
- *  the service runs once, the degenerate collapse). Kept un-lowered so `midSegment` can classify it
- *  (→ InjectionKind via `injectionKindOf`) and take the read VERBATIM as the head's last step. */
+/** What a call() site parsed to before registry lookup — the service name plus its resolved params. */
 export interface CallSpec {
   readonly serviceName: string;
   readonly params: CallParams;
-  readonly injectionTraversal?: any;
   /** The pre-barrier alias a sibling `select(label)` reads as its injected value. */
   readonly injectionLabel?: string;
 }
@@ -79,13 +55,13 @@ export interface CallSite {
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
-  /** The explicit shape of this mid-traversal federate injection, if it has one. `fold:true` is
-   *  carried to the sibling as an internal flag so marker lowering chooses membership without
-   *  inspecting the JSON pair value. */
-  readonly injection?: InjectionKind;
   /** Standard bound parameter used by federate's mapValues injection. It is a call-site input,
    *  rather than a service-private params entry: the synthesized sibling Gremlin names it directly. */
-  readonly mapValues?: { readonly param: string };
+  readonly mapValues?: {
+    readonly param: string;
+    readonly label: string;
+    readonly reduce?: { readonly partial: string; readonly combine: 'sum' | 'min' | 'max'; readonly empty: 'zero' | 'nothing' };
+  };
   /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
    *  known once at plan time (the tail is right there in the chain), the same category as
    *  `federationDepth`. A barrier that shapes its fetch by the downstream demand (federate skipping the
@@ -106,20 +82,6 @@ export interface CallSite {
     readonly siblingGremlin: string;
     readonly suffixFrom: number;
     readonly reduces: boolean;
-  };
-  /** MID-TRAVERSAL REDUCTION pushdown — a transport optimization (`reducers.ts`). Present only for a
-   *  mid-traversal federate whose local tail is a bare reducer that SPLITS. `apply` runs the sibling as a
-   *  per-parent GROUPED partial (`group().by().by(<partial>())`, keyed by origin for the marker route
-   *  or by the ordinary map key for mapValues) so a `(key→partial)` map
-   *  crosses instead of every element; the resume COMBINES the partials per parent with `combine`/`empty`,
-   *  yielding the same per-parent answer as the element scatter + local reduce (the authority). `empty`
-   *  is the empty-input answer (`zero` = the monoid `count`;
-   *  `nothing` = a semigroup — `sum`/`min`/`max`); `reducer` is the original step name (for framing). */
-  readonly reduce?: {
-    readonly reducer: string;
-    readonly partial: string;
-    readonly combine: 'sum' | 'min' | 'max';
-    readonly empty: 'zero' | 'nothing';
   };
 }
 

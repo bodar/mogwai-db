@@ -47,7 +47,7 @@ import { valueHead } from './barrier-value.ts';
 // deliberate product decision that unblocks the wall.
 
 /** The reserved bind name the resume's re-injected `within(<survivors>)` carries. Underscore-prefixed
- *  and mogwai-namespaced (as `INJECT_VALUES_KEY` is) so it cannot collide with a user bound-param. It
+ *  and mogwai-namespaced so it cannot collide with a user bound-param. It
  *  names the ONE `json_each` bind the survivor set crosses as; only one such `within` exists per
  *  resumed statement (a further regex in the tail becomes the NEXT segment), so there is nothing for
  *  the bind-dedup to conflate. */

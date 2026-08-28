@@ -70,7 +70,6 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
-    federateReduce: request.fastPaths.federateReduce,
     detached: options?.detached ?? false,
     labelRegime: labelRegime(request.sourceOptions),
     services: servicesNamedBy(steps, request.params, request.registry),

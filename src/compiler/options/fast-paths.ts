@@ -64,19 +64,6 @@ export interface FastPathConfig {
    * relation legitimately changes the emission order of a traversal that never called `order()`.
    */
   readonly propertySeek: boolean;
-  /**
-   * May a MID-TRAVERSAL federate reduction push down as a per-group partial (`reducers.ts`)? Off runs
-   * the reducer LOCALLY over the scattered elements (`foreignRejoin` + a local reduce) — result-equivalent
-   * by the split law `combine(partial(A), partial(B)) ≡ reduce(A ∪ B)`, and the AUTHORITY the pushed path
-   * is checked against.
-   *
-   * **Federation-specific: its differential is a federation test, NOT the L5 corpus** — L5 generates over
-   * the base graph and never emits a `call(federate,…)`, so this switch is invisible to the per-switch
-   * sweep by construction (the honest version of the `repeatBodyExpansion`/`propertySeek` caveat, where a
-   * switch's agreement is asserted elsewhere than L5). `test/federation.test.ts` runs a mid-traversal
-   * reduction with the switch ON and OFF and asserts the same answer.
-   */
-  readonly federateReduce: boolean;
 }
 
 export interface CompileOptions {
@@ -112,7 +99,6 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   movementCollapse: true,
   repeatBodyExpansion: true,
   propertySeek: true,
-  federateReduce: true,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({

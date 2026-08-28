@@ -153,29 +153,23 @@ const cellAt = (row: Expr, at: number): Expr =>
 /**
  * SCATTER a batched barrier's pooled results back over the parents that asked for them.
  *
- * A mid-traversal injected `call()` runs the sibling once over parent `(corrId, value)` pairs. The
- * sibling carries each matching pair's corrId back, so this resume joins the landed pool to its parent
- * identity — never re-matching a returned element's value. This preserves distinct parents that inject
- * equal values and works independently of the injected value's shape.
- *
- * With no injection the sub-traversal is a constant, so every parent gets the whole pool — a CROSS join,
- * which is the same statement with the ON dropped. `parentCount` supplies that relation's size.
+ * A constant mid-traversal runs once, then every parent receives its complete result pool through an
+ * ordinary CROSS join. `parentCount` supplies that parent relation.
  */
-export function foreignRejoin(pool: Rel, elem: Elem, parentCount: number, injected: boolean, fresh: Minter): Rel {
+export function foreignRejoin(pool: Rel, elem: Elem, parentCount: number, fresh: Minter): Rel {
   // ONE parent per row, the same one-bind rule the pool itself lands under: a parent set is data-sized.
   const parents = make.explode({
-    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, corrId) => corrId)), 'text'), as: { value: 'fdv' },
+    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, parentId) => parentId)), 'text'), as: { value: 'fdv' },
     type: typeOf(meta('fdv', 'int')),
   });
   const payload = foreignPayloadCols(elem);
-  // A single parent with no injection takes the pool unchanged — the join would multiply by one, and
+  // A single parent takes the pool unchanged — the join would multiply by one, and
   // skipping it keeps the ordinary one-parent federate plan as small as it was.
-  if (!injected && parentCount <= 1) return pool;
+  if (parentCount <= 1) return pool;
   const joined = make.join({
     id: fresh('fgj'), left: pool, right: parents, channels: [],
-    join: injected ? 'inner' : 'cross',
+    join: 'cross',
     type: typeOf(...pool.type.cols, meta('fdv', 'int')),
-    ...(injected ? { on: { kind: 'binary' as const, op: '=' as const, left: col(pool.id, 'corrId'), right: col(parents.id, 'fdv') } } : {}),
   });
   return make.project({
     id: fresh('fgr'), input: joined, channels: [], type: typeOf(...payload),

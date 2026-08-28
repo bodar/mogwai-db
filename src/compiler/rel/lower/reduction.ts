@@ -12,7 +12,6 @@ import { normalize } from '../../ir/passes.ts';
 import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { argValues, isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { isInjectedAliasBody, isParentMarkerBody } from '../../ir/injection.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
@@ -521,14 +520,31 @@ export function childRows(
  * `subject IN (SELECT sv FROM json_each(<list>))` is that lowering spelled in SQLite's dialect.
  */
 export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | null {
-  // A federated `within(__.call('parent', read.fold()))` — the EXPLICIT membership form of injection.
-  // The marker operand resolves to the injected list's MEMBERSHIP SET (the pair value exploded by
-  // json_each), so the sibling's own `within` drives membership — no compiler `.fold()`-implies-
-  // membership inference. Checked on the RAW (un-normalized) body: `normalize` runs `parseCallSpec` on
-  // the `call('parent', …)` and throws (it is not a registered service), so this must fire BEFORE
-  // `rootedSteps` normalizes. Present only on a federated sibling chain (`ctx.injectionCell`).
-  if (ctx.injectionCell && isNested(operand) && isParentMarkerBody(stepChain(operand.nested, ctx.params)))
-    return ctx.injectionCell.listSet();
+  const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
+  // `Column.values` returns the map entry's value unchanged
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java`).
+  // `within` applies `Contains` equality to each collection member, so the entry's list is a set
+  // relation here rather than the scalar first-value read used by `has(k, select(Column.values))`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/Contains.java`).
+  if (ctx.entryValue && body?.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
+    && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') {
+    const members = make.explode({
+      id: fresh('evs'), channels: [], expr: ctx.entryValue, as: { value: 'sv' },
+      type: typeOf(meta('sv', 'any', true)),
+    });
+    const value = col(members.id, 'sv');
+    return make.project({
+      id: fresh('evp'), input: members, channels: [], type: typeOf(meta('sv', 'any', true)),
+      exprs: [['sv', {
+        kind: 'case',
+        whens: [[
+          { kind: 'binary', op: '=', left: { kind: 'call', fn: 'json_type', args: [value] }, right: compilerText('object') },
+          { kind: 'call', fn: 'json_extract', args: [value, compilerText('$.v')] },
+        ]],
+        else: value,
+      }]],
+    });
+  }
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
   const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!steps) return null;
@@ -570,18 +586,11 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
 export function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES): Expr | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!body?.length) return null;
-  // A federated `parent` MARKER operand resolves to the per-parent injected VALUE cell — the whole
-  // lift-and-shift: the sibling's own `has(k, marker)` then compares the stored value to this cell as
-  // ORDINARY equality (or whatever operator the user wrote), no compiler shape sniff. Present only on a
-  // federated sibling chain (`ctx.injectionCell`), so a non-federated operand falls through unchanged.
-  if (ctx.injectionCell && (isParentMarkerBody(body)
-    || isInjectedAliasBody(body, ctx.injectionCell.label)
-    // A map-entry value is the ordinary scope value of `select(Column.values)`: Column returns
-    // the entry's value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/
-    // tinkerpop/gremlin/structure/Column.java`).  The entry-rooted V()/E() arm below supplies that
-    // value through the same correlated cell the federated injection path already uses.
-    || (body.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
-      && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values'))) return ctx.injectionCell.value;
+  // A map-entry value is the ordinary scope value of `select(Column.values)`: Column returns the
+  // entry's value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/
+  // gremlin/structure/Column.java`). The entry-rooted V()/E() arm supplies that correlated value.
+  if (ctx.entryValue && body.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
+    && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') return ctx.entryValue;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
@@ -1254,11 +1263,9 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
       id: fresh('evj'), left: root, right: source, join: 'inner', channels: [],
       type: typeOf(...root.type.cols, ...source.type.cols), on: compilerInt(1),
     });
-    // `unfold()` keeps a map entry's stored typed node in `mv`; a scalar `Column.values`
-    // read is its payload, exactly as `entrySide` restores it for the ordinary entry loop.
-    // The mapValues transport supplies scalar parent values, so another value shape remains an
-    // honest decline until its corresponding entry-side decoder is needed here.
-    if (host.entry.valOf.kind !== 'scalar') return null;
+    // `unfold()` keeps a map entry's stored typed node in `mv`; `Column.values` reads its payload.
+    // A scalar becomes a direct equality operand; a list is exploded by `foldedListSet` for `within`.
+    if (host.entry.valOf.kind !== 'scalar' && host.entry.valOf.kind !== 'list') return null;
     // Keep the entry value as a one-row scalar subquery, then drop the entry columns before the
     // ordinary element tail. Property/movement builders own the element scan's payload schema and
     // correctly reject a widened `(entry, element)` join as an element relation.
@@ -1273,13 +1280,7 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     });
     const entryCtx: ChainCtx = {
       ...inBody(ctx),
-      injectionCell: {
-        value: entryValue,
-        listSet: () => make.explode({
-          id: fresh('evx'), channels: [], expr: entryValue, as: { value: 'value' },
-          type: typeOf(meta('value', 'any', true)),
-        }),
-      },
+      entryValue,
     };
     // A terminal reducer belongs to this entry-correlated rooted read, not to the outer group
     // pool. Reuse the correlated reducer so count keeps its seed while numeric reducers retain

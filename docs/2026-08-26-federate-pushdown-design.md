@@ -291,28 +291,16 @@ membership) injection**.
 
 ### Where the marker substrate went
 
-The `parent`-marker + minted-`origin` corrId substrate above is the FIRST implementation of mid-traversal
-injection and is still on trunk, but it is **being superseded** by the `{parentId → parentValue}` map +
-standard-`mapValues` design (see "Injection" at the top). Two forces drove the redesign: it kept forcing
-per-shape arms (scalar vs list vs map — a drift refuted repeatedly), and it made injection reach into
-SHARED filter code (`nestedFirstValue`/`foldedListSet` via `ctx.injectionCell`) — which violates the rule
-that injection must change no non-federate code. The mapValues design retires the marker, the reserved key,
-the `origin` correlation channel, `injectionCell`, and `foreignRejoin`'s injected arm, replacing all of it
-with correlation as an ordinary `group().by(Column.keys)` key. Do not extend the marker substrate; build
-toward the redesign.
+The `parent`-marker + minted-`origin` corrId substrate above was the FIRST implementation of mid-traversal
+injection. It was deleted when the `{parentId → parentValue}` map + standard-`mapValues` design landed.
+The redesign removed its per-shape arms and its reach into shared filter code, replacing hidden correlation
+with the ordinary `group().by(Column.keys)` key.
 
 ## Open, in rough priority
 
-1. **The mapValues injection redesign** — replace the marker/corrId substrate with the
-   `{parentId → parentValue}` map + standard-`mapValues` sibling query (the "Injection" section is the full
-   design; its "staged build" is the worklist). Stage 1 (make `group().by(Column.keys).by(<child>)` lower —
-   a committed deferral today) is the highest-risk prerequisite and comes first. This subsumes what the old
-   backlog called "bigger-than-scalar injection (MAP/SUBGRAPH)": under the redesign a map/list/element/
-   composite value is just an ordinary `by()` result shape the sibling produces, no per-shape correlation
-   work.
-2. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
+1. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
    `union`-of-two-siblings + identity comparisons.
-3. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
+2. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
    could be threaded through the resume (today `cap` over a pre-barrier collection fails closed locally).
    Lower value.
 

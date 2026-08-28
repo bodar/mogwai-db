@@ -9,7 +9,7 @@ import type { IoStore } from '../src/iostore.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/spi/types.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
-import { parseCallSpec, injectionKindOf } from '../src/services/params/call-params.ts';
+import { parseCallSpec } from '../src/services/params/call-params.ts';
 import { subTraversalToGremlin } from '../src/services/params/traversal-param.ts';
 import { compile, compilePlan } from '../src/compiler/compiler.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
@@ -163,43 +163,11 @@ describe('call/with fold + param resolution', () => {
     expect(subTraversalToGremlin(t.steps)).toBe('g.V().has("age",gt(30))');
   });
 
-  // ---- mid-traversal per-parent INJECTION (the `parent` marker inside the traversal) ----
-
-  test('a parent marker inside the traversal is captured as the injection', () => {
-    for (const read of ['__.values("name")', '__.id()', '__.label()']) {
-      const s = spec(`g.call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", ${read}))])`);
-      expect(s.injectionTraversal).toBeDefined();          // the marker's READ body, captured
-      expect(s.params.graph).toBe('crew');
-    }
-  });
-
-  test('injectionKindOf classifies direct scalar/list reads and rejects unshaped streams', () => {
-    // Classifies the marker's READ body (`call("parent", <read>)`'s 2nd arg). Feed the read directly.
-    const kind = (read: string) => injectionKindOf(callStep(`g.call("parent", ${read})`).args[1].value.nested, {});
-    expect(kind('__.values("name")')).toEqual({ kind: 'values', key: 'name' });
-    expect(kind('__.id()')).toEqual({ kind: 'id' });
-    expect(kind('__.label()')).toEqual({ kind: 'label' });
-    expect(kind('__.values("name").fold()')).toEqual({ kind: 'values', key: 'name', fold: true });
-    expect(kind('__.id().fold()')).toEqual({ kind: 'id', fold: true });
-    expect(kind('__.label().fold()')).toEqual({ kind: 'label', fold: true });
-    // Computed / non-direct → null (the caller fails closed with a clear deferral).
-    expect(kind('__.out("knows").values("name")')).toBeNull();
-    expect(kind('__.union(__.values("name"),__.values("age")).fold()')).toBeNull();
-    expect(kind('__.out().count()')).toBeNull();
-    expect(kind('__.constant(1)')).toBeNull();
-  });
-
-  test('a bare parent marker (no read) throws at parse — fail closed', () => {
-    expect(() => spec('g.call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent"))])'))
-      .toThrow(/injection marker needs a read/);
-  });
-
   test('a NON-injection traversal beside a map is NOT captured (the --list dynamic-params form)', () => {
     // call(name, map, project-traversal) is TinkerPop's call_string_map_traversal: the map wins,
     // the traversal is ordinary dynamic params — NEVER an injection (and never retains the cyclic
     // antlr node, which a toEqual on the spec would choke on).
     const s = spec('g.call("--list", ["service":"tinker.search"], __.project("x").by(__.constant("y")))');
-    expect(s.injectionTraversal).toBeUndefined();
     expect(s.params).toEqual({ service: 'tinker.search' });
   });
 });
@@ -272,17 +240,6 @@ describe('call() routing (seedCall)', () => {
     }
   });
 
-  test('a mid-traversal barrier with an UNSUPPORTED injection fails closed', () => {
-    const federate: Service = {
-      name: 'federate', type: 'barrier', describeParams: () => ({}),
-      resolve: () => ({ kind: 'barrier', residency: 'worker', apply: async () => [] }),
-    };
-    const reg = createRegistry([federate]);
-    // The parent marker's read is a multi-valued stream with no explicit fold — never collapse it implicitly.
-    expect(() => compilePlan(
-      'g.V().call("federate", ["graph":"crew", "traversal": __.V().has("name", __.call("parent", __.out("knows").values("name")))])', {}, { registry: () => reg }))
-      .toThrow(/must be a direct value read/);
-  });
 });
 
 describe('--list (DirectoryService) — end to end over GraphBinary', () => {

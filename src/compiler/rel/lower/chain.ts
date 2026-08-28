@@ -141,18 +141,8 @@ export interface ChainCtx extends FilterCtx {
    * would see the graph AFTER the write.
    */
   readonly mutating: boolean;
-  /**
-   * THE FEDERATED INJECTION CELL — a chain-global binding a `parent` MARKER operand resolves against,
-   * or absent. When a sibling sub-traversal carries an injected `(corrKey, value)` pair table, the
-   * marker `__.call('parent', …)` is an ordinary nested-traversal OPERAND that resolves to the
-   * per-parent VALUE cell (a bound `iv` column of the exploded pairs), so the sibling's OWN operator
-   * (`has(k, marker)` → eq, `has(k, within(marker))` → membership, a map wherever a map goes) lowers
-   * through the ORDINARY predicate machinery. `value` is the scalar cell (`resolveScalar`); `listSet`
-   * is the membership set the explicit `within(marker)` form explodes (`resolveListSet`). Same
-   * category as `collections`/`sideEffects`: a chain-global binding the resolvers consult, not a
-   * property of the relation. Absent for every non-federated chain.
-   */
-  readonly injectionCell?: { readonly value: import('../../../rel/expr.ts').Expr; readonly listSet: () => import('../../../rel/rel.ts').Rel; readonly label?: string };
+  /** A map-entry child reads `select(Column.values)` from this correlated value cell. */
+  readonly entryValue?: import('../../../rel/expr.ts').Expr;
 }
 
 /**

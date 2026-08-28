@@ -1,13 +1,13 @@
 import type { IRStep } from '../ir/strategies.ts';
 import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
-import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, InjectionKind, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
-import { injectionKindOf, isTraversalParam, parentMarkerReadIn, parentMarkerStepIndex, parseCallSpec } from '../../services/params/call-params.ts';
+import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
+import { isTraversalParam, parseCallSpec } from '../../services/params/call-params.ts';
 import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
 import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { labelsBoundBefore, preBarrierSelectRead } from '../ir/labels.ts';
 import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
-import { arg, argValues, stepChain } from '../../gremlin/frontend.ts';
+import { arg, argValues } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, lowerTypedNodeStream, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -95,10 +95,8 @@ export interface SegmentRequest {
  *  explicit `traversal` arg.** `pushableTailPrefix` finds the longest remote-safe prefix; its steps become
  *  the sibling query, synthesized from their OWN source text (`ctx.getText()` per step — a bound `$x` stays
  *  a param the sibling resolves — re-rooted at `g`; no un-parser, locked decision). The prefix's steps are
- *  ALSO where the `parent` injection marker is found (`injectionRead`), so the arg-less MID form (win 2b)
- *  needs no separate branch — `barrierIn` folds `injectionRead` into `spec.injectionTraversal`, and every
- *  downstream reader (injection classify, mid/source route, head, scatter) sees the SAME fact whether the
- *  marker came from an explicit arg or an inferred prefix.
+ *  ALSO where a pre-barrier alias is read, so the arg-less MID form needs no separate branch: every
+ *  downstream reader sees the same label fact whether the body was explicit or inferred.
  *
  *  THE BREAK POINT for an injection is AT the marker step: a marker is a per-parent FILTER on the sibling,
  *  so anything AFTER it (a reducer, a `values`) is LOCAL processing of the scattered result — exactly the
@@ -107,27 +105,19 @@ export interface SegmentRequest {
  *  pushes (source form), reducer included. `null` when nothing pushes (an empty prefix). */
 function inferredPushdown(
   steps: readonly IRStep[], at: number, spec: CallSpec, params: Record<string, any>,
-): { siblingGremlin: string; prefixLength: number; reduces: boolean; injectionRead: any; injectionLabel?: string } | null {
+): { siblingGremlin: string; prefixLength: number; reduces: boolean; injectionLabel?: string } | null {
   if (spec.serviceName !== FEDERATE_SERVICE || spec.params.traversal != null) return null;
   const prefix = pushableTailPrefix(steps, at, params);
   if (prefix.length === 0) return null;
-  // Cap the prefix at the `parent` marker step (the injection filter boundary), if any — the arg-less MID
-  // form. `parentMarkerStepIndex` looks only at each step's own operand args (which pushed step is the
-  // filter). A marker → the prefix ends there and cannot end in a reducer; no marker → the whole prefix.
-  const full = steps.slice(at + 1, at + 1 + prefix.length);
-  const markerAt = parentMarkerStepIndex(full, params);
-  const prefixLength = markerAt >= 0 ? markerAt + 1 : prefix.length;
+  const prefixLength = prefix.length;
   const pushed = steps.slice(at + 1, at + 1 + prefixLength);
   const siblingGremlin = 'g.' + pushed.map((s) => s.ctx.getText()).join('.');
   // A source-rooted sibling query (the first pushed step is the tail's `.V()`/`.E()` re-source) — the
   // same shape the explicit `traversal` arg must have. A tail that does not re-source cannot be pushed as
   // a source query, so it declines to push (stays local) rather than synthesize an unrooted `g.…`.
   if (!siblingGremlin.startsWith('g.V(') && !siblingGremlin.startsWith('g.E(')) return null;
-  // The injection read from the pushed prefix's marker (win 2b), classified downstream exactly like the
-  // explicit form's `injectionTraversal`. `null` when the prefix has no marker (a plain arg-less push).
-  const injectionRead = markerAt >= 0 ? parentMarkerReadIn(pushed, params) : null;
   return {
-    siblingGremlin, prefixLength, reduces: markerAt >= 0 ? false : prefix.reduces, injectionRead,
+    siblingGremlin, prefixLength, reduces: prefix.reduces,
     ...(prefix.injectionLabel ? { injectionLabel: prefix.injectionLabel } : {}),
   };
 }
@@ -149,9 +139,9 @@ function explicitInjectionLabel(steps: readonly IRStep[], at: number, spec: Call
  *  — the same answer as the element scatter + local reduce, only a `(key→partial)` map crosses. Mean
  *  (`partial:null`, reduce-first to two partials) is a follow-up — declines here for now. */
 function inferredReduce(
-  steps: readonly IRStep[], at: number, spec: CallSpec, injection: InjectionKind | undefined, suffixFrom: number,
-): CallSite['reduce'] | undefined {
-  if (spec.serviceName !== FEDERATE_SERVICE || at === 0 || !injection) return undefined;
+  steps: readonly IRStep[], at: number, spec: CallSpec, injectionLabel: string | undefined, suffixFrom: number,
+): NonNullable<CallSite['mapValues']>['reduce'] | undefined {
+  if (spec.serviceName !== FEDERATE_SERVICE || at === 0 || !injectionLabel) return undefined;
   // Pushdown has already moved the remote V()/E() prefix to the sibling. Only the remaining LOCAL
   // suffix decides whether this is a per-parent reduction.
   const tail = steps.slice(suffixFrom);
@@ -159,7 +149,7 @@ function inferredReduce(
   if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
   const reducer = reducerOf(only.name);
   if (!reducer || reducer.partial == null || reducer.combine == null) return undefined; // mean/unsplittable → follow-up
-  return { reducer: only.name, partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };
+  return { partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };
 }
 
 function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier | null {
@@ -181,31 +171,23 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // run over the SUFFIX, not the whole tail.
     const pushdown = inferredPushdown(steps, at, spec, request.params);
     const suffixFrom = at + 1 + (pushdown?.prefixLength ?? 0);
-    // UNIFY the two forms: the sub-traversal's injection read is `spec.injectionTraversal` for the explicit
-    // form (set by `parseCallSpec`) OR `pushdown.injectionRead` for the arg-less form (the marker found in
-    // the pushed prefix, win 2b). Fold the arg-less read onto an EFFECTIVE spec so every downstream reader
-    // — injection classify, mid/source route, head projection, scatter — is identical for both forms. At
-    // most one is set (an explicit `traversal` disables pushdown, so no inferred read can arise beside it).
+    // Fold either form's pre-barrier alias onto an effective spec so every downstream reader sees the
+    // same mapValues injection fact.
     const injectionLabel = pushdown?.injectionLabel ?? explicitInjectionLabel(steps, at, spec, request.params);
-    const effectiveSpec: CallSpec = pushdown?.injectionRead
-      ? { ...spec, injectionTraversal: pushdown.injectionRead }
-      : injectionLabel
+    const effectiveSpec: CallSpec = injectionLabel
         ? { ...spec, injectionLabel }
         : spec;
     // MID-TRAVERSAL REDUCTION (monoid transport optimization): a mid federate whose tail is a bare reducer
     // pushes the reduction as a per-parent grouped PARTIAL; the resume combines per parent.
-    const injection = injectionOf(effectiveSpec, request.params);
-    const reduce = request.lowering.federateReduce === false ? undefined : inferredReduce(steps, at, effectiveSpec, injection, suffixFrom);
+    const reduce = inferredReduce(steps, at, effectiveSpec, injectionLabel, suffixFrom);
     // The local tail (after any pushed prefix) is a fact ABOUT this call site — the same category as
     // `federationDepth`. It travels on `CallSite.tailDemand`/`CallSite.pushdown`, the structure that means
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
-      injection,
-      mapValues: injection?.kind === 'alias' ? { param: freshMapValuesParam(request.params) } : undefined,
+      mapValues: injectionLabel ? { param: freshMapValuesParam(request.params), label: injectionLabel, ...(reduce ? { reduce } : {}) } : undefined,
       tailDemand: contentDemand(steps, suffixFrom),
       pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
-      reduce,
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
@@ -217,23 +199,8 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
 }
 
 /**
- * THE INJECTION a mid-traversal call declares — the per-parent value its sub-traversal is run against,
- * as the `parent` marker stands in for.
- *
- * An injection is only ever a DIRECT value read (`__.values(k)`, `__.id()`, `__.label()`). The
- * `parent` marker's READ body is `spec.injectionTraversal` (set by `parseCallSpec` when a marker is
- * present — a bare marker with no read already threw). So a marker read that does NOT classify as one of
- * those is an ERROR rather than a decline: silently running with no injection would batch the sibling
- * once and hand every parent the whole pool, which is a different question with a plausible answer.
+ * THE INJECTION a mid-traversal call declares — the pre-barrier alias value its sibling reads.
  */
-function injectionOf(spec: CallSpec, params: Record<string, any>): InjectionKind | undefined {
-  if (spec.injectionLabel) return { kind: 'alias', label: spec.injectionLabel };
-  if (!spec.injectionTraversal) return undefined;   // no injection → constant sub-traversal
-  const injection = injectionKindOf(spec.injectionTraversal, params) ?? undefined;
-  if (!injection)
-    throw new Error(`call("${spec.serviceName}"): the parent marker's read must be a direct value read — __.values(key), __.id(), or __.label()`);
-  return injection;
-}
 
 /** Pick an ordinary sibling variable that cannot shadow a user binding carried into the pushed tail. */
 function freshMapValuesParam(params: Record<string, any>): string {
@@ -307,18 +274,15 @@ function planOf(steps: readonly IRStep[], request: SegmentRequest): Plan {
  *  declines WHOLE — there is no half-segment, and the parents must come from the same algebra the
  *  resume continues in. */
 function midSegment(steps: readonly IRStep[], barrier: Barrier, request: SegmentRequest): SegmentPlan | null {
-  const injection = injectionOf(barrier.spec, request.params);
   // With no injection the sub-traversal is a constant, and the head exists only to COUNT the parents —
   // `id()` is the cheapest one-row-per-traverser read, and its value is never matched on.
   const call = steps[barrier.at]!;
   // The injection READ is the user's own body, taken verbatim rather than re-synthesized from
   // the classification — `injectionKindOf` already parsed it, and re-minting a `values(k)` step would be
   // a second spelling of the same read for the classifier to drift from.
-  const read: readonly IRStep[] = injection?.kind === 'alias'
-    ? [{ name: 'select', args: [arg(injection.label)], ctx: call.ctx }]
-    : injection && barrier.spec.injectionTraversal
-      ? stepChain(barrier.spec.injectionTraversal, request.params) as IRStep[]
-      : [{ name: 'id', args: [], ctx: call.ctx }];
+  const read: readonly IRStep[] = barrier.spec.injectionLabel
+    ? [{ name: 'select', args: [arg(barrier.spec.injectionLabel)], ctx: call.ctx }]
+    : [{ name: 'id', args: [], ctx: call.ctx }];
   const lowered = lowerToRel([...steps.slice(0, barrier.at), ...read], request.lowering);
   if (!lowered) return null;
   const head = finishLowering(lowered);
@@ -335,7 +299,7 @@ function midSegment(steps: readonly IRStep[], barrier: Barrier, request: Segment
     residency: barrier.residency,
     resume: (out: BarrierOutput, headRows: readonly BarrierInput[]): Plan =>
       resumed(steps, barrier, request, out, {
-        parentCount: headRows.length, injected: injection !== undefined,
+        parentCount: headRows.length, injected: barrier.spec.injectionLabel !== undefined,
       }),
   };
 }
@@ -494,8 +458,8 @@ function resumed(
     // MID-TRAVERSAL REDUCTION combine: the sibling returned a `(key→partial)` map (a `t:'map'` ValueNode).
     // COMBINE it per parent with the monoid — explode the map, LEFT JOIN each parent to its key, apply the
     // combine + identity — yielding the same per-parent answer as the element scatter + local reduce.
-    if (barrier.site.reduce && rejoin)
-      return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.parentCount, barrier.site.reduce, steps, barrier.suffixFrom, request.lowering)) };
+    if (barrier.site.mapValues?.reduce && rejoin)
+      return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.parentCount, barrier.site.mapValues.reduce, steps, barrier.suffixFrom, request.lowering)) };
     // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
   }

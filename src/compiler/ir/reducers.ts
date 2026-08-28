@@ -1,7 +1,7 @@
 // ---------- reducers: how a terminal reducer SPLITS into partial-remote + combine-local ----------
 //
 // A federate mid-traversal reduction (`V().call(federate,…,inj).count()`) can push its reducer to the
-// sibling as a PARTIAL keyed by the injected corrId, then COMBINE the partials locally per parent — the
+// sibling as a PARTIAL keyed by the injected map key, then COMBINE the partials locally per parent — the
 // same answer, but only a `(key→partial)` map crosses the wire instead of every element. This is a
 // TRANSPORT OPTIMIZATION over a path that already produces the right answer (element scatter + local
 // reduce), so the combine must satisfy the SPLIT law

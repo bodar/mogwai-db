@@ -383,13 +383,11 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       // to re-emit the row that many times — exactly as `elementPayload` carries it over the base graph.
       // Without it a `…out()` element-terminal after a collapse would answer N traversers as one row.
       const bulk = opts.bulk ? input.channels.find((channel) => channel.role === 'bulk') : undefined;
-      const origin = opts.origin;
       return make.project({
-        id: fresh('blr'), input: j, channels: [], type: typeOf(...payload, ...(bulk ? [meta('bulk', 'int')] : []), ...(origin ? [meta('corrId', 'int')] : [])),
+        id: fresh('blr'), input: j, channels: [], type: typeOf(...payload, ...(bulk ? [meta('bulk', 'int')] : [])),
         exprs: [
           ...payload.map((c) => [c.name, col(j.id, B(c.name))] as const),
           ...(bulk ? [['bulk', col(j.id, bulk.col)] as const] : []),
-          ...(origin ? [['corrId', col(j.id, origin)] as const] : []),
         ],
       });
     },

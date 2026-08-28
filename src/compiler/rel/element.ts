@@ -306,7 +306,7 @@ const ROW = (name: string): string => `w_${name}`;
  * it. `opts.bulk` is the caller's collapse switch, asked once, so an uncollapsed compile's projection is
  * unchanged.
  */
-export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: boolean; readonly detached: boolean; readonly origin?: string }, fresh: Minter): Rel {
+export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: boolean; readonly detached: boolean }, fresh: Minter): Rel {
   const rowCols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
   const row = make.scan({
     id: fresh('wel'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rwx'), channels: [],
@@ -336,7 +336,6 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
       : []),
     [meta('props', 'json'), elem === 'edge' ? edgeProps(rowid, fresh) : vertexProps(rowid, fresh, opts.detached)],
     ...(bulk ? [[meta('bulk', 'int'), col(ordered.id, bulk.col)] as const] : []),
-    ...(opts.origin ? [[meta('corrId', 'int'), col(ordered.id, opts.origin)] as const] : []),
   ];
   return make.project({
     id: fresh('wpl'), input: ordered, channels: [], type: typeOf(...payload.map(([column]) => column)),
