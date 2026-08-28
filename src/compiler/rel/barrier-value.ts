@@ -16,13 +16,14 @@ import { finishLowering } from './spine.ts';
 // what `buildValueTransformSegment` is. regex keeps its own resume (a `within(<survivors>)` re-inject
 // with a trigram prefilter) and shares only `valueHead`.
 
-/** The head of a value-transform barrier: the lowered prefix, IF it is a scalar `value` read; else
- *  `null` so the caller declines and the fold lowers the step its own way (no regression). One guard,
- *  three barriers — the `read`+`value` shape they all require. */
+/** The head of a value-transform barrier: the lowered prefix, IF it is a scalar `value` read (reverse/
+ *  split/regex over a scalar stream) OR a `jsonbList` read (a `order`/`dedup(Scope.local)` whose head is a
+ *  LIST-framed stream — `readSegmentHead` delivers the parsed list as `injectedValue`); else `null` so the
+ *  caller declines and the fold lowers the step its own way (no regression). */
 export function valueHead(lowered: RelLowering | null): Compiled | null {
   if (!lowered) return null;
   const head = finishLowering(lowered);
-  return head.kind === 'read' && head.shape.kind === 'value' ? head : null;
+  return head.kind === 'read' && (head.shape.kind === 'value' || head.shape.kind === 'jsonbList') ? head : null;
 }
 
 /**

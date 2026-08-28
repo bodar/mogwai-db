@@ -1,7 +1,7 @@
 import type { Step } from '../../gremlin/frontend.ts';
 import type { SegmentPlan } from '../segment.ts';
-import { lowerValueResume, type Lowering } from './lower.ts';
-import { buildValueTransformSegment } from './barrier-value.ts';
+import { lowerToRel, lowerValueResume, type Lowering } from './lower.ts';
+import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 
 // ---------- reverse() as a value-transform BARRIER — substrate A ----------
 //
@@ -46,5 +46,11 @@ export function reverseBarrierIn(steps: readonly Step[]): number | null {
  * uses too — reverse and split differ only in the transform and the resume lowering.
  */
 export function buildReverseSegment(steps: readonly Step[], at: number, lowering: Lowering): SegmentPlan | null {
+  // `valueHead` now also admits a `jsonbList` head (for the order/dedup barrier), but reverse's resume is
+  // SCALAR (`lowerValueResume`), so a LIST-framed `reverse()` must stay on the INLINE `listMemberOp` path
+  // (which reverses a list — and a nested list — in place). Decline a non-scalar head here so the fold
+  // keeps it, rather than framing the list as its JSON text.
+  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  if (head && head.shape.kind !== 'value') return null;
   return buildValueTransformSegment(steps, at, lowering, reverseValue, lowerValueResume, 'reverse');
 }

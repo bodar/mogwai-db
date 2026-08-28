@@ -1,8 +1,8 @@
 import { isScopeArg, type Step } from '../../gremlin/frontend.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { SegmentPlan } from '../segment.ts';
-import { lowerListResume, type Lowering } from './lower.ts';
-import { buildValueTransformSegment } from './barrier-value.ts';
+import { lowerListResume, lowerToRel, type Lowering } from './lower.ts';
+import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 
 // ---------- split() as a value-transform BARRIER — substrate A ----------
 //
@@ -66,6 +66,11 @@ export function splitBarrierIn(steps: readonly Step[]): { at: number; separator:
 export function buildSplitSegment(
   steps: readonly Step[], at: number, separator: string | null, lowering: Lowering,
 ): SegmentPlan | null {
+  // `valueHead` now also admits a `jsonbList` head (the order/dedup barrier), but `split()` reads a SCALAR
+  // string (`splitValue` throws on a non-string), so a LIST-framed head must decline here — the reference's
+  // non-string throw case is the fold's to raise, not this barrier's to mis-read.
+  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  if (head && head.shape.kind !== 'value') return null;
   // The value twin of `reverse()` on the shared shell: each string splits into a LIST, so the survivors
   // re-inject through `lowerListResume` (reverse uses `lowerValueResume`). The separator is bound into
   // the per-value transform here.

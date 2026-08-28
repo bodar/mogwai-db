@@ -3255,12 +3255,30 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
  * needs its own seed rather than reusing `lowerValueResume`.
  */
 export function lowerListResume(lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  return lowerListResumeOf(BARE_LIST, lists, steps, from, opts);
+}
+
+/**
+ * `lowerListResume` with the MEMBER shape stated — `split()` re-injects a bare list (`BARE_LIST`), but a
+ * value-transform whose output preserves the INPUT list's members (a bare `order`/`dedup(Scope.local)` over
+ * a NESTED list) must re-frame them by that shape or a following `unfold()` mis-reads them. A nested `list`/
+ * `map` member is itself a JSON collection, so a scalar `value` re-inject would frame it as its JSON TEXT
+ * (a string on the wire) — hence the shape-carrying twin. `of` is DATA the caller carries from the pre-
+ * barrier stream, never re-derived. (The order/dedup barrier declines an element-membered nested list, so
+ * `of` here reaches only scalar/list/map members.)
+ */
+export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  // A NESTED member (a `list`/`map`) is itself a JSON collection, so the seed value carries `json(sv)` —
+  // `json_each` hands back a nested element as its TEXT, and without the `json()` the framer would read a
+  // string where an array belongs (`items.map is not a function`). A flat member (`BARE_LIST`, split's
+  // case) needs no wrap: `sv` is already the scalar. `of` IS the member descriptor.
+  const nested = of.kind === 'list' || of.kind === 'map';
   return valueResume(lists, steps, from, opts,
     (exploded, fresh) => make.project({
       id: fresh('lrp'), input: exploded, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
-      exprs: [[LIST_COL, col(exploded.id, 'sv')]],
+      exprs: [[LIST_COL, nested ? jsonOf(col(exploded.id, 'sv')) : col(exploded.id, 'sv')]],
     }),
-    (seed, ctx, fresh) => continueAs(seed, { kind: 'list', of: BARE_LIST }, steps, from, false, ctx, fresh, NO_ALIASES));
+    (seed, ctx, fresh) => continueAs(seed, { kind: 'list', of }, steps, from, false, ctx, fresh, NO_ALIASES));
 }
 
 /**

@@ -15,6 +15,7 @@ import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
+import { buildOrderDedupSegment, orderDedupBarrierIn } from './order-dedup-local.ts';
 import type { Elem } from '../elem.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
@@ -231,6 +232,7 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const regex = regexBarrierIn(steps);
   const reverseAt = reverseBarrierIn(steps);
   const split = splitBarrierIn(steps);
+  const orderDedup = orderDedupBarrierIn(steps);
   // The EARLIEST boundary wins: a segment's head is the prefix BEFORE it, so a later barrier belongs to
   // that head's resumed tail, not to this segment. A value-transform boundary (a regex `has()`, a
   // `reverse()`, a `split()`) is asked here rather than discovered in the fold, for the same reason as a
@@ -241,10 +243,14 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const regexAt = regex ? regex.at : Infinity;
   const revAt = reverseAt ?? Infinity;
   const splitAt = split ? split.at : Infinity;
-  const earliest = Math.min(callAt, regexAt, revAt, splitAt);
+  const odAt = orderDedup ? orderDedup.at : Infinity;
+  const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt);
   if (earliest === Infinity) return null;
   if (earliest === splitAt) return buildSplitSegment(steps, split!.at, split!.separator, request.lowering);
   if (earliest === revAt) return buildReverseSegment(steps, reverseAt!, request.lowering);
+  // order/dedup(Scope.local) over a NESTED scalar list — declines (→ inline fold) for a scalar/flat-list or
+  // element-membered head.
+  if (earliest === odAt) return buildOrderDedupSegment(steps, orderDedup!.at, orderDedup!.op, request.lowering);
   if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
   // A DECORATE barrier (an OLAP algorithm) keeps the LIVE element stream — it does not land detached
   // rows — so it takes its own resume, not the source/mid foreign one.
