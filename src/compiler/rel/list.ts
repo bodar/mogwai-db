@@ -894,9 +894,17 @@ export function correlatedListMembers(
   }
   if (isBareList(of)) {
     return {
+      // Carry the member POSITION (`MEMBER.ord`) as the ENCOUNTER channel: a scalar member re-enters the
+      // scalar loop, whose `fold()` (`foldScalars`) orders by the encounter WHEN THERE IS ONE and falls
+      // back to the VALUE otherwise — so without this, `by(__.unfold().fold())` over a scalar list would
+      // value-SORT the members (`[27,29,32,35]`) instead of preserving list order (`[29,27,32,35]`), a
+      // wrong answer `UnfoldStep`+`FoldStep` never produce. The member's `json_each` position IS its
+      // encounter here (`membersOf` is correlated to ONE host's list), the same fact `renumber` mints for
+      // the relation-level `unfold()`.
       rel: make.project({
-        id: fresh('cuv'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
-        exprs: [['v', memberPayload(of, exploded)]],
+        id: fresh('cuv'), input: exploded, channels: [{ col: MEMBER.ord, role: 'encounter' }],
+        type: typeOf(meta('v', 'any', true), meta(MEMBER.ord, 'int')),
+        exprs: [['v', memberPayload(of, exploded)], [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
       }),
       scalar: memberTypeOf(of) ?? UNKNOWN,
     };

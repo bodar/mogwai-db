@@ -825,9 +825,16 @@ export function valueColIsSubquery(rel: Rel, name: string): boolean {
  * and `by(__.values('age').max())` are the SAME lowering rooted differently (a movement hop, or a
  * one-row SELF relation). The body from `from` is the ordinary fold against `root`; EVERY path returns
  * (a `ChildValue` or `null`), so a caller either takes it or declines.
+ *
+ * `rootAs` is the SHAPE the body continues over, not just an element: an adjacency/self root is
+ * `{kind:'elements'}`, but a LIST HOST's `unfold()` re-enters its MEMBERS, which may be a scalar stream
+ * (`by(__.unfold().count()|sum()|fold())` over a scalar-membered list). The root shape only feeds the
+ * ONE `continueAs` dispatcher, so a scalar root reduces through exactly the same collapse arms — the
+ * member re-entry is a reachability question, not a second engine.
  */
 export function correlatedReduce(
-  root: Rel, rootElem: Elem, body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+  root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>,
+  body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null {
   // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
   // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer row,
@@ -838,7 +845,7 @@ export function correlatedReduce(
   // — so a per-host EXISTS over the value rows is the `present` signal.
   const last = body.at(-1);
   if (last && (last.name === 'min' || last.name === 'max') && !argValues(last).length && !isLocalScope(last) && body.length >= 2) {
-    const values = continueAs(root, { kind: 'elements', elem: rootElem }, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
+    const values = continueAs(root, rootAs, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
     let fenced = false;
     if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
     const probeCol = values?.rel.type.cols[0];
@@ -868,7 +875,7 @@ export function correlatedReduce(
       };
     }
   }
-  const tail = continueAs(root, { kind: 'elements', elem: rootElem }, body, from, false, inBody(ctx), fresh, NO_ALIASES);
+  const tail = continueAs(root, rootAs, body, from, false, inBody(ctx), fresh, NO_ALIASES);
   // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say. `result` is a
   // TYPE fact, not a CARDINALITY one: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so a
   // non-collapsed subquery has as many rows as the fan-out and SQLite silently takes the first
@@ -942,7 +949,7 @@ export const selfCollapses = (name: string): boolean => isReducer(name) || name 
 export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
   const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-  return correlatedReduce(selfRow, host.elem, body, 0, ctx, fresh);
+  return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
 }
 
 export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1088,7 +1095,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // A movement is not required — what is required is that the body END in a reducer; a bare
   // `__.count()`/`__.values(k)` with no reduction falls through to the expression arm below.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, ctx.source, fresh);
-  if (child) return correlatedReduce(child.rel, child.elem, body, 1, ctx, fresh);
+  if (child) return correlatedReduce(child.rel, { kind: 'elements', elem: child.elem }, body, 1, ctx, fresh);
   // A BRANCH-headed body (`by(__.union(a,b)….fold())`) — the union fans the host out over its arms, then
   // the tail reduces. `continueAs` already lowers a `union`/`choose`/`coalesce` over an INPUT relation
   // (the chain-position branch), so rooting it at the one-row SELF relation carrying the host id and
@@ -1285,7 +1292,7 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     // A terminal reducer belongs to this entry-correlated rooted read, not to the outer group
     // pool. Reuse the correlated reducer so count keeps its seed while numeric reducers retain
     // their productivity distinction over an empty sibling stream.
-    const reduced = correlatedReduce(scoped, elem, body, 1, entryCtx, fresh);
+    const reduced = correlatedReduce(scoped, { kind: 'elements', elem }, body, 1, entryCtx, fresh);
     if (reduced) return reduced;
     const tail = continueAs(scoped, { kind: 'elements', elem }, body, 1, false, entryCtx, fresh, NO_ALIASES);
     if (!tail || tail.effects || tail.framing.kind !== 'elements') return null;
@@ -1434,8 +1441,11 @@ export function scalarHostChild(
  * (`[]`/no-emit) is the one `correlatedReduce` already states.
  *
  * `count(Scope.local)` over the list is the map-size shape and belongs to `mapTail`/`listTail`, not
- * here; other openers and non-element members decline (fail closed) — their correlated re-entry is a
- * later increment.
+ * here. An ELEMENT-membered list re-enters the element loop; a SCALAR-membered one (bare or typed —
+ * `values('age').fold()`) re-enters the SCALAR loop, so `by(__.unfold().count()|sum()|fold())` over a
+ * scalar list reduces through the same `correlatedReduce` collapse arms (`correlatedListMembers`
+ * already frames both). A MAP / nested-LIST member still declines in `correlatedListMembers` — its
+ * correlated re-entry (routing through `mapTail`/`listTail`) is a later increment.
  */
 export function listHostChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'list' }>, ctx: ChainCtx, fresh: Minter,
@@ -1443,8 +1453,11 @@ export function listHostChild(
   const first = body[0];
   if (!first || first.name !== 'unfold' || argValues(first).length || body.length < 2) return null;
   const members = correlatedListMembers(host.list, host.of, fresh);
-  if (!members || !('elem' in members)) return null; // element members only, for now
-  // The body after `unfold()` is the ordinary correlated body over the exploded elements — the SAME
-  // engine an adjacency-rooted `by()` reducer uses, so a trailing `values(k).fold()` / reducer is free.
-  return correlatedReduce(members.rel, members.elem, body, 1, ctx, fresh);
+  if (!members) return null;
+  // The body after `unfold()` is the ordinary correlated body over the exploded members — the SAME
+  // engine an adjacency-rooted `by()` reducer uses, rooted at the member's own shape, so a trailing
+  // `values(k).fold()` (element) / reducer / `is(P).count()` (scalar) is free.
+  const rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }> =
+    'elem' in members ? { kind: 'elements', elem: members.elem } : { kind: 'scalar', type: members.scalar };
+  return correlatedReduce(members.rel, rootAs, body, 1, ctx, fresh);
 }
