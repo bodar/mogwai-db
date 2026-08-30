@@ -420,8 +420,10 @@ UNEVALUABLE`.
   (`recordToMap` → `mapTail`).
 - ✅ **List shape.** Members-as-ELEMENTS (per-arm admission, local slices, `order`/`dedup` by id); members-as-MAPS
   (`project`/`valueMap`/`group().fold()`, `unfold()` round-trip); element-member SET OPS same-kind by rowid
-  (`listSetOp`); `by()` over a LIST host (`unfold()`→`correlatedListMembers`→`correlatedReduce`); `by(<pre>.fold())`
-  collect + fence (`recordToMap` `Materialize` when self-contained).
+  (`listSetOp`); `by()` over a LIST host (`unfold()`→`correlatedListMembers`→`correlatedReduce`) for ELEMENT
+  and SCALAR members (`by(__.unfold().count()|sum()|max()|min()|fold())`, the member position carried as the
+  `encounter` channel so `fold()` preserves list order); `by(<pre>.fold())` collect + fence (`recordToMap`
+  `Materialize` when self-contained).
 - ✅ **`RowShape`** — one row-algebra engine (`orderRows`/`rowOp`/`dedupOn`) for the element and property streams.
 - ✅ **Fan-out / child seam.** `flatMap`/`local` fan-out rejoin (`flatMapRejoin`); per-origin SLICE
   (`partitionedSlice`, = Calcite `convertDistinctOn`) and FOLD (correlated list subquery, seed-free);
@@ -455,7 +457,9 @@ UNEVALUABLE`.
 - 🚧 **Map-shape residue:** the map-valued `union` source; seeded `fold([:], Operator.addAll)`; the `merge`
   map-operand; a non-string (`T`-token) key. (A map feeding `mergeV`/`mergeE` — 7 write traversals — is write
   substrate, not this.)
-- 🚧 **List members that read as a VALUE:** SCALAR/`typed`/`mixed`/nested-list and MAP members over a `by()` or
+- 🚧 **List members that read as a VALUE:** a SCALAR-member `by()` reduction LANDED (above); a TYPED member still
+  reads UNTYPED (the re-entry drops `memberVtype`, so `by(__.unfold().is(P))`/typed order decline — mirror
+  `unfoldList`'s typed branch next); `mixed`/nested-list and MAP members over a `by()` or
   list host; `order`/`range(Scope.local)` over a list-of-maps; a PROPERTY-member or nested-list-member list;
   `select()` inside a list-host body (the other opener).
 - 🚧 **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`) — decorrelation into the P1
