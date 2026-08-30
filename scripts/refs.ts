@@ -24,7 +24,7 @@
  *
  * Exit codes: 0 whatever it finds, 1 only if the name resolves to nothing (a typo should be loud).
  */
-import { ROOT, relOf, startSession, uriOf } from './lsp.ts';
+import { ROOT, relOf, startSession, uriOf, type Session } from './lsp.ts';
 
 const argv = process.argv.slice(2);
 const fuzzy = argv.includes('--fuzzy');
@@ -43,6 +43,37 @@ const KIND: Record<number, string> = {
 };
 
 type Decl = { name: string; kind: number; rel: string; line: number; character: number };
+
+/** Seed a position for a symbol `workspace/symbol` can't see — an ambient global declared in lib or
+ *  `@types` (Buffer, console, a lib type). Scans editable code (src/test/scripts, never the generated
+ *  `parser/` or the vendored tree) for a non-comment whole-word use, PROBES references there, and
+ *  returns the first position that actually resolves — so a match in a comment or string, which
+ *  resolves to nothing, is skipped rather than seeding a dead query. */
+async function firstResolvingUse(
+  session: Session,
+  name: string,
+): Promise<{ rel: string; line: number; character: number } | undefined> {
+  const word = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+  for (const dir of ['src', 'test', 'scripts']) {
+    for await (const rel of new Bun.Glob(`${dir}/**/*.ts`).scan({ cwd: ROOT })) {
+      const lines = (await Bun.file(`${ROOT}/${rel}`).text()).split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trimStart();
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
+        const m = word.exec(lines[i]);
+        if (!m) continue;
+        await session.open(rel);
+        const res = await session.request('textDocument/references', {
+          textDocument: { uri: uriOf(rel) },
+          position: { line: i, character: m.index },
+          context: { includeDeclaration: false },
+        });
+        if (((res.result ?? []) as any[]).length) return { rel, line: i, character: m.index };
+      }
+    }
+  }
+  return undefined;
+}
 
 const session = await startSession();
 
@@ -67,6 +98,21 @@ if (posMatch) {
       line: loc.range.start.line, character: loc.range.start.character,
     });
   }
+  // GLOBAL FALLBACK: workspace/symbol indexes only workspace-DECLARED symbols, so an ambient global
+  // (Buffer, console, a lib/@types name) resolves to nothing above. Seed a position from a real
+  // use-site and let the checker resolve the global THERE — the same authoritative answer the
+  // positional form gives, so `refs.ts Buffer` need not hunt a line:col by hand.
+  if (!decls.length && !fuzzy) {
+    const seed = await firstResolvingUse(session, target);
+    if (seed) {
+      decls.push({ name: target, kind: 0, rel: seed.rel, line: seed.line, character: seed.character });
+      console.error(
+        `refs: \`${target}\` is not a workspace symbol — resolved as a global via ${seed.rel}:${seed.line + 1}. `
+        + `A name that is BOTH a value and a type (e.g. Buffer) has two declarations; this reports the one `
+        + `used there — point refs.ts at the other kind of use for its references.`,
+      );
+    }
+  }
 }
 
 if (!decls.length) {
@@ -85,9 +131,15 @@ const lineAt = async (rel: string, line: number) => {
   return textOf.get(rel)![line] ?? '';
 };
 
+// `vendor` (the reference-only vendored submodules) and `deps` (node_modules) are their OWN buckets,
+// not `src`: a refactor wants to SEE that, say, the gremlin client's serializers are typed in a name,
+// but must not count those reference-only declarations as our editable code. Shown, never silently
+// dropped — just bucketed apart from what we own.
 const bucketOf = (rel: string) =>
   rel.startsWith('test/') ? 'test' : rel.startsWith('scripts/') ? 'scripts'
-  : rel.startsWith('parser/') ? 'parser' : 'src';
+  : rel.startsWith('parser/') ? 'parser'
+  : rel.startsWith('vendor/') ? 'vendor'
+  : rel.startsWith('node_modules/') ? 'deps' : 'src';
 
 for (const d of decls) {
   await session.open(d.rel);

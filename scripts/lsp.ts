@@ -22,7 +22,21 @@ export type Range = { start: Pos; end: Pos };
 export type Edit = { range: Range; newText: string };
 
 export const uriOf = (p: string) => `file://${ROOT}/${p}`;
-export const relOf = (u: string) => u.replace(`file://${ROOT}/`, '');
+/**
+ * A file URI -> a repo-relative, percent-decoded path.
+ *
+ * The in-root case is a plain prefix strip. But a reference can land OUTSIDE the worktree root: the
+ * vendored submodules are a SYMLINK to the main checkout (`share_from_main`), so the server resolves
+ * `vendor/…` to an absolute path under a DIFFERENT root, which the prefix strip leaves untouched.
+ * Re-relativize from the `vendor/`/`node_modules/` segment so such a ref reads, buckets, and re-opens
+ * (via the symlink) honestly instead of defaulting to `src` with a blank body. `decodeURIComponent`
+ * turns the server's `%40types` back into `@types` — the on-disk name, so the path round-trips.
+ */
+export const relOf = (u: string) => {
+  const stripped = u.startsWith(`file://${ROOT}/`) ? u.slice(`file://${ROOT}/`.length) : u.replace(/^file:\/\//, '');
+  const outside = /\/((?:vendor|node_modules)\/.*)$/.exec(stripped);
+  return decodeURIComponent(outside ? outside[1] : stripped);
+};
 
 export interface Session {
   /** Send a request and await its response envelope (`{result}` or `{error}`). */
