@@ -457,12 +457,15 @@ UNEVALUABLE`.
 - 🚧 **Map-shape residue:** the map-valued `union` source; seeded `fold([:], Operator.addAll)`; the `merge`
   map-operand; a non-string (`T`-token) key. (A map feeding `mergeV`/`mergeE` — 7 write traversals — is write
   substrate, not this.)
-- 🚧 **List members that read as a VALUE:** SCALAR and TYPED member `by()` reductions LANDED (above — a typed
-  member carries `memberVtype`, so `max`/`min`/`order`/`fold` are type-aware). LEFT: an `is(P)`/`order()` INSIDE
-  the correlated body declines — `scalarTail` fences a clause-reader with a `Materialize` and `correlatedReduce`
-  refuses a fenced (uncorrelatable) tail; `mixed`/nested-list and MAP members over a `by()` or
-  list host; `order`/`range(Scope.local)` over a list-of-maps; a PROPERTY-member or nested-list-member list;
-  `select()` inside a list-host body (the other opener).
+- 🚧 **List members that read as a VALUE:** SCALAR, TYPED, MAP and nested-LIST member `by()` reductions LANDED
+  (above — `correlatedListMembers` returns one `{rel, framing}` per member kind, so `by(__.unfold().count()|fold())`
+  over a list-of-maps/lists and a typed `max`/`min`/`order`/`fold` all reduce through `correlatedReduce`; only a
+  MIXED-membered list still declines). LEFT: an `is(P)`/`order()` INSIDE the correlated body declines —
+  `scalarTail` fences a clause-reader with a `Materialize` and `correlatedReduce` refuses a fenced
+  (uncorrelatable) tail (🔴 bind-budgeting a correlated clause-reader without a `Materialize` is a design call —
+  the naive fence-skip is unsafe for a typed member's ~20-bind vtype ORDER CASE); `order`/`range(Scope.local)`
+  over a list-of-maps (the `nested` decline in `listMemberOp`, a recursive compare/equality key); a PROPERTY-member
+  list; `select()` inside a list-host body (the other opener).
 - 🚧 **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`) — decorrelation into the P1
   envelope; unlocks the unbounded repeat body whose UNION is not the top node (`repeat(__.bothE().inV())`).
   ⚠️ Must NOT be shortcut with a disjunctive single-arm join `ON (e.src=w.id OR e.tgt=w.id)`: it matches a
