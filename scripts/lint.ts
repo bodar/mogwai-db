@@ -40,7 +40,12 @@ const GENERATED = ['parser/'];
  */
 const FLAGS = ['--noUnusedLocals', '--noUnusedParameters', '--verbatimModuleSyntax'];
 
-const proc = Bun.spawn(['bunx', 'tsc', '--noEmit', ...FLAGS], {
+// `--pretty false` forces the PLAIN `path(line,col): error TSxxxx` diagnostic format the DIAG regex
+// below parses. Without it, tsc emits its COLORIZED multi-line format whenever it detects colour
+// support — and `FORCE_COLOR` in the ambient env (a harness sets `FORCE_COLOR=3`) turns it on even
+// through a pipe, so every diagnostic became unparseable and the gate FAILED CLOSED on a clean tree.
+// The format is now pinned rather than left to colour detection.
+const proc = Bun.spawn(['bunx', 'tsc', '--noEmit', '--pretty', 'false', ...FLAGS], {
   cwd: new URL('..', import.meta.url).pathname,
   stdout: 'pipe',
   stderr: 'pipe',
