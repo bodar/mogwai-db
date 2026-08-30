@@ -17,9 +17,7 @@ import { assertCfLimits } from '../cf-limits.ts';
  * get to influence. The census's one-off planner probe (docs, 2026-07-28) is the precedent; this
  * is that probe made permanent and reachable.
  */
-const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-
-const REVERSE_UNORDERED = env?.MOGWAI_REVERSE_UNORDERED === '1';
+const REVERSE_UNORDERED = Bun.env.MOGWAI_REVERSE_UNORDERED === '1';
 
 /**
  * The second suite-wide perturbation, and the same argument applies verbatim: `bun:sqlite` accepts
@@ -27,7 +25,7 @@ const REVERSE_UNORDERED = env?.MOGWAI_REVERSE_UNORDERED === '1';
  * green here and broken in production. `MOGWAI_CF_LIMITS=1` makes every statement this driver runs
  * assert DO legality — `mise run test:cf-limits`. See src/cf-limits.ts.
  */
-const CF_LIMITS = env?.MOGWAI_CF_LIMITS === '1';
+const CF_LIMITS = Bun.env.MOGWAI_CF_LIMITS === '1';
 
 /** `Sql` over `bun:sqlite` (dev / local runtime). Synchronous. */
 export class BunSqlite implements Sql {

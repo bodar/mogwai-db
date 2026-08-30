@@ -11,24 +11,24 @@ import { extendedRegistry } from '../services/standard.ts';
  *  prefix can be overridden with `$MOGWAI_PATH_PREFIX` (defaults to `gremlin`). */
 export function startServer(
   port = 8182,
-  dir = process.env.MOGWAI_DB_DIR,
-  pathPrefix = process.env.MOGWAI_PATH_PREFIX,
+  dir = Bun.env.MOGWAI_DB_DIR,
+  pathPrefix = Bun.env.MOGWAI_PATH_PREFIX,
   /** The io namespace `io("…")` resolves against, rooted at this directory. The Bun twin of the
    *  Worker's optional `IO` R2 binding, and optional for the same reason: absent, io() fails closed
    *  naming what is missing rather than resolving a path against the process's cwd. */
-  ioDir = process.env.MOGWAI_IO_DIR,
+  ioDir = Bun.env.MOGWAI_IO_DIR,
 ) {
   // Production injects the EXTENDED registry (federation on). The single place the registry
   // choice is made; the conformance host injects standardRegistry at its own construction.
   const manager = new BunGraphManager(dir, extendedRegistry, ioDir ? new FileIoStore(ioDir) : undefined);
   // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
   // is its channel). `$MOGWAI_LOG=1` turns the one-line-per-query access log back on.
-  const app = application({ manager, pathPrefix, log: process.env.MOGWAI_LOG ? verboseLogger : undefined });
+  const app = application({ manager, pathPrefix, log: Bun.env.MOGWAI_LOG ? verboseLogger : undefined });
   return Bun.serve({ port, fetch: app.router });
 }
 
 if (import.meta.main) {
   const server = startServer();
-  const prefix = process.env.MOGWAI_PATH_PREFIX ?? 'gremlin';
+  const prefix = Bun.env.MOGWAI_PATH_PREFIX ?? 'gremlin';
   console.log(`mogwai-db listening on :${server.port} (graphs at /${prefix}/{id})`);
 }

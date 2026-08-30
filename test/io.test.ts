@@ -190,7 +190,7 @@ describe('FileIoStore is ROOTED', () => {
     await expect(store.readStream('data/../modern.json')).resolves.toBeInstanceOf(ReadableStream);
     // A LEADING SLASH is not an absolute path — a path is a KEY under the root, which is what it
     // is on R2 too, so `/etc/passwd` names a (missing) key rather than the host's file.
-    await expect(store.readStream('/etc/passwd')).rejects.toThrow(/ENOENT/);
+    await expect(store.readStream('/etc/passwd')).rejects.toThrow(/no such document in the io directory/);
   });
 
   test('list() returns root-relative, /-separated keys under a prefix', async () => {

@@ -1,4 +1,7 @@
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+// mkdir/rm have no `Bun.*` namespace equivalent — Bun implements node:fs natively and that is the
+// idiomatic way to make/remove a directory here. Existence checks (Bun.file().exists()), recursive
+// listing (Bun.Glob) and the byte streams (Bun.file().stream()/.writer()) all use Bun's own APIs.
+import { mkdir, rm } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { IoSink, IoStore } from '../iostore.ts';
 
@@ -35,9 +38,11 @@ export class FileIoStore implements IoStore {
 
   async readStream(path: string): Promise<ReadableStream<Uint8Array>> {
     const full = this.locate(path);
-    // `stat` fails closed with ENOENT for a missing key, exactly as `read` used to — so the
-    // absence surfaces HERE (as R2's does), not silently on the first chunk read.
-    await stat(full);
+    // Fail closed on a missing key — the absence surfaces HERE (as R2IoStore's does), not silently
+    // on the first chunk read. `Bun.file().exists()` is the Bun-native stat; the message mirrors
+    // R2's `no such object` so the two IoStore leaves read alike.
+    if (!(await Bun.file(full).exists()))
+      throw new Error(`io("${path}"): no such document in the io directory`);
     return Bun.file(full).stream();
   }
 
@@ -55,13 +60,13 @@ export class FileIoStore implements IoStore {
   }
 
   async list(prefix: string): Promise<string[]> {
-    // Keys are root-relative and always `/`-separated, so a listing reads the same on both
-    // runtimes — an R2 key has no platform separator to reproduce.
-    const entries = await readdir(this.root, { recursive: true, withFileTypes: true });
-    return entries
-      .filter((e) => e.isFile())
-      .map((e) => join(e.parentPath ?? this.root, e.name).slice(this.root.length + 1).split(sep).join('/'))
-      .filter((k) => k.startsWith(prefix))
-      .sort();
+    // Keys are root-relative and always `/`-separated (Bun.Glob normalizes), so a listing reads the
+    // same on both runtimes — an R2 key has no platform separator to reproduce. `**/*` matches
+    // root-level files as well as nested ones; `dot: true` keeps a dot-prefixed key, which the old
+    // `readdir` walk also returned.
+    const keys: string[] = [];
+    for await (const key of new Bun.Glob('**/*').scan({ cwd: this.root, onlyFiles: true, dot: true }))
+      if (key.startsWith(prefix)) keys.push(key);
+    return keys.sort();
   }
 }
