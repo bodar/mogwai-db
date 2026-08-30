@@ -96,10 +96,10 @@
     "bound": 0
   },
   "combine": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 3561,
     "compiler": 75,
-    "bound": 1
+    "bound": 0
   },
   "concat": {
     "binds": 0,
@@ -144,16 +144,16 @@
     "bound": 0
   },
   "difference": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 2833,
     "compiler": 54,
-    "bound": 1
+    "bound": 0
   },
   "disjunct": {
-    "binds": 2,
+    "binds": 0,
     "bytes": 3304,
     "compiler": 55,
-    "bound": 2
+    "bound": 0
   },
   "drop": {
     "binds": 4,
@@ -282,10 +282,10 @@
     "bound": 0
   },
   "intersect": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 2829,
     "compiler": 54,
-    "bound": 1
+    "bound": 0
   },
   "inV": {
     "binds": 0,
@@ -372,10 +372,10 @@
     "bound": 0
   },
   "merge": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 2832,
     "compiler": 53,
-    "bound": 1
+    "bound": 0
   },
   "mergeE": {
     "binds": 7,
@@ -420,10 +420,10 @@
     "bound": 0
   },
   "order": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 4273,
     "compiler": 60,
-    "bound": 1
+    "bound": 0
   },
   "out": {
     "binds": 0,
@@ -474,10 +474,10 @@
     "bound": 0
   },
   "replace": {
-    "binds": 2,
+    "binds": 0,
     "bytes": 2087,
-    "compiler": 88,
-    "bound": 2
+    "compiler": 90,
+    "bound": 0
   },
   "reverse": {
     "binds": 0,
@@ -558,10 +558,10 @@
     "bound": 0
   },
   "unfold": {
-    "binds": 1,
+    "binds": 0,
     "bytes": 5790,
     "compiler": 75,
-    "bound": 1
+    "bound": 0
   },
   "union": {
     "binds": 0,

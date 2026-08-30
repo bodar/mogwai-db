@@ -1,5 +1,6 @@
-import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
+import { constLit } from './const.ts';
 import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -79,10 +80,6 @@ export interface Transformed {
 }
 
 const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
-/** A value the USER wrote, which may be a wire parameter: `argValues` flattened the `Arg` away, so
- *  the name is not reachable here and it binds. Threading the name is
- *  `docs/archive/2026-08-05-parameters-are-the-only-binds.md`'s remaining work, not this module's. */
-const text = (value: string): Expr => lit(value, 'text');
 /** A value the COMPILER authored — a whitespace set, an epoch factor, an off-by-one — which is a
  *  CONSTANT and inlines at zero cost to the 100-parameter budget. `mise run sql-hygiene`'s `bound`
  *  ratchet is what catches one of these leaking back into a bind, and it caught `dateAdd`'s. */
@@ -95,7 +92,7 @@ const heldInt = (value: number): Expr => compilerInt(value);
  * NULL propagates through every one of them (SQLite's own semantics), which is exactly Gremlin's
  * null-in/null-out, so none needs a guard. `concat` is the one exception and says why inline.
  */
-const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => Expr | null>> = {
+const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step: IRStep) => Expr | null>> = {
   length: (v) => call('length', v),
   toUpper: (v) => call('upper', v),
   toLower: (v) => call('lower', v),
@@ -105,9 +102,15 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
   trim: (v) => call('trim', v, held(JAVA_WHITESPACE)),
   lTrim: (v) => call('ltrim', v, held(JAVA_WHITESPACE)),
   rTrim: (v) => call('rtrim', v, held(JAVA_WHITESPACE)),
-  replace: (v, args) => {
-    const [from, to] = args.filter((a): a is string => typeof a === 'string');
-    return from === undefined || to === undefined ? null : call('replace', v, text(from), text(to));
+  replace: (v, _args, step) => {
+    // The `from`/`to` STRINGS the user wrote route through `constLit`: a `$param` binds (a real
+    // parameter, named and cache-shared), a literal INLINES — the Golden Rule, matching the write path.
+    // `transformExpr` holds the `step`, so the Arg name was never actually lost; the old `text = lit()`
+    // that bound every literal is gone.
+    const strArgs = step.args.filter((a) => typeof a.value === 'string');
+    if (strArgs.length < 2) return null;
+    const from = constLit(strArgs[0]!), to = constLit(strArgs[1]!);
+    return from && to ? call('replace', v, from, to) : null;
   },
   // TinkerPop resolves negative indices against the string length BEFORE slicing; passing them
   // straight to SQLite would instead invoke substr's from-the-right / backwards-length semantics.
@@ -217,7 +220,7 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
 
   const pure = VALUE_TX[step.name];
   if (pure) {
-    const expr = pure(v, args);
+    const expr = pure(v, args, step);
     // No static type, `asString` included. That looks wrong for a `CAST(… AS TEXT)` and is not: the
     // framing `UNKNOWN` infers per VALUE, which for a text value is `string` anyway, so it frames
     // correctly — and CLAIMING a type here where none is warranted would be the worse error. A

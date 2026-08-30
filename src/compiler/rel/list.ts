@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -1252,9 +1252,15 @@ export const nonIterableArgument = (step: IRStep, arg: unknown, encountered: str
  * relation would drop the write and leave a `Ref` naming a binding that was never made.
  */
 function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly expr: Expr; readonly of: ListOf } | null {
-  const literal = (members: readonly unknown[]) =>
-    ({ expr: { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] } as Expr, of: BARE_LIST });
-  if (Array.isArray(arg)) return literal(arg);
+  // The operand's JSON crosses as ONE value. A `$param` list (`combine($x)`, the WHOLE list IS the
+  // parameter's value) binds under its name; a literal array INLINES (the Golden Rule) — the old
+  // `lit()` bound every literal collection.
+  const literal = (members: readonly unknown[], name: string | null) => ({
+    expr: { kind: 'call', fn: 'jsonb',
+      args: [name != null ? param(JSON.stringify(members), name, 'text') : compilerText(JSON.stringify(members))] } as Expr,
+    of: BARE_LIST,
+  });
+  if (Array.isArray(arg)) return literal(arg, step.args[0]?.name ?? null);
   // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
   // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,
   // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
@@ -1267,7 +1273,9 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
     const [value, extra] = argValues(inner[0]);
     if (extra !== undefined || value === undefined) return null;
-    return literal([value]);
+    // A COMPILER-BUILT single-element list wrapping the constant — always inlined (the `[value]` list is
+    // not itself a parameter, even if `value` came from one; that inner scalar is a separate concern).
+    return literal([value], null);
   }
   // A BARE `constant(v)` operand — no `fold()` — YIELDS v, and a value is not iterable. Same compile-time
   // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
