@@ -5,15 +5,16 @@ on:
     branches: [trunk]
   pull_request:
 
-# `gates` + `rel-sweep` + a fan-out of `test` runners, one runner each, because the gate is CPU-bound
-# and a runner has 4 cores.
+# `gates` + a fan-out of `rel-sweep` runners + a fan-out of `test` runners, because the gate is
+# CPU-bound and a runner has only 4 cores.
 #
-# Measured on trunk: the whole graph is two long poles that already run concurrently — `test` and
-# `rel-sweep` (~110s) — plus static gates that finish within 7s of install and hide entirely
-# underneath them. One `bun test` is a single process using ~1.27 cores, so a single runner sat at
-# roughly half idle while the wall was set by the longer pole. Sharding INSIDE a runner does not fix
-# that (measured: 2 test shards ∥ 2 sweep shards on a 4-core pin took 66.8s against 72.9s unsharded —
-# every extra bun process re-pays JIT warmup); more runners does.
+# Measured on real CI: the wall is set by two fan-outs that run concurrently — `rel-sweep` and `test` —
+# plus static gates that finish within 7s of install and hide entirely underneath them. Each bracket is
+# one `bun test`, a single process using ~1.27 cores, so a single runner sat at roughly half idle while
+# the wall was set by the longer pole. Sharding INSIDE a runner does not fix that (measured: 2 test
+# shards ∥ 2 sweep shards on a 4-core pin took 66.8s against 72.9s unsharded — every extra bun process
+# re-pays JIT warmup); more RUNNERS does. `rel-sweep` was ~120s on one runner against ~70s for the next
+# test bracket, so it is the fan-out that matters most — see its job below.
 #
 # The `test` fan-out is by BRACKET, not anonymous shard: the `plan` job runs `test:bracket --matrix`
 # to discover the bracket names (L1, L2, …, other), and the `test` job spins one runner per bracket,
@@ -42,18 +43,31 @@ jobs:
         env:
           MOGWAI_SKIP_REFERENCE: "1"
 
-  # Its own job because it is the second pole: 105s, and nothing in the suite can start it earlier.
+  # THE longest pole, fanned across a runner matrix. Measured on real CI it was ~120s of compute where
+  # the next runner was ~70s — a single 4-core box is core-starved below the sweep's own ~6 knee, so
+  # more cores on one runner cannot fix it; more runners can. Each runner owns `index % RUNNERS === RUNNER`
+  # of the corpus (scripts/rel-sweep.ts) and still shards its slice across its own cores.
   #
-  # It shards itself across the runner's four cores (scripts/rel-sweep.ts, `min(4, cores)` by default),
-  # which needs nothing here — the sweep is the only thing on this runner, so the cores are all its.
+  # `strategy.job-total` IS the runner count, so the `runner:` list is the single source of truth:
+  # adding a runner is one more entry and nothing else. The values MUST stay 0..N-1 and contiguous —
+  # the partition is a modulo, so a gap or an out-of-range index would drop or duplicate traversals.
+  # `needs['rel-sweep'].result` in the `ci` job is the matrix rollup (green only if every leg is), so
+  # the aggregate gate needs no change.
   rel-sweep:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [0, 1, 2]
+    name: rel-sweep (${{ matrix.runner }})
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/provision
       - run: mise run rel-sweep
         env:
           MOGWAI_SKIP_REFERENCE: "1"
+          SWEEP_RUNNERS: ${{ strategy.job-total }}
+          SWEEP_RUNNER: ${{ matrix.runner }}
 
   # Discover the test brackets and hand them to `test` as a matrix. One extra job on the critical
   # path (~install + a sub-second script), the price of the bracket names being DERIVED rather than

@@ -54,18 +54,22 @@ const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
   .split('\n').filter(Boolean);
 
 /**
- * ## Sharding, and why the parent spawns rather than the workflow fanning out
+ * ## Two-level parallelism: per-core shards here, a runner matrix in CI
  *
- * The sweep was the single longest pole in the gate once the suite was split across runners: 105s on a
- * CI runner, against 56s for the longest test shard. The corpus loop is embarrassingly parallel (each
- * traversal is independent), so it shards by index across child processes of this same script.
- * Measured here, one run each: 54.8s at 1 → 32.5s at 2 → 22.0s at 4 → 19.3s at 6.
+ * The sweep is the single longest pole in the gate: measured on real CI, ~120s of compute where the
+ * next runner is ~70s — because on a 4-core box it is core-starved below its own knee of ~6. The corpus
+ * loop is embarrassingly parallel (each traversal is independent), so it splits TWO ways: by index
+ * across child processes of THIS script (the per-core shards below), and — when CI sets it — by index
+ * across separate RUNNER machines (the SWEEP_RUNNER/SWEEP_RUNNERS block further down). More cores on one
+ * runner bottoms out at the knee; more runners is what actually moves the pole, so `.github/workflows/
+ * ci.yml` fans this across a matrix the same way it fans `test` across brackets.
  *
- * Doing it here rather than as a CI matrix keeps `mise run rel-sweep` one command that behaves the same
- * everywhere, and keeps the shards on the four cores of ONE runner instead of paying a fresh provision
- * on four.
+ * Keeping the per-core shards IN-PROCESS (rather than making every core its own CI runner) is the part
+ * worth defending: it keeps `mise run rel-sweep` one command that behaves the same everywhere, and keeps
+ * a runner's own cores busy without paying a fresh provision per core. The matrix sits OUTSIDE that, at
+ * the machine boundary, where a provision is unavoidable anyway.
  *
- * `min(6, cores)` by default. The shards do not scale for free — each re-pays JIT warmup on the same
+ * Per-core shards are `min(6, cores)` by default. The shards do not scale for free — each re-pays JIT warmup on the same
  * hot lowering loop, and the work is allocation/bandwidth-bound, not core-bound — so wall bottoms out
  * well before the core count. Measured on a 24-core box: 4→39.9s, 6→32.9s, 8→34.7s, 10→32.1s, 12→36.3s,
  * 16→35.7s: the knee is ~6 and everything past it is flat-to-worse (more JIT rewarm, and a less-even
@@ -84,6 +88,26 @@ const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
 const SHARDS = Number(Bun.env.SWEEP_SHARDS ?? Math.min(6, navigator.hardwareConcurrency || 1));
 const SHARD = Bun.env.SWEEP_SHARD === undefined ? null : Number(Bun.env.SWEEP_SHARD);
 if (!Number.isInteger(SHARDS) || SHARDS < 1) throw new Error(`SWEEP_SHARDS must be a positive integer, got ${Bun.env.SWEEP_SHARDS}`);
+
+/**
+ * ## The CROSS-RUNNER partition, on top of the per-core shards above
+ *
+ * The shards above bottom out at a knee of ~6 and, more to the point, at ONE runner's core count — 4
+ * on a CI box, which left the sweep the single longest pole (~120s) because it was core-starved below
+ * its own knee. So CI fans it across RUNNERS machines exactly the way `test` is fanned across brackets:
+ * this runner owns corpus indices `index % RUNNERS === RUNNER`, and its local shards then split THAT
+ * slice across its own cores.
+ *
+ * The two filters compose WITHOUT the runners having to agree on `SHARDS`: they are independent modulos
+ * on the global corpus index, so a given index has exactly one owning RUNNER (`index % RUNNERS`) and,
+ * within it, exactly one owning SHARD (`index % SHARDS`) — every traversal is swept once and none twice,
+ * even if a heterogeneous runner picked a different core count. Default `1`/`0` is the whole corpus, so a
+ * local `mise run rel-sweep` is byte-for-byte what it was.
+ */
+const RUNNERS = Number(Bun.env.SWEEP_RUNNERS ?? 1);
+const RUNNER = Number(Bun.env.SWEEP_RUNNER ?? 0);
+if (!Number.isInteger(RUNNERS) || RUNNERS < 1) throw new Error(`SWEEP_RUNNERS must be a positive integer, got ${Bun.env.SWEEP_RUNNERS}`);
+if (!Number.isInteger(RUNNER) || RUNNER < 0 || RUNNER >= RUNNERS) throw new Error(`SWEEP_RUNNER must be in [0, ${RUNNERS}), got ${Bun.env.SWEEP_RUNNER}`);
 
 if (SHARD === null && SHARDS > 1) {
   // PARENT: fan out, merge, report. Deliberately not `--shard`-flag driven — the env var is what a
@@ -216,6 +240,10 @@ function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolea
  * which is the one thing it must not be. The saving is in the shards above instead.
  */
 for (const [index, query] of CORPUS.entries()) {
+  // The cross-runner slice FIRST (a child inherits SWEEP_RUNNER/SWEEP_RUNNERS via env), then this
+  // runner's per-core shard. Both the spawned children and the single-process inline path run this
+  // loop, so both filters live here rather than in the parent's fan-out.
+  if (index % RUNNERS !== RUNNER) continue;
   if (SHARD !== null && index % SHARDS !== SHARD) continue;
   let steps: IRStep[];
   // A traversal the FRONT END rejects is not this gate's business — L1 owns parse coverage.
@@ -257,7 +285,8 @@ function report(
   swept: number, emitted: number, shards: number,
 ): never {
   const how = shards > 1 ? `, ${shards} shards` : '';
-  console.log(`rel-sweep: ${swept} prefix × shape × switch combinations over ${CORPUS.length} corpus traversals${how}`);
+  const slice = RUNNERS > 1 ? ` (runner ${RUNNER + 1}/${RUNNERS}'s slice of ${CORPUS.length})` : ` over ${CORPUS.length} corpus traversals`;
+  console.log(`rel-sweep: ${swept} prefix × shape × switch combinations${slice}${how}`);
   console.log(`rel-sweep: ${emitted} admitted plans rendered — every one within the ${DO_BIND_CAP}-bind platform cap`);
   if (!violations.size && !accounting.size) {
     console.log('rel-sweep: 0 violations — the decline contract and the bind accounting both hold');
