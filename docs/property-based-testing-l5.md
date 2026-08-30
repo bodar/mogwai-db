@@ -52,7 +52,7 @@ change what is supported); here it only means the law is not evaluable, so it is
 split by whether the PREFIX or the law's own FORM was unsupported — the latter the more interesting
 signal.
 
-Oracle 4 (fail-closed discipline) is built twice: `test/census/` separates `crashed` from `deferred`
+Oracle 4 (fail-closed discipline) is built twice: `test/L7-census/` separates `crashed` from `deferred`
 over the whole corpus and gates the count from growing; `test/L5-properties/capability.test.ts` +
 `capability-baseline.ts` permit executions and *declared* deferrals over generated compositions while
 failing on any new raw failure. The census covers what somebody wrote down; the capability ratchet

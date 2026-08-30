@@ -57,7 +57,7 @@ const canon = (value: any): any =>
  *
  * The durable facts it rested on still hold: a traversal that does not call `order()` has no
  * specified emission order — traversers are a multiset (root `CLAUDE.md`) — so emission order is
- * telemetry that never gates, exactly as `test/census/` treats it (it gates on "no executing
+ * telemetry that never gates, exactly as `test/L7-census/` treats it (it gates on "no executing
  * traversal changes its answer" and reports emission-order change as telemetry). The order `order()`
  * DOES specify is an `ORDER BY` in the emitted SQL and therefore survives any plan change.
  */

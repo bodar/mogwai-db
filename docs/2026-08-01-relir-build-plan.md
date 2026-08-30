@@ -3,7 +3,7 @@
 `Step[] → RelIR → SQL`: an inspectable, rewritable relational algebra between the Gremlin front-end and
 the `q` SQL kernel. It is the ONLY lowering.
 
-**Numbers live in instruments, never in this prose** — coverage is `test/census/goldens.tsv`, the
+**Numbers live in instruments, never in this prose** — coverage is `test/L7-census/goldens.tsv`, the
 conformance floor is `test/L3-conformance/l3-state.json`, the per-family blockers are
 `mise run rel-blockers` (re-run it; it moves). A machine-checkable statement of the same rules:
 `docs/spec/relir-algebra.allium`.

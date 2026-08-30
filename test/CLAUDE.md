@@ -22,7 +22,7 @@
   run one level each; `mise run ci` is the full gate.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
   beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test` and
-  `build`, and `test` is a bare `bun test` over all 71 files, so **L1–L5 and `test/census` are inside
+  `build`, and `test` is a bare `bun test` over all 71 files, so **L1–L5 and `test/L7-census` are inside
   it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
   exist for the inner loop — before `ci`, not after it.
@@ -100,7 +100,11 @@
 
 ## The census — not a ladder level
 
-`test/census/` asks the one question no level above can: **did anything CHANGE?** Every L1–L5 test
+It lives in `test/L7-census/` so the CI bracket function hands it its OWN runner (`test (L7)`) rather
+than dragging the `other` bracket — the `L7` prefix is only the path→runner mechanism, and the gap after
+L5 is deliberate: this is not the next conformance rung. `mise run census` stays its human-facing name.
+
+`test/L7-census/` asks the one question no level above can: **did anything CHANGE?** Every L1–L5 test
 asserts correctness; a behaviour-preserving refactor's success criterion is a number that does NOT
 move, which — with the ladder alone — is indistinguishable from a refactor that quietly turned
 fail-closed deferrals into wrong answers. Two committed TSVs record what the engine DOES with all
@@ -109,7 +113,7 @@ each with its message). `mise run census`; re-record with `mise run census-recor
 
 Four gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
 traversal changes its answer** (the regression nothing else can see) · no clean deferral becomes a
-crash — plus a coverage floor. Runbook + the status vocabulary: `test/census/README.md`.
+crash — plus a coverage floor. Runbook + the status vocabulary: `test/L7-census/README.md`.
 
 **It deliberately does NOT auto-record.** L3 rewrites its state on a clean local run and that is
 safe there because its artifact is a monotone floor. The census is a baseline whose most

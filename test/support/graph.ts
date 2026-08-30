@@ -4,7 +4,7 @@ import { compile } from '../../src/compiler/compiler.ts';
 import { exec } from './executor.ts';
 
 // Shared graph-minting primitives. These began in `test/L5-properties/oracle.ts`; they moved here
-// when the census (test/census/) became a second consumer, because a helper used by two levels
+// when the census (test/L7-census/) became a second consumer, because a helper used by two levels
 // that lives inside one of them is how a third consumer ends up hand-rolling a copy.
 
 /** Insert a vertex at a KNOWN rowid with its labels, by raw SQL — the fixture shape used by the
@@ -59,7 +59,7 @@ export type StoreFactory = () => GraphStore;
  *
  *  NOTE this uses a bare `compile()`, so it sees no service registry: a `call()` traversal throws
  *  here and is reported as a non-write, which is correct (no `call()` form is a write today). Do
- *  NOT reuse this as a general "does it compile" probe — see the header on test/census/census.ts. */
+ *  NOT reuse this as a general "does it compile" probe — see the header on test/L7-census/census.ts. */
 export function isWrite(q: string): boolean {
   // Treat a throw as no answer rather than as "read": a traversal that fails to compile is not a
   // write (it throws identically however it is run), but it must not be filed as a read that shares

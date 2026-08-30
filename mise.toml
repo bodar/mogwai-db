@@ -182,18 +182,21 @@ depends = ["install", "check", "submodule"]
 run = "L5_SEED=$(bun -e 'console.log(Math.floor(Math.random() * 0x7fffffff))') L5_RUNS=3000 bun test test/L5-properties"
 
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
-# has not CHANGED. `submodule` because it executes traversals (same reason as L5).
+# has not CHANGED. `submodule` because it executes traversals (same reason as L5). It lives in
+# `test/L7-census/` so the CI bracket function gives it its OWN runner (`test (L7)`) instead of dragging
+# the `other` bracket — the `L7` name is the bracket mechanism (path → runner), and the deliberate gap
+# after L5 marks that it is not the next conformance rung. `mise run census` stays its human-facing name.
 [tasks.census]
 description = "Census — the refactor guard: every corpus traversal's outcome vs the committed baseline"
 depends = ["install", "check", "submodule"]
-run = "bun test test/census"
+run = "bun test test/L7-census"
 
 # Re-record the baseline. Deliberately a command rather than the test rewriting itself: the census
 # is a two-way baseline, so an auto-record would launder the very regression it exists to catch.
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"
 depends = ["install", "check", "submodule"]
-run = "bun run test/census/record.ts"
+run = "bun run test/L7-census/record.ts"
 
 [tasks.generate]
 description = "Regenerate parser/ + parser/gql/ from the submodule's origin/master grammars (antlr-ng)"

@@ -36,4 +36,4 @@ for (const r of rows) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
 
 writeCensus(rows);
 console.log(`\ncensus recorded: ${rows.length} traversals — ${JSON.stringify(byStatus)}`);
-console.log('Commit test/census/goldens.tsv + test/census/deferrals.tsv.');
+console.log('Commit test/L7-census/goldens.tsv + test/L7-census/deferrals.tsv.');

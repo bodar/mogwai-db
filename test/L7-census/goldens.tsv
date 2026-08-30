@@ -3,7 +3,7 @@
 # can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing
 # traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.
 # Never re-record to make a red build green without a written reason — that is the one thing
-# this file exists to prevent. See test/census/README.md.
+# this file exists to prevent. See test/L7-census/README.md.
 status	n	d	ms	ord	query
 ran	6	6	451a72ec9b6e35bc	1398710f0f2e9dc4	g.E()
 ran	6	6	ac898afbc8893256	c05b9074aae182b0	g.E().elementMap()

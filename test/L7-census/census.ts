@@ -180,7 +180,7 @@ const HEADER = [
   '# can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing',
   '# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.',
   '# Never re-record to make a red build green without a written reason — that is the one thing',
-  '# this file exists to prevent. See test/census/README.md.',
+  '# this file exists to prevent. See test/L7-census/README.md.',
 ].join('\n');
 
 const GOLDEN_COLS = 'status\tn\td\tms\tord\tquery';

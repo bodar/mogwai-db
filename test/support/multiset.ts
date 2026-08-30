@@ -13,7 +13,7 @@ import type { Framed } from '../../src/execute.ts';
  *
  * ## Why it lives in `test/support/` and not in either caller
  *
- * L5's differential oracle (`L5-properties/oracle.ts`) and the census (`census/census.ts`) both need
+ * L5's differential oracle (`L5-properties/oracle.ts`) and the census (`L7-census/census.ts`) both need
  * it, so it lives in neither — the same rule `test/support/graph.ts` already follows for the shared
  * seeds.
  *
