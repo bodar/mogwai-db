@@ -976,9 +976,7 @@ export function foldScalars(
   // CORRELATED fold (`scalarChild`'s list arm), whose `EXISTS`-shaped hop mints no encounter, so without
   // this its `json_group_array` is SCAN order — right by luck, wrong under `test:perturbed`. Only the
   // no-encounter branch is new, so an ordinary fold's SQL is byte-unchanged.
-  const order: readonly SortTerm[] = opts.order?.length
-    ? opts.order.map((column) => ({ expr: col(flagged.id, column), dir: 'asc' as const }))
-    : [{ expr: value, dir: 'asc' as const }];
+  const order = foldOrder(flagged, opts.order, 'v');
   // A PER-ROW member envelopes when the whole list is lossy (any member's type does not survive its
   // storage class — now including `double`, whose whole-number members would infer back as Int and whose
   // 17-digit members would lose a bit), else stays bare (the remaining lossless types — `string`/`int` —
@@ -1003,16 +1001,7 @@ export function foldScalars(
     rel: make.aggregate({
       id: fresh('fd'), input: flagged, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       groupBy: [],
-      aggs: [[LIST_COL, {
-        kind: 'call',
-        fn: 'jsonb',
-        args: [{
-          kind: 'call',
-          fn: 'COALESCE',
-          args: [{ kind: 'agg', fn: 'json_group_array', args: [member], orderBy: order },
-            { kind: 'call', fn: 'json', args: [compilerText('[]')] }],
-        }],
-      }]],
+      aggs: [[LIST_COL, collectedArray(member, order)]],
     }),
     of: { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull },
   };
@@ -1044,18 +1033,12 @@ export function foldElements(
 ): { readonly rel: Rel; readonly of: ListOf } {
   // ORDER BY the encounter when there is one; else by the member ROWID — see `foldScalars`. Only the
   // no-encounter (correlated) branch is new, so an ordinary element fold's SQL is byte-unchanged.
-  const order: readonly SortTerm[] = opts.order?.length
-    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
-    : [{ expr: col(input.id, 'id'), dir: 'asc' as const }];
+  const order = foldOrder(input, opts.order, 'id');
   return {
     rel: make.aggregate({
       id: fresh('fe'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       groupBy: [],
-      aggs: [[LIST_COL, {
-        kind: 'call',
-        fn: 'jsonb',
-        args: [coalesce({ kind: 'agg', fn: 'json_group_array', args: [col(input.id, 'id')], orderBy: order }, EMPTY_ARRAY)],
-      }]],
+      aggs: [[LIST_COL, collectedArray(col(input.id, 'id'), order)]],
     }),
     of: { kind: 'elem', elem },
   };
@@ -1082,20 +1065,7 @@ export function foldElements(
 export function foldMaps(
   input: Rel, mapCol: string, of: MapOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  const order: readonly SortTerm[] = opts.order?.length
-    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
-    : [{ expr: col(input.id, mapCol), dir: 'asc' as const }];
-  return {
-    rel: make.aggregate({
-      id: fresh('fm'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
-      groupBy: [],
-      // `json(mapCol)` for `memberNode`'s reason: the map column is JSONB and `json_group_array` would
-      // re-encode a raw JSONB member as a quoted STRING, so it crosses back to text first and rides in
-      // as a nested array.
-      aggs: [[LIST_COL, collectedArray(jsonOf(col(input.id, mapCol)), order)]],
-    }),
-    of: { kind: 'map', of },
-  };
+  return foldNested(input, mapCol, { kind: 'map', of }, opts.order, fresh);
 }
 
 /**
@@ -1114,18 +1084,28 @@ export function foldMaps(
 export function foldLists(
   input: Rel, of: ListOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  const order: readonly SortTerm[] = opts.order?.length
-    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
-    : [{ expr: col(input.id, LIST_COL), dir: 'asc' as const }];
+  return foldNested(input, LIST_COL, { kind: 'list', of }, opts.order, fresh);
+}
+
+const foldOrder = (input: Rel, order: readonly string[] | undefined, defaultCol: string): readonly SortTerm[] =>
+  order?.length
+    ? order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
+    : [{ expr: col(input.id, defaultCol), dir: 'asc' as const }];
+
+/** Shared fold body for map and list members, which both must cross `json_group_array` under `json()`. */
+const foldNested = (
+  input: Rel, sourceCol: string, of: ListOf, order: readonly string[] | undefined, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } => {
+  const terms = foldOrder(input, order, sourceCol);
   return {
     rel: make.aggregate({
-      id: fresh('fl'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      id: fresh('fn'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       groupBy: [],
-      aggs: [[LIST_COL, collectedArray(jsonOf(col(input.id, LIST_COL)), order)]],
+      aggs: [[LIST_COL, collectedArray(jsonOf(col(input.id, sourceCol)), terms)]],
     }),
-    of: { kind: 'list', of },
+    of,
   };
-}
+};
 
 /** The storage-class-determined types a bare member infers back to EXACTLY — `string` and `int`, the two
  *  whose JS value round-trips its own type and precision through the JSON channel. `double` is NOT one:
