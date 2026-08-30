@@ -457,9 +457,10 @@ UNEVALUABLE`.
 - 🚧 **Map-shape residue:** the map-valued `union` source; seeded `fold([:], Operator.addAll)`; the `merge`
   map-operand; a non-string (`T`-token) key. (A map feeding `mergeV`/`mergeE` — 7 write traversals — is write
   substrate, not this.)
-- 🚧 **List members that read as a VALUE:** a SCALAR-member `by()` reduction LANDED (above); a TYPED member still
-  reads UNTYPED (the re-entry drops `memberVtype`, so `by(__.unfold().is(P))`/typed order decline — mirror
-  `unfoldList`'s typed branch next); `mixed`/nested-list and MAP members over a `by()` or
+- 🚧 **List members that read as a VALUE:** SCALAR and TYPED member `by()` reductions LANDED (above — a typed
+  member carries `memberVtype`, so `max`/`min`/`order`/`fold` are type-aware). LEFT: an `is(P)`/`order()` INSIDE
+  the correlated body declines — `scalarTail` fences a clause-reader with a `Materialize` and `correlatedReduce`
+  refuses a fenced (uncorrelatable) tail; `mixed`/nested-list and MAP members over a `by()` or
   list host; `order`/`range(Scope.local)` over a list-of-maps; a PROPERTY-member or nested-list-member list;
   `select()` inside a list-host body (the other opener).
 - 🚧 **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`) — decorrelation into the P1
