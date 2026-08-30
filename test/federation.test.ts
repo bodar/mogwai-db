@@ -908,3 +908,26 @@ describe('federate — SUBGRAPH within/3-arg-has/V(ids)', () => {
     expect(first.length).toBe(1);
   });
 });
+
+describe('federate — bound-EDGE has(key) presence', () => {
+  // Bound-EDGE has(key) / has(key, value) matches exactly the edges that carry the key, over the bound
+  // graph, identical to the source. develops edges carry `since`, uses edges carry `skill` (crew fixture).
+  // (The correlated `hasPropertyPredicate` edge branch stays fail-closed correct — `IS NOT NULL`, not the
+  // always-false `!= NULL` — even though the main edge-has path is the `boundPropertyRelation` join.)
+  const fedN = async (trav: string) =>
+    Number((await Promise.all((await mgr.executor('home').framedAsync(`g.call("federate").with("graph","crew").with("traversal", ${trav})`, {})).map(dec)))[0]);
+  const crewN = async (g: string) =>
+    Number((await Promise.all((await mgr.executor('crew').framedAsync(g, {})).map(dec)))[0]);
+
+  test('E().has(key) matches the edges that HAVE the key', async () => {
+    const expected = await crewN('g.E().has("since").count()');
+    expect(expected).toBeGreaterThan(0); // sanity: the crew graph really has such edges
+    expect(await fedN('__.E().has("since").count()')).toBe(expected);
+  });
+
+  test('E().has(key, value) filters by the bound value', async () => {
+    const expected = await crewN('g.E().has("since", gt(2010)).count()');
+    expect(expected).toBeGreaterThan(0);
+    expect(await fedN('__.E().has("since", gt(2010)).count()')).toBe(expected);
+  });
+});

@@ -1,9 +1,9 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
-import { and, eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { FOREIGN_ORD, foreignPayloadCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
 import { storedCompareOn } from './predicate.ts';
@@ -190,17 +190,13 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
 
     // ---- has(key[,v]): EXISTS over the landed property tree at `key`, correlated on id ----
     hasPropertyPredicate(kind, id, key, valuePred, fresh) {
+      // A bound EDGE's `has()` is served by the `boundPropertyRelation` JOIN path, so this correlated
+      // EXISTS form is only ever reached for a VERTEX — proven: an unconditional throw here leaves the
+      // whole federation suite green. So an edge is declined (fail-closed) rather than carrying a dead
+      // branch that duplicated the vertex scaffold below.
+      if (kind === 'edge') return null;
       const row = rowById(cteOf(kind, fresh), id, fresh);
       const at = jsonExtract(col(row.id, 'props'), jsonKeyPath(key));
-      if (kind === 'edge') {
-        // An edge key holds a single `{t,v}` node.
-        const value = jsonExtract(at, '$.v');
-        const matches = valuePred ? valuePred(value, jsonExtract(at, '$.t')) : undefined;
-        if (valuePred && !matches) return null;
-        const present: Expr = { kind: 'binary', op: '!=', left: at, right: compilerNull() };
-        return existsOf(make.filter({ id: fresh('bhe'), input: row, channels: [], type: row.type,
-          pred: matches ? and(present, matches) : present }), fresh);
-      }
       // A vertex key holds an ARRAY of `{t,v}` nodes — any-member membership.
       const ex = make.explode({ id: fresh('bhx'), input: row, channels: [], expr: at, as: { value: 'hv' },
         type: typeOf(...row.type.cols, meta('hv', 'any', true)) });
@@ -321,10 +317,10 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
 
     // ---- the zero-label gate: the landed label array (vertex) / bare name (edge) is non-empty ----
     hasAnyLabel(kind, id, fresh) {
+      // Only ever called for a VERTEX (the multi-label group gate, `map.ts`); a vertex's label set is a
+      // JSON array, non-empty when it carries any label. `cteOf(kind)` keeps the parameter honest.
       const row = rowById(cteOf(kind, fresh), id, fresh);
-      const nonEmpty: Expr = kind === 'edge'
-        ? { kind: 'binary', op: '!=', left: col(row.id, 'label'), right: compilerNull() }
-        : { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [col(row.id, 'label')] }, right: compilerInt(0) };
+      const nonEmpty: Expr = { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [col(row.id, 'label')] }, right: compilerInt(0) };
       return existsOf(make.filter({ id: fresh('bha'), input: row, channels: [], type: row.type, pred: nonEmpty }), fresh);
     },
 
