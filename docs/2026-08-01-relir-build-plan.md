@@ -8,7 +8,8 @@ conformance floor is `test/L3-conformance/l3-state.json`, the per-family blocker
 `mise run rel-blockers` (re-run it; it moves). A machine-checkable statement of the same rules:
 `docs/spec/relir-algebra.allium`.
 
-**Legend:** ⚠️ trap, do not re-derive · 🚧 left · 🔴 needs a human call.
+**Legend:** ✅ landed (the mechanism is in the code; the line records only that it exists) · ⚠️ trap, do
+not re-derive · 🚧 left · 🔴 needs a human call.
 
 ---
 
@@ -177,8 +178,8 @@ makes a new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 | **`prune`** | column pruning — a walk carries only what its body and its consumer read |
 | **`semijoin`** | the PHYSICAL tier: lift a correlated property `EXISTS` in front of the bare scan it filters, as a DISTINCT relation the plan is DRIVEN from (a semi-join). ONE decorrelation with the access path as a pluggable `OwnerSeek` strategy — `indexSeek` (base `vp_key_value`, switched by `propertySeek`) and `trigramSeek` (the `property_fts` trigram index, switched by `ftsSubstringPredicate`, positive + negative TextP). The caller passes the enabled strategies STRATEGY-MAJOR (trigram before index, so a substring predicate takes the trigram index); the pass reads no config. Formerly two clones, `seek.ts` + `fts.ts` |
 | **`fuse`** | 🚧 small semantic rewrites. Ask what still buys anything the assembler doesn't before wiring it |
-| **`flatten`** | ✅ landed by DISSOLUTION, not as a pass. `expandRepeatBody` is deleted; the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto` — Calcite `SqlImplementor.needNewSubQuery` prior art), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No standalone `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally (block.ts treats a union side as `closed`→derived table while the self-ref stays unwrapped in the term's FROM), so `repeat(__.bothE().inV())` composes without one |
-| **`recognize`** | RETIRED as a distinct pass. "Fast paths as plan rewrites" is not a tier of its own but the physical-rewrite KIND, now realised by `semijoin` (two `OwnerSeek` strategies over the finished algebra); `recognize` was a placeholder name, not a term of art. What remains is a PERF tail, not a pass: `trigramSeek` fires only on a filter over a bare scan with a literal ≥3-char term, so a nested / non-scan-rooted / parameterized `containing()` takes the correct-but-unindexed generic `LIKE`. Gate any widening on a real slow query + EXPLAIN, not on a structural hunch — the uncovered cases already answer correctly |
+| **`flatten`** | ✅ landed by DISSOLUTION, not a pass — the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto`), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally |
+| **`recognize`** | ✅ RETIRED as a distinct pass — "fast paths as plan rewrites" is the physical-rewrite KIND, realised by `semijoin` over the finished algebra, not a tier of its own. Residue is a PERF tail (a nested/param `containing()` takes the correct-but-unindexed generic `LIKE`), gated on a real slow query + EXPLAIN |
 
 **Declared is not wired.** Only `name` and `semijoin` have production callers; there is no object that
 orders them — the order above is the order.
@@ -406,689 +407,136 @@ the top node (join-union distribution), the UNORDERED bulked slice, the unroll's
 ## §10. What is left — the worklist, in compounding-substrate order
 
 Rank by what a gap UNLOCKS, not by L3 gain — substrate that opens other families first, leaf gaps last.
-Re-derive the live blocker ranking from `mise run rel-blockers` (it rots — `blame()` once read a wrapper
-and reported the LARGEST family as absent; read a decline's REASON, not its date). Three worklists FAIL
-LOUDLY when a shape lands, so check them before assuming something is untracked: `test/rel-spine.test.ts`'s
-`DECLINED`, `test/L4-addendum`'s `@Unsupported`, L5's `LAW UNEVALUABLE`.
+Re-derive the live blocker ranking from `mise run rel-blockers` (it rots — read a decline's REASON, not
+its date). Three worklists FAIL LOUDLY when a shape lands, so check them before assuming something is
+untracked: `test/rel-spine.test.ts`'s `DECLINED`, `test/L4-addendum`'s `@Unsupported`, L5's `LAW
+UNEVALUABLE`.
 
-**Substrate — each unlocks several families, do these first:**
+### Landed substrate (✅ — each line records only that the mechanism exists; the code is the authority)
 
-- **The map shape (a READ).** The map-value SOURCE is now built: `g.inject([k:v, …])` seeds a
-  map-valued traverser (`mapLiteralBlob`/`injectMap`, `compiler/rel/{map,lower}.ts`), so the whole
-  re-enterable tail already built for `group()`/`valueMap()` works over a literal. It reuses
-  `valueNodeOf` — the one authority for the stored `{t,v}` tree — so the blob is a compile-time typed
-  literal (zero binds). **Multi-key `select(k1,k2,…)`** over a map is also in (`mapSelect`) — a sub-map
-  projection in select order, filtering the traverser when a key is absent (`SelectStep.java:66-89`)
-  and keeping a present-null key (`Scoping.getScopeValue:121` reads `containsKey`). What is LEFT of the
-  multiplier: the map-valued **`union`** source, and the remaining corpus TAILS — **seeded
-  `fold([:], Operator.addAll)`** and the **`merge`** map-operand. A non-string (`T`-token) key and a
-  map feeding `mergeV`/`mergeE` (7 write traversals — ⚠️ not write work) decline whole and belong to
-  the write substrate.
-- **A list whose members may be ELEMENTS.** LANDED for the ops that do not read a member as a VALUE:
-  member admission is now PER ARM rather than one `isBareList` door, so the local slices and
-  `order`/`dedup` serve an element list while a string transform and a member predicate still decline (a
-  rowid is not a string). An element member IS a `ChildHost`, so `by(k)`/`by(T.label)`/`by(<body>)` cost
-  nothing new, and an unproductive `by()` drops the member (`Order.feature:281-289`). ⚠️ Its compare key
-  and identity are the SAME two per-type facts the property `RowShape` states — `GremlinValueComparator`
-  compares an Element by id, `ElementHelper` hashes it by id. 🚧 What is LEFT: the map-family residue
-  (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map
-  entries), and a PROPERTY-member or NESTED-list member list in the same arms.
-- **A list whose members are MAPS — LANDED.** `project(k…).by(…).fold()`, `valueMap().fold()`,
-  `group().…fold()`, and a nested `project().by(__.…project().fold())` — every GraphQL to-many object
-  field at depth ≥ 2 (`docs/2026-08-07-graphql-front-end-plan.md` §2·2, the substrate item it names
-  first). `fold()` had an arm only on the scalar/element tails; it now has one on `recordTail`/`mapTail`
-  too, a record collapsing via `recordToMap` FIRST so `foldMaps` (`list.ts`, `foldScalars`' twin) sees
-  ONE map column whatever produced it — the per-row pairs array, collected under `json()` so
-  `json_group_array` keeps each member a nested array rather than a re-encoded string. `ListOf` grew a
-  `{ kind: 'map'; of: MapOf }` arm (`render.ts` — the total-union completion, framed by the one
-  `frameTypedNode` `{t:'map'}` rule already in `execute.ts`). ⚠️ A list NESTED inside a `project()` field
-  frames through `listNodeExpr`, NOT `listPayloadExpr` — the same `elementNode`/`elementObject` split one
-  level up: a member inside a map value is read by the TREE walker (`frameTypedNode`), which needs every
-  leaf tagged, where the top-level list framer takes bare element objects; getting this wrong frames a
-  folded element list as untyped objects (`[null,…]` off the wire). **`unfold()` closes the round trip**
-  (`unfoldMapMembers`, `unfoldNested`'s twin): a map-membered list unfolds to one MAP traverser per
-  member, re-entering `mapTail`, so `project().fold().unfold()` and `select(Pop.all).by(__.…fold()).unfold()`
-  compose. ⚠️ That surfaced a LATENT key-encoding split — `group()`/`valueMap()` emit a `{t,v}` node key,
-  `project()` a BARE string key; both frame identically but `select(<key>)` read only the `{t,v}` form, so
-  the map-key match is now tolerant of both (`keyMatches`, `COALESCE($[0].v, $[0])`, shared by
-  `mapKey`/`mapSelect`). 🚧 What is LEFT: the remaining member ops over a list-of-maps (`order`/`range` at
-  `Scope.local`) fail closed pending their own arms (`count(local)` is shape-agnostic and works).
-  ✅ **A `by(<pre>.fold())` GROUP VALUE — a LIST per partition — LANDED** (`groupCollected`, `map.ts`):
-  the sibling of `groupReduced`, pooling the pre-fold body's rows through `child.rows` (so
-  `by(__.out().fold())`'s many-per-traverser body flattens exactly as `by(__.out().count())`'s does) and
-  COLLECTING them rather than reducing. A `FoldStep` SEEDS `[]`, so an empty pool keeps its key with `l[]`
-  rather than dropping it — the same SEED row `groupReduced`'s count arm unions in, filtered from the array
-  by the collecting aggregate's `FILTER`. Members frame through `producedMemberNode` (factored out of
-  `byNode`, so an element list rides as `{t:'vertex',…}` nodes), and the pooled rows hand off to `groupMap`
-  unchanged — so a `by(<pre>.fold())` frames identically to the by()-less collect one container along. An
-  `order()` before the fold composes for free (`child.rows` preserves the origin through it, and a global
-  order restricted to a partition IS that partition's order); a `dedup()` before it DECLINES (it collapses
-  the pool). The ELEMENT-identity key (`by()`) now reaches the pooled arm — count AND fold — by taking the
-  key from the child rows' `origin`. L3: the `sideEffect/Group.feature` `byXout_foldX`/`byXout_order_foldX`
-  family plus `map/Group`'s ordered-fold scenarios. 🚧 What is LEFT: a `dedup()`/`sample()` before the fold
-  (a partition-relative barrier the shared pool cannot honour); a SCALAR host.
-  ⚠️ **A record field's PRESENCE guard re-emits the field's whole value expression** (`recordPairs`'s
-  `CASE WHEN <value> IS NOT NULL THEN json_insert(…, <value>)`), so an OPTIONAL nested field spells its
-  entire correlated subquery TWICE — and it COMPOUNDS with nesting (a depth-3 selection was 27 KB). A
-  field is only optional when its `by()` body can be UNPRODUCTIVE; a `fold()`/`count()` seeds and is
-  always productive, so `byField` reads the seam's `present === ALWAYS_PRODUCTIVE` (moved to `child.ts`
-  as the one shared object) and drops the guard. Measured: depth-2 6.2 KB → 3.3 KB, depth-3 27 KB → 8 KB,
-  and the `select`/`tail` hygiene baselines returned to their pre-feature bytes.
-  ⚠️ **The map COLLAPSE re-emits each field column too** — `jsonMember`'s `CASE` spells `v`/`vtype` ~6×
-  per field and the emitter INLINES a `Project` column's definition at every reference, so a field whose
-  value is a `firstOf` property subquery re-emitted the whole subquery ~6× (a single `project('n').by('name')`
-  → 16 `vertex_properties` subqueries). `recordToMap` now FENCES the record relation (`Materialize`) so each
-  field column is computed once in a CTE — but ONLY when `freeRelIds(rel).size === 0` (self-contained): a
-  CORRELATED record inside a `by(__.…fold())` reads an outer row and a fence would hoist it out of that
-  scope (`freeRelIds` is the shared authority `name`/`flatten` use, and `check` refuses a fence over a
-  self-reference for the same reason). Measured: `project('n').by('name')` 2570 → 1243 B, `select` family
-  −53 %, behaviour byte-identical (census answer-change gate clean). 🚧 What is LEFT: a CORRELATED inner
-  fold (`by(__.out().project().fold())` at depth ≥ 2) cannot be fenced, so its per-field property read still
-  duplicates (correct, just verbose). ⚠️ The fix is NOT to route `recordNode`/the inline record through
-  `byNode`: measured, that regresses a TYPED record key/value to `t: null` because `byNode` DROPS a per-row
-  vtype (its "compute-once invariant" — a plain map side cannot carry one, but a record field must, and the
-  `group().by(__.project(…))` L2 assertions pin `t:'string'`/`t:'int'`). The correct shape is a single
-  correlated subquery projecting `{t: vtype, v: jsonMember(value, vtype)}` with value/vtype as COLUMNS of
-  ONE scan — `byNode`'s own property-KEY arm (`firstOf(typedNode(col,col))`) already does exactly this, so
-  the increment is teaching the record-field path to reuse that shape per host WITHOUT the vtype-dropping
-  scalar arm. Low urgency: exactly ONE corpus traversal has `by(__.project(…))`, and the common
-  depth-1/non-correlated selections are already fenced.
-- **A `by()` body over a LIST host — LANDED for element members.** `select(Pop.all).by(__.unfold().values(k).fold())`
-  and `.by(__.unfold().count())`: the traverser is a COLLECTION, so `ChildHost` grew a `list` variant
-  (`child.ts`, carrying the list value + its `ListOf`) and `scalarChild` a `listHostChild` arm. `unfold()`
-  is the opener that CONSUMES the collection — `correlatedListMembers` (`list.ts`) explodes the host's
-  list value into a CORRELATED member relation (no `input`, exactly as `membersOf` is), and an element
-  list then re-enters `correlatedReduce` — the SAME engine an adjacency-rooted `by(__.out().values(k).fold())`
-  uses, rooted at the members instead of a hop, so the trailing `values(k).fold()` / reducer and the
-  empty-list seed rule are free. `hostSelf` gained the list identity arm (a bare `by()` over a list
-  selection projects the collection). 🚧 What is LEFT: SCALAR/`typed`/`mixed`/nested-list and MAP members
-  decline (fail closed) — their correlated re-entry is a later increment; and `select()` inside a list-host
-  body (`by(__.select('a').unfold()…)`) is the other opener, not yet built.
-- **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
-  now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
-  the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the
-  whole payload. The property stream was wired through it (`propertyRowShape`), which is what removed the
-  fourth copy of `order()` rather than adding one. ⚠️ Two facts a new shape must supply and cannot guess,
-  both per TYPE and both cited in `compiler/rel/property.ts`: **`GremlinValueComparator` dispatches the
-  NATURAL ORDER per type** — a `VertexProperty` by id, an edge `Property` by KEY then VALUE, so an
-  identity `by()` is a term LIST and not one expression (`naturalSort` exists for exactly that) — and
-  **`ElementHelper` hashes an Element by id and a Property by key+value, ignoring the owning element**, so
-  `g.V().bothE().properties().dedup()` collapses equal weights ACROSS edges. 🚧 What is LEFT: the SCALAR
-  and RECORD tails still call `orderRows` from their own loops rather than declaring a `RowShape` (so
-  neither gets `dedup`'s identity rule), and the MAP/LIST tails are not in it at all.
-- **The property stream's remaining vocabulary.** Its row ops and its two filters
-  (`hasKey`/`hasValue`, via `propertyHasClause` + `valueSet`) are in; 🚧 what is left is the `by()`
-  vocabulary (`T.key`/`T.value` are absent from `TOKENS` in `modulator.ts`, so `order().by(T.key)` and
-  `dedup().by(value)` decline), the `id()`/`label()` retypes off a property row (a `VertexProperty`'s
-  `label()` IS its key), `where(<body>)` over a property host, and META-properties
-  (`properties().properties()`, `has(k,v)` over a VertexProperty — a different row, deliberately not
-  answered off this one).
-- **The child seam consumer + `origin` naming a rowid-less parent.** `ChildSeam.rows`+`origin` EXISTS; the
-  CONSUMER is what is left. **`flatMap`/`local` FAN-OUT bodies now consume it** (`flatMapRejoin`,
-  `lower.ts`): a barrier-free body is TRANSPARENT (`flatMap(__.out())` is `out()`), so it mints `origin`,
-  lowers the body, drops `origin` after — a downstream whole-row `dedup` must not distinguish rows by which
-  host they descend from. The **per-origin SLICE has LANDED** (`partitionedSlice`): a trailing
-  `limit`/`skip`/`range` inside the body is `n` per HOST — a `row_number() PARTITION BY origin` window,
-  `dedupOn`'s shape, ordered by `encounter`+payload so the impl-defined "result should be OF … count N" pick
-  is DETERMINISTIC and perturbation-stable (L3 +8; = Calcite `convertDistinctOn`). The **per-origin FOLD has
-  LANDED** too, and NOT via `GROUP BY origin`: `local(__.out().fold())` is the SAME correlated shape as
-  `local(__.out().count())`, so `scalarChild`'s movement-then-reducer arm accepts a `list`-framed tail and
-  lands a correlated LIST subquery. The seed is FREE — `foldElements`/`foldScalars` already
-  `COALESCE(json_group_array, '[]')`, so a sink's subquery over an empty body yields `[]` with no seed
-  machinery. And because the body is ONE correlated subquery per host, a barrier INSIDE it (`order()`/`dedup()`
-  before the fold) is scoped per-origin for FREE and correct (L3 +1). ✅ **A `coalesce`/`optional` ARM is now a
-  consumer too** (`reductionArm`, `lower.ts`): a branch arm ending in a per-origin collapse
-  (`coalesce(__.out().count(), __.constant(0))`, `coalesce(__.values(k).fold(), …)`) routes through the SAME
-  `scalarChild` reduction — one row per host, so a `local`-style per-origin fold/count works as a branch arm
-  AND carries the frozen fan-out position, composing under a downstream slice. `reductionHost`/`reductionTail`
-  are the extracted host + payload projection shared with `perTraverserChild`. ⚠️ ONLY `coalesce`/`optional`
-  (`FlatMapStep`/`AbstractStep`, per-traverser); `union`/`choose extends BranchStep` BATCH a reducer arm over
-  the whole input (`element-branch-child.feature`, `[6,4]`), so their reducer arms are the arm-major lowering,
-  NOT this. `coalesce-reduction-arm.feature`. 🚧 LEFT on this arm: a SEEDED reducer only (`count`/`fold`) — a
-  non-seeded `max`/`sum` arm whose emptiness needs a `present` filter stays declined. ✅ **A `count` arm now
-  MEETS a plain scalar** (`coalesce(__.out().count(), __.constant(0))`): `result:'count'` carries a
-  `STATIC('long')` type and NO `vt` column, so `meetScalarArms` admits it (count→long, constant→int, a per-row
-  tagged scalar; the count wins as a `long` since it seeds, the default is a dead fallback). A `result:'number'`
-  reducer (`sum`/`mean`) is still refused there — its type rides on a `vt` column the meet's own `vtype` would
-  contradict. ✅ **The SHAPE-AGNOSTIC tail over a variant stream landed** (`variantTail`, `lower.ts`): a mixed-shape
-  merge (`union`/`choose`/`coalesce`/`optional` whose arms disagree on shape) composes with `count()`
-  (`countTail` = `SUM(bulk)`), the SLICES (`sliceOp` — `limit`/`range`/`skip`), and a bare `dedup()` — a
-  whole-PAYLOAD `Distinct` (`dedupOn` over `(vk, v, rid, list)`, the identity across every arm: an element by
-  `(vk, rid)`, a scalar by `(vk, v)`, so a cross-arm equal scalar collapses and two shapes never collide).
-  A slice reads the fan-out `encounter` the branch minted, so `union(…).limit(1)`/`.skip(1)` are deterministic
-  under `test:perturbed` (the arm-order pin in `variant-rowops.feature`); `count()`/`dedup()` are order-free.
-  🚧 LEFT: anything that reads a PAYLOAD MEMBER — `unfold()`, a member transform, a keyed/`by()` dedup —
-  declines; a variant has no uniform member shape, so that is the variant-MEMBER vocabulary. 12+ `@Unsupported`
-  scenarios across `variant-rowops`/`list-branch-child`/`nested-branch-arms`/`scalar-reentry` dropped their tag
-  (verified, incl. `V()`-re-source arms `union(constant(x), __.V()).count()`). ✅ **`optional`
-  now lowers** (`optionalArms`) as `coalesce(t, __.identity())` — an EMPTY-body fallback arm that `continueAs`
-  restores as the input unchanged — so it inherits the reduction arm, the traverser-major slice key, and (a
-  branch, so the `path` channel's `pad` merge already handles it) `optional(…).path()` at depth: the two nested
-  `Optional.feature` path scenarios pass exactly (+2 L3). `optional` is now in `BRANCH_HOSTS`, so a `by()`/`local()`
-  body may self-root it too. 🚧 LEFT: an element re-source arm (`optional(__.V())`). 🚧 What is
-  LEFT of the fan-out multiplier,
-  fail-closed today: a per-origin SCALAR-order path (`values(k).order().fold()` still declines — a scalar
-  stream order in the correlated body), and the reductions with NO fold (`max(local)`/`mean(local)` after a
-  scoped fold); the same machinery is what `group().by(k).by(__.out().fold()|limit(n)|order())` needs;
-  `tail` (count-from-end); a **child-body-label ESCAPE**
-  (`local(out().as('b')).select('a','b')` — the reference's 4 maps, currently declined not `[]`; the same
-  @Unsupported feature as `map(out().as('a')).select('a')`); **path HIDING** through a fan-out
-  (`flatMap(out().out()).path()` is `[v,end]`, `FlatMap.feature:56`); and `map`'s per-origin WINDOW (it takes
-  the FIRST body result). Unlocks the group-scoped reducer (`count()` with a non-empty body — LANDED for the
-  count arm — and a SCALAR
-  host — the empty pool is PER-REDUCER and decides INNER vs LEFT: `CountGlobalStep` seeds 0 and keeps its
-  key, `SumGlobalStep` does not; a scalar host needs `origin` to name a parent with no rowid) and
-  `property(k, <traversal>)` writes. ⚠️ For `property(k,<traversal>)`, two values are provably ONE-ROW (the
-  first increment); a multi-row value is a SEPARATE case (`applyAll`, `AddPropertyStep.java:105-199`): 0
-  rows → NO mutation (never a NULL write); >1 under `single` → the guard-binding message *"Single-cardinality
-  property requires exactly one value, but traversal produced N results"*; >1 under `list`/`set` → each
-  written; the single-argument MAP form is a third case.
-- **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`). Decorrelation into the P1
-  envelope; unlocks the unbounded repeat body whose UNION is not the top node (`repeat(__.bothE().inV())` —
-  term is `project(join(union(…),…))`, and a projection over a compound needs a derived table). ⚠️ Must NOT
-  be shortcut with a disjunctive single-arm join `ON (e.src=w.id OR e.tgt=w.id)`: it matches a SELF-LOOP
-  once where `both()` must yield the vertex twice, and it fails SILENTLY.
-- **Mint one deterministic window order over a whole fan-out.** Unlocks the UNORDERED bulked slice
-  (`g.V().both().both().limit(2)` — `bulkSlice` has no position to accumulate along, so a collapse is
-  refused in front of it) AND the demanded-order branch merge (below). Three demand levels, and the
-  first two have LANDED:
-  - **POSITIONLESS** (`!ctx.ordered`): a `union` over an ordered input, or with an arm-local
-    `order()/limit()`, drops the spent order and merges (`dropEncounter`, `unionArms`) — correct
-    because a union is unordered.
-  - **COLLECT/write demand** (`ctx.ordered && !ctx.sliced`): a `fold`/`cap`/`group` needs a COLUMN to
-    collect by but does not pin WHICH order — TinkerPop's own `BranchStep` emission order is
-    impl-defined (`vendor/tinkerpop/gremlin-core/.../branch/BranchStep.java:120-152`) and no corpus
-    scenario pins a branch fold's member order. `withFanoutOrder` (`lower.ts`) mints a whole-row
-    `ROW_NUMBER` after the merge, general over every framing. (Calcite: a plain `Union` carries no
-    collation — `RelMdCollation` guarantees order only for `EnumerableMergeUnion` — so the order is
-    IMPOSED via a window, `SqlStdOperatorTable.ROW_NUMBER`.)
-  - **SLICE demand** (`ctx.ordered && ctx.sliced`) — the TRAVERSER-major half LANDED (`mintTraverserMajor`,
-    `sliceableBranch`). A positional `limit/range/skip/tail` reads the fan-out to pick a SUBSET, and
-    `BranchStep.standardAlgorithm` pins it: barrier-free arms are TRAVERSER-major, arm-minor
-    (`[parent position, arm_idx, arm_encounter]` — realised as the within-(parent,arm) PAYLOAD tie,
-    which the slices, falling on traverser boundaries, never observe); `coalesce`/`optional`
-    (`FlatMapStep`) are always traverser-major. The parent position rides each arm UNCHANGED through its
-    hops as the `branchOrder` channel (already in the channel core: `identical` merge, `empty` barrier,
-    `undefined` group), minted from the input's `encounter` (`augmentParent`) — which works where
-    `origin`, a rowid, cannot (a scalar parent, and position ≠ id under `order().by(k)`) — plus a
-    per-arm `arm_idx` `branchOrder` channel, re-minted into a fresh `encounter` after the ordinary
-    `mergeArms` (element/scalar/list/map/variant merge unchanged; the key is orthogonal). Nine
-    `branch-traverser-major`/`emission-order` scenarios pass. ✅ **ARM-major landed for the ALL-BATCHED case**
-    (`batchedBranch`/`mintArmMajor`, `lower.ts`): a `union` where EVERY arm holds a barrier (`armBatches`) is
-    run per arm over the WHOLE input — each arm was already `continueAs`'d as a GLOBAL reduction over the
-    source, so the work is to UNION them ARM-major (`tagArm` + `renumber` over `[arm_idx, payload]`, the mirror
-    of `mintTraverserMajor` with no parent key) with a real `Sort` for the bare-result wire order. Two facts
-    made it tractable: the arms COLLAPSED (a barrier drops the per-row channels), so the merge base is the arms'
-    OWN channels not the input's — which is exactly what made the per-row `mergeArms` refuse them (`[bulk]` vs
-    `[]`); and the EMPTY-INPUT gate (`hasLabel('none').union(count,…)` is EMPTY not `[0,…]` — an option no start
-    was routed to emits nothing) is an `Exists(input)` where `input` is the SHARED branch source, so `name` CTEs
-    it with no replication. `union(__.count(), __.out('created').count())` → `[6,4]`, `union(__.min(),__.max())`
-    → `[27,35]`, both deterministic under `test:perturbed` (`element-branch-child`/`scalar-reentry`, 4 tags
-    dropped). ✅ **The MIXED batched/streaming case landed for SCALAR arms** (`mixedScalarBranch`/`toScalarArm`):
-    a collapsed reduction beside a per-input arm (`union(__.min(), __.constant(99))` → `[27,99,99,99,99]`,
-    `union(__.count(), __.values('age'))` → `[6, ages…]`) — each arm is normalized to a common `[v, vtype, bulk]`
-    scalar (the batched arm gains `bulk = 1`, a `number` reduction's `vt` / a `count`'s `long` / a scalar's own
-    type becomes the shared `vtype`), then handed to `batchedBranch`. ⚠️ The batching test is `isReductionArm`
-    (a body holding a `selfCollapses` barrier), NARROWER than `armBatches` (any Barrier) on purpose: a SLICE arm
-    (`union(out().limit(1), in())`) batches too but does not COLLAPSE, so it stays the ordinary merge — using
-    `armBatches` here stopped two corpus reads executing (census caught it). ✅ **MIXED-SHAPE landed too**
-    (`mixedBranch`): a collapsed scalar/list reduction beside a streaming ELEMENT arm merges as a VARIANT
-    arm-major — `union(__.count(), __.out())` → `[1, v[vadas], v[lop], v[josh]]`, `union(__.values('name').fold(),
-    __.out())` → `[l[marko], …]` — a scalar arm normalizes via `toScalarArm`, an element/list arm gains
-    `bulk=1` (`ensureBulk`), then `mergeArms`' variant merge reconciles the shapes — including a LIST-of-ELEMENTS
-    arm (`union(__.fold(), __.out())` → `[l[v[marko]], v[vadas], …]`): `variantPayload` now frames the folded
-    list's members through the SAME `listPayloadExpr` expansion the non-variant list uses (rowids →
-    `{id,label,props}` objects), where before it passed raw rowids and `rowVertex` threw on an undefined
-    `props`. ✅ **The SINGLE-arm form LANDED** (`unionArms`/`sourceUnion`): `union(t)` IS `t` — `UnionStep`'s
-    one branch takes every traverser — so a non-reduction single arm returns its own lowering (chain- and
-    source-position), which is what makes `union(__.out().limit(2)).count()` the GLOBAL `2` rather than a
-    per-origin `5` (`element-branch-child`, two tags dropped). A single REDUCTION arm still declines (it owes
-    the arm-major `Exists(input)` gate a `Union` of one input cannot carry). 🚧 What is LEFT, each fail-closed:
-    a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a **batched `choose`** (a per-arm gate, not the
-    shared-input one — see the census note); an **alias through a collapsed arm** (`union(min.as('x'),
-    …).select('x')` — the barrier drops the label); a **NESTED** branch inside a sliced arm (a key STACK).
-- **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
-  (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is
-  a PERF tail on already-correct queries, gated on measurement — not a pass to build.
+- ✅ **Map shape (a READ).** `inject([k:v,…])` map source (`injectMap`, zero-bind typed literal via
+  `valueNodeOf`); multi-key `select(k…)` sub-map projection in select order (`mapSelect`); `by(<pre>.fold())`
+  group value = a LIST per partition (`groupCollected`); `Scope.local` count/slice over a select record
+  (`recordToMap` → `mapTail`).
+- ✅ **List shape.** Members-as-ELEMENTS (per-arm admission, local slices, `order`/`dedup` by id); members-as-MAPS
+  (`project`/`valueMap`/`group().fold()`, `unfold()` round-trip); element-member SET OPS same-kind by rowid
+  (`listSetOp`); `by()` over a LIST host (`unfold()`→`correlatedListMembers`→`correlatedReduce`); `by(<pre>.fold())`
+  collect + fence (`recordToMap` `Materialize` when self-contained).
+- ✅ **`RowShape`** — one row-algebra engine (`orderRows`/`rowOp`/`dedupOn`) for the element and property streams.
+- ✅ **Fan-out / child seam.** `flatMap`/`local` fan-out rejoin (`flatMapRejoin`); per-origin SLICE
+  (`partitionedSlice`, = Calcite `convertDistinctOn`) and FOLD (correlated list subquery, seed-free);
+  `coalesce`/`optional` reduction arm (`reductionArm`, seeded `count`/`fold` only); `optional` lowering;
+  the shape-agnostic variant tail (`variantTail` — count/slice/dedup over a mixed merge).
+- ✅ **Branch merge / emission order.** Positionless, collect-demand (`withFanoutOrder`) and slice-demand
+  TRAVERSER-major (`mintTraverserMajor`, the `branchOrder` parent-position carrier) mints; ARM-major for
+  all-batched (`batchedBranch`), mixed batched/streaming SCALAR (`mixedScalarBranch`), and MIXED-SHAPE
+  arms (`mixedBranch`); single-arm `union(t)`≡`t`; record-valued arms (agree→record, disagree→map-demote);
+  branch + filter over the property tail.
+- ✅ **Path family.** `simplePath`/`cyclicPath` linear + recursive (path channel through the walk) + bounded
+  (`unrollableBodyStep`); `by(<proj>)` path compare; barrier-drops-path (`dropPath`); value positions
+  mid-path (`appendValuePosition`); `from`/`to` sub-path scoping via gated labels-on-path (`subPathMembers`).
+- ✅ **Predicate / alias / scope seams.** Nested-traversal operand for compare / `within` / `without` (rooted
+  + correlated, order-faithful `nestedFirstValue`; folded-list and vararg forms); alias scope threaded through
+  the filter seam (`where(select…)`), compound alias-`where` over the modulator ring (`aliasValueWhere`), bare
+  `where(P)` identity compare; `select(name)` over a NAMED COLLECTION (CROSS join, `selectCollection`);
+  `math`/`format` over a record order key and a `withSideEffect` constant; `select`/alias re-root in a child body
+  (`selectRerootHost`/`selectRerootSubject`); `concat(__.<traversal>)` operand (with `concatEmptyGuard`);
+  `by(__.values(k).is(P))`; keyed `dedup(k…)` on the element stream (`dedupByLabels`); self-rooted `by(__.…fold())`.
+- ✅ **Retype / typing leaves.** `constant()` carries its declared type; `hasId(…)` (was entirely unlowered);
+  exact REAL→JSON (`jsonMember`/`jsonMemberByTypeof`); a GLOBAL string transform over a list = TinkerPop's
+  type error (`GLOBAL_STRING_THROWS`, propagates); the LOCAL `StringLocalStep` runtime value guard
+  (`localStringMemberGuard`); illegal `range(low,high)` raises (`ValueParseError`); `all`/`any`/`none` over a
+  SCALAR traverser = empty; a single shared `constantRetype` from every tail.
 
-**Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
+### Still open — the worklist, in unlock order
 
-- **Runtime / computed LABEL** (~6 writes). `ElementHelper.validateLabel` is three PURE predicates → a
-  guard binding, not a decline. ⚠️ The message set depends on ARITY — `addV(single)` gives three `Label
-  can not be …` messages; `addV(a, b)` IS a Collection and `AddVertexStep.resolveLabelCollection` raises
-  FOUR others BEFORE `validateLabel`. 🔴 Settle the three-answer coercion HERE, don't add a fourth:
-  `mergeV([(T.label): x])` coerces, `g.addV(x)` declines, `addLabel(x)` coerces — all reachable
-  (`stringArgument : stringLiteral | variable`). `validateLabel` is TYPED upstream and coerces
-  (`String(label)`), so the gap is a missing guard at the nine CALL SITES, raise per-site. ✅ The `- found:
-  %s` tail names a GREMLIN type (`CanonicalType`), the tail only.
-- **`T.id` on `mergeV`/`mergeE`** (5 writes). `elementIdGuard` exists; the `Insert` column plumbing does not.
+**Substrate (each opens several families):**
+
+- 🚧 **Map-shape residue:** the map-valued `union` source; seeded `fold([:], Operator.addAll)`; the `merge`
+  map-operand; a non-string (`T`-token) key. (A map feeding `mergeV`/`mergeE` — 7 write traversals — is write
+  substrate, not this.)
+- 🚧 **List members that read as a VALUE:** SCALAR/`typed`/`mixed`/nested-list and MAP members over a `by()` or
+  list host; `order`/`range(Scope.local)` over a list-of-maps; a PROPERTY-member or nested-list-member list;
+  `select()` inside a list-host body (the other opener).
+- 🚧 **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`) — decorrelation into the P1
+  envelope; unlocks the unbounded repeat body whose UNION is not the top node (`repeat(__.bothE().inV())`).
+  ⚠️ Must NOT be shortcut with a disjunctive single-arm join `ON (e.src=w.id OR e.tgt=w.id)`: it matches a
+  SELF-LOOP once where `both()` must yield the vertex twice, and it fails SILENTLY.
+- 🚧 **Fan-out multiplier residue:** a per-origin SCALAR-order path (`values(k).order().fold()`); reductions with
+  NO fold (`max`/`mean(local)` after a scoped fold); the group-scoped reducer with a SCALAR host (empty pool is
+  per-reducer — `CountGlobalStep` seeds 0 and keeps its key, `SumGlobalStep` does not; a scalar host needs
+  `origin` to name a rowid-less parent); `tail` (count-from-end); a child-body-label ESCAPE
+  (`local(out().as('b')).select('a','b')`); path HIDING through a fan-out (`flatMap(out().out()).path()`);
+  `map`'s per-origin WINDOW (it takes the FIRST body result).
+- 🚧 **Branch / slice residue:** a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a batched `choose`
+  (a per-arm gate, not the shared-input one); an ALIAS through a collapsed arm (the barrier drops the label);
+  a NESTED branch inside a sliced arm (a key STACK).
+- 🚧 **`RowShape` gaps:** the SCALAR and RECORD tails call `orderRows` from their own loops (so neither gets
+  `dedup`'s identity rule); the MAP/LIST tails are not in it at all.
+- 🚧 **Property-stream vocabulary:** the `by()` vocabulary (`T.key`/`T.value` absent from `TOKENS`), the
+  `id()`/`label()` retypes off a property row, `where(<body>)` over a property host, and META-properties
+  (`properties().properties()`). `project`/`select` over a property needs FRAMER work — the record→map wire
+  framer emits empty maps (`[{}, …]`), verified 2026-08-13 and reverted rather than shipping the mis-frame.
+
+**Guard-binding family** (§6·5 — a graph-dependent refusal → `Binding.guard`):
+
+- 🔴 **Runtime / computed LABEL** (~6 writes). `ElementHelper.validateLabel` is three PURE predicates → a guard,
+  not a decline; the gap is a missing guard at the nine CALL SITES. ⚠️ The message set depends on ARITY. Settle
+  the three-answer coercion HERE, don't add a fourth: `mergeV([(T.label): x])` coerces, `g.addV(x)` declines,
+  `addLabel(x)` coerces.
+- 🚧 **`T.id` on `mergeV`/`mergeE`** (5 writes) — `elementIdGuard` exists; the `Insert` column plumbing does not.
+
+**Writes** (rel-blockers: property 4, addE 3, addV 2, mergeE 1):
+
+- 🚧 **`property(k, <traversal>)`** — two values are provably ONE-ROW (first increment); a multi-row value is the
+  `applyAll` case (`AddPropertyStep.java:105-199`): 0 rows → NO mutation; >1 under `single` → the guard message
+  *"Single-cardinality property requires exactly one value, but traversal produced N results"*; >1 under
+  `list`/`set` → each written; the single-argument MAP form is a third case.
+- 🚧 **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
+  needs an `UPDATE` this route does not emit.
+- 🚧 **`with()` on a write · singletons** (`addE` after `addE`, `addInE`; ~10 writes) — one reason each.
 
 **Parameter / repeat residue:**
 
-- **Parameterised `times($x)` should PREFER the walk** (§9), where it stays a bind — unrolling forces the
-  early parameter reduction the root `CLAUDE.md` names.
-- **The unroll's admitted-body gate should be a DENY-list** of exactly `loops()`, a named `repeat('a',…)`,
-  `emit()`, `until()` — the transform's validity is a property of `repeat`, not the body's step names. ⚠️
-  Worth ~+10, but most bounded declines are blocked by steps the SPLICED chain still cannot lower (`select`,
-  `local`, `group`, the map shape) — most of the repeat gap is the ordinary coverage gap in a `repeat` costume.
-  ✅ Partially done by ADDITION rather than inversion: `simplePath()`/`cyclicPath()` joined `unrollableBodyStep`
-  (they are pure path filters an unrolled phase reproduces exactly), which is the pattern — each step earns
-  admission by an argument that its spliced phase is faithful, and the residual gate becomes a deny-list once
-  every remaining body step has one. The path filters were the ones the SPLICED chain already lowers.
+- 🚧 **`times($x)` should PREFER the walk** (§9), where it stays a bind — unrolling forces the early parameter
+  reduction the root `CLAUDE.md` names.
+- 🚧 **The unroll's admitted-body gate should be a DENY-list** of exactly `loops()`, a named `repeat('a',…)`,
+  `emit()`, `until()`. ✅ Partially done by ADDITION: `simplePath()`/`cyclicPath()` joined `unrollableBodyStep`
+  (pure path filters an unrolled phase reproduces). ⚠️ Worth ~+10, but most bounded declines are ordinary
+  coverage gaps in a `repeat` costume (`select`/`local`/`group`/the map shape the spliced chain still can't lower).
 
-**Leaf gaps — one family, no downstream unlock:**
+**Leaf gaps** (one family, no downstream unlock):
 
-- ✅ **`simplePath()` / `cyclicPath()` — LANDED for BOTH the linear form AND inside the recursive walk.**
-  `Path.isSimple()` is "no two path objects are equal"; the path is carried (`tracksPath`, seeded
-  because a PATH_FAMILY step is present, extended at every hop) as a JSONB array of tagged entries
-  (`{k,v[,t]}`), and equal objects produce the IDENTICAL entry (an element by rowid, a value by its
-  `{v,t}`), so uniqueness is a correlated `COUNT(*) = COUNT(DISTINCT entry)` over `json_each(path)`
-  (`pathSimplePredicate`), a filter that keeps the element framing. Verified row-for-row
-  (`V(1).out('created').in('created').simplePath()` → josh,peter; `cyclicPath()` → marko).
-  ✅ **The RECURSIVE form landed with the path channel through the walk** (`repeatWalk`, `compiler/rel/walk.ts`):
-  the walk no longer declines a path-tracking input — the channel is seeded at the source, APPENDED per hop
-  by the body's own movement (`extendPath`, so a multi-hop `outE().inV()` body records edge AND vertex
-  positions), and `simplePath()` reads it in-body as an ordinary correlated filter (a nested SELECT the
-  recursive-term barrier laws allow). The append (`Project`) and the filter both sit over a `both()` body's
-  hop-union, and `distributeThroughUnion` (the generalized loops-bump transpose, Calcite
-  `Project`/`FilterSetOpTransposeRule`) pushes them into the arms so each stays a single recursive reference.
-  L3 +5 (`Unfold`/`Loops` incl. `loops()` in `until`/`Repeat` `outE_inV`).
-  ✅ **The BOUNDED form landed too** — `simplePath()`/`cyclicPath()` are now `unrollableBodyStep`s
-  (`ir/strategies.ts`), so `repeat(__.both().simplePath()).times(n)` splices the filter into a flat chain
-  and lowers through the linear path machinery; splicing it TOP-LEVEL is also what makes `analyzeChain`
-  track a path with no explicit `path()` tail (the pass runs before analyze). L3 +2
-  (`SimplePath` `timesX3X_path`, and the `order()`-in-body `order_byXname_descX...timesX2X_path` — order
-  composes through the per-phase splice, verified incl. ORDER).
-  ✅ **The PATH-COMPOSITION family LANDED — combinatorial completeness (the corpus combines none of them):**
-  a `by(<proj>)` compares each position by its projection (`pathSimpleByPredicate` — cycling `by()` ring,
-  drop on unproductive, distinctness over projections; `cyclicPath().by('age')` → `[marko,marko]`, L3 +1);
-  a BARRIER/retype after a path-carrying stream DROPS the spent path (`dropPath` — `count`/`fold`/unkeyed
-  `group`/`dedup`/`select`; `simplePath().count()` counts what the filter kept) rather than declining; an
-  UNBOUNDED in-body path step with no `path()` tail seeds the walk anyway (`repeatBodyTracksPath` in analyze
-  scans repeat bodies); a JOIN-over-UNION recursive body composes (`distributeThroughUnion`'s join case,
-  Calcite `JoinUnionTransposeRule` — `bothE().inV()` sharing the plain edge scan across arms); and a VALUE
-  position mid-path is recorded (`appendValuePosition` — `values(k).path()` frames `[V,V,value]`, the
-  `pathPositions` value arm reshaping `{k,v,t}`→`{t,v}` with no rejoin; L3 +2).
-  ✅ **`from`/`to` SUB-path scoping LANDED via GATED labels-on-path** (`subPathMembers`): `Path.subPath`
-  slices by LABEL position (cycle-safe), so each position records its `as()` labels — but ONLY when a
-  `from`/`to` is present (`ChainFacts.demandsPathLabels`, so a path query without one is byte-for-byte
-  unchanged and a non-path query pays nothing). `objectEntry` carries an `L` array, `as()` appends
-  (`appendPathLabel`), `subPathMembers` slices between the LAST `from`- and `to`-labelled positions; a
-  not-found label yields an EMPTY sub-path (fail-closed). ⚠️ Path simplicity compares OBJECTS not labels,
-  so the distinctness key STRIPS `L` (`json_remove`) or a vertex under two labels would read as distinct.
-  L3 +4 (`Path`/`SimplePath`/`CyclicPath` from/to). 🚧 LEFT — `id`/`label`/`valueMap` value positions
-  (channels:`[]`, no carry); `path().unfold()` over a MIXED element+value path (the `scalars` boundary —
-  a list cannot yet hold an element member); and the ENCOUNTER-plus-path walk.
-- ✅ **`all`/`any`/`none` over a SCALAR traverser is EMPTY — LANDED.** Their `filter` returns FALSE for a
-  non-Iterable item (`vendor/tinkerpop/gremlin-core/.../filter/{All,Any,None}Step.java` — the `return false`
-  after the `instanceof Iterable` block), so a value stream (`values('age').none(P.gt(32))`,
-  `inject(7).all(P.eq(7))`, `inject(null).any(P.eq(null))`) drops WHOLE regardless of the predicate. The
-  scalar tail now filters `CONSTANT.false` for a single-arg quantifier; the LIST form (`listMemberOp`, member
-  testing) is unchanged. L3 +9. ✅ **The nested-traversal member predicate over a LIST also lands**
-  (`inject([…]).none(P.eq(__.V(9999).values(k)))`): `memberPredicate` gained a `resolveScalar` hook built
-  from the child seam's `rooted` read (a member list has no element host, so only the rooted arm applies —
-  the cross-module twin of `nestedFirstValue`'s rooted branch, since `list.ts` cannot reach `lower.ts`).
-
-- ✅ **Exact REAL → JSON — LANDED as ONE authority, `jsonMember`/`jsonMemberByTypeof` (`build.ts`).** Every
-  scalar crossing INTO a `json_object`/`json_array`/`json_group_array` is now lossless at any depth: a
-  binary64 rides as a 17-digit JSON number (lossy-only guard) and a wide integer as decimal TEXT (BigInt
-  at the wire, generalizing `sumTower`'s exact tail to any blob). Routed through by `typedNode` (all `{t,v}`
-  members), `foldScalars` (static/per-row/unknown), `byNode` (map keys/values — a computed scalar carries
-  its static tag so a count key frames Long and a `math()` value keeps its digits), and `injectList`/
-  `injectSource`. This unblocked group-scoped `mean` (`map/Mean.feature`, L3 +1) and fixed whole-number
-  doubles (`1.0` was framing Int) and wide ints in folds. The four traps still hold and are encoded:
-  (1) JSON-ENTRY not `storedValueOn` (the row path re-quotes); (2) gate on the TAG where there is one, and
-  on `typeof(value)` ONLY for a materialized COLUMN (`jsonMemberByTypeof`) — never a subquery; (3) the
-  lossy-only guard; (4) `json()` as the aggregate's direct argument. ⚠️ The `typeof` arm repairs a REAL
-  only: a wide integer's TEXT needs a `long`/`bigint` tag the untyped path lacks, so an untyped wide int
-  stays a magnitude-inferred number rather than a wrong-type String.
-- **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis. The lossy test
-  must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag
-  is a DIFFERENT question, measured wrong: `values('name').fold()` is `typed` while every member is bare at
-  run time.
-- **The `set` framing marker** survives `range(local)`/`all`/`any`/`none`, dropped only by
-  `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. The
-  THREADING is now in place: an arm that decides the marker returns it and `listTail` treats the field as
-  authoritative-when-present, so `reverse()` unmaking a set (`ReverseStep` returns a `List`) is stated
-  rather than inferred. 🚧 `order(local)` still does not drop it.
-- **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
-  type today) — needs head-position tracking on the RelIR `AliasEntry`.
-- **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
-  `path().by(<transform>)` writes) — inert until tags join a comparison; a null tag means "infer from the
-  value" everywhere else.
-- ✅ **A GLOBAL string transform over a LIST is TinkerPop's type error, not a gap — LANDED.**
-  `toUpper/toLower/trim/lTrim/rTrim/length/substring/replace` each have a `*GlobalStep` that throws
-  `IllegalArgumentException` on a non-String receiver, and over a list the receiver IS the list
-  (`vendor/tinkerpop/gremlin-core/.../map/{ToUpper,…,Replace}GlobalStep.java`). The shape is CERTAIN in
-  the list vocabulary (§6·5), so `listMemberOp` raises the reference's verbatim
-  `"The <step>() step can only take string as argument, encountered class java.util.ArrayList"` (a
-  `ValueParseError` that PROPAGATES) rather than declining to a generic `UnsupportedTraversal`
-  (`GLOBAL_STRING_THROWS`, `ir/step.ts`). Calcite's prior art is the LAYER, not the message: an
-  operator over a wrong-typed operand raises at VALIDATION before any plan node
-  (`vendor/calcite/core/.../sql/validate/SqlValidatorImpl.java`), which is exactly a compile-time raise
-  ahead of SQL emission. `asString` is the ONE exclusion — `AsStringGlobalStep` stringifies any value
-  (`"[1, 2]"`), a real answer.
-- ✅ **The LOCAL `StringLocalStep` form over a non-string MEMBER is a runtime guard — LANDED, and it
-  fixed a WRONG ANSWER.** `g.inject([1,2]).trim(Scope.local)` and `values('age').fold().trim(local)`
-  were SILENTLY COERCING (`["1","2"]`) where `StringLocalStep.map` throws per member on a non-null
-  non-string (`vendor/tinkerpop/gremlin-core/.../step/util/StringLocalStep.java:54-58`) — the §12
-  "wrong answer with the right arity" class, banked in the census goldens. The member type here is
-  per-row/unknown (never a static tag), so it can be neither a decline (that refuses the valid
-  all-string `values('name').fold()`) nor a compile-time throw: it is a **runtime VALUE guard**
-  (`localStringMemberGuard`, `list.ts`) — the §6·5 `Binding.guard` mechanism applied to `json_each`
-  members instead of a graph row, raising iff a member's `memberTypeTag` is non-null and not `'string'`.
-  Threaded through the ONE list-loop return that can carry a guard (`lower.ts`, on `effects` like a
-  snapshot). The guard set is exactly `GLOBAL_STRING_THROWS` — `asString(local)` is NOT one
-  (`AsStringLocalStep` stringifies each member; only a null member raises `Can't parse null as String.`,
-  a different error not yet built). Message is the reference's verbatim to the corpus-checked prefix
-  (the offending `<class>` is omitted — `Guard.valueColumn` appends, the reference spells it
-  mid-sentence, no scenario checks past the prefix). L3 +3.
-- ✅ **An illegal `range(low, high)` (`low > high`, both != -1) RAISES — LANDED.** `RangeGlobalStep`/
-  `RangeLocalStep` throw `"Not a legal range: [low, high]"` in their CONSTRUCTOR
-  (`vendor/tinkerpop/gremlin-core/.../step/filter/RangeGlobalStep.java:65-66`). `sliceOf` already
-  computed the check; it now throws a `ValueParseError` (a propagating ANSWER, §6·5) instead of a plain
-  `Error`, and the two `sliceOp`/`listMemberOp` catchers rethrow that class rather than swallowing it to
-  a generic `UnsupportedTraversal`. Both scopes, though the corpus names only the global — one authority.
-  L3 +2.
-- **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and
-  `barrier(Barrier.normSack)`. Both honest.
-- **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
-  needs an `UPDATE` this route does not emit.
-- **`with()` on a write · singletons** (`addE` after `addE`, `addInE`; ~10 writes) — one reason each.
-- **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept
+- 🚧 **Set-op keeps members' types** — `values('when').fold().merge(…)` returns raw millis; the lossy test must
+  span BOTH sides (`withLossyFlag` asks it of one). ⚠️ Gating on the compile-time `typed` flag is a DIFFERENT
+  question, measured wrong.
+- 🚧 **The `set` framing marker** survives all but `order(local)`/`unfold()`; the threading is in place but
+  `order(local)` still does not drop it.
+- 🚧 **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
+  type) — needs head-position tracking on the RelIR `AliasEntry`.
+- 🚧 **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
+  `path().by(<transform>)` writes) — inert until tags join a comparison.
+- 🚧 **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy) and `barrier(Barrier.normSack)`.
+- 🚧 **Path value positions** — `id`/`label`/`valueMap` (channels `[]`, no carry); `path().unfold()` over a MIXED
+  element+value path; the ENCOUNTER-plus-path walk.
+- 🚧 **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept
   the rest.
-- **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
-- **`split()` (7 blockers) is DEFERRED BY DESIGN, not a leaf to build.** It is a Java-`StringUtil.split`
-  string→list transform whose every arm diverges from SQL (whole-separator empty-token collapsing,
-  char-split, whitespace-split), so its home is the Java-string-op semantics commitment in
-  `docs/2026-08-12-regex-as-a-barrier-research.md` (a SQL-native `replace`/recursive-CTE form with a
-  documented divergence, or the JS barrier), NOT a bespoke recursive-CTE reproduction of Commons. It
-  fails closed correctly today. Do not build it ahead of that one decision.
+- 🚧 **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
+- 🚧 **`split()` (7 blockers) is DEFERRED BY DESIGN, not a leaf to build.** A Java-`StringUtil.split` string→list
+  transform whose every arm diverges from SQL; its home is the string-op-semantics decision in
+  `docs/2026-08-12-regex-as-a-barrier-research.md`, NOT a bespoke recursive-CTE. Fails closed correctly today.
 
-Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch (the
-SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>).option(k, arm)` where the
-choice is a body rather than a `T` token — the arm-merging half is now ONE dispatcher over three builders
-at both per-row shapes, `BRANCH_HOSTS`/`branchArms`, and a token choice is `tokenChoice`), row ops
-(`Column`-keyed and the `path()` tails), aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history
-reads), side effects, then `local`, `match`, `where`, the `path` tails.
+**Families still largely open** (rank live via `rel-blockers`): the scalar-transform tail; branch (the
+SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>)` where the choice is a body rather
+than a `T` token); row ops (`Column`-keyed and the `path()` tails); aliases (`select`, dominated by
+`Pop.all`/`Pop.mixed` history reads); side effects; then `local`, `match`, `where`, the `path` tails.
 
-🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
-pattern this whole stage kept finding:
-- ✅ **`select(name)` over a NAMED COLLECTION — LANDED as a CROSS join, and it was one missing caller.**
-  `Scoping.getScopeValue` consults `traverser.getSideEffects()` BEFORE the path
-  (`vendor/tinkerpop/gremlin-core/.../step/Scoping.java:119-131`), so a single-key `select("a")` naming a
-  `group`/`groupCount`/`aggregate` side effect resolves to the FINISHED collection whatever an `as()` bound.
-  `SelectStep` emits it once per surviving traverser, which is a CROSS join of the stream's channels onto the
-  one-row reduced value — `readCollection`, the SAME relation `cap("a")` reads, the `foreign.ts` constant
-  sub-traversal shape minus the injection ON (`selectCollection`, `lower.ts`). The value's framing is carried
-  verbatim, so the map/list tail takes the rest: `count(Scope.local)` → the map size, `unfold()` → the
-  members, and a WRITE (`select("x").unfold().addE(…).to("a")` → the full bipartite) composes. Five corpus
-  traversals, reads/repeat-unfold/write all at once. ⚠️ **The trap it surfaced, banked because it is a WRONG
-  ANSWER a retype invites:** a re-root that drops the traverser's payload must STILL thread the live alias
-  map, or a following `select(<label>)` empties the stream — `select("x").select("label")` returned `[]`
-  until the cross join carried the alias channels through and `continueAs` was handed the real `labels`, not
-  `NO_ALIASES` (the census cannot see it — the traversal was newly executing). 🚧 LEFT: a `by()` over a
-  collection select (a member projection) and a multi-key select mixing a collection name with labels
-  (both decline via `selectKeys`).
-- ✅ **A PROJECTOR body (`math`/`format`) as an ORDER KEY over a project RECORD — LANDED, one missing arm.**
-  `math("a / b")` reads the record's fields as scope variables (`Scoping.getScopeValue`), so it is a
-  correlated scalar exactly as `project(a,b).math("a / b")` (the direct chain step) already was — but
-  `byExpr`→`scalarChild` had no RECORD-host arm (it declined every host but scalar/list/element), so
-  `order().by(__.math("a / b"), Order.desc)` over a `project(...)` declined. `scalarChild` now routes a
-  single-projector body over a record host to `projectorValue` (the same builder the chain step uses),
-  making the `math` an order key. Result is ORDERED and matches `Math.feature` row-for-row
-  (`[ripple, josh, marko, vadas, lop, peter]`), deterministic under `test:perturbed` (a real `ORDER BY`).
-  🚧 LEFT: a projector body with a TAIL past it over a record (re-enters over the projector's scalar, a
-  later increment).
-- ✅ **A `by()` child body ending in an `is(<P>)` FILTER — LANDED across every `by()` host.** `valueRun`
-  (`lower/reduction.ts`, the scalar child body's transform run) handled projectors and transforms but
-  declined a trailing `is()`, so `aggregate("x").by(__.values("age").is(P.gt(29)))` — the age only where
-  it exceeds 29 — declined. The filtered-out value is UNPRODUCTIVE, which the `by()` vocabulary already
-  carries as a NULL value (dropped by the host's productivity filter, or kept under
-  `ProductiveByStrategy`), so the fix NULLs the value (`CASE WHEN pred THEN value END`) rather than adding
-  a productivity-PREDICATE channel `ByField` does not have (`ByField.optional` is a boolean null-check,
-  not an arbitrary predicate — routing the predicate there would be the larger change). Both strategy
-  variants fall out: default drops the null member (`[32,35]`), ProductiveBy keeps it
-  (`[32,35,null,null,null,null]`). ⚠️ Because `valueRun` is the ONE scalar-child-body engine, this
-  generalises for free to `project`/`order`/`group`/`dedup` hosts — any `by(__.values(k).is(P))`. Only a
-  value-`P` `is`; a `typeOf`/gtype assert or a nested-traversal `is` operand declines.
-- ✅ **A `Scope.local` count/slice over a multi-key `select(k…).by(…)` RECORD — LANDED as `recordToMap` →
-  `mapTail`.** A multi-key select frames as a RECORD; a `Scope.local` op reads it AS A MAP (`SelectStep`
-  yields a `LinkedHashMap`), so `recordTail` COLLAPSES the record to a map (`recordToMap`, the same boundary
-  `fold()` already crossed) and re-enters `mapTail`. `count(Scope.local)` is the entry count and
-  `limit`/`range`/`skip`/`tail`(Scope.local) is an ORDER-PRESERVING ENTRY slice (`mapRange`, `map.ts` —
-  `RangeLocalStep.applyRangeMap` / `TailLocalStep`, the LIST-local slice's shape over the `MAP_COL` pairs
-  array: explode, sort by position, take the window, re-collect ASC). One arm, six corpus traversals
-  (limit/range/tail at both bounds over `select("a","b","c").by("name")`), all row-for-row against the
-  reference. ⚠️ The pair must re-collect through `jsonOf` — `json_group_array` re-encodes a bare `json_each`
-  element as a JSON STRING, which double-encodes the `[key,val]` pair (it produced `{"[":"\""}` before the
-  wrap; the same trap `mapSide` documents). 🚧 LEFT: `order`/`dedup`(Scope.local) over a map (a re-KEY, not
-  a window — a different question), and a `by()` over the local slice.
-- ✅ **`hasId(…)` — LANDED, and it was ENTIRELY unlowered (0 executing, 21 deferrals) despite the algebra
-  existing.** `hasId` reads the element's EXTERNAL id (`COALESCE(uid,id)`), the same row `has(T.id,…)`
-  does — so `sourceFilter` now routes it straight to `hasTokenClause('id',…)` with the id token supplied,
-  and every predicate form composes for free: `hasId(1)`/`hasId([2,6])`/`hasId(1,2)` an id-membership
-  `within` (the front end keeps a collection arg WHOLE with `.members`, exactly the single-collection
-  operand `predicateExpr`'s `within` spreads), `hasId(P.gt(2))` a range, `hasId(P.eq(__.V(x).id()))` the
-  nested-operand compare (composing with the resolveScalar work above), and
-  `hasId(P.within([]))`/`hasId(P.without([]))`/`hasId(null)`/`hasId(P.eq(null))` the degenerate sets that
-  fold to their truth value (`filter/HasId.feature` pins `within[]`→0, `without[]`→6, `null`→empty). Both
-  vertex and edge. The param-bearing forms (`hasId(vid1)`) are the census's "unbound" set; L3 binds them.
-- ✅ **a KEYED `dedup(k1,…,kn)[.by(proj)]` on the ELEMENT stream — LANDED, and it was PURELY a missing
-  caller.** `dedupByLabels` (`lower.ts`, `DedupGlobalStep` with `dedupLabels`) was already built and wired
-  into the RECORD tail (the post-`select` form); the PRE-`select` form (`g.V().as('a').both().as('b').dedup('a','b').by(T.label).select('a','b')`,
-  `dedup('a','b').path().by('name')`) declined only because the element loop's `rowOp` rejects an
-  args-bearing `dedup` and nothing called the helper where the live alias map is in scope. One `if` before
-  the `rowOp` call reuses it verbatim: each label's `Pop.last` identity (rowid, or the shared `by()`
-  projection) tuples into `dedupOn`'s ranked window, the survivor keeps its whole payload+path, and a
-  non-live label or unproductive `by()` declines/drops per the reference. The representative is
-  impl-defined ("should be of"), so the deterministic first-per-tuple is a valid member and the pinned
-  COUNT (distinct tuples) is perturbation-invariant. L3 +3 (`filter/Dedup.feature`, `SubgraphStrategy.feature`).
-  🚧 LEFT: a bare `dedup()` over a path-carrying element stream (still the `pathCarried` decline), and a
-  `Scope.local` `dedup(labels)` over a fold.
-- ✅ **a `select(<label>)` RE-ROOT in a child body — LANDED.** `selectRerootHost` (`lower.ts`) is the alias
-  analogue of `rerootedHost`'s endpoint/owner reroots: a body leading with `select('a')` reads the label
-  off the `HostRow`'s alias map (`aliasProjection`, `Scoping.getScopeValue` resolves a label off the
-  traverser's scope) and CONTINUES against it — an element alias → an element host, a value alias → a scalar
-  host carrying the label's per-row type. A list/Pop history and a record host (whose own MAP SCOPE answers
-  `select` in `recordTail`, § `scopeValue`) decline, fail closed. One missing caller, not missing algebra:
-  `byExpr`/`scalarChild` already dispatch a nested `by()`/`map`/`is`/`concat` body through `child.scalar`,
-  so it composes at every host at once — `map(__.select('a').values('name'))`,
-  `by(__.select('a').values('name'))` and `order().by(__.select('a')…)` over element AND scalar hosts (L3
-  +2). ✅ **`concat(__.<traversal>)` now routes its operand through the seam too** — a nested operand is a
-  correlated scalar (`scalarChild`) whose FIRST result is appended through the same `concat_ws` + all-null
-  guard as the string form. A PROVABLY-PRODUCTIVE operand rides no extra machinery; a MAYBE-empty one no
-  longer DECLINES — it now carries a runtime throw guard (`concatEmptyGuard`, §6·5) because
-  `TraversalUtil.apply` THROWS on an empty sub-traversal where a correlated subquery would yield the null
-  `concat_ws` silently skips. The guard runs the operand-`present` predicate over the surviving traversers
-  and raises the reference's verbatim `'The provided traverser does not map to a value'` iff SOME row's
-  operand produced nothing, so `concat(__.select('a').values('lang'))` over software SUCCEEDS ({lop,ripple}
-  uses java) and a mixed stream RAISES rather than fabricating a short answer (`concat(__.select('a'))`,
-  L3 +1; the maybe-empty form, +2). ✅ **A COMPARISON/`eq` predicate operand that is a nested traversal now resolves too**
-  (`is(P.gt(__.V(x).values(k)))`, `has(k, P.eq(__.V(9999).values(k)))`, bare `is(__.V(9999)…)` =
-  `is(P.eq(…))`): `predicateExpr`'s `resolveScalar` hook (shared with the within/without vararg member)
-  returns the operand's FIRST value via `nestedFirstValue` — a ROOTED operand (`__.V(x)…`) as a scalar
-  SUBQUERY over `rootedRead` (the first row = `tv.next()`), a CORRELATED one (`__.values(k)`)
-  via the element-host `scalarChild`. ⚠️ **The first is the operand's ORDERED first, and a bare subquery
-  does NOT give it** — `P.resolve` takes `tv.next()` over the operand's OWN order, so an operand ending in
-  `order()` picks the sorted first, but projecting only `v` let `prune` drop the read's `encounter` channel
-  and a `(SELECT v FROM r0)` took a SCAN-order row (`has("name", __.V(x).out().values("name").order())`
-  picked an arbitrary neighbour — the defect that read as a FLAKY L3 regression, passing only when scan
-  order matched sort order). So the rooted branch now `ORDER BY`s the encounter and `LIMIT 1`s
-  (`nestedFirstValue`, `lower/reduction.ts`) — deterministic and order-faithful; an unordered operand has
-  no encounter and takes one arbitrary-but-single row as before. Pinned in
-  `test/L4-addendum/predicate-operand-scope.feature`. The compare is DIRECT (`binary(cmp, subject, nested)`, not `ordered`'s
-  vtype cast — a runtime operand has no compile-time type; SQLite's storage-class order matches
-  `GremlinValueComparator` for the same-typed pairs the corpus makes). An unproductive operand is a NULL
-  scalar and `subject <cmp> NULL` → not-true, which is the SCALAR predicate's empty-operand SHORT-CIRCUIT
-  (`P.resolve` → `resolvedEmpty` → `test` false) for every op but `neq`, which declines (its `IS NOT 1`
-  negation reads a NULL as true; no corpus pairs `neq` with a traversal). Wired at `has`/`is`/`where`. L3 +5.
-  ✅ **Also wired into a `choose`/`where`/`filter` CONDITION** (`sourceFilter`'s `is`, `valuePredicate`) — so
-  `choose(__.is(P.eq(__.V(9999).values(k))), …)` and `choose(__.is(P.gte(__.V().…mean())), …)` lower. That
-  surfaced a latent `choose` bug and FIXED it: `ChooseStep` routes on the condition's PRODUCTIVITY (produced
-  → then, else → else), and the else arm was `NOT pred`, which is NULL (row dropped from BOTH arms) when the
-  condition is UNPRODUCTIVE — an absent value or an empty `V(9999)` operand. It is now `notProduced(pred)`
-  (`pred IS NOT 1`), sending a false-OR-null condition to the else, identical to `NOT pred` wherever pred
-  cannot be null (census: 0 changed answers, so no live `choose` had a nullable condition before). L3 +2.
-  ✅ **the operand seam now carries the traverser's SCOPE — a `select`/alias or `sack` read as a comparison
-  operand.** `nestedFirstValue` built its element child host with no `row`, so `scalarChild`'s select arm
-  (`selectRerootHost`, which reads `host.row.aliases`) and the sack channel had nothing to resolve against;
-  a `select`/`sack`-led operand therefore declined where a rooted `__.V(x)…` or a bare `__.values(k)` did
-  not. Threading the alias map onto that host — the operand-seam twin of `selectRerootHost` in a
-  `by()`/`map()` body — makes `has(k, P.gt(__.select('a').values(k)))` compare each traverser to its aliased
-  START (`g.V().as('a').out().has('age', P.gt(__.select('a').values('age')))` keeps the neighbour older than
-  the vertex it was reached from) and `has(k, P.gt(__.sack()))` compare against the sack. L3 +2; census +1
-  newly executing (`withSack(29).V().has('age',P.gt(__.sack())).values('name')`, verified = `P.gt(29)`), 0
-  changed. Pinned in `test/L4-addendum/predicate-operand-scope.feature`. 🚧 LEFT: the SCALAR-stream `is`/`where`
-  callers still pass a null host (`values('age').is(P.gt(__.select('a')…))`); a multi-key `select` in a child
-  body (a record); a `Pop` history select.
-- ✅ **the FILTER seam now carries the alias scope — a `select`/`as`-variable reads in a predicate body.**
-  `sourceFilter`/`childPredicate`/`bodyPredicate`/`valuePredicate`/`projectionProductive` folded every
-  `where`/`filter`/`not`/`and`/`or` body with `NO_ALIASES`, so no filter body could read a label —
-  where TinkerPop's `Scoping` consults the traverser's scope for a filter body exactly as for a
-  projection. The map is threaded through the seam and `selectRerootSubject` reroots a `select`-led body
-  to the aliased traverser (the predicate-seam twin of `selectRerootHost`). So
-  `where(__.select('n').hasLabel('person'))`, the or/and-of-selects forms, and — via the `as`→`select`
-  where-variable Pass rewrite — the `where(__.and(__.as('b').in(), __.not(__.as('a')…)))` start-variable
-  family lower and answer (Where.feature). `correlatedExists` keeps `NO_ALIASES` on purpose: it folds
-  over the CHILD relation, whose scope starts empty (an outer label persisting into a moved child body
-  is a later, correlated-join phase). 🚧 LEFT: an alias read AFTER a movement inside a filter body
-  (`where(__.out().select('n')…)`); a list/Pop history alias in a filter body.
-- ✅ **a COMPOUND alias-compare `where(k, P)` over label identities.** `aliasWhere` accepted only a
-  single binary `where(k1, P.op(k2))`; `WherePredicateStep` composes `eq`/`neq`/`and`/`or`/`not` over
-  `selectKey` operands. `aliasIdentityPred` recurses the connective tree (the mirror of `predicateExpr`'s
-  and/or/not), each leaf comparing the start alias's rowid against the operand label's — the no-`by()`
-  IDENTITY form (`where('c', P.not(P.eq('a').or(P.eq('d'))))`, Where.feature).
-- ✅ **the `by()`-value compound alias-where over the modulator RING — LANDED** (`aliasValueWhere`).
-  `WherePredicateStep`'s `filter`/`setPredicateValues` project the startKey through `by[0]` once, then
-  each predicate LEAF's operand label through the NEXT `by()` in encounter order, CYCLING (the
-  `TraversalRing` resets per traverser; the `ConnectiveP` tree is walked left-to-right). The LHS is
-  shared across leaves; a non-productive projection drops the row (an `IS NOT NULL` term per projection,
-  a `ProductiveByStrategy` keep-null still declining). Verified row-for-row vs `Where.feature` including
-  the CYCLED `d`→`by[0]` in `where('a', P.lt('b').or(P.gt('c')).and(P.neq('d'))).by('age').by('weight').by(min)`.
-- ✅ **a bare `where(P)` alias-compare — the subject is the CURRENT traverser** (`where(P.neq('a'))`,
-  `WherePredicateStep` with a null startKey uses `traverser.get()`). Handled over an element stream as an
-  identity rowid compare (reusing `aliasIdentityPred`), GATED on the predicate naming a live label — else
-  it is an ordinary value predicate and falls through to `sourceFilter`. Unblocks the `addE` co-developer
-  write and the Grateful-Dead `where(P.eq('song'))` join.
-- ✅ **`math()`/`format()` resolve a `withSideEffect()` CONSTANT variable** (`math('_ + x')` with
-  `withSideEffect('x', 100)`). `Scoping.getScopeValue` consults the side-effects before the path labels;
-  `sideEffectConst` inlines the seam's registered constant as a typed literal (zero binds).
-- ✅ **a `within`/`without` operand may be a RUN-TIME folded list** (`P.within(__.V(x).out('knows').values(k).fold())`).
-  `predicateExpr` gained a `resolveListSet` hook (the caller owns it — it holds the child seam); a single
-  nested operand explodes the resolved set with json_each (`subject IN (SELECT sv FROM json_each(<list>))`).
-  `foldedListSet` lowers the folded traversal as a rooted read (it re-sources → one fixed set correlated to
-  nothing), takes its one `list` value as a scalar subquery, explodes it sole-from; a member compares raw
-  (`Contains.within` is `.equals`, a scalar fold's members are bare). Wired at `is`/`where`/`has`.
-  ✅ **The VARARG-traversal-member form now lowers too** (`within(__.values('nonexistent'), __.constant('marko'))`,
-  `Has.feature`, L3 +2): unlike the fold, each operand is NOT rooted — `P.resolve(traverser)`
-  (`vendor/tinkerpop/gremlin-core/.../P.java:328-373`) runs each child traversal against the CURRENT
-  traverser and takes its FIRST result as ONE element, dropping an operand that produced nothing. So
-  `predicateExpr` gained a `resolveScalar` hook alongside `resolveListSet`: a nested vararg operand resolves
-  to the correlated first value via the element-host `scalarChild` (`varargScalar`), and the members build the
-  ordinary `IN`-list — the operand's `values(k)` becomes a `SELECT … ORDER BY id LIMIT 1` correlated subquery
-  (NULL when unproductive) and a `constant(v)` inlines. The NULL member is INERT in the `IN`/`NOT IN` idiom
-  exactly as a literal null is, so "drop the non-producing operand" and "leave its NULL in the list" are the
-  same answer (both `within`'s empty→no-match and `without`'s empty→match fall out). The single non-fold
-  operand (`within(__.values(k))` = its one first value) falls through the fold check into the SAME path. 🚧 LEFT: a
-  folded UNION operand (the source-`union` gap, fail closed); a vararg operand whose first result is itself a
-  LIST/ELEMENT (a list-valued or element member no scenario names — declined by the scalar-framing gate).
-- **the branch + filter families over the PROPERTY tail — LANDED.** `Subject` grew a third `property`
-  variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing, and
-  `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
-  property host, and `where`/`filter`/`not`/`and`/`or` route through the SAME `sourceFilter` vocabulary
-  (`SCALAR_FILTER_HOSTS`) and preserve the shape. `is` stays declined (a property has no single value).
-  What is LEFT on this tail is `project`/`select`. ⚠️ `project(k…).by(…)` over a property is NOT just a
-  missing caller: routing it through `recordOf` with the property host COMPILES and `select(field)` reads
-  the field, but the record→map WIRE framer emits EMPTY maps (`[{}, …]`) — a wrong answer with the right
-  arity. The record/map framer does not yet frame property-derived fields, so this needs framer work, not
-  a one-line dispatch (verified 2026-08-13, reverted rather than shipping the mis-frame).
-  **`constant` is now a SINGLE shared retype** (`constantRetype`) reached from every tail — element,
-  scalar, list, property, map — rather than two copies plus three gaps.
-  ✅ **`fold()`/collect after a `union`/`choose`/`coalesce` — LANDED** (`withFanoutOrder`,
-  `g.V().coalesce(__.values('name'), __.constant('x')).fold()`): a COLLECT demand takes any
-  deterministic fan-out order (see §10's mint bullet). The SLICE demand's TRAVERSER-major half also
-  landed (barrier-free branches + `coalesce`); what is LEFT is the ARM-major / nested / scoped-fold-arm
-  residue (see the SLICE bullet). Common pattern, real L3.
-  ✅ **A branch arm may now END in a `project()` — RECORD-valued arms merge, agreeing or not.** Two
-  rungs, and the second is the interesting one. (1) Arms whose records AGREE merge as records:
-  `sameFraming` declined `record` outright ("nothing builds a record-valued branch arm yet"), and the gap
-  was the equality, not a node — `RecordField.prefix` is POSITIONAL, so structurally-equal records already
-  occupy the same columns and the positional `Union` merges them (`sameRecordFields`; `optional` is
-  compared rather than merged, because `mergeArms` adopts the FIRST arm's framing and a wrong flag is a key
-  present where `ifProductive` omits one). (2) Arms whose records DISAGREE demote to MAP values
-  (`mapDemotedArms` → `recordToMap`): the fix is a NARROWER row, not a wider one — the fields collapse into
-  the one `map` column whose entries are self-describing `{t,v}` nodes, so arms with entirely different key
-  sets become two rows of one column. **That makes the same key able to hold a different TYPE per arm**
-  (measured: `{v:29}` … `{v:'java'}`), which as columns is one column with two storage classes and is
-  unrepresentable. Agreeing records deliberately do not demote — they keep their columns — and the
-  demotion costs the COLUMN, not the reachability: `select(k)` still answers through the map's JSON member
-  and correctly DROPS a row whose key is absent (`SelectStep.java:65-90`) instead of reading a sibling
-  arm's value. Prior art both sides: Neo4j's GraphQL library emits exactly this per-branch map
-  (`CALL { … WITH this0 { .id, __resolveType: "Child1" } AS this0 RETURN this0 AS this UNION … }`), and
-  Calcite's `SetOp` (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/SetOp.java`) requires
-  the row-type agreement both rungs establish. Zero L3 (the corpus has no record-armed branch) —
-  `test/compiler/record-branch-arms.exec.test.ts` is the coverage. `coalesce` came with it, via
-  `ALWAYS_PRODUCTIVE_TERMINAL` gaining `project`/`valueMap`/`elementMap` — each a `ScalarMapStep` whose
-  `processNextStart` splits unconditionally (`ScalarMapStep.java:38-40`), `select` deliberately NOT (it
-  returns `EmptyTraverser`), which is what keeps that set a real distinction rather than "map-shaped steps".
-  🚧 LEFT on this tail: a record arm against an ELEMENT/scalar/list arm (declines — `variantArmOf` has no
-  `vk` for a record), and `local(__.project(…))`.
-  ✅ **A `by()` arm may COLLECT the host's OWN rows — the self-rooted `fold()`.** Pure reachability, and
-  the strange edge it left is the tell: `by(__.out().fold())` worked (movement-rooted) while
-  `by(__.values(k).fold())` — the more ordinary Gremlin — declined. `correlatedReduce` has had a
-  per-origin FOLD arm all along; the gate admitting a body to the SELF root named only the numeric
-  reducers and `count`, so nothing reached it without a leading hop. `selfCollapses` adds `fold`, kept a
-  LOCAL predicate rather than a widening of `COLLAPSING_BARRIERS` (same question, different purpose —
-  that set also feeds `BATCHED_BARRIERS` and `repeat()`'s body-barrier reasoning, where `fold`'s
-  membership is its own claim). Newly answering: `by(__.values(k).fold())` over a `Cardinality.list`
-  property and **`by(__.labels().fold())` over a MULTI-LABEL vertex** — the multi-label read a GraphQL
-  type-identity field needs. Empty is `FoldStep`'s seed both ways (an absent key and a zero-label vertex
-  each give `[]`, never the `[null]` an outer join would). `labels()` emission order is the label
-  dictionary id, the same pick `LabelStep` makes, so the first collected label and `label()` agree — now
-  asserted so the two cannot drift into separate picks. `selfRootedReduce` extracts the one-row self-root
-  source the branch arm and the barrier arm built identically. 🚧 LEFT: a bare `by(__.labels())` and
-  `by(__.union(values,values))` — a fan-out body a `by()` must take the FIRST of
-  (`TraversalUtil.produce` → `traversal.next()`), i.e. `yields: 'first'` for a fan-out, which is the
-  expression arm's business; and `by(__.properties(k).fold())`, the property-member list.
-  ⚠️ **A FILTERED mapping arm is not always productive — a measured WRONG ANSWER, and the set that caused
-  it was two kinds conflated.** `ALWAYS_PRODUCTIVE_TERMINAL` is read from a body's LAST STEP ALONE, which
-  is sound for a SEEDED terminal (`count`/`fold` emit however empty the input, so nothing before them can
-  matter) and unsound for a MAPPING one (`constant`/`project`/`valueMap`/`elementMap` are `ScalarMapStep`s
-  emitting one traverser per INCOMING traverser — they still need an input). So
-  `coalesce(__.hasLabel('person').project(…), __.hasLabel('software').project(…))` declared arm 1
-  always-firing, exhausted the coalesce, and returned only the person rows — the software vertices vanished.
-  `constant` carried the same defect BEFORE the mapping terminals joined the set, and it would equally have
-  let the filter-no-op Pass delete the filter in `where(__.hasLabel('person').constant(1))`. Fixed as
-  `SEEDED_TERMINAL` vs `MAPPING_TERMINAL` (a mapping terminal qualifies only as the WHOLE body —
-  conservative, because the precise rule wants `isStreamIdentity` and that module imports this one), plus an
-  EXACT reduction in `childPredicate`: a trailing mapping terminal is transparent to the productivity
-  QUESTION, so ask the prefix (`<prefix>.project(k)` produces exactly when `<prefix>` does). The second half
-  is what makes this a capability gain rather than a new decline. **It is load-bearing for GraphQL:** a union
-  field must lower to `coalesce`, not `union`, because GraphQL admits one concrete type per value while a
-  vertex may bear several labels — measured on the zoo's overlapping `aquatic`/`endangered`, `union`
-  duplicates tux and atlas under two type names (11 rows) where `coalesce` resolves each once (8).
-  ✅ **`constant()` carries its DECLARED type.** It framed every plain literal `UNKNOWN` — inference at the
-  wire for a type the front end had already parsed onto `Arg.type` — and inference reads the SQL storage
-  class, which cannot see a LEXICAL distinction (and `constLit` narrows it further, inlining a boolean as
-  INTEGER 1). Three silent wrong wire types, asserted on the TYPE BYTE because JS cannot tell an Int from a
-  Long: `constant(30L)` framed INT, `constant(30.5f)` DOUBLE, `constant(true)` **INT 1 rather than BOOLEAN**.
-  No framer work — a stored boolean already frames as GraphBinary BOOLEAN from an INTEGER column plus a
-  `boolean` tag, so the route existed and the constant simply never named its type (§6·7).
-- **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
-  neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
-- ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
-  when both are the SAME kind, comparing by ROWID (`ElementHelper` hashes/equals an Element by id AND
-  class, so a vertex rowid never equals an edge's), and the result keeps its element `of`. A cross-kind
-  operand and element `product` decline (a mixed-element or bare-framed-rowid result the payload layer
-  cannot carry). The corpus names only the ERROR forms (`combine(__.V())` — a non-folded stream is not
-  iterable), so this is pure combinatorial completeness (0 L3).
-
-✅ **The SLICE-demanded TRAVERSER-major merge LANDED** (`mintTraverserMajor`) — a barrier-free
-`union`/`choose` and every `coalesce` present the reference's traverser-major subset via the
-`branchOrder` parent-position carrier (see §10's mint bullet for the mechanism and the residue). What
-still DECLINES, fail-closed: the ARM-major key (a union/choose with a batched-barrier arm), a NESTED
-branch inside a sliced arm (needs a key stack), and a scoped-fold arm (its grouping empties the key).
+**Single-missing-caller residue** (each is one caller, not missing algebra — the pattern this whole stage kept
+finding): `by()` over a collection select + a multi-key select mixing a collection name with labels; a projector
+body with a TAIL past it over a record; the SCALAR-stream `is`/`where` callers still pass a null host; a record
+arm against an ELEMENT/scalar/list arm and `local(__.project(…))`; a bare `by(__.labels())` and `by(__.union(…))`
+(a fan-out `by` takes the FIRST); `by(__.properties(k).fold())`; a folded UNION operand for `within` (the
+source-`union` gap); a vararg operand whose first result is itself a LIST/ELEMENT; a `Pop` history select.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
@@ -1096,12 +544,12 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
 
 ⚠️ **Invariants earned here — re-breaking each costs a wrong answer** (the rest are at their call sites):
 
-- **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the non-null
-  side; over an all-null input they reduce to null and ONE null traverser is emitted. Nulls sort LAST, with
-  an explicit `IS NULL` term (SQLite orders NULLs first ascending).
-- **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`); `containsKey` is presence
-  (an `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY RESULT, not a
-  decline (`Select.feature:578-596`).
+- **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the non-null side;
+  over an all-null input they reduce to null and ONE null traverser is emitted. Nulls sort LAST, with an
+  explicit `IS NULL` term (SQLite orders NULLs first ascending).
+- **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`); `containsKey` is presence (an
+  `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY RESULT, not a decline
+  (`Select.feature:578-596`).
 - **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
   distinguishable no other way, and a body that cannot report it DECLINES.
 
