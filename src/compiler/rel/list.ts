@@ -870,17 +870,17 @@ export function unfoldList(
  *
  * `unfold()` over a list traverser is a relation-level explode (`unfoldList`); `unfold()` inside a
  * `by()` is the SAME explode CORRELATED to one host's list value — no `input`, exactly as `membersOf`
- * is correlated. An ELEMENT-membered list re-enters the element loop (the members are rowids, `unfoldList`'s
- * own round-trip rule), so the rest of the body is the ordinary correlated element body; a bare-scalar
- * list re-enters the scalar loop. Other member shapes (`typed`/`mixed`/`map`/nested `list`) decline
- * here — their correlated re-entry is its own increment.
+ * is correlated. Each member kind re-enters its own loop: an ELEMENT list the element loop (rowids), a
+ * SCALAR/typed list the scalar loop, a MAP list `mapTail`, a nested-LIST list `listTail`. Only a MIXED
+ * list declines (no uniform re-entry framing).
  *
- * Returns the correlated member relation plus what it framed, so the caller routes the tail to the
- * matching loop exactly as `unfoldList`'s caller does.
+ * Returns the correlated member relation plus the `RelFraming` the caller hands straight to
+ * `correlatedReduce` — ONE re-entry shape routed through the one `continueAs` dispatcher, exactly as
+ * `unfoldList`'s caller routes the relation-level unfold.
  */
 export function correlatedListMembers(
   list: Expr, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly elem: Elem } | { readonly rel: Rel; readonly scalar: ScalarType } | null {
+): { readonly rel: Rel; readonly framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' } | { readonly kind: 'list' } | { readonly kind: 'map' }> } | null {
   const exploded = membersOf(jsonOf(list), fresh);
   if (of.kind === 'elem') {
     return {
@@ -889,7 +889,28 @@ export function correlatedListMembers(
         // The same rowid CAST the relation-level element unfold states, for the same reason.
         exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }]],
       }),
-      elem: of.elem,
+      framing: { kind: 'elements', elem: of.elem },
+    };
+  }
+  // A MAP or nested-LIST member re-enters `mapTail` / `listTail` — the CORRELATED twins of
+  // `unfoldMapMembers` / `unfoldNested`. Each member is itself a JSONB collection riding in the `map` /
+  // `LIST_COL` column under `json()` (the enclosing explode's subtype would not survive otherwise), and
+  // the member POSITION rides as the ENCOUNTER channel so a re-collecting `fold()` keeps list order (the
+  // scalar arm's reason). A map's keys are self-describing, so `keyOf` is scalar and `of.of` is the
+  // value-side shape.
+  if (of.kind === 'map' || of.kind === 'list') {
+    const sourceCol = of.kind === 'map' ? 'map' : LIST_COL;
+    return {
+      rel: make.project({
+        id: fresh(of.kind === 'map' ? 'cum' : 'cul'), input: exploded,
+        channels: [{ col: MEMBER.ord, role: 'encounter' }],
+        type: typeOf(meta(sourceCol, 'json'), meta(MEMBER.ord, 'int')),
+        exprs: [[sourceCol, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
+          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+      }),
+      framing: of.kind === 'map'
+        ? { kind: 'map', keyOf: { kind: 'scalar' }, valOf: of.of }
+        : { kind: 'list', of: of.of },
     };
   }
   if (isBareList(of)) {
@@ -912,9 +933,11 @@ export function correlatedListMembers(
         exprs: [['v', memberPayload(of, exploded)], [MEMBER.ord, col(exploded.id, MEMBER.ord)],
           ...(vtype ? [['vtype', vtype] as const] : [])],
       }),
-      scalar: vtype ? PER_ROW('vtype') : (memberTypeOf(of) ?? UNKNOWN),
+      framing: { kind: 'scalar', type: vtype ? PER_ROW('vtype') : (memberTypeOf(of) ?? UNKNOWN) },
     };
   }
+  // A MIXED-membered list has no uniform re-entry framing (heterogeneous members), so it declines —
+  // `unfold()` over one is a variant stream, terminal at the relation level too.
   return null;
 }
 

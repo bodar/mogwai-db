@@ -833,7 +833,7 @@ export function valueColIsSubquery(rel: Rel, name: string): boolean {
  * member re-entry is a reachability question, not a second engine.
  */
 export function correlatedReduce(
-  root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>,
+  root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' } | { readonly kind: 'list' } | { readonly kind: 'map' }>,
   body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null {
   // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
@@ -1441,11 +1441,10 @@ export function scalarHostChild(
  * (`[]`/no-emit) is the one `correlatedReduce` already states.
  *
  * `count(Scope.local)` over the list is the map-size shape and belongs to `mapTail`/`listTail`, not
- * here. An ELEMENT-membered list re-enters the element loop; a SCALAR-membered one (bare or typed —
- * `values('age').fold()`) re-enters the SCALAR loop, so `by(__.unfold().count()|sum()|fold())` over a
- * scalar list reduces through the same `correlatedReduce` collapse arms (`correlatedListMembers`
- * already frames both). A MAP / nested-LIST member still declines in `correlatedListMembers` — its
- * correlated re-entry (routing through `mapTail`/`listTail`) is a later increment.
+ * here. Every member kind re-enters its own loop (`correlatedListMembers` frames each): an ELEMENT list
+ * the element loop, a SCALAR/typed list the scalar loop, a MAP list `mapTail`, a nested-LIST list
+ * `listTail` — so `by(__.unfold().count()|sum()|fold())` and a trailing member reducer reduce through
+ * the same `correlatedReduce` collapse arms whatever the members are. Only a MIXED list declines.
  */
 export function listHostChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'list' }>, ctx: ChainCtx, fresh: Minter,
@@ -1455,9 +1454,8 @@ export function listHostChild(
   const members = correlatedListMembers(host.list, host.of, fresh);
   if (!members) return null;
   // The body after `unfold()` is the ordinary correlated body over the exploded members — the SAME
-  // engine an adjacency-rooted `by()` reducer uses, rooted at the member's own shape, so a trailing
-  // `values(k).fold()` (element) / reducer / `is(P).count()` (scalar) is free.
-  const rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }> =
-    'elem' in members ? { kind: 'elements', elem: members.elem } : { kind: 'scalar', type: members.scalar };
-  return correlatedReduce(members.rel, rootAs, body, 1, ctx, fresh);
+  // engine an adjacency-rooted `by()` reducer uses, rooted at the member's OWN framing (element / scalar
+  // / map / nested-list), so a trailing `values(k).fold()`, a member reducer, or a shape-agnostic
+  // `count()` / `fold()` over any member kind is free.
+  return correlatedReduce(members.rel, members.framing, body, 1, ctx, fresh);
 }

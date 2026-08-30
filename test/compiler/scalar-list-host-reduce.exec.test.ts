@@ -53,3 +53,32 @@ describe('a TYPED-membered list host carries the member type into the reduction'
     expect(r.v).toBe('10.5'); // numeric max; a text compare would wrongly pick '9.99'
   });
 });
+
+describe('MAP and nested-LIST members over a list host reduce too', () => {
+  // correlatedListMembers frames a map member into mapTail and a nested-list member into listTail (the
+  // correlated twins of unfoldMapMembers/unfoldNested), so a shape-agnostic count() and a re-collecting
+  // fold() work whatever the members are. The member position rides as the encounter channel, so fold()
+  // is order-preserving (unfold+fold is the identity).
+  const one = (store: ReturnType<typeof seededStore>, g: string) => (run(store, g) as any[])[0];
+  // A list of the four person {name:[...]} maps.
+  const MAPS = "g.V().hasLabel('person').valueMap('name').fold()";
+  // group().by(T.label).by(values('name').fold()) -> values() is [ [person names], [software names] ].
+  const LISTS = "g.V().group().by(T.label).by(__.values('name').fold()).select(Column.values)";
+
+  test('count over a list-of-maps counts the maps', () => {
+    const store = seededStore();
+    expect(one(store, `${MAPS}.as('a').select('a').by(__.unfold().count())`).v).toBe(4);
+  });
+
+  test('count over a list-of-lists counts the inner lists', () => {
+    const store = seededStore();
+    expect(one(store, `${LISTS}.as('a').select('a').by(__.unfold().count())`).v).toBe(2);
+  });
+
+  test('fold over a list-of-maps re-collects in order (unfold+fold is identity)', () => {
+    const store = seededStore();
+    const base = one(store, MAPS).list;
+    const refolded = one(store, `${MAPS}.as('a').select('a').by(__.unfold().fold())`).list;
+    expect(refolded).toBe(base);
+  });
+});
