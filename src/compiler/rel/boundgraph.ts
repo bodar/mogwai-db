@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
@@ -44,6 +44,13 @@ export const landedCols = (kind: Elem): readonly import('../../rel/types.ts').Co
 // `(id, label: TEXT name, src, tgt, props: JSON)`.
 
 const jsonKeyPath = (key: string): string => `$."${key.replace(/"/g, '""')}"`;
+
+/** An element id from a NON-parameter V()/E()/hasId() arg (a parameter is declined by the caller) — a
+ *  parsed LITERAL, so it INLINES as a typed SQL literal rather than spending a bind (the Golden Rule: a
+ *  bind serves a user parameter, nothing else). An integer rowid inlines INTEGER; any other id form
+ *  inlines as text — the same match the bound `?` produced, at zero parameter-budget cost. */
+const idLit = (v: unknown): Expr =>
+  typeof v === 'number' && Number.isSafeInteger(v) ? compilerInt(v) : compilerText(String(v));
 
 /** The inline string label names in a movement/label-arg set — the ONLY form a landed edge's TEXT
  *  `label` column matches (`label IN (names)`). A bound label PARAMETER is not modelled and the caller
@@ -106,7 +113,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
         for (const v of members) ids.push(v);
       }
       const pred = ids.length
-        ? { kind: 'in-list' as const, expr: col(scan.id, 'id'), values: ids.map((v) => lit(v)) }
+        ? { kind: 'in-list' as const, expr: col(scan.id, 'id'), values: ids.map(idLit) }
         : undefined;
       return { scan, pred };
     },
@@ -190,7 +197,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
         const value = jsonExtract(at, '$.v');
         const matches = valuePred ? valuePred(value, jsonExtract(at, '$.t')) : undefined;
         if (valuePred && !matches) return null;
-        const present: Expr = { kind: 'binary', op: '!=', left: at, right: lit(null) };
+        const present: Expr = { kind: 'binary', op: '!=', left: at, right: compilerNull() };
         return existsOf(make.filter({ id: fresh('bhe'), input: row, channels: [], type: row.type,
           pred: matches ? and(present, matches) : present }), fresh);
       }
@@ -316,7 +323,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
     hasAnyLabel(kind, id, fresh) {
       const row = rowById(cteOf(kind, fresh), id, fresh);
       const nonEmpty: Expr = kind === 'edge'
-        ? { kind: 'binary', op: '!=', left: col(row.id, 'label'), right: lit(null) }
+        ? { kind: 'binary', op: '!=', left: col(row.id, 'label'), right: compilerNull() }
         : { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [col(row.id, 'label')] }, right: compilerInt(0) };
       return existsOf(make.filter({ id: fresh('bha'), input: row, channels: [], type: row.type, pred: nonEmpty }), fresh);
     },

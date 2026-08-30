@@ -1,7 +1,7 @@
 import { gremlinTypeOf, mapEntryType, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import {
     argValues, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
-    stepChain, type Step,
+    stepChain, type Arg, type Step,
 } from '../../gremlin/frontend.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
@@ -110,7 +110,25 @@ export type Cardinality = VertexCardinality | null;
 // the FULL recursive type tree, threaded so a collection value tags each element/entry/key
 // losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
 // value has no literal typeNode (its type is resolved at run time as a scalar).
-export interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
+export interface MetaPropSpec {
+  key: string;
+  keyName: string | null;
+  value: any;
+  valueName: string | null;
+  vtype: CanonicalType | null;
+  typeNode: TypeNode | null;
+}
+
+export interface PropSpec {
+  key: string | { nested: any };
+  keyName: string | null;
+  value: any;
+  valueName: string | null;
+  vtype: CanonicalType | null;
+  typeNode: TypeNode | null;
+  meta: readonly MetaPropSpec[] | null;
+  cardinality: Cardinality;
+}
 
 
 
@@ -148,13 +166,17 @@ export type ParsedProperty =
   | { kind: 'none' };
 
 export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
-  const { cardinality, rest, off } = readCardinality(argValues(s));
-  let [key, val] = rest; const metaArgs = rest.slice(2);
-  { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
-  { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
+  const { cardinality, off } = readCardinality(argValues(s));
+  const keyArg = s.args[off]!;
+  const valueArg = s.args[off + 1]!;
+  let key = keyArg.value, val = valueArg.value;
+  let keyName = keyArg.name, valueName = valueArg.name;
+  const metaArgs = s.args.slice(off + 2);
+  { const ck = constFromNested(key, sideEffects, params); if (ck.has) { key = ck.value; keyName = null; } }
+  { const cv = constFromSelect(val, sideEffects, params); if (cv.has) { val = cv.value; valueName = null; } }
   if (key == null || (typeof key === 'object' && !isNested(key) && !isTokenArg(key))) return { kind: 'none' };
   if (isTokenArg(key)) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
-  return { kind: 'prop', spec: { key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
+  return { kind: 'prop', spec: { key, keyName, value: val, valueName, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
 }
 
 /** What an EDGE property may not carry. TinkerPop's edge `Property` has neither a cardinality nor
@@ -181,16 +203,17 @@ export function parsePropertyTail(steps: readonly Step[], what: string, sideEffe
 // Trailing property() args after (key, value) are meta-property key/value pairs
 // (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
 // meta-of-meta).
-function metaOf(metaArgs: any[]): Record<string, any> | null {
+function metaOf(metaArgs: readonly Arg[]): readonly MetaPropSpec[] | null {
   if (!metaArgs.length) return null;
   if (metaArgs.length % 2 !== 0) throw new Error('property() meta-properties must be key/value pairs');
-  const m: Record<string, any> = {};
+  const m: MetaPropSpec[] = [];
   for (let i = 0; i < metaArgs.length; i += 2) {
-    const mk = metaArgs[i];
-    if (typeof mk !== 'string') throw new Error('property() meta-property key must be a string');
-    const mv = metaArgs[i + 1];
-    if (isNested(mv)) throw new Error('property() meta-property value must be a scalar');
-    m[mk] = mv;
+    const mk = metaArgs[i]!;
+    if (typeof mk.value !== 'string') throw new Error('property() meta-property key must be a string');
+    const mv = metaArgs[i + 1]!;
+    if (isNested(mv.value)) throw new Error('property() meta-property value must be a scalar');
+    m.push({ key: mk.value, keyName: mk.name, value: mv.value, valueName: mv.name,
+      vtype: gremlinTypeOf(mv.value, mv.type), typeNode: mv.type });
   }
   return m;
 }
@@ -201,7 +224,7 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
 // channel said nothing (a JS client that dropped the type / an untyped bound map).
 export const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}, cardinalities: Record<string, Cardinality> = {}): PropSpec[] =>
   Object.entries(rec).map(([key, value]) => ({
-    key, value, typeNode: types[key] ?? null,
+    key, keyName: null, value, valueName: null, typeNode: types[key] ?? null,
     vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: cardinalities[key] ?? null,
   }));
 

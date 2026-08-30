@@ -1,21 +1,21 @@
 {
   "addE": {
-    "binds": 12,
+    "binds": 7,
     "bytes": 1127,
-    "compiler": 20,
-    "bound": 30
+    "compiler": 50,
+    "bound": 0
   },
   "addLabel": {
     "binds": 4,
     "bytes": 1116,
-    "compiler": 15,
-    "bound": 2
+    "compiler": 17,
+    "bound": 0
   },
   "addV": {
     "binds": 4,
     "bytes": 1156,
-    "compiler": 15,
-    "bound": 3
+    "compiler": 18,
+    "bound": 0
   },
   "all": {
     "binds": 0,
@@ -36,10 +36,10 @@
     "bound": 0
   },
   "as": {
-    "binds": 12,
+    "binds": 4,
     "bytes": 1192,
-    "compiler": 22,
-    "bound": 30
+    "compiler": 52,
+    "bound": 0
   },
   "asBool": {
     "binds": 0,
@@ -123,7 +123,7 @@
     "binds": 4,
     "bytes": 3205,
     "compiler": 40,
-    "bound": 3
+    "bound": 0
   },
   "dateAdd": {
     "binds": 0,
@@ -162,7 +162,7 @@
     "bound": 0
   },
   "dropLabel": {
-    "binds": 3,
+    "binds": 2,
     "bytes": 1116,
     "compiler": 15,
     "bound": 0
@@ -205,9 +205,9 @@
   },
   "fold": {
     "binds": 4,
-    "bytes": 1355,
-    "compiler": 13,
-    "bound": 2
+    "bytes": 1353,
+    "compiler": 14,
+    "bound": 0
   },
   "format": {
     "binds": 0,
@@ -312,7 +312,7 @@
     "bound": 0
   },
   "labels": {
-    "binds": 4,
+    "binds": 3,
     "bytes": 563,
     "compiler": 6,
     "bound": 0
@@ -384,10 +384,10 @@
     "bound": 0
   },
   "mergeV": {
-    "binds": 12,
+    "binds": 6,
     "bytes": 1413,
-    "compiler": 28,
-    "bound": 17
+    "compiler": 45,
+    "bound": 0
   },
   "min": {
     "binds": 0,
@@ -410,8 +410,8 @@
   "option": {
     "binds": 15,
     "bytes": 1632,
-    "compiler": 29,
-    "bound": 35
+    "compiler": 63,
+    "bound": 0
   },
   "or": {
     "binds": 0,
@@ -462,10 +462,10 @@
     "bound": 0
   },
   "property": {
-    "binds": 18,
+    "binds": 13,
     "bytes": 1354,
-    "compiler": 85,
-    "bound": 216
+    "compiler": 301,
+    "bound": 0
   },
   "range": {
     "binds": 0,
@@ -536,8 +536,8 @@
   "to": {
     "binds": 13,
     "bytes": 1286,
-    "compiler": 76,
-    "bound": 180
+    "compiler": 256,
+    "bound": 0
   },
   "toLower": {
     "binds": 0,
@@ -588,10 +588,10 @@
     "bound": 0
   },
   "values": {
-    "binds": 12,
+    "binds": 4,
     "bytes": 4255,
     "compiler": 95,
-    "bound": 29
+    "bound": 0
   },
   "where": {
     "binds": 0,

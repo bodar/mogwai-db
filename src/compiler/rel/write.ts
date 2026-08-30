@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
@@ -11,9 +11,9 @@ import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { ChildSeam } from './child.ts';
-import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
+import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
-import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
@@ -21,6 +21,7 @@ import { aliasIdAt } from './alias.ts';
 import { propertyRowId } from './property.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
+import { constLit } from './const.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -266,9 +267,12 @@ export type PropertyWrite = PropertySet | PropertyRemoval;
 export interface PropertySet {
   readonly kind: 'set';
   readonly key: string;
+  readonly keyName: string | null;
   /** The value as STORAGE holds it, and the canonical Gremlin type beside it. */
   readonly stored: unknown;
-  readonly vtype: string | null;
+  readonly valueName: string | null;
+  readonly typeNode: TypeNode | null;
+  readonly vtype: CanonicalType | null;
   /** Is `stored` a COLLECTION's JSON text rather than a scalar? It decides one thing — that the value
    *  crosses as `jsonb(?)` rather than a bare bind — and it is carried rather than re-derived from
    *  `vtype` because `propertyValueBind` is the authority on which types are collections and a second
@@ -276,7 +280,7 @@ export interface PropertySet {
   readonly collection: boolean;
   /** The META-PROPERTY object as JSON TEXT, or `null` where the step named none. It crosses as
    *  `jsonb(<text>)` for `stored`'s reason and lands in the property row's own `meta` column. */
-  readonly meta: string | null;
+  readonly meta: readonly MetaPropSpec[] | null;
   /** What this value indexes as: (kind, text) pairs from the ONE shared walk. */
   readonly fts: readonly { readonly kind: string; readonly text: string }[];
   /** The DECLARED cardinality, or `null` for "the traversal named none" — a real state, since only
@@ -288,6 +292,7 @@ export interface PropertySet {
 export interface PropertyRemoval {
   readonly kind: 'remove';
   readonly key: string;
+  readonly keyName: string | null;
 }
 
 /**
@@ -302,8 +307,31 @@ export interface PropertyRemoval {
  * §6·2 is unaffected: the blob goes INTO the table, and this statement's `RETURNING` projects ids
  * only, so nothing untransportable is retained.
  */
-const storedExpr = (write: PropertySet): Expr =>
-  write.collection ? { kind: 'call', fn: 'jsonb', args: [lit(write.stored, 'text')] } : lit(write.stored);
+const storedExpr = (write: PropertySet): Expr => {
+  if (write.collection) {
+    const text = write.valueName === null ? compilerText(String(write.stored)) : param(write.stored, write.valueName, 'text');
+    return { kind: 'call', fn: 'jsonb', args: [text] };
+  }
+  // `vtype` preserves Gremlin's declared type. SQLite's scalar storage class remains the
+  // materialized value's class, which is why an integral Double continues to land INTEGER
+  // (the JSON set writer has the same representation). This keeps writes and bulk imports
+  // byte-identical while `vtype: double` still frames the property as a Double on read.
+  const storageType = typeof write.stored === 'number' && Number.isInteger(write.stored) ? 'int' : write.vtype;
+  return constLit(arg(write.stored, storageType, write.valueName))!;
+};
+
+const metaExpr = (meta: NonNullable<PropertySet['meta']>): Expr => ({
+  kind: 'call', fn: 'jsonb', args: [{
+    kind: 'call', fn: 'json_object', args: meta.flatMap((entry) => {
+      const key = entry.keyName === null ? compilerText(entry.key) : param(entry.key, entry.keyName, 'text');
+      const { stored, collection } = propertyValueBind(entry.value, entry.vtype, entry.typeNode);
+      const value: Expr = collection
+        ? { kind: 'call', fn: 'json', args: [entry.valueName === null ? compilerText(String(stored)) : param(stored, entry.valueName, 'text')] }
+        : constLit(arg(stored, entry.vtype, entry.valueName))!;
+      return [key, value];
+    }),
+  }],
+});
 
 /** The property side-table each element kind writes, as `Scan` must declare it. */
 const PROPERTY_TABLE = {
@@ -317,17 +345,18 @@ const FTS_ROW_COLS: readonly ColMeta[] = [meta('owner_elem', 'text'), meta('pid'
 /** `(id, owner)` — what a property write's `RETURNING` hands the FTS insert. */
 const WRITTEN_TYPE: RelType = typeOf(meta('id', 'int'), meta('owner', 'int'));
 
-const text = (value: string): Expr => lit(value, 'text');
+const text = (value: string): Expr => compilerText(value);
+const propertyKeyExpr = (key: string, name: string | null): Expr => name === null ? compilerText(key) : param(key, name, 'text');
 
 /** This element's effective cardinality for one key, as an EXPRESSION — the declaration it carries,
  *  or the graph default. A declared cardinality is a compile-time constant instead, because the
  *  statement that declares it runs first. */
-function cardinalityOf(owner: Expr, key: string, declared: VertexCardinality | null, fresh: Minter): Expr {
+function cardinalityOf(owner: Expr, key: Expr, declared: VertexCardinality | null, fresh: Minter): Expr {
   if (declared) return text(declared);
   const scan = make.scan({ id: fresh('t'), table: 'vertex_property_cardinality', alias: fresh('wt'), channels: [], type: typeOf(...CARDINALITY_COLS) });
   const matching = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, 'node'), owner), eq(col(scan.id, 'key'), text(key))),
+    pred: and(eq(col(scan.id, 'node'), owner), eq(col(scan.id, 'key'), key)),
   });
   const only = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('cardinality', 'text', true)), exprs: [['cardinality', col(matching.id, 'cardinality')]] });
   return { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: only }, text(DEFAULT_VERTEX_CARDINALITY)] };
@@ -357,7 +386,7 @@ function indexWritten(written: Rel, elem: Elem, write: PropertySet, fresh: Minte
       // twin in `deleteFts` always inlined; these two did not, and the sql-hygiene `bound` ratchet is
       // what surfaced the disagreement (the drop family reached this path for the first time).
       ['owner_elem', compilerText(elem === 'edge' ? 'edge' : 'node')],
-      ['pid', col(paired.id, 'id')], ['owner', col(paired.id, 'owner')], ['pk', text(write.key)],
+      ['pid', col(paired.id, 'id')], ['owner', col(paired.id, 'owner')], ['pk', propertyKeyExpr(write.key, write.keyName)],
       ['kind', col(paired.id, 'kind')], ['text', col(paired.id, 'text')],
     ],
   });
@@ -386,10 +415,10 @@ function dropStaleIndex(elem: Elem, rows: Rel, fresh: Minter): Stmt {
 /** The existing property rows for one key over a set of owners, optionally narrowed further (the
  *  single-cardinality guard). Projected to `id`, which is what both the FTS sweep and the row
  *  delete address them by. */
-function existingRows(elem: Elem, owners: Rel, key: string, guard: ((owner: Expr) => Expr) | undefined, fresh: Minter): { readonly ids: Rel; readonly pred: (target: Rel) => Expr } {
+function existingRows(elem: Elem, owners: Rel, key: Expr, guard: ((owner: Expr) => Expr) | undefined, fresh: Minter): { readonly ids: Rel; readonly pred: (target: Rel) => Expr } {
   const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
   const clause = (target: Rel): Expr => and(
-    and({ kind: 'in-query', expr: col(target.id, spec.owner), plan: owners, negated: false }, eq(col(target.id, 'key'), text(key))),
+    and({ kind: 'in-query', expr: col(target.id, spec.owner), plan: owners, negated: false }, eq(col(target.id, 'key'), key)),
     guard ? guard(col(target.id, spec.owner)) : undefined,
   );
   const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
@@ -419,7 +448,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   // the FTS text those rows own, then the rows. It is UNGUARDED — `property(k, null)` removes under
   // every cardinality, which is what makes it a removal rather than a `single` write of nothing.
   if (write.kind === 'remove') {
-    const stale = existingRows(elem, ids, write.key, undefined, fresh);
+    const stale = existingRows(elem, ids, propertyKeyExpr(write.key, write.keyName), undefined, fresh);
     bind(dropStaleIndex(elem, stale.ids, fresh));
     const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
@@ -431,7 +460,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     const target = make.scan({ id: fresh('t'), table: 'vertex_property_cardinality', alias: fresh('wt'), channels: [], type: typeOf(...CARDINALITY_COLS) });
     const rows = make.project({
       id: fresh('p'), input: owners, channels: [], type: typeOf(...CARDINALITY_COLS),
-      exprs: [['node', col(owners.id, 'id')], ['key', text(write.key)], ['cardinality', text(write.cardinality)]],
+      exprs: [['node', col(owners.id, 'id')], ['key', propertyKeyExpr(write.key, write.keyName)], ['cardinality', text(write.cardinality)]],
     });
     bind(insert({
       target, cols: CARDINALITY_COLS.map((column) => column.name), source: rows, channels: [], type: typeOf(),
@@ -447,8 +476,8 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   if (replaces) {
     const guard = elem === 'edge' || write.cardinality === 'single'
       ? undefined
-      : (owner: Expr): Expr => eq(cardinalityOf(owner, write.key, null, fresh), text('single'));
-    const stale = existingRows(elem, ids, write.key, guard, fresh);
+      : (owner: Expr): Expr => eq(cardinalityOf(owner, propertyKeyExpr(write.key, write.keyName), null, fresh), text('single'));
+    const stale = existingRows(elem, ids, propertyKeyExpr(write.key, write.keyName), guard, fresh);
     bind(dropStaleIndex(elem, stale.ids, fresh));
     if (elem !== 'edge') {
       const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
@@ -464,7 +493,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(and(eq(col(scan.id, spec.owner), col(owners.id, 'id')), eq(col(scan.id, 'key'), text(write.key))),
+      pred: and(and(eq(col(scan.id, spec.owner), col(owners.id, 'id')), eq(col(scan.id, 'key'), propertyKeyExpr(write.key, write.keyName))),
         eq(col(scan.id, 'value'), storedExpr(write))),
     });
     return { kind: 'exists', plan: matching, negated: true };
@@ -478,15 +507,15 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
       // The OWNERS relation carries the traverser's channels (a snapshot keeps them), and a `Filter`
       // is channel-preserving by contract — naming a shorter list is the dropped-channel defect.
       id: fresh('f'), input: owners, channels: owners.channels, type: owners.type,
-      pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(col(owners.id, 'id'), write.key, write.cardinality, fresh), right: text('set') }, right: present() },
+      pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(col(owners.id, 'id'), propertyKeyExpr(write.key, write.keyName), write.cardinality, fresh), right: text('set') }, right: present() },
     })
     : owners;
   const source = make.project({
     id: fresh('p'), input: seed, channels: [],
     type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true),
       ...(write.meta === null ? [] : [meta('meta', 'blob', true)])),
-    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? compilerNull('text') : text(write.vtype)],
-      ...(write.meta === null ? [] : [['meta', { kind: 'call', fn: 'jsonb', args: [lit(write.meta, 'text')] }] as const])],
+    exprs: [[spec.owner, col(seed.id, 'id')], ['key', propertyKeyExpr(write.key, write.keyName)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? compilerNull('text') : compilerText(write.vtype)],
+      ...(write.meta === null ? [] : [['meta', metaExpr(write.meta)] as const])],
   });
   const rowsWritten = insert({
     target, cols: [spec.owner, 'key', 'value', 'vtype', ...(write.meta === null ? [] : ['meta'])], source, channels: [], type: WRITTEN_TYPE,
@@ -847,7 +876,7 @@ function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam): PropertyWrite | 
   // consults neither, so `property(k, null, 'acl', null)` is an ordinary removal and the meta pair is
   // simply not part of the answer. Asking about meta first made that traversal decline for a reason
   // that does not apply to it.
-  if (value === null) return { kind: 'remove', key: spec.key };
+  if (value === null) return { kind: 'remove', key: spec.key, keyName: spec.keyName };
   if (value === undefined) return null;
   if (elem === 'edge' && (spec.cardinality !== null || spec.meta)) return null;
   // A META-PROPERTY is a JSONB object on the property row, so it is `storedExpr`'s question again with
@@ -856,11 +885,12 @@ function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam): PropertyWrite | 
   // whose element turns out to be declared `set` — an equal value already present is not re-inserted
   // and its meta is PATCHED instead, which is an UPDATE statement this route does not emit. Admitting
   // it would silently drop the meta on that arm.
-  const meta = spec.meta ? JSON.stringify(spec.meta) : null;
+  const meta = spec.meta;
   if (meta !== null && spec.cardinality !== 'single' && spec.cardinality !== 'list') return null;
   const { stored, collection } = propertyValueBind(value, vtype, typeNode);
+  if (!collection && !constLit(arg(stored, vtype, spec.valueName))) return null;
   return {
-    kind: 'set', key: spec.key, stored, collection, meta, vtype, cardinality: spec.cardinality,
+    kind: 'set', key: spec.key, keyName: spec.keyName, stored, valueName: spec.valueName, typeNode, collection, meta, vtype, cardinality: spec.cardinality,
     fts: propertyFtsEntries(value, typeNode),
   };
 }
@@ -2236,7 +2266,7 @@ function mergeWrites(
   for (const [key, value] of Object.entries(spec.props)) {
     const typeNode = spec.propTypes[key] ?? null;
     const write = writeOf({
-      key, value, vtype: gremlinTypeOf(value, typeNode), typeNode, meta: null,
+      key, keyName: null, value, valueName: null, vtype: gremlinTypeOf(value, typeNode), typeNode, meta: null,
       cardinality: spec.propCardinalities[key] ?? null,
     }, elem, child);
     if (!write) return null;
