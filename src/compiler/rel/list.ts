@@ -4,7 +4,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -893,6 +893,11 @@ export function correlatedListMembers(
     };
   }
   if (isBareList(of)) {
+    // A TYPED list's members carry their OWN type out — the same `vtype` column `unfoldList`'s typed
+    // branch projects — so the re-entered scalar stream frames per row and `is(P)`/typed `order`/a typed
+    // `fold()` compare exactly rather than by SQLite storage class. An untagged member has no `vtype` and
+    // infers from its storage class (`memberVtype` is `undefined`), which is what the wire would do anyway.
+    const vtype = memberVtype(of, exploded);
     return {
       // Carry the member POSITION (`MEMBER.ord`) as the ENCOUNTER channel: a scalar member re-enters the
       // scalar loop, whose `fold()` (`foldScalars`) orders by the encounter WHEN THERE IS ONE and falls
@@ -903,10 +908,11 @@ export function correlatedListMembers(
       // the relation-level `unfold()`.
       rel: make.project({
         id: fresh('cuv'), input: exploded, channels: [{ col: MEMBER.ord, role: 'encounter' }],
-        type: typeOf(meta('v', 'any', true), meta(MEMBER.ord, 'int')),
-        exprs: [['v', memberPayload(of, exploded)], [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+        type: typeOf(meta('v', 'any', true), meta(MEMBER.ord, 'int'), ...(vtype ? [meta('vtype', 'text', true)] : [])),
+        exprs: [['v', memberPayload(of, exploded)], [MEMBER.ord, col(exploded.id, MEMBER.ord)],
+          ...(vtype ? [['vtype', vtype] as const] : [])],
       }),
-      scalar: memberTypeOf(of) ?? UNKNOWN,
+      scalar: vtype ? PER_ROW('vtype') : (memberTypeOf(of) ?? UNKNOWN),
     };
   }
   return null;

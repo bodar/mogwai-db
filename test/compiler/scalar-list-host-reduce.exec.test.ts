@@ -28,5 +28,28 @@ describe('a by() body over a SCALAR-membered list host', () => {
     // channel prevents.
     expect(one(store, `${AGES}.by(__.unfold().fold())`).list).toBe('[29,27,32,35]');
   });
+});
 
+describe('a TYPED-membered list host carries the member type into the reduction', () => {
+  // A typed member re-enters the scalar loop with its own `vtype` (mirroring unfoldList's typed branch),
+  // so a comparison is TYPE-AWARE and the result frames by its true Gremlin type — not the SQLite storage
+  // class. Two wrong answers this prevents: a datetime max framed as a bare Long, and a bigdecimal (stored
+  // as decimal TEXT) compared LEXICOGRAPHICALLY ('9.99' > '10.5') rather than numerically.
+  const one = (store: ReturnType<typeof seededStore>, g: string) => (run(store, g) as any[])[0];
+  const DT = "g.inject(datetime('2021-06-01T00:00:00Z'), datetime('2020-01-01T00:00:00Z')).fold().as('a').select('a')";
+  const BD = "g.inject(9.99M, 10.5M, 2.1M).fold().as('a').select('a')";
+
+  test('a datetime member max frames as a DateTime, not a Long', () => {
+    const store = seededStore();
+    const r = one(store, `${DT}.by(__.unfold().max())`);
+    expect(r.vt).toBe('datetime');
+    expect(r.v).toBe(1622505600000); // 2021-06-01, the later of the two
+  });
+
+  test('a bigdecimal member max compares NUMERICALLY, not lexicographically', () => {
+    const store = seededStore();
+    const r = one(store, `${BD}.by(__.unfold().max())`);
+    expect(r.vt).toBe('bigdecimal');
+    expect(r.v).toBe('10.5'); // numeric max; a text compare would wrongly pick '9.99'
+  });
 });
