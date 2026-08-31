@@ -24,21 +24,22 @@ browser primitives almost one-for-one:
 
 | Cloudflare concept | Browser analog | Why it lines up |
 |---|---|---|
-| One DO = one isolated graph, single-threaded | One **dedicated Worker** (in the elected leader tab) owning one (or N) SQLite-WASM database(s) | Single-threaded run-to-completion context; no shared-memory races inside it |
+| One DO = one isolated graph, single-threaded | One **dedicated Worker per graph** (in that graph's elected leader tab) | Single-threaded run-to-completion context per graph; cross-graph concurrency from having many Workers, exactly as Cloudflare gets it from many DOs |
 | `ctx.storage.sql` — **synchronous** SQLite | SQLite-WASM over **OPFS `SyncAccessHandle`** (sync, inside a *dedicated* Worker) | Both are synchronous SQLite; the `Sql` seam is already sync *because of the DO* (`src/storage.ts:1`) |
 | DO RPC — **structured-clone** args/results | Worker `postMessage` — **structured-clone** | Same serialization algorithm; the same constraint already shaped the data plane (see §3) |
 | Worker edge (parse wire, frame HTTP) → DO (run) | Service Worker `fetch` handler → Worker (run) | `makeRouter` is already `Request → Response` (`src/router.ts:89`), i.e. the exact `FetchEvent.respondWith` contract |
-| `idFromName` provisions a DO on first access | `WasmGraphManager` opens an OPFS db on first access | `BunGraphManager` already does exactly this with a `Map<id, store>` (`src/bun/BunGraphManager.ts:63`) |
+| `idFromName` → a distinct DO per graph | a coordinator spawns a distinct Worker per graph id, on first access | mirrors `CloudflareGraphManager.getByName(id)` → distinct DO (`cloudflare-graph-manager.ts:96`), not `BunGraphManager`'s single-process `Map` |
 | R2 bucket binding backing `io()` | OPFS directory via async File System Access API | `IoStore` is *already async* (`src/iostore.ts:42`); async OPFS slots straight in |
 | 10 GB DO storage ceiling | Origin storage quota (OPFS) | Same "big store, small isolate" pressure the streaming `IoStore` was built for |
 
-The payoff of the top rows is worth stating plainly: **the browser analog of a Durable Object is a
-single dedicated Worker, in one elected "leader" tab, owning the storage** — every other tab routes
-its queries to that one Worker. A `SharedWorker` is *not* the DO (it cannot open an OPFS
+The payoff of the top rows is worth stating plainly: **the browser analog of a Durable Object is one
+dedicated Worker *per graph*, in that graph's elected "leader" tab** — every other tab routes its
+queries for that graph to its leader Worker. A `SharedWorker` is *not* the DO (it cannot open an OPFS
 `SyncAccessHandle` — that method is spec-restricted to a dedicated Worker); its only role is brokering
-messages between tabs. Web Locks elects the leader and migrates it automatically when that tab
-closes, which is the DO's one-instance-per-name guarantee, synthesized. The mechanism is a small,
-proven pattern (rhashimoto's `SharedService`); the full topology is §7.
+messages between tabs. Web Locks elects each graph's leader independently and migrates it
+automatically when that tab closes — the DO's one-instance-per-name guarantee, synthesized per graph,
+so different graphs run concurrently (and may even be led by different tabs). The mechanism is a
+small, proven pattern (rhashimoto's `SharedService`); the full topology is §7.
 
 ---
 
@@ -95,24 +96,27 @@ from birth.
 `GraphManager` (`src/manager.ts`) is lifecycle (create/info/destroy) **and** the executor factory /
 federation source. Two browser-side pieces:
 
-1. **Inside the leader Worker:** `WasmGraphManager`, a near-verbatim copy of `BunGraphManager` — a
-   `Map<id, GraphStore>` over OPFS-backed `WasmSqlite` handles, create-on-demand
-   (`src/bun/BunGraphManager.ts:63`). One leader Worker owns N graphs, exactly as one Bun process does.
+1. **Inside each per-graph Worker:** a single-graph `GraphStore` over `WasmSqlite` on *that* graph's
+   `opfs-sahpool` pool, plus its executor — the DO's own in-process runner (the analog of
+   `graph-store-do.ts`'s `executor()`). One Worker, one graph — not a `Map` of graphs.
 
-2. **Across the tab/thread boundary:** a `PostMessageGraphManager` that mirrors
-   `CloudflareGraphManager` (`src/cloudflare/cloudflare-graph-manager.ts:87`). Where the CF manager
-   proxies to a DO via `ns.getByName(id)` + RPC, this one proxies to the **leader** Worker over the
-   `SharedService` channel (§7) — Web Locks decides which tab currently hosts it, transparently.
-   `executor(id)` returns a `RemoteExecutor` whose `framedAsync` posts `{gremlin, params, paramTypes}`
-   and awaits `Framed[]` back. This is the direct analog of `GraphDatabase.framed`
-   (`src/cloudflare/graph-store-do.ts:74`).
+2. **The coordinator (the browser `GraphManager`):** mirrors `CloudflareGraphManager`
+   (`src/cloudflare/cloudflare-graph-manager.ts:87`), *not* `BunGraphManager`. It maps a graph id to
+   that graph's **leader Worker** — spawning the Worker on first access if this tab holds the graph's
+   Web Lock, otherwise routing to whichever tab does — and proxies over the `SharedService` channel
+   (§7). `executor(id)` returns a `RemoteExecutor` whose `framedAsync` posts
+   `{gremlin, params, paramTypes}` and awaits `Framed[]`; the direct analog of `GraphDatabase.framed`
+   (`src/cloudflare/graph-store-do.ts:74`). Cross-graph `federate` routes Worker-to-Worker through
+   this coordinator — the browser twin of Cloudflare's cross-DO `runForeign` RPC, which already exists.
 
-Note what you get to **drop**: the CF edge/DO split exists because Cloudflare bills a cheap stateless
-edge separately from a stateful DO, so compiling at the edge and shipping a rendered `Executable`
-(`runFramed`) is a real optimization. In the browser there is no such billing boundary and no
-network hop — the edge and the store are the same machine. **Run the whole `makeRouter` + manager +
-store in the one Worker.** The `framed(gremlin)` string path is all you need for v1; edge-compilation
-(`runFramed`/`readHead`) is a pure optimization you can skip.
+Note what maps and what you get to **drop**: the CF *structural* edge/store split maps directly — the
+**Service Worker is the edge** (`makeRouter` + the coordinator `GraphManager`, §7), and **each
+per-graph Worker is the store** (executor), exactly as CF's edge Worker fronts its DOs. What you drop
+is the edge-*compilation* optimization: CF compiles at the cheap edge and ships a rendered
+`Executable` to the DO (`runFramed`) *only* because it bills edge and DO separately. In the browser
+there's no billing boundary, so each per-graph Worker simply compiles + runs its own queries — the
+`framed(gremlin)` string path (`graph-store-do.ts:74`) is all v1 needs; `runFramed`/`readHead` are a
+pure optimization you can skip.
 
 ---
 
@@ -237,18 +241,24 @@ the Fetch-API router — is already browser-portable.
 
 Two decisions settle the topology, both locked.
 
-**Where the graph lives:** a **single dedicated Worker, in one elected "leader" tab — this is the
-DO.** It runs `makeRouter` + `WasmGraphManager` + `WasmSqlite` over `opfs-sahpool` (§2.1). It
-*cannot* be a SharedWorker: `createSyncAccessHandle` is spec-restricted to a dedicated Worker. Every
-other tab is a *client* that routes its queries to the leader and gets `Framed[]` back — the exact
-shape of `CloudflareGraphManager` proxying to the one DO.
+**Where the graph lives:** **one dedicated Worker per graph, in that graph's elected "leader" tab —
+each Worker is a DO.** It runs a single-graph `GraphStore` + `WasmSqlite` over `opfs-sahpool` (§2.1),
+each graph's pool in its own OPFS `directory` so per-graph pools never collide. It *cannot* be a
+SharedWorker: `createSyncAccessHandle` is spec-restricted to a dedicated Worker. This is Cloudflare's
+model exactly — `idFromName(graphId)` gives a distinct DO per graph; here the coordinator spawns a
+distinct Worker per graph id on first access. **The payoff is real cross-graph concurrency:** graphs
+A and B run on separate threads (and may be led by different tabs), while each graph stays
+single-writer within itself — the same place Cloudflare gets its concurrency (many DOs), never within
+one graph. Every other tab is a *client* that routes a graph's queries to that graph's leader and
+gets `Framed[]` back.
 
 Cross-tab coordination is a proven ~200-line pattern — rhashimoto's **`SharedService`**:
 
-- **Web Locks elects the leader and watches its lifetime.** The first tab becomes the provider; when
-  it closes *or crashes*, the lock releases and another tab automatically becomes the provider and
-  re-opens the DB (`opfs-sahpool` re-acquires its handle pool). This is the DO's one-instance-per-name
-  guarantee, synthesized — and the automatic failover is what makes it safe.
+- **Web Locks elects the leader per graph and watches its lifetime.** One lock per graph id; the
+  first tab to hold graph X's lock hosts graph X's Worker, and on close *or crash* the lock releases
+  and another tab takes over graph X and re-opens its pool (`opfs-sahpool` re-acquires its handles).
+  Different graphs may have different leader tabs. This is the DO's one-instance-per-name guarantee,
+  synthesized per graph — and the automatic failover is what makes it safe.
 - **A Service Worker (or SharedWorker) brokers the `MessagePort`s** between tabs and the leader — used
   only as a message relay, never to hold OPFS.
 - **Mid-migration correctness:** a write in flight when the leader migrates is re-sent to the new
@@ -361,8 +371,8 @@ the whole reason the estimate is "leaves, not a rewrite."
 |---|---|---|---|---|
 | `Sql` (sync) | `BunSqlite` | `DurableObjectSqlite` | `WasmSqlite` (official `@sqlite.org/sqlite-wasm`, `opfs-sahpool`) | `GraphStore`, whole compiler — **unchanged** |
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` | `io()` service, formats — **unchanged** |
-| `GraphManager` (lifecycle + executor factory) | `BunGraphManager` | `CloudflareGraphManager` | `WasmGraphManager` + `PostMessageGraphManager` | `makeRouter` — **unchanged** |
-| entry point | `bun/server.ts` | `cloudflare/worker.ts` | leader dedicated Worker (`makeRouter`) + a Service Worker (`fetch` intercept + `SharedService` port broker) | `application()` DI — **unchanged** |
+| `GraphManager` (lifecycle + executor factory) | `BunGraphManager` (`Map` of graphs) | `CloudflareGraphManager` (id → DO) | `WasmGraphManager` — coordinator, id → per-graph leader Worker over `SharedService` (mirrors the CF one) | `makeRouter` — **unchanged** |
+| entry point | `bun/server.ts` | `cloudflare/worker.ts` | a **Service Worker** (`makeRouter` + coordinator + `fetch` intercept + `SharedService` broker) fronting **one dedicated Worker per graph** (store + executor) | `application()` DI — **unchanged** |
 | `Buffer` (ambient global) | Bun global | workerd `nodejs_compat` global | browser **entry** does `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer` | wire/execute/http use the bare global — **unchanged** |
 
 Everything in the rightmost "unchanged" column is the reason this is a feasibility *yes*.
