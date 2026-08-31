@@ -1,5 +1,5 @@
 // Drives the page-side edge in a browser: makeRouter over a BrowserCoordinator, exercised with raw
-// fetch-shaped Requests (the SW that will intercept real client fetches is 4c; here the router is called
+// fetch-shaped Requests (the Service Worker that will intercept real client fetches is 4c; here the router is called
 // directly). Proves the full page path — router → coordinator → per-graph dedicated Worker →
 // opfs-sahpool — plus multi-graph routing (one Worker per graph) and the management verbs, all in a real
 // browser. A dedicated Worker may spawn nested Workers, so this driver worker stands in for the page.

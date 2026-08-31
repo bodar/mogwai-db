@@ -10,16 +10,16 @@ describe('browser: Service Worker edge + unmodified GLV', () => {
 
   beforeAll(async () => {
     out = await runBrowserPage({
-      pageEntry: Bun.fileURLToPath(import.meta.resolve('./pages/sw-edge.page.ts')),
+      pageEntry: Bun.fileURLToPath(import.meta.resolve('./pages/service-worker-edge.page.ts')),
       serviceWorker: Bun.fileURLToPath(import.meta.resolve('../src/browser/service-worker.entry.ts')),
       extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../src/browser/graph-worker.entry.ts')) },
     });
   }, 90_000);
 
   const NAMES = [
-    'a plain fetch is intercepted by the SW and reaches the store',
-    'the SW routes a management GET (JSON) to the coordinator',
-    'the UNMODIFIED TinkerPop GLV works over the SW edge (fetch)',
+    'a plain fetch is intercepted by the Service Worker and reaches the store',
+    'the Service Worker routes a management GET (JSON) to the coordinator',
+    'the UNMODIFIED TinkerPop GLV works over the Service Worker edge (fetch)',
   ];
 
   test('the page ran every edge check (no fatal)', () => {

@@ -1,7 +1,7 @@
 // The STORE tier of the browser port: what runs INSIDE a graph's dedicated Worker. One
 // GraphWorkerHost = one graph = one Durable Object — a GraphStore over WasmSqlite on that graph's own
 // opfs-sahpool database, plus the Executor that compiles + runs + frames its queries. The doc's
-// mapping: SW = edge (makeRouter + coordinator); per-graph Worker = store (this). The edge-compilation
+// mapping: Service Worker = edge (makeRouter + coordinator); per-graph Worker = store (this). The edge-compilation
 // optimization (runFramed) is dropped in the browser — each Worker compiles and runs its own queries.
 //
 // This is the substance; the postMessage TRANSPORT that fronts it (the dedicated-worker entry the
@@ -69,7 +69,7 @@ export class GraphWorkerHost {
     return host;
   }
 
-  /** Compile + run + frame a query to GraphBinary value buffers — what the coordinator/SW streams back
+  /** Compile + run + frame a query to GraphBinary value buffers — what the coordinator/Service Worker streams back
    *  to the client. Async because a federated top-level call() drives its segment loop here. */
   framed(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]> {
     return this.executor.framedAsync(gremlin, params, paramTypes);

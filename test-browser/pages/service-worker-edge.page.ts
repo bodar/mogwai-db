@@ -19,7 +19,7 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 async function main() {
   const coordinator = new BrowserCoordinator('/graph-worker.js');
   const router = makeRouter(coordinator);
-  await registerServiceWorker('/sw.js'); // resolves once the SW controls this page
+  await registerServiceWorker('/service-worker.js'); // resolves once the Service Worker controls this page
   installMogwaiPageEdge(router); // must be installed before any intercepted fetch
 
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -32,19 +32,19 @@ async function main() {
     return Number(data[0]);
   };
 
-  await check('a plain fetch is intercepted by the SW and reaches the store', async () => {
+  await check('a plain fetch is intercepted by the Service Worker and reaches the store', async () => {
     await postJson("g.addV('person').property('name','marko').property('age',29)");
     await postJson("g.addV('person').property('name','vadas').property('age',27)");
     const n = await readCount('g.V().count()');
     if (n !== 2) throw new Error(`count = ${n}`);
   });
 
-  await check('the SW routes a management GET (JSON) to the coordinator', async () => {
+  await check('the Service Worker routes a management GET (JSON) to the coordinator', async () => {
     const j = await (await fetch(gremlinUrl)).json() as any;
     if (j.vertexCount !== 2) throw new Error(JSON.stringify(j));
   });
 
-  await check('the UNMODIFIED TinkerPop GLV works over the SW edge (fetch)', async () => {
+  await check('the UNMODIFIED TinkerPop GLV works over the Service Worker edge (fetch)', async () => {
     const { DriverRemoteConnection } = gremlin.driver;
     const { traversal } = gremlin.process.AnonymousTraversalSource;
     const conn = new DriverRemoteConnection(gremlinUrl);

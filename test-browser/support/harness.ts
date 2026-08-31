@@ -15,14 +15,6 @@ import { bundleBrowser } from '../../src/browser/bundle.ts';
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
 export const CHROME_PATH = process.env.MOGWAI_CHROME ?? '/usr/bin/google-chrome-stable';
 
-/**
- * Launch headless Chrome with BACKGROUND-THROTTLING DISABLED. A headless page/worker has no visible tab,
- * so Chrome treats it as backgrounded and throttles timers, rAF and more to as little as once a minute —
- * which on a loaded CI runner stalls anything that chains many async turns (opfs-sahpool init, the wire
- * frame loop, a Service Worker handshake) until the test's own timeout fires. It reproduces ONLY under
- * CI load, which is exactly why the flags are not optional: the heaviest browser tests timed out on CI
- * while passing locally in under a second. The three flags are the standard headless-testing set.
- */
 // ONE shared Chrome for the whole browser lane. Launching a fresh Chrome PER test file hung on CI: the
 // stage timing showed the 4th/5th `chromium.launch()` never resolving under the runner's resource limits,
 // while a single launch reused across files is stable. Each test still gets an ISOLATED BrowserContext
@@ -125,7 +117,7 @@ export interface BrowserPageRun {
   /** The page's ESM entry (bundled + served as `/page.js`, loaded by the page). It sets `window.__done`
    *  and `window.__result` when finished. */
   pageEntry: string;
-  /** The Service Worker entry (bundled + served as `/sw.js`, scope `/`). */
+  /** The Service Worker entry (bundled + served as `/service-worker.js`, scope `/`). */
   serviceWorker: string;
   /** Extra worker bundles the page spawns (e.g. `{ '/graph-worker.js': '…/graph-worker.entry.ts' }`). */
   extraWorkers?: Record<string, string>;
@@ -134,13 +126,13 @@ export interface BrowserPageRun {
 
 /**
  * Drive a real PAGE (not a spawned worker) in Chrome — for the Service Worker edge, where the client's
- * `fetch` runs in the page and the SW intercepts it. Serves the page, its SW, and any graph-worker
- * bundles over http://localhost (a secure context, so SW + OPFS work with no certs), then returns
+ * `fetch` runs in the page and the Service Worker intercepts it. Serves the page, its Service Worker, and any graph-worker
+ * bundles over http://localhost (a secure context, so Service Worker + OPFS work with no certs), then returns
  * whatever `window.__result` the page sets when `window.__done` is true.
  */
 export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 60_000 }: BrowserPageRun): Promise<any> {
   const pageJs = await bundleBrowser(pageEntry);
-  const swJs = await bundleBrowser(serviceWorker);
+  const serviceWorkerJs = await bundleBrowser(serviceWorker);
   const extras: Record<string, string> = {};
   for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
@@ -150,8 +142,8 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     port: 0,
     async fetch(req) {
       const p = new URL(req.url).pathname;
-      // The SW is served with a root scope so it can intercept /gremlin/* regardless of the page path.
-      if (p === '/sw.js') return new Response(swJs, { headers: { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/' } });
+      // The Service Worker is served with a root scope so it can intercept /gremlin/* regardless of the page path.
+      if (p === '/service-worker.js') return new Response(serviceWorkerJs, { headers: { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/' } });
       if (p === '/page.js') return new Response(pageJs, { headers: { 'Content-Type': 'text/javascript' } });
       if (p === '/sqlite3.wasm') return new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
       if (p in extras) return new Response(extras[p], { headers: { 'Content-Type': 'text/javascript' } });

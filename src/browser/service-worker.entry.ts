@@ -2,23 +2,23 @@
 // intercepts `fetch('/gremlin/*')` (and `/graphql/*`, and the bare `/gremlin`) so ANY client that
 // speaks fetch — the unmodified TinkerPop GLV included — reaches the local graph with no monkey-patching.
 //
-// The SW cannot host the store (a Service Worker can spawn no dedicated Worker, and opfs-sahpool needs
+// The Service Worker cannot host the store (it can spawn no dedicated Worker, and opfs-sahpool needs
 // one), so it is a BROKER: it forwards an intercepted request to a controlled PAGE that hosts the
 // coordinator + graph Workers (installMogwaiPageEdge, page-edge.ts), and streams the page's response back
-// to the client. This mirrors the Cloudflare structural split — SW = edge, page-hosted Worker = store —
-// with only the edge-compilation optimization dropped. A request/response crosses page↔SW as bytes over a
-// per-request MessageChannel; the request/response bodies transfer zero-copy.
+// to the client. This mirrors the Cloudflare structural split — edge here, page-hosted Worker = store —
+// with only the edge-compilation optimization dropped. A request/response crosses page↔edge as bytes over
+// a per-request MessageChannel; the request/response bodies transfer zero-copy.
 //
 // `self` is the ServiceWorkerGlobalScope (the WebWorker-lib type); the ambient `self` cannot be that
 // specific under a shared lib set, so cast once here.
-const sw = self as unknown as ServiceWorkerGlobalScope;
+const scope = self as unknown as ServiceWorkerGlobalScope;
 
-// Activate immediately and take control of open pages, so a freshly-registered SW serves the very page
-// that registered it without a reload (the test lane, and a first visit, both depend on this).
-sw.addEventListener('install', () => sw.skipWaiting());
-sw.addEventListener('activate', (event) => event.waitUntil(sw.clients.claim()));
+// Activate immediately and take control of open pages, so a freshly-registered Service Worker serves the
+// very page that registered it without a reload (the test lane, and a first visit, both depend on this).
+scope.addEventListener('install', () => scope.skipWaiting());
+scope.addEventListener('activate', (event) => event.waitUntil(scope.clients.claim()));
 
-sw.addEventListener('fetch', (event) => {
+scope.addEventListener('fetch', (event) => {
   const { pathname } = new URL(event.request.url);
   if (!isGraphPath(pathname)) return; // not ours — fall through to the network (page, assets, wasm)
   event.respondWith(forwardToPage(event.request));
@@ -32,7 +32,7 @@ function isGraphPath(pathname: string): boolean {
 
 /** Forward one request to a page hosting the store, and turn its reply back into a Response. */
 async function forwardToPage(request: Request): Promise<Response> {
-  const client = (await sw.clients.matchAll({ type: 'window', includeUncontrolled: true }))[0];
+  const client = (await scope.clients.matchAll({ type: 'window', includeUncontrolled: true }))[0];
   if (!client) {
     // No page is open to host the graph's Worker — a graph is only serveable while a hosting page lives.
     return new Response('no mogwai page is open to serve this graph', { status: 503 });

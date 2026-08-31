@@ -1,6 +1,6 @@
-// The PAGE side of the Service Worker edge. The SW (service-worker.entry.ts) intercepts a client's
+// The PAGE side of the Service Worker edge. The Service Worker (service-worker.entry.ts) intercepts a client's
 // `fetch('/gremlin/*')` and forwards it here, to a page that hosts the coordinator + graph Workers; this
-// runs the local `router` and replies on the per-request port. So the SW is a pure broker and the PAGE
+// runs the local `router` and replies on the per-request port. So the Service Worker is a pure broker and the PAGE
 // is the store host — the only split that respects "a Service Worker cannot spawn a dedicated Worker".
 import type { PageEdgeRequest, PageEdgeResponse } from './service-worker.entry.ts';
 
@@ -8,7 +8,7 @@ import type { PageEdgeRequest, PageEdgeResponse } from './service-worker.entry.t
 export type EdgeRouter = (req: Request) => Promise<Response>;
 
 /** Install the page-side edge: answer requests the Service Worker forwards by running `router` and
- *  replying on the request's port. Returns a disposer that removes the listener. Call once, after the SW
+ *  replying on the request's port. Returns a disposer that removes the listener. Call once, after the Service Worker
  *  controls the page (see {@link registerServiceWorker}). */
 export function installMogwaiPageEdge(router: EdgeRouter): () => void {
   const onMessage = async (event: MessageEvent) => {
@@ -34,7 +34,7 @@ export function installMogwaiPageEdge(router: EdgeRouter): () => void {
 }
 
 /** Register the Service Worker and resolve once it CONTROLS this page — so the first intercepted fetch
- *  is not raced by activation. In a fresh page the SW installs (skipWaiting) and claims (clients.claim),
+ *  is not raced by activation. In a fresh page the Service Worker installs (skipWaiting) and claims (clients.claim),
  *  which sets `serviceWorker.controller` (firing `controllerchange`).
  *
  *  Race-free by construction: a naive `await ready; if (!controller) await once('controllerchange')`

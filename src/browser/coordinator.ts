@@ -1,7 +1,7 @@
 // The COORDINATOR — the browser's GraphManager, the twin of CloudflareGraphManager (id → Durable
 // Object) and BunGraphManager (id → in-process store). Here: id → that graph's dedicated Worker. It
 // runs in a PAGE (a Window), because only a Window can spawn dedicated Workers — a Service Worker
-// cannot (verified: `Worker` is undefined in ServiceWorkerGlobalScope). So the SW HTTP edge brokers an
+// cannot (verified: `Worker` is undefined in ServiceWorkerGlobalScope). So the Service Worker HTTP edge brokers an
 // intercepted fetch to a page hosting this coordinator; the coordinator spawns/holds the graph Workers
 // and hands `makeRouter` a RemoteExecutor per graph. Concurrency is many graphs on many Workers (many
 // threads), never within one graph — exactly where Cloudflare gets it (one DO, run-to-completion).
