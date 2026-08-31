@@ -114,8 +114,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/provision
       - run: mise run test:browser
-        env:
-          MOGWAI_BROWSER_DEBUG: "1" # TEMP: echo the page console live so a headless-only hang is diagnosable
 
   # The single "did everything pass" signal, kept so there is one check name to read (and to require,
   # if trunk ever gains required checks — today the ruleset only enforces linear history).

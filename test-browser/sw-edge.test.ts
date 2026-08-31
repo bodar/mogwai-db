@@ -14,7 +14,7 @@ describe('browser: Service Worker edge + unmodified GLV', () => {
       serviceWorker: Bun.fileURLToPath(import.meta.resolve('../src/browser/service-worker.entry.ts')),
       extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../src/browser/graph-worker.entry.ts')) },
     });
-  }, 240_000);
+  }, 90_000);
 
   const NAMES = [
     'a plain fetch is intercepted by the SW and reaches the store',

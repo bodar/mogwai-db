@@ -139,14 +139,11 @@ export interface BrowserPageRun {
  * whatever `window.__result` the page sets when `window.__done` is true.
  */
 export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 60_000 }: BrowserPageRun): Promise<any> {
-  const t0 = Date.now();
-  const stage = (m: string) => { if (process.env.MOGWAI_BROWSER_DEBUG) console.log(`[sw-page +${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`); };
   const pageJs = await bundleBrowser(pageEntry);
   const swJs = await bundleBrowser(serviceWorker);
   const extras: Record<string, string> = {};
   for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
-  stage('bundled');
   const HTML = `<!doctype html><meta charset="utf-8"><title>loading</title><script type="module" src="/page.js"></script>`;
 
   const server = Bun.serve({
@@ -164,23 +161,15 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
 
   const context = await (await browserInstance()).newContext();
   const consoleLines: string[] = [];
-  const debug = !!process.env.MOGWAI_BROWSER_DEBUG;
-  const record = (line: string) => { consoleLines.push(line); if (debug) console.log(`[sw-page] ${line}`); };
-  stage('context');
   const page = await context.newPage();
   try {
-    page.on('console', (m) => record(`[${m.type()}] ${m.text()}`));
-    page.on('pageerror', (e) => record(`[pageerror] ${e.message}`));
-    stage('goto');
+    page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
+    page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
-    stage('goto done; waiting for __done');
     await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
-    stage('__done');
     return await page.evaluate('window.__result');
   } catch (e) {
-    const progress = await page.evaluate('window.__progress').catch(() => null);
-    if (debug) console.log(`[sw-page] FAILED: ${e instanceof Error ? e.message : String(e)}\nprogress=${JSON.stringify(progress)}\nconsole=\n${consoleLines.join('\n')}`);
-    throw new Error(`${e instanceof Error ? e.message : String(e)}\nprogress=${JSON.stringify(progress)}`);
+    throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
   } finally {
     await context.close();
     server.stop(true);

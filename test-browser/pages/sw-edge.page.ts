@@ -10,9 +10,6 @@ import { installMogwaiPageEdge, registerServiceWorker } from '../../src/browser/
 import { ioc } from '../../src/io.ts';
 import gremlin from 'gremlin';
 
-// A progress trail the harness reads back on timeout — more reliable than console echo, which the CI
-// log did not surface. TEMP diagnostic.
-(window as any).__progress = ['module-loaded'];
 const results: { name: string; ok: boolean; error?: string }[] = [];
 async function check(name: string, fn: () => Promise<void>): Promise<void> {
   try { await fn(); results.push({ name, ok: true }); }
@@ -20,14 +17,10 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
-  const log = (m: string) => { console.log(`main: ${m}`); (window as any).__progress.push(m); };
   const coordinator = new BrowserCoordinator('/graph-worker.js');
   const router = makeRouter(coordinator);
-  log('registering SW');
   await registerServiceWorker('/sw.js'); // resolves once the SW controls this page
-  log(`SW registered; controller=${!!navigator.serviceWorker.controller}`);
   installMogwaiPageEdge(router); // must be installed before any intercepted fetch
-  log('edge installed');
 
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const gremlinUrl = `${location.origin}/gremlin/${G}`;
@@ -40,13 +33,9 @@ async function main() {
   };
 
   await check('a plain fetch is intercepted by the SW and reaches the store', async () => {
-    log('check1: first postJson');
     await postJson("g.addV('person').property('name','marko').property('age',29)");
-    log('check1: first postJson done');
     await postJson("g.addV('person').property('name','vadas').property('age',27)");
-    log('check1: reading count');
     const n = await readCount('g.V().count()');
-    log(`check1: count=${n}`);
     if (n !== 2) throw new Error(`count = ${n}`);
   });
 
@@ -77,7 +66,6 @@ async function main() {
 }
 
 main().catch((e: any) => {
-  (window as any).__progress.push(`FATAL: ${String(e?.message ?? e)}`);
   (window as any).__result = { results, fatal: String(e?.stack || e) };
   (window as any).__done = true;
 });
