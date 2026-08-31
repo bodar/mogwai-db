@@ -17,10 +17,14 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
+  const log = (m: string) => console.log(`main: ${m}`);
   const coordinator = new BrowserCoordinator('/graph-worker.js');
   const router = makeRouter(coordinator);
+  log('registering SW');
   await registerServiceWorker('/sw.js'); // resolves once the SW controls this page
+  log(`SW registered; controller=${!!navigator.serviceWorker.controller}`);
   installMogwaiPageEdge(router); // must be installed before any intercepted fetch
+  log('edge installed');
 
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const gremlinUrl = `${location.origin}/gremlin/${G}`;
@@ -33,9 +37,13 @@ async function main() {
   };
 
   await check('a plain fetch is intercepted by the SW and reaches the store', async () => {
+    log('check1: first postJson');
     await postJson("g.addV('person').property('name','marko').property('age',29)");
+    log('check1: first postJson done');
     await postJson("g.addV('person').property('name','vadas').property('age',27)");
+    log('check1: reading count');
     const n = await readCount('g.V().count()');
+    log(`check1: count=${n}`);
     if (n !== 2) throw new Error(`count = ${n}`);
   });
 

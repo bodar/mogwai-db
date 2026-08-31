@@ -144,17 +144,20 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
 
   const browser = await launchChrome();
   const consoleLines: string[] = [];
+  const debug = !!process.env.MOGWAI_BROWSER_DEBUG;
+  const record = (line: string) => { consoleLines.push(line); if (debug) console.error(`[sw-page] ${line}`); };
   try {
     const page = await browser.newPage();
-    page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
-    page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
+    page.on('console', (m) => record(`[${m.type()}] ${m.text()}`));
+    page.on('pageerror', (e) => record(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
     await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
     return await page.evaluate('window.__result');
   } catch (e) {
     throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
   } finally {
-    await browser.close();
+    // Guard close so a Service Worker that keeps the context alive can't swallow the diagnostic above.
+    await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5_000))]);
     server.stop(true);
   }
 }
