@@ -66,9 +66,68 @@ unmodified gremlin GLV / plain fetch  ->  globalThis.fetch  ->  Service Worker i
 
 **The one remaining increment: cross-tab leader election + failover** (share one graph across tabs; a
 hard-killed leader releases its Web Lock and pool and another tab takes over). This is the doc's flagged
-measure-in-a-real-browser unknown, and it still carries an unresolved design decision — the SharedService
-strategy (depend on wa-sqlite's / vendor rhashimoto's MIT port / clean-room reimplement). It should
-be its own focused session with a design pass.
+measure-in-a-real-browser unknown. **Decision (Dan, 2026-08-31): clean-room TypeScript reimplementation**,
+using rhashimoto's `SharedService` (`rhashimoto/wa-sqlite` `demo/SharedService-sw/`, MIT) as a REFERENCE
+only — not a vendor/port. The design that reference yields is below.
+
+## Cross-tab failover — design (from the SharedService audit)
+
+**The pattern, distilled.** rhashimoto's `SharedService` makes a same-origin singleton with automatic
+leader election + crash failover out of THREE primitives, and the genuinely valuable idea is using Web
+Locks for two jobs at once:
+
+1. **Election + liveness in one lock.** The leader ("provider") holds `navigator.locks.request(
+   'SharedService-<name>', {signal})` for its whole life. Only one holder exists; the rest queue. Release
+   (tab closed/crashed/aborted) fires the next waiter's callback → it becomes leader. That single lock IS
+   the election AND the failover — no heartbeats, no election protocol.
+2. **A second per-`clientId` lock = death detection.** Each context holds a lock named after its own id;
+   anyone detects that context dying by *requesting* that lock (grantable only once the holder is gone).
+   The leader uses exactly this to close a dead client's port — crash-safe cleanup with no polling.
+3. **A broker to TRANSFER a MessagePort to a specific client.** `BroadcastChannel` carries the "who is
+   leader" announcements and the clients' port *requests*, but cannot transfer a port; so a broker (the
+   `-sw` variant's Service Worker, routing by `clients.get(clientId)`) hands the port to the right client.
+   Then a per-client `MessageChannel` carries the actual nonce-matched RPC.
+
+**Audit — carry these fixes into our TS version** (the reference is clever and sound; the rough edges are
+small): guard the response-callback lookup (a late/duplicate response for a deleted nonce throws today);
+BOUND the "no provider yet" retry loop and surface a "no leader" state rather than spin forever (same
+unbounded-hang shape as the SW-control race we already fixed); reject-and-retry-once in-flight RPCs across
+a failover instead of just failing them; `crypto.randomUUID()` nonces, not `Math.random()`; fail closed on
+unknown method names (no `target[method]` reaching the prototype). Keep the subtlety that the leader needs
+its OWN `BroadcastChannel` instance to serve its own request.
+
+**What we KEEP vs. DROP** — our shape is far narrower than the general library:
+- **Keep** the two-lock scheme: a per-graph lock `mogwai-graph-<id>` = "which page hosts this graph's
+  Worker," and a per-page-`clientId` lock for death detection.
+- **Reuse, don't add:** we already run the Service Worker as broker, and it already has `event.clientId`
+  and `clients.get(id)`. Today `forwardToPage` picks `matchAll()[0]`; the failover version routes
+  `/gremlin/{id}` to the LEADER page for that graph (its clientId), electing it via the per-graph lock.
+- **Drop** the generic `Proxy`/`createSharedServicePort` (our client↔Worker RPC is already the typed
+  `GraphWorkerClient` / `graph-worker-protocol`), the SharedWorker path, and the `fetch('./clientId')`
+  polling (`page-edge.ts` already resolves SW control).
+- New work: the leader acquires the per-graph lock → spawns the Worker; a non-leader tab's fetch routes
+  through the SW to the leader; on leader death the lock releases, a new leader acquires it and **re-opens
+  the opfs-sahpool DB after the dead tab's SAH handles release**.
+
+**Phased plan.**
+1. **Per-graph leadership in the coordinator.** `BrowserCoordinator` acquires `mogwai-graph-<id>` before
+   spawning a Worker; a page that does not hold the lock does NOT spawn — it registers with the SW as a
+   *client* of that graph (its clientId) instead. One Worker per graph across the whole origin.
+2. **SW routes by leader, not `matchAll()[0]`.** The SW keeps a `graphId → leader clientId` map (fed by
+   the leader announcing on a `BroadcastChannel`), and `forwardToPage` targets `clients.get(leaderId)`;
+   503 with a clear body when no leader is currently elected.
+3. **Failover.** On leader death its per-graph lock releases; the next waiting page's `locks.request`
+   callback fires, it spawns the Worker (re-opening the opfs-sahpool DB) and announces itself the new
+   leader; the SW re-points the map; in-flight requests retry once against the new leader.
+4. **`navigator.storage.persist()`** requested once, and surface quota (the 10 GB DO-ceiling analog).
+
+**Tests (multi-tab Playwright — the unknowns live HERE).** Two `context`s (or two pages) sharing one
+graph: (a) both read/write the same graph, only one Worker exists; (b) **hard-kill the leader** (close its
+context) and confirm the other takes over and re-opens the DB with no corruption and no lost committed
+data — the handle-release-on-failover timing is the ONE thing only this test settles; (c) a request
+in-flight at the moment of failover completes (retry) rather than erroring; (d) tx-dedup: a write that was
+acknowledged is not double-applied across the handoff. These extend the existing `runBrowserPage` harness
+(now multi-context on one shared browser).
 
 ## Verdict
 
@@ -216,8 +275,8 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   Playwright lane, `test-browser/browser.test.ts`).
 - ✅ `coordinator.ts` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED, page-hosted;
   single-tab routing is first-party MessagePort RPC, not SharedService).
-- ⏳ `sharedservice.ts` — Web-Locks-election + MessagePort routing for CROSS-TAB failover. The one
-  DEFERRED increment (its own design pass — see the decision section above).
+- ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-routed-by-leader + handoff. The one
+  remaining increment; DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built.
 - ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` + `graph-worker.entry.ts` +
   `GraphWorkerClient.ts` (LANDED, proven in-browser over opfs-sahpool, clone boundary tested).
 - ✅ service worker entry — `service-worker.entry.ts` (LANDED; the SW BROKERS an intercepted fetch to
