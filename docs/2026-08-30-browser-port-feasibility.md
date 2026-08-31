@@ -70,6 +70,49 @@ measure-in-a-real-browser unknown. **Decision (Dan, 2026-08-31): clean-room Type
 using rhashimoto's `SharedService` (`rhashimoto/wa-sqlite` `demo/SharedService-sw/`, MIT) as a REFERENCE
 only — not a vendor/port. The design that reference yields is below.
 
+## Browser RPC → Cap'n Web (decided 2026-08-31)
+
+**Decision (Dan):** replace ALL hand-rolled RPC hops **in the browser** with Cap'n Web (`capnweb`, MIT,
+zero-deps, added as a runtime dep — browser-leaf only, kept out of the Bun/CF bundles by per-target
+bundling). **Nothing outside the browser changes** — the Cloudflare DO keeps its native workerd RPC; this
+is not about CF. Do it as green increments: **page↔worker first**, then the Service-Worker↔page hop.
+
+**Spike-proven (scratch, Bun, capnweb 0.12.0) — every risk cleared:**
+- `Framed[]` = `{buf: Uint8Array, bulk: bigint}[]` round-trips **native/raw** over a `MessagePort` — the
+  `MessagePortTransport` uses `encodingLevel: "structuredClonable"`, so `TypedArray`/`bigint` are sent
+  as-is (no base64/JSON blowup). This was the make-or-break.
+- A thrown `Error` arrives as a rejection **with message + stack** → failure-as-value for free; the
+  browser-boundary `rpcTry`/`rpcUnwrap` go away (`src/rpc.ts` STAYS — it's the CF-DO boundary).
+- Bundles for the browser (~104 KB unmin / ~16 KB gz — negligible vs the 3.5 MB worker bundle). Has
+  first-class `bun` + `workerd` export conditions; its `RpcTarget` on workerd IS the DO one.
+
+**API facts (from `node_modules/capnweb/dist/index.d.ts` + source):**
+- `newMessagePortRpcSession(port: MessagePort, localMain?, opts?) → RpcStub<T>` — symmetric; `localMain`
+  is what THIS side exposes, the return is a typed stub to the PEER's `localMain`.
+- `RpcTarget` (exported base class) — extend it to expose an object. Methods may be sync or async;
+  args/returns must be `RpcCompatible` (our `Framed[]`/`GraphInfo`/`ForeignResult`/`TypeNode` are).
+- `MessagePortTransport` calls `port.start()` + `addEventListener('message')`, so it needs a REAL
+  `MessagePort`, NOT a Worker/WorkerGlobalScope. Use an explicit `MessageChannel`: the page (spawner)
+  creates it, transfers `port2` + the `graphId` to the worker via the worker's first `postMessage`, and
+  uses `port1`; the worker `open`s the host then `newMessagePortRpcSession(port2, host)`. Calls sent
+  before the worker's session exists queue on the port, so the async `open` gap is fine.
+- Custom transport (for the SW hop): `interface RpcTransport { send(msg): void|Promise; receive():
+  Promise<msg>; abort?(reason) }`, then `new RpcSession(transport, localMain).getRemoteMain()`. Messages
+  are OPAQUE; the docs bless a transparent relay A→B→C (B forwards frames unparsed) — exactly the SW
+  bounce. Framing + ordering must be preserved.
+
+**Hop 1 — page↔graph-worker (do first).** `GraphWorkerHost extends RpcTarget`; delete
+`graph-worker-protocol.ts` and `GraphWorkerClient.ts` (the protocol becomes the host's TS signatures, the
+stub becomes `newMessagePortRpcSession<GraphWorkerHost>(port1)`); `graph-worker.entry.ts` shrinks to
+open-host + expose-session; `BrowserGraphManager.executor(id)` holds the stub and delegates. Rewire
+`test/browser/graph-worker-rpc.test.ts` to drive the capnweb stub (keeps the `Framed[]` clone-boundary
+coverage). ≈ −150 LOC hand-rolled RPC, +~30 wiring. Keep the browser lane 33/33.
+
+**Hop 2 — client fetch → Service Worker → page (after hop 1).** The SW↔page forwarding in
+`service-worker.entry.ts` + `page-edge.ts` becomes a capnweb session over a custom `RpcTransport`: the
+page exposes an `RpcTarget` (`{ fetch(reqInit): respInit }` running `makeRouter`), the SW calls it,
+relaying opaque frames. This also sets up the cross-tab failover transport (client → SW → leader page).
+
 ## Cross-tab failover — design (from the SharedService audit)
 
 **The pattern, distilled.** rhashimoto's `SharedService` makes a same-origin singleton with automatic

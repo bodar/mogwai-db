@@ -35,6 +35,7 @@
     "@bodar/yadic": "^0.495.349",
     "@sqlite.org/sqlite-wasm": "^3.53.0-build1",
     "antlr4ng": "^3.0.16",
+    "capnweb": "^0.12.0",
     "graphql": "^16.11.0",
     "gremlin": "link:gremlin"
   },
