@@ -67,7 +67,7 @@ unmodified gremlin GLV / plain fetch  ->  globalThis.fetch  ->  Service Worker i
 **The one remaining increment: cross-tab leader election + failover** (share one graph across tabs; a
 hard-killed leader releases its Web Lock and pool and another tab takes over). This is the doc's flagged
 measure-in-a-real-browser unknown, and it still carries an unresolved design decision — the SharedService
-strategy (depend on wa-sqlite's / vendor rhashimoto's Apache-2.0 port / clean-room reimplement). It should
+strategy (depend on wa-sqlite's / vendor rhashimoto's MIT port / clean-room reimplement). It should
 be its own focused session with a design pass.
 
 ## Verdict
@@ -110,7 +110,9 @@ is spec-restricted to a *dedicated* Worker, so the DB cannot live in a SharedWor
 **Web Locks + `SharedService` synthesize the DO's one-instance guarantee.** One Web Lock per graph id;
 the tab holding it hosts that graph's Worker, and on close/crash the lock releases and another tab takes
 over and re-opens the pool (automatic failover). Cross-tab routing to the current host is rhashimoto's
-`SharedService` pattern (~200 lines, Apache-2.0, **ported** — we do not depend on wa-sqlite). A
+`SharedService` pattern (~200 lines, **MIT** — © Roy T. Hashimoto, `rhashimoto/wa-sqlite`
+`demo/SharedService/`; a Service-Worker broker variant lives at `demo/SharedService-sw/`. Verified
+2026-08-31; an earlier draft said Apache-2.0, which is wrong. **ported** — we do not depend on wa-sqlite). A
 `SharedWorker`, if used at all, is only a `MessagePort` broker — never the store.
 
 **Multiple graphs never require multiple tabs.** One tab hosts one Worker per graph it opens, running
