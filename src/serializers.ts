@@ -15,7 +15,6 @@
 // TODO(upstream): these are apache/tinkerpop gremlin-js TODOs — file a PR adding them.
 // Once released, drop this module and the values land through the client's own ioc.
 
-import { Buffer } from 'buffer';
 import { BigDecimal, Duration } from './gremlin/types.ts';
 
 // The client ioc has no shipped type declarations (see io.ts) — type it loosely.

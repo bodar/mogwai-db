@@ -1,4 +1,3 @@
-import { Buffer } from 'buffer';
 import type { Executor as ExecutorApi, ForeignResult, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';

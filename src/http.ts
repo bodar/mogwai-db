@@ -7,7 +7,6 @@
 // only mid-flight event is client cancel. Pre-flight failures (parse/compile/SQL)
 // surface as a thrown error the router turns into `errorResponse` — one buffered
 // HEADER + status trailer, HTTP always 200 with the error on the trailer.
-import { Buffer } from 'buffer';
 import { ioc } from './io.ts';
 import { type Framed } from './execute.ts';
 

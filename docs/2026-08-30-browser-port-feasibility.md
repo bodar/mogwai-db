@@ -195,38 +195,39 @@ equivalent for (it implements `node:fs`/`node:path` natively, which *is* the idi
 that whole leaf gets a browser twin (`WasmSqlite` / `OpfsIoStore`) rather than a port. Nothing
 `bun:`/`node:` reaches the compiler / execute / wire / router core.
 
-The one thing that *did* reach the shared core is **`Buffer`** — a Node/Bun global absent in the
-browser. The LSP settles the true surface (grep counted comments, `vendor/` and `node_modules/`
-alike): **our editable code uses `Buffer` in exactly four files — `execute.ts`, `serializers.ts`,
-`http.ts`, `router.ts`** (40 value-uses + 77 type-uses). The earlier "leak into
+The one thing that touches the shared core is **`Buffer`** — a value the byte layer uses in exactly
+four files (`execute.ts`, `serializers.ts`, `http.ts`, `router.ts`; LSP-measured, grep having counted
+comments, `vendor/`, and `node_modules/` alike). The earlier "leak into
 `compiler/rel/spine.ts`/`lower.ts`" was a false alarm — those are comments describing `execute.ts`'s
 framers; the front-end/compiler boundary (decision #5) is intact and holds zero `Buffer` code.
 
-**The resolution — and it needs no new dependency.** The `gremlin` client this project reuses
-(decision #4) is itself built on the `buffer` API: 35 of its source files `import { Buffer } from
-'buffer'` and its serializers *return* `Buffer`, depending pervasively on Node-specific methods
-(`writeInt32BE`, `readBigInt64BE`, `readFloatBE`, …) that a plain `Uint8Array` lacks. So the byte
-layer is `Buffer`-shaped whether we like it or not — and the client already made the browser call.
-Two measured facts make matching it the clean, zero-cost move:
+**The resolution: treat `Buffer` as an ambient platform global, exactly like the core already treats
+`Request`/`Response`/`ReadableStream`/`TextEncoder`.** The core does not import those Web globals; each
+platform supplies them. `Buffer` is the same shape of thing — the one wrinkle being that it is *not* a
+universal global (present in Bun, present in workerd under `nodejs_compat`, **absent in the browser**).
+So the four core files reference the **bare global** and never import it; the platform provides it:
 
-- **Bun's browser bundler auto-injects a `buffer` polyfill for any `import from 'buffer'`** — verified:
-  a browser build of a module that imports it pulls in a real ~52 KB polyfill, while a module using
-  the *bare global* `Buffer` gets **nothing** (a `ReferenceError` waiting to happen). Bun ships its own
-  polyfill; the `buffer` npm package need not even be installed. So the fix is simply to make our
-  `Buffer` references *imported* rather than *global*.
-- **`import { Buffer } from 'buffer'` already works on all three targets.** On Bun it resolves to the
-  built-in (`=== globalThis.Buffer`); in a browser bundle Bun injects the polyfill; on Cloudflare it
-  resolves under the `nodejs_compat` flag the DO already runs with — and `src/serializers.ts` *already*
-  imports it this way and ships to the DO in production. So this is not a new convention, just applying
-  the one `serializers.ts` already set to the other three files.
+- **Bun** — global `Buffer` is always present. ✔ (full suite green)
+- **Cloudflare** — `nodejs_compat` (already enabled, `wrangler.jsonc`) provides the global. **Verified**:
+  with all four imports removed, the wrangler *build* of the CF bundle and the *real-workerd* runtime
+  test (`test/cloudflare.test.ts`, 38 GraphBinary round-trips through the DO) both pass. This also
+  avoids bundling a redundant polyfill *over* workerd's native `Buffer`.
+- **Browser** — the one place the global is missing, so the **browser entry** (the root shared worker)
+  supplies it, in *one* place: `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer;`. That
+  import triggers Bun's browser bundler to inject its own `buffer` polyfill automatically (measured: an
+  imported `'buffer'` pulls a real ~52 KB polyfill; a bare global pulls nothing — the `buffer` npm
+  package need not even be installed). There is **no `--inject`-style CLI flag** on `bun build` (only
+  `--define`/`--banner`/`--external`/`--packages`), so the entry-file import is the idiomatic way to
+  force it in — which also keeps the polyfill out of the Bun and Cloudflare builds, where it is not
+  wanted.
 
-**Done:** `execute.ts`, `http.ts`, `router.ts` now `import { Buffer } from 'buffer'` like
-`serializers.ts` — three import lines, zero logic change, byte-identical, browser-bundleable. There is
-no `Uint8Array` rewrite and no upstreaming to do: rewriting our half would not shrink the browser
-bundle (the client still triggers Bun's polyfill), so its only payoff would be code purity, and the
-byte layer is deliberately `Buffer`-shaped to hug the client it interoperates with. The one honest
-cost is that the browser bundle carries Bun's ~52 KB `buffer` polyfill — unavoidable (the client needs
-it), automatic (Bun provides it), and negligible for an in-browser database.
+So the core stays genuinely runtime-agnostic (it names `Buffer` the way it names `fetch`), and the
+`buffer` polyfill is scoped to the browser build alone, provided at its single entry point — not
+sprinkled through the shared layer. No `Uint8Array` rewrite and no upstreaming: the byte layer is
+deliberately `Buffer`-shaped to interoperate with the `gremlin` client (decision #4), which is itself
+built on the `buffer` API (its serializers *return* `Buffer` and use `writeInt32BE`/`readBigInt64BE`/…
+that a plain `Uint8Array` lacks), so the browser build carries that polyfill regardless — automatic,
+and negligible for an in-browser database.
 
 Everything else — antlr4ng (pure JS), the generated parser (pure JS/TS), the compiler, `execute.ts`,
 the Fetch-API router — is already browser-portable.
@@ -331,9 +332,10 @@ Do the risky, cheap things first; each answers a yes/no that gates the rest.
 3. **Worker-boundary clone test (§3).** Post a real query, get `Framed[]` back (transferred), frame a
    Response. This is the browser twin of `test/cloudflare.test.ts` — the thing green main-thread CI
    will *not* catch. Reuse `rpcTry`/`rpcUnwrap` verbatim.
-4. **`Buffer` — done (§6).** `execute.ts`/`http.ts`/`router.ts` now `import { Buffer } from 'buffer'`
-   like `serializers.ts`, so Bun's browser bundler injects the polyfill automatically. The "compiler
-   `Buffer` leak" was a false alarm (comments). Nothing left here.
+4. **`Buffer` — resolved for Bun/CF, one line for the browser (§6).** The core uses the ambient
+   global (verified: Bun + real-workerd both green with zero imports). The browser entry supplies it
+   with `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer;`, which triggers Bun's auto
+   polyfill. The "compiler `Buffer` leak" was a false alarm (comments).
 5. **`fetch` interception end-to-end (§7).** Register the Service Worker, `fetch('/gremlin/g')` from
    a page, hit the SharedWorker, get a GraphBinary response. This is the "unmodified client" proof.
 6. **`IoStore` over OPFS (§2.2).** GraphSON export/import streaming through `OpfsIoStore`; confirm
@@ -353,6 +355,6 @@ the whole reason the estimate is "leaves, not a rewrite."
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` | `io()` service, formats — **unchanged** |
 | `GraphManager` (lifecycle + executor factory) | `BunGraphManager` | `CloudflareGraphManager` | `WasmGraphManager` + `PostMessageGraphManager` | `makeRouter` — **unchanged** |
 | entry point | `bun/server.ts` | `cloudflare/worker.ts` | `sharedworker.ts` + optional `sw.ts` | `application()` DI — **unchanged** |
-| cross-cutting | — | — | **`Buffer` → `import from 'buffer'`** (done; Bun bundler auto-polyfills) | wire/execute/http |
+| `Buffer` (ambient global) | Bun global | workerd `nodejs_compat` global | browser **entry** does `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer` | wire/execute/http use the bare global — **unchanged** |
 
 Everything in the rightmost "unchanged" column is the reason this is a feasibility *yes*.
