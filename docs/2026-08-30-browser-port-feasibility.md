@@ -36,8 +36,24 @@ progress against this plan.
   Bun's browser polyfill lacks), `bundle.ts` (shared `Bun.build` config so the test lane and production
   build share shims), `buffer-global.ts` (installs `Buffer` as a global, imported first so it beats
   `http.ts`/`io.ts` module-init).
+- **Graph-worker postMessage transport** — `graph-worker.entry.ts` (the dedicated-Worker entry the
+  coordinator spawns), `GraphWorkerClient.ts` (page-side promise-RPC, reused by the coordinator),
+  `graph-worker-protocol.ts`. Proven in-browser (`graph-worker-rpc.test.ts`): a nested Worker is spawned,
+  `Framed[]` crosses the structured-clone boundary and decodes, and a failing query rejects as a value
+  (no hang). The failure-as-value helpers moved `src/cloudflare/rpc.ts` → `src/rpc.ts` (runtime-neutral;
+  same contract serves the DO RPC and the browser Worker postMessage boundaries).
 - **Deps added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — per-target bundling keeps it
   out of the Bun/CF bundles; nothing on those paths imports `src/browser/*`), `playwright` (dev driver).
+
+## Coordination-layer decision (2026-08-31)
+
+Verified: a **Service Worker cannot spawn dedicated Workers** (`Worker`/`SharedWorker` are `undefined` in
+`ServiceWorkerGlobalScope`; `navigator.locks` IS available there). So Worker-spawning must live in a PAGE
+and the SW brokers `fetch`→page-hosted-Worker. Chosen approach (Dan, 2026-08-31): **build the single-tab
+end-to-end path first** — the SW HTTP edge + a page-hosted coordinator that spawns one graph Worker per
+graph + first-party MessagePort routing — proving the whole stack for the common single-tab case as
+first-party code. Cross-tab leader election + failover (the SharedService/Web-Locks work, the doc's
+flagged unknown) is deferred to its own focused increment.
 
 ## Verdict
 
