@@ -45,12 +45,13 @@ export class GraphWorkerClient {
     return infoOf(await this.send({ op: 'open', graphId }));
   }
 
-  /** Compile + run + frame a query to GraphBinary value buffers (buffers arrive as `Uint8Array` after
-   *  the structured clone; a consumer that reframes them wraps with `Buffer.from`). */
+  /** Compile + run + frame a query to GraphBinary value buffers. The buffers arrive as `Uint8Array`
+   *  after the structured clone, so re-wrap each as `Buffer` here — that restores the `Framed` contract
+   *  (`buf: Buffer`) the response framer (`streamBuffers` → `Buffer.concat`) relies on, at the one seam. */
   async framed(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]> {
     const r = await this.send({ op: 'query', gremlin, params, paramTypes });
     if (r.op !== 'query') throw new Error(`unexpected reply op ${r.op} for query`);
-    return rpcUnwrap(r.result);
+    return rpcUnwrap(r.result).map((f) => ({ buf: Buffer.from(f.buf), bulk: f.bulk }));
   }
 
   /** A federated hop landing INTO this graph (the coordinator routes a sibling's federate here). */
