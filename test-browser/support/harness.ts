@@ -121,7 +121,7 @@ export interface BrowserPageRun {
  * bundles over http://localhost (a secure context, so SW + OPFS work with no certs), then returns
  * whatever `window.__result` the page sets when `window.__done` is true.
  */
-export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 90_000 }: BrowserPageRun): Promise<any> {
+export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 60_000 }: BrowserPageRun): Promise<any> {
   const pageJs = await bundleBrowser(pageEntry);
   const swJs = await bundleBrowser(serviceWorker);
   const extras: Record<string, string> = {};

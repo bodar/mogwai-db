@@ -35,14 +35,29 @@ export function installMogwaiPageEdge(router: EdgeRouter): () => void {
 
 /** Register the Service Worker and resolve once it CONTROLS this page — so the first intercepted fetch
  *  is not raced by activation. In a fresh page the SW installs (skipWaiting) and claims (clients.claim),
- *  which fires `controllerchange`; if it already controls the page, resolve immediately. */
-export async function registerServiceWorker(url: string): Promise<ServiceWorkerRegistration> {
+ *  which sets `serviceWorker.controller` (firing `controllerchange`).
+ *
+ *  Race-free by construction: a naive `await ready; if (!controller) await once('controllerchange')`
+ *  can MISS the event when it fires between `ready` resolving and the listener attaching — an infinite
+ *  hang that surfaces only under CI timing. So this listens AND polls, re-checking `controller` on both,
+ *  and is BOUNDED: past the deadline it resolves anyway, turning a would-be hang into a clear downstream
+ *  failure (an un-intercepted fetch gets the page HTML, not GraphBinary) rather than a timeout with no
+ *  diagnosis. */
+export async function registerServiceWorker(url: string, controlTimeoutMs = 30_000): Promise<ServiceWorkerRegistration> {
   const reg = await navigator.serviceWorker.register(url, { type: 'module' });
   await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) {
-    await new Promise<void>((resolve) => {
-      navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true });
-    });
-  }
+  if (navigator.serviceWorker.controller) return reg;
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      navigator.serviceWorker.removeEventListener('controllerchange', onChange);
+      clearInterval(poll);
+      clearTimeout(deadline);
+      resolve();
+    };
+    const onChange = () => { if (navigator.serviceWorker.controller) done(); };
+    navigator.serviceWorker.addEventListener('controllerchange', onChange);
+    const poll = setInterval(() => { if (navigator.serviceWorker.controller) done(); }, 50);
+    const deadline = setTimeout(done, controlTimeoutMs); // bound: never hang, fail loudly downstream
+  });
   return reg;
 }
