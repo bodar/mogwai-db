@@ -75,6 +75,13 @@ DO analog (one instance per graph), so it is a feature here, not a limitation. `
 is spec-restricted to a **dedicated** Worker, so the DB cannot live in a SharedWorker regardless. The
 multi-connection VFSes are a documented fallback only (§8·1), not the default.
 
+**Build — the *standard* `@sqlite.org/sqlite-wasm`, not the `SQLITE_WASM_BARE_BONES` variant.**
+Verified against `ext/wasm/api/sqlite3-wasm.c`: the standard build defines `SQLITE_ENABLE_FTS5` and
+enables JSON (so JSONB), both of which our schema requires — `property_fts` is an FTS5 **trigram**
+index (`tinker.search` + `TextP` substring predicates) and collection values are stored as JSONB.
+Bare-bones omits both (`SQLITE_OMIT_FTS5` / `SQLITE_OMIT_JSON`), so it is not an option. No custom
+build is needed as long as we take the standard artifact.
+
 ### 2.2 `IoStore` → OPFS documents (new leaf)
 
 `IoStore` (`src/iostore.ts:37`) hides where whole-graph documents live for `io()` import/export. It
