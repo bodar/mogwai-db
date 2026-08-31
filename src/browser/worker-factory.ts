@@ -9,49 +9,94 @@
 import { newMessagePortRpcSession, RpcTarget } from 'capnweb';
 import { spawnGraphWorker, bootSession, removeOpfsDir, type BootstrapMessage } from './worker-spawn.ts';
 
-/** The capnweb interface the SW edge calls. Spawning + ownership live here; the SW holds the data-plane
- *  stubs. Every method is a typed capnweb call — the port hand-off it triggers is the one native message. */
+/** This tab's stake in one graph: a queued (or granted) per-graph Web Lock and, once granted, the Worker
+ *  it owns. `abort` cancels the queue / releases the lock on destroy. */
+interface Leadership {
+  worker?: Worker;
+  abort: AbortController;
+  isLeader: boolean;
+}
+
+/** The capnweb interface the SW edge calls. Spawning + ownership + cross-tab leadership live here; the SW
+ *  holds the data-plane stubs. Every method is a typed capnweb call — the port hand-off it triggers is the
+ *  one native message.
+ *
+ *  Leadership is a per-graph Web Lock (`mogwai-graph-<id>`), held for this tab's LIFE — election and crash
+ *  liveness in ONE primitive: only one tab holds it (the owner that spawns the graph's Worker), the rest
+ *  queue, and when the owner tab is destroyed the browser releases the lock and the next queued tab's
+ *  callback fires → it becomes leader, spawns the Worker (re-opening opfs-sahpool over the committed data)
+ *  and pushes the SW a fresh port. No heartbeats, no announcement protocol. */
 export class WorkerFactory extends RpcTarget {
-  private readonly workers = new Map<string, Worker>();
+  private readonly graphs = new Map<string, Leadership>();
 
   /** `workerUrl` is the bundled graph-worker entry (`graph-worker.entry.ts`) the page serves. */
   constructor(private readonly workerUrl: string | URL) {
     super();
   }
 
-  /** Ensure graph `id`'s Worker exists (spawn on first call), then hand the controlling SW a fresh DIRECT
-   *  session port to it (a `mogwai-graph-port` Bootstrap). Returns once dispatched; the SW pairs the
-   *  arriving port with this call. Open failures surface on the SW's first stub call (the Worker serves
-   *  its host as an RpcPromise over open()), so this need not await the open. */
+  /** The SW wants graph `id`. Ensure this tab is IN the leadership queue for it (enqueue once); the tab
+   *  that HOLDS the lock spawns the Worker and hands the SW a fresh DIRECT port. A tab that is queued but
+   *  not (yet) leader does nothing — the current leader delivers, and if the leader dies this tab's lock
+   *  callback fires and delivers then (failover). Idempotent per id. */
   async openGraph(id: string): Promise<void> {
-    let worker = this.workers.get(id);
-    let port: MessagePort;
-    if (!worker) {
-      const s = spawnGraphWorker(this.workerUrl, id);
-      worker = s.worker;
-      this.workers.set(id, worker);
-      port = s.port;
-    } else {
-      port = bootSession(worker, id); // already spawned — just a fresh session over the existing host
+    let g = this.graphs.get(id);
+    if (!g) {
+      const abort = new AbortController();
+      g = { abort, isLeader: false };
+      this.graphs.set(id, g);
+      const L = g;
+      // Held for life: the callback resolves only when `abort` fires (destroyGraph) — otherwise the
+      // browser releases the lock when this tab's document is destroyed, promoting the next waiter.
+      navigator.locks
+        .request(`mogwai-graph-${id}`, { signal: abort.signal }, () => {
+          L.isLeader = true;
+          this.deliver(id, L); // granted leadership (initial election OR failover) → spawn + push a port
+          return heldUntilAborted(abort.signal);
+        })
+        .catch((e: unknown) => {
+          if (!(e instanceof DOMException && e.name === 'AbortError')) throw e; // aborted = destroyGraph, fine
+        });
+    } else if (g.isLeader) {
+      this.deliver(id, g); // already leader; SW re-asked (e.g. it never got the first port) → fresh port
     }
-    this.deliver({ kind: 'mogwai-graph-port', graphId: id, port });
   }
 
-  /** Tear down graph `id`'s Worker + storage (idempotent) — the factory owns the Worker, so teardown is
-   *  its job (terminate releases the opfs-sahpool handles; then remove the OPFS database). */
+  /** Tear down graph `id` (idempotent): release/cancel this tab's lock (so a queued tab does not later
+   *  resurrect a destroyed graph), terminate the Worker if we own it, and remove the OPFS database. */
   async destroyGraph(id: string): Promise<void> {
-    const w = this.workers.get(id);
-    if (w) {
-      w.terminate();
-      this.workers.delete(id);
+    const g = this.graphs.get(id);
+    if (g) {
+      g.abort.abort();
+      g.worker?.terminate();
+      this.graphs.delete(id);
     }
     await removeOpfsDir(`.mogwai/${encodeURIComponent(id)}`);
   }
 
+  /** As leader for `id`: spawn its Worker if we don't own one yet (on failover this re-opens opfs-sahpool
+   *  over the committed data), then hand the controlling SW a fresh session port to it. */
+  private deliver(id: string, g: Leadership): void {
+    const port = g.worker ? bootSession(g.worker, id) : (() => {
+      const s = spawnGraphWorker(this.workerUrl, id);
+      g.worker = s.worker;
+      return s.port;
+    })();
+    this.post({ kind: 'mogwai-graph-port', graphId: id, port });
+  }
+
   /** Post a Bootstrap (port hand-off) to the controlling Service Worker, transferring the port. */
-  private deliver(msg: Extract<BootstrapMessage, { port: MessagePort }>): void {
+  private post(msg: Extract<BootstrapMessage, { port: MessagePort }>): void {
     navigator.serviceWorker.controller?.postMessage(msg, [msg.port]);
   }
+}
+
+/** A promise that resolves only when `signal` aborts — used to HOLD a Web Lock for the tab's life (or
+ *  until an explicit release). */
+function heldUntilAborted(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 
 /** Install the page-side factory: open a control-plane capnweb session with the Service Worker (so the SW
