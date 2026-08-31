@@ -183,7 +183,19 @@ green — it drives the client's `fetch`, so the SW-internal rewiring is invisib
 substrate the cross-tab story below wants, so we build it once here rather than building the in-page
 version and tearing it out.
 
-## Cross-tab failover — design (SW is the shared edge; leadership only owns the Worker)
+## Cross-tab failover — ✅ LANDED + PROVEN 2026-08-31 (`5c5d777` mechanism, `0b6dbe8` proof)
+
+Built and proven in a real browser: two tabs share one origin; tab A leads a graph with two acked writes;
+A is HARD-KILLED (page closed); tab B takes over, re-opens opfs-sahpool over the committed data, and keeps
+serving — count intact, a further acked write applied once (`test/browser/failover.test.ts`, stable
+~1.1s). This settled the two flagged unknowns: **a hard-killed leader's SAH handles release promptly
+enough** for the new leader to re-open the DB (no corruption, no lost data), and **the read issued straight
+after the kill retries across the handoff** (a hard-killed tab never closes its MessagePort — capnweb only
+sees a close via an explicit `null` from `abort()` — so the dead-stub call HANGS until the new leader's
+port disposes it, then the manager retries once). `navigator.storage.persist()` is requested on factory
+install (OPFS is otherwise evictable). What was built matches the design below.
+
+### The design (as built)
 
 Because the SW is a **single origin-wide edge shared by all tabs** (above), cross-tab is NOT about routing
 between edges — there is one edge. It is *only* about **which tab spawns and owns each graph's single
@@ -213,12 +225,16 @@ resolves with the `GraphInfo`. The SW pairs the arriving port with the call and 
 `RpcStub<GraphWorkerHost>`. If NO tab yet leads `id`, a tab with it open acquires the lock (that is how it
 becomes leader) and answers. The ONLY native message in any of this is the `Bootstrap` port hand-off.
 
-**Failover.** The leader tab dies → its document is destroyed → its Worker dies and the SW's entangled
-port breaks → the next queued in-flight call on that stub rejects. The SW **evicts the dead stub and
-re-runs the handshake**; the released Web Lock has already promoted a new leader tab, which spawns the
-Worker — **re-opening the opfs-sahpool DB after the dead tab's SAH handles release** (the one timing only a
-real browser settles) — and hands the SW a fresh port. The rejected in-flight request is **retried once**
-against the new stub, so a request in flight at the instant of failover completes rather than erroring.
+**Failover (corrected by the build — the port does NOT break).** A hard-killed tab does NOT gracefully
+close its MessagePort: capnweb's `MessagePortTransport` only registers a close when the peer sends an
+explicit `null` (its `abort()`), which a destroyed document never does. So the SW's stub to the dead
+Worker does **not** break on its own — an in-flight call HANGS. The reliable death signal is instead the
+**released Web Lock promoting a new leader**, which spawns the Worker (**re-opening the opfs-sahpool DB
+after the dead tab's SAH handles release** — the one timing only a real browser settles, and it does) and
+**pushes the SW a fresh port**. On that push the SW **disposes the old stub** — which aborts its session
+and makes the hung call reject — installs the new stub, and the manager **retries the call once** against
+the new leader. So a request in flight at the instant of a hard kill completes rather than erroring, with
+no reliance on a port-close that never comes.
 
 **Carry these robustness fixes** (from the reference audit, still apply): BOUND the "no leader yet" wait
 and surface a clear 503/"no leader" state rather than spin forever (same unbounded-hang shape as the
@@ -226,16 +242,23 @@ SW-control race already fixed); retry an in-flight RPC exactly once across a fai
 `crypto.randomUUID()` for any handshake nonce; a write that was acknowledged must not be double-applied
 across a handover (tx-dedup).
 
-**Phased plan.**
-1. **Per-graph leadership in the `WorkerFactory`.** The factory tab acquires `mogwai-graph-<id>` before
-   spawning a Worker; a tab that does not hold the lock does NOT spawn — it just queues on the lock (a
-   leader-in-waiting) and answers the SW's port-handshake only while it holds the lock. One Worker per
-   graph across the whole origin.
-2. **SW handshake + `graphId → stub` map.** The SW asks the current leader for a port on a miss, caches the
-   stub, evicts on rejection; 503 with a clear body while no leader can be elected.
-3. **Failover.** Owner death breaks the port; the released lock promotes the next tab; it spawns and
-   re-opens opfs-sahpool; the SW re-handshakes and retries the in-flight request once.
-4. **`navigator.storage.persist()`** requested once, and surface quota (the 10 GB DO-ceiling analog).
+**Phased plan — all ✅ landed (`5c5d777`/`0b6dbe8`), except a small residue below.**
+1. ✅ **Per-graph leadership in the `WorkerFactory`** — `mogwai-graph-<id>` held for the tab's life via
+   `navigator.locks.request({signal})`; `openGraph` enqueues once per id (the granted tab spawns +
+   delivers, the rest queue as leaders-in-waiting); `destroyGraph` aborts the lock.
+2. ✅ **SW-side `FactoryStubSource`** — control sessions to the factory tabs, the per-graph current stub,
+   the bounded "no factory → 503" wait, and late-tab re-queueing for active graphs.
+3. ✅ **Failover** — new-leader push disposes the dead stub; `BrowserGraphManager` retries once on a
+   changed stub; opfs-sahpool re-opens over the committed data. Proven by `failover.test.ts`.
+4. ✅ **`navigator.storage.persist()`** requested on factory install.
+
+**Residue (not blocking; fail-safe as-is):**
+- **Surface quota** (`navigator.storage.estimate()`, the 10 GB DO-ceiling analog) — not yet exposed
+  anywhere, because there is no consumer for it yet.
+- **Write exactly-once tail.** An ACKED write is never retried, so it is applied once (the test asserts
+  this). A write that COMMITTED on the old leader but whose ack was lost to the hard kill is retried
+  (at-least-once) — the narrow committed-but-unacked window. Exactly-once there needs write idempotency
+  keys, out of this increment's scope.
 
 **Tests (multi-tab Playwright — the unknowns live HERE).** Two `context`s (or two pages) sharing one
 graph: (a) both read/write the same graph, only one Worker exists; (b) **hard-kill the leader** (close its
@@ -404,8 +427,9 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   `destroyGraph`) over a control-plane capnweb session; the SW holds a direct `GraphWorkerHost` stub per
   graph and a `WorkerFactory` stub. `worker-spawn.ts` holds the shared spawn/bootstrap helpers + the one
   native `Bootstrap` message type. Interim double hop gone. `service-worker-edge.test.ts` unchanged + green.
-- ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-holds-a-stub-per-leader + handoff.
-  DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built. Builds on Hop 2.
+- ✅ Cross-tab failover — Web-Locks per-graph leader election (`WorkerFactory`) + `FactoryStubSource`
+  (SW-side control + failover stub swap) + `BrowserGraphManager` retry-once. LANDED + PROVEN in a real
+  browser (`failover.test.ts`: hard-kill the leader, another tab takes over, data intact).
 - ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` (now `extends RpcTarget`) +
   `graph-worker.entry.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
   opfs-sahpool, clone boundary tested. (Hop 1 replaced the hand-rolled `GraphWorkerClient`/protocol.)

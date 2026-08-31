@@ -104,6 +104,10 @@ function heldUntilAborted(signal: AbortSignal): Promise<void> {
  *  its ports were reaped). Returns a disposer that removes the listener. Call once, after the SW controls
  *  the page (see {@link registerServiceWorker}). */
 export function installWorkerFactory(workerUrl: string | URL): () => void {
+  // Ask the browser to make this origin's OPFS PERSISTENT — otherwise it is evictable under storage
+  // pressure, which would silently drop a graph's committed data (the 10 GB DO ceiling has no such risk).
+  // Fire-and-forget: it may prompt, be auto-granted, or be denied; storage still works either way.
+  void navigator.storage?.persist?.().catch(() => {});
   const factory = new WorkerFactory(workerUrl);
   const openControl = () => {
     const channel = new MessageChannel();
