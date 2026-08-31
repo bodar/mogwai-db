@@ -83,3 +83,58 @@ export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 6
     server.stop(true);
   }
 }
+
+export interface BrowserPageRun {
+  /** The page's ESM entry (bundled + served as `/page.js`, loaded by the page). It sets `window.__done`
+   *  and `window.__result` when finished. */
+  pageEntry: string;
+  /** The Service Worker entry (bundled + served as `/sw.js`, scope `/`). */
+  serviceWorker: string;
+  /** Extra worker bundles the page spawns (e.g. `{ '/graph-worker.js': '…/graph-worker.entry.ts' }`). */
+  extraWorkers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+/**
+ * Drive a real PAGE (not a spawned worker) in Chrome — for the Service Worker edge, where the client's
+ * `fetch` runs in the page and the SW intercepts it. Serves the page, its SW, and any graph-worker
+ * bundles over http://localhost (a secure context, so SW + OPFS work with no certs), then returns
+ * whatever `window.__result` the page sets when `window.__done` is true.
+ */
+export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 90_000 }: BrowserPageRun): Promise<any> {
+  const pageJs = await bundleBrowser(pageEntry);
+  const swJs = await bundleBrowser(serviceWorker);
+  const extras: Record<string, string> = {};
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
+  const wasm = await Bun.file(wasmPath()).arrayBuffer();
+  const HTML = `<!doctype html><meta charset="utf-8"><title>loading</title><script type="module" src="/page.js"></script>`;
+
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const p = new URL(req.url).pathname;
+      // The SW is served with a root scope so it can intercept /gremlin/* regardless of the page path.
+      if (p === '/sw.js') return new Response(swJs, { headers: { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/' } });
+      if (p === '/page.js') return new Response(pageJs, { headers: { 'Content-Type': 'text/javascript' } });
+      if (p === '/sqlite3.wasm') return new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
+      if (p in extras) return new Response(extras[p], { headers: { 'Content-Type': 'text/javascript' } });
+      return new Response(HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    },
+  });
+
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  const consoleLines: string[] = [];
+  try {
+    const page = await browser.newPage();
+    page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
+    page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
+    await page.goto(`http://localhost:${server.port}/`);
+    await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
+    return await page.evaluate('window.__result');
+  } catch (e) {
+    throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
+  } finally {
+    await browser.close();
+    server.stop(true);
+  }
+}

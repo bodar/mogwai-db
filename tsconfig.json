@@ -3,12 +3,15 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // DOM + DOM.Iterable are here for the BROWSER leaf (src/browser/*): OPFS (FileSystemDirectoryHandle,
-    // navigator.storage), Worker, and Web Locks (navigator.locks) are DOM-lib globals, not Bun/workers
-    // ones. Measured at ZERO added errors against the bun + workers-types set (they layer cleanly, and
-    // skipLibCheck covers the .d.ts), so one lib list still type-checks all three targets. lib is
-    // type-only — it changes nothing at runtime, where per-target bundling selects the real globals.
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    // DOM + DOM.Iterable + WebWorker are here for the BROWSER leaf (src/browser/*): OPFS
+    // (FileSystemDirectoryHandle, navigator.storage), Worker, and Web Locks (navigator.locks) are DOM
+    // globals; the Service Worker edge's FetchEvent / ServiceWorkerGlobalScope / Client(s) are WebWorker
+    // globals. Each was measured at ZERO added errors against the bun + workers-types set (they layer
+    // cleanly, and skipLibCheck covers the .d.ts), so one lib list still type-checks all targets. lib is
+    // type-only — it changes nothing at runtime, where per-target bundling selects the real globals. A
+    // Service Worker file casts `self` to `ServiceWorkerGlobalScope` (the WebWorker type) since the
+    // ambient `self` cannot be that specific scope under a shared lib set.
+    "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"],
     "types": ["bun", "@cloudflare/workers-types"],
 
     "strict": true,
