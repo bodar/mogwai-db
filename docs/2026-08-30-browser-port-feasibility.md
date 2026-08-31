@@ -149,8 +149,11 @@ over `open()` (so an open failure rejects calls, fail closed, no fake host);
 that seam. `graph-worker-rpc.test.ts` drives the capnweb stub (clone-boundary + failure-as-value kept).
 Net −102 LOC. Browser lane 33/33; full `ci` green.
 
-**Hop 2 — make the SW the edge; the page becomes a Worker factory; SW talks to the Worker DIRECTLY.**
-This replaces the interim "SW → page → Worker" double hop with a single data-plane hop. The pieces:
+**Hop 2 — SW is the edge; the page is the `WorkerFactory`; SW talks to the Worker DIRECTLY. ✅ LANDED
+2026-08-31 (`b691da7`).** Replaced the interim "SW → page → Worker" double hop with a single data-plane
+hop; every proven-in-a-real-browser unknown (a SW *receiving* a transferred `MessagePort`, its entanglement
+with a dedicated Worker's port, capnweb over that port from SW scope) is now confirmed by the green
+`service-worker-edge` test. The pieces as built:
 
 - **`makeRouter` + the response framing move into `service-worker.entry.ts`.** The SW becomes the real
   edge: on an intercepted `fetch('/gremlin/{id}')` it runs `makeRouter`, whose `executor(id)` returns the
@@ -391,21 +394,24 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   contract green in-process via `test/bun-wasm.test.ts`).
 - ✅ `OpfsIoStore.ts` — `IoStore` over async OPFS streaming (LANDED; proven against real OPFS via the
   Playwright lane, `test/browser/browser.test.ts`).
-- ✅ `BrowserGraphManager` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED,
-  page-hosted; single-tab routing is a direct capnweb stub, Hop 1). ⏳ Hop 2 splits it: the SW-side half is
-  the router's `executor(id)` over a direct stub, the page-side half becomes the `WorkerFactory`.
-- ⏳ **Hop 2 — SW is the edge; page is the `WorkerFactory`; direct SW↔Worker capnweb** (see "Hop 2" above).
-  Moves `makeRouter` + framing into `service-worker.entry.ts`; renames `page-edge.ts → worker-factory.ts`
-  exposing a typed `WorkerFactory` (`openGraph`); the SW holds a direct stub per graph. Kills the interim
-  double hop. `service-worker-edge.test.ts` is the unchanged contract.
+- ✅ `BrowserGraphManager` — now ONE `GraphManager` engine over a `GraphStubSource` seam (LANDED, Hop 2):
+  `LocalWorkerSource` (spawns its own Workers — the manager test) or the SW's factory source (asks the
+  `WorkerFactory` for a port). Holds the stubs + `executor`/`create`/`info`/`destroy` + the `Framed[]`→
+  `Buffer` rewrap once.
+- ✅ **Hop 2 — SW is the edge; page is the `WorkerFactory`; direct SW↔Worker capnweb** (`b691da7`).
+  `makeRouter` + framing moved into `service-worker.entry.ts` (660 KB bundle — wire only, no SQLite/
+  compiler); `page-edge.ts → worker-factory.ts` exposes the typed `WorkerFactory` (`openGraph`/
+  `destroyGraph`) over a control-plane capnweb session; the SW holds a direct `GraphWorkerHost` stub per
+  graph and a `WorkerFactory` stub. `worker-spawn.ts` holds the shared spawn/bootstrap helpers + the one
+  native `Bootstrap` message type. Interim double hop gone. `service-worker-edge.test.ts` unchanged + green.
 - ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-holds-a-stub-per-leader + handoff.
   DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built. Builds on Hop 2.
 - ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` (now `extends RpcTarget`) +
   `graph-worker.entry.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
   opfs-sahpool, clone boundary tested. (Hop 1 replaced the hand-rolled `GraphWorkerClient`/protocol.)
-- ✅ service worker entry — `service-worker.entry.ts` (LANDED interim: the SW BROKERS an intercepted fetch
-  to the page, which runs `makeRouter` — `page-edge.ts`. Hop 2 makes the SW itself the edge running
-  `makeRouter`, talking directly to each graph's Worker).
+- ✅ service worker entry — `service-worker.entry.ts` (LANDED, Hop 2: the SW IS the edge — runs
+  `makeRouter` and holds a direct capnweb stub to each graph's Worker; a page-hosted `WorkerFactory`
+  spawns the Workers on its behalf, since a SW cannot spawn a dedicated Worker).
 - ✅ `test/browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the
   OpfsIoStore, GraphWorkerHost, transport, coordinator, and SW-edge contracts + the clone-boundary test).
   Later: fuller `graphContract` coverage in-browser + the crash-failover tests.
