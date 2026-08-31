@@ -232,6 +232,25 @@ description = "Re-extract the L1 corpus.txt from the submodule's origin/master G
 depends = ["submodule"]
 run = "bun run test/L1-corpus/regen-corpus.ts"
 
+[tasks.version]
+description = "Print the derived release version (major from package.json · commit count · build/timestamp)"
+run = "bun scripts/version.ts"
+
+[tasks.package]
+description = "Build the release artifacts under dist/: the browser zip + the Bun binaries (all targets)"
+depends = ["install"]
+run = "bun scripts/package.ts"
+
+[tasks."package:browser"]
+description = "Just the browser zip: dist/browser/{mogwai,service-worker,worker}.js + sqlite3.wasm, zipped"
+depends = ["install"]
+run = "bun scripts/package.ts --browser"
+
+[tasks."package:binaries"]
+description = "Just the Bun standalone binaries (pass a subset via `--binaries=linux-x64,darwin-arm64`)"
+depends = ["install"]
+run = "bun scripts/package.ts --binaries"
+
 [tasks.build]
 description = "Bundle the Cloudflare Worker (dry-run deploy)"
 # `submodule` listed explicitly: the worker bundles src/io.ts, which imports `gremlin/io` — and,

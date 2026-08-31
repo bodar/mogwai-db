@@ -1,8 +1,8 @@
 // The Playwright browser lane's shared driver — the twin of test/cloudflare.test.ts's spawn-and-drive,
 // but for a real Chrome instead of wrangler dev. The lane runs as part of a normal `bun test` / `mise run
-// ci` (its own `browser` CI bracket, like L1–L5), and each `describe` is `skipIf(!chromeAvailable())` so a
-// machine with no system Chrome (or an explicit `$MOGWAI_SKIP_BROWSER`) SKIPS them cleanly rather than
-// failing — CI has Chrome, so the gate still covers them there.
+// ci` (its own `browser` CI bracket, like L1–L5), and each `describe` is `skipIf(!browserLaneEnabled())`
+// so a machine with no system Chrome (or an explicit `$MOGWAI_SKIP_BROWSER`) SKIPS them cleanly rather
+// than failing — CI has Chrome, so the gate still covers them there.
 //
 // Playwright is used as a DRIVER LIBRARY (`chromium.launch()`), not `@playwright/test` — no second test
 // runner; `bun test` stays the one runner. It drives the SYSTEM Chrome (present on GitHub's
@@ -12,6 +12,10 @@
 import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { bundleBrowser } from '../../../src/browser/bundle.ts';
+
+/** Bundle a browser entry for the lane. `$MOGWAI_MINIFY=1` builds the MINIFIED release form (what the
+ *  packaged zip ships), so the lane can prove the release artifacts run — not just the readable dev form. */
+const bundle = (entry: string): Promise<string> => bundleBrowser(entry, { minify: !!process.env.MOGWAI_MINIFY });
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
@@ -98,9 +102,9 @@ export interface BrowserWorkerRun {
  * mirroring how cloudflare.test.ts drives the contract against a real workerd and asserts here.
  */
 export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 60_000 }: BrowserWorkerRun): Promise<any> {
-  const workerJs = await bundleBrowser(entry);
+  const workerJs = await bundle(entry);
   const extras: Record<string, string> = {};
-  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundle(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
 
   const server = Bun.serve({
@@ -152,10 +156,10 @@ export interface BrowserPageRun {
  * whatever `window.__result` the page sets when `window.__done` is true.
  */
 export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = {}, timeoutMs = 60_000 }: BrowserPageRun): Promise<any> {
-  const pageJs = await bundleBrowser(pageEntry);
-  const serviceWorkerJs = await bundleBrowser(serviceWorker);
+  const pageJs = await bundle(pageEntry);
+  const serviceWorkerJs = await bundle(serviceWorker);
   const extras: Record<string, string> = {};
-  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundle(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
   const HTML = `<!doctype html><meta charset="utf-8"><title>loading</title><script type="module" src="/page.js"></script>`;
 
@@ -207,10 +211,10 @@ export interface BrowserContextRun {
  * The pages are NOT auto-navigated — `fn` opens exactly the tabs the scenario needs.
  */
 export async function withBrowserContext<T>({ pageEntry, serviceWorker, extraWorkers = {} }: BrowserContextRun, fn: (ctx: { context: BrowserContext; origin: string; console: string[] }) => Promise<T>): Promise<T> {
-  const pageJs = await bundleBrowser(pageEntry);
-  const serviceWorkerJs = await bundleBrowser(serviceWorker);
+  const pageJs = await bundle(pageEntry);
+  const serviceWorkerJs = await bundle(serviceWorker);
   const extras: Record<string, string> = {};
-  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundle(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
   const HTML = `<!doctype html><meta charset="utf-8"><title>loading</title><script type="module" src="/page.js"></script>`;
 

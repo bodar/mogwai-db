@@ -1,6 +1,6 @@
 {
   "name": "mogwai-db",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare Durable Objects",
   "type": "module",
   "main": "src/bun/server.ts",

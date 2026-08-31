@@ -25,12 +25,18 @@ export function browserBundlePlugin(): BunPlugin {
 }
 
 /** Bundle a browser worker/entry to a single ESM string, with the browser shims applied. Throws with
- *  the bundler logs on failure (a missing polyfill export surfaces HERE, at build, not at runtime). */
-export async function bundleBrowser(entry: string): Promise<string> {
+ *  the bundler logs on failure (a missing polyfill export surfaces HERE, at build, not at runtime).
+ *  `minify` for the shipped release artifacts (the test lane leaves it off for readable stacks). */
+export async function bundleBrowser(entry: string, opts: { minify?: boolean } = {}): Promise<string> {
   const out = await Bun.build({
     entrypoints: [entry],
     target: 'browser',
     format: 'esm',
+    // Whitespace + syntax only — NOT identifiers. The core (parser/compiler/wire) does name-based
+    // dispatch, and mangling identifiers breaks it (measured: a minified worker parses every query to an
+    // "empty traversal"). Whitespace is the bulk of the win anyway; capnweb RPC also dispatches by method
+    // NAME across the SW↔Worker boundary, so those must survive too.
+    minify: opts.minify ? { whitespace: true, syntax: true, identifiers: false } : false,
     plugins: [browserBundlePlugin()],
   });
   if (!out.success) throw new Error(`browser bundle failed:\n${out.logs.map((l) => String(l)).join('\n')}`);

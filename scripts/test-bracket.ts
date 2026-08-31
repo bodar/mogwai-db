@@ -101,7 +101,10 @@ console.log(`bracket ${wanted}: ${mine.length} of ${discover(root).length} disco
 
 // The browser bracket runs in its OWN process (this spawn), so activate the lane here — its on-the-fly
 // Bun.build is unreliable under the full suite's FD load but solid isolated (see harness browserLaneEnabled).
-const env = wanted === 'browser' ? { ...process.env, MOGWAI_RUN_BROWSER: '1' } : undefined;
+// MOGWAI_MINIFY makes CI drive the MINIFIED release artifacts (what the zip ships), so a minify regression
+// fails the gate — identifier mangling once broke the compiler; this guards it. (Local dev runs the
+// readable unminified form via `mise run test:browser`.)
+const env = wanted === 'browser' ? { ...process.env, MOGWAI_RUN_BROWSER: '1', MOGWAI_MINIFY: '1' } : undefined;
 
 // `bun test` with explicit paths, inheriting stdio so the reporter output is the normal one.
 const run = Bun.spawn(['bun', 'test', ...mine], { cwd: root, stdio: ['inherit', 'inherit', 'inherit'], env });
