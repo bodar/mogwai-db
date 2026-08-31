@@ -186,39 +186,47 @@ does not rest on JSPI.
 
 ---
 
-## 6. The one real cross-cutting task: `Buffer`
+## 6. `Buffer` — resolved
 
-The measured dependency surface is tiny and concentrated — which is the seam discipline paying off:
+The platform coupling is genuinely a leaf. After the Bun-native cleanup (`process.env` → `Bun.env`;
+`FileIoStore` on `Bun.file().exists()` + `Bun.Glob`), the only Node/Bun API surface left in
+`src/bun/*` is `mkdir`/`rm` and `node:path` — directory and path ops Bun has **no** `Bun.*`
+equivalent for (it implements `node:fs`/`node:path` natively, which *is* the idiomatic path), and
+that whole leaf gets a browser twin (`WasmSqlite` / `OpfsIoStore`) rather than a port. Nothing
+`bun:`/`node:` reaches the compiler / execute / wire / router core.
 
-- **`bun:` / `Bun.` runtime coupling:** confined entirely to `src/bun/{BunSqlite,BunGraphManager,
-  server}.ts` + `FileIoStore.ts`. Every other hit is a *comment* citing `bun:sqlite` version numbers
-  (measured SQLite facts), not a runtime dependency.
-- **`node:` imports:** only `src/bun/BunGraphManager.ts` and `src/bun/FileIoStore.ts` (the leaves
-  being replaced). Zero in the compiler / execute / wire / router core.
-- **`process.env`:** only `src/bun/server.ts` (test/config switches). Trivially absent in-browser.
+The one thing that *did* reach the shared core is **`Buffer`** — a Node/Bun global absent in the
+browser. The LSP settles the true surface (grep counted comments, `vendor/` and `node_modules/`
+alike): **our editable code uses `Buffer` in exactly four files — `execute.ts`, `serializers.ts`,
+`http.ts`, `router.ts`** (40 value-uses + 77 type-uses). The earlier "leak into
+`compiler/rel/spine.ts`/`lower.ts`" was a false alarm — those are comments describing `execute.ts`'s
+framers; the front-end/compiler boundary (decision #5) is intact and holds zero `Buffer` code.
 
-So the platform leaf is genuinely a leaf. The **one** thing that reaches into the shared core is
-`Buffer` — a Node/Bun global that is **not** a browser global. Measured: **114 uses across 10
-files** — `router.ts`, `http.ts`, `wire.ts`, `serializers.ts`, `execute.ts`, `bulk.ts`, `api.ts`,
-`graphql/edge.ts`, and (notably) `compiler/rel/spine.ts` + `compiler/rel/lower.ts`.
+**The resolution — and it needs no new dependency.** The `gremlin` client this project reuses
+(decision #4) is itself built on the `buffer` API: 35 of its source files `import { Buffer } from
+'buffer'` and its serializers *return* `Buffer`, depending pervasively on Node-specific methods
+(`writeInt32BE`, `readBigInt64BE`, `readFloatBE`, …) that a plain `Uint8Array` lacks. So the byte
+layer is `Buffer`-shaped whether we like it or not — and the client already made the browser call.
+Two measured facts make matching it the clean, zero-cost move:
 
-Two ways to close it, presented honestly with their real costs:
+- **Bun's browser bundler auto-injects a `buffer` polyfill for any `import from 'buffer'`** — verified:
+  a browser build of a module that imports it pulls in a real ~52 KB polyfill, while a module using
+  the *bare global* `Buffer` gets **nothing** (a `ReferenceError` waiting to happen). Bun ships its own
+  polyfill; the `buffer` npm package need not even be installed. So the fix is simply to make our
+  `Buffer` references *imported* rather than *global*.
+- **`import { Buffer } from 'buffer'` already works on all three targets.** On Bun it resolves to the
+  built-in (`=== globalThis.Buffer`); in a browser bundle Bun injects the polyfill; on Cloudflare it
+  resolves under the `nodejs_compat` flag the DO already runs with — and `src/serializers.ts` *already*
+  imports it this way and ships to the DO in production. So this is not a new convention, just applying
+  the one `serializers.ts` already set to the other three files.
 
-1. **Polyfill (`buffer` package aliased to the global via the bundler's `inject`/`define`).**
-   Near-zero code change; small bundle cost (~a few KB). Legitimate here because the `gremlin` JS
-   client's own GraphBinary serializers — which this project reuses (decision #4) — are already
-   browser-targeted, so the wire layer's `Buffer` usage is the shim's exact use case. This is the
-   right v1 move: it unblocks the whole port without touching the core.
-2. **Refactor `Buffer` → `Uint8Array`/`DataView`.** The clean-substrate version. Larger diff, but it
-   removes a Node-ism from a codebase that is otherwise runtime-agnostic, and it makes the byte layer
-   honest about what it is. Worth doing *eventually*, and worth doing *first* for the two compiler
-   files: `Buffer` in `compiler/rel/spine.ts`/`lower.ts` is a slight smell — the compiler is supposed
-   to depend only on the IR, and wire-byte types leaking into lowering is the kind of boundary blur
-   CLAUDE.md warns about. Audit those two before polyfilling; they may be BLOB-literal handling
-   (legitimate) or a leak (fix it).
-
-Recommendation: **polyfill for the spike and v1, schedule the `Uint8Array` refactor as follow-up**,
-and audit the two compiler-layer `Buffer` uses now rather than papering over them.
+**Done:** `execute.ts`, `http.ts`, `router.ts` now `import { Buffer } from 'buffer'` like
+`serializers.ts` — three import lines, zero logic change, byte-identical, browser-bundleable. There is
+no `Uint8Array` rewrite and no upstreaming to do: rewriting our half would not shrink the browser
+bundle (the client still triggers Bun's polyfill), so its only payoff would be code purity, and the
+byte layer is deliberately `Buffer`-shaped to hug the client it interoperates with. The one honest
+cost is that the browser bundle carries Bun's ~52 KB `buffer` polyfill — unavoidable (the client needs
+it), automatic (Bun provides it), and negligible for an in-browser database.
 
 Everything else — antlr4ng (pure JS), the generated parser (pure JS/TS), the compiler, `execute.ts`,
 the Fetch-API router — is already browser-portable.
@@ -323,8 +331,9 @@ Do the risky, cheap things first; each answers a yes/no that gates the rest.
 3. **Worker-boundary clone test (§3).** Post a real query, get `Framed[]` back (transferred), frame a
    Response. This is the browser twin of `test/cloudflare.test.ts` — the thing green main-thread CI
    will *not* catch. Reuse `rpcTry`/`rpcUnwrap` verbatim.
-4. **`Buffer` polyfill through the bundler (§6).** Get `execute.ts` + `serializers.ts` + `wire.ts` to
-   run in the Worker. Audit the two `compiler/rel` `Buffer` uses while here.
+4. **`Buffer` — done (§6).** `execute.ts`/`http.ts`/`router.ts` now `import { Buffer } from 'buffer'`
+   like `serializers.ts`, so Bun's browser bundler injects the polyfill automatically. The "compiler
+   `Buffer` leak" was a false alarm (comments). Nothing left here.
 5. **`fetch` interception end-to-end (§7).** Register the Service Worker, `fetch('/gremlin/g')` from
    a page, hit the SharedWorker, get a GraphBinary response. This is the "unmodified client" proof.
 6. **`IoStore` over OPFS (§2.2).** GraphSON export/import streaming through `OpfsIoStore`; confirm
@@ -344,6 +353,6 @@ the whole reason the estimate is "leaves, not a rewrite."
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` | `io()` service, formats — **unchanged** |
 | `GraphManager` (lifecycle + executor factory) | `BunGraphManager` | `CloudflareGraphManager` | `WasmGraphManager` + `PostMessageGraphManager` | `makeRouter` — **unchanged** |
 | entry point | `bun/server.ts` | `cloudflare/worker.ts` | `sharedworker.ts` + optional `sw.ts` | `application()` DI — **unchanged** |
-| cross-cutting | — | — | **`Buffer` → polyfill then `Uint8Array`** | wire/execute/http |
+| cross-cutting | — | — | **`Buffer` → `import from 'buffer'`** (done; Bun bundler auto-polyfills) | wire/execute/http |
 
 Everything in the rightmost "unchanged" column is the reason this is a feasibility *yes*.

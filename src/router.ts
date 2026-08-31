@@ -12,6 +12,7 @@
 // The graph-path prefix is configurable; `gremlin` is the default. The bare `/gremlin`
 // endpoint is NOT prefixed — it is a fixed TinkerPop HTTP convention (and the path
 // the official cucumber harness / stock GLVs POST to), so it stays regardless.
+import { Buffer } from 'buffer';
 import type { GraphManager } from './manager.ts';
 import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
