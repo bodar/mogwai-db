@@ -5,7 +5,7 @@
 // GLV — reaches the local opfs-sahpool graph with no monkey-patching, proving the port's headline thesis
 // end to end in a real browser.
 import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response decode
-import { installWorkerFactory, registerServiceWorker } from '../../../src/browser/worker-factory.ts';
+import { installMogwai } from '../../../src/browser/worker-factory.ts';
 import { ioc } from '../../../src/io.ts';
 import gremlin from 'gremlin';
 
@@ -16,8 +16,9 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
-  await registerServiceWorker('/service-worker.js'); // resolves once the Service Worker controls this page
-  installWorkerFactory('/graph-worker.js'); // opens the control session so the SW can spawn graphs via us
+  // The whole production bootstrap: register the SW + install the factory, resolving ./service-worker.js
+  // and ./worker.js relative to this page (import.meta.url) — the real relative-resolution path.
+  await installMogwai();
 
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const gremlinUrl = `${location.origin}/gremlin/${G}`;

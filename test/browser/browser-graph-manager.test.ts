@@ -10,7 +10,7 @@ describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: manager + makeRouter
   beforeAll(async () => {
     out = await runBrowserWorker({
       entry: Bun.fileURLToPath(import.meta.resolve('./workers/browser-graph-manager.worker.ts')),
-      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/graph-worker.entry.ts')) },
+      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/worker.ts')) },
     });
   }, 90_000);
 

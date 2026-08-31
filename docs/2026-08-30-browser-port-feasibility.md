@@ -36,7 +36,7 @@ progress against this plan.
   Bun's browser polyfill lacks), `bundle.ts` (shared `Bun.build` config so the test lane and production
   build share shims), `buffer-global.ts` (installs `Buffer` as a global, imported first so it beats
   `http.ts`/`io.ts` module-init).
-- **Graph-worker RPC — now Cap'n Web (Hop 1 LANDED 2026-08-31, `b248efd`)** — `graph-worker.entry.ts`
+- **Graph-worker RPC — now Cap'n Web (Hop 1 LANDED 2026-08-31, `b248efd`)** — `worker.ts`
   (boot-then-expose: the page transfers a `MessagePort` + graphId as the worker's first message; the
   worker opens the host and serves it as an `RpcPromise` over the `open()` promise). `GraphWorkerHost`
   extends capnweb's `RpcTarget`, so its `framed()`/`runForeign()`/`info()` signatures ARE the protocol —
@@ -50,7 +50,7 @@ progress against this plan.
 - **Deps added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — per-target bundling keeps it
   out of the Bun/CF bundles; nothing on those paths imports `src/browser/*`), `playwright` (dev driver).
 
-- **Service Worker edge + page edge (single-tab)** — `service-worker.entry.ts` (intercepts
+- **Service Worker edge + page edge (single-tab)** — `service-worker.ts` (intercepts
   `/gremlin|/graphql` fetches, brokers them to a controlled page over a per-request MessageChannel),
   `page-edge.ts` (`installMogwaiPageEdge` runs the local router; `registerServiceWorker` resolves once the
   SW controls the page). Proven (`service-worker-edge.test.ts`): a plain fetch AND the **unmodified TinkerPop GLV**
@@ -142,7 +142,7 @@ is not about CF. Do it as green increments: **page↔worker first**, then the Se
 
 **Hop 1 — page↔graph-worker. ✅ LANDED 2026-08-31 (`b248efd`).** `GraphWorkerHost extends RpcTarget`;
 `graph-worker-protocol.ts` and `GraphWorkerClient.ts` DELETED (the protocol is now the host's TS
-signatures, the stub is `newMessagePortRpcSession<GraphWorkerHost>(port1)`); `graph-worker.entry.ts`
+signatures, the stub is `newMessagePortRpcSession<GraphWorkerHost>(port1)`); `worker.ts`
 shrank to boot-then-expose over a page-created `MessageChannel`, serving the host as an `RpcPromise`
 over `open()` (so an open failure rejects calls, fail closed, no fake host);
 `BrowserGraphManager.executor(id)` holds the stub and delegates, with the `Framed[]`→`Buffer` rewrap at
@@ -155,7 +155,7 @@ hop; every proven-in-a-real-browser unknown (a SW *receiving* a transferred `Mes
 with a dedicated Worker's port, capnweb over that port from SW scope) is now confirmed by the green
 `service-worker-edge` test. The pieces as built:
 
-- **`makeRouter` + the response framing move into `service-worker.entry.ts`.** The SW becomes the real
+- **`makeRouter` + the response framing move into `service-worker.ts`.** The SW becomes the real
   edge: on an intercepted `fetch('/gremlin/{id}')` it runs `makeRouter`, whose `executor(id)` returns the
   capnweb stub over the SW's **direct** port to graph `id`'s Worker. (No SQLite/compiler in the SW bundle —
   only the wire/framing; those stay in the Worker.)
@@ -175,7 +175,7 @@ with a dedicated Worker's port, capnweb over that port from SW scope) is now con
   tab gone), it evicts and re-calls `openGraph`.
 - **`BrowserGraphManager` splits:** the SW-side half is the router's `executor(id)`/`info`/`create` over
   the direct stub; the page-side half is the factory (spawn/own/leadership). Hop 1's `GraphWorkerHost` and
-  `graph-worker.entry.ts` are untouched — only *who holds the other end of the port* moves from the page to
+  `worker.ts` are untouched — only *who holds the other end of the port* moves from the page to
   the SW.
 
 `service-worker-edge.test.ts` (plain fetch + management GET + unmodified GLV) is the contract and stays
@@ -356,7 +356,7 @@ is the browser twin of `test/cloudflare.test.ts` that a green main-thread run wo
 | `Sql` (sync) | `BunSqlite` | `DurableObjectSqlite` | `WasmSqlite` — official `@sqlite.org/sqlite-wasm`, `opfs-sahpool` |
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` — `file.stream()` / `createWritable()` (the `IoSink` contract) |
 | `GraphManager` (lifecycle + executor factory) | `BunGraphManager` (`Map`) | `CloudflareGraphManager` (id→DO) | SW-side `executor(id)` → a direct capnweb stub to `id`'s Worker; the `WorkerFactory` (page) spawns/owns Workers, Web-Lock leader per graph |
-| entry point | `bun/server.ts` | `cloudflare/worker.ts` | a **Service Worker** = the edge (`makeRouter` + `fetch` intercept + a direct capnweb stub per graph); a `WorkerFactory` page spawns **one Worker per graph** |
+| entry point | `bun/server.ts` | `cloudflare/worker.ts` | THREE bundles, dropped together in one dir: **`mogwai.js`** (`src/browser/mogwai.ts`) the page bootstrap a consumer includes (`<script type=module src=mogwai.js>` → `installMogwai()`, which resolves the two siblings via `import.meta.url`); **`service-worker.js`** (`service-worker.ts`) = the edge; **`worker.js`** (`worker.ts`) = one dedicated Worker per graph |
 | `Buffer` | Bun global | workerd `nodejs_compat` global | ambient global; the SW entry supplies it: `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer` (Bun's bundler auto-polyfills the import) |
 
 Everything above these leaves — `GraphStore`, the whole compiler, `execute.ts`, wire, `makeRouter` — is
@@ -422,7 +422,7 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   `WorkerFactory` for a port). Holds the stubs + `executor`/`create`/`info`/`destroy` + the `Framed[]`→
   `Buffer` rewrap once.
 - ✅ **Hop 2 — SW is the edge; page is the `WorkerFactory`; direct SW↔Worker capnweb** (`b691da7`).
-  `makeRouter` + framing moved into `service-worker.entry.ts` (660 KB bundle — wire only, no SQLite/
+  `makeRouter` + framing moved into `service-worker.ts` (660 KB bundle — wire only, no SQLite/
   compiler); `page-edge.ts → worker-factory.ts` exposes the typed `WorkerFactory` (`openGraph`/
   `destroyGraph`) over a control-plane capnweb session; the SW holds a direct `GraphWorkerHost` stub per
   graph and a `WorkerFactory` stub. `worker-spawn.ts` holds the shared spawn/bootstrap helpers + the one
@@ -431,9 +431,9 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   (SW-side control + failover stub swap) + `BrowserGraphManager` retry-once. LANDED + PROVEN in a real
   browser (`failover.test.ts`: hard-kill the leader, another tab takes over, data intact).
 - ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` (now `extends RpcTarget`) +
-  `graph-worker.entry.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
+  `worker.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
   opfs-sahpool, clone boundary tested. (Hop 1 replaced the hand-rolled `GraphWorkerClient`/protocol.)
-- ✅ service worker entry — `service-worker.entry.ts` (LANDED, Hop 2: the SW IS the edge — runs
+- ✅ service worker entry — `service-worker.ts` (LANDED, Hop 2: the SW IS the edge — runs
   `makeRouter` and holds a direct capnweb stub to each graph's Worker; a page-hosted `WorkerFactory`
   spawns the Workers on its behalf, since a SW cannot spawn a dedicated Worker).
 - ✅ `test/browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the

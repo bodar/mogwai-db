@@ -16,8 +16,8 @@ describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: cross-tab leader fai
     await withBrowserContext(
       {
         pageEntry: Bun.fileURLToPath(import.meta.resolve('./pages/failover.page.ts')),
-        serviceWorker: Bun.fileURLToPath(import.meta.resolve('../../src/browser/service-worker.entry.ts')),
-        extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/graph-worker.entry.ts')) },
+        serviceWorker: Bun.fileURLToPath(import.meta.resolve('../../src/browser/service-worker.ts')),
+        extraWorkers: { '/worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/worker.ts')) },
       },
       async ({ context, origin }) => {
         const G = `failover-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;

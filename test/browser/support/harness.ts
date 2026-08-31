@@ -63,7 +63,7 @@ export interface BrowserWorkerRun {
   /** Absolute path to the dedicated-worker entry module (bundled fresh for the browser here). */
   entry: string;
   /** Extra worker bundles to serve, keyed by the URL path the driver worker spawns them from (e.g.
-   *  `{ '/graph-worker.js': '/abs/path/graph-worker.entry.ts' }`). A dedicated Worker may create nested
+   *  `{ '/graph-worker.js': '/abs/path/worker.ts' }`). A dedicated Worker may create nested
    *  Workers, so the driver worker at `entry` can `new Worker('/graph-worker.js')`. */
   extraWorkers?: Record<string, string>;
   /** Milliseconds to wait for the worker to post its result. */
@@ -119,7 +119,7 @@ export interface BrowserPageRun {
   pageEntry: string;
   /** The Service Worker entry (bundled + served as `/service-worker.js`, scope `/`). */
   serviceWorker: string;
-  /** Extra worker bundles the page spawns (e.g. `{ '/graph-worker.js': '…/graph-worker.entry.ts' }`). */
+  /** Extra worker bundles the page spawns (e.g. `{ '/graph-worker.js': '…/worker.ts' }`). */
   extraWorkers?: Record<string, string>;
   timeoutMs?: number;
 }
@@ -174,7 +174,7 @@ export interface BrowserContextRun {
   pageEntry: string;
   /** The Service Worker entry (bundled + served as `/service-worker.js`, scope `/`). */
   serviceWorker: string;
-  /** Extra worker bundles the pages spawn (e.g. `{ '/graph-worker.js': '…/graph-worker.entry.ts' }`). */
+  /** Extra worker bundles the pages spawn (e.g. `{ '/graph-worker.js': '…/worker.ts' }`). */
   extraWorkers?: Record<string, string>;
 }
 

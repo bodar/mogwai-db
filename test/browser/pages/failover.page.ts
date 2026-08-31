@@ -3,7 +3,7 @@
 // calls this API step by step via `page.evaluate`. So the tabs share one origin's OPFS, Web Locks, and
 // the single Service Worker — exactly the production shape.
 import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response decode
-import { installWorkerFactory, registerServiceWorker } from '../../../src/browser/worker-factory.ts';
+import { installMogwai } from '../../../src/browser/worker-factory.ts';
 import { ioc } from '../../../src/io.ts';
 
 const origin = location.origin;
@@ -20,8 +20,7 @@ const api = {
   /** Register the SW + install this tab's WorkerFactory. After this, the SW re-broadcasts any active
    *  graphs to this tab so it queues for their leadership (a failover candidate). */
   async setup(): Promise<void> {
-    await registerServiceWorker('/service-worker.js');
-    installWorkerFactory('/graph-worker.js');
+    await installMogwai(); // register SW + install factory, sibling scripts resolved relative to this page
   },
 
   /** Run a write query (a plain fetch through the SW edge). Resolves only on the response — an ACKED write. */

@@ -29,7 +29,7 @@ interface Leadership {
 export class WorkerFactory extends RpcTarget {
   private readonly graphs = new Map<string, Leadership>();
 
-  /** `workerUrl` is the bundled graph-worker entry (`graph-worker.entry.ts`) the page serves. */
+  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) the page serves. */
   constructor(private readonly workerUrl: string | URL) {
     super();
   }
@@ -99,6 +99,29 @@ function heldUntilAborted(signal: AbortSignal): Promise<void> {
   });
 }
 
+/** Options for {@link installMogwai}. All optional — the defaults resolve the two sibling scripts RELATIVE
+ *  to the bootstrap bundle (`import.meta.url`), so the three files (`mogwai.js` + `service-worker.js` +
+ *  `worker.js`) can live at any path together and find each other. */
+export interface MogwaiOptions {
+  /** The Service Worker script URL. Default: `./service-worker.js` beside this bundle. */
+  serviceWorker?: string | URL;
+  /** The per-graph Worker script URL. Default: `./worker.js` beside this bundle. */
+  worker?: string | URL;
+  /** The Service Worker scope. Default: the SW's own directory (root, for a root deploy) — widen it (and
+   *  serve the SW with `Service-Worker-Allowed`) only to intercept `/gremlin/*` above the SW's path. */
+  scope?: string;
+}
+
+/** The page bootstrap: register the Service Worker and install this tab's WorkerFactory. This is the whole
+ *  of what a consuming page does — the two sibling scripts default to resolving beside this bundle, so a
+ *  page includes ONE `<script type="module" src=".../mogwai.js">` and everything else self-wires. */
+export async function installMogwai(opts: MogwaiOptions = {}): Promise<() => void> {
+  const serviceWorker = opts.serviceWorker ?? new URL('./service-worker.js', import.meta.url);
+  const worker = opts.worker ?? new URL('./worker.js', import.meta.url);
+  await registerServiceWorker(serviceWorker, opts.scope); // resolves once the SW controls this page
+  return installWorkerFactory(worker);
+}
+
 /** Install the page-side factory: open a control-plane capnweb session with the Service Worker (so the SW
  *  can call `openGraph`), and re-open one whenever the SW solicits (`mogwai-need-control`, after the SW or
  *  its ports were reaped). Returns a disposer that removes the listener. Call once, after the SW controls
@@ -132,8 +155,8 @@ export function installWorkerFactory(workerUrl: string | URL): () => void {
  *  that surfaces only under CI timing. So this listens AND polls, re-checking `controller` on both, and is
  *  BOUNDED: past the deadline it resolves anyway, turning a would-be hang into a clear downstream failure
  *  (an un-intercepted fetch gets the page HTML, not GraphBinary) rather than a timeout with no diagnosis. */
-export async function registerServiceWorker(url: string, controlTimeoutMs = 30_000): Promise<ServiceWorkerRegistration> {
-  const reg = await navigator.serviceWorker.register(url, { type: 'module' });
+export async function registerServiceWorker(url: string | URL, scope?: string, controlTimeoutMs = 30_000): Promise<ServiceWorkerRegistration> {
+  const reg = await navigator.serviceWorker.register(url.toString(), { type: 'module', ...(scope ? { scope } : {}) });
   await navigator.serviceWorker.ready;
   if (navigator.serviceWorker.controller) return reg;
   await new Promise<void>((resolve) => {

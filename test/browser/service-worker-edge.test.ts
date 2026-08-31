@@ -11,8 +11,8 @@ describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: Service Worker edge 
   beforeAll(async () => {
     out = await runBrowserPage({
       pageEntry: Bun.fileURLToPath(import.meta.resolve('./pages/service-worker-edge.page.ts')),
-      serviceWorker: Bun.fileURLToPath(import.meta.resolve('../../src/browser/service-worker.entry.ts')),
-      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/graph-worker.entry.ts')) },
+      serviceWorker: Bun.fileURLToPath(import.meta.resolve('../../src/browser/service-worker.ts')),
+      extraWorkers: { '/worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/worker.ts')) },
     });
   }, 90_000);
 

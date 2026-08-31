@@ -81,7 +81,7 @@ export class BrowserGraphManager implements GraphManager {
 export class LocalWorkerSource implements GraphStubSource {
   private readonly graphs = new Map<string, { worker: Worker; stub: RpcStub<GraphWorkerHost> }>();
 
-  /** `workerUrl` is the bundled graph-worker entry (`graph-worker.entry.ts`) served by the host. */
+  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) served by the host. */
   constructor(private readonly workerUrl: string | URL) {}
 
   open(id: string): Promise<RpcStub<GraphWorkerHost>> {
