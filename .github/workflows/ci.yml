@@ -127,3 +127,43 @@ jobs:
           SWEEP: ${{ needs['rel-sweep'].result }}
           PLAN: ${{ needs.plan.result }}
           TEST: ${{ needs.test.result }}
+
+  # CONTINUOUS RELEASE — trunk-based: every push to trunk that passes the whole gate is published
+  # automatically, no manual step and no tags to cut. Gated on the `ci` aggregate succeeding (so it never
+  # ships a red commit) and on a direct push to trunk (never a PR). The derived version
+  # (major·commit-count·run-number, scripts/version.ts) makes every commit a unique, monotonic release, so
+  # two pushes cannot collide on a tag. Runs AFTER `ci`, so a trunk push costs the gate + the package/
+  # cross-compile time; PRs pay nothing (the `if` skips them).
+  release:
+    needs: [ci]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.ci.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the GitHub Release
+    steps:
+      # fetch-depth: 0 — scripts/version.ts counts commits from HEAD for the minor and REFUSES a shallow
+      # clone. The other jobs are fine shallow; the release is the one that needs full history.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/provision
+      # Version computed ONCE and passed to the packager, so asset names and the release tag cannot
+      # disagree (GITHUB_RUN_NUMBER fixes the patch across both reads within this run).
+      - name: Package artifacts
+        id: pkg
+        run: |
+          V="$(mise exec -- bun scripts/version.ts)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          mise exec -- bun scripts/package.ts --version "$V"
+      # The browser zip + all platform binaries as assets; --generate-notes fills the body from the
+      # commits since the previous release.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.pkg.outputs.version }}
+        run: |
+          gh release create "v$V" \
+            --title "v$V" \
+            --generate-notes \
+            "dist/mogwai-browser-$V.zip" \
+            dist/bin/mogwai-"$V"-*
