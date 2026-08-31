@@ -252,6 +252,12 @@ single-writer within itself — the same place Cloudflare gets its concurrency (
 one graph. Every other tab is a *client* that routes a graph's queries to that graph's leader and
 gets `Framed[]` back.
 
+**Multiple graphs never require multiple tabs.** A single tab hosts one Worker *per graph it opens*,
+so one tab runs many graphs concurrently — a Worker each — exactly as one Cloudflare colo hosts many
+DOs. Extra *tabs* matter only for *sharing one graph* across tabs; that is the only place per-graph
+leadership and failover come into play. The common single-page case is one tab owning all its graphs'
+Workers directly.
+
 Cross-tab coordination is a proven ~200-line pattern — rhashimoto's **`SharedService`**:
 
 - **Web Locks elects the leader per graph and watches its lifetime.** One lock per graph id; the
@@ -362,6 +368,36 @@ Do the risky, cheap things first; each answers a yes/no that gates the rest.
 Only after 1–3 is the answer to "is this feasible?" fully de-risked; 4–6 turn it into a running
 thing. Nothing in 1–3 requires touching the core — they are all leaf shims and topology — which is
 the whole reason the estimate is "leaves, not a rewrite."
+
+---
+
+## 11. Testing the browser leaf
+
+The browser-only paths (OPFS SQLite, the Service Worker edge, per-graph leader failover, `OpfsIoStore`)
+can't run under `bun test` alone — they need a real browser. The harness mirrors the existing
+`test/cloudflare.test.ts` pattern, which spawns `wrangler dev` and drives it over the wire:
+
+- **`bun test` stays the single runner.** A test file `Bun.serve`s the built browser bundle on
+  `http://localhost:PORT`, then drives a real browser with **Playwright as a *library*** — the
+  `playwright` package's `chromium.launch()` / `page.goto()` / `page.evaluate()`, **not**
+  `@playwright/test` — asserting with bun's own `expect`. Playwright is a browser *driver* here, not a
+  second test runner, which honors the no-second-test-tool rule (CLAUDE.md).
+- **localhost is a secure context**, so the Service Worker registers and OPFS is available over plain
+  HTTP — no self-signed certs (verified: browsers treat `http://localhost` as trustworthy).
+- **Contract reuse.** The same `graphContract` that drives Bun and Cloudflare drives the browser
+  instance over `fetch`; because the Service Worker intercepts `/gremlin/*`, the contract needs no
+  browser-specific variant — which is itself the proof of the unmodified-client thesis.
+- **The browser-specific tests** are the remaining spikes turned into gates: the Worker
+  structured-clone round-trip (§3, runnable in a bare Bun `Worker` even before Playwright), leader
+  failover (kill a page mid-write; another takes over, §8·1), and OPFS streaming for `io()` (§2.2).
+- **New CI lane.** This needs a Playwright-capable browser environment; it does not run in the current
+  Bun-only `mise run ci`, so the browser suite is a separate lane (headless Chromium in CI), not folded
+  into the existing gate.
+
+**New dependencies this introduces** (all needing the usual explicit approval, CLAUDE.md): the
+official **`@sqlite.org/sqlite-wasm`** (runtime, browser leaf only — kept out of the Bun/CF bundles by
+per-target bundling) and **`playwright`** (dev, as a driver library). The `SharedService` coordination
+is ~200 lines of Apache-2.0 code **ported** from wa-sqlite's demo, not an npm dependency on wa-sqlite.
 
 ---
 
