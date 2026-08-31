@@ -75,6 +75,9 @@ export async function opfsSahpoolWasmSql(
   cfLimits = false,
 ): Promise<WasmSqlite> {
   const sqlite3 = await wasmSqliteModule();
-  const pool = await sqlite3.installOpfsSAHPoolVfs({ name: `mogwai-${directory}`, directory });
+  // The VFS registration name must be a plain identifier (no path separators), so sanitize the
+  // directory into one; the `directory` itself may carry `/` path elements (created automatically).
+  const name = `mogwai-${directory.replace(/[^A-Za-z0-9_.-]/g, '_')}`;
+  const pool = await sqlite3.installOpfsSAHPoolVfs({ name, directory });
   return new WasmSqlite(new pool.OpfsSAHPoolDb(`/${dbName}`), cfLimits);
 }

@@ -9,6 +9,7 @@
 // browser download is needed — only the driver package. localhost is a secure context, so OPFS + Web
 // Locks + Service Workers all work over plain HTTP with no certs and no COOP/COEP.
 import { chromium } from 'playwright';
+import { bundleBrowser } from '../../src/browser/bundle.ts';
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
@@ -43,9 +44,7 @@ export interface BrowserWorkerRun {
  * mirroring how cloudflare.test.ts drives the contract against a real workerd and asserts here.
  */
 export async function runBrowserWorker({ entry, timeoutMs = 60_000 }: BrowserWorkerRun): Promise<any> {
-  const built = await Bun.build({ entrypoints: [entry], target: 'browser', format: 'esm' });
-  if (!built.success) throw new Error(`worker bundle failed:\n${built.logs.map((l) => String(l)).join('\n')}`);
-  const workerJs = await built.outputs[0].text();
+  const workerJs = await bundleBrowser(entry);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
 
   const server = Bun.serve({
