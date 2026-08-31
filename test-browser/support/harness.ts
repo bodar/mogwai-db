@@ -23,24 +23,33 @@ export const CHROME_PATH = process.env.MOGWAI_CHROME ?? '/usr/bin/google-chrome-
  * CI load, which is exactly why the flags are not optional: the heaviest browser tests timed out on CI
  * while passing locally in under a second. The three flags are the standard headless-testing set.
  */
-function launchChrome(): Promise<Browser> {
-  return chromium.launch({
-    headless: true,
-    executablePath: CHROME_PATH,
-    args: [
-      // CI essentials. A GitHub runner's /dev/shm is tiny (~64 MB), so Chrome backing its shared memory
-      // there HANGS the launch of a heavier page (the SW-edge lane, with a page + SW + multiple workers)
-      // — measured: launch never resolved on CI while the lighter lanes passed. --disable-dev-shm-usage
-      // moves that backing to /tmp; --no-sandbox is required in the runner's unprivileged container.
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      // Headless has no visible tab, so Chrome backgrounds the page and throttles timers/rAF to ~1/min,
-      // stalling anything that chains many async turns under CI load. These three lift that.
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-    ],
-  });
+// ONE shared Chrome for the whole browser lane. Launching a fresh Chrome PER test file hung on CI: the
+// stage timing showed the 4th/5th `chromium.launch()` never resolving under the runner's resource limits,
+// while a single launch reused across files is stable. Each test still gets an ISOLATED BrowserContext
+// (own storage partition → own OPFS), so graphs never collide across tests. The browser is closed on
+// process exit (bun test ending kills it regardless); a leaked context would matter, a leaked browser
+// does not. `bun test ./test-browser` runs all files in one process, so this singleton is shared.
+let sharedBrowser: Promise<Browser> | undefined;
+function browserInstance(): Promise<Browser> {
+  if (!sharedBrowser) {
+    sharedBrowser = chromium.launch({
+      headless: true,
+      executablePath: CHROME_PATH,
+      args: [
+        // CI essentials. --no-sandbox is required in the runner's unprivileged container;
+        // --disable-dev-shm-usage moves Chrome's shared memory off the runner's tiny (~64 MB) /dev/shm.
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        // Headless has no visible tab, so Chrome backgrounds the page and throttles timers/rAF to ~1/min,
+        // stalling anything that chains many async turns under CI load. These three lift that.
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
+    });
+    void sharedBrowser.then((b) => process.once('exit', () => { void b.close(); }));
+  }
+  return sharedBrowser;
 }
 
 /** Resolve the sqlite-wasm binary the package publishes as `./sqlite3.wasm`, served alongside a bundled
@@ -92,10 +101,10 @@ export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 6
     },
   });
 
-  const browser = await launchChrome();
+  const context = await (await browserInstance()).newContext();
   const consoleLines: string[] = [];
   try {
-    const page = await browser.newPage();
+    const page = await context.newPage();
     page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
     page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
@@ -107,7 +116,7 @@ export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 6
   } catch (e) {
     throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
   } finally {
-    await browser.close();
+    await context.close();
     server.stop(true);
   }
 }
@@ -153,12 +162,12 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     },
   });
 
-  const browser = await launchChrome();
+  const context = await (await browserInstance()).newContext();
   const consoleLines: string[] = [];
   const debug = !!process.env.MOGWAI_BROWSER_DEBUG;
   const record = (line: string) => { consoleLines.push(line); if (debug) console.log(`[sw-page] ${line}`); };
-  stage('launched');
-  const page = await browser.newPage();
+  stage('context');
+  const page = await context.newPage();
   try {
     page.on('console', (m) => record(`[${m.type()}] ${m.text()}`));
     page.on('pageerror', (e) => record(`[pageerror] ${e.message}`));
@@ -173,7 +182,7 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     if (debug) console.log(`[sw-page] FAILED: ${e instanceof Error ? e.message : String(e)}\nprogress=${JSON.stringify(progress)}\nconsole=\n${consoleLines.join('\n')}`);
     throw new Error(`${e instanceof Error ? e.message : String(e)}\nprogress=${JSON.stringify(progress)}`);
   } finally {
-    await browser.close();
+    await context.close();
     server.stop(true);
   }
 }
