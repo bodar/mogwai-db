@@ -8,7 +8,7 @@
 // ubuntu-latest images and here at /usr/bin/google-chrome-stable) via `executablePath`, so no Playwright
 // browser download is needed — only the driver package. localhost is a secure context, so OPFS + Web
 // Locks + Service Workers all work over plain HTTP with no certs and no COOP/COEP.
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { bundleBrowser } from '../../../src/browser/bundle.ts';
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
@@ -160,6 +160,61 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     await page.goto(`http://localhost:${server.port}/`);
     await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
     return await page.evaluate('window.__result');
+  } catch (e) {
+    throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
+  } finally {
+    await context.close();
+    server.stop(true);
+  }
+}
+
+export interface BrowserContextRun {
+  /** The page's ESM entry (bundled + served as `/page.js`). For a multi-page scenario it should expose an
+   *  API on `window` (e.g. `window.mogwai`) that the driver calls step by step via `page.evaluate`. */
+  pageEntry: string;
+  /** The Service Worker entry (bundled + served as `/service-worker.js`, scope `/`). */
+  serviceWorker: string;
+  /** Extra worker bundles the pages spawn (e.g. `{ '/graph-worker.js': '…/graph-worker.entry.ts' }`). */
+  extraWorkers?: Record<string, string>;
+}
+
+/**
+ * Drive a scenario across MULTIPLE pages in ONE shared BrowserContext — for cross-tab tests (leader
+ * election + failover), where several tabs share one origin's OPFS, Web Locks, and the single Service
+ * Worker. Serves the page/SW/graph-worker bundles over http://localhost, then hands `fn` the shared
+ * `context` and `origin` so it can open pages, drive them via `evaluate`, and hard-kill one (`page.close`).
+ * The pages are NOT auto-navigated — `fn` opens exactly the tabs the scenario needs.
+ */
+export async function withBrowserContext<T>({ pageEntry, serviceWorker, extraWorkers = {} }: BrowserContextRun, fn: (ctx: { context: BrowserContext; origin: string; console: string[] }) => Promise<T>): Promise<T> {
+  const pageJs = await bundleBrowser(pageEntry);
+  const serviceWorkerJs = await bundleBrowser(serviceWorker);
+  const extras: Record<string, string> = {};
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
+  const wasm = await Bun.file(wasmPath()).arrayBuffer();
+  const HTML = `<!doctype html><meta charset="utf-8"><title>loading</title><script type="module" src="/page.js"></script>`;
+
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const p = new URL(req.url).pathname;
+      if (p === '/service-worker.js') return new Response(serviceWorkerJs, { headers: { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/' } });
+      if (p === '/page.js') return new Response(pageJs, { headers: { 'Content-Type': 'text/javascript' } });
+      if (p === '/sqlite3.wasm') return new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
+      if (p in extras) return new Response(extras[p], { headers: { 'Content-Type': 'text/javascript' } });
+      return new Response(HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    },
+  });
+
+  const context = await (await browserInstance()).newContext();
+  const consoleLines: string[] = [];
+  // Attach per-page (robust across Playwright versions — context-level 'console' is newer). Every page the
+  // scenario opens gets its console + page errors funneled into one buffer surfaced on failure.
+  context.on('page', (p) => {
+    p.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
+    p.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
+  });
+  try {
+    return await fn({ context, origin: `http://localhost:${server.port}`, console: consoleLines });
   } catch (e) {
     throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
   } finally {
