@@ -59,9 +59,9 @@ progress against this plan.
 ## Coordination-layer decision (2026-08-31) — SINGLE-TAB E2E COMPLETE
 
 Verified: a **Service Worker cannot spawn dedicated Workers** (`Worker`/`SharedWorker` are `undefined` in
-`ServiceWorkerGlobalScope`; `navigator.locks` IS available there). So Worker-spawning lives in a PAGE and
-the SW brokers `fetch`→page-hosted-Worker. Chosen approach (Dan, 2026-08-31): **single-tab end-to-end
-first** — now DONE and proven in a real browser. The full stack runs:
+`ServiceWorkerGlobalScope`; `navigator.locks` IS available there). So Worker-spawning lives in a PAGE. The
+first landed cut (single-tab E2E, proven in a real browser) had the SW broker `fetch`→a page that ran
+`makeRouter` and held the graph Workers:
 
 ```
 unmodified gremlin GLV / plain fetch  ->  globalThis.fetch  ->  Service Worker intercept
@@ -69,11 +69,42 @@ unmodified gremlin GLV / plain fetch  ->  globalThis.fetch  ->  Service Worker i
   ->  WasmSqlite on opfs-sahpool  ->  GraphBinary response back through the SW
 ```
 
-**The one remaining increment: cross-tab leader election + failover** (share one graph across tabs; a
-hard-killed leader releases its Web Lock and pool and another tab takes over). This is the doc's flagged
-measure-in-a-real-browser unknown. **Decision (Dan, 2026-08-31): clean-room TypeScript reimplementation**,
-using rhashimoto's `SharedService` (`rhashimoto/wa-sqlite` `demo/SharedService-sw/`, MIT) as a REFERENCE
-only — not a vendor/port. The design that reference yields is below.
+### Direction pivot (Dan, 2026-08-31) — SW is the edge; the page is a Worker factory, NOT in the data path
+
+The single-tab cut works, but it routes **every request through a double hop** (SW → page → Worker),
+because `makeRouter` and the manager live in the page. That is the interim shape, not the target. Two
+platform facts let us collapse it:
+
+1. **A `MessagePort` stays entangled after transfer to *any* agent — a Service Worker included.** So the
+   page never has to sit in the message path. The page spawns graph `G`'s Worker `W`, makes a
+   `MessageChannel {p1,p2}`, transfers `p1` **to `W`** and `p2` **to the SW**; now the SW and `W` hold
+   entangled ports and talk **directly**, capnweb over that port. The page has stepped out.
+2. **There is exactly ONE Service Worker per (origin, scope), shared across every tab** — the SW is not
+   one-per-tab, it is the origin-wide singleton edge by spec. So there is no "shared server" to build and
+   no `SharedWorker` for the edge: the SW already IS it.
+
+So the target architecture is the one the seams table below always described — **SW = the edge (runs
+`makeRouter`, holds a direct capnweb stub to each graph's Worker); the page = a pure `WorkerFactory` +
+owner + leader** (only a Window can spawn a dedicated Worker, and a dedicated Worker dies with its owner
+document, so some tab must spawn and *keep* it). `makeRouter`'s `executor(id)` on the SW side is just "the
+stub over the port the factory handed me." **Data plane: one hop, SW → Worker.** **Control plane (rare — SW
+cold-start, a new graph, or a failover): the SW asks the factory `openGraph(graphId)` over a typed capnweb
+`WorkerFactory` interface** — not a hand-rolled message.
+
+**Everything meaningful is strongly-typed capnweb — data plane AND control plane.** No hop carries a
+hand-rolled byte protocol; **no wire needs a custom `RpcTransport`**. The ONE irreducible native message is
+the capnweb **bootstrap**: handing a `MessagePort` to an agent so a session can exist (capnweb's own
+`MessagePortTransport` does `port.postMessage(message)` with no transfer list, so it *cannot itself* carry
+a port — a port must be delivered natively before any typed call is possible). We give it a single shared
+type — `interface Bootstrap { port: MessagePort; graphId?: string }` — carrying only a port and a tag,
+with no application fields to grow. Every other message, in both directions, is a typed capnweb call.
+
+**The one remaining measure-in-a-browser unknown: cross-tab leader election + failover** — which tab
+spawns/owns each graph's single Worker, and a clean handover when that tab is hard-killed. Note this is
+*only* about the Worker-owning tab; the edge is already a shared singleton. **Decision (Dan, 2026-08-31):
+clean-room TypeScript**, using rhashimoto's `SharedService` (`rhashimoto/wa-sqlite`
+`demo/SharedService-sw/`, MIT) as a REFERENCE for the **Web-Locks election/liveness primitives only** — we
+do NOT need its port-broker machinery, because our SW can transfer ports itself. The design is below.
 
 ## Browser RPC → Cap'n Web (decided 2026-08-31)
 
@@ -101,10 +132,13 @@ is not about CF. Do it as green increments: **page↔worker first**, then the Se
   creates it, transfers `port2` + the `graphId` to the worker via the worker's first `postMessage`, and
   uses `port1`; the worker `open`s the host then `newMessagePortRpcSession(port2, host)`. Calls sent
   before the worker's session exists queue on the port, so the async `open` gap is fine.
-- Custom transport (for the SW hop): `interface RpcTransport { send(msg): void|Promise; receive():
-  Promise<msg>; abort?(reason) }`, then `new RpcSession(transport, localMain).getRemoteMain()`. Messages
-  are OPAQUE; the docs bless a transparent relay A→B→C (B forwards frames unparsed) — exactly the SW
-  bounce. Framing + ordering must be preserved.
+- **A `MessagePort` transferred to a Service Worker stays entangled** with the port held by a dedicated
+  Worker (HTML spec: transfer preserves entanglement, and a SW can receive a transferred port — page→SW
+  via `controller.postMessage(msg, [port])`, arriving as `event.ports`; page→Worker via
+  `worker.postMessage(msg, [port])`). This is what lets the SW hold a **direct** capnweb `MessagePort`
+  session to a graph's Worker with the page out of the data path — so the custom `RpcTransport`/opaque-relay
+  the earlier plan reached for is **NOT needed**. (`RpcSession`+custom `RpcTransport` remains available if a
+  future need arises, but nothing in this port uses it.)
 
 **Hop 1 — page↔graph-worker. ✅ LANDED 2026-08-31 (`b248efd`).** `GraphWorkerHost extends RpcTarget`;
 `graph-worker-protocol.ts` and `GraphWorkerClient.ts` DELETED (the protocol is now the host's TS
@@ -115,60 +149,89 @@ over `open()` (so an open failure rejects calls, fail closed, no fake host);
 that seam. `graph-worker-rpc.test.ts` drives the capnweb stub (clone-boundary + failure-as-value kept).
 Net −102 LOC. Browser lane 33/33; full `ci` green.
 
-**Hop 2 — client fetch → Service Worker → page (after hop 1).** The SW↔page forwarding in
-`service-worker.entry.ts` + `page-edge.ts` becomes a capnweb session over a custom `RpcTransport`: the
-page exposes an `RpcTarget` (`{ fetch(reqInit): respInit }` running `makeRouter`), the SW calls it,
-relaying opaque frames. This also sets up the cross-tab failover transport (client → SW → leader page).
+**Hop 2 — make the SW the edge; the page becomes a Worker factory; SW talks to the Worker DIRECTLY.**
+This replaces the interim "SW → page → Worker" double hop with a single data-plane hop. The pieces:
 
-## Cross-tab failover — design (from the SharedService audit)
+- **`makeRouter` + the response framing move into `service-worker.entry.ts`.** The SW becomes the real
+  edge: on an intercepted `fetch('/gremlin/{id}')` it runs `makeRouter`, whose `executor(id)` returns the
+  capnweb stub over the SW's **direct** port to graph `id`'s Worker. (No SQLite/compiler in the SW bundle —
+  only the wire/framing; those stay in the Worker.)
+- **`page-edge.ts` becomes the `WorkerFactory`** (rename the file to `worker-factory.ts` — it is a Worker
+  factory + owner, not an "edge"; the SW is the edge now). It exposes a typed capnweb `WorkerFactory`
+  `RpcTarget` — `openGraph(graphId): Promise<GraphInfo>` — over a control-plane capnweb session with the
+  SW. On `openGraph(G)` it spawns `G`'s Worker if this tab is `G`'s leader, makes a `MessageChannel`,
+  bootstraps the Worker's session with one end (`Bootstrap` → the Worker serves `newMessagePortRpcSession(
+  port, host)`, Hop 1's surface unchanged) and bootstraps the SW's DIRECT session with the other end
+  (`Bootstrap{ port, graphId: G }` → `controller.postMessage(msg, [port])`). Then it is out of the data
+  path; it keeps owning the Worker (a dedicated Worker dies with its document). (`registerServiceWorker`
+  moves here — the factory tab registers the SW, then opens the control session by bootstrapping it a port.)
+- **The SW keeps `graphId → RpcStub<GraphWorkerHost>`** (over the bootstrapped direct port) plus a
+  `RpcStub<WorkerFactory>` per factory tab. On a miss — first request for a graph, or after the browser
+  reaped the SW and its in-memory ports — it calls `factory.openGraph(id)` and pairs the resulting
+  `Bootstrap{graphId:id}` with the direct stub it builds. On a stub rejection meaning the port died (owner
+  tab gone), it evicts and re-calls `openGraph`.
+- **`BrowserGraphManager` splits:** the SW-side half is the router's `executor(id)`/`info`/`create` over
+  the direct stub; the page-side half is the factory (spawn/own/leadership). Hop 1's `GraphWorkerHost` and
+  `graph-worker.entry.ts` are untouched — only *who holds the other end of the port* moves from the page to
+  the SW.
 
-**The pattern, distilled.** rhashimoto's `SharedService` makes a same-origin singleton with automatic
-leader election + crash failover out of THREE primitives, and the genuinely valuable idea is using Web
-Locks for two jobs at once:
+`service-worker-edge.test.ts` (plain fetch + management GET + unmodified GLV) is the contract and stays
+green — it drives the client's `fetch`, so the SW-internal rewiring is invisible to it. This is the
+substrate the cross-tab story below wants, so we build it once here rather than building the in-page
+version and tearing it out.
 
-1. **Election + liveness in one lock.** The leader ("provider") holds `navigator.locks.request(
-   'SharedService-<name>', {signal})` for its whole life. Only one holder exists; the rest queue. Release
-   (tab closed/crashed/aborted) fires the next waiter's callback → it becomes leader. That single lock IS
-   the election AND the failover — no heartbeats, no election protocol.
-2. **A second per-`clientId` lock = death detection.** Each context holds a lock named after its own id;
-   anyone detects that context dying by *requesting* that lock (grantable only once the holder is gone).
-   The leader uses exactly this to close a dead client's port — crash-safe cleanup with no polling.
-3. **A broker to TRANSFER a MessagePort to a specific client.** `BroadcastChannel` carries the "who is
-   leader" announcements and the clients' port *requests*, but cannot transfer a port; so a broker (the
-   `-sw` variant's Service Worker, routing by `clients.get(clientId)`) hands the port to the right client.
-   Then a per-client `MessageChannel` carries the actual nonce-matched RPC.
+## Cross-tab failover — design (SW is the shared edge; leadership only owns the Worker)
 
-**Audit — carry these fixes into our TS version** (the reference is clever and sound; the rough edges are
-small): guard the response-callback lookup (a late/duplicate response for a deleted nonce throws today);
-BOUND the "no provider yet" retry loop and surface a "no leader" state rather than spin forever (same
-unbounded-hang shape as the SW-control race we already fixed); reject-and-retry-once in-flight RPCs across
-a failover instead of just failing them; `crypto.randomUUID()` nonces, not `Math.random()`; fail closed on
-unknown method names (no `target[method]` reaching the prototype). Keep the subtlety that the leader needs
-its OWN `BroadcastChannel` instance to serve its own request.
+Because the SW is a **single origin-wide edge shared by all tabs** (above), cross-tab is NOT about routing
+between edges — there is one edge. It is *only* about **which tab spawns and owns each graph's single
+Worker thread**, and handing that ownership over cleanly when the owner tab dies. That narrows the problem
+sharply, and the port-transfer fact narrows it further: the SW holds a direct port to the Worker, so a
+dead owner tab shows up as the **port breaking** — the death signal is free.
 
-**What we KEEP vs. DROP** — our shape is far narrower than the general library:
-- **Keep** the two-lock scheme: a per-graph lock `mogwai-graph-<id>` = "which page hosts this graph's
-  Worker," and a per-page-`clientId` lock for death detection.
-- **Reuse, don't add:** we already run the Service Worker as broker, and it already has `event.clientId`
-  and `clients.get(id)`. Today `forwardToPage` picks `matchAll()[0]`; the failover version routes
-  `/gremlin/{id}` to the LEADER page for that graph (its clientId), electing it via the per-graph lock.
-- **Drop** the generic `Proxy`/`createSharedServicePort` (our client↔Worker RPC is already the typed
-  `GraphWorkerClient` / `graph-worker-protocol`), the SharedWorker path, and the `fetch('./clientId')`
-  polling (`page-edge.ts` already resolves SW control).
-- New work: the leader acquires the per-graph lock → spawns the Worker; a non-leader tab's fetch routes
-  through the SW to the leader; on leader death the lock releases, a new leader acquires it and **re-opens
-  the opfs-sahpool DB after the dead tab's SAH handles release**.
+**The one valuable primitive we keep from `SharedService`: election + liveness in ONE Web Lock.** The
+owner ("leader") tab holds `navigator.locks.request('mogwai-graph-<id>', {signal})` for its whole life.
+Only one holder exists; other tabs with that graph open queue on the same lock. Release (tab
+closed/crashed) fires the next waiter's callback → it becomes leader. That single lock IS the election AND
+the failover — no heartbeats, no announcement protocol.
+
+**What we DROP from `SharedService` (and why we can):**
+- The **`BroadcastChannel` port-broker** and the whole "can't transfer a port, so route by clientId"
+  dance — our SW transfers ports itself, directly to a client and to a Worker.
+- The **per-`clientId` death-detection lock** — the SW's direct stub rejecting (its entangled port broke
+  when the owner tab's document was destroyed) IS the death signal; no second lock needed to notice it.
+- The generic `Proxy`/`createSharedServicePort` and the SharedWorker path — our RPC is the typed capnweb
+  `GraphWorkerHost` stub, and the edge is the SW, not a SharedWorker.
+
+**The handshake (control plane, typed capnweb).** The SW holds a `RpcStub<WorkerFactory>` per factory tab
+(each bootstrapped once when the tab registers). On a `fetch('/gremlin/{id}')` for which the SW has no live
+stub, it calls `openGraph(id)` on the factory stubs; the tab that is `id`'s leader (holds the lock) spawns
+the Worker if it hasn't and bootstraps the SW a direct port (`Bootstrap{graphId:id}`), then `openGraph`
+resolves with the `GraphInfo`. The SW pairs the arriving port with the call and builds the direct
+`RpcStub<GraphWorkerHost>`. If NO tab yet leads `id`, a tab with it open acquires the lock (that is how it
+becomes leader) and answers. The ONLY native message in any of this is the `Bootstrap` port hand-off.
+
+**Failover.** The leader tab dies → its document is destroyed → its Worker dies and the SW's entangled
+port breaks → the next queued in-flight call on that stub rejects. The SW **evicts the dead stub and
+re-runs the handshake**; the released Web Lock has already promoted a new leader tab, which spawns the
+Worker — **re-opening the opfs-sahpool DB after the dead tab's SAH handles release** (the one timing only a
+real browser settles) — and hands the SW a fresh port. The rejected in-flight request is **retried once**
+against the new stub, so a request in flight at the instant of failover completes rather than erroring.
+
+**Carry these robustness fixes** (from the reference audit, still apply): BOUND the "no leader yet" wait
+and surface a clear 503/"no leader" state rather than spin forever (same unbounded-hang shape as the
+SW-control race already fixed); retry an in-flight RPC exactly once across a failover, then fail closed;
+`crypto.randomUUID()` for any handshake nonce; a write that was acknowledged must not be double-applied
+across a handover (tx-dedup).
 
 **Phased plan.**
-1. **Per-graph leadership in the coordinator.** `BrowserGraphManager` acquires `mogwai-graph-<id>` before
-   spawning a Worker; a page that does not hold the lock does NOT spawn — it registers with the SW as a
-   *client* of that graph (its clientId) instead. One Worker per graph across the whole origin.
-2. **SW routes by leader, not `matchAll()[0]`.** The SW keeps a `graphId → leader clientId` map (fed by
-   the leader announcing on a `BroadcastChannel`), and `forwardToPage` targets `clients.get(leaderId)`;
-   503 with a clear body when no leader is currently elected.
-3. **Failover.** On leader death its per-graph lock releases; the next waiting page's `locks.request`
-   callback fires, it spawns the Worker (re-opening the opfs-sahpool DB) and announces itself the new
-   leader; the SW re-points the map; in-flight requests retry once against the new leader.
+1. **Per-graph leadership in the `WorkerFactory`.** The factory tab acquires `mogwai-graph-<id>` before
+   spawning a Worker; a tab that does not hold the lock does NOT spawn — it just queues on the lock (a
+   leader-in-waiting) and answers the SW's port-handshake only while it holds the lock. One Worker per
+   graph across the whole origin.
+2. **SW handshake + `graphId → stub` map.** The SW asks the current leader for a port on a miss, caches the
+   stub, evicts on rejection; 503 with a clear body while no leader can be elected.
+3. **Failover.** Owner death breaks the port; the released lock promotes the next tab; it spawns and
+   re-opens opfs-sahpool; the SW re-handshakes and retries the in-flight request once.
 4. **`navigator.storage.persist()`** requested once, and surface quota (the 10 GB DO-ceiling analog).
 
 **Tests (multi-tab Playwright — the unknowns live HERE).** Two `context`s (or two pages) sharing one
@@ -250,14 +313,15 @@ seams that are *already* async in the core.
 |---|---|---|
 | `Sql.exec`/`query` (`src/storage.ts:154`) | **sync** | `opfs-sahpool` in a dedicated Worker — sync ✅ proven |
 | compile (`compilePlan`) | **sync**, pure | pure JS/WASM ✅ |
-| `executor(id).framedAsync` | **async** | `postMessage`/`SharedService` boundary ✅ |
+| `executor(id).framedAsync` | **async** | capnweb `MessagePort` session, SW → Worker DIRECT ✅ (Hop 1) |
 | `IoStore.readStream`/`writeStream` (`src/iostore.ts:42`) | **async**, streaming | async OPFS `stream()`/`createWritable()` ✅ proven |
-| RPC payloads (`Framed[]`, `Executable`) | **structured-clone-safe** (already, for the DO) | `postMessage` structured clone — same algorithm; transfer `Framed[]` buffers zero-copy |
+| RPC payloads (`Framed[]`, `Executable`) | **structured-clone-safe** (already, for the DO) | capnweb `encodingLevel: structuredClonable` — `Uint8Array`/`bigint` sent native (a copy, but no base64/JSON blowup) |
 
 The data plane is already clone-safe because the DO RPC boundary already structured-clones it
-(`Program` ships rendered, `Compiled`/`Executable` are plain data — `src/cloudflare/rpc.ts`). The one
-test that green main-thread runs won't catch — a payload that fails to cross the Worker boundary — is
-the browser twin of `test/cloudflare.test.ts`; reuse `rpcTry`/`rpcUnwrap` verbatim.
+(`Program` ships rendered, `Compiled`/`Executable` are plain data — `src/cloudflare/rpc.ts`). Across the
+browser Worker boundary, capnweb turns a query failure into a stub rejection automatically, so the browser
+side needs no `rpcTry`/`rpcUnwrap` (those stay for the DO boundary, `src/rpc.ts`); `graph-worker-rpc.test.ts`
+is the browser twin of `test/cloudflare.test.ts` that a green main-thread run won't catch.
 
 ## The three seams (new leaves under unchanged interfaces)
 
@@ -265,8 +329,8 @@ the browser twin of `test/cloudflare.test.ts`; reuse `rpcTry`/`rpcUnwrap` verbat
 |---|---|---|---|
 | `Sql` (sync) | `BunSqlite` | `DurableObjectSqlite` | `WasmSqlite` — official `@sqlite.org/sqlite-wasm`, `opfs-sahpool` |
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` — `file.stream()` / `createWritable()` (the `IoSink` contract) |
-| `GraphManager` (lifecycle + executor factory) | `BunGraphManager` (`Map`) | `CloudflareGraphManager` (id→DO) | coordinator: id → per-graph leader Worker over `SharedService` (mirrors the CF one) |
-| entry point | `bun/server.ts` | `cloudflare/worker.ts` | a **Service Worker** (`makeRouter` + coordinator + `fetch` + broker) fronting **one Worker per graph** |
+| `GraphManager` (lifecycle + executor factory) | `BunGraphManager` (`Map`) | `CloudflareGraphManager` (id→DO) | SW-side `executor(id)` → a direct capnweb stub to `id`'s Worker; the `WorkerFactory` (page) spawns/owns Workers, Web-Lock leader per graph |
+| entry point | `bun/server.ts` | `cloudflare/worker.ts` | a **Service Worker** = the edge (`makeRouter` + `fetch` intercept + a direct capnweb stub per graph); a `WorkerFactory` page spawns **one Worker per graph** |
 | `Buffer` | Bun global | workerd `nodejs_compat` global | ambient global; the SW entry supplies it: `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer` (Bun's bundler auto-polyfills the import) |
 
 Everything above these leaves — `GraphStore`, the whole compiler, `execute.ts`, wire, `makeRouter` — is
@@ -277,8 +341,11 @@ as a bare ambient global in the four wire files (verified: Bun + real workerd bo
 ## Locked decisions
 
 1. **Official `@sqlite.org/sqlite-wasm`, standard build** (FTS5 + JSONB), VFS **`opfs-sahpool`**.
-2. **One dedicated Worker per graph**; **Web Locks** leader election; **`SharedService`** pattern ported for coordination (not a wa-sqlite dependency).
-3. **Service Worker** as the HTTP edge — unconditional; unmodified `fetch` clients work.
+2. **One dedicated Worker per graph**; **Web Locks** per-graph leader election. `SharedService` is a
+   REFERENCE for the lock election/liveness primitives only — no port-broker, no wa-sqlite dependency.
+3. **Service Worker** as the HTTP edge — unconditional; unmodified `fetch` clients work. **All browser RPC
+   is strongly-typed capnweb** (data plane SW↔Worker; control plane SW↔`WorkerFactory`); the only native
+   message is the capnweb `Bootstrap` port hand-off, which capnweb cannot itself carry.
 4. **`Buffer`** stays an ambient platform global in the core; only the browser entry provides it.
 5. **No COOP/COEP, no JSPI, no second test runner.**
 
@@ -313,7 +380,8 @@ Everything paper- and API-verifiable is done. What's left can only be measured i
   `fetch` (the SW intercept means no browser-specific variant) — itself the proof of the unmodified-client thesis.
 - **New CI lane** (Playwright-capable, headless Chromium) — separate from the current Bun-only `mise run ci`.
 - **Deps (approved):** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — kept out of the Bun/CF
-  bundles by per-target bundling), `playwright` (dev driver). `SharedService` is ported code, not a dep.
+  bundles by per-target bundling), `playwright` (dev driver), `capnweb` (runtime, browser-leaf only — all
+  browser RPC). `SharedService` is a REFERENCE for the Web-Lock primitives, not ported code and not a dep.
 
 ## Build plan
 
@@ -323,15 +391,21 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   contract green in-process via `test/bun-wasm.test.ts`).
 - ✅ `OpfsIoStore.ts` — `IoStore` over async OPFS streaming (LANDED; proven against real OPFS via the
   Playwright lane, `test/browser/browser.test.ts`).
-- ✅ `coordinator.ts` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED, page-hosted;
-  single-tab routing is first-party MessagePort RPC, not SharedService).
-- ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-routed-by-leader + handoff. The one
-  remaining increment; DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built.
+- ✅ `BrowserGraphManager` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED,
+  page-hosted; single-tab routing is a direct capnweb stub, Hop 1). ⏳ Hop 2 splits it: the SW-side half is
+  the router's `executor(id)` over a direct stub, the page-side half becomes the `WorkerFactory`.
+- ⏳ **Hop 2 — SW is the edge; page is the `WorkerFactory`; direct SW↔Worker capnweb** (see "Hop 2" above).
+  Moves `makeRouter` + framing into `service-worker.entry.ts`; renames `page-edge.ts → worker-factory.ts`
+  exposing a typed `WorkerFactory` (`openGraph`); the SW holds a direct stub per graph. Kills the interim
+  double hop. `service-worker-edge.test.ts` is the unchanged contract.
+- ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-holds-a-stub-per-leader + handoff.
+  DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built. Builds on Hop 2.
 - ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` (now `extends RpcTarget`) +
   `graph-worker.entry.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
   opfs-sahpool, clone boundary tested. (Hop 1 replaced the hand-rolled `GraphWorkerClient`/protocol.)
-- ✅ service worker entry — `service-worker.entry.ts` (LANDED; the SW BROKERS an intercepted fetch to
-  the page, because it cannot spawn the store's Worker — `makeRouter` runs in the page, `page-edge.ts`).
+- ✅ service worker entry — `service-worker.entry.ts` (LANDED interim: the SW BROKERS an intercepted fetch
+  to the page, which runs `makeRouter` — `page-edge.ts`. Hop 2 makes the SW itself the edge running
+  `makeRouter`, talking directly to each graph's Worker).
 - ✅ `test/browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the
   OpfsIoStore, GraphWorkerHost, transport, coordinator, and SW-edge contracts + the clone-boundary test).
   Later: fuller `graphContract` coverage in-browser + the crash-failover tests.
