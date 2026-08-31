@@ -24,18 +24,21 @@ browser primitives almost one-for-one:
 
 | Cloudflare concept | Browser analog | Why it lines up |
 |---|---|---|
-| One DO = one isolated graph, single-threaded | One **Worker** owning one (or N) SQLite-WASM database(s) | Single-threaded run-to-completion context; no shared-memory races inside it |
-| `ctx.storage.sql` — **synchronous** SQLite | SQLite-WASM over **OPFS `SyncAccessHandle`** (sync, inside a Worker) | Both are synchronous SQLite; the `Sql` seam is already sync *because of the DO* (`src/storage.ts:1`) |
+| One DO = one isolated graph, single-threaded | One **dedicated Worker** (in the elected leader tab) owning one (or N) SQLite-WASM database(s) | Single-threaded run-to-completion context; no shared-memory races inside it |
+| `ctx.storage.sql` — **synchronous** SQLite | SQLite-WASM over **OPFS `SyncAccessHandle`** (sync, inside a *dedicated* Worker) | Both are synchronous SQLite; the `Sql` seam is already sync *because of the DO* (`src/storage.ts:1`) |
 | DO RPC — **structured-clone** args/results | Worker `postMessage` — **structured-clone** | Same serialization algorithm; the same constraint already shaped the data plane (see §3) |
 | Worker edge (parse wire, frame HTTP) → DO (run) | Service Worker `fetch` handler → Worker (run) | `makeRouter` is already `Request → Response` (`src/router.ts:89`), i.e. the exact `FetchEvent.respondWith` contract |
 | `idFromName` provisions a DO on first access | `WasmGraphManager` opens an OPFS db on first access | `BunGraphManager` already does exactly this with a `Map<id, store>` (`src/bun/BunGraphManager.ts:63`) |
 | R2 bucket binding backing `io()` | OPFS directory via async File System Access API | `IoStore` is *already async* (`src/iostore.ts:42`); async OPFS slots straight in |
 | 10 GB DO storage ceiling | Origin storage quota (OPFS) | Same "big store, small isolate" pressure the streaming `IoStore` was built for |
 
-The payoff of that last row is worth stating plainly: **the closest browser analog to a Durable
-Object is a `SharedWorker`** — one instance shared across every same-origin tab, single-threaded,
-owning the storage. Tabs are the "clients." That is the DO's isolation and lifetime model, in the
-browser, for free. (Caveat and the dedicated-Worker fallback: §7.)
+The payoff of the top rows is worth stating plainly: **the browser analog of a Durable Object is a
+single dedicated Worker, in one elected "leader" tab, owning the storage** — every other tab routes
+its queries to that one Worker. A `SharedWorker` is *not* the DO (it cannot open an OPFS
+`SyncAccessHandle` — that method is spec-restricted to a dedicated Worker); its only role is brokering
+messages between tabs. Web Locks elects the leader and migrates it automatically when that tab
+closes, which is the DO's one-instance-per-name guarantee, synthesized. The mechanism is a small,
+proven pattern (rhashimoto's `SharedService`); the full topology is §7.
 
 ---
 
@@ -64,13 +67,12 @@ normalizes `boolean`/`bigint`/big-decimal so the DO's stricter `SqlStorageValue`
 SQLite is more permissive than the DO but stricter than Bun; running the existing coercion is safe
 and keeps one behavior across all three runtimes.
 
-**One thing to decide:** which OPFS VFS.
-- `opfs-sahpool` (SAH Pool) — pre-opens a pool of sync access handles, **no COOP/COEP headers
-  required**, fastest, but single-connection (one Worker owns the file). Best default (see §7, §8).
-- Default `OpfsDb` VFS — also uses `SyncAccessHandle`, supports the standard file model. Also no
-  COOP/COEP on the modern sync-handle path.
-- The legacy SharedArrayBuffer async proxy — **requires COOP/COEP** cross-origin isolation. Avoid
-  unless forced (see §5, §8).
+**VFS — `opfs-sahpool`, locked.** It pre-opens a pool of sync access handles, is the fastest OPFS
+option, and requires **no COOP/COEP** — at the cost of a single connection (one dedicated Worker owns
+the DB at a time). That single-connection constraint *is* the leader model (§7), which is the faithful
+DO analog (one instance per graph), so it is a feature here, not a limitation. `createSyncAccessHandle`
+is spec-restricted to a **dedicated** Worker, so the DB cannot live in a SharedWorker regardless. The
+multi-connection VFSes are a documented fallback only (§8·1), not the default.
 
 ### 2.2 `IoStore` → OPFS documents (new leaf)
 
@@ -93,18 +95,16 @@ from birth.
 `GraphManager` (`src/manager.ts`) is lifecycle (create/info/destroy) **and** the executor factory /
 federation source. Two browser-side pieces:
 
-1. **Inside the Worker:** `WasmGraphManager`, a near-verbatim copy of `BunGraphManager` — a
+1. **Inside the leader Worker:** `WasmGraphManager`, a near-verbatim copy of `BunGraphManager` — a
    `Map<id, GraphStore>` over OPFS-backed `WasmSqlite` handles, create-on-demand
-   (`src/bun/BunGraphManager.ts:63`). One Worker can own N graphs, exactly as one Bun process does.
-   (Or one Worker per graph for stronger DO-style isolation — a topology choice, §7, not a code
-   difference at this seam.)
+   (`src/bun/BunGraphManager.ts:63`). One leader Worker owns N graphs, exactly as one Bun process does.
 
-2. **Across the thread boundary:** a `PostMessageGraphManager` that mirrors
+2. **Across the tab/thread boundary:** a `PostMessageGraphManager` that mirrors
    `CloudflareGraphManager` (`src/cloudflare/cloudflare-graph-manager.ts:87`). Where the CF manager
-   proxies to a DO via `ns.getByName(id)` + RPC, this one proxies to the Worker via `postMessage`
-   with a request id and a `MessageChannel` (or a promise-keyed correlation map). `executor(id)`
-   returns a `RemoteExecutor` whose `framedAsync` posts `{gremlin, params, paramTypes}` and awaits
-   `Framed[]` back. This is the direct analog of `GraphDatabase.framed`
+   proxies to a DO via `ns.getByName(id)` + RPC, this one proxies to the **leader** Worker over the
+   `SharedService` channel (§7) — Web Locks decides which tab currently hosts it, transparently.
+   `executor(id)` returns a `RemoteExecutor` whose `framedAsync` posts `{gremlin, params, paramTypes}`
+   and awaits `Framed[]` back. This is the direct analog of `GraphDatabase.framed`
    (`src/cloudflare/graph-store-do.ts:74`).
 
 Note what you get to **drop**: the CF edge/DO split exists because Cloudflare bills a cheap stateless
@@ -175,14 +175,13 @@ are **synchronous** (the spec moved them off Promises), so SQLite-WASM's VFS cal
 synchronously inside the Worker. No async import under WASM → no JSPI. The user's instinct is
 correct.
 
-JSPI (or the older SharedArrayBuffer + `Atomics.wait` proxy, which drags in the COOP/COEP
-requirement) becomes relevant **only if you deliberately back SQLite with async storage** — e.g.
-async OPFS without sync handles, or IndexedDB — which you would consider only to work around the
-multi-tab single-writer limitation (§8). So JSPI is a *contingency of a storage decision*, not a
-baseline dependency. Recommendation: **do not reach for JSPI**; if multi-tab write concurrency
-forces async storage, prefer leader-election (§8) over an async VFS, and keep the whole stack
-synchronous. Worth a one-hour spike to confirm current browser sync-handle support, but the design
-does not rest on JSPI.
+JSPI (or the older SharedArrayBuffer + `Atomics.wait` proxy, which drags in COOP/COEP) would only
+matter if SQLite were backed by *async* storage. The locked design isn't: `opfs-sahpool` is
+synchronous inside the leader's dedicated Worker (§7), so nothing under WASM ever awaits — and even
+the multi-connection fallback (§8·1) stays synchronous (`OPFSCoopSyncVFS` keeps its methods sync via
+a return-error-then-retry wrapper). So JSPI is not needed on either path. **Do not reach for JSPI.**
+Worth a one-hour browser spike to confirm current sync-handle support, but the design does not rest
+on it.
 
 ---
 
@@ -234,41 +233,43 @@ the Fetch-API router — is already browser-portable.
 
 ---
 
-## 7. Topology — Service Worker vs dedicated Worker vs SharedWorker
+## 7. Topology — the leader Worker and the Service Worker edge
 
-Three viable shapes. The choice turns on one question: **do you want unmodified `fetch('/gremlin/g')`
-to reach the in-browser database?** That property — an unmodified TinkerPop GLV talking HTTP to a
-database with no server — is the project's entire thesis, extended to the tab.
+Two decisions settle the topology, both locked.
 
-**Recommended: SharedWorker (the DO) + optional Service Worker (the HTTP edge).**
+**Where the graph lives:** a **single dedicated Worker, in one elected "leader" tab — this is the
+DO.** It runs `makeRouter` + `WasmGraphManager` + `WasmSqlite` over `opfs-sahpool` (§2.1). It
+*cannot* be a SharedWorker: `createSyncAccessHandle` is spec-restricted to a dedicated Worker. Every
+other tab is a *client* that routes its queries to the leader and gets `Framed[]` back — the exact
+shape of `CloudflareGraphManager` proxying to the one DO.
 
-- A **`SharedWorker`** is the tightest DO analog: one instance per origin, shared across all tabs,
-  single-threaded, owning the SQLite-WASM-over-OPFS store. It runs `makeRouter` + `WasmGraphManager`
-  + `WasmSqlite`. This is where the graph lives, once, for the whole origin — exactly a DO's
-  one-instance-per-name model.
-- A **Service Worker** intercepts `fetch` for `/gremlin/*` and forwards to the SharedWorker,
-  returning its `Response`. Because `makeRouter` is already `Request → Response`, the Service Worker
-  is almost pass-through. This is what preserves the unmodified-client property: a GLV does
-  `fetch('/gremlin/g')` and never knows there is no network.
+Cross-tab coordination is a proven ~200-line pattern — rhashimoto's **`SharedService`**:
 
-Two real browser constraints shape this and must be respected:
+- **Web Locks elects the leader and watches its lifetime.** The first tab becomes the provider; when
+  it closes *or crashes*, the lock releases and another tab automatically becomes the provider and
+  re-opens the DB (`opfs-sahpool` re-acquires its handle pool). This is the DO's one-instance-per-name
+  guarantee, synthesized — and the automatic failover is what makes it safe.
+- **A Service Worker (or SharedWorker) brokers the `MessagePort`s** between tabs and the leader — used
+  only as a message relay, never to hold OPFS.
+- **Mid-migration correctness:** a write in flight when the leader migrates is re-sent to the new
+  leader; an idempotent-retry / tx-dedup guard (rhashimoto's pattern) keeps it from double-applying.
+  A detail to honor, not a blocker.
 
-- **A Service Worker cannot spawn nested dedicated Workers**, and its lifecycle is
-  terminate-when-idle — so you must *not* run SQLite inside the Service Worker itself (OPFS handles
-  would thrash on every SW restart). The SW is a thin forwarder; the SharedWorker holds the store.
-  The SharedWorker is created by the page (or handed to the SW as a `MessagePort` the page transfers),
-  because the SW can't create it.
-- **`SharedWorker` support:** Chrome/Firefox yes; Safari dropped it and restored it in Safari 16
-  (2022). If the target matrix includes older Safari, the fallback is a **dedicated Worker elected as
-  the single owner via the Web Locks API** (`navigator.locks` — one tab holds the lock and owns the
-  store; others proxy to it over `BroadcastChannel`). Slightly more plumbing, same single-owner
-  guarantee. The spike should confirm the current support matrix rather than trust this paragraph.
+**The HTTP edge is a Service Worker — locked, and it is the whole point.** A **Service Worker
+intercepts `fetch` for `/gremlin/*`** and forwards to the leader, returning its `Response`; since
+`makeRouter` is already `Request → Response`, the SW is near pass-through. This is what carries the
+project's thesis into the tab: **any client that speaks `fetch` just works, unmodified** — an
+unmodified TinkerPop GLV, a bare `fetch()`, a third-party library, anything — with **no
+monkey-patching of `fetch`** and no in-page shim to install. The SW is the seam; the client sees a
+normal URL over a normal `fetch`, and never knows there is no network. And **one Service Worker does
+double duty** — the `fetch` intercept *and* the `SharedService` `MessagePort` broker (rhashimoto's
+`SharedService-sw` variant brokers ports through a Service Worker) — so the HTTP edge and the cross-tab
+coordination are a single component.
 
-**Simplest shape, if you don't need `fetch()` interception:** skip the Service Worker entirely. The
-in-page client talks to the (Shared)Worker through a thin `fetch`-shaped shim — a function that
-takes a Request-like and returns a Response-like over `postMessage`. You lose the "literal fetch"
-magic but the whole app collapses to *page + one Worker*. Good for an embedded/library use where the
-consumer is your own code, not an unmodified GLV.
+**Library + VFS, locked:** the **official `@sqlite.org/sqlite-wasm`** build for the DB (canonical
+SQLite, sync OO1 API fits the sync `Sql` seam) on **`opfs-sahpool`**, plus the **`SharedService`
+*pattern*** for coordination (VFS/build-agnostic, ~200 lines). `wa-sqlite` is not adopted as a
+library; its `OPFSCoopSyncVFS` is referenced only as the multi-connection fallback (§8·1).
 
 ---
 
@@ -276,18 +277,23 @@ consumer is your own code, not an unmodified GLV.
 
 These have no Bun or Cloudflare analog and are where the real design attention goes:
 
-1. **Multi-tab concurrency = single-writer election.** A DO is single-writer by platform
-   construction. In the browser, N tabs of one origin share OPFS, and the SAH-Pool VFS is
-   single-connection (one Worker may hold the file). The SharedWorker/Web-Locks topology (§7) *is* the
-   answer: elect exactly one owner of the store; all tabs route through it. Get this right and you
-   never touch async storage or JSPI. Get it wrong (two Workers both opening the OPFS db) and you get
-   corruption or lock errors. **This is the #1 design risk of the whole port** — not the SQLite, not
-   the Buffer, but the concurrency-owner election. It deserves the first spike.
+1. **Multi-tab concurrency = single-writer election (resolved — §7).** A DO is single-writer by
+   platform construction; in the browser we synthesize that with a **Web-Locks-elected leader Worker**
+   (the `SharedService` pattern). This was the #1 design risk, and the spike closed it: the pattern is
+   proven, ~200 lines, with automatic failover on tab close/crash. The one part still worth a *browser*
+   test is that a hard-crashed leader releases its `opfs-sahpool` handles promptly enough for a clean
+   takeover.
+   **Fallback — multi-connection**, only if leader failover proves flaky in practice or a workload
+   genuinely needs several tabs writing without a coordinator: it is not a free upgrade. It costs
+   either COOP/COEP (the official `opfs` VFS needs `SharedArrayBuffer`) or a library swap to
+   wa-sqlite's `OPFSCoopSyncVFS` (no COOP/COEP, but **high write-transaction overhead**), and buys
+   little — even multi-connection VFSes serialize (*"no such thing as N concurrent readers"*). So it
+   stays a fallback, not the default.
 
-2. **COOP/COEP cross-origin isolation.** Only the legacy SharedArrayBuffer OPFS proxy needs it;
-   the SAH / sync-handle path does **not**. Choosing `opfs-sahpool` (§2.1) buys you out of the header
-   requirement entirely, which matters because COOP/COEP breaks embedding third-party scripts/iframes
-   and is a deployment headache. Decide this on day one: **sync-handle VFS, no COOP/COEP.**
+2. **COOP/COEP — avoided by the locked choice.** `opfs-sahpool` needs no cross-origin isolation, which
+   matters because COOP/COEP breaks embedding third-party scripts/iframes. The headers would resurface
+   only on the multi-connection fallback *if* it used the official `opfs` VFS (the wa-sqlite
+   `OPFSCoopSyncVFS` fallback avoids them). On the primary path: **no COOP/COEP.**
 
 3. **Storage durability / eviction.** OPFS is persistent and origin-scoped but evictable under
    pressure unless you call `navigator.storage.persist()`. Quota is generous (often a large fraction
@@ -323,12 +329,13 @@ reinforce each other.
 
 Do the risky, cheap things first; each answers a yes/no that gates the rest.
 
-1. **Concurrency owner (highest risk, §8·1).** SharedWorker (or Web-Locks-elected dedicated Worker)
-   owning one OPFS SQLite db, two tabs writing. Prove single-writer holds and no corruption. If
-   SharedWorker's support matrix disqualifies it, prove the Web-Locks fallback here.
-2. **Sync SQLite over OPFS, no COOP/COEP (§2.1, §5).** `@sqlite.org/sqlite-wasm` with `opfs-sahpool`
-   inside a Worker; run the existing schema DDL (`storage.ts` SCHEMA) and a handful of `query`
-   round-trips through a `WasmSqlite` shim. Confirms the sync seam and kills the JSPI question.
+1. **Concurrency owner — design resolved (§7); one browser test remains.** The leader model
+   (`SharedService`: Web-Locks election + a dedicated-Worker DB) is locked. The test is the failover
+   edge: kill the leader tab mid-write and confirm another tab takes over cleanly — the Web Lock
+   releases, `opfs-sahpool` handles free, no corruption, and the in-flight write is dedup-safe.
+2. **Sync SQLite over OPFS, no COOP/COEP (§2.1, §5).** Official `@sqlite.org/sqlite-wasm` with
+   `opfs-sahpool` inside a dedicated Worker; run the existing schema DDL (`storage.ts` SCHEMA) and a
+   handful of `query` round-trips through a `WasmSqlite` shim. Confirms the sync seam and settles JSPI.
 3. **Worker-boundary clone test (§3).** Post a real query, get `Framed[]` back (transferred), frame a
    Response. This is the browser twin of `test/cloudflare.test.ts` — the thing green main-thread CI
    will *not* catch. Reuse `rpcTry`/`rpcUnwrap` verbatim.
@@ -337,7 +344,8 @@ Do the risky, cheap things first; each answers a yes/no that gates the rest.
    with `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer;`, which triggers Bun's auto
    polyfill. The "compiler `Buffer` leak" was a false alarm (comments).
 5. **`fetch` interception end-to-end (§7).** Register the Service Worker, `fetch('/gremlin/g')` from
-   a page, hit the SharedWorker, get a GraphBinary response. This is the "unmodified client" proof.
+   a page, reach the leader Worker (through the `SharedService` broker the same SW provides), get a
+   GraphBinary response. This is the "unmodified client" proof — and exercises the SW's double duty.
 6. **`IoStore` over OPFS (§2.2).** GraphSON export/import streaming through `OpfsIoStore`; confirm
    the two-pass adjacency load works page-at-a-time and peak memory stays bounded.
 
@@ -351,10 +359,10 @@ the whole reason the estimate is "leaves, not a rewrite."
 
 | Interface | Bun leaf | Cloudflare leaf | **Browser leaf (new)** | Core above it |
 |---|---|---|---|---|
-| `Sql` (sync) | `BunSqlite` | `DurableObjectSqlite` | `WasmSqlite` (OPFS SAH) | `GraphStore`, whole compiler — **unchanged** |
+| `Sql` (sync) | `BunSqlite` | `DurableObjectSqlite` | `WasmSqlite` (official `@sqlite.org/sqlite-wasm`, `opfs-sahpool`) | `GraphStore`, whole compiler — **unchanged** |
 | `IoStore` (async, streaming) | `FileIoStore` | `R2IoStore` | `OpfsIoStore` | `io()` service, formats — **unchanged** |
 | `GraphManager` (lifecycle + executor factory) | `BunGraphManager` | `CloudflareGraphManager` | `WasmGraphManager` + `PostMessageGraphManager` | `makeRouter` — **unchanged** |
-| entry point | `bun/server.ts` | `cloudflare/worker.ts` | `sharedworker.ts` + optional `sw.ts` | `application()` DI — **unchanged** |
+| entry point | `bun/server.ts` | `cloudflare/worker.ts` | leader dedicated Worker (`makeRouter`) + a Service Worker (`fetch` intercept + `SharedService` port broker) | `application()` DI — **unchanged** |
 | `Buffer` (ambient global) | Bun global | workerd `nodejs_compat` global | browser **entry** does `import { Buffer } from 'buffer'; globalThis.Buffer = Buffer` | wire/execute/http use the bare global — **unchanged** |
 
 Everything in the rightmost "unchanged" column is the reason this is a feasibility *yes*.
