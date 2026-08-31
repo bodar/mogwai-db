@@ -8,12 +8,32 @@
 // ubuntu-latest images and here at /usr/bin/google-chrome-stable) via `executablePath`, so no Playwright
 // browser download is needed — only the driver package. localhost is a secure context, so OPFS + Web
 // Locks + Service Workers all work over plain HTTP with no certs and no COOP/COEP.
-import { chromium } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 import { bundleBrowser } from '../../src/browser/bundle.ts';
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
 export const CHROME_PATH = process.env.MOGWAI_CHROME ?? '/usr/bin/google-chrome-stable';
+
+/**
+ * Launch headless Chrome with BACKGROUND-THROTTLING DISABLED. A headless page/worker has no visible tab,
+ * so Chrome treats it as backgrounded and throttles timers, rAF and more to as little as once a minute —
+ * which on a loaded CI runner stalls anything that chains many async turns (opfs-sahpool init, the wire
+ * frame loop, a Service Worker handshake) until the test's own timeout fires. It reproduces ONLY under
+ * CI load, which is exactly why the flags are not optional: the heaviest browser tests timed out on CI
+ * while passing locally in under a second. The three flags are the standard headless-testing set.
+ */
+function launchChrome(): Promise<Browser> {
+  return chromium.launch({
+    headless: true,
+    executablePath: CHROME_PATH,
+    args: [
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+    ],
+  });
+}
 
 /** Resolve the sqlite-wasm binary the package publishes as `./sqlite3.wasm`, served alongside a bundled
  *  worker so `@sqlite.org/sqlite-wasm` finds it by default (it fetches `sqlite3.wasm` relative to the
@@ -64,7 +84,7 @@ export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 6
     },
   });
 
-  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  const browser = await launchChrome();
   const consoleLines: string[] = [];
   try {
     const page = await browser.newPage();
@@ -122,7 +142,7 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     },
   });
 
-  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  const browser = await launchChrome();
   const consoleLines: string[] = [];
   try {
     const page = await browser.newPage();
