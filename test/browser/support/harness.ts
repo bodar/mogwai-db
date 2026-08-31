@@ -1,19 +1,40 @@
 // The Playwright browser lane's shared driver — the twin of test/cloudflare.test.ts's spawn-and-drive,
-// but for a real Chrome instead of wrangler dev. The lane is SEPARATE from the Bun-only `mise run ci`:
-// the test `describe`s are `skipIf(!MOGWAI_BROWSER_LANE)`, so a bare `bun test` discovers and SKIPS them
-// (no headless browser), and only `mise run test:browser` (which sets the env) runs them for real.
+// but for a real Chrome instead of wrangler dev. The lane runs as part of a normal `bun test` / `mise run
+// ci` (its own `browser` CI bracket, like L1–L5), and each `describe` is `skipIf(!chromeAvailable())` so a
+// machine with no system Chrome (or an explicit `$MOGWAI_SKIP_BROWSER`) SKIPS them cleanly rather than
+// failing — CI has Chrome, so the gate still covers them there.
 //
 // Playwright is used as a DRIVER LIBRARY (`chromium.launch()`), not `@playwright/test` — no second test
 // runner; `bun test` stays the one runner. It drives the SYSTEM Chrome (present on GitHub's
 // ubuntu-latest images and here at /usr/bin/google-chrome-stable) via `executablePath`, so no Playwright
 // browser download is needed — only the driver package. localhost is a secure context, so OPFS + Web
 // Locks + Service Workers all work over plain HTTP with no certs and no COOP/COEP.
+import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { bundleBrowser } from '../../../src/browser/bundle.ts';
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
 export const CHROME_PATH = process.env.MOGWAI_CHROME ?? '/usr/bin/google-chrome-stable';
+
+/** The skip gate for every browser `describe`. The lane runs only when ALL hold:
+ *   - `$MOGWAI_RUN_BROWSER` is set — because the lane's on-the-fly `Bun.build` (which reads the whole
+ *     vendored gremlin client) is unreliable under the FULL suite's file-descriptor load in ONE bun
+ *     process (measured: `EBADF`/`EINVAL` reading the client), but rock-solid in its OWN process. So it
+ *     runs isolated: the `browser` CI bracket and the `mise run test:browser` step set this flag, while a
+ *     bare `bun test` / the mixed core run leaves it unset and SKIPS the lane. Use `mise run test`.
+ *   - a system Chrome binary is present (the lane drives it, no Playwright download) — so a machine
+ *     without Chrome skips cleanly even with the flag; CI has Chrome, so the gate still covers it there.
+ *   - `$MOGWAI_SKIP_BROWSER` is unset — the escape hatch for a present-but-unlaunchable Chrome. */
+export function browserLaneEnabled(): boolean {
+  if (process.env.MOGWAI_SKIP_BROWSER) return false;
+  if (!process.env.MOGWAI_RUN_BROWSER) return false;
+  try {
+    return existsSync(CHROME_PATH);
+  } catch {
+    return false;
+  }
+}
 
 // ONE shared Chrome for the whole browser lane. Launching a fresh Chrome PER test file hung on CI: the
 // stage timing showed the 4th/5th `chromium.launch()` never resolving under the runner's resource limits,

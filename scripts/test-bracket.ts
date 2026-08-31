@@ -16,7 +16,8 @@
  * ## The bracket function is TOTAL, so nothing is ever forgotten
  *
  * Every discovered file maps to exactly one bracket:
- *   - `test/L<n>-<name>/…`  →  bracket `L<n>`  (regex on the path — L1, L2, … Ln)
+ *   - `test/L<n>-<name>/…`  →  bracket `L<n>`     (regex on the path — L1, L2, … Ln)
+ *   - `test/browser/…`      →  bracket `browser`  (the one lane that drives a real Chrome, on its own runner)
  *   - everything else       →  bracket `other`
  * This is the load-bearing property carried over from the sharder: the brackets are DERIVED from
  * discovery, not a hand-written path list, so a new `test/L6-whatever/` dir becomes its own `L6`
@@ -44,9 +45,12 @@ const PATTERNS = [
   'test/**/*_spec_*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}',
 ];
 
-/** The TOTAL bracket function. `test/L<n>-…` → `L<n>`; anything else → `other`. Keep it pure and
- *  path-only so `--matrix` and a run agree without re-scanning. */
+/** The TOTAL bracket function. `test/L<n>-…` → `L<n>`; `test/browser/…` → `browser` (its own runner, so
+ *  the one bracket that launches a real Chrome is isolated and legible — a red `test (browser)` says the
+ *  browser lane broke); anything else → `other`. Keep it pure and path-only so `--matrix` and a run agree
+ *  without re-scanning. */
 function bracketOf(file: string): string {
+  if (file.startsWith('test/browser/')) return 'browser';
   return file.match(/^test\/(L\d+)-/)?.[1] ?? 'other';
 }
 
@@ -57,19 +61,16 @@ function discover(root: string): string[] {
   return files;
 }
 
-/** Group discovered files by bracket. Bracket order: L-levels ascending by number, then `other` last
- *  (so the matrix and the --list output read L1, L2, …, other). */
+/** Group discovered files by bracket. Bracket order: L-levels ascending by number, then `browser`, then
+ *  `other` last (so the matrix and the --list output read L1, L2, …, browser, other). */
 function brackets(root: string): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   for (const file of discover(root)) {
     const key = bracketOf(file);
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(file);
   }
-  const ordered = [...groups.keys()].sort((a, b) => {
-    if (a === 'other') return 1;
-    if (b === 'other') return -1;
-    return Number(a.slice(1)) - Number(b.slice(1));
-  });
+  const rank = (k: string) => (k === 'other' ? Number.MAX_SAFE_INTEGER : k === 'browser' ? Number.MAX_SAFE_INTEGER - 1 : Number(k.slice(1)));
+  const ordered = [...groups.keys()].sort((a, b) => rank(a) - rank(b));
   return new Map(ordered.map((k) => [k, groups.get(k)!.sort()]));
 }
 
@@ -98,6 +99,10 @@ if (!mine) throw new Error(`unknown bracket ${JSON.stringify(wanted)} — discov
 
 console.log(`bracket ${wanted}: ${mine.length} of ${discover(root).length} discovered file(s)`);
 
+// The browser bracket runs in its OWN process (this spawn), so activate the lane here — its on-the-fly
+// Bun.build is unreliable under the full suite's FD load but solid isolated (see harness browserLaneEnabled).
+const env = wanted === 'browser' ? { ...process.env, MOGWAI_RUN_BROWSER: '1' } : undefined;
+
 // `bun test` with explicit paths, inheriting stdio so the reporter output is the normal one.
-const run = Bun.spawn(['bun', 'test', ...mine], { cwd: root, stdio: ['inherit', 'inherit', 'inherit'] });
+const run = Bun.spawn(['bun', 'test', ...mine], { cwd: root, stdio: ['inherit', 'inherit', 'inherit'], env });
 process.exit(await run.exited);

@@ -124,9 +124,13 @@ run = "bash scripts/init-submodule.sh"
 # so a test run must gate on the type-check first — else a type error ships green under a bare
 # `bun test` (which is how the build once went red after a refactor passed its tests).
 [tasks.test]
-description = "Full suite: corpus + contract + L3 conformance (both runtimes)"
+description = "Full suite: the Bun-process core, then the browser lane in its OWN process"
 depends = ["install", "check", "submodule"]
-run = "bun test"
+# TWO processes on purpose. Step 1 is the core suite; the browser `describe`s discover but SKIP (the lane
+# flag is unset), so no Chrome and no heavy Bun.build under the full-suite FD load. Step 2 runs JUST the
+# browser lane in a fresh process with the flag set — isolated, where its bundling is reliable (and it
+# self-skips if there is no system Chrome). CI runs the same split as parallel bracket jobs instead.
+run = ["bun test", "MOGWAI_RUN_BROWSER=1 bun test test/browser/"]
 [tasks."test:cf-limits"]
 description = "Instrument: L3 conformance with every compiled statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]
@@ -138,14 +142,17 @@ env = { MOGWAI_CF_LIMITS = "1" }
 run = "bun test test/L3-conformance"
 
 # The BROWSER lane — Playwright drives a real (system) Chrome against the browser leaves (src/browser/*).
-# A SEPARATE lane, deliberately outside `mise run ci`: the core gate stays Bun-only (no browser needed).
-# The tests live under test/browser/ but their `describe`s are `skipIf(!MOGWAI_BROWSER_LANE)`, so a bare
-# `bun test` / `mise run test` discovers and SKIPS them (no Chrome) — only this task, which sets the env,
-# runs them for real. It has its own CI job (.github/workflows/ci.yml `browser`). No submodule.
+# Part of the normal gate now: the tests run under a bare `bun test` / `mise run ci` and get their own CI
+# runner as the `browser` bracket (scripts/test-bracket.ts), like L1–L5. Each `describe` is
+# `skipIf(!chromeAvailable())`, so a machine with no system Chrome (or `$MOGWAI_SKIP_BROWSER=1`) SKIPS them
+# cleanly rather than failing; CI has Chrome, so the gate covers them there. This task is the local
+# convenience for running JUST the lane. No submodule.
 [tasks."test:browser"]
 description = "Browser lane: Playwright → real Chrome over the browser leaves (OPFS, opfs-sahpool)"
 depends = ["install", "check"]
-env = { MOGWAI_BROWSER_LANE = "1" }
+# MOGWAI_RUN_BROWSER activates the lane (harness browserLaneEnabled); it runs in its OWN process, which is
+# what keeps the heavy on-the-fly Bun.build reliable (mixed with the full suite it hits EBADF).
+env = { MOGWAI_RUN_BROWSER = "1" }
 # Trailing slash scopes to the directory — `bun test test/browser` is a PREFIX that would also pull in
 # test/browser-wasm.test.ts (the Bun-only WASM contract, which must stay in the core gate).
 run = "bun test test/browser/"

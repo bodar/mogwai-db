@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
 import type { Page } from 'playwright';
-import { withBrowserContext } from './support/harness.ts';
+import { withBrowserContext, browserLaneEnabled } from './support/harness.ts';
 
 // The cross-tab failover proof — the one increment whose load-bearing facts only a real browser settles.
 // Two tabs share ONE origin (one OPFS, one Web-Lock namespace, one Service Worker). Tab A leads a graph;
@@ -11,7 +11,7 @@ import { withBrowserContext } from './support/harness.ts';
 // its MessagePort, so the SW's stub to the dead Worker HANGS until the new leader (elected by the released
 // Web Lock) pushes a fresh port; that push disposes the dead stub, the hung call rejects, and the manager
 // retries once against the new leader. So this test also exercises the in-flight-across-failover retry.
-describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: cross-tab leader failover', () => {
+describe.skipIf(!browserLaneEnabled())('browser: cross-tab leader failover', () => {
   test('a hard-killed leader hands the graph to another tab, data intact', async () => {
     await withBrowserContext(
       {

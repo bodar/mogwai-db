@@ -17,11 +17,13 @@ on:
 # test bracket, so it is the fan-out that matters most — see its job below.
 #
 # The `test` fan-out is by BRACKET, not anonymous shard: the `plan` job runs `test:bracket --matrix`
-# to discover the bracket names (L1, L2, …, other), and the `test` job spins one runner per bracket,
-# named `test (L2)` in the UI. So a red run says WHICH layer broke — `test (L2)` → `mise run L2`
-# locally — without opening a job. Brackets are DERIVED from discovery (`test/L<n>-…` → `L<n>`, else
-# `other`; scripts/test-bracket.ts), so a new test file cannot escape every bracket and a new
-# `test/L6-…/` dir becomes its own `L6` runner with no edit here. `other` is one runner for now —
+# to discover the bracket names (L1, L2, …, browser, other), and the `test` job spins one runner per
+# bracket, named `test (L2)` in the UI. So a red run says WHICH layer broke — `test (L2)` → `mise run L2`
+# locally — without opening a job. Brackets are DERIVED from discovery (`test/L<n>-…` → `L<n>`,
+# `test/browser/…` → `browser`, else `other`; scripts/test-bracket.ts), so a new test file cannot escape
+# every bracket and a new `test/L6-…/` dir becomes its own `L6` runner with no edit here. The `browser`
+# bracket is the one that drives a real Chrome (preinstalled on the runner); it skips itself where no
+# Chrome exists (`chromeAvailable()`), so it is safe in the aggregate. `other` is one runner for now —
 # split it (cost-balance) only if it out-runs the largest L bracket, since the brackets run in
 # parallel and the wall is the slowest one regardless.
 #
@@ -99,21 +101,6 @@ jobs:
         env:
           MOGWAI_SKIP_REFERENCE: "1"
           MOGWAI_BRACKET: ${{ matrix.bracket }}
-
-  # The BROWSER lane — Playwright drives GitHub's preinstalled system Chrome
-  # (/usr/bin/google-chrome-stable) against the browser leaves (src/browser/*): WasmSqlite on
-  # opfs-sahpool, OpfsIoStore over real OPFS. Deliberately a SEPARATE lane, NOT in the aggregate `ci`
-  # gate below and NOT in `mise run test`/`mise run ci`: the core gate stays Bun-only (runnable with no
-  # browser), and this proves the parts only a real browser has. Keeping it out of the aggregate is what
-  # preserves the local/CI coverage symmetry the header note demands — `mise run ci` does not run it, so
-  # neither does the aggregate; `mise run test:browser` is its local twin. A red run here shows red on
-  # the commit without blocking the Bun gate.
-  browser:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/provision
-      - run: mise run test:browser
 
   # The single "did everything pass" signal, kept so there is one check name to read (and to require,
   # if trunk ever gains required checks — today the ruleset only enforces linear history).

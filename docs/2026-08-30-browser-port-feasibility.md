@@ -17,13 +17,14 @@ progress against this plan.
   (`file.stream()` / `createWritable()`), fail-closed absence, prefix listing, truncating rewrite,
   abort-leaves-nothing. The browser twin of `FileIoStore`/`R2IoStore`, reached from inside a graph's
   dedicated Worker; keys resolve under a shared base dir (per-deployment io namespace).
-- **The Playwright browser lane** — `test/browser/` (outside `bun test`'s `test/` root). Playwright as a
+- **The Playwright browser lane** — `test/browser/` (discovered by `bun test`; its own `browser` bracket). Playwright as a
   DRIVER LIBRARY (`chromium.launch`) drives GitHub's / this machine's **system Chrome** (no browser
   download), bundling a dedicated worker with `Bun.build`, serving it over `localhost`, asserting on what
   the worker posts back. `test/browser/support/harness.ts` (`runBrowserWorker`) is the reusable driver
   every later browser leaf reuses; `test/browser/browser.test.ts` runs the OpfsIoStore contract against
-  REAL OPFS. Its own CI job (`browser`), separate from the Bun-only aggregate; `mise run test:browser`
-  locally. `tsconfig` gained DOM libs (measured 0-conflict) so the browser leaves type-check in the main gate.
+  REAL OPFS. It is part of the gate as the `browser` CI bracket (its own runner, like L1–L5) and runs
+  under `mise run test`/`ci` in its OWN process; `mise run test:browser` runs just it. `tsconfig` gained DOM
+  libs (measured 0-conflict) so the browser leaves type-check in the main gate.
 - **`GraphWorkerHost` (the store tier)** — `src/browser/GraphWorkerHost.ts`, what runs inside a graph's
   dedicated Worker: a `GraphStore` over its own opfs-sahpool WASM SQLite database + the `Executor`
   (self-federation; cross-worker federation fail-closed, routed by the coordinator). PROVEN: the WHOLE
@@ -404,7 +405,9 @@ Everything paper- and API-verifiable is done. What's left can only be measured i
 - **localhost is a secure context**, so SW + OPFS + Web Locks work over plain HTTP — no certs.
 - **Contract reuse:** the same `graphContract` that drives Bun and Cloudflare drives the browser over
   `fetch` (the SW intercept means no browser-specific variant) — itself the proof of the unmodified-client thesis.
-- **New CI lane** (Playwright-capable, headless Chromium) — separate from the current Bun-only `mise run ci`.
+- **In the gate as the `browser` CI bracket** (headless system Chromium) — part of `mise run ci`, but run
+  in its OWN process (its on-the-fly `Bun.build` hits `EBADF` under the full suite's FD load in one bun
+  process; isolated it is reliable). `browserLaneEnabled()` skips it where no system Chrome exists.
 - **Deps (approved):** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — kept out of the Bun/CF
   bundles by per-target bundling), `playwright` (dev driver), `capnweb` (runtime, browser-leaf only — all
   browser RPC). `SharedService` is a REFERENCE for the Web-Lock primitives, not ported code and not a dep.

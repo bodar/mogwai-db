@@ -1,11 +1,11 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
-import { runBrowserPage } from './support/harness.ts';
+import { runBrowserPage, browserLaneEnabled } from './support/harness.ts';
 
 // The CAPSTONE of the single-tab browser path: the Service Worker HTTP edge intercepting a real client's
 // fetch and brokering it to a page that hosts the manager + graph Workers over opfs-sahpool. Proves
 // the port's headline thesis end to end in a real browser — a plain fetch AND the UNMODIFIED TinkerPop
-// GLV both reach the local graph with no monkey-patching. Separate lane; `mise run test:browser`.
-describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: Service Worker edge + unmodified GLV', () => {
+// GLV both reach the local graph with no monkey-patching. Runs in the `browser` CI bracket.
+describe.skipIf(!browserLaneEnabled())('browser: Service Worker edge + unmodified GLV', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };
 
   beforeAll(async () => {

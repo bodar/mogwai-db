@@ -1,11 +1,11 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
-import { runBrowserWorker } from './support/harness.ts';
+import { runBrowserWorker, browserLaneEnabled } from './support/harness.ts';
 
 // The graph-worker Cap'n Web transport (worker.ts, GraphWorkerHost over a MessagePort) in a real browser:
 // a driver worker spawns the graph-worker as a nested dedicated Worker and drives it over RPC. Proves
 // Framed[] crosses the structured-clone boundary and that a query FAILURE returns as a value (the RPC
 // rejects rather than hanging) — the browser twin of the Cloudflare clone-boundary test.
-describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: graph-worker RPC transport', () => {
+describe.skipIf(!browserLaneEnabled())('browser: graph-worker RPC transport', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };
 
   beforeAll(async () => {
