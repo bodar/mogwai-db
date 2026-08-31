@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { GraphStore } from '../storage.ts';
+import { GraphStore, type Sql } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
@@ -28,7 +28,7 @@ import { BunSqlite } from './BunSqlite.ts';
  * escape the directory.
  */
 export class BunGraphManager implements GraphManager {
-  private graphs = new Map<string, { store: GraphStore; sql: BunSqlite }>();
+  private graphs = new Map<string, { store: GraphStore; sql: Sql }>();
   private readonly registry: RegistryProvider;
 
   /**
@@ -50,6 +50,13 @@ export class BunGraphManager implements GraphManager {
     /** Override the ambient fast-path config for every graph this manager owns — the differential
      *  seam. Omitted in production. */
     private readonly fastPaths?: FastPathConfig,
+    /** How a graph's synchronous `Sql` store is constructed from its `source` (`:memory:` or a file
+     *  path). Defaults to `bun:sqlite` — this manager's lifecycle logic (map, create-on-demand,
+     *  destroy) is storage-agnostic, so the SAME battle-tested manager backs the browser's WASM leaf
+     *  by injecting a `WasmSqlite` factory (src/browser/WasmSqlite.ts), which is how that leaf earns
+     *  full conformance coverage in-process. `dir` file persistence is a property of the default
+     *  bun:sqlite factory; an injected memory-only factory ignores the path. */
+    private readonly makeSql: (source: string) => Sql = (source) => new BunSqlite(source),
   ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
@@ -63,7 +70,7 @@ export class BunGraphManager implements GraphManager {
   private resolve(id: string) {
     let g = this.graphs.get(id);
     if (!g) {
-      const sql = new BunSqlite(this.dir ? this.fileFor(id) : ':memory:');
+      const sql = this.makeSql(this.dir ? this.fileFor(id) : ':memory:');
       const store = new GraphStore(sql); // ctor runs the schema DDL
       g = { store, sql };
       this.graphs.set(id, g);
@@ -103,7 +110,7 @@ export class BunGraphManager implements GraphManager {
     // (dir mode) unlink the file even if it was never loaded this run — so a
     // graph persisted by an earlier run is still destroyable.
     const g = this.graphs.get(id);
-    g?.sql.close();
+    g?.sql.close?.();
     this.graphs.delete(id);
     if (this.dir) {
       // Remove the db and its WAL sidecars (journal_mode=WAL leaves -wal/-shm);

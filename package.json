@@ -33,6 +33,7 @@
   "dependencies": {
     "@bodar/lazyrecords": "npm:@jsr/bodar__lazyrecords",
     "@bodar/yadic": "^0.495.349",
+    "@sqlite.org/sqlite-wasm": "^3.53.0-build1",
     "antlr4ng": "^3.0.16",
     "graphql": "^16.11.0",
     "gremlin": "link:gremlin"
