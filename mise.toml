@@ -128,10 +128,14 @@ description = "Full suite: corpus + contract + L3 conformance (both runtimes)"
 depends = ["install", "check", "submodule"]
 run = "bun test"
 [tasks."test:cf-limits"]
-description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
+description = "Instrument: L3 conformance with every compiled statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]
+# MOGWAI_CF_LIMITS wraps the L3 host's store factory with CfLimitedSql (conformance-server.ts) — the one
+# deliberate seam. L3 runs the WHOLE feature corpus through the compiler on Bun (never a real DO), so it
+# is where a data-scaling bind list would otherwise hide; the contract's DO-legality is enforced natively
+# by the real DO in cloudflare.test.ts, and `mise run binds` catches the placeholder idiom statically.
 env = { MOGWAI_CF_LIMITS = "1" }
-run = "bun test"
+run = "bun test test/L3-conformance"
 
 # The BROWSER lane — Playwright drives a real (system) Chrome against the browser leaves (src/browser/*).
 # A SEPARATE lane, deliberately outside `bun test`'s test/ root and outside `mise run ci`: the core gate

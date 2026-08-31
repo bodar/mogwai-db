@@ -9,15 +9,16 @@
 //
 // So this is the instrument that converts a DO-only wall into a Bun-visible failure. It sits at the
 // `Sql` seam rather than at `GraphStore.query`, so raw-SQL callers and the store's own statements
-// are both covered, and it is deliberately a DECORATOR: the same wrapper composes over the Bun
-// driver (for a suite run) or over any other `Sql`.
+// are both covered, and it is a DECORATOR (`CfLimitedSql`) — the driver classes (BunSqlite, WasmSqlite)
+// know nothing of it; the wrapper composes over any `Sql` where the assertion is wanted.
 //
-// Two entry points, one implementation:
-//   - `CfLimitedSql` — wrap explicitly, for a test that asserts one statement's shape.
-//   - `MOGWAI_CF_LIMITS=1` — BunSqlite applies `cfLimitViolation` to every statement it runs, so a
-//     WHOLE suite can be perturbed without threading a parameter through every store construction
-//     in test/. Same mechanism, and same reasoning, as `MOGWAI_REVERSE_UNORDERED` (BunSqlite's
-//     header has the argument); `mise run test:cf-limits` is the suite-wide invocation.
+// It is wired at TWO deliberate places, never scattered through the drivers:
+//   - explicitly, in a test that asserts one statement's shape (cf-limits.test.ts, bulk.test.ts);
+//   - suite-wide-ish, at the L3 conformance host (conformance-server.ts): `MOGWAI_CF_LIMITS=1` wraps
+//     THAT host's store factory, so the whole feature corpus is asserted DO-legal on Bun —
+//     `mise run test:cf-limits`. L3 is the right seam because it runs the full corpus through the
+//     compiler and never against a real DO; the CONTRACT's DO-legality is enforced natively by the real
+//     DO in cloudflare.test.ts, and `mise run binds` catches the placeholder idiom statically.
 import type { Sql } from './api.ts';
 
 /** Cloudflare DO SQLite: maximum bound parameters in one query. */

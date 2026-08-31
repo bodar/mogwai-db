@@ -17,24 +17,18 @@
 // Bun and its `browser` export under the browser bundler — same statement, target-selected build.
 import sqlite3InitModule, { type Database, type Sqlite3Static, type SqlValue } from '@sqlite.org/sqlite-wasm';
 import type { Sql } from '../storage.ts';
-import { assertCfLimits } from '../cf-limits.ts';
 
 /** `Sql` over an `@sqlite.org/sqlite-wasm` OO1 database handle. Synchronous — the OO1 API is, on every
  *  VFS. Construct with a handle from {@link memoryWasmSqlFactory} (in-memory) or
- *  {@link opfsSahpoolWasmSqlFactory} (`opfs-sahpool`, browser Worker). */
+ *  {@link opfsSahpoolWasmSql} (`opfs-sahpool`, browser Worker). */
 export class WasmSqlite implements Sql {
-  /** `cfLimits` mirrors BunSqlite's `MOGWAI_CF_LIMITS` switch: assert Durable-Object statement legality
-   *  (≤100 binds, ≤100 KB text) on every query. Off by default; the WASM runtime accepts far more, so a
-   *  row-count-sized bind list would pass here and fail only on a real DO — exactly the trap cf-limits.ts
-   *  exists to surface. */
-  constructor(private readonly db: Database, private readonly cfLimits = false) {}
+  constructor(private readonly db: Database) {}
 
   exec(sql: string): void {
     this.db.exec(sql);
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
-    if (this.cfLimits) assertCfLimits(sql, binds);
     // `resultRows` collects every row as an object ({column: value}); we read the array we passed, so
     // the call's `returnValue` is immaterial. One statement per exec (the whole codebase's contract),
     // so first-statement binding is the only binding.
@@ -59,9 +53,9 @@ export function wasmSqliteModule(): Promise<Sqlite3Static> {
  *  any in-process manager (BunGraphManager's `makeSql` seam). Async only to initialize the module ONCE
  *  up front; the returned factory is sync so it drops straight into a sync `resolve(id)`. Each call
  *  mints a fresh, isolated `:memory:` database — one per graph, mirroring one DB per graph on OPFS. */
-export async function memoryWasmSqlFactory(cfLimits = false): Promise<(source: string) => WasmSqlite> {
+export async function memoryWasmSqlFactory(): Promise<(source: string) => WasmSqlite> {
   const sqlite3 = await wasmSqliteModule();
-  return () => new WasmSqlite(new sqlite3.oo1.DB(':memory:', 'c'), cfLimits);
+  return () => new WasmSqlite(new sqlite3.oo1.DB(':memory:', 'c'));
 }
 
 /** One graph's `opfs-sahpool` store, for a browser dedicated Worker. Installs the pool VFS (idempotent
@@ -69,15 +63,11 @@ export async function memoryWasmSqlFactory(cfLimits = false): Promise<(source: s
  *  graph gets its own pool in its own OPFS `directory` (`.mogwai/{graphId}`), matching
  *  `idFromName(graphId) → distinct DO`. `createSyncAccessHandle` is spec-restricted to a dedicated
  *  Worker, so this MUST run inside one — never on the main thread or a SharedWorker. */
-export async function opfsSahpoolWasmSql(
-  directory: string,
-  dbName = 'graph.sqlite3',
-  cfLimits = false,
-): Promise<WasmSqlite> {
+export async function opfsSahpoolWasmSql(directory: string, dbName = 'graph.sqlite3'): Promise<WasmSqlite> {
   const sqlite3 = await wasmSqliteModule();
   // The VFS registration name must be a plain identifier (no path separators), so sanitize the
   // directory into one; the `directory` itself may carry `/` path elements (created automatically).
   const name = `mogwai-${directory.replace(/[^A-Za-z0-9_.-]/g, '_')}`;
   const pool = await sqlite3.installOpfsSAHPoolVfs({ name, directory });
-  return new WasmSqlite(new pool.OpfsSAHPoolDb(`/${dbName}`), cfLimits);
+  return new WasmSqlite(new pool.OpfsSAHPoolDb(`/${dbName}`));
 }

@@ -13,6 +13,8 @@ import { copyFileSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
+import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { CfLimitedSql } from '../../src/cf-limits.ts';
 import { FileIoStore } from '../../src/bun/FileIoStore.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { application } from '../../src/application.ts';
@@ -120,7 +122,12 @@ export async function buildConformanceApp(graphs: readonly string[] = Object.key
   // The consequence is stated, not discovered: the untagged `*_single_label_graph` scenarios can no
   // longer get their refusal, so they are excluded BY NAME in `tags.ts`. A scenario asserting a
   // capability we do not claim is out of scope, on the same footing as any other declared wall.
-  const manager = new BunGraphManager(undefined, standardRegistry, new FileIoStore(ioNamespace()));
+  // The cf-limits seam: `MOGWAI_CF_LIMITS=1` (`mise run test:cf-limits`) wraps this host's store factory
+  // with `CfLimitedSql`, asserting every compiled statement is Durable-Object-legal on Bun. See cf-limits.ts.
+  const makeSql = Bun.env.MOGWAI_CF_LIMITS === '1'
+    ? (source: string) => new CfLimitedSql(new BunSqlite(source))
+    : undefined;
+  const manager = new BunGraphManager(undefined, standardRegistry, new FileIoStore(ioNamespace()), undefined, makeSql);
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
   for (const g of graphs) {
