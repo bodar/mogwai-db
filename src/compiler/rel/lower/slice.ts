@@ -16,7 +16,6 @@ import { aliasIdAt, aliasProjection, aliasValueAt } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
 import { payloadCols } from '../build.ts';
 import { exprChildren } from '../../../rel/walk.ts';
-import { argValues } from '../../../gremlin/frontend.ts';
 import { ValueParseError } from '../../../gremlin/coerce.ts';
 import { BY_HOSTS as BY_READERS } from '../../ir/strategies.ts';
 import type { ChildHost } from '../child.ts';
@@ -153,7 +152,7 @@ export const PER_TRAVERSER_HOSTS = new Set(['map', 'flatMap', 'local']);
 /** `tail(n)`/`sample(n)`'s count. Both default to 1, and neither takes a range, so the numeric
  *  argument is the whole decode — `sliceOf` deliberately refuses `tail` (see `sliceOp`). */
 const countArg = (step: IRStep): number =>
-  Number(argValues(step).find((v) => typeof v === 'number') ?? 1);
+  Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1);
 
 /** `ORDER BY <position> [DESC] LIMIT/OFFSET` — the plain slice, where a row IS one traverser. An
  *  unordered relation stays unordered rather than inventing a SQLite scan order: a slice with no

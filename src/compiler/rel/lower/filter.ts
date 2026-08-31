@@ -11,7 +11,7 @@ import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../p
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { argValues, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
+import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
@@ -312,7 +312,7 @@ export function valuePredicate(
   if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
   const produced = scalarChild(body.slice(0, -1), childHostOf(subject, aliases), ctx, fresh);
   if (!produced) return null;
-  const args = argValues(last);
+  const args = last.args.map((a) => a.value);
   if (args.length !== 1) return null;
   // The value's own type is what a range comparison needs — a big long carried as decimal TEXT orders
   // lexically otherwise — and the seam now reports it, so the subject type is read rather than assumed.
@@ -421,7 +421,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
   // one. Every other step reaching here (`hasLabel`, `has`, `filter`, `not`) is not a `BY_HOSTS`
   // member, so a modulator on one is a front-end impossibility and declining is belt-and-braces.
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
 
   if (step.name === 'hasLabel') {
     // `hasLabelClause` validates and lowers each label `Arg` — an inline name inlines, a `$label`

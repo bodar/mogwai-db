@@ -1,6 +1,6 @@
 import { col, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { arg, argValues } from '../../gremlin/frontend.ts';
+import { arg } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { compileMath, mathVars, type MathOps } from '../../gremlin/math.ts';
 import { FORMAT_FROM_BY, formatTemplate } from '../../gremlin/format.ts';
@@ -99,7 +99,7 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
  * the same reason.
  */
 export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter): Expr | null {
-  const [formula, extra] = argValues(step);
+  const formula = step.args[0]?.value, extra = step.args[1]?.value;
   if (typeof formula !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;
@@ -155,7 +155,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
 function formatValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly expr: Expr; readonly tokens: number } | null {
-  const [template, extra] = argValues(step);
+  const template = step.args[0]?.value, extra = step.args[1]?.value;
   if (typeof template !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;

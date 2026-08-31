@@ -9,7 +9,7 @@ import { armBatches, isLocalScope } from '../../ir/step.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
-import { argValues, isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
+import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
 import { ALWAYS_PRODUCTIVE } from '../child.ts';
 import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
@@ -189,7 +189,7 @@ export function unionArms(
   // READS the fan-out's emission order (`ctx.ordered`, the chain-global demand), the merge MINTS one
   // deterministic order over the whole fan-out after the fact (`withFanoutOrder`, §10) rather than
   // declining — the positionless rows are the same either way.
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
@@ -285,7 +285,7 @@ export function variantTail(
     const step = steps[at]!;
     const sliced = sliceOp(step, cur, bulked, fresh);
     if (sliced) { cur = sliced; continue; }
-    if (step.name === 'count' && !argValues(step).length && !isLocalScope(step)) {
+    if (step.name === 'count' && !step.args.length && !isLocalScope(step)) {
       const counted = countTail(cur, fresh);
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -295,7 +295,7 @@ export function variantTail(
     // scalar by value). `dedupOn` keeps the first occurrence (`MIN(encounter)`) and resets `bulk`; it
     // declines through `groupableChannels` where an alias/path sits in the row, exactly as the row-shape
     // dedup does — a grouping may carry only the roles `CHANNEL_GROUP_POLICY` gives an N→1 answer.
-    if (step.name === 'dedup' && !argValues(step).length && !isLocalScope(step) && !step.modulators?.length) {
+    if (step.name === 'dedup' && !step.args.length && !isLocalScope(step) && !step.modulators?.length) {
       if (pathCarried(cur) || !groupableChannels(cur.channels)) return null;
       const deduped = dedupOn(payloadCols(cur).map((column) => col(cur.id, column.name)), cur, [], fresh);
       if (!deduped) return null;
@@ -341,7 +341,7 @@ export function sourceUnion(
   step: IRStep, ctx: ChainCtx, fresh: Minter,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const arms: Tail[] = [];
   for (const arg of args) {
@@ -681,7 +681,7 @@ export function coalesceArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
@@ -700,7 +700,7 @@ export function optionalArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const [nested, extra] = argValues(step);
+  const nested = step.args[0]?.value, extra = step.args[1]?.value;
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
@@ -774,7 +774,7 @@ export function chooseArms(
   // is a per-traverser predicate, not an option), so a SLICE with a batched then/else arm declines
   // (arm-major not built); otherwise the arms lower from `augmentParent(input)` and merge through
   // `mintTraverserMajor`, else the fan-out order is minted for a collect / dropped. See `unionArms`.
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.length > 3) return null;
   // THE CONDITION MAY BE A BARE PREDICATE, not only a body: `choose(P.eq(29), __.constant('matched'))`
   // is `ChooseStep(new IsStep(P), …)` — TinkerPop's own `choose(Predicate, …)` overload wraps it — so

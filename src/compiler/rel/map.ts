@@ -5,7 +5,6 @@ import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
-import { argValues } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
@@ -267,7 +266,7 @@ export function groupRows(
   // the map is computed. So this builds either, and the CALLER decides: the barrier form returns the
   // map as the traverser, the keyed form registers it and passes the traversers through. Anything
   // else in the argument position is a form this does not serve.
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length > 1 || (args.length === 1 && typeof args[0] !== 'string')) return null;
   // TWO SLOTS for `group()`, one for `groupCount()`, and that is the whole of the arity difference:
   // `GroupStep` takes a key `by()` and a value `by()`, `GroupCountStep` only a key.
@@ -320,7 +319,7 @@ export function groupRows(
    */
   const lastOnly = valueBy?.key.kind === 'child' && valueBy.key.body.length === 1
     && valueBy.key.body[0]!.name === 'tail'
-    && !argValues(valueBy.key.body[0]!).some((arg) => typeof arg === 'number' && arg !== 1);
+    && !valueBy.key.body[0]!.args.some((a) => typeof a.value === 'number' && a.value !== 1);
   // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
   // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
   // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
@@ -864,7 +863,7 @@ function groupCollected(
   // Remove the one bare barrier before lowering the child, then restore it below once KEY_COL is a real
   // partition column.  A by()-keyed or repeated dedup needs its own key projection and declines here.
   const dedups = pre.filter((bodyStep) => bodyStep.name === 'dedup');
-  if (dedups.length > 1 || dedups.some((bodyStep) => argValues(bodyStep).length || bodyStep.modulators?.length)) return null;
+  if (dedups.length > 1 || dedups.some((bodyStep) => bodyStep.args.length || bodyStep.modulators?.length)) return null;
   const pooledPre = dedups.length ? pre.filter((bodyStep) => bodyStep.name !== 'dedup') : pre;
   const rows = child.rows(pooledPre, input, host.elem, host.row?.aliases ?? NO_LABELS);
   // A body that lost the origin (a barrier BEFORE the fold — `by(__.out().order().fold())`) is a
@@ -1380,7 +1379,7 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
  */
 export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
   const window = step.name === 'tail'
-    ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
+    ? { offset: 0, limit: Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1) }
     : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
   if (!window) return null;
   const rel = fenced(input, fresh);

@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
-import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
+import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
@@ -410,7 +410,7 @@ export function listMemberOp(
   // types (so this is not a rewrite), and a later explode renumbers from the new array, which is what
   // makes a following slice read the reversed positions rather than the original ones.
   if (step.name === 'reverse') {
-    if (isLocalScope(step) || argValues(step).length) return null;
+    if (isLocalScope(step) || step.args.length) return null;
     const members = membersOf(list, fresh);
     return {
       rel: withList(rel, listOfMembers(members, memberNode(of, members), [memberOrder(members, 'desc')], fresh), fresh),
@@ -442,10 +442,10 @@ export function listMemberOp(
     if (step.name === 'dedup') {
       // ⚠️ THE SCOPE TOKEN IS AN ARGUMENT, so a bare argument COUNT declined the only form this arm
       // serves. `dedup(Scope.local)` carries `{scope:'local'}` in `args` — the very thing `isLocalScope`
-      // just read — so `argValues(step).length` was 1 for EVERY traversal reaching here and everything
+      // just read — so `step.args.length` was 1 for EVERY traversal reaching here and everything
       // below was unreachable. What it must refuse is a LABEL tuple (`dedup('a','b')`), a path-distinct
       // question this module cannot answer, and a string argument is what names one.
-      if (step.modulators?.length || argValues(step).some((a) => typeof a === 'string')) return null;
+      if (step.modulators?.length || step.args.some((a) => typeof a.value === 'string')) return null;
       // FIRST OCCURRENCE WINS and the surviving order is the original one — `DedupLocalStep` builds a
       // `LinkedHashSet`, so it is insertion order over distinct values.
       //
@@ -541,7 +541,7 @@ export function listMemberOp(
 
   if (LIST_LOCAL_TX.has(step.name) && isLocalScope(step)) {
     const window = step.name === 'tail'
-      ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
+      ? { offset: 0, limit: Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1) }
       // An illegal `range(Scope.local, 2, 1)` is a `ValueParseError` answer that PROPAGATES (§6·5);
       // only the "not a slice step" routing throw declines. Mirror of `sliceOp`.
       : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
@@ -577,7 +577,7 @@ export function listMemberOp(
   // all. `all` is "no member fails", which is not the same as "every member passes" once a predicate
   // can be NULL — hence `IS NOT TRUE` rather than `NOT (…)`.
   if (step.name === 'all' || step.name === 'any' || step.name === 'none') {
-    const args = argValues(step);
+    const args = step.args.map((a) => a.value);
     // A member PREDICATE reads the member as a value; over an element it is a question about the element
     // and therefore the child seam's, not this module's.
     if (args.length !== 1 || !isBareList(of)) return null;
@@ -623,7 +623,7 @@ export function listRetype(
   readonly result?: 'number' | 'count'; readonly productiveNull?: boolean;
 } | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
@@ -1271,7 +1271,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
   if (!inner?.length) return null;
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
-    const [value, extra] = argValues(inner[0]);
+    const value = inner[0].args[0]?.value, extra = inner[0].args[1]?.value;
     if (extra !== undefined || value === undefined) return null;
     // A COMPILER-BUILT single-element list wrapping the constant — always inlined (the `[value]` list is
     // not itself a parameter, even if `value` came from one; that inner scalar is a separate concern).
@@ -1281,7 +1281,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
   // `not null` wording, which is why the type is passed as `null` rather than derived.
   if (inner.length === 1 && inner[0]!.name === 'constant') {
-    const [value, extra] = argValues(inner[0]!);
+    const value = inner[0]!.args[0]?.value, extra = inner[0]!.args[1]?.value;
     if (extra !== undefined || value === undefined || Array.isArray(value)) return null;
     return nonIterableArgument(step, arg, value === null ? null : gremlinTypeOfValue(value));
   }
@@ -1322,13 +1322,13 @@ export function listSetOp(
   step: IRStep, input: Rel, of: ListOf, terminal: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name)) return null;
-  const [arg, extra] = argValues(step);
+  const first = step.args[0]?.value, extra = step.args[1]?.value;
   if (extra !== undefined) return null;
   // ⚠️ THE OPERAND IS RESOLVED BEFORE THE SELF'S MEMBER ENCODING IS GATED, and the order is the whole
   // difference between an ERROR and a decline: a non-iterable operand is the traversal's own answer
   // whatever the self's members are, so testing `isBareList(of)` first turned every element-member list's
   // `combine(2)` into a silent decline. The gate stays AFTER the thing that raises.
-  const resolved = operandList(step, arg, child);
+  const resolved = operandList(step, first, child);
   if (!resolved) return null;
   // TWO MEMBER ENCODINGS ARE ADMITTED, and the split is the SAME per-type identity fact the property
   // `RowShape` and the element-member `order`/`dedup` already state. A BARE-scalar list compares members

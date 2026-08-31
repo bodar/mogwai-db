@@ -11,7 +11,7 @@ import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
-import { argValues, isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
@@ -243,7 +243,7 @@ export function perTraverserChild(
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const [nested, extra] = argValues(step);
+  const nested = step.args[0]?.value, extra = step.args[1]?.value;
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
@@ -738,7 +738,7 @@ export function hostSelf(host: ChildHost): { readonly framing: RelFraming; reado
  * puts the path labels in the same slot either way).
  */
 export function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extract<ChildHost, { kind: 'element' }> | null {
-  if (step.modulators?.length || step.optionArms || argValues(step).length) return null;
+  if (step.modulators?.length || step.optionArms || step.args.length) return null;
   const row = host.row ? { row: host.row } : {};
   if (host.kind === 'element' && host.elem === 'edge') {
     const end = step.name === 'outV' ? 'src' : step.name === 'inV' ? 'tgt' : null;
@@ -844,7 +844,7 @@ export function correlatedReduce(
   // value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE null (`ReducingBarrierStep`)
   // — so a per-host EXISTS over the value rows is the `present` signal.
   const last = body.at(-1);
-  if (last && (last.name === 'min' || last.name === 'max') && !argValues(last).length && !isLocalScope(last) && body.length >= 2) {
+  if (last && (last.name === 'min' || last.name === 'max') && !last.args.length && !isLocalScope(last) && body.length >= 2) {
     const values = continueAs(root, rootAs, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
     let fenced = false;
     if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
@@ -996,7 +996,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // diverge from the top-level step. `PropertyMapStep` is a ScalarMapStep — one map per element
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/PropertyMapStep.java`).
   if ((first.name === 'valueMap' || first.name === 'elementMap') && body.length === 1 && host.kind === 'element') {
-    const args = argValues(first);
+    const args = first.args.map((a) => a.value);
     const tokens = args.includes(true);
     const asked = propertyKeyArgs(args.filter((arg) => !(tokens && arg === true)));
     if (!asked || first.modulators?.length || first.optionArms || (first.name === 'elementMap' && tokens)) return null;
@@ -1055,9 +1055,9 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   if (host.kind === 'property') {
     // A property's KEY is always present and always a string; its VALUE carries the stored `vtype` per
     // row, which is `propertyValue`'s channel read through a rowid instead of through the join.
-    if (first.name === 'key' && !argValues(first).length)
+    if (first.name === 'key' && !first.args.length)
       return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
-    if (first.name === 'value' && !argValues(first).length)
+    if (first.name === 'value' && !first.args.length)
       return valueRun(body, 1, {
         value: propertyReadOf(host.id, host.ownerElem, 'value', fresh), type: UNKNOWN,
         vtype: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh), present: ALWAYS_PRODUCTIVE,
@@ -1134,7 +1134,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   let at = 0;
   const leading = body[0];
   if (leading?.name === 'values') {
-    const args = argValues(leading);
+    const args = leading.args.map((a) => a.value);
     if (args.length !== 1 || typeof args[0] !== 'string') return null;
     const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, ctx.source, fresh);
     if (!projected) return null;
@@ -1204,7 +1204,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
     if (carried.role === 'loops') type = STATIC('int');
     at = 1;
   } else if (leading?.name === 'constant') {
-    const args = argValues(leading);
+    const args = leading.args.map((a) => a.value);
     if (args.length !== 1) return null;
     // Productivity is EMISSION, not NULLNESS: TraversalProduct.java explicitly says null is a valid
     // productive value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/
@@ -1411,7 +1411,7 @@ export function scalarHostChild(
   let at = 0;
   const leading = body[0];
   if (leading?.name === 'constant') {
-    const args = argValues(leading);
+    const args = leading.args.map((a) => a.value);
     // Productivity is EMISSION, not NULLNESS — the element arm's own citation. A deliberate
     // `constant(null)` declines there and declines here for the identical reason.
     if (args.length !== 1 || args[0] === null) return null;
@@ -1421,7 +1421,7 @@ export function scalarHostChild(
     vtype = undefined;
     at = 1;
   } else if (leading?.name === 'identity') {
-    if (argValues(leading).length) return null;
+    if (leading.args.length) return null;
     at = 1;
   }
   // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
@@ -1450,7 +1450,7 @@ export function listHostChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'list' }>, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null {
   const first = body[0];
-  if (!first || first.name !== 'unfold' || argValues(first).length || body.length < 2) return null;
+  if (!first || first.name !== 'unfold' || first.args.length || body.length < 2) return null;
   const members = correlatedListMembers(host.list, host.of, fresh);
   if (!members) return null;
   // The body after `unfold()` is the ordinary correlated body over the exploded members — the SAME

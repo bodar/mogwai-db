@@ -7,7 +7,7 @@ import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { labelsBoundBefore, preBarrierSelectRead } from '../ir/labels.ts';
 import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
-import { arg, argValues } from '../../gremlin/frontend.ts';
+import { arg } from '../../gremlin/frontend.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, lowerTypedNodeStream, type Lowering, type RelLowering } from './lower.ts';
 import { decorateGraph } from './decorate.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -147,7 +147,7 @@ function inferredReduce(
   // suffix decides whether this is a per-parent reduction.
   const tail = steps.slice(suffixFrom);
   const only = tail.length === 1 ? tail[0]! : undefined;
-  if (!only || argValues(only).length !== 0 || isLocalScope(only)) return undefined;
+  if (!only || only.args.length !== 0 || isLocalScope(only)) return undefined;
   const reducer = reducerOf(only.name);
   if (!reducer || reducer.partial == null || reducer.combine == null) return undefined; // mean/unsplittable → follow-up
   return { partial: reducer.partial, combine: reducer.combine, empty: reducer.empty };

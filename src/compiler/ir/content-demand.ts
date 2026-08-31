@@ -1,5 +1,4 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
-import { argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, REDUCERS } from './step.ts';
 import { labelReads, labelsBoundBefore, preBarrierSelectRead } from './labels.ts';
 
@@ -66,7 +65,7 @@ const WHOLE_PAYLOAD_READS: ReadonlySet<string> = new Set(['valueMap', 'elementMa
  *  is not a literal (a bound param / computed) — which forces `'all'` (we cannot narrow to an unknown
  *  key). `has(k, …)` reads its FIRST arg as the key; `values(k…)` reads all args as keys. */
 const literalKeysOf = (step: IRStep): readonly string[] | null => {
-  const vals = argValues(step);
+  const vals = step.args.map((a) => a.value);
   if (step.name === 'values') {
     const keys = vals.filter((k): k is string => typeof k === 'string');
     return keys.length === vals.length ? keys : null; // a non-literal key → cannot narrow
@@ -166,14 +165,14 @@ const COLLECTION_READERS: ReadonlySet<string> = new Set(['cap']);
 /** The string collection KEY a step writes/reads (its first arg), or null when it is not a keyed
  *  collection step (a bare `group()` reducing barrier, a non-string arg). */
 const collectionKeyOf = (step: IRStep): string | null => {
-  const first = argValues(step)[0];
+  const first = step.args[0]?.value;
   return typeof first === 'string' ? first : null;
 };
 
 /** The reducing steps whose presence as the LAST pushed step means the sibling returns a SCALAR (so the
  *  resume frames a value, not elements). `REDUCERS` = count + the numeric reducers. */
 const isBareReducer = (s: IRStep): boolean =>
-  REDUCERS.has(s.name) && argValues(s).length === 0 && !isLocalScope(s);
+  REDUCERS.has(s.name) && s.args.length === 0 && !isLocalScope(s);
 
 export interface PushablePrefix {
   /** How many tail steps (from `barrier.at + 1`) run on the SIBLING. 0 = nothing pushes. */

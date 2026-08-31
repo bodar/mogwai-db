@@ -112,11 +112,6 @@ export const collectionArg = (kind: 'list' | 'set', members: readonly Arg[]): Ar
   return { value: kind === 'set' ? new Set(values) : values, type: { t: kind, items: members.map((m) => m.type) }, name: null, members };
 };
 
-/** The plain resolved values of a step's arguments, dropping the type/name metadata — for the
- *  consumers that genuinely want a value array (a varargs spread, `flattenListArgs`). Prefer reading
- *  `step.args[i].value` at a single index; this is for whole-array value use. */
-export const argValues = (step: { args: readonly Arg[] }): any[] => step.args.map((a) => a.value);
-
 export interface Step {
   name: string;
   /** The step's arguments, each a value+type+name object (see `Arg`). Was three parallel arrays. */

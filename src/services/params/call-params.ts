@@ -1,4 +1,4 @@
-import { stepChain, isNested, argValues } from '../../gremlin/frontend.ts';
+import { stepChain, isNested } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, Service, ServiceRegistry } from '../spi/types.ts';
@@ -69,7 +69,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
   const proj = chain[0];
   if (!proj || proj.name !== 'project' || chain.slice(1).some((s) => s.name !== 'by'))
     throw new Error('call() map traversal must be __.project(...).by(__.constant(...)) — richer forms are not yet supported');
-  const keys = argValues(proj).filter((a): a is string => typeof a === 'string');
+  const keys = proj.args.map((a) => a.value).filter((a): a is string => typeof a === 'string');
   const byBodies = chain.slice(1).map((s) => s.args[0]?.value);
   const out: CallParams = {};
   keys.forEach((k, i) => {
@@ -89,7 +89,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
  *  traversal arg is TinkerPop's DYNAMIC-PARAMS traversal (`project(...).by(constant)` → a constant map).
  */
 export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSpec {
-  const [name, ...rest] = argValues(step);
+  const [name, ...rest] = step.args.map((a) => a.value);
   // Bare g.call() ≡ g.call("--list") (the directory). A missing name defaults to it.
   const serviceName = typeof name === 'string' ? name : DIRECTORY_SERVICE_NAME;
 

@@ -1,5 +1,5 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
-import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../gremlin/frontend.ts';
 import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
 import { bulkGroupCollapseTerminal, bulkObservedFrom, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
@@ -57,7 +57,7 @@ const PATH_STEPS = PATH_FAMILY;
  *  and this never sees it. */
 function repeatBodyTracksPath(step: IRStep): boolean {
   if (step.name !== 'repeat') return false;
-  for (const value of argValues(step)) {
+  for (const { value } of step.args) {
     if (!isNested(value)) continue;
     try {
       const body = stepChain((value as { nested: unknown }).nested, {}) as IRStep[];
@@ -119,9 +119,9 @@ const BRANCH_MERGE_STEPS = new Set(['union', 'choose', 'coalesce', 'optional']);
  *  over- or under-seeds an order column, never mis-answers. */
 function armChains(step: IRStep): IRStep[][] {
   const trees: unknown[] = [];
-  for (const a of argValues(step)) if (isNested(a)) trees.push((a as { nested: unknown }).nested);
+  for (const a of step.args) if (isNested(a.value)) trees.push((a.value as { nested: unknown }).nested);
   for (const opt of step.optionArms ?? []) {
-    const n = argValues(opt as IRStep).find(isNested);
+    const n = opt.args.find((a) => isNested(a.value))?.value;
     if (n) trees.push((n as { nested: unknown }).nested);
   }
   const chains: IRStep[][] = [];
@@ -237,7 +237,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     if (!ordered && BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
-    if (sawFanout && s.name === 'dedup' && argValues(s).some((a) => typeof a === 'string')) return true;
+    if (sawFanout && s.name === 'dedup' && s.args.some((a) => typeof a.value === 'string')) return true;
     if (FANOUT_STEPS.has(s.name)) { sawFanout = true; ordered = false; }
   }
   // THE TERMINAL EMISSION ORDER. Everything above answers "does a SLICE or COLLECT downstream read the

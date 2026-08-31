@@ -1,5 +1,5 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
-import { isNested, argValues } from '../../gremlin/frontend.ts';
+import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
@@ -204,7 +204,7 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * lowering entirely and never reaches here.
  */
 export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?: ScalarType): Transformed | null {
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
 
   // OVER A COMPILE-TIME LITERAL, THE CAST SUBFAMILY IS NOT A SQL CAST AT ALL — it is a parse that must
   // RAISE, and SQL cannot raise. TinkerPop requires `Can't parse string '1,000' as number.` and

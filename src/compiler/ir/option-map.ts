@@ -1,4 +1,4 @@
-import { argValues, isNested, isPickArg } from '../../gremlin/frontend.ts';
+import { isNested, isPickArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from './step.ts';
 
 /**
@@ -59,9 +59,9 @@ export function optionArms(step: IRStep, body: BodyOf): OptionArm[] | null {
   const out: OptionArm[] = [];
   const seen = new Set<OptionPick>();
   for (const opt of step.optionArms ?? []) {
-    const bodyArg = argValues(opt).find(isNested);
+    const bodyArg = opt.args.find((a) => isNested(a.value))?.value;
     if (!bodyArg) return null;
-    const keyArg = argValues(opt).find((x: unknown) => x !== bodyArg);
+    const keyArg = opt.args.find((a) => a.value !== bodyArg)?.value;
     const token = isPickArg(keyArg) ? keyArg.pick : undefined;
     if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
     const pick: OptionPick = keyArg === undefined ? 'none' : token ?? 'key';

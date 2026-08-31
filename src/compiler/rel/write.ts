@@ -9,7 +9,7 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
+import { arg, isNested } from '../../gremlin/frontend.ts';
 import type { ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
@@ -604,7 +604,7 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
 function mutationLabelNames(
   step: IRStep, sideEffects: Map<string, any> | undefined, params: Record<string, any>,
 ): readonly string[] | null {
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   const names: string[] = [];
   for (const value of args) {
     let resolved: unknown = value;
@@ -757,7 +757,7 @@ export function elementDropLabel(
 ): Effects | null {
   if (elem === 'edge') return null;
   const all = step.name === 'dropLabels';
-  if (all && argValues(step).length) return null;
+  if (all && step.args.length) return null;
   // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is
   // on the step, never on the resolver's answer. `mutationLabelNames` also returns `null`, and there
   // it means DECLINE; conflating the two made `dropLabel(constant(["a","b"]), constant("c"))` — a
@@ -1121,7 +1121,7 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // `property(T.label, …)` REPLACES the step's own labels rather than adding to them — `insertVertex`
   // reads the same way, and it is not an addition: `addV('a').property(T.label,'b')` is a vertex
   // labelled `b`. The count rule then applies to whichever list won.
-  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], child, fresh);
+  const labels = creationLabels(tokens.label === null ? step.args.map((a) => a.value) : [tokens.label], child, fresh);
   if (!labels) return null;
   const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'vertex', child) : [];
   if (!writes) return null;

@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
-import { argValues, type MergePolicy } from '../../gremlin/frontend.ts';
+import { type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
@@ -183,7 +183,7 @@ export type Collections = Map<string, Collection>;
  *  module serves. Shared so the two sides cannot disagree about what counts as a name. */
 function labelOf(step: IRStep): string | null {
   if (step.optionArms || isLocalScope(step)) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   return args.length === 1 && typeof args[0] === 'string' ? args[0] : null;
 }
 

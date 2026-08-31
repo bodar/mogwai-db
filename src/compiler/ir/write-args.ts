@@ -1,6 +1,6 @@
 import { gremlinTypeOf, mapEntryType, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import {
-    argValues, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
+    isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
     stepChain, type Arg, type Step,
 } from '../../gremlin/frontend.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
@@ -166,7 +166,7 @@ export type ParsedProperty =
   | { kind: 'none' };
 
 export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
-  const { cardinality, off } = readCardinality(argValues(s));
+  const { cardinality, off } = readCardinality(s.args.map((a) => a.value));
   const keyArg = s.args[off]!;
   const valueArg = s.args[off + 1]!;
   let key = keyArg.value, val = valueArg.value;
@@ -485,7 +485,7 @@ export function mergeMaps(
   const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${op}()`, sideEffects, params);
   for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
     if (s.name !== 'option') throw new Deferral(`step not implemented after ${op}(): ${s.name}()`);
-    const [sel, mapArg, cardinalityArg] = argValues(s);
+    const sel = s.args[0]?.value, mapArg = s.args[1]?.value, cardinalityArg = s.args[2]?.value;
     if (!isMergeArg(sel))
       throw new Error(`${op} option() selector must be Merge.onCreate/onMatch`);
     if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))

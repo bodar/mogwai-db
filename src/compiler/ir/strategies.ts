@@ -1,4 +1,4 @@
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, argValues, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
@@ -322,7 +322,7 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
       // Movement explosion (edge criterion only): land on the edge, filter it, land on the
       // far endpoint, filter it. The NEAR endpoint was filtered by the previous producer.
       if (eCrit && s.name in EXPLODE_EDGE) {
-        out.push(synth(EXPLODE_EDGE[s.name], argValues(s), s.ctx));
+        out.push(synth(EXPLODE_EDGE[s.name], s.args.map((a) => a.value), s.ctx));
         out.push(whereOf(eCrit));
         out.push(synth(EXPLODE_FARV[s.name], [], s.ctx));
         if (vCrit) out.push(vFilter());
@@ -1488,7 +1488,7 @@ export function absorbModulators(steps: IRStep[]): IRStep[] {
       const m = steps[j];
       // Modulator entries stay VALUE-lists (a by()'s resolved args) — every `.modulators` consumer
       // reads values, and a by($x) modulator param is not wired to bind yet (see the const seam).
-      if (m.name === 'by') { modulators.push(argValues(m)); continue; }
+      if (m.name === 'by') { modulators.push(m.args.map((a) => a.value)); continue; }
       // from()/to() are path-scoping modulators only on a path-family host.
       if (pathHost && m.name === 'from' && typeof m.args[0]?.value === 'string') { from = m.args[0].value; continue; }
       if (pathHost && m.name === 'to' && typeof m.args[0]?.value === 'string') { to = m.args[0].value; continue; }

@@ -19,7 +19,7 @@ import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -508,7 +508,7 @@ function terminal(
   step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
 
   // A MID-TRAVERSAL `call()` IS A RETYPE, and this is exactly the right place for it: a `streaming`
   // service produces ONE VALUE per input traverser, so an element relation becomes a scalar one —
@@ -1015,7 +1015,7 @@ function collectionArm(
     // (`group("a")`) is a SIDE EFFECT that passes its traversers on, so a path would have to carry
     // through the member rows — not built, so it declines with a path (fail closed). Both no-ops over a
     // scalar stream, which never carries a path here.
-    if (argValues(step).length) { if (pathCarried(rel)) return { tail: null }; }
+    if (step.args.length) { if (pathCarried(rel)) return { tail: null }; }
     else rel = dropPath(rel, fresh);
     // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
     // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and the
@@ -1025,7 +1025,7 @@ function collectionArm(
     if (!rows) return { tail: null };
     // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
     // CONTINUES and only the unkeyed form becomes the traverser. One rule, two hosts (§6·6).
-    if (argValues(step).length) {
+    if (step.args.length) {
       // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed rather
       // than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what Phase 4 said
       // would let them take the aggregate sites' `snapshot` binding — but the KEY column holds a JSONB
@@ -1199,7 +1199,7 @@ function scalarTail(
       const reSourced = reSource(step, rel, out, ctx, fresh);
       return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
     }
-    const args = argValues(step);
+    const args = step.args.map((a) => a.value);
     if (step.optionArms) return null;
     // A PATH carried into the scalar stream (a `values()` appended a value position). It composes with
     // exactly the path-family steps — `path()` frames it, `simplePath()`/`cyclicPath()` filter it —
@@ -1748,7 +1748,7 @@ const exactTailConst = (a: Arg | undefined): { expr: Expr; tag: string } | null 
 function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (!args.length) return null;
   // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
   // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Flattening
@@ -1885,7 +1885,7 @@ function listLiteralBlob(listArg: Arg, values: readonly unknown[]): Expr | null 
 }
 
 function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
   const blobs = (args as readonly unknown[][]).map((values, ai) => listLiteralBlob(step.args[ai]!, values));
@@ -2152,7 +2152,7 @@ function pathTail(
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
-    const args = argValues(step);
+    const args = step.args.map((a) => a.value);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
     if (step.name === 'is') {
@@ -2211,7 +2211,7 @@ function mapTail(
   let labels = aliases;
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
-    const args = argValues(step);
+    const args = step.args.map((a) => a.value);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
@@ -2392,10 +2392,10 @@ function selectedKey(step: IRStep): string | null {
  *  about which argument forms are a column read and which are a label read. */
 function selectedColumn(step: IRStep): 'keys' | 'values' | null {
   if (step.name !== 'select') return null;
-  // `argValues`, NOT `step.args` — an `Arg` is `{value, type, name}` since a user PARAMETER became a
+  // Read `a.value`, never the bare `Arg` — an `Arg` is `{value, type, name}` since a user PARAMETER became a
   // first-class IR fact, so a test against the wrapper is permanently false. That exact reading rot is
   // what made `rel-blockers` file every labelled `group("a")` under the unkeyed bucket.
-  const args = argValues(step);
+  const args = step.args.map((a) => a.value);
   if (args.length !== 1) return null;
   const arg = args[0];
   if (!isColumnArg(arg)) return null;
@@ -2418,7 +2418,7 @@ function mapEntryTail(
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
-    const args = argValues(step);
+    const args = step.args.map((a) => a.value);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
     if ((step.modulators?.length && step.name !== 'group' && step.name !== 'groupCount') || step.optionArms) return null;
 
@@ -3606,7 +3606,7 @@ function detachedTail(
   }
   // SHAPE-AGNOSTIC row ops over ANY landed element stream — `count()` reads cardinality (a landed row IS
   // one traverser) and `dedup()` collapses by element identity (`id` functionally determines the tuple).
-  if (step.name === 'count' && argValues(step).length === 0 && !isLocalScope(step)) {
+  if (step.name === 'count' && step.args.length === 0 && !isLocalScope(step)) {
     const counted = countTail(seed, fresh);
     return continueAs(counted.rel, counted.framing, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
@@ -3615,14 +3615,14 @@ function detachedTail(
   // (Distinct collapses nothing) and a `bulk` must be RESET to 1 by the survivor (a Distinct would keep
   // the collapsed multiplicity). Both are what the MAIN FOLD's dedup does, so the shortcut is taken only
   // for a channel-less stream (a homogeneous list); otherwise dedup falls through to the handoff.
-  if (step.name === 'dedup' && argValues(step).length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms
+  if (step.name === 'dedup' && step.args.length === 0 && !isLocalScope(step) && !step.modulators?.length && !step.optionArms
     && seed.channels.length === 0) {
     const deduped = make.distinct({ id: fresh('dtd'), input: seed, channels: seed.channels, type: seed.type });
     return detachedTail(deduped, elem, steps, from + 1, ctx, fresh, subgraph);
   }
   // id() / label() — the element's tokens, REJOINED from the landed relation by id via `ctx.source`.
   if (step.name === 'id' || step.name === 'label') {
-    if (argValues(step).length) return null;
+    if (step.args.length) return null;
     const value = step.name === 'id' ? source.externalId(elem, col(seed.id, 'id'), fresh) : source.labelScalar(elem, col(seed.id, 'id'), fresh);
     const rel = make.project({ id: fresh('fgs'), input: seed, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] });
     // An id frames as whatever it was STORED as (uid string or rowid int) — no static tag; a label is a string.
@@ -3630,7 +3630,7 @@ function detachedTail(
   }
   // values(k…) — one scalar per matching property VALUE, rejoined from the landed `{t,v}` tree.
   if (step.name === 'values') {
-    const keys = argValues(step).filter((key): key is string => typeof key === 'string');
+    const keys = step.args.map((a) => a.value).filter((key): key is string => typeof key === 'string');
     if (keys.length !== step.args.length) return null;
     return scalarTail(source.propertyValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, bulked, ctx, fresh);
   }
@@ -3639,7 +3639,7 @@ function detachedTail(
   // the bound stream ARRIVES with an encounter (a subgraph seed now seeds one), that is the cross-origin
   // order and `lord` is the within-vertex tiebreak; with none, `lord` alone (label-dictionary order,
   // base; JSON-array order, bound) — the same two-key rule the base `labels()` uses.
-  if (step.name === 'labels' && !argValues(step).length && !step.modulators?.length && !step.optionArms) {
+  if (step.name === 'labels' && !step.args.length && !step.modulators?.length && !step.optionArms) {
     const named = source.labelNames(seed, elem, fresh);
     const arriving = encounterOf(named.channels);
     const channels = arriving ? named.channels : withChannel(named.channels, ENCOUNTER);
@@ -3688,7 +3688,7 @@ function elementTail(
     // `unfold()` after an entry value's element-list expansion is an identity, not a deferral.
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/UnfoldStep.java:42-53`.)
     if (step.name === 'unfold') {
-      if (argValues(step).length) return null;
+      if (step.args.length) return null;
       continue;
     }
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels);
@@ -3748,7 +3748,7 @@ function elementTail(
       // so a later `from`/`to` can slice by label. One append per label; a no-op unless a `from`/`to` is
       // in the chain, so an ordinary `as()` in a path query is untouched.
       if (ctx.demandsPathLabels && pathCarried(rel))
-        for (const name of argValues(step)) if (typeof name === 'string') rel = appendPathLabel(rel, name, fresh);
+        for (const { value: name } of step.args) if (typeof name === 'string') rel = appendPathLabel(rel, name, fresh);
       continue;
     }
     // THE SHARED COLLECTION VOCABULARY — `select` (a re-root to an aliased object), `group`/`groupCount`,
@@ -3842,7 +3842,7 @@ function elementTail(
     // `listPayload` expands it at the root, so a following `range(local)`/`unfold().limit(1)` throws
     // rows away before anything computes a property bag for them.
     if (step.name === 'fold') {
-      if (argValues(step).length || isLocalScope(step) || step.modulators?.length) return null;
+      if (step.args.length || isLocalScope(step) || step.modulators?.length) return null;
       // `fold()` is a COLLECTING BARRIER: it gathers the surviving element traversers into one list and
       // emits a single new traverser, so any carried path is consumed with them (`dropPath`). A
       // `simplePath().fold()` collects the elements that survived the filter — the path did its work.
@@ -3931,7 +3931,7 @@ function elementTail(
     // could differ on. The RECORD tail wires the SAME helper for the post-`select` form; this is the
     // pre-`select` one, and the only missing caller (the algebra was already built).
     if (step.name === 'dedup' && !isLocalScope(step) && (step.args ?? []).length && !step.optionArms) {
-      const keys = argValues(step);
+      const keys = step.args.map((a) => a.value);
       if (keys.every((k) => typeof k === 'string')) {
         const bys = modulations(step, 1, childSeam(ctx, fresh));
         if (!bys) return null;
@@ -4323,7 +4323,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   // op is meaningful. A non-productive `by()` yields NULL, so the comparison drops the row (NULL is not
   // true) exactly as TinkerPop drops it.
   if (step.name === 'where') {
-    const wargs = argValues(step);
+    const wargs = step.args.map((a) => a.value);
     const pred = step.args?.[1]?.value;
     const pred1 = step.args?.[0]?.value; // the bare `where(P)` predicate (no startKey)
     // A BARE `where(P)` with NO startKey — the subject is the CURRENT traverser, compared against the
@@ -4422,7 +4422,7 @@ function recordTail(
     // FIELD rather than a same-named `as()` label (§ `scopeValue`).
     const host: ChildHost = { kind: 'record', fields, row: { rel, aliases: labels } };
 
-    if (step.name === 'identity' || step.name === 'barrier') { if (argValues(step).length) return null; continue; }
+    if (step.name === 'identity' || step.name === 'barrier') { if (step.args.length) return null; continue; }
 
     if (step.name === 'as') {
       // `as(label…)` binds the record AS THE MAP it is — collapse it (recordToMap, the same boundary
@@ -4436,7 +4436,7 @@ function recordTail(
     }
 
     if (step.name === 'select') {
-      const args = argValues(step);
+      const args = step.args.map((a) => a.value);
       // MAP SCOPE BEATS PATH SCOPE (`Scoping.getScopeValue`), so a key that names a FIELD re-enters
       // that field and only a miss falls through to the alias channel. A modulated or multi-key
       // select over a record is `selectKeys`' business either way.
@@ -4479,7 +4479,7 @@ function recordTail(
     if (sliced) { rel = sliced; continue; }
 
     if (step.name === 'count') {
-      if (argValues(step).length) return null;
+      if (step.args.length) return null;
       const counted = countTail(rel, fresh);
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -4488,7 +4488,7 @@ function recordTail(
     // traverser: `project(k…).by(…).fold()`, the GraphQL to-many object field. The collapse is
     // `recordToMap` — the same boundary `select`/wire cross — so the fold sees a `MAP_COL` whatever the
     // fields were, and the member shape is the map's self-describing pairs array (`MapOf.scalar`).
-    if (step.name === 'fold' && !argValues(step).length && !isLocalScope(step)) {
+    if (step.name === 'fold' && !step.args.length && !isLocalScope(step)) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       const encounter = encounterOf(rel.channels);
@@ -4518,7 +4518,7 @@ function recordTail(
     // over a record (identity grouping) is a separate increment; a LABELLED dedup reads the bound
     // aliases the record already carries and collapses the tuple, optionally under a shared `by()`.
     if (step.name === 'dedup' && !isLocalScope(step)) {
-      const keys = argValues(step);
+      const keys = step.args.map((a) => a.value);
       if (keys.length && keys.every((k) => typeof k === 'string')) {
         const bys = modulations(step, 1, childSeam(ctx, fresh));
         if (!bys) return null;
@@ -4535,7 +4535,7 @@ function recordTail(
     // `mapEntryTail`), so re-entering it at THIS step reaches its own `unfold` handler with the map's
     // self-describing pairs — no record-specific entry machinery needed. `SelectStep`/`Scoping` yield a
     // `LinkedHashMap`, so the entry order is the field declaration order the record already carries.
-    if (step.name === 'unfold' && !argValues(step).length) {
+    if (step.name === 'unfold' && !step.args.length) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
