@@ -133,6 +133,16 @@ depends = ["install", "check", "submodule"]
 env = { MOGWAI_CF_LIMITS = "1" }
 run = "bun test"
 
+# The BROWSER lane — Playwright drives a real (system) Chrome against the browser leaves (src/browser/*).
+# A SEPARATE lane, deliberately outside `bun test`'s test/ root and outside `mise run ci`: the core gate
+# stays Bun-only (no browser needed to run it), and this lane runs where a browser is available. It has
+# its own CI job (.github/workflows/ci.yml `browser`). No submodule (it exercises none of the corpus/
+# client). The `./` path prefix is required because bunfig scopes bare `bun test` to test/.
+[tasks."test:browser"]
+description = "Browser lane: Playwright → real Chrome over the browser leaves (OPFS, opfs-sahpool)"
+depends = ["install", "check"]
+run = "bun test ./test-browser"
+
 # Conformance ladder — invoke a single level directly. Every level now provisions the submodule
 # whether it lists it or not, because `install` depends on it. The listing is kept where it is
 # SEMANTIC — "this level reads submodule content" (L3/L4's corpus, L5/census's real Executor) — and

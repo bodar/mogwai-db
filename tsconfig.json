@@ -3,7 +3,12 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ESNext"],
+    // DOM + DOM.Iterable are here for the BROWSER leaf (src/browser/*): OPFS (FileSystemDirectoryHandle,
+    // navigator.storage), Worker, and Web Locks (navigator.locks) are DOM-lib globals, not Bun/workers
+    // ones. Measured at ZERO added errors against the bun + workers-types set (they layer cleanly, and
+    // skipLibCheck covers the .d.ts), so one lib list still type-checks all three targets. lib is
+    // type-only — it changes nothing at runtime, where per-target bundling selects the real globals.
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun", "@cloudflare/workers-types"],
 
     "strict": true,
@@ -47,5 +52,5 @@
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "test", "parser", "scripts"]
+  "include": ["src", "test", "test-browser", "parser", "scripts"]
 }

@@ -44,6 +44,7 @@
     "antlr-ng": "^1.0.10",
     "fast-check": "^4.9.0",
     "graphql-http": "^1.22.4",
+    "playwright": "^1.62.1",
     "typescript": "^7.0.2",
     "wrangler": "^4.110.0"
   },
