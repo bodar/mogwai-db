@@ -1,14 +1,14 @@
-// The COORDINATOR — the browser's GraphManager, the twin of CloudflareGraphManager (id → Durable
-// Object) and BunGraphManager (id → in-process store). Here: id → that graph's dedicated Worker. It
-// runs in a PAGE (a Window), because only a Window can spawn dedicated Workers — a Service Worker
-// cannot (verified: `Worker` is undefined in ServiceWorkerGlobalScope). So the Service Worker HTTP edge brokers an
-// intercepted fetch to a page hosting this coordinator; the coordinator spawns/holds the graph Workers
-// and hands `makeRouter` a RemoteExecutor per graph. Concurrency is many graphs on many Workers (many
-// threads), never within one graph — exactly where Cloudflare gets it (one DO, run-to-completion).
+// The browser's GraphManager — the twin of CloudflareGraphManager (id → Durable Object) and
+// BunGraphManager (id → in-process store). Here: id → that graph's dedicated Worker. It runs in a PAGE
+// (a Window), because only a Window can spawn dedicated Workers — a Service Worker cannot (verified:
+// `Worker` is undefined in ServiceWorkerGlobalScope). So the Service Worker HTTP edge brokers an
+// intercepted fetch to a page hosting this manager; the manager spawns/holds the graph Workers and hands
+// `makeRouter` a RemoteExecutor per graph. Concurrency is many graphs on many Workers (many threads),
+// never within one graph — exactly where Cloudflare gets it (one DO, run-to-completion).
 //
-// This is the SINGLE-TAB coordinator: one page owns its graphs' Workers. Cross-tab leader election +
-// failover (one graph shared across tabs via Web Locks + a SharedService port broker) is a separate,
-// deferred increment; nothing here forecloses it — a leader-elected variant wraps the same spawn.
+// This is the SINGLE-TAB manager: one page owns its graphs' Workers. Cross-tab leader election + failover
+// (one graph shared across tabs via Web Locks + a SharedService port broker) is a separate, deferred
+// increment; nothing here forecloses it — a leader-elected variant wraps the same spawn.
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import { GraphWorkerClient } from './GraphWorkerClient.ts';
 
@@ -20,7 +20,7 @@ interface Graph {
   opened: Promise<GraphInfo>;
 }
 
-export class BrowserCoordinator implements GraphManager {
+export class BrowserGraphManager implements GraphManager {
   private readonly graphs = new Map<string, Graph>();
 
   /** `workerUrl` is the bundled graph-worker entry (graph-worker.entry.ts) the page serves; `type:

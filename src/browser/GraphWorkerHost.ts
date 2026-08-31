@@ -1,12 +1,12 @@
 // The STORE tier of the browser port: what runs INSIDE a graph's dedicated Worker. One
 // GraphWorkerHost = one graph = one Durable Object — a GraphStore over WasmSqlite on that graph's own
 // opfs-sahpool database, plus the Executor that compiles + runs + frames its queries. The doc's
-// mapping: Service Worker = edge (makeRouter + coordinator); per-graph Worker = store (this). The edge-compilation
+// mapping: Service Worker = edge (makeRouter + manager); per-graph Worker = store (this). The edge-compilation
 // optimization (runFramed) is dropped in the browser — each Worker compiles and runs its own queries.
 //
 // This is the substance; the postMessage TRANSPORT that fronts it (the dedicated-worker entry the
-// coordinator spawns) is a thin wrapper landed with the coordinator, where its RPC protocol is designed
-// alongside the coordinator's routing. Keeping the host transport-free is what lets the browser lane
+// manager spawns) is a thin wrapper landed with the manager, where its RPC protocol is designed
+// alongside the manager's routing. Keeping the host transport-free is what lets the browser lane
 // drive it directly and prove the whole compiler+executor+wire stack runs in a browser over the REAL
 // opfs-sahpool VFS (test-browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
@@ -40,7 +40,7 @@ export class GraphWorkerHost {
   private constructor(
     readonly graphId: string,
     private readonly store: GraphStore,
-    /** This graph's executor — also the endpoint a coordinator routes a SIBLING'S federated hop INTO
+    /** This graph's executor — also the endpoint a manager routes a SIBLING'S federated hop INTO
      *  (its `runForeign`), which is the cross-Worker twin of the Cloudflare DO's `raw`/`runForeign` RPC. */
     readonly executor: Executor,
   ) {}
@@ -53,14 +53,14 @@ export class GraphWorkerHost {
     const store = new GraphStore(sql);
     let host: GraphWorkerHost;
     // Federation source: SELF resolves to this graph's own executor (a federate to one's own graph is
-    // in-process); a SIBLING is a cross-Worker hop the COORDINATOR routes, so fail closed here naming it
+    // in-process); a SIBLING is a cross-Worker hop the manager routes, so fail closed here naming it
     // rather than silently opening the sibling's data in the wrong Worker. The closure reads `host` only
     // at federate time, by when it is assigned.
     const source: FederationSource = {
       executor: (id) => {
         if (id === graphId) return host.executor;
         throw new Error(
-          `graph worker "${graphId}": cross-worker federation to "${id}" is routed by the coordinator, not the graph worker`,
+          `graph worker "${graphId}": cross-worker federation to "${id}" is routed by the manager, not the graph worker`,
         );
       },
     };
@@ -69,13 +69,13 @@ export class GraphWorkerHost {
     return host;
   }
 
-  /** Compile + run + frame a query to GraphBinary value buffers — what the coordinator/Service Worker streams back
+  /** Compile + run + frame a query to GraphBinary value buffers — what the manager/Service Worker streams back
    *  to the client. Async because a federated top-level call() drives its segment loop here. */
   framed(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]> {
     return this.executor.framedAsync(gremlin, params, paramTypes);
   }
 
-  /** The detached-row transfer a sibling's federated hop lands through — the coordinator invokes this
+  /** The detached-row transfer a sibling's federated hop lands through — the manager invokes this
    *  when another graph's Worker federates INTO this one (the browser twin of the DO `runForeign` RPC). */
   runForeign(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {
     return this.executor.runForeign(gremlin, params, depth, paramTypes, terminal);
@@ -87,4 +87,4 @@ export class GraphWorkerHost {
   }
 }
 // Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's
-// file handles) is the COORDINATOR's concern — it owns the Worker — so the host exposes no close/destroy.
+// file handles) is the manager's concern — it owns the Worker — so the host exposes no close/destroy.

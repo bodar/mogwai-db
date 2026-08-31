@@ -1,6 +1,6 @@
-// The postMessage RPC contract between a page-side coordinator and a graph's dedicated Worker — the
+// The postMessage RPC contract between a page-side manager and a graph's dedicated Worker — the
 // browser twin of the Durable Object's RPC surface (src/cloudflare/graph-store-do.ts). One Worker hosts
-// ONE graph (= one DO); the coordinator opens it, then runs queries / federated hops / info against it.
+// ONE graph (= one DO); the manager opens it, then runs queries / federated hops / info against it.
 //
 // The DATA-PLANE payloads (query → Framed[], foreign → ForeignResult) cross as a `RpcResult` so a query
 // FAILURE travels as a value and never escapes the Worker's onmessage as an uncaught error (which would

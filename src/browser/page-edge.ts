@@ -1,10 +1,10 @@
 // The PAGE side of the Service Worker edge. The Service Worker (service-worker.entry.ts) intercepts a client's
-// `fetch('/gremlin/*')` and forwards it here, to a page that hosts the coordinator + graph Workers; this
+// `fetch('/gremlin/*')` and forwards it here, to a page that hosts the manager + graph Workers; this
 // runs the local `router` and replies on the per-request port. So the Service Worker is a pure broker and the PAGE
 // is the store host — the only split that respects "a Service Worker cannot spawn a dedicated Worker".
 import type { PageEdgeRequest, PageEdgeResponse } from './service-worker.entry.ts';
 
-/** The router the page serves — `makeRouter(coordinator)`, `Request → Promise<Response>`. */
+/** The router the page serves — `makeRouter(manager)`, `Request → Promise<Response>`. */
 export type EdgeRouter = (req: Request) => Promise<Response>;
 
 /** Install the page-side edge: answer requests the Service Worker forwards by running `router` and

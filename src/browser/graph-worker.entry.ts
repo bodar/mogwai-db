@@ -1,4 +1,4 @@
-// The dedicated-Worker ENTRY the coordinator spawns, one per graph — the postMessage transport that
+// The dedicated-Worker ENTRY the manager spawns, one per graph — the postMessage transport that
 // fronts a GraphWorkerHost. It hosts ONE graph (= one DO): `open` boots the host over that graph's
 // opfs-sahpool database, then `query`/`foreign`/`info` run against it. A DATA-PLANE failure crosses back
 // as a `RpcResult` value (rpcTry) so a bad query never escapes onmessage as an uncaught error that would

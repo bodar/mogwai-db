@@ -4,7 +4,7 @@
 //
 // The Service Worker cannot host the store (it can spawn no dedicated Worker, and opfs-sahpool needs
 // one), so it is a BROKER: it forwards an intercepted request to a controlled PAGE that hosts the
-// coordinator + graph Workers (installMogwaiPageEdge, page-edge.ts), and streams the page's response back
+// manager + graph Workers (installMogwaiPageEdge, page-edge.ts), and streams the page's response back
 // to the client. This mirrors the Cloudflare structural split — edge here, page-hosted Worker = store —
 // with only the edge-compilation optimization dropped. A request/response crosses page↔edge as bytes over
 // a per-request MessageChannel; the request/response bodies transfer zero-copy.

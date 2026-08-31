@@ -1,11 +1,11 @@
 // The capstone page: the FULL single-tab browser stack, driven by a real client's `fetch`. This page
-// hosts the coordinator + graph Workers and installs the page edge; the Service Worker intercepts the
+// hosts the manager + graph Workers and installs the page edge; the Service Worker intercepts the
 // page's own `fetch('/gremlin/*')` and brokers it back here. So a client — a plain fetch AND the
 // UNMODIFIED TinkerPop GLV — reaches the local opfs-sahpool graph with no monkey-patching, proving the
 // port's headline thesis end to end in a real browser.
 import '../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
 import { makeRouter } from '../../src/router.ts';
-import { BrowserCoordinator } from '../../src/browser/coordinator.ts';
+import { BrowserGraphManager } from '../../src/browser/BrowserGraphManager.ts';
 import { installMogwaiPageEdge, registerServiceWorker } from '../../src/browser/page-edge.ts';
 import { ioc } from '../../src/io.ts';
 import gremlin from 'gremlin';
@@ -17,8 +17,8 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
-  const coordinator = new BrowserCoordinator('/graph-worker.js');
-  const router = makeRouter(coordinator);
+  const manager = new BrowserGraphManager('/graph-worker.js');
+  const router = makeRouter(manager);
   await registerServiceWorker('/service-worker.js'); // resolves once the Service Worker controls this page
   installMogwaiPageEdge(router); // must be installed before any intercepted fetch
 
@@ -39,7 +39,7 @@ async function main() {
     if (n !== 2) throw new Error(`count = ${n}`);
   });
 
-  await check('the Service Worker routes a management GET (JSON) to the coordinator', async () => {
+  await check('the Service Worker routes a management GET (JSON) to the manager', async () => {
     const j = await (await fetch(gremlinUrl)).json() as any;
     if (j.vertexCount !== 2) throw new Error(JSON.stringify(j));
   });

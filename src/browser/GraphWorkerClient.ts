@@ -1,5 +1,5 @@
 // The page-side half of the graph-worker transport: a promise-based RPC client over one graph's
-// dedicated Worker. The coordinator holds one of these per graph (spawn the Worker, wrap it here), and
+// dedicated Worker. The manager holds one of these per graph (spawn the Worker, wrap it here), and
 // so does the browser test lane. Matches replies to requests by a monotonic `rid`, and turns a
 // data-plane `RpcResult` back into a value-or-throw with `rpcUnwrap` (the far-side stack travels with a
 // failure, so a query error thrown here reads as if it were thrown locally).
@@ -24,7 +24,7 @@ export class GraphWorkerClient {
       }
     });
     // A hard Worker crash (not a query failure — those come back as values) rejects everything in flight
-    // rather than leaving callers hung; the coordinator treats it as the graph worker going away.
+    // rather than leaving callers hung; the manager treats it as the graph worker going away.
     worker.addEventListener('error', (e) => {
       const err = new Error(`graph worker crashed: ${e.message}`);
       for (const p of this.pending.values()) p.reject(err);
@@ -54,7 +54,7 @@ export class GraphWorkerClient {
     return rpcUnwrap(r.result).map((f) => ({ buf: Buffer.from(f.buf), bulk: f.bulk }));
   }
 
-  /** A federated hop landing INTO this graph (the coordinator routes a sibling's federate here). */
+  /** A federated hop landing INTO this graph (the manager routes a sibling's federate here). */
   async runForeign(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {
     const r = await this.send({ op: 'foreign', gremlin, params, depth, paramTypes, terminal });
     if (r.op !== 'foreign') throw new Error(`unexpected reply op ${r.op} for foreign`);

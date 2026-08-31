@@ -1,11 +1,11 @@
-// Drives the page-side edge in a browser: makeRouter over a BrowserCoordinator, exercised with raw
+// Drives the page-side edge in a browser: makeRouter over a BrowserGraphManager, exercised with raw
 // fetch-shaped Requests (the Service Worker that will intercept real client fetches is 4c; here the router is called
-// directly). Proves the full page path — router → coordinator → per-graph dedicated Worker →
+// directly). Proves the full page path — router → manager → per-graph dedicated Worker →
 // opfs-sahpool — plus multi-graph routing (one Worker per graph) and the management verbs, all in a real
 // browser. A dedicated Worker may spawn nested Workers, so this driver worker stands in for the page.
 import '../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
 import { makeRouter } from '../../src/router.ts';
-import { BrowserCoordinator } from '../../src/browser/coordinator.ts';
+import { BrowserGraphManager } from '../../src/browser/BrowserGraphManager.ts';
 import { ioc } from '../../src/io.ts';
 
 const results: { name: string; ok: boolean; error?: string }[] = [];
@@ -16,8 +16,8 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 
 self.onmessage = async () => {
   try {
-    const coordinator = new BrowserCoordinator('/graph-worker.js');
-    const router = makeRouter(coordinator);
+    const manager = new BrowserGraphManager('/graph-worker.js');
+    const router = makeRouter(manager);
     const post = (graphId: string, gremlin: string) =>
       router(new Request(`http://x/gremlin/${graphId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -34,7 +34,7 @@ self.onmessage = async () => {
     await post(A, "g.addV('person').property('name','vadas')");
     await post(B, "g.addV('language').property('name','zig')");
 
-    await check('router → coordinator → worker: count on graph A', async () => {
+    await check('router → manager → worker: count on graph A', async () => {
       const d = await read(A, 'g.V().count()');
       if (Number(d[0]) !== 2) throw new Error(`A count = ${d[0]}`);
     });

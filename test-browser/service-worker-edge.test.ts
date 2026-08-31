@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll } from 'bun:test';
 import { runBrowserPage } from './support/harness.ts';
 
 // The CAPSTONE of the single-tab browser path: the Service Worker HTTP edge intercepting a real client's
-// fetch and brokering it to a page that hosts the coordinator + graph Workers over opfs-sahpool. Proves
+// fetch and brokering it to a page that hosts the manager + graph Workers over opfs-sahpool. Proves
 // the port's headline thesis end to end in a real browser — a plain fetch AND the UNMODIFIED TinkerPop
 // GLV both reach the local graph with no monkey-patching. Separate lane; `mise run test:browser`.
 describe('browser: Service Worker edge + unmodified GLV', () => {
@@ -18,7 +18,7 @@ describe('browser: Service Worker edge + unmodified GLV', () => {
 
   const NAMES = [
     'a plain fetch is intercepted by the Service Worker and reaches the store',
-    'the Service Worker routes a management GET (JSON) to the coordinator',
+    'the Service Worker routes a management GET (JSON) to the manager',
     'the UNMODIFIED TinkerPop GLV works over the Service Worker edge (fetch)',
   ];
 
