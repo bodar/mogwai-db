@@ -60,7 +60,7 @@ export function optionArms(step: IRStep, body: BodyOf): OptionArm[] | null {
   const seen = new Set<OptionPick>();
   for (const opt of step.optionArms ?? []) {
     const bodyArg = opt.args.find((a) => isNested(a.value))?.value;
-    if (!bodyArg) return null;
+    if (!bodyArg || !isNested(bodyArg)) return null;
     const keyArg = opt.args.find((a) => a.value !== bodyArg)?.value;
     const token = isPickArg(keyArg) ? keyArg.pick : undefined;
     if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any

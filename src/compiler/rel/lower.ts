@@ -19,7 +19,7 @@ import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -1814,7 +1814,7 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   // them, so `ordered` casts THIS subject to its numeric class while leaving the native one alone. That
   // is what lets `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order correctly instead of declining.
   let textTail = false;
-  const rowExpr = (value: unknown, i: number): Expr | null => {
+  const rowExpr = (value: ArgValue, i: number): Expr | null => {
     const paramName = step.args[i]?.name ?? null;
     const literal = constLit(arg(value, rowType(i), paramName));
     if (literal) return literal;
@@ -1869,7 +1869,7 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
 /** One `[…]` literal argument as the `LIST_COL` pairs blob a list-valued relation carries, or `null` to
  *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row) and
  *  `constant([…])` (a per-row retype) — the two are one literal, produced at different positions. */
-function listLiteralBlob(listArg: Arg, values: readonly unknown[]): Expr | null {
+function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null {
   // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
   // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
   // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
@@ -1888,7 +1888,7 @@ function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; 
   const args = step.args.map((a) => a.value);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
-  const blobs = (args as readonly unknown[][]).map((values, ai) => listLiteralBlob(step.args[ai]!, values));
+  const blobs = args.map((values, ai) => listLiteralBlob(step.args[ai]!, values));
   if (blobs.some((blob) => !blob)) return null;
   // The ENCOUNTER ordinal — `injectMap`'s rule, and the fix for a real order bug: `inject([…],[…]).fold()`
   // folds SEVERAL list traversers into a list-of-lists, and `foldLists` orders the members by this channel;

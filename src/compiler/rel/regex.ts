@@ -97,7 +97,7 @@ export function regexBarrierIn(steps: readonly Step[]): RegexBarrier | null {
  *  named collection operand, so it lowers to the ONE `json_each` bind (`predicate.ts` `jsonEachInSet`).
  *  The rest of the chain is untouched: the prefix re-narrows the population and the tail continues,
  *  both in ordinary SQL. */
-function reinject(steps: readonly Step[], at: number, key: string, survivors: readonly unknown[]): Step[] {
+function reinject(steps: readonly Step[], at: number, key: string, survivors: readonly string[]): Step[] {
   const within = arg({ op: 'within', operands: [arg([...survivors], null, REGEX_SURVIVORS_PARAM)] });
   const has: Step = { ...steps[at]!, args: [arg(key), within] };
   return steps.map((s, i) => (i === at ? has : s));
@@ -211,9 +211,9 @@ export function buildRegexSegment(
 /** The DISTINCT candidate values that match — the barrier's whole transform. A non-string value is not
  *  a `P<String>` match under regex or notRegex alike (the LIKE path's `textSubject` type gate), so it
  *  is neither tested nor a survivor. `negated !== test` is Java's `negate != matcher.find()`. */
-function survivorsOf(headRows: readonly BarrierInput[], re: RegExp, negated: boolean): unknown[] {
+function survivorsOf(headRows: readonly BarrierInput[], re: RegExp, negated: boolean): string[] {
   const seen = new Set<string>();
-  const survivors: unknown[] = [];
+  const survivors: string[] = [];
   for (const row of headRows) {
     const value = row.injectedValue;
     if (typeof value !== 'string' || seen.has(value)) continue;

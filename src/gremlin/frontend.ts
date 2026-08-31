@@ -76,7 +76,7 @@ export interface Arg {
   /** The resolved value: a scalar, a tagged token (`{scope}`/`{token}`/…), a `Pred`, a `{nested}`
    *  traversal, a JS Map/Set, or a bracketed-list array. A parameter still exposes its resolved
    *  value here — `name` is the only thing that marks it variable, it is not opaque. */
-  readonly value: any;
+  readonly value: ArgValue;
   /** The canonical Gremlin type of `value` as its carrying channel declared it — a parsed literal's
    *  subtype (numeric suffix, string, boolean, datetime, uuid, list, map) or, for a bound-param
    *  reference, the wire DataType the client serialized. `null` when the channel said nothing (the
@@ -100,7 +100,7 @@ export interface Arg {
 
 /** Build an `Arg`. `type`/`name` default to null — a synthetic step argument (compiler-minted, no
  *  wire provenance) is a plain value with neither, and no `members` (not a collection literal). */
-export const arg = (value: any, type: TypeNode | null = null, name: string | null = null): Arg => ({ value, type, name });
+export const arg = (value: ArgValue, type: TypeNode | null = null, name: string | null = null): Arg => ({ value, type, name });
 
 /** Build a collection-LITERAL `Arg` from its member `Arg`s. Derives all three views in ONE place so
  *  they cannot desync: `value` is the raw wire/storage form (a JS array for a list, a JS `Set` for a
@@ -146,7 +146,7 @@ export type TaggedArg =
   /** A bare Cardinality token, or its value-bearing form used inside a map.
    * `Cardinality.set(v)` is TinkerPop's CardinalityValueTraversal: its cardinality
    * overrides a map/default cardinality for this one property. */
-  | { readonly cardinality: string; readonly value?: any }
+  | { readonly cardinality: string; readonly value?: ArgValue }
   | { readonly gtype: string }
   | { readonly pick: string }
   | { readonly withOption: string }
@@ -154,6 +154,22 @@ export type TaggedArg =
   | { readonly operator: string }
   | { readonly scope: string }
   | { readonly nested: any };
+
+/** Every shape a resolved `Arg.value` can take. Closed union — was `any`.
+ *  - bare scalars: a parsed literal or a bound param's resolved value
+ *  - BigDecimal / Duration: the exact-carrier "oversized tail" literals
+ *  - TaggedArg: the 14 tagged tokens (order/pop/column/token/direction/merge/cardinality/gtype/
+ *    pick/withOption/dt/operator/scope/nested) — `nested` still carries a parser CST node (`any`)
+ *  - Pred: a `P`/`TextP` predicate ({op, operands})
+ *  - the three container LITERALS: list -> array, set -> Set, map -> Map (keys may be typed) */
+export type ArgValue =
+  | string | number | boolean | null | bigint
+  | BigDecimal | Duration
+  | TaggedArg
+  | Pred
+  | readonly ArgValue[]
+  | ReadonlySet<ArgValue>
+  | ReadonlyMap<ArgValue, ArgValue>;
 
 type TaggedKey = 'order' | 'pop' | 'column' | 'token' | 'direction' | 'merge' | 'cardinality'
   | 'gtype' | 'pick' | 'withOption' | 'dt' | 'operator' | 'scope' | 'nested';
@@ -168,7 +184,7 @@ export const isTokenArg = (arg: unknown): arg is Extract<TaggedArg, { token: str
 export const isDirectionArg = (arg: unknown): arg is Extract<TaggedArg, { direction: string }> => tagged(arg, 'direction');
 export const isMergeArg = (arg: unknown): arg is Extract<TaggedArg, { merge: string }> => tagged(arg, 'merge');
 export const isCardinalityArg = (arg: unknown): arg is Extract<TaggedArg, { cardinality: string }> => tagged(arg, 'cardinality');
-export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinality: string; readonly value: any } =>
+export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinality: string; readonly value: ArgValue } =>
   isCardinalityArg(arg) && 'value' in arg;
 export const isGTypeArg = (arg: unknown): arg is Extract<TaggedArg, { gtype: string }> => tagged(arg, 'gtype');
 export const isPickArg = (arg: unknown): arg is Extract<TaggedArg, { pick: string }> => tagged(arg, 'pick');

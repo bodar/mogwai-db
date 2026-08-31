@@ -323,10 +323,16 @@ export function storedScalar(val: any, vtype: CanonicalType | null): any {
  * the FTS rows (see `propertyFtsRows`).
  */
 export function propertyValueBind(
-  val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null,
+  val: import('./frontend.ts').ArgValue, vtype: CanonicalType | null, typeNode?: TypeNode | null,
+): { stored: import('./frontend.ts').ArgValue; collection: boolean };
+export function propertyValueBind(
+  val: unknown, vtype: CanonicalType | null, typeNode?: TypeNode | null,
+): { stored: unknown; collection: boolean };
+export function propertyValueBind(
+  val: any, vtype: CanonicalType | null, typeNode?: TypeNode | null,
 ): { stored: any; collection: boolean } {
   const collection = isCollectionType(vtype);
-  return { collection, stored: collection ? JSON.stringify(valueNodeOf(val, typeNode).v) : storedScalar(val, vtype) };
+  return { collection, stored: collection ? JSON.stringify(valueNodeOf(val, typeNode ?? null).v) : storedScalar(val, vtype) };
 }
 
 /** Types without a bidirectional GraphBinary serializer. Formerly {bigdecimal, char,

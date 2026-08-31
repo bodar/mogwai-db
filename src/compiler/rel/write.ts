@@ -269,7 +269,7 @@ export interface PropertySet {
   readonly key: string;
   readonly keyName: string | null;
   /** The value as STORAGE holds it, and the canonical Gremlin type beside it. */
-  readonly stored: unknown;
+  readonly stored: import('../../gremlin/frontend.ts').ArgValue;
   readonly valueName: string | null;
   readonly typeNode: TypeNode | null;
   readonly vtype: CanonicalType | null;
@@ -1685,7 +1685,7 @@ function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minte
  * question about a traversal nobody wrote.
  */
 function matching(
-  labels: readonly string[], props: readonly (readonly [string, unknown])[], child: ChildSeam, fresh: Minter,
+  labels: readonly string[], props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   return rootedVertices([
     { name: 'V', args: [] },
@@ -2202,7 +2202,7 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  * expressible.
  */
 function edgeCriteria(
-  label: string | null, props: readonly (readonly [string, unknown])[], child: ChildSeam, fresh: Minter,
+  label: string | null, props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   const read = child.rooted([
     { name: 'E', args: [] },

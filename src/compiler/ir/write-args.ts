@@ -1,7 +1,7 @@
 import { gremlinTypeOf, mapEntryType, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import {
     isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
-    stepChain, type Arg, type Step,
+    stepChain, type Arg, type ArgValue, type Step,
 } from '../../gremlin/frontend.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
@@ -44,7 +44,7 @@ import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
 // A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
 // constant at compile time (correct-by-construction — the value never changes). Returns
 // {has:false} for any other nested shape so the caller falls through to its own handling.
-function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any } {
+function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: true; value: ArgValue } | { has: false; value: undefined } {
   if (!isNested(nested)) return { has: false, value: undefined };
   const inner = stepChain(nested.nested, params);
   if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string' && sideEffects?.has(inner[0].args[0].value))
@@ -58,7 +58,7 @@ function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined,
 //                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
 // This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
 // value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
-export function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+export function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: true; value: ArgValue; vtype: CanonicalType | null; typeNode: TypeNode | null } | { has: false; value: undefined; vtype: null; typeNode: null } {
   const c = constFromSelect(nested, sideEffects, params);
   // A `withSideEffect` constant is a raw JS value out of the registry with no wire arg behind it, so
   // it HAS no TypeNode and `null` is the honest answer rather than a gap — `gremlinTypeOf(v, null)`
@@ -113,16 +113,16 @@ export type Cardinality = VertexCardinality | null;
 export interface MetaPropSpec {
   key: string;
   keyName: string | null;
-  value: any;
+  value: ArgValue;
   valueName: string | null;
   vtype: CanonicalType | null;
   typeNode: TypeNode | null;
 }
 
 export interface PropSpec {
-  key: string | { nested: any };
+  key: string | number | boolean | bigint | { nested: any };
   keyName: string | null;
-  value: any;
+  value: ArgValue;
   valueName: string | null;
   vtype: CanonicalType | null;
   typeNode: TypeNode | null;
@@ -160,7 +160,7 @@ export const propTypeNode = (step: Step, off: number): TypeNode | null => step.a
  *  (only one of them collapsed a `__.select(sideEffectConst)` VALUE). */
 export type ParsedProperty =
   | { kind: 'prop'; spec: PropSpec }
-  | { kind: 'token'; token: string; value: any; meta: boolean }
+  | { kind: 'token'; token: string; value: ArgValue; meta: boolean }
   /** `property(null, …)` — a null KEY adds nothing, which is TinkerPop's null case. (The map form
    *  never reaches here: `desugarPropertyMap` expanded it before lowering ever saw the chain.) */
   | { kind: 'none' };
@@ -245,12 +245,12 @@ export interface MergeSpec {
   readonly role: MergeRole;
   /** A LIST because a merge map's T.label may be `["a","b"]`; null = the key was absent. */
   label: string[] | null | { nested: any };
-  id: any;
-  outV: any;
-  inV: any;
+  id: ArgValue | undefined;
+  outV: ArgValue | undefined;
+  inV: ArgValue | undefined;
   /** Props are keyed by a stable internal slot until resolveMergeSpec turns a nested
    * map key into its actual string. Static keys use themselves as the slot. */
-  props: Record<string, any>;
+  props: Record<string, ArgValue>;
   propTypes: Record<string, TypeNode | null>;
   propKeys: Record<string, string | { nested: any }>;
   /** The per-key property cardinality. A map's CardinalityValueTraversal wins over

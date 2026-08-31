@@ -6,6 +6,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { RelId } from '../../rel/types.ts';
 import { containsSelfRef, mapRelChildren, mapRelExprs, rewriteExpr } from '../../rel/walk.ts';
 import type { IRStep } from '../ir/step.ts';
+import { isNested } from '../../gremlin/frontend.ts';
 import type { AliasMap } from '../alias.ts';
 import type { Elem } from '../elem.ts';
 import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Minter } from './build.ts';
@@ -153,15 +154,21 @@ export function repeatWalk(
   /** The one combination whose two output routes cannot suppress each other. See `OUTPUT POSITIONS`. */
   const twice = !!until && !!emit && untilFirst && !emitFirst;
 
-  const body = child.body(repeat.args[0]?.value?.nested, 'child');
+  const repeatBody = repeat.args[0]?.value;
+  if (!isNested(repeatBody)) return null;
+  const body = child.body(repeatBody.nested, 'child');
   if (!body?.length) return null;
-  const predicate = until ? child.body(until.args[0]?.value?.nested, 'child') : undefined;
+  const untilBody = until?.args[0]?.value;
+  if (until && !isNested(untilBody)) return null;
+  const predicate = until && isNested(untilBody) ? child.body(untilBody.nested, 'child') : undefined;
   if (until && !predicate?.length) return null;
   // `emit(pred)` carries a nested traversal. The `emit(P)` overload wraps a raw predicate in
   // `__.filter(P)` upstream and does not reach us as one, so it declines here exactly as `until(P)`
   // already does rather than being silently read as a traversal.
+  const emitBody = emit?.args[0]?.value;
+  if (emit && (emit.args ?? []).length === 1 && !isNested(emitBody)) return null;
   const emitted = emit && (emit.args ?? []).length === 1
-    ? child.body(emit.args[0]?.value?.nested, 'child') : undefined;
+    && isNested(emitBody) ? child.body(emitBody.nested, 'child') : undefined;
   if (emit && (emit.args ?? []).length === 1 && !emitted?.length) return null;
 
   // Encounter is a unique position that cannot repeat at every depth, so it stays explicit rather than

@@ -1,4 +1,4 @@
-import { arg, isNested, isPred, stepChain, type Arg } from '../../gremlin/frontend.ts';
+import { arg, isNested, isPred, stepChain, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
 import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
@@ -395,7 +395,7 @@ function rootLabel(patterns: readonly Pattern[]): string | null {
 
 /** Synthesize an IR step borrowing the host `match` step's parse context, so an error raised deep in
  *  the fold still points at the right source span (as `gql.ts`/`strategies.ts` do). */
-const syn = (host: IRStep, name: string, values: unknown[] = []): IRStep =>
+const syn = (host: IRStep, name: string, values: ArgValue[] = []): IRStep =>
   ({ name, args: values.map((v) => arg(v)), ctx: host.ctx });
 
 /** A `where(<body>)`/`not(<body>)` filter LEG lowered against a stream that CARRIES the bound aliases —
