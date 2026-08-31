@@ -10,6 +10,9 @@ import { installMogwaiPageEdge, registerServiceWorker } from '../../src/browser/
 import { ioc } from '../../src/io.ts';
 import gremlin from 'gremlin';
 
+// A progress trail the harness reads back on timeout — more reliable than console echo, which the CI
+// log did not surface. TEMP diagnostic.
+(window as any).__progress = ['module-loaded'];
 const results: { name: string; ok: boolean; error?: string }[] = [];
 async function check(name: string, fn: () => Promise<void>): Promise<void> {
   try { await fn(); results.push({ name, ok: true }); }
@@ -17,7 +20,7 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
-  const log = (m: string) => console.log(`main: ${m}`);
+  const log = (m: string) => { console.log(`main: ${m}`); (window as any).__progress.push(m); };
   const coordinator = new BrowserCoordinator('/graph-worker.js');
   const router = makeRouter(coordinator);
   log('registering SW');
@@ -74,6 +77,7 @@ async function main() {
 }
 
 main().catch((e: any) => {
+  (window as any).__progress.push(`FATAL: ${String(e?.message ?? e)}`);
   (window as any).__result = { results, fatal: String(e?.stack || e) };
   (window as any).__done = true;
 });

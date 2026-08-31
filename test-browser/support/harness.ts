@@ -146,15 +146,22 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
   const consoleLines: string[] = [];
   const debug = !!process.env.MOGWAI_BROWSER_DEBUG;
   const record = (line: string) => { consoleLines.push(line); if (debug) console.error(`[sw-page] ${line}`); };
+  const page = await browser.newPage();
   try {
-    const page = await browser.newPage();
     page.on('console', (m) => record(`[${m.type()}] ${m.text()}`));
     page.on('pageerror', (e) => record(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
     await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
     return await page.evaluate('window.__result');
   } catch (e) {
-    throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
+    // TEMP diagnostic: read the page's progress trail back even on a hang, so the last step reached is
+    // visible in the CI log (console echo did not surface).
+    const progress = await page.evaluate('window.__progress').catch(() => null);
+    throw new Error(
+      `${e instanceof Error ? e.message : String(e)}` +
+      `\n--- progress ---\n${JSON.stringify(progress)}` +
+      `\n--- browser console ---\n${consoleLines.join('\n')}`,
+    );
   } finally {
     // Guard close so a Service Worker that keeps the context alive can't swallow the diagnostic above.
     await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5_000))]);
