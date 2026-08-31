@@ -8,7 +8,7 @@
 // manager spawns) is a thin wrapper landed with the manager, where its RPC protocol is designed
 // alongside the manager's routing. Keeping the host transport-free is what lets the browser lane
 // drive it directly and prove the whole compiler+executor+wire stack runs in a browser over the REAL
-// opfs-sahpool VFS (test-browser/workers/graph-worker.worker.ts).
+// opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
 import { graphInfo, type GraphInfo } from '../manager.ts';
 import { Executor, type Framed } from '../execute.ts';

@@ -5,14 +5,14 @@ import { runBrowserPage } from './support/harness.ts';
 // fetch and brokering it to a page that hosts the manager + graph Workers over opfs-sahpool. Proves
 // the port's headline thesis end to end in a real browser — a plain fetch AND the UNMODIFIED TinkerPop
 // GLV both reach the local graph with no monkey-patching. Separate lane; `mise run test:browser`.
-describe('browser: Service Worker edge + unmodified GLV', () => {
+describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: Service Worker edge + unmodified GLV', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };
 
   beforeAll(async () => {
     out = await runBrowserPage({
       pageEntry: Bun.fileURLToPath(import.meta.resolve('./pages/service-worker-edge.page.ts')),
-      serviceWorker: Bun.fileURLToPath(import.meta.resolve('../src/browser/service-worker.entry.ts')),
-      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../src/browser/graph-worker.entry.ts')) },
+      serviceWorker: Bun.fileURLToPath(import.meta.resolve('../../src/browser/service-worker.entry.ts')),
+      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/graph-worker.entry.ts')) },
     });
   }, 90_000);
 

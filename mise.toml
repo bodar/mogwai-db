@@ -138,14 +138,17 @@ env = { MOGWAI_CF_LIMITS = "1" }
 run = "bun test test/L3-conformance"
 
 # The BROWSER lane — Playwright drives a real (system) Chrome against the browser leaves (src/browser/*).
-# A SEPARATE lane, deliberately outside `bun test`'s test/ root and outside `mise run ci`: the core gate
-# stays Bun-only (no browser needed to run it), and this lane runs where a browser is available. It has
-# its own CI job (.github/workflows/ci.yml `browser`). No submodule (it exercises none of the corpus/
-# client). The `./` path prefix is required because bunfig scopes bare `bun test` to test/.
+# A SEPARATE lane, deliberately outside `mise run ci`: the core gate stays Bun-only (no browser needed).
+# The tests live under test/browser/ but their `describe`s are `skipIf(!MOGWAI_BROWSER_LANE)`, so a bare
+# `bun test` / `mise run test` discovers and SKIPS them (no Chrome) — only this task, which sets the env,
+# runs them for real. It has its own CI job (.github/workflows/ci.yml `browser`). No submodule.
 [tasks."test:browser"]
 description = "Browser lane: Playwright → real Chrome over the browser leaves (OPFS, opfs-sahpool)"
 depends = ["install", "check"]
-run = "bun test ./test-browser"
+env = { MOGWAI_BROWSER_LANE = "1" }
+# Trailing slash scopes to the directory — `bun test test/browser` is a PREFIX that would also pull in
+# test/browser-wasm.test.ts (the Bun-only WASM contract, which must stay in the core gate).
+run = "bun test test/browser/"
 
 # Conformance ladder — invoke a single level directly. Every level now provisions the submodule
 # whether it lists it or not, because `install` depends on it. The listing is kept where it is

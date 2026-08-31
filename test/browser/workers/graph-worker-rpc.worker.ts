@@ -3,11 +3,11 @@
 // (Framed[] crossing the structured-clone boundary), info, and a FAILURE that must come back as a value
 // (a bad query rejects the client promise; it must not hang the RPC). Proves the browser twin of the
 // Durable Object clone-boundary the doc flags: a payload that fails to cross the Worker boundary.
-import '../../src/browser/buffer-global.ts'; // first — Buffer for the decode path (streamBuffers/ioc)
-import { GraphWorkerClient } from '../../src/browser/GraphWorkerClient.ts';
-import { streamBuffers } from '../../src/http.ts';
-import { ioc } from '../../src/io.ts';
-import type { Framed } from '../../src/execute.ts';
+import '../../../src/browser/buffer-global.ts'; // first — Buffer for the decode path (streamBuffers/ioc)
+import { GraphWorkerClient } from '../../../src/browser/GraphWorkerClient.ts';
+import { streamBuffers } from '../../../src/http.ts';
+import { ioc } from '../../../src/io.ts';
+import type { Framed } from '../../../src/execute.ts';
 
 async function read(client: GraphWorkerClient, gremlin: string): Promise<any[]> {
   // Framed buffers arrive as Uint8Array after the clone — rewrap to Buffer for the response framing.

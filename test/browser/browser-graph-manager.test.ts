@@ -4,13 +4,13 @@ import { runBrowserWorker } from './support/harness.ts';
 // The page-side edge in a real browser: makeRouter over the BrowserGraphManager (id → per-graph dedicated
 // Worker → opfs-sahpool). Proves the full page path plus multi-graph routing and the management verbs —
 // the whole browser store stack short of the Service Worker fetch intercept (4c). Separate lane.
-describe('browser: manager + makeRouter over per-graph Workers', () => {
+describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: manager + makeRouter over per-graph Workers', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };
 
   beforeAll(async () => {
     out = await runBrowserWorker({
       entry: Bun.fileURLToPath(import.meta.resolve('./workers/browser-graph-manager.worker.ts')),
-      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../src/browser/graph-worker.entry.ts')) },
+      extraWorkers: { '/graph-worker.js': Bun.fileURLToPath(import.meta.resolve('../../src/browser/graph-worker.entry.ts')) },
     });
   }, 90_000);
 

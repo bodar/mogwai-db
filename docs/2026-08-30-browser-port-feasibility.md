@@ -17,18 +17,18 @@ progress against this plan.
   (`file.stream()` / `createWritable()`), fail-closed absence, prefix listing, truncating rewrite,
   abort-leaves-nothing. The browser twin of `FileIoStore`/`R2IoStore`, reached from inside a graph's
   dedicated Worker; keys resolve under a shared base dir (per-deployment io namespace).
-- **The Playwright browser lane** — `test-browser/` (outside `bun test`'s `test/` root). Playwright as a
+- **The Playwright browser lane** — `test/browser/` (outside `bun test`'s `test/` root). Playwright as a
   DRIVER LIBRARY (`chromium.launch`) drives GitHub's / this machine's **system Chrome** (no browser
   download), bundling a dedicated worker with `Bun.build`, serving it over `localhost`, asserting on what
-  the worker posts back. `test-browser/support/harness.ts` (`runBrowserWorker`) is the reusable driver
-  every later browser leaf reuses; `test-browser/browser.test.ts` runs the OpfsIoStore contract against
+  the worker posts back. `test/browser/support/harness.ts` (`runBrowserWorker`) is the reusable driver
+  every later browser leaf reuses; `test/browser/browser.test.ts` runs the OpfsIoStore contract against
   REAL OPFS. Its own CI job (`browser`), separate from the Bun-only aggregate; `mise run test:browser`
   locally. `tsconfig` gained DOM libs (measured 0-conflict) so the browser leaves type-check in the main gate.
 - **`GraphWorkerHost` (the store tier)** — `src/browser/GraphWorkerHost.ts`, what runs inside a graph's
   dedicated Worker: a `GraphStore` over its own opfs-sahpool WASM SQLite database + the `Executor`
   (self-federation; cross-worker federation fail-closed, routed by the coordinator). PROVEN: the WHOLE
   core (compiler → executor → GraphBinary wire, encode AND decode) runs in a real Chrome Worker over the
-  production opfs-sahpool VFS — `test-browser/graph-worker.test.ts` runs the gremlin data plane and
+  production opfs-sahpool VFS — `test/browser/graph-worker.test.ts` runs the gremlin data plane and
   decodes with the vendored client's own reader. Only the postMessage TRANSPORT fronting it is deferred
   to the coordinator increment (its RPC protocol is designed there).
 - **Browser-bundle infra** (needed by every browser worker running the core, all measured from the real
@@ -48,7 +48,7 @@ progress against this plan.
 - **Service Worker edge + page edge (single-tab)** — `service-worker.entry.ts` (intercepts
   `/gremlin|/graphql` fetches, brokers them to a controlled page over a per-request MessageChannel),
   `page-edge.ts` (`installMogwaiPageEdge` runs the local router; `registerServiceWorker` resolves once the
-  SW controls the page). Proven (`sw-edge.test.ts`): a plain fetch AND the **unmodified TinkerPop GLV**
+  SW controls the page). Proven (`service-worker-edge.test.ts`): a plain fetch AND the **unmodified TinkerPop GLV**
   reach the local opfs-sahpool graph with no monkey-patching.
 
 ## Coordination-layer decision (2026-08-31) — SINGLE-TAB E2E COMPLETE
@@ -60,7 +60,7 @@ first** — now DONE and proven in a real browser. The full stack runs:
 
 ```
 unmodified gremlin GLV / plain fetch  ->  globalThis.fetch  ->  Service Worker intercept
-  ->  page edge  ->  makeRouter  ->  BrowserCoordinator  ->  per-graph dedicated Worker
+  ->  page edge  ->  makeRouter  ->  BrowserGraphManager  ->  per-graph dedicated Worker
   ->  WasmSqlite on opfs-sahpool  ->  GraphBinary response back through the SW
 ```
 
@@ -110,7 +110,7 @@ its OWN `BroadcastChannel` instance to serve its own request.
   the opfs-sahpool DB after the dead tab's SAH handles release**.
 
 **Phased plan.**
-1. **Per-graph leadership in the coordinator.** `BrowserCoordinator` acquires `mogwai-graph-<id>` before
+1. **Per-graph leadership in the coordinator.** `BrowserGraphManager` acquires `mogwai-graph-<id>` before
    spawning a Worker; a page that does not hold the lock does NOT spawn — it registers with the SW as a
    *client* of that graph (its clientId) instead. One Worker per graph across the whole origin.
 2. **SW routes by leader, not `matchAll()[0]`.** The SW keeps a `graphId → leader clientId` map (fed by
@@ -272,7 +272,7 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
 - ✅ `WasmSqlite.ts` — `Sql` over `@sqlite.org/sqlite-wasm` / `opfs-sahpool` (LANDED; full conformance
   contract green in-process via `test/browser-wasm.test.ts`).
 - ✅ `OpfsIoStore.ts` — `IoStore` over async OPFS streaming (LANDED; proven against real OPFS via the
-  Playwright lane, `test-browser/browser.test.ts`).
+  Playwright lane, `test/browser/browser.test.ts`).
 - ✅ `coordinator.ts` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED, page-hosted;
   single-tab routing is first-party MessagePort RPC, not SharedService).
 - ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-routed-by-leader + handoff. The one
@@ -281,6 +281,6 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   `GraphWorkerClient.ts` (LANDED, proven in-browser over opfs-sahpool, clone boundary tested).
 - ✅ service worker entry — `service-worker.entry.ts` (LANDED; the SW BROKERS an intercepted fetch to
   the page, because it cannot spawn the store's Worker — `makeRouter` runs in the page, `page-edge.ts`).
-- ✅ `test-browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the
+- ✅ `test/browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the
   OpfsIoStore, GraphWorkerHost, transport, coordinator, and SW-edge contracts + the clone-boundary test).
   Later: fuller `graphContract` coverage in-browser + the crash-failover tests.

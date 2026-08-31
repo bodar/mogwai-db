@@ -3,11 +3,11 @@
 // page's own `fetch('/gremlin/*')` and brokers it back here. So a client — a plain fetch AND the
 // UNMODIFIED TinkerPop GLV — reaches the local opfs-sahpool graph with no monkey-patching, proving the
 // port's headline thesis end to end in a real browser.
-import '../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
-import { makeRouter } from '../../src/router.ts';
-import { BrowserGraphManager } from '../../src/browser/BrowserGraphManager.ts';
-import { installMogwaiPageEdge, registerServiceWorker } from '../../src/browser/page-edge.ts';
-import { ioc } from '../../src/io.ts';
+import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
+import { makeRouter } from '../../../src/router.ts';
+import { BrowserGraphManager } from '../../../src/browser/BrowserGraphManager.ts';
+import { installMogwaiPageEdge, registerServiceWorker } from '../../../src/browser/page-edge.ts';
+import { ioc } from '../../../src/io.ts';
 import gremlin from 'gremlin';
 
 const results: { name: string; ok: boolean; error?: string }[] = [];

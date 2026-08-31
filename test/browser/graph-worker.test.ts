@@ -6,7 +6,7 @@ import { runBrowserWorker } from './support/harness.ts';
 // the vendored client's own reader. Proves the entire core runs in a dedicated Worker on the production
 // storage VFS (test/browser-wasm.test.ts proves the same core under Bun over :memory: — this closes the
 // real-browser + real-VFS half). Separate lane; run with `mise run test:browser`.
-describe('browser: GraphWorkerHost over opfs-sahpool', () => {
+describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: GraphWorkerHost over opfs-sahpool', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };
 
   beforeAll(async () => {

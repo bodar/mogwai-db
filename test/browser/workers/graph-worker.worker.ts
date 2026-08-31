@@ -3,10 +3,10 @@
 // gremlin client's own reader (so the whole wire path — encode in the worker, decode in the worker —
 // is proven to run in a browser). This is the browser twin of the gremlin data-plane contract, and the
 // proof that the entire core runs in a dedicated Worker on the production storage VFS.
-import '../../src/browser/buffer-global.ts'; // MUST be first — installs Buffer before http.ts/io.ts init
-import { GraphWorkerHost } from '../../src/browser/GraphWorkerHost.ts';
-import { streamBuffers } from '../../src/http.ts';
-import { ioc } from '../../src/io.ts';
+import '../../../src/browser/buffer-global.ts'; // MUST be first — installs Buffer before http.ts/io.ts init
+import { GraphWorkerHost } from '../../../src/browser/GraphWorkerHost.ts';
+import { streamBuffers } from '../../../src/http.ts';
+import { ioc } from '../../../src/io.ts';
 
 async function read(host: GraphWorkerHost, gremlin: string): Promise<any[]> {
   const framed = await host.framed(gremlin, {});

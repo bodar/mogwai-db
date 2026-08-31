@@ -3,10 +3,10 @@
 // directly). Proves the full page path — router → manager → per-graph dedicated Worker →
 // opfs-sahpool — plus multi-graph routing (one Worker per graph) and the management verbs, all in a real
 // browser. A dedicated Worker may spawn nested Workers, so this driver worker stands in for the page.
-import '../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
-import { makeRouter } from '../../src/router.ts';
-import { BrowserGraphManager } from '../../src/browser/BrowserGraphManager.ts';
-import { ioc } from '../../src/io.ts';
+import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
+import { makeRouter } from '../../../src/router.ts';
+import { BrowserGraphManager } from '../../../src/browser/BrowserGraphManager.ts';
+import { ioc } from '../../../src/io.ts';
 
 const results: { name: string; ok: boolean; error?: string }[] = [];
 async function check(name: string, fn: () => Promise<void>): Promise<void> {

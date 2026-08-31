@@ -1,7 +1,7 @@
 // The Playwright browser lane's shared driver — the twin of test/cloudflare.test.ts's spawn-and-drive,
-// but for a real Chrome instead of wrangler dev. It lives OUTSIDE test/ (bunfig scopes `bun test` to
-// test/) so the browser lane is a SEPARATE CI lane — the default `mise run ci` (bare `bun test`) never
-// pulls a headless browser in, and `mise run test:browser` runs this deliberately.
+// but for a real Chrome instead of wrangler dev. The lane is SEPARATE from the Bun-only `mise run ci`:
+// the test `describe`s are `skipIf(!MOGWAI_BROWSER_LANE)`, so a bare `bun test` discovers and SKIPS them
+// (no headless browser), and only `mise run test:browser` (which sets the env) runs them for real.
 //
 // Playwright is used as a DRIVER LIBRARY (`chromium.launch()`), not `@playwright/test` — no second test
 // runner; `bun test` stays the one runner. It drives the SYSTEM Chrome (present on GitHub's
@@ -9,7 +9,7 @@
 // browser download is needed — only the driver package. localhost is a secure context, so OPFS + Web
 // Locks + Service Workers all work over plain HTTP with no certs and no COOP/COEP.
 import { chromium, type Browser } from 'playwright';
-import { bundleBrowser } from '../../src/browser/bundle.ts';
+import { bundleBrowser } from '../../../src/browser/bundle.ts';
 
 /** The Chrome binary Playwright drives. System Chrome by default (no download); override with
  *  `$MOGWAI_CHROME` if a machine keeps it elsewhere. */
@@ -20,7 +20,7 @@ export const CHROME_PATH = process.env.MOGWAI_CHROME ?? '/usr/bin/google-chrome-
 // while a single launch reused across files is stable. Each test still gets an ISOLATED BrowserContext
 // (own storage partition → own OPFS), so graphs never collide across tests. The browser is closed on
 // process exit (bun test ending kills it regardless); a leaked context would matter, a leaked browser
-// does not. `bun test ./test-browser` runs all files in one process, so this singleton is shared.
+// does not. `bun test test/browser` runs all files in one process, so this singleton is shared.
 let sharedBrowser: Promise<Browser> | undefined;
 function browserInstance(): Promise<Browser> {
   if (!sharedBrowser) {

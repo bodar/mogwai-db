@@ -2,7 +2,7 @@
 // of {name, ok, error} checks. Runs the IoStore contract's browser-specific half — streaming read/write,
 // fail-closed absence, prefix listing, re-openable reads, truncation, and abort — the shape neither the
 // Bun (FileIoStore) nor Cloudflare (R2IoStore) leaf can prove here.
-import { OpfsIoStore } from '../../src/browser/OpfsIoStore.ts';
+import { OpfsIoStore } from '../../../src/browser/OpfsIoStore.ts';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
