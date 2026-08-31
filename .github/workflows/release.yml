@@ -1,0 +1,47 @@
+name: Release
+
+# Manual for now — you trigger it on a green trunk commit from the Actions tab, and it derives the
+# version (major·commit-count·run-number), builds the artifacts, and cuts the GitHub Release. To publish
+# on EVERY trunk push instead (continuous release, like dragoman), add `push: { branches: [trunk] }` here
+# — the version scheme already gives each commit a unique, monotonic version — but gate it on CI first.
+on:
+  workflow_dispatch:
+
+# The release job creates a GitHub Release, which needs write access to repository contents.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — scripts/version.ts counts commits from HEAD for the minor, and REFUSES a shallow
+      # clone (the count would be wrong). The rest of CI is fine shallow; the release is the exception.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/provision
+
+      # Build BOTH deliverables under dist/: the browser zip and every Bun binary target. The version is
+      # computed ONCE and passed to the packager, so the asset names and the release tag cannot disagree
+      # (GITHUB_RUN_NUMBER makes the patch stable across the two reads within this run).
+      - name: Package artifacts
+        id: pkg
+        run: |
+          V="$(mise exec -- bun scripts/version.ts)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          mise exec -- bun scripts/package.ts --version "$V"
+
+      # Cut the release with the browser zip + all platform binaries as assets. --generate-notes fills the
+      # body from the commits since the previous release. Idempotent-ish: a re-run of the same commit gets
+      # a new patch (the run number), so the tag never collides.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.pkg.outputs.version }}
+        run: |
+          gh release create "v$V" \
+            --title "v$V" \
+            --generate-notes \
+            "dist/mogwai-browser-$V.zip" \
+            dist/bin/mogwai-"$V"-*
