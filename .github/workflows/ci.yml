@@ -142,28 +142,33 @@ jobs:
       contents: write # to create the GitHub Release
     steps:
       # fetch-depth: 0 — scripts/version.ts counts commits from HEAD for the minor and REFUSES a shallow
-      # clone. The other jobs are fine shallow; the release is the one that needs full history.
+      # clone; fetch-tags so `git log <prev-release-tag>..HEAD` (the notes) resolves the prior tag.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          fetch-tags: true
       - uses: ./.github/actions/provision
-      # Version computed ONCE and passed to the packager, so asset names and the release tag cannot
-      # disagree (GITHUB_RUN_NUMBER fixes the patch across both reads within this run).
-      - name: Package artifacts
-        id: pkg
-        run: |
-          V="$(mise exec -- bun scripts/version.ts)"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          mise exec -- bun scripts/package.ts --version "$V"
-      # The browser zip + all platform binaries as assets; --generate-notes fills the body from the
-      # commits since the previous release.
+      # `mise run package` (NOT a bare `bun`) so its `install` dependency runs first — a direct `bun` call
+      # skips it and node_modules (capnweb, sqlite-wasm, the linked client) is absent. package.ts derives
+      # the SAME version this run's `gh` step reads (GITHUB_RUN_NUMBER fixes the patch), so names agree.
+      - name: Build release artifacts
+        run: mise run package
+      # Notes from the COMMITS since the last release — trunk-based means direct pushes, no PRs, so GitHub's
+      # PR-based --generate-notes would be empty. On the FIRST release (no prior tag) fall back to the head
+      # commit rather than dumping the whole history.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          V: ${{ steps.pkg.outputs.version }}
         run: |
+          V="$(mise exec -- bun scripts/version.ts)"
+          PREV="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
+            git log "$PREV..HEAD" --pretty='- %s (%h)' > notes.md
+          else
+            { echo 'First automated release.'; echo; git log -1 --pretty='- %s (%h)'; } > notes.md
+          fi
           gh release create "v$V" \
             --title "v$V" \
-            --generate-notes \
+            --notes-file notes.md \
             "dist/mogwai-browser-$V.zip" \
             dist/bin/mogwai-"$V"-*
