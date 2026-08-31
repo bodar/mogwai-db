@@ -10,7 +10,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { R2IoStore } from './R2IoStore.ts';
-import { rpcTry, type RpcFailure, type RpcResult } from './rpc.ts';
+import { rpcTry, type RpcFailure, type RpcResult } from '../rpc.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;

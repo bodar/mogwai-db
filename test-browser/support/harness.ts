@@ -33,6 +33,10 @@ const PAGE = (workerType: 'module' | 'classic') => `<!doctype html><meta charset
 export interface BrowserWorkerRun {
   /** Absolute path to the dedicated-worker entry module (bundled fresh for the browser here). */
   entry: string;
+  /** Extra worker bundles to serve, keyed by the URL path the driver worker spawns them from (e.g.
+   *  `{ '/graph-worker.js': '/abs/path/graph-worker.entry.ts' }`). A dedicated Worker may create nested
+   *  Workers, so the driver worker at `entry` can `new Worker('/graph-worker.js')`. */
+  extraWorkers?: Record<string, string>;
   /** Milliseconds to wait for the worker to post its result. */
   timeoutMs?: number;
 }
@@ -43,8 +47,10 @@ export interface BrowserWorkerRun {
  * exercising against the real browser APIs; the caller (a `bun test`) asserts on the returned value —
  * mirroring how cloudflare.test.ts drives the contract against a real workerd and asserts here.
  */
-export async function runBrowserWorker({ entry, timeoutMs = 60_000 }: BrowserWorkerRun): Promise<any> {
+export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 60_000 }: BrowserWorkerRun): Promise<any> {
   const workerJs = await bundleBrowser(entry);
+  const extras: Record<string, string> = {};
+  for (const [path, file] of Object.entries(extraWorkers)) extras[path] = await bundleBrowser(file);
   const wasm = await Bun.file(wasmPath()).arrayBuffer();
 
   const server = Bun.serve({
@@ -53,6 +59,7 @@ export async function runBrowserWorker({ entry, timeoutMs = 60_000 }: BrowserWor
       const p = new URL(req.url).pathname;
       if (p === '/worker.js') return new Response(workerJs, { headers: { 'Content-Type': 'text/javascript' } });
       if (p === '/sqlite3.wasm') return new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
+      if (p in extras) return new Response(extras[p], { headers: { 'Content-Type': 'text/javascript' } });
       return new Response(PAGE('module'), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     },
   });

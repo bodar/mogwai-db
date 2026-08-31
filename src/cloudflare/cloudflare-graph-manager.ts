@@ -8,7 +8,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import type { Compiled } from '../sql/kernel/render.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
 import type { GraphDatabase } from './graph-store-do.ts';
-import { rpcUnwrap, type RpcFailure, type RpcResult } from './rpc.ts';
+import { rpcUnwrap, type RpcFailure, type RpcResult } from '../rpc.ts';
 
 /** The edge-side executor for one DO: compile (and render) at the Worker (edge-compilation), then run
  *  the plan on the DO. A non-segment plan (read or write) ships to `runFramed`; a federation segment is
