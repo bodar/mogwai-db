@@ -28,6 +28,14 @@ function launchChrome(): Promise<Browser> {
     headless: true,
     executablePath: CHROME_PATH,
     args: [
+      // CI essentials. A GitHub runner's /dev/shm is tiny (~64 MB), so Chrome backing its shared memory
+      // there HANGS the launch of a heavier page (the SW-edge lane, with a page + SW + multiple workers)
+      // — measured: launch never resolved on CI while the lighter lanes passed. --disable-dev-shm-usage
+      // moves that backing to /tmp; --no-sandbox is required in the runner's unprivileged container.
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      // Headless has no visible tab, so Chrome backgrounds the page and throttles timers/rAF to ~1/min,
+      // stalling anything that chains many async turns under CI load. These three lift that.
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
