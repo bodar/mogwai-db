@@ -9,7 +9,7 @@ progress against this plan.
   `@sqlite.org/sqlite-wasm`'s OO1 API, VFS-agnostic (`:memory:` for dev/tests, `opfs-sahpool` for a
   browser Worker). Proven DEEP without a browser: because the OO1 API is synchronous and runs a real
   WASM SQLite (3.53.0, FTS5 + JSON) in-process, the whole conformance contract runs under `bun test`
-  against it — `test/browser-wasm.test.ts` (all 38 contract assertions: data plane, management, io
+  against it — `test/bun-wasm.test.ts` (all 38 contract assertions: data plane, management, io
   formats, federation, and the `barrier_state` OLAP SQL). Only the VFS differs in a real browser.
 - **`BunGraphManager` is now storage-agnostic** — a `makeSql` factory seam (default `bun:sqlite`,
   unchanged) lets the SAME battle-tested manager back the WASM leaf; the browser graph-Worker reuses it.
@@ -270,7 +270,7 @@ Everything paper- and API-verifiable is done. What's left can only be measured i
 New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
 
 - ✅ `WasmSqlite.ts` — `Sql` over `@sqlite.org/sqlite-wasm` / `opfs-sahpool` (LANDED; full conformance
-  contract green in-process via `test/browser-wasm.test.ts`).
+  contract green in-process via `test/bun-wasm.test.ts`).
 - ✅ `OpfsIoStore.ts` — `IoStore` over async OPFS streaming (LANDED; proven against real OPFS via the
   Playwright lane, `test/browser/browser.test.ts`).
 - ✅ `coordinator.ts` — the `GraphManager`: id → per-graph Worker; spawns Workers (LANDED, page-hosted;

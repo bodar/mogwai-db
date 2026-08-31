@@ -13,7 +13,7 @@ import { graphContract } from './contract.ts';
 // over GraphBinary. It earns that coverage IN-PROCESS: `@sqlite.org/sqlite-wasm`'s OO1 API is
 // synchronous and runs a real WASM SQLite (3.53.0, FTS5 + JSON) in this Bun process, so the store
 // leaf is proven deeply here without a browser. Only the VFS differs in a real browser — `opfs-sahpool`
-// instead of `:memory:` — and that is what the Playwright lane (test/browser.test.ts) will cover; the
+// instead of `:memory:` — and that is what the Playwright lane (test/browser/) covers; the
 // SQL the compiler emits, exercised end to end here (movement, group, io formats, and the `barrier_state`
 // OLAP SQL — WITHOUT ROWID, `INSERT … RETURNING`, per-round `WITH … INSERT`), is identical on both VFSes.
 //
@@ -22,7 +22,7 @@ import { graphContract } from './contract.ts';
 // only the SQLite runtime swapped — isolating the variable under test to the WASM engine.
 let server: ReturnType<typeof Bun.serve> | undefined;
 
-graphContract('browser-wasm', {
+graphContract('bun-wasm', {
   async start() {
     const makeSql = await memoryWasmSqlFactory();
     // A temp io root so the contract's io() round-trip has somewhere to read/write (the Bun twin of the

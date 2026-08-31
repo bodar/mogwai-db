@@ -4,7 +4,7 @@ import { runBrowserWorker } from './support/harness.ts';
 // The graph-worker STORE tier (GraphWorkerHost) driven in a real Chrome over the REAL opfs-sahpool VFS:
 // seed a graph and read it back through the full compiler → executor → GraphBinary wire, decoding with
 // the vendored client's own reader. Proves the entire core runs in a dedicated Worker on the production
-// storage VFS (test/browser-wasm.test.ts proves the same core under Bun over :memory: — this closes the
+// storage VFS (test/bun-wasm.test.ts proves the same core under Bun over :memory: — this closes the
 // real-browser + real-VFS half). Separate lane; run with `mise run test:browser`.
 describe.skipIf(!process.env.MOGWAI_BROWSER_LANE)('browser: GraphWorkerHost over opfs-sahpool', () => {
   let out: { results: { name: string; ok: boolean; error?: string }[]; fatal?: string };

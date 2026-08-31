@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll } from 'bun:test';
 import { runBrowserWorker } from './support/harness.ts';
 
 // The BROWSER lane (Playwright → real Chrome). Everything paper-verifiable about the browser port runs
-// under bun test against WASM SQLite in-process (test/browser-wasm.test.ts); this lane proves the parts
+// under bun test against WASM SQLite in-process (test/bun-wasm.test.ts); this lane proves the parts
 // that ONLY a real browser has — here, OpfsIoStore over real OPFS. Its `describe` is skipped unless
 // `MOGWAI_BROWSER_LANE` is set, so the default `mise run ci` never launches a browser; run it with
 // `mise run test:browser`.
