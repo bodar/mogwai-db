@@ -5,7 +5,7 @@
 // browser. A dedicated Worker may spawn nested Workers, so this driver worker stands in for the page.
 import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
 import { makeRouter } from '../../../src/router.ts';
-import { BrowserGraphManager } from '../../../src/browser/BrowserGraphManager.ts';
+import { BrowserGraphManager, LocalWorkerSource } from '../../../src/browser/BrowserGraphManager.ts';
 import { ioc } from '../../../src/io.ts';
 
 const results: { name: string; ok: boolean; error?: string }[] = [];
@@ -16,7 +16,7 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 
 self.onmessage = async () => {
   try {
-    const manager = new BrowserGraphManager('/graph-worker.js');
+    const manager = new BrowserGraphManager(new LocalWorkerSource('/graph-worker.js'));
     const router = makeRouter(manager);
     const post = (graphId: string, gremlin: string) =>
       router(new Request(`http://x/gremlin/${graphId}`, {

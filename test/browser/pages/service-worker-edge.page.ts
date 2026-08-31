@@ -1,12 +1,11 @@
-// The capstone page: the FULL single-tab browser stack, driven by a real client's `fetch`. This page
-// hosts the manager + graph Workers and installs the page edge; the Service Worker intercepts the
-// page's own `fetch('/gremlin/*')` and brokers it back here. So a client — a plain fetch AND the
-// UNMODIFIED TinkerPop GLV — reaches the local opfs-sahpool graph with no monkey-patching, proving the
-// port's headline thesis end to end in a real browser.
-import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response framing/decode
-import { makeRouter } from '../../../src/router.ts';
-import { BrowserGraphManager } from '../../../src/browser/BrowserGraphManager.ts';
-import { installMogwaiPageEdge, registerServiceWorker } from '../../../src/browser/page-edge.ts';
+// The capstone page: the FULL single-tab browser stack, driven by a real client's `fetch`. This page is
+// just the WorkerFactory — it spawns/owns the graph Workers on the Service Worker's behalf. The SW is the
+// edge (runs makeRouter, holds a DIRECT stub to each graph's Worker); it intercepts the page's own
+// `fetch('/gremlin/*')` and answers it itself. So a client — a plain fetch AND the UNMODIFIED TinkerPop
+// GLV — reaches the local opfs-sahpool graph with no monkey-patching, proving the port's headline thesis
+// end to end in a real browser.
+import '../../../src/browser/buffer-global.ts'; // first — Buffer for the response decode
+import { installWorkerFactory, registerServiceWorker } from '../../../src/browser/worker-factory.ts';
 import { ioc } from '../../../src/io.ts';
 import gremlin from 'gremlin';
 
@@ -17,10 +16,8 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main() {
-  const manager = new BrowserGraphManager('/graph-worker.js');
-  const router = makeRouter(manager);
   await registerServiceWorker('/service-worker.js'); // resolves once the Service Worker controls this page
-  installMogwaiPageEdge(router); // must be installed before any intercepted fetch
+  installWorkerFactory('/graph-worker.js'); // opens the control session so the SW can spawn graphs via us
 
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const gremlinUrl = `${location.origin}/gremlin/${G}`;
