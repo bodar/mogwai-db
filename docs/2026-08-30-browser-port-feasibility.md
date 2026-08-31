@@ -13,8 +13,19 @@ progress against this plan.
   formats, federation, and the `barrier_state` OLAP SQL). Only the VFS differs in a real browser.
 - **`BunGraphManager` is now storage-agnostic** — a `makeSql` factory seam (default `bun:sqlite`,
   unchanged) lets the SAME battle-tested manager back the WASM leaf; the browser graph-Worker reuses it.
-- **Dep added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — kept out of the Bun/CF
-  bundles by per-target bundling; nothing on those paths imports `src/browser/*`).
+- **`OpfsIoStore` (the `IoStore` leaf)** — `src/browser/OpfsIoStore.ts`, streaming read/write over OPFS
+  (`file.stream()` / `createWritable()`), fail-closed absence, prefix listing, truncating rewrite,
+  abort-leaves-nothing. The browser twin of `FileIoStore`/`R2IoStore`, reached from inside a graph's
+  dedicated Worker; keys resolve under a shared base dir (per-deployment io namespace).
+- **The Playwright browser lane** — `test-browser/` (outside `bun test`'s `test/` root). Playwright as a
+  DRIVER LIBRARY (`chromium.launch`) drives GitHub's / this machine's **system Chrome** (no browser
+  download), bundling a dedicated worker with `Bun.build`, serving it over `localhost`, asserting on what
+  the worker posts back. `test-browser/support/harness.ts` (`runBrowserWorker`) is the reusable driver
+  every later browser leaf reuses; `test-browser/browser.test.ts` runs the OpfsIoStore contract against
+  REAL OPFS. Its own CI job (`browser`), separate from the Bun-only aggregate; `mise run test:browser`
+  locally. `tsconfig` gained DOM libs (measured 0-conflict) so the browser leaves type-check in the main gate.
+- **Deps added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — per-target bundling keeps it
+  out of the Bun/CF bundles; nothing on those paths imports `src/browser/*`), `playwright` (dev driver).
 
 ## Verdict
 
@@ -156,9 +167,11 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
 
 - ✅ `WasmSqlite.ts` — `Sql` over `@sqlite.org/sqlite-wasm` / `opfs-sahpool` (LANDED; full conformance
   contract green in-process via `test/browser-wasm.test.ts`).
-- `OpfsIoStore.ts` — `IoStore` over async OPFS streaming.
+- ✅ `OpfsIoStore.ts` — `IoStore` over async OPFS streaming (LANDED; proven against real OPFS via the
+  Playwright lane, `test-browser/browser.test.ts`).
 - `coordinator.ts` — the `GraphManager`: id → per-graph leader Worker; spawns Workers; routes via `SharedService`.
 - `sharedservice.ts` — the ported Web-Locks-election + MessagePort-routing pattern.
 - graph Worker entry — single-graph `GraphStore` + executor.
 - service worker entry — `makeRouter` + coordinator + `fetch` intercept + port broker + the `Buffer` global.
-- `test/browser.test.ts` — Playwright lane: `graphContract` over the SW, plus the crash-failover and clone-boundary tests.
+- ✅ `test-browser/` — the Playwright lane (LANDED as reusable `runBrowserWorker` harness + the
+  OpfsIoStore contract). Later: `graphContract` over the SW, plus crash-failover and clone-boundary tests.
