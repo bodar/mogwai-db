@@ -36,12 +36,17 @@ progress against this plan.
   Bun's browser polyfill lacks), `bundle.ts` (shared `Bun.build` config so the test lane and production
   build share shims), `buffer-global.ts` (installs `Buffer` as a global, imported first so it beats
   `http.ts`/`io.ts` module-init).
-- **Graph-worker postMessage transport** — `graph-worker.entry.ts` (the dedicated-Worker entry the
-  coordinator spawns), `GraphWorkerClient.ts` (page-side promise-RPC, reused by the coordinator),
-  `graph-worker-protocol.ts`. Proven in-browser (`graph-worker-rpc.test.ts`): a nested Worker is spawned,
-  `Framed[]` crosses the structured-clone boundary and decodes, and a failing query rejects as a value
-  (no hang). The failure-as-value helpers moved `src/cloudflare/rpc.ts` → `src/rpc.ts` (runtime-neutral;
-  same contract serves the DO RPC and the browser Worker postMessage boundaries).
+- **Graph-worker RPC — now Cap'n Web (Hop 1 LANDED 2026-08-31, `b248efd`)** — `graph-worker.entry.ts`
+  (boot-then-expose: the page transfers a `MessagePort` + graphId as the worker's first message; the
+  worker opens the host and serves it as an `RpcPromise` over the `open()` promise). `GraphWorkerHost`
+  extends capnweb's `RpcTarget`, so its `framed()`/`runForeign()`/`info()` signatures ARE the protocol —
+  the hand-rolled `GraphWorkerClient.ts` + `graph-worker-protocol.ts` are DELETED. A query failure OR an
+  open failure rejects the caller's stub with its reason (capnweb exception support), so no `rpcTry`/
+  `rpcUnwrap` wrapper on this boundary. `BrowserGraphManager.executor(id)` holds
+  `newMessagePortRpcSession<GraphWorkerHost>(port1)` and delegates; the `Framed[]` Uint8Array→Buffer
+  rewrap lives at that one seam. Proven in-browser (`graph-worker-rpc.test.ts`, still 5/5): `Framed[]`
+  crosses NATIVE (no base64/JSON blowup), and a failing query rejects (no hang). `src/rpc.ts` is
+  UNCHANGED — it is the Cloudflare DO boundary (native workerd RPC), a different transport.
 - **Deps added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — per-target bundling keeps it
   out of the Bun/CF bundles; nothing on those paths imports `src/browser/*`), `playwright` (dev driver).
 
@@ -101,12 +106,14 @@ is not about CF. Do it as green increments: **page↔worker first**, then the Se
   are OPAQUE; the docs bless a transparent relay A→B→C (B forwards frames unparsed) — exactly the SW
   bounce. Framing + ordering must be preserved.
 
-**Hop 1 — page↔graph-worker (do first).** `GraphWorkerHost extends RpcTarget`; delete
-`graph-worker-protocol.ts` and `GraphWorkerClient.ts` (the protocol becomes the host's TS signatures, the
-stub becomes `newMessagePortRpcSession<GraphWorkerHost>(port1)`); `graph-worker.entry.ts` shrinks to
-open-host + expose-session; `BrowserGraphManager.executor(id)` holds the stub and delegates. Rewire
-`test/browser/graph-worker-rpc.test.ts` to drive the capnweb stub (keeps the `Framed[]` clone-boundary
-coverage). ≈ −150 LOC hand-rolled RPC, +~30 wiring. Keep the browser lane 33/33.
+**Hop 1 — page↔graph-worker. ✅ LANDED 2026-08-31 (`b248efd`).** `GraphWorkerHost extends RpcTarget`;
+`graph-worker-protocol.ts` and `GraphWorkerClient.ts` DELETED (the protocol is now the host's TS
+signatures, the stub is `newMessagePortRpcSession<GraphWorkerHost>(port1)`); `graph-worker.entry.ts`
+shrank to boot-then-expose over a page-created `MessageChannel`, serving the host as an `RpcPromise`
+over `open()` (so an open failure rejects calls, fail closed, no fake host);
+`BrowserGraphManager.executor(id)` holds the stub and delegates, with the `Framed[]`→`Buffer` rewrap at
+that seam. `graph-worker-rpc.test.ts` drives the capnweb stub (clone-boundary + failure-as-value kept).
+Net −102 LOC. Browser lane 33/33; full `ci` green.
 
 **Hop 2 — client fetch → Service Worker → page (after hop 1).** The SW↔page forwarding in
 `service-worker.entry.ts` + `page-edge.ts` becomes a capnweb session over a custom `RpcTransport`: the
@@ -320,8 +327,9 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   single-tab routing is first-party MessagePort RPC, not SharedService).
 - ⏳ Cross-tab failover — Web-Locks per-graph leader election + SW-routed-by-leader + handoff. The one
   remaining increment; DESIGN DONE (clean-room TS, see "Cross-tab failover — design" above), not built.
-- ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` + `graph-worker.entry.ts` +
-  `GraphWorkerClient.ts` (LANDED, proven in-browser over opfs-sahpool, clone boundary tested).
+- ✅ graph Worker STORE tier + transport — `GraphWorkerHost.ts` (now `extends RpcTarget`) +
+  `graph-worker.entry.ts` (Cap'n Web session over a MessagePort). LANDED, proven in-browser over
+  opfs-sahpool, clone boundary tested. (Hop 1 replaced the hand-rolled `GraphWorkerClient`/protocol.)
 - ✅ service worker entry — `service-worker.entry.ts` (LANDED; the SW BROKERS an intercepted fetch to
   the page, because it cannot spawn the store's Worker — `makeRouter` runs in the page, `page-edge.ts`).
 - ✅ `test/browser/` — the Playwright lane (LANDED: `runBrowserWorker`/`runBrowserPage` harness + the
