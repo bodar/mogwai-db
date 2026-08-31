@@ -1,7 +1,20 @@
 # mogwai-db in the browser — locked design + proof
 
-**Status:** design **locked** and **empirically proven** in a real browser (2026-08-31). No production
-code yet; this is the plan to build against.
+**Status:** design **locked** and **empirically proven** in a real browser (2026-08-31). Build in
+progress against this plan.
+
+## Landed
+
+- **`WasmSqlite` (the `Sql` leaf)** — `src/browser/WasmSqlite.ts`, the synchronous `Sql` seam over
+  `@sqlite.org/sqlite-wasm`'s OO1 API, VFS-agnostic (`:memory:` for dev/tests, `opfs-sahpool` for a
+  browser Worker). Proven DEEP without a browser: because the OO1 API is synchronous and runs a real
+  WASM SQLite (3.53.0, FTS5 + JSON) in-process, the whole conformance contract runs under `bun test`
+  against it — `test/browser-wasm.test.ts` (all 38 contract assertions: data plane, management, io
+  formats, federation, and the `barrier_state` OLAP SQL). Only the VFS differs in a real browser.
+- **`BunGraphManager` is now storage-agnostic** — a `makeSql` factory seam (default `bun:sqlite`,
+  unchanged) lets the SAME battle-tested manager back the WASM leaf; the browser graph-Worker reuses it.
+- **Dep added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — kept out of the Bun/CF
+  bundles by per-target bundling; nothing on those paths imports `src/browser/*`).
 
 ## Verdict
 
@@ -141,7 +154,8 @@ Everything paper- and API-verifiable is done. What's left can only be measured i
 
 New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
 
-- `WasmSqlite.ts` — `Sql` over `@sqlite.org/sqlite-wasm` / `opfs-sahpool` (proven shape).
+- ✅ `WasmSqlite.ts` — `Sql` over `@sqlite.org/sqlite-wasm` / `opfs-sahpool` (LANDED; full conformance
+  contract green in-process via `test/browser-wasm.test.ts`).
 - `OpfsIoStore.ts` — `IoStore` over async OPFS streaming.
 - `coordinator.ts` — the `GraphManager`: id → per-graph leader Worker; spawns Workers; routes via `SharedService`.
 - `sharedservice.ts` — the ported Web-Locks-election + MessagePort-routing pattern.
