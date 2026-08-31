@@ -1,43 +1,25 @@
-// The dedicated-Worker ENTRY the manager spawns, one per graph — the postMessage transport that
-// fronts a GraphWorkerHost. It hosts ONE graph (= one DO): `open` boots the host over that graph's
-// opfs-sahpool database, then `query`/`foreign`/`info` run against it. A DATA-PLANE failure crosses back
-// as a `RpcResult` value (rpcTry) so a bad query never escapes onmessage as an uncaught error that would
-// hang the caller — the same contract as the DO boundary (src/rpc.ts).
+// The dedicated-Worker ENTRY the manager spawns, one per graph — now just OPEN the host then EXPOSE it
+// as a Cap'n Web session over a MessagePort. It hosts ONE graph (= one DO). The page (spawner) creates a
+// MessageChannel and sends `{ port, graphId }` as the worker's first message (transferring `port`); this
+// worker opens the graph's host over its opfs-sahpool database and serves RPC on that port.
+//
+// The host is exposed as an `RpcPromise` over the OPEN promise, so pipelined calls (info/framed/runForeign)
+// wait for open, and if open REJECTS every call rejects with the reason — fail closed, straight through
+// capnweb's exception support (no hand-rolled failure-as-value wrapper, and no separate open RPC). A query
+// FAILURE likewise crosses back as a stub rejection with its message. (src/rpc.ts stays — it is the
+// Cloudflare DO boundary, a different transport.)
 import './buffer-global.ts'; // MUST be first — installs Buffer before the wire (http.ts/io.ts) inits
+import { newMessagePortRpcSession, RpcPromise } from 'capnweb';
 import { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { OpfsIoStore } from './OpfsIoStore.ts';
-import { rpcTry } from '../rpc.ts';
-import type { GraphWorkerRequest, GraphWorkerReply } from './graph-worker-protocol.ts';
 
-let host: GraphWorkerHost | undefined;
-
-function requireHost(): GraphWorkerHost {
-  if (!host) throw new Error('graph worker received a data request before `open`');
-  return host;
+/** The boot message: the RPC port to serve on plus which graph this Worker hosts. */
+interface Boot {
+  port: MessagePort;
+  graphId: string;
 }
 
-async function handle(req: GraphWorkerRequest): Promise<GraphWorkerReply> {
-  switch (req.op) {
-    case 'open':
-      try {
-        host = await GraphWorkerHost.open(req.graphId, { io: new OpfsIoStore(['io']) });
-        return { rid: req.rid, op: 'open', ok: true, info: host.info() };
-      } catch (e: any) {
-        return { rid: req.rid, op: 'open', ok: false, error: String(e?.message ?? e), stack: e?.stack };
-      }
-    case 'query':
-      return { rid: req.rid, op: 'query', result: await rpcTry(() => requireHost().framed(req.gremlin, req.params, req.paramTypes)) };
-    case 'foreign':
-      return { rid: req.rid, op: 'foreign', result: await rpcTry(() => requireHost().runForeign(req.gremlin, req.params, req.depth, req.paramTypes, req.terminal)) };
-    case 'info':
-      try {
-        return { rid: req.rid, op: 'info', ok: true, info: requireHost().info() };
-      } catch (e: any) {
-        return { rid: req.rid, op: 'info', ok: false, error: String(e?.message ?? e), stack: e?.stack };
-      }
-  }
-}
-
-self.onmessage = async (e: MessageEvent<GraphWorkerRequest>) => {
-  (self as unknown as Worker).postMessage(await handle(e.data));
+self.onmessage = (e: MessageEvent<Boot>) => {
+  const { port, graphId } = e.data;
+  newMessagePortRpcSession(port, new RpcPromise(GraphWorkerHost.open(graphId, { io: new OpfsIoStore(['io']) })));
 };

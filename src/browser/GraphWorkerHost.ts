@@ -19,6 +19,7 @@ import type { FederationSource } from '../compiler/segment.ts';
 import type { IoStore } from '../iostore.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { opfsSahpoolWasmSql } from './WasmSqlite.ts';
+import { RpcTarget } from 'capnweb';
 
 /** How a graph's synchronous store is opened. Defaults to that graph's own opfs-sahpool database (one
  *  DB per graph = one DO); a test injects an in-memory factory. Async only for the WASM/pool init. */
@@ -36,14 +37,21 @@ export interface GraphWorkerHostOptions {
   makeSql?: GraphSqlFactory;
 }
 
-export class GraphWorkerHost {
+// Extends capnweb's RpcTarget so the manager can hold it by REFERENCE across the page↔Worker
+// MessagePort and invoke framed()/runForeign()/info() over RPC — the postMessage protocol IS these TS
+// signatures. A thrown query error rejects the caller's stub with its message (failure-as-value, for
+// free), so the hand-rolled rpcTry/rpcUnwrap wrapper the browser boundary used to need is gone (src/rpc.ts
+// stays — it is the Cloudflare DO boundary, a different transport).
+export class GraphWorkerHost extends RpcTarget {
   private constructor(
     readonly graphId: string,
     private readonly store: GraphStore,
     /** This graph's executor — also the endpoint a manager routes a SIBLING'S federated hop INTO
      *  (its `runForeign`), which is the cross-Worker twin of the Cloudflare DO's `raw`/`runForeign` RPC. */
     readonly executor: Executor,
-  ) {}
+  ) {
+    super();
+  }
 
   /** Open (or create-on-open) graph `graphId`'s store and build its executor. Idempotent at the SQL
    *  level: `GraphStore`'s ctor runs the schema DDL `IF NOT EXISTS`, so re-opening an existing graph's

@@ -9,14 +9,18 @@
 // This is the SINGLE-TAB manager: one page owns its graphs' Workers. Cross-tab leader election + failover
 // (one graph shared across tabs via Web Locks + a SharedService port broker) is a separate, deferred
 // increment; nothing here forecloses it — a leader-elected variant wraps the same spawn.
+import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
-import { GraphWorkerClient } from './GraphWorkerClient.ts';
+import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 
 interface Graph {
   worker: Worker;
-  client: GraphWorkerClient;
-  /** Resolves once `open` has booted the host — every op awaits it, so a query issued immediately after
-   *  first addressing a graph still runs against an opened store (create-on-demand, like the DO). */
+  /** The Cap'n Web stub to the graph's GraphWorkerHost (over a per-graph MessagePort). Calls made
+   *  before the Worker finishes opening its host queue on the port, so the create-on-demand gap is safe. */
+  stub: RpcStub<GraphWorkerHost>;
+  /** Resolves once the Worker has booted the host — a first `info()` doubles as the open confirmation.
+   *  Every op awaits it so a query issued immediately after first addressing a graph runs against an
+   *  opened store, and an open FAILURE surfaces here (the stub rejects) rather than hanging. */
   opened: Promise<GraphInfo>;
 }
 
@@ -27,30 +31,38 @@ export class BrowserGraphManager implements GraphManager {
    *  'module'` because it is an ESM bundle. */
   constructor(private readonly workerUrl: string | URL) {}
 
-  /** Get (or spawn on demand) graph `id`'s Worker — the browser twin of DO-on-first-access. */
+  /** Get (or spawn on demand) graph `id`'s Worker — the browser twin of DO-on-first-access. Spawns the
+   *  Worker, opens a MessageChannel, hands the Worker `port2` + the graphId as its first message (so it
+   *  opens THIS graph's host and serves RPC there), and holds the Cap'n Web stub over `port1`. */
   private resolve(id: string): Graph {
     let g = this.graphs.get(id);
     if (!g) {
       const worker = new Worker(this.workerUrl, { type: 'module', name: id });
-      const client = new GraphWorkerClient(worker);
-      g = { worker, client, opened: client.open(id) };
+      const channel = new MessageChannel();
+      worker.postMessage({ port: channel.port2, graphId: id }, [channel.port2]);
+      const stub = newMessagePortRpcSession<GraphWorkerHost>(channel.port1);
+      // `info()` resolves only after the Worker's `open` completes, so awaiting it confirms the graph is
+      // live (and rejects with the reason if open failed) — it stands in for the old explicit `open` RPC.
+      g = { worker, stub, opened: Promise.resolve(stub.info()) };
       this.graphs.set(id, g);
     }
     return g;
   }
 
   /** A RemoteExecutor bound to graph `id`'s Worker (the router needs only this). Every call awaits the
-   *  graph's `open` first, so the store is live before a query runs. */
+   *  graph's open first, so the store is live before a query runs. The framed buffers arrive as
+   *  `Uint8Array` across the port, so re-wrap each as `Buffer` — that restores the `Framed` contract
+   *  (`buf: Buffer`) the response framer (`streamBuffers` → `Buffer.concat`) relies on, at the one seam. */
   executor(id: string): RemoteExecutor {
     const g = this.resolve(id);
     return {
       framedAsync: async (gremlin, params, paramTypes) => {
         await g.opened;
-        return g.client.framed(gremlin, params, paramTypes);
+        return (await g.stub.framed(gremlin, params, paramTypes)).map((f) => ({ buf: Buffer.from(f.buf), bulk: f.bulk }));
       },
       runForeign: async (gremlin, params, depth, paramTypes, terminal) => {
         await g.opened;
-        return g.client.runForeign(gremlin, params, depth, paramTypes, terminal);
+        return g.stub.runForeign(gremlin, params, depth, paramTypes, terminal);
       },
     };
   }
@@ -62,7 +74,7 @@ export class BrowserGraphManager implements GraphManager {
   async info(id: string): Promise<GraphInfo> {
     const g = this.resolve(id);
     await g.opened;
-    return g.client.info();
+    return g.stub.info();
   }
 
   /** Teardown: terminate the graph's Worker (releasing its opfs-sahpool file handles) and drop it, then
@@ -72,7 +84,8 @@ export class BrowserGraphManager implements GraphManager {
   async destroy(id: string): Promise<void> {
     const g = this.graphs.get(id);
     if (g) {
-      g.client.terminate();
+      g.stub[Symbol.dispose](); // drop the RPC session; terminating the Worker tears down its port too
+      g.worker.terminate();
       this.graphs.delete(id);
     }
     await removeOpfsDir(`.mogwai/${encodeURIComponent(id)}`);
