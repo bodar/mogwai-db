@@ -24,6 +24,18 @@ progress against this plan.
   every later browser leaf reuses; `test-browser/browser.test.ts` runs the OpfsIoStore contract against
   REAL OPFS. Its own CI job (`browser`), separate from the Bun-only aggregate; `mise run test:browser`
   locally. `tsconfig` gained DOM libs (measured 0-conflict) so the browser leaves type-check in the main gate.
+- **`GraphWorkerHost` (the store tier)** — `src/browser/GraphWorkerHost.ts`, what runs inside a graph's
+  dedicated Worker: a `GraphStore` over its own opfs-sahpool WASM SQLite database + the `Executor`
+  (self-federation; cross-worker federation fail-closed, routed by the coordinator). PROVEN: the WHOLE
+  core (compiler → executor → GraphBinary wire, encode AND decode) runs in a real Chrome Worker over the
+  production opfs-sahpool VFS — `test-browser/graph-worker.test.ts` runs the gremlin data plane and
+  decodes with the vendored client's own reader. Only the postMessage TRANSPORT fronting it is deferred
+  to the coordinator increment (its RPC protocol is designed there).
+- **Browser-bundle infra** (needed by every browser worker running the core, all measured from the real
+  bundle): `node-util-shim.ts` (the one `node:util` export — `isDeepStrictEqual` — the client needs and
+  Bun's browser polyfill lacks), `bundle.ts` (shared `Bun.build` config so the test lane and production
+  build share shims), `buffer-global.ts` (installs `Buffer` as a global, imported first so it beats
+  `http.ts`/`io.ts` module-init).
 - **Deps added:** `@sqlite.org/sqlite-wasm` (runtime, browser-leaf only — per-target bundling keeps it
   out of the Bun/CF bundles; nothing on those paths imports `src/browser/*`), `playwright` (dev driver).
 
@@ -171,7 +183,9 @@ New leaf `src/browser/`, plus a Service Worker entry and a Playwright test lane:
   Playwright lane, `test-browser/browser.test.ts`).
 - `coordinator.ts` — the `GraphManager`: id → per-graph leader Worker; spawns Workers; routes via `SharedService`.
 - `sharedservice.ts` — the ported Web-Locks-election + MessagePort-routing pattern.
-- graph Worker entry — single-graph `GraphStore` + executor.
+- ✅ graph Worker STORE tier — `GraphWorkerHost.ts` (single-graph `GraphStore` + executor, LANDED and
+  proven in-browser over opfs-sahpool). The postMessage transport entry that fronts it lands with the
+  coordinator (its RPC protocol is designed alongside the routing).
 - service worker entry — `makeRouter` + coordinator + `fetch` intercept + port broker + the `Buffer` global.
 - ✅ `test-browser/` — the Playwright lane (LANDED as reusable `runBrowserWorker` harness + the
   OpfsIoStore contract). Later: `graphContract` over the SW, plus crash-failover and clone-boundary tests.
