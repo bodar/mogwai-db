@@ -86,9 +86,9 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | Step | | Notes |
 |---|:--:|---|
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | |
-| `group().by().by()`, `groupCount()` | ✅ | ❌ a SCALAR host; a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
+| `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | ❌ ELEMENT-list and `Column`-keyed order forms; `order().by(T.key/T.value)` over a property |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | ❌ `Column`-keyed order forms |
 
 ## 5. Branching
 
