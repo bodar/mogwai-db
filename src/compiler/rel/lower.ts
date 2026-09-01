@@ -46,7 +46,7 @@ import { BARE_LIST, collectionRetype, foldElements, foldLists, foldMaps, foldSca
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
-import { boundGraph } from './boundgraph.ts';
+import { boundGraph, type MergedGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { PairSpec } from '../../services/spi/types.ts';
 import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
@@ -2555,6 +2555,11 @@ export interface Lowering {
    *  base, so the algorithm's result composes as an ordinary property over the live element stream. A
    *  bound-graph resume sets its own source directly (`lowerForeignResume`), not through this. */
   readonly source?: GraphSource;
+  /** The landed graphs a multi-graph merge has accumulated so far (`nestedBranchSegment`), each with its
+   *  graph identity and CTE bindings. It is what `unifiedBoundGraph` (`source`, above) rejoins by the
+   *  composite `(graph, id)` for a POST-MERGE element read; carried here so a later segment can extend
+   *  it. Absent for every non-merge compile. */
+  readonly mergedGraphs?: readonly MergedGraph[];
 }
 
 /**
@@ -2576,6 +2581,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   services: opts.services ?? NO_SERVICES,
   sack: opts.sack ?? null,
   source: opts.source ?? BaseGraph,
+  mergedGraphs: opts.mergedGraphs ?? [],
   // A FRESH registry unless a caller hands one down. `rootedRead` is the caller that does, and it
   // must: side effects live on the ROOT traversal (`AggregateStep.java:57`), so a rooted sub-chain
   // shares the outer chain's collections rather than getting an empty map — the isolation that was

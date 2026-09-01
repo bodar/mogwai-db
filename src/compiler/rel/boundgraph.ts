@@ -3,7 +3,8 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
-import { eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import type { Binding } from '../../rel/plan.ts';
 import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
 import { storedCompareOn } from './predicate.ts';
@@ -382,6 +383,135 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       const bulk = opts.bulk ? input.channels.find((channel) => channel.role === 'bulk') : undefined;
       return make.project({
         id: fresh('blr'), input: j, channels: [], type: typeOf(...payload, ...(bulk ? [meta('bulk', 'int')] : [])),
+        exprs: [
+          ...payload.map((c) => [c.name, col(j.id, B(c.name))] as const),
+          ...(bulk ? [['bulk', col(j.id, bulk.col)] as const] : []),
+        ],
+      });
+    },
+  };
+}
+
+// ---------- unifiedBoundGraph — the POST-MERGE source over SEVERAL landed graphs (Phase 3) ----------
+//
+// A multi-graph merge (`union(federate(A).V(), federate(B).V())`) leaves a stream whose rows carry an
+// `id` from disjoint landed id-spaces plus a `graph` channel (Phase 2's discriminator) naming which one.
+// A post-merge element READ (`values(k)`, a bare element return) must rejoin the right graph's payload,
+// so a single-CTE `boundGraph` (which rejoins by id alone) would silently read the wrong graph. This
+// source is the discriminator PROMOTED from a channel into a relation: the arms' landed CTEs are unioned
+// under a `graph` tag, and every read rejoins by the COMPOSITE `(graph, id)`, reading the graph value off
+// the stream row's own `graph` channel.
+//
+// It implements ONLY the INPUT-CARRYING reads — `propertyValues` and `leafPayload` take the whole stream
+// `input`, so they can read its `graph` channel and add it to their join. The correlated id-only reads
+// (`hasLabelPredicate`, `propertyScalar`, movement, …) receive only an `id` and cannot see the graph, so
+// they stay unsupported here and `postMergeTail` (`segment.ts`) admits only the input-carrying tail —
+// anything else fails closed as `UnsupportedTraversal` rather than misjoining one graph.
+
+/** One landed arm of a multi-graph merge: its graph identity, the CTE binding names holding its landed
+ *  vertices/edges, and those bindings' Plan declarations. `unifiedBoundGraph` tags each arm's rows with
+ *  `graph` and unions them into the relation a post-merge read rejoins. */
+export interface MergedGraph {
+  readonly graph: string;
+  readonly vertexBinding: string | null;
+  readonly edgeBinding: string | null;
+  readonly bindings: readonly Binding[];
+}
+
+export function unifiedBoundGraph(mergedGraphs: readonly MergedGraph[]): GraphSource {
+  const first = mergedGraphs[0]!;
+  // The base carries the interface shape and the SAFE id-only reads (`externalId`/`externalIdOf`/edge
+  // label — they return the stream's own column, no rejoin, so they are correct unified). Every rejoin
+  // read is overridden below or gated out; `postMergeTail` is the fail-closed boundary.
+  const base = boundGraph(first.vertexBinding, first.edgeBinding);
+
+  /** The value of the stream row's `graph` channel — the graph half of the composite identity. */
+  const graphColOf = (input: Rel): Expr => {
+    const channel = input.channels.find((c) => c.role === 'graph');
+    if (!channel) throw new Error('unifiedBoundGraph: the merged stream carries no graph channel to rejoin by');
+    return col(input.id, channel.col);
+  };
+
+  /** The graph-TAGGED union of every arm's landed relation of this kind: `SELECT '<g>' AS graph, <cols>
+   *  FROM <bgv_g> UNION ALL …`. A fresh copy per read (like `boundGraph.cteOf`) so a structurally shared
+   *  node is never rebuilt by a pass. */
+  const unifiedCte = (kind: Elem, fresh: Minter): Rel => {
+    const arms: Rel[] = [];
+    for (const g of mergedGraphs) {
+      const binding = kind === 'edge' ? g.edgeBinding : g.vertexBinding;
+      if (!binding) continue; // this graph landed no rows of this kind
+      const ref = make.ref({ id: fresh('uref'), name: binding, channels: [], type: typeOf(...landedCols(kind)) });
+      arms.push(make.project({
+        id: fresh('utag'), input: ref, channels: [], type: typeOf(meta('graph', 'text'), ...landedCols(kind)),
+        exprs: [['graph', compilerText(g.graph)], ...landedCols(kind).map((c) => [c.name, col(ref.id, c.name)] as const)],
+      }));
+    }
+    if (arms.length === 0) throw new Error(`unifiedBoundGraph: no landed ${kind} relation across the merged graphs`);
+    return arms.length === 1 ? arms[0]! : make.union({ id: fresh('uunion'), inputs: arms, all: true, channels: [], type: arms[0]!.type });
+  };
+
+  return {
+    ...base,
+
+    // The per-arm landed CTEs the reads reference by name — declared once at `lowered()` through the
+    // source, exactly as a `decorateGraph` stack declares its layers.
+    bindings: () => mergedGraphs.flatMap((g) => g.bindings),
+
+    // ---- values(keys…): rejoin the UNIFIED relation by (graph, id), explode its `{t,v}` tree per key ----
+    propertyValues(input, kind, keys, fresh) {
+      const cte = unifiedCte(kind, fresh);
+      const P = { id: 'uvid', props: 'uvprops', graph: 'uvg' } as const;
+      const pref = make.project({
+        id: fresh('uvp'), input: cte, channels: [],
+        type: typeOf(meta(P.id, 'any', true), meta(P.props, 'json', true), meta(P.graph, 'text', true)),
+        exprs: [[P.id, col(cte.id, 'id')], [P.props, col(cte.id, 'props')], [P.graph, col(cte.id, 'graph')]],
+      });
+      const j = make.join({
+        id: fresh('uvj'), left: input, right: pref, join: 'inner', ordered: true, channels: input.channels,
+        type: typeOf(...input.type.cols, meta(P.id, 'any', true), meta(P.props, 'json', true), meta(P.graph, 'text', true)),
+        on: and(eq(col(pref.id, P.id), col(input.id, 'id')), eq(col(pref.id, P.graph), graphColOf(input))),
+      });
+      const KEY = { value: 'ukv', key: 'ukk' } as const;
+      const perKey = make.explode({
+        id: fresh('uke'), input: j, channels: input.channels, expr: col(j.id, P.props), as: { key: KEY.key, value: KEY.value },
+        type: typeOf(...j.type.cols, meta(KEY.key, 'text', true), meta(KEY.value, 'any', true)),
+      });
+      const wanted = keys && keys.length
+        ? make.filter({ id: fresh('ukf'), input: perKey, channels: input.channels, type: perKey.type,
+          pred: { kind: 'in-list', expr: col(perKey.id, KEY.key), values: keys.map(compilerText) } })
+        : perKey;
+      const NODE = 'ukn';
+      const nodes = kind === 'edge' ? wanted : make.explode({
+        id: fresh('ukx'), input: wanted, channels: input.channels, expr: col(wanted.id, KEY.value), as: { value: NODE },
+        type: typeOf(...wanted.type.cols, meta(NODE, 'any', true)),
+      });
+      const node = kind === 'edge' ? col(wanted.id, KEY.value) : col(nodes.id, NODE);
+      return make.project({
+        id: fresh('uvv'), input: nodes, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...input.channels.map((c) => meta(c.col, 'int'))),
+        exprs: [['v', jsonExtract(node, '$.v')], ['vtype', jsonExtract(node, '$.t')],
+          ...input.channels.map((c) => [c.col, col(nodes.id, c.col)] as const)],
+      });
+    },
+
+    // ---- leaf: reconstitute the wire payload for a terminal merged element, rejoined by (graph, id) ----
+    leafPayload(input, kind, opts, fresh) {
+      const cte = unifiedCte(kind, fresh);
+      const payload = foreignPayloadCols(kind);
+      const B = (name: string): string => `ul_${name}`;
+      const pref = make.project({
+        id: fresh('ulp'), input: cte, channels: [],
+        type: typeOf(...payload.map((c) => meta(B(c.name), c.type, c.nullable)), meta(B('graph'), 'text', true)),
+        exprs: [...payload.map((c) => [B(c.name), col(cte.id, c.name)] as const), [B('graph'), col(cte.id, 'graph')]],
+      });
+      const j = make.join({
+        id: fresh('ulj'), left: input, right: pref, join: 'inner', ordered: true, channels: input.channels,
+        type: typeOf(...input.type.cols, ...pref.type.cols),
+        on: and(eq(col(pref.id, B('id')), col(input.id, 'id')), eq(col(pref.id, B('graph')), graphColOf(input))),
+      });
+      const bulk = opts.bulk ? input.channels.find((channel) => channel.role === 'bulk') : undefined;
+      return make.project({
+        id: fresh('ulr'), input: j, channels: [], type: typeOf(...payload, ...(bulk ? [meta('bulk', 'int')] : [])),
         exprs: [
           ...payload.map((c) => [c.name, col(j.id, B(c.name))] as const),
           ...(bulk ? [['bulk', col(j.id, bulk.col)] as const] : []),

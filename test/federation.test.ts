@@ -1008,13 +1008,35 @@ describe('federate — nested in union arms (multi-graph merge)', () => {
     expect(await count('g.union(__.call("federate").with("graph","crew").V(), __.V()).dedup().count()')).toBe(crew + home);
   });
 
-  // FAIL CLOSED (still open until Phase 3): a post-merge tail that MATERIALIZES merged elements needs the
-  // graph-tagged unified relation, so it must REFUSE — never misjoin against one graph.
+  // POST-MERGE ELEMENT READS (Phase 3, the graph-tagged unifiedBoundGraph): `values()` and a bare element
+  // return over the merged stream rejoin the right graph's payload by the composite (graph, id).
   const merged2 = 'g.union(__.call("federate").with("graph","crew").V(), __.call("federate").with("graph","home").V())';
-  test('post-merge values() over the merged stream refuses (needs the unified relation)', async () => {
-    expect(mgr.executor('home').framedAsync(`${merged2}.values("name")`, {})).rejects.toThrow(/not supported/);
+  const vals = async (g: string) =>
+    (await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec)));
+
+  test('post-merge values(name) reads BOTH graphs\' properties (no cross-graph misjoin)', async () => {
+    const crewNames = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V()', {})).map(dec)));
+    const homeNames = names(await Promise.all((await mgr.executor('home').framedAsync('g.V()', {})).map(dec)));
+    expect((await vals(`${merged2}.values("name")`)).sort()).toEqual([...crewNames, ...homeNames].sort());
   });
-  test('bare element return over the merged stream refuses (needs the unified relation)', async () => {
-    expect(mgr.executor('home').framedAsync(merged2, {})).rejects.toThrow(/not supported/);
+  test('bare element return materializes every merged element with its OWN graph\'s data', async () => {
+    const got = await vals(merged2);
+    expect(got.length).toBe(12);
+    // Each element carries a real name property from its source graph — a misjoin would drop or duplicate.
+    const crewNames = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V()', {})).map(dec)));
+    const homeNames = names(await Promise.all((await mgr.executor('home').framedAsync('g.V()', {})).map(dec)));
+    expect(names(got).sort()).toEqual([...crewNames, ...homeNames].sort());
+  });
+  // STILL FAIL CLOSED: a post-merge read that needs the id-only rejoin (hasLabel/has), live adjacency
+  // (out/in), or the BASE graph in the unified relation (a bound+base element read) — refuse (Phase 3b).
+  test('bound + base element read refuses (base graph not yet in the unified relation)', async () => {
+    // count/dedup over the SAME mix are fine (no rejoin); only the element read needs the base landed.
+    expect(mgr.executor('home').framedAsync('g.union(__.call("federate").with("graph","crew").V(), __.V()).values("name")', {})).rejects.toThrow(/not supported/);
+  });
+  test('post-merge hasLabel() refuses (needs the id-only graph rejoin)', async () => {
+    expect(mgr.executor('home').framedAsync(`${merged2}.hasLabel("person").count()`, {})).rejects.toThrow(/not supported/);
+  });
+  test('post-merge out() refuses (needs live cross-graph adjacency)', async () => {
+    expect(mgr.executor('home').framedAsync(`${merged2}.out().count()`, {})).rejects.toThrow(/not supported/);
   });
 });

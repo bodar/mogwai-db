@@ -11,6 +11,7 @@ import { arg, isNested } from '../../gremlin/frontend.ts';
 import { minter } from './build.ts';
 import { landForeignRows } from './foreign.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, lowerTypedNodeStream, type Lowering, type RelLowering } from './lower.ts';
+import { unifiedBoundGraph, type MergedGraph } from './boundgraph.ts';
 import { BRANCH_HOSTS } from './lower/branch.ts';
 import { rootedSteps } from './lower/reduction.ts';
 import { LOCAL_GRAPH } from './lower/chain.ts';
@@ -242,11 +243,30 @@ function nestedBarrierIn(
       if (barrier.spec.serviceName !== FEDERATE_SERVICE || barrier.spec.injectionLabel || barrier.site.mapValues) continue;
       // A federate arm the user WANTS merged: the post-merge tail must be safe, else FAIL CLOSED
       // (return null → the arm's call declines in the fold → `UnsupportedTraversal`), never misjoin.
-      if (postMergeTail(steps, at) === 'unsafe') return null;
+      const mode = postMergeTail(steps, at);
+      if (mode === 'unsafe') return null;
+      // A post-merge ELEMENT read rejoins the graph-tagged unified relation, which holds only the FEDERATE
+      // arms' landed CTEs — a BASE arm's elements (`$local`) have no landed relation to rejoin, so a mixed
+      // base+federate merge with an element tail fails closed (Phase 3b: the base graph in the union).
+      // `count`/`dedup` over such a mix are fine (no rejoin), so this gate is specific to `elements`.
+      if (mode === 'elements' && !allArmsFederate(step, request.params)) return null;
       return { branchAt: at, armIndex, barrier };
     }
   }
   return null;
+}
+
+/** Is EVERY arm of a branch a federate-derived element source — either an un-landed federate `call()` or
+ *  an already-landed marker (`landedSource`)? A BASE arm (a bare `V()`/`E()` reading the local graph) is
+ *  NOT, and it has no landed relation for the unified post-merge rejoin, so an element-read merge that
+ *  includes one fails closed. A non-element arm shape declines too (only element arms merge here). */
+function allArmsFederate(branchStep: IRStep, params: Record<string, any>): boolean {
+  return branchStep.args.every((a) => {
+    if (!isNested(a.value)) return false;
+    const body = rootedSteps((a.value as { readonly nested: unknown }).nested, params);
+    const head = body?.[0];
+    return !!head && (head.name === 'call' || head.landedSource != null);
+  });
 }
 
 /** Cardinality/slice steps — consume a merged element stream touching neither element payload nor
@@ -256,23 +276,35 @@ const CARDINALITY_STEPS: ReadonlySet<string> = new Set(['count', 'limit', 'range
 /** Identity-collapsing steps admitted in Phase 2 — served correctly by the `graph` discriminator that
  *  `nestedBranchSegment` stamps. `dedup` first; `group`/`groupCount` by(id) are a follow-up. */
 const IDENTITY_STEPS: ReadonlySet<string> = new Set(['dedup']);
+/** Post-merge reads served by `unifiedBoundGraph`'s INPUT-CARRYING methods (Phase 3): `values(k)` and a
+ *  bare element return (an empty suffix) rejoin the graph-tagged unified relation by `(graph, id)`;
+ *  slice rides along untouched. `hasLabel`/`has`/movement need the id-only rejoin and stay unsafe. */
+const ELEMENT_READ_STEPS: ReadonlySet<string> = new Set(['values', 'limit', 'range', 'skip']);
 
 /** How the tail AFTER a nested-branch federate merge (`steps` from `branchAt + 1`) may consume the
  *  merged multi-graph element stream:
  *   - `cardinality` — pure count/slice ending in `count()`: correct with NO discriminator (Phase 1).
  *   - `identity` — adds `dedup`: correct once every arm carries the `graph` discriminator (Phase 2).
- *   - `unsafe` — materializes elements (`values`/`hasLabel`/bare return, a per-graph rejoin — Phase 3),
- *     or a slice with no reducer, or anything unrecognized. FAIL CLOSED: never misjoin against one graph.
- *  Belt-and-suspenders: `contentDemand` must see no element/adjacency reach for either safe mode. */
-function postMergeTail(steps: readonly IRStep[], branchAt: number): 'cardinality' | 'identity' | 'unsafe' {
+ *   - `elements` — materializes the merged elements (`values(k)`, a bare element return, slice): correct
+ *     once every arm is tagged AND the post-merge source is the graph-tagged `unifiedBoundGraph` (Phase 3).
+ *   - `unsafe` — a `hasLabel`/`has`/movement read (needs the id-only rejoin), or anything unrecognized.
+ *     FAIL CLOSED: never misjoin against one graph.
+ *  A tail ENDING IN `count()` reduces to a scalar (no materialization); otherwise the merged elements
+ *  ARE the result (materialized) or read by `values`. */
+function postMergeTail(steps: readonly IRStep[], branchAt: number): 'cardinality' | 'identity' | 'elements' | 'unsafe' {
   const suffix = steps.slice(branchAt + 1);
-  if (!suffix.length || !suffix.some((s) => s.name === 'count')) return 'unsafe';
   const demand = contentDemand(steps, branchAt + 1);
-  if (demand.reachesElements || demand.reachesAdjacency) return 'unsafe';
-  const hasDedup = suffix.some((s) => IDENTITY_STEPS.has(s.name));
-  const allowed = suffix.every((s) => CARDINALITY_STEPS.has(s.name) || (hasDedup && IDENTITY_STEPS.has(s.name)));
-  if (!allowed) return 'unsafe';
-  return hasDedup ? 'identity' : 'cardinality';
+  if (suffix.some((s) => s.name === 'count')) {
+    if (demand.reachesElements || demand.reachesAdjacency) return 'unsafe'; // an element read before the count
+    const hasDedup = suffix.some((s) => IDENTITY_STEPS.has(s.name));
+    const allowed = suffix.every((s) => CARDINALITY_STEPS.has(s.name) || (hasDedup && IDENTITY_STEPS.has(s.name)));
+    if (!allowed) return 'unsafe';
+    return hasDedup ? 'identity' : 'cardinality';
+  }
+  // No count → the merged ELEMENTS are the result (materialized) or read by `values`. Movement needs the
+  // id-only rejoin `unifiedBoundGraph` does not implement, so it stays unsafe.
+  if (demand.reachesAdjacency) return 'unsafe';
+  return suffix.every((s) => ELEMENT_READ_STEPS.has(s.name)) ? 'elements' : 'unsafe';
 }
 
 /**
@@ -297,10 +329,12 @@ function nestedBranchSegment(
   // the same `bgv0`/`bge0` binding name and collide when both CTEs coexist in the merged plan.
   const salt = `n${branchAt}a${armIndex}`;
   const callCtx = armBody[barrier.at]!.ctx;
-  // When the post-merge tail COLLAPSES BY IDENTITY (`dedup`), every arm must carry a `graph` tag so the
-  // merged stream keeps per-graph identity — this arm its own sibling graph name, the others `$local`
-  // for the base graph or their own name when they land. A cardinality tail (count only) needs none.
-  const identity = postMergeTail(steps, branchAt) === 'identity';
+  // When the post-merge tail needs per-graph IDENTITY (`dedup`) or MATERIALIZES the merged elements
+  // (`values`/bare return — Phase 3), every arm must carry a `graph` tag so the merged stream keeps its
+  // per-graph identity — this arm its own sibling graph name, the others `$local` for the base graph or
+  // their own name when they land. A pure cardinality tail (count only) needs no tag.
+  const mode = postMergeTail(steps, branchAt);
+  const tagged = mode === 'identity' || mode === 'elements';
   const graphName = String(barrier.spec.params.graph);
   return {
     kind: 'segment',
@@ -319,15 +353,24 @@ function nestedBranchSegment(
       const { vertexBinding, edgeBinding, streamElem, bindings } = landForeignRows(foreign, elem, fresh, null, salt);
       // The arm becomes a marker `V()`/`E()` reading the landed relation, followed by whatever LOCAL
       // suffix the arm had after any pushed prefix (`barrier.suffixFrom`).
-      const marker: IRStep = { name: streamElem === 'edge' ? 'E' : 'V', args: [], ctx: callCtx, landedSource: { vertexBinding, edgeBinding }, ...(identity ? { graphTag: graphName } : {}) };
+      const marker: IRStep = { name: streamElem === 'edge' ? 'E' : 'V', args: [], ctx: callCtx, landedSource: { vertexBinding, edgeBinding }, ...(tagged ? { graphTag: graphName } : {}) };
       const newBody: IRStep[] = [marker, ...armBody.slice(barrier.suffixFrom)];
       const rewrittenBranch: IRStep = {
         ...branchStep,
-        args: branchStep.args.map((a, i) => (i === armIndex ? { ...a, value: { nested: newBody } } : identity ? stampLocalArm(a, request.params) : a)),
+        args: branchStep.args.map((a, i) => (i === armIndex ? { ...a, value: { nested: newBody } } : tagged ? stampLocalArm(a, request.params) : a)),
       };
       const rewrittenSteps = steps.map((s, i) => (i === branchAt ? rewrittenBranch : s));
-      const source = withExtraBindings(request.lowering.source ?? BaseGraph, bindings);
-      return planOf(rewrittenSteps, { ...request, lowering: { ...request.lowering, source } });
+      // A POST-MERGE ELEMENT READ (`values`/bare return) rejoins the graph-tagged UNIFIED relation, so the
+      // post-merge source is a `unifiedBoundGraph` over ALL arms landed so far (accumulated across
+      // segments on `lowering.mergedGraphs`). Otherwise the per-arm CTEs just ride on the source as
+      // bindings (`withExtraBindings`) — the arms read their own markers and the tail never rejoins.
+      const lowering: Lowering = mode === 'elements'
+        ? (() => {
+            const merged: MergedGraph[] = [...(request.lowering.mergedGraphs ?? []), { graph: graphName, vertexBinding, edgeBinding, bindings }];
+            return { ...request.lowering, source: unifiedBoundGraph(merged), mergedGraphs: merged };
+          })()
+        : { ...request.lowering, source: withExtraBindings(request.lowering.source ?? BaseGraph, bindings) };
+      return planOf(rewrittenSteps, { ...request, lowering });
     },
   };
 }
