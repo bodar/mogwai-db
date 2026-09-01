@@ -41,15 +41,16 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | Step | | Notes |
 |---|:--:|---|
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label,…)` | ✅ | |
-| `has(T.id,…)`, `hasId` | ❌ | |
+| `has(T.id,…)`, `hasId` | ✅ | |
 | `hasKey`, `hasValue` | ✅ | |
 | `is(P)` | ✅ | ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
 | `where(__.…)`, `not`, `filter(__.…)` | ✅ | ❌ ordered children using traversal-valued `by()` |
 | `where(P)` / `where('a',P)` | 🟡 | ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
-| `and`, `or` | ✅ | ❌ `filter(rawPredicate)` |
-| `dedup()`, `dedup(labels)` | ✅ | ❌ bare `dedup()` after `as()`/path tracking; more than one `by()`; `dedup().by(value)` over a property |
+| `and`, `or` | ✅ | |
+| `dedup()`, `dedup(labels)` | ✅ | ❌ bare `dedup()` after path tracking; more than one `by()` |
 | `identity()`, `sample(n)` | ✅ | |
-| `coin(p)`, `simplePath`, `cyclicPath` | ❌ | |
+| `simplePath`, `cyclicPath` | ✅ | |
+| `coin(p)` | ❌ | |
 | `typeOf(GType)` over a stored property | ✅ | |
 
 **Predicates (`P`)** — all ✅ in every position a predicate is accepted, except as noted.
@@ -58,7 +59,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 |---|:--:|---|
 | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `within`, `without` | ✅ | |
 | `between`, `inside` | ✅ | |
-| `outside` | ❌ | |
+| `outside` | ✅ | |
 
 **Text predicates (`TextP`)** — case-insensitive under SQLite `LIKE`; a ≥3-char literal term uses the
 `property_fts` trigram access path.
