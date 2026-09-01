@@ -75,10 +75,10 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 |---|:--:|---|
 | `values(k…)`, `label()`, `labels()`, `id()` | ✅ | |
 | `valueMap()`, `valueMap(true)`, `elementMap()` | ✅ | ❌ selective token subsets (`with(tokens, ids)`) |
-| `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ `id()`/`label()` off a property row; META-properties (`properties().properties()`, `has(k,v)` over a VertexProperty) |
+| `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ META-properties (`properties().properties()`, `has(k,v)` over a VertexProperty) |
 | `propertyMap()` | ❌ | |
 | `project(k…).by(…)` | ✅ | |
-| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed`; `select(label).by(key)` as a child body |
+| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed` |
 | `constant(v)` | ✅ | |
 
 ## 4. Aggregation & barriers
