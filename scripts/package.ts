@@ -20,7 +20,7 @@
  */
 import { mkdir, rm, chmod } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { version } from './version.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -81,12 +81,15 @@ async function packageBrowser(): Promise<void> {
   }
 
   // The WASM binary worker.js loads at runtime (resolved via the package export so it survives a bump).
+  // It fetches `sqlite3.wasm` RELATIVE to itself — no CDN, so shipping it here makes the zip self-contained.
+  // Record the exact SQLite version (the package version, e.g. 3.53.0-build1) so the release states it.
   const wasm = Bun.fileURLToPath(import.meta.resolve('@sqlite.org/sqlite-wasm/sqlite3.wasm'));
+  const sqlitePkg = (JSON.parse(readFileSync(join(dirname(wasm), '..', 'package.json'), 'utf8')).version as string) ?? 'unknown';
   await Bun.write(join(out, 'sqlite3.wasm'), Bun.file(wasm));
-  console.log(`  browser/sqlite3.wasm       ${(Bun.file(wasm).size / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`  browser/sqlite3.wasm       ${(Bun.file(wasm).size / 1024 / 1024).toFixed(1)} MB (SQLite ${sqlitePkg})`);
 
   await Bun.write(join(out, 'index.html'), INDEX_HTML);
-  await Bun.write(join(out, 'README.md'), browserReadme(VERSION));
+  await Bun.write(join(out, 'README.md'), browserReadme(VERSION, sqlitePkg));
 
   await zipDir(out, join(DIST, `mogwai-db-${VERSION}-browser.zip`), ['.']);
 }
@@ -184,11 +187,16 @@ const INDEX_HTML = `<!doctype html>
 </script>
 `;
 
-function browserReadme(version: string): string {
+function browserReadme(version: string, sqlitePkg: string): string {
+  const sqliteVer = sqlitePkg.replace(/-build\d+$/, '');
   return `# mogwai-db — browser build ${version}
 
 Run a TinkerPop 4 Gremlin graph (compiled to SQLite/WASM) entirely in the browser. Any TinkerPop-4 GLV,
 or a plain \`fetch\`, talks to it over HTTP with no changes — a Service Worker is the local edge.
+
+**Self-contained.** Everything it needs is in this zip — including \`sqlite3.wasm\`. Unzip into a static
+folder and serve it: there are NO runtime downloads and NO CDN dependencies. Built and tested against
+**SQLite ${sqliteVer}** (\`@sqlite.org/sqlite-wasm@${sqlitePkg}\`).
 
 ## Files
 
@@ -196,7 +204,8 @@ or a plain \`fetch\`, talks to it over HTTP with no changes — a Service Worker
   worker factory. Resolves the two sibling scripts relative to itself (\`import.meta.url\`).
 - \`service-worker.js\` — the HTTP edge; intercepts \`fetch('/gremlin/*')\` and \`/graphql/*\`.
 - \`worker.js\` — one dedicated Worker per graph (SQLite on the \`opfs-sahpool\` VFS).
-- \`sqlite3.wasm\` — the SQLite WASM binary \`worker.js\` loads at runtime (must sit beside it).
+- \`sqlite3.wasm\` — the SQLite ${sqliteVer} WASM binary \`worker.js\` loads at runtime (fetched relative, so
+  it MUST sit beside \`worker.js\`).
 
 ## Use
 
