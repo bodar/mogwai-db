@@ -19,7 +19,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()`/`otherV()`; a fan-out `flatMap`/`local` child body still awaits the per-parent rejoin substrate |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()`/`otherV()` |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | |
 | `otherV` | ❌ | |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
@@ -34,7 +34,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `tinker.degree.centrality` | ✅ | |
 | `tinker.search` | ✅ | ❌ `type=VertexProperty`, `<3`-char term, `regex` |
 | `io` (service) | ✅ | internal; what `io()` desugars to. Coverage as `io()` above |
-| `federate` | ✅ | cross-graph pushdown (async barrier); `.with("subgraph", true)` brings back a traversable subgraph. ❌ `has(key, without/textP/composed)`, bound-parameter/`null` movement labels, `limit`/`order` over the bound stream, `path()`/`as()` spanning the call, and local movement over a NON-subgraph detached result |
+| `federate` | ✅ | cross-graph pushdown (async barrier); `.with("subgraph", true)` brings back a traversable subgraph. ❌ bound-parameter/`null` movement labels, `order` over the bound stream, `path()`/`as()` spanning the call, and local movement over a NON-subgraph detached result |
 
 ## 2. Filters & predicates
 
