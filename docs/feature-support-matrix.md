@@ -11,7 +11,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | ✅ | Supported, at any depth. |
 | 🟡 | Partial — the note says what is missing. |
 | ❌ | Not yet. Throws `UnsupportedTraversal`. |
-| 🚫 | Out of scope — we will not build it. **Not** a backlog item; §15 is the whole list, and §16 holds what is merely unbuilt. |
+| 🚫 | Out of scope — we will not build it. **Not** a backlog item; §15 is the whole list. |
 
 ---
 
@@ -153,7 +153,7 @@ the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
 
 Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-lowering-plan.md`.
 
-`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family (full `call()` catalog in §17).
+`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family (full `call()` catalog in §16).
 
 ## 9. Lists & collections
 
@@ -220,9 +220,23 @@ A write chain is a SEQUENCE of statements, O(write steps) and never O(rows).
 
 ## 13. Traversal strategies
 
-`PartitionStrategy` ✅ (❌ with `mergeV`/`mergeE`), `SubgraphStrategy` ✅ (❌ the `vertexProperties`
-criterion), `ProductiveByStrategy` ✅, `withoutStrategies` ✅. A semantic strategy we do not implement
-is REJECTED, never silently ignored.
+Every strategy TinkerPop ships is classified into ONE handling; unlisted → **reject**, the
+fail-closed backstop, so a semantic strategy is never silently ignored. `withStrategies(X)` accepts a
+strategy only if its handling is inject/verify/no-op; `withoutStrategies(X)` filters `X` out of the
+active set — a safe no-op by default (we apply no strategy on our own), EXCEPT for an always-on one
+whose effect is unconditional (that request is rejected, since we cannot un-apply it).
+
+| Handling | What it does | Strategies |
+|---|---|---|
+| **Inject** ✅ | rewrites the chain to change the result set | `SubgraphStrategy` (❌ `vertexProperties` criterion; a mutating traversal), `PartitionStrategy` (❌ `mergeV`/`mergeE`; `includeMetaProperties`), `ProductiveByStrategy` (❌ a `by()` on an unsupported host) |
+| **Verify** ✅ | asserts legality and throws the spec's message | `StandardVerificationStrategy` (always-on: `inject()` under `repeat()`, a mutating value-arg child), `ReadOnlyStrategy`, `EdgeLabelVerificationStrategy` (only when `throwException:true`), `ReservedKeysVerificationStrategy` (only when `throwException:true`) |
+| **No-op, but we DO the work** ⚙️ | result unchanged, yet the optimization is genuinely performed; `withoutStrategies` suppresses the PLAN, not the answer | `PathRetractionStrategy` (drops unread labels; cleanly suppressible), `RepeatUnrollStrategy` (unrolls fixed `times(n)`; suppression is PARTIAL — leaves the barrier-body widening), `ConnectiveStrategy` (infix `.and()`/`.or()` folding, applied unconditionally — and always-on, so `withoutStrategies` of it is REJECTED) |
+| **No-op, inert** 💤 | accepted, changes nothing whether named or disabled — SQLite's planner does this work, or the condition can't arise on our surface | `CountStrategy`, `IdentityRemovalStrategy`, `FilterRankingStrategy`, `LazyBarrierStrategy`, `EarlyLimitStrategy`, `OrderLimitStrategy`, `AdjacentToIncidentStrategy`, `IncidentToAdjacentStrategy`, `InlineFilterStrategy`, `PathProcessorStrategy`, `ByModulatorOptimizationStrategy`, `MatchAlgorithmStrategy`, `MatchPredicateStrategy`, `GValueReductionStrategy`, `ProviderGValueReductionStrategy`, `RequirementsStrategy`, `LambdaRestrictionStrategy`, `GraphFilterStrategy`, `ComputerFinalizationStrategy`, `MessagePassingReductionStrategy`, `ComputerVerificationStrategy`, `VertexProgramRestrictionStrategy`, `HaltedTraverserStrategy`, `VertexProgramStrategy`, `OptionsStrategy`, `ProfileStrategy`, `SeedStrategy` |
+| **Reject** ❌ | fail-closed — would change results if silently ignored | anything unlisted, incl. `SackStrategy`, `SideEffectStrategy`, `EventStrategy`, `ElementIdStrategy`, `ReferenceElementStrategy` |
+
+⚠️ `OptionsStrategy`/`ProfileStrategy`/`SeedStrategy` are inert only until `with()`/`profile()`/
+`coin()`-`sample()` land — revisit then. The always-on verify + fold passes (`StandardVerificationStrategy`,
+`ConnectiveStrategy`) run whether or not the user names them.
 
 ## 14. Element / property model
 
@@ -239,33 +253,30 @@ Short on purpose: a 🚫 means **we will not build this**, never "we have not go
 | `store(k)` | gone from the language upstream |
 | Row-at-a-time interpretation | the failure mode this project exists to avoid |
 
-## 16. Not yet — INTENDED, unscheduled (❌)
+## 16. OLAP / graph algorithms (`call()`)
 
-Not a wall: an item here has a design doc, is unscheduled, and fails closed with a clear deferral
-until it lands — so a query never gets a silently narrower answer in the meantime. This bucket is
-empty right now: `regex` LANDED as a barrier (see §2) and the OLAP / graph-algorithm family
-(`pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`) LANDED (see §8, §17).
+Fourteen graph algorithms run as `call()` services — the compute stays set-based SQL, never a
+row-at-a-time interpreter. Each is invoked `g.V().call("<name>")`.
 
-## 17. OLAP / graph algorithms (`call()`)
+**Four have a native TinkerPop step** and answer it directly (it desugars to the same service):
+`pageRank()`, `connectedComponent()` (= `wcc`), `peerPressure()`, `shortestPath()`. The other ten are
+reachable only through `call()`.
 
-Thirteen graph algorithms run as `call()` services — the compute stays set-based SQL, never a
-row-at-a-time interpreter. Each is invoked `g.V().call("<name>")`; the ones with a native TinkerPop
-step (noted below) also answer that step, which desugars to the same service.
+The four with a native step lead the table; the algorithm name links a canonical reference.
 
 | Algorithm | `call()` name | Notes |
 |---|---|---|
-| PageRank | `pageRank` | native `pageRank()` |
-| ArticleRank | `articleRank` | |
-| Weakly-connected components | `wcc` | native `connectedComponent()` |
-| Strongly-connected components | `scc` | |
-| Peer-pressure clustering | `peerPressure` | native `peerPressure()` |
-| Betweenness centrality | `betweenness` | |
-| Closeness centrality | `closeness` | |
-| Harmonic centrality | `harmonic` | |
-| HITS | `hits` | decorates hub + authority |
-| Triangle count | `triangleCount` | |
-| Local clustering coefficient | `localClusteringCoefficient` | |
-| k-core | `kcore` | decorates the core value |
-| Node similarity | `nodeSimilarity` | yields `{node1, node2, similarity}` pairs |
-
-`shortestPath` is the path finder (§7/§8), also reachable as `call("shortestPath")`.
+| [PageRank](https://en.wikipedia.org/wiki/PageRank) | `pageRank` | native `pageRank()` |
+| [Weakly-connected components](https://en.wikipedia.org/wiki/Component_(graph_theory)) | `wcc` | native `connectedComponent()` |
+| [Peer-pressure clustering](https://en.wikipedia.org/wiki/Label_propagation_algorithm) | `peerPressure` | native `peerPressure()` |
+| [Shortest path](https://en.wikipedia.org/wiki/Shortest_path_problem) | `shortestPath` | native `shortestPath()`; the path finder (§7/§8) |
+| [ArticleRank](https://neo4j.com/docs/graph-data-science/current/algorithms/article-rank/) | `articleRank` | |
+| [Strongly-connected components](https://en.wikipedia.org/wiki/Strongly_connected_component) | `scc` | |
+| [Betweenness centrality](https://en.wikipedia.org/wiki/Betweenness_centrality) | `betweenness` | |
+| [Closeness centrality](https://en.wikipedia.org/wiki/Closeness_centrality) | `closeness` | |
+| [Harmonic centrality](https://en.wikipedia.org/wiki/Centrality#Harmonic_centrality) | `harmonic` | |
+| [HITS](https://en.wikipedia.org/wiki/HITS_algorithm) | `hits` | decorates hub + authority |
+| [Triangle count](https://en.wikipedia.org/wiki/Clustering_coefficient) | `triangleCount` | |
+| [Local clustering coefficient](https://en.wikipedia.org/wiki/Clustering_coefficient#Local_clustering_coefficient) | `localClusteringCoefficient` | |
+| [k-core](https://en.wikipedia.org/wiki/Degeneracy_(graph_theory)#k-Cores) | `kcore` | decorates the core value |
+| [Node similarity](https://en.wikipedia.org/wiki/Jaccard_index) | `nodeSimilarity` | yields `{node1, node2, similarity}` pairs |
