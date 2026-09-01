@@ -170,5 +170,6 @@ jobs:
           gh release create "v$V" \
             --title "v$V" \
             --notes-file notes.md \
-            "dist/mogwai-browser-$V.zip" \
-            dist/bin/mogwai-"$V"-*
+            "dist/mogwai-db-browser-$V.zip" \
+            "dist/mogwai-db-cloudflare-$V.zip" \
+            dist/bin/mogwai-db-"$V"-*
