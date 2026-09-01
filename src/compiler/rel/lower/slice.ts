@@ -22,7 +22,8 @@ import type { ChildHost } from '../child.ts';
 import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
 import { pathCarried } from '../path.ts';
-import { BULK, encounterOf, originOf, type ChainCtx } from './chain.ts';
+import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
+import { withChannel } from '../../../channels.ts';
 import { dropPath, orderRows } from '../lower.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
 
@@ -384,7 +385,10 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   // element by the label they bound (a different multiset). So decline rather than take an arbitrary one
   // — a clean deferral, not a wrong answer; the window arms above are the honest lowering where a
   // traverser is more than its identity, and they have already claimed the `origin`/property cases.
-  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin'))) return null;
+  // `graph` (a multi-graph merge) is excluded like `origin`: it is not a group PASSENGER but part of the
+  // identity KEY (spliced into the `Distinct`/group-by below), so its `undefined` group policy must not
+  // veto the dedup — it is consulted, not averaged.
+  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) return null;
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -396,11 +400,18 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   // may carry a role only where N-rows-into-one has a defined answer, which `bulk` and `encounter`
   // have and an alias, a path or a sack do not.
   if (!ordered) {
+    // A `graph` channel (a multi-graph merge) is part of element IDENTITY: dedup on `(id, graph)`, not
+    // `id` alone, so A's id 5 and B's id 5 do not collapse. `bulk` stays the constant 1 (the survivor
+    // stands for itself), so a `Distinct` over `(id, graph, 1)` collapses exactly the duplicate
+    // `(id, graph)` pairs. Absent a graph channel this is the ordinary `(id, 1)` dedup, byte-unchanged.
+    const graph = graphOf(input.channels);
+    const chans = graph ? withChannel(BULK, graph) : BULK;
     const projected = make.project({
-      id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-      exprs: [['id', col(input.id, 'id')], ['bulk', compilerInt(1)]],
+      id: fresh('dd'), input, channels: chans, type: typeOf(meta('id', 'int'), ...carriedCols(chans)),
+      exprs: [['id', col(input.id, 'id')],
+        ...chans.map((c) => [c.col, c.role === 'graph' ? col(input.id, c.col) : compilerInt(1)] as const)],
     });
-    return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
+    return make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
   }
   // THE AGGREGATES ARE DERIVED FROM THE CHANNELS THE INPUT ACTUALLY CARRIES, never named — §12's rule,
   // and this line broke it. The pair `['bulk', 'encounter']` was hardcoded while every ordered element

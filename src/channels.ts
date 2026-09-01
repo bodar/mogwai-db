@@ -49,7 +49,7 @@
  * the census answer-gate refuted it on the spot (it over-partitions the group pool). So the ROLE is one;
  * the value each producer writes is its own.
  */
-export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops';
+export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops' | 'graph';
 
 export interface Channel { readonly col: string; readonly role: ChannelRole; }
 export type Channels = readonly Channel[];
@@ -79,6 +79,11 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
   // A fork inside a walk body cannot rebind the loop counter: every arm reads the same incoming
   // value and the bump happens once when the term closes.
   loops: 'identical',
+  // WHICH GRAPH a bound element came from — a per-traverser provenance fact, like `origin`/`fromV`.
+  // `identical` is what makes a multi-graph merge REQUIRE every arm to carry it (each arm stamps its
+  // own graph value; the values differ per row but the column must be present on all), so an arm that
+  // forgot it fails the peer check loudly rather than merging two graphs' ids under no discriminator.
+  graph: 'identical',
 };
 
 /**
@@ -99,6 +104,10 @@ export const CHANNEL_BARRIER_POLICY: Readonly<Record<ChannelRole, BarrierPolicy>
   bulk: 'drop',
   // TinkerPop likewise calls resetLoops() on every traverser emitted from RepeatEndStep.
   loops: 'drop',
+  // A real barrier (count/fold/group) emits a NEW traverser with no per-row identity left, so nothing
+  // downstream needs the graph tag: every identity consumer (dedup/group-key/has(id)) reads the LIVE
+  // channel to build its key BEFORE such a barrier. `drop`, like every other per-row role.
+  graph: 'drop',
 };
 
 /** Same-scope peer arms must agree on the rigid roles; re-homed child arms cannot be compared with
@@ -112,7 +121,7 @@ export type RigidPolicy = 'peer' | 'rehomed';
  * would see a merge silently reorder its columns. The framing layer's own column accessor is the
  * tie — `test/channel-contracts.test.ts` pins the two against each other.
  */
-export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path'];
+export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path', 'graph'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
 
@@ -187,6 +196,11 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
   fromV: 'undefined',
   // Choosing one member's depth when a group spans iterations would be arbitrary.
   loops: 'undefined',
+  // The graph tag is never a group PASSENGER — it is CONSULTED as part of the identity key (spliced
+  // into the dedup/group key beside the id, the way `origin` is spliced into `dedupOn`, entirely
+  // outside `groupableChannels`). `undefined` so a relation that reaches the generic aggregate with a
+  // still-live, unconsulted graph channel declines rather than silently averaging it across graphs.
+  graph: 'undefined',
 };
 
 /** May a grouping carry this whole channel list through? See `CHANNEL_GROUP_POLICY`. */
@@ -225,6 +239,10 @@ export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
   bulk: false,
   // A whole frontier shares its iteration number.
   loops: false,
+  // Many rows share one graph value (every element landed from one sibling), so it is NOT row-unique —
+  // and must not claim to be: the merged `dedup()` builds a `Distinct` over `(id, graph, bulk=1)` that
+  // genuinely collapses duplicate `(id, graph)` pairs, which a row-unique claim would make inert.
+  graph: false,
 };
 
 /** The channels that make a whole-row `DISTINCT` inert — empty is the only legal answer for one. */

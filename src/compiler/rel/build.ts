@@ -54,6 +54,9 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
   encounter: { type: 'int', nullable: false },
   origin: { type: 'int', nullable: false },
   fromV: { type: 'int', nullable: true },
+  // The graph a bound element came from — the federate call's own graph name (or the `$local` sentinel
+  // for the base graph). A TEXT tag, present on every row of a multi-graph merge.
+  graph: { type: 'text', nullable: false },
 };
 
 /** The carried channels' COLUMNS, in the channel list's own order — every relation that carries

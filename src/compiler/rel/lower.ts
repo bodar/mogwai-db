@@ -57,7 +57,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
@@ -3290,9 +3290,12 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
-  const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
+  const pathChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
   if (!first) return null;
+  // A `graphTag` on the source step (a multi-graph merge arm, nested-branch federate) seeds a `graph`
+  // channel carrying that graph's identity, so `dedup` over the merged stream keeps per-graph identity.
+  const seedChannels = first.graphTag != null ? withChannel(pathChannels, GRAPH) : pathChannels;
 
   /** `withSack(seed)`'s channel, layered onto whatever a source produced — one helper for every
    *  source, because seeding it is the same act wherever the traverser came from. A declared sack
@@ -3447,7 +3450,8 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
       channel.role === 'bulk' ? compilerInt(1)
         : channel.role === 'encounter' ? col(source.id, 'id')
-          : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }, facts.demandsPathLabels),
+          : channel.role === 'graph' ? compilerText(first.graphTag!)
+            : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }, facts.demandsPathLabels),
     ] as const)],
   });
 

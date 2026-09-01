@@ -87,6 +87,15 @@ export const originOf = (channels: Channels): Channel | undefined =>
 export const encounterOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'encounter');
 
+/** THE GRAPH CHANNEL — which graph a bound element came from, carried so a multi-graph merge keeps
+ *  per-graph identity (`dedup`/`group`/`has(id)` must not collapse A's id 5 with B's id 5). Its value
+ *  is the federate call's own graph name, or the `$local` sentinel for the base graph. Consulted as part
+ *  of the identity key when present, and absent entirely from every single-graph query. */
+export const GRAPH: Channel = { col: 'graph', role: 'graph' };
+export const LOCAL_GRAPH = '$local';
+export const graphOf = (channels: Channels): Channel | undefined =>
+  channels.find((channel) => channel.role === 'graph');
+
 /** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
 export interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }

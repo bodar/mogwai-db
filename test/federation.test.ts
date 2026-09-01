@@ -988,14 +988,31 @@ describe('federate — nested in union arms (multi-graph merge)', () => {
     expect(await count('g.union(__.call("federate").with("graph","crew").E(), __.call("federate").with("graph","home").E()).count()')).toBe(crewE + homeE);
   });
 
-  // FAIL CLOSED (Phase 1 boundary): a post-merge tail that materializes merged elements or decides
-  // cross-graph identity is not evaluable yet, so it must REFUSE — never misjoin against one graph.
+  // CROSS-GRAPH IDENTITY (Phase 2, the `graph` discriminator channel): dedup over the merged stream keeps
+  // per-graph identity — A's id 5 and B's id 5 do NOT collapse — while a within-graph duplicate still does.
+  test('dedup() across two DIFFERENT graphs keeps per-graph identity (no cross-graph collapse)', async () => {
+    const crew = await onGraph('crew', 'g.V().count()');
+    const home = await onGraph('home', 'g.V().count()');
+    // crew and home ids overlap; without the discriminator this would collapse to ~max(crew,home).
+    expect(await count('g.union(__.call("federate").with("graph","crew").V(), __.call("federate").with("graph","home").V()).dedup().count()'))
+      .toBe(crew + home);
+  });
+  test('dedup() within the SAME graph (both arms crew) still collapses duplicates', async () => {
+    const crew = await onGraph('crew', 'g.V().count()');
+    expect(await count('g.union(__.call("federate").with("graph","crew").V(), __.call("federate").with("graph","crew").V()).dedup().count()'))
+      .toBe(crew);
+  });
+  test('dedup() across a bound graph + the BASE graph keeps both', async () => {
+    const crew = await onGraph('crew', 'g.V().count()');
+    const home = await onGraph('home', 'g.V().count()');
+    expect(await count('g.union(__.call("federate").with("graph","crew").V(), __.V()).dedup().count()')).toBe(crew + home);
+  });
+
+  // FAIL CLOSED (still open until Phase 3): a post-merge tail that MATERIALIZES merged elements needs the
+  // graph-tagged unified relation, so it must REFUSE — never misjoin against one graph.
   const merged2 = 'g.union(__.call("federate").with("graph","crew").V(), __.call("federate").with("graph","home").V())';
   test('post-merge values() over the merged stream refuses (needs the unified relation)', async () => {
     expect(mgr.executor('home').framedAsync(`${merged2}.values("name")`, {})).rejects.toThrow(/not supported/);
-  });
-  test('post-merge dedup() over the merged stream refuses (needs the graph discriminator)', async () => {
-    expect(mgr.executor('home').framedAsync(`${merged2}.dedup().count()`, {})).rejects.toThrow(/not supported/);
   });
   test('bare element return over the merged stream refuses (needs the unified relation)', async () => {
     expect(mgr.executor('home').framedAsync(merged2, {})).rejects.toThrow(/not supported/);
