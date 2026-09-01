@@ -226,13 +226,40 @@ misjoins against one graph — the `safePostMergeTail` gate admits only a cardin
 
 1. **Post-merge element reads** (`values`/`hasLabel`/a bare element return/movement) — a merged row's `id`
    comes from one of several disjoint landed id-spaces with no per-row tag, so a single `ctx.source`
-   rejoin would silently read the wrong graph. **Phase 3:** land the arms into a graph-TAGGED unified
-   relation (`SELECT 'A' AS graph,* FROM bgv_A UNION ALL …`) and rejoin by the composite `(graph, id)`.
-2. **Cross-graph identity** (`dedup`/`has(T.id)`/`group().by(id)`) — A's id `5` and B's id `5` must not
-   collapse. **Phase 2:** a new `graph` `ChannelRole` (its own name — `origin` is taken) carried in the
-   row, threaded through `externalId` and the dedup/group keys; provably inert for single-graph queries.
-   The Phase-3 unified relation is the SAME `graph` discriminator promoted into a relation, so the two
-   pillars share one substrate.
+   rejoin would silently read the wrong graph. **Phase 3 (open) — the design, ready to build:**
+   - **The unified relation.** The `graph` channel already carried in the merged row (Phase 2) is the tag;
+     land the arms into a graph-TAGGED unified relation — `SELECT '<A>' AS graph,* FROM bgv_A UNION ALL
+     SELECT '<B>' AS graph,* FROM bgv_B` — and a `unifiedBoundGraph` `GraphSource` whose reads rejoin it
+     by the COMPOSITE `(graph, id)`, reading the graph value off the stream row's `graph` channel. This is
+     the same discriminator promoted from a channel into a relation, so it composes with Phase 2 rather
+     than duplicating it.
+   - **Where it plugs in.** `nestedBranchSegment` sets the POST-MERGE `ctx.source` (i.e.
+     `request.lowering.source`) to the `unifiedBoundGraph`, while the arms keep reading their own per-arm
+     `landedSource` markers (the two coexist: arms use markers, the post-merge tail uses `ctx.source`).
+   - **Accumulation.** The unified relation needs ALL arms' CTEs, but segments land one arm at a time, so
+     the source is rebuilt each segment with the accumulated `(graph, vertexBinding, edgeBinding)` list +
+     accumulated bindings; the LAST segment carries the complete set, and the final re-plan (no barrier)
+     lowers the post-merge tail against it.
+   - **The clean split.** `GraphSource` methods that take the whole `input` stream (`leafPayload`,
+     `propertyValues`, `propertyStream`, `labelNames`) can read the `graph` channel off `input` and add
+     `AND unified.graph = input.graph` to their join — so `values(k)` and a bare element return land with
+     NO interface change. The CORRELATED-scalar methods that take only `id` (`hasLabelPredicate`,
+     `hasPropertyPredicate`, `propertyScalar`, `hasTokenPredicate`) cannot see `graph`, so post-merge
+     `hasLabel`/`has(key)` either stay fail-closed or need those signatures to also carry the graph expr —
+     a bounded follow-up. Lift `postMergeTail` to admit the input-carrying reads first.
+   - `has(T.id, <literal>)` is already correct semantics unchanged (the predicate compares the id column
+     and matches across graphs, which is TinkerPop's own provenance-blind `has(id)`).
+2. **Cross-graph identity** — **Phase 2 ✅ LANDED for `dedup`.** A new `graph` `ChannelRole`
+   (`src/channels.ts`, its own name — `origin` is taken for parent-row provenance) is carried in the row:
+   all five total policy tables + `CHANNEL_COL` + `ROLE_ORDER` declare it; `nestedBranchSegment` stamps
+   every arm of an identity-sensitive merge (a landed arm its sibling name, a base arm `$local`), so
+   `mergeArms` agrees; the unordered `dedup` (`slice.ts`) makes the `Distinct` key `(id, graph)` and
+   excludes `graph` from the groupable-channels veto exactly as `origin` is excluded. **Provably inert for
+   single-graph queries** — stamped ONLY on a multi-graph identity merge, so nothing else carries it and
+   the census (byte-level answer gate) is green. Remaining (Phase 2b, same substrate): `group().by(id)`
+   (the by()-less rowid key and the `.by(id)` key composite) and `has(T.id, <nested cross-graph scalar>)`.
+   The Phase-3 unified relation is the SAME discriminator promoted into a relation, so the pillars share
+   one substrate.
 
 Deferred (tracked, genuinely separate): the parallel I/O barrier batch (run independent sibling RPCs
 concurrently — beneficial for the async-I/O barrier class, federate + `io()`, a no-op for the
