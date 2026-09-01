@@ -241,11 +241,7 @@ Short on purpose: a 🚫 means **we will not build this**, never "we have not go
 
 ## 16. Not yet — INTENDED, unscheduled (❌)
 
-Not a wall: it has a design doc, is unscheduled, and fails closed with a clear deferral until it
-lands — so a query never gets a silently narrower answer in the meantime. (`regex` was here; it
-LANDED as a barrier — see §2. Its `apply` shape and the barrier substrate it shares with OLAP are
-`docs/2026-08-21-barrier-substrate-design.md`.)
-
-| Item | Shape | Doc |
-|---|---|---|
-| OLAP / graph algorithms — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath` | `call()` services (the GDS-shaped superset) with the four native step names as thin desugar Passes to the same services — one implementation, compute stays set-based SQL, never a row-at-a-time interpreter | `docs/2026-07-24-graph-algorithms-plan.md`, substrate `docs/2026-08-21-barrier-substrate-design.md` |
+Not a wall: an item here has a design doc, is unscheduled, and fails closed with a clear deferral
+until it lands — so a query never gets a silently narrower answer in the meantime. This bucket is
+empty right now: `regex` LANDED as a barrier (see §2) and the OLAP / graph-algorithm family
+(`pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`) LANDED (see §8).
