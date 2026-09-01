@@ -3,9 +3,9 @@
  * RELEASE PACKAGING — build the distributable artifacts under `dist/` (gitignored). Everything is named
  * `mogwai-db-…` (the product; a sibling like `mogwai-mem` would be `mogwai-mem-…`):
  *
- *   bun scripts/package.ts --browser                 # dist/mogwai-db-browser-<ver>.zip
+ *   bun scripts/package.ts --browser                 # dist/mogwai-db-<ver>-browser.zip
  *   bun scripts/package.ts --binaries[=linux-x64,…]  # dist/bin/mogwai-db-<ver>-<os>-<arch>[.exe]
- *   bun scripts/package.ts --cloudflare              # dist/mogwai-db-cloudflare-<ver>.zip
+ *   bun scripts/package.ts --cloudflare              # dist/mogwai-db-<ver>-cloudflare.zip
  *   bun scripts/package.ts                            # all three
  *   bun scripts/package.ts --version 1.2.3            # override the version (default: scripts/version.ts)
  *
@@ -18,7 +18,7 @@
  *     `wrangler.jsonc` (main → the bundle, `no_bundle`, the DO migration + R2 binding) + a deploy README.
  *     A consumer sets two env vars and `wrangler deploy`s — no build on their side.
  */
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, chmod } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { version } from './version.ts';
@@ -88,7 +88,7 @@ async function packageBrowser(): Promise<void> {
   await Bun.write(join(out, 'index.html'), INDEX_HTML);
   await Bun.write(join(out, 'README.md'), browserReadme(VERSION));
 
-  await zipDir(out, join(DIST, `mogwai-db-browser-${VERSION}.zip`), ['.']);
+  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-browser.zip`), ['.']);
 }
 
 async function packageBinaries(): Promise<void> {
@@ -115,13 +115,20 @@ async function packageCloudflare(): Promise<void> {
   await run(['bunx', 'wrangler', 'deploy', '--dry-run', '--outdir', out]);
   if (!(await Bun.file(join(out, 'worker.js')).exists())) throw new Error('wrangler did not produce worker.js');
 
-  // The deploy template + README (overwriting wrangler's stub README). The template is DERIVED from the
-  // repo's wrangler.jsonc so it cannot drift — same DO migration, R2 binding, compat — with `main` pointed
-  // at the prebuilt bundle and `no_bundle` on, and the account left to the env.
+  // The deploy config + script + README (overwriting wrangler's stub README). The config is DERIVED from
+  // the repo's wrangler.jsonc so it cannot drift — same DO migration, R2 binding, compat — with `main`
+  // pointed at the prebuilt bundle and `no_bundle` on, and the account left to the env.
+  const cfg = readJsonc(join(ROOT, 'wrangler.jsonc'));
+  const bucket = cfg.r2_buckets?.[0]?.bucket_name ?? 'mogwai-io';
   await Bun.write(join(out, 'wrangler.jsonc'), cloudflareTemplate());
-  await Bun.write(join(out, 'README.md'), cloudflareReadme(VERSION));
+  // deploy.sh: checks the env is set, creates the R2 bucket if missing, deploys — the README's steps,
+  // baked in. Templated from scripts/templates/ with the bucket name; made executable so it survives the zip.
+  const deploySh = readFileSync(join(ROOT, 'scripts/templates/cloudflare-deploy.sh'), 'utf8').replaceAll('__MOGWAI_BUCKET__', bucket);
+  await Bun.write(join(out, 'deploy.sh'), deploySh);
+  await chmod(join(out, 'deploy.sh'), 0o755);
+  await Bun.write(join(out, 'README.md'), cloudflareReadme(VERSION, bucket));
 
-  await zipDir(out, join(DIST, `mogwai-db-cloudflare-${VERSION}.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'README.md']);
+  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md']);
 }
 
 /** Zip named entries (relative to `dir`) into `zipPath`, replacing any existing archive. */
@@ -212,37 +219,37 @@ Then any client can query \`POST /gremlin/{graphId}\` with \`{"gremlin":"g.V().c
 `;
 }
 
-function cloudflareReadme(version: string): string {
+function cloudflareReadme(version: string, bucket: string): string {
   return `# mogwai-db — Cloudflare deploy ${version}
 
 A **prebuilt** mogwai-db Worker + Durable Object. No build on your side — deploy the bundle straight to
 your own Cloudflare account. (Graphs are TinkerPop 4 Gremlin over HTTP, each an isolated SQLite Durable
 Object.)
 
-## Files
-
-- \`worker.js\` — the prebuilt Worker (exports the \`GraphDatabase\` Durable Object).
-- \`worker.js.map\` — sourcemap; mapped stack traces in the Cloudflare dashboard.
-- \`wrangler.jsonc\` — the deploy config: \`main\` → the bundle, \`no_bundle\`, the DO migration, the R2 binding.
-- \`README.md\` — this file.
-
 ## Deploy
 
-Needs the wrangler CLI (\`npx wrangler\`) and a Cloudflare API token with **Workers Scripts + Durable
-Objects + R2** edit permissions.
+Set a Cloudflare API token with **Workers Scripts + Durable Objects + R2** edit permissions, then run the
+script — it checks the env, creates the \`${bucket}\` R2 store if missing, and deploys:
 
 \`\`\`sh
-export CLOUDFLARE_API_TOKEN=…   CLOUDFLARE_ACCOUNT_ID=…
-npx wrangler r2 bucket create mogwai-io    # the io() whole-graph import/export store
-npx wrangler deploy
+export CLOUDFLARE_API_TOKEN=…                 # required
+export CLOUDFLARE_ACCOUNT_ID=…               # only if the token can see more than one account
+./deploy.sh
 \`\`\`
 
 Your Worker goes live at \`mogwai-db.<your-subdomain>.workers.dev\`; query a graph with
 \`POST /gremlin/{id}\`, body \`{"gremlin":"g.V().count()"}\`. The Durable Object is created on deploy and
 provisioned per graph on first request (there is no create/drop API — addressing a graph provisions it).
 
-**Nothing to edit** — the account comes from the two env vars and the config is correct as shipped. Change
-\`name\` only if you want a different Worker name.
+(No bash? Run what \`deploy.sh\` does: \`npx wrangler r2 bucket create ${bucket}\` then \`npx wrangler deploy\`.)
+
+## Files
+
+- \`deploy.sh\` — the one command above; checks the env, ensures the R2 bucket, deploys.
+- \`worker.js\` — the prebuilt Worker (exports the \`GraphDatabase\` Durable Object).
+- \`worker.js.map\` — sourcemap; mapped stack traces in the Cloudflare dashboard.
+- \`wrangler.jsonc\` — the deploy config: \`main\` → the bundle, \`no_bundle\`, the DO migration, the R2 binding.
+  Nothing needs editing — the account comes from the env vars.
 `;
 }
 
