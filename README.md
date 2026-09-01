@@ -4,10 +4,7 @@
 
 # mogwai-db
 
-**A TinkerPop 4 Gremlin graph database with SQLite as its engine — so it runs
-natively everywhere SQLite does: in the browser, at the edge on Cloudflare Durable
-Objects, and as a single self-contained binary or Docker image on Linux, macOS, and
-Windows (arm64 and amd64).**
+**A TinkerPop 4 graph database with SQLite as its engine — natively targeting the browser, edge, bare metal and Docker.** 
 
 Point any TinkerPop 4 client at it and it speaks Gremlin over the standard HTTP
 wire. SQLite does the real work — storage, indexing, planning, execution — and
