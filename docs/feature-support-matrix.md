@@ -122,7 +122,8 @@ per-request limit is the backstop.
 | Step | | Notes |
 |---|:--:|---|
 | `path()`, `path().by(…)` | ✅ | |
-| `simplePath`, `cyclicPath`, `tree`, `subgraph` | ❌ | |
+| `simplePath`, `cyclicPath` | ✅ | |
+| `tree`, `subgraph` | ❌ | |
 
 ## 8. Pattern matching
 
