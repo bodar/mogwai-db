@@ -144,20 +144,16 @@ the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
 | start variable bound BEFORE the match | ✅ | |
 | FILTER LEG `where(<body>)`/`not(<body>)` | ✅ | |
 | inline `where('a', P.eq/neq('b'))` between two bound ELEMENT aliases | ✅ | |
-| `and`/`or` connective GROUPS | ❌ | they BIND their nested ends |
+| `or` connective GROUPS | ❌ | they BIND their nested ends |
 | `where('a', P.op('b'))` non-`eq`/`neq`, or over a SCALAR alias | ❌ | |
-| filter-AFTER-reduce end / `fold()` end | ❌ | `count().is(P.gt(10)).as('b')` |
+| `fold()` end | ❌ | |
 | MOVING no-end pattern | ❌ | |
 | 0/1-variable bindings map | ❌ | |
 | nested `match` inside a pattern | ❌ | |
-| `dedup(labels)` | ❌ | |
-| `match()` on an edge stream | ❌ | |
 
 Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-lowering-plan.md`.
 
-`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
-**not yet** rather than never: designed as `call()` services with the four step names as desugar
-Passes (`docs/2026-07-24-graph-algorithms-plan.md`), so the compute stays set-based SQL.
+`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family.
 
 ## 9. Lists & collections
 
