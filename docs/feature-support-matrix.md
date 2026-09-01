@@ -98,7 +98,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | ❌ where a downstream slice/collect READS the fan-out emission order; over a PROPERTY stream |
 | `coalesce` | ✅ | ❌ a non-seeded reducer arm (`max`/`sum`); a `number`-reducer scalar merged with a plain scalar; a payload-MEMBER tail over a variant stream (`unfold`, a member transform, a keyed/`by()` dedup) |
 | `optional` | ✅ | ❌ an element re-source arm (`optional(__.V())`) |
-| `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | 🟡 | ❌ `map` over a fan-out (movement) body (`map(__.out())`); `flatMap` over a pure scalar body (`flatMap(__.values('name'))`); `local` with a per-origin `order().by()`; `flatMap`/`local` under `path()`; a label bound inside the body that the outer chain reads (`local(__.out().as('b'))…select('b')`) |
+| `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | 🟡 | ❌ `map` over a fan-out (movement) body (`map(__.out())`); `flatMap` over a pure scalar body (`flatMap(__.values('name'))`); `flatMap`/`local` under `path()`; a label bound inside the body that the outer chain reads (`local(__.out().as('b'))…select('b')`) |
 | `branch`, `sideEffect(__.…)` | ❌ | |
 
 Heterogeneous arms merge into a **variant stream**; after the merge the shape-agnostic steps
