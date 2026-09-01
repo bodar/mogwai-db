@@ -44,9 +44,9 @@ import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
-import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignPayloadCols, foreignRejoin, foreignRelation } from './foreign.ts';
+import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
-import { boundGraph, landedCols } from './boundgraph.ts';
+import { boundGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { PairSpec } from '../../services/spi/types.ts';
 import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
@@ -2885,11 +2885,9 @@ export function lowerForeignResume(
   // element ONCE. A mapValues result can contain one sibling element under several parent keys; the
   // payload binding stays distinct while the keyed pool below preserves that multiplicity for its join.
   const mapValues = rejoin && 'mapValues' in rejoin ? rejoin.mapValues : null;
-  const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
-  const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
-  const edgeRows = dedupById(rows.filter((r) => r.kind === 'edge'));
-  const isSubgraph = edgeRows.length > 0 && vertexRows.length > 0;
-  const streamElem: Elem = isSubgraph ? 'edge' : elem;
+  // Land the awaited rows as the `fenced` CTE bindings a `BoundGraph` reads through (`landForeignRows`) —
+  // split by kind (a subgraph's edges + its incident vertices), each declared once as a `Ref` target.
+  const { vertexBinding, edgeBinding, streamElem, isSubgraph, bindings } = landForeignRows(rows, elem, fresh, mapValues);
   // A landed relation carries no channels by default — the rows crossed a segment boundary as detached
   // references. But a SUBGRAPH source-form seed CAN carry an `encounter` minted from the landed array
   // order (the sibling's emission order — see the seed below), so a chain that DEMANDS an encounter
@@ -2906,43 +2904,6 @@ export function lowerForeignResume(
   // without its order.
   if (facts.tracksPath && facts.demandsEncounter) return null;
   if (facts.demandsEncounter && !seedsEncounter && !ordersMidChain) return null;
-  // The landed graph is the SOURCE a `BoundGraph` reads through. Each landed relation is declared ONCE
-  // as a `fenced` (`AS MATERIALIZED`) CTE Plan binding over its rows, and every read — the stream seed,
-  // each rejoin, the leaf — REFERENCES it by name (a `Ref`). That is Calcite's materialize-once
-  // (`RelOptMaterialization`): N reads share one CTE and its ONE `json_each` bind, computed once, rather
-  // than re-exploding the JSON literal per read (which also doubled the DO bind count). A binding is used
-  // rather than a structurally shared node because a shared node is duplicated by a tree-rebuild pass —
-  // the RelIR scope check refuses it — whereas a `Ref` is a named leaf. `null` binding = the KIND is
-  // absent from this result (a vertex list has no edges), which fails a hop closed; an EMPTY same-kind
-  // relation is still declared (a zero-row CTE), so an empty federated vertex list frames, not throws.
-  const bindings: Binding[] = [];
-  const declare = (landedRows: readonly ForeignRow[], kind: Elem): string => {
-    const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
-    // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
-    // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
-    const raw = mapValues
-      ? foreignMapRelation(mapValues, kind, fresh)
-      : foreignRelation(landedRows, kind, fresh, [], undefined, true);
-    // The bound payload is one row per element. A mapValues result may carry the same sibling
-    // element under several parent keys; parent multiplicity belongs to the rejoin pool below.
-    const landedRelation = mapValues
-      ? (() => {
-          const deduped = make.distinct({ id: fresh('fmd'), input: raw, channels: [], type: raw.type });
-          return make.project({
-            id: fresh('fmo'), input: deduped, channels: [], type: typeOf(...landedCols(kind)),
-            exprs: [
-              ...foreignPayloadCols(kind).map((column) => [column.name, col(deduped.id, column.name)] as const),
-              [FOREIGN_ORD, compilerInt(0)],
-            ],
-          });
-        })()
-      : raw;
-    const materialized = make.materialize({ id: fresh('bgm'), input: landedRelation, channels: [], type: landedRelation.type, name, fenced: true });
-    bindings.push({ name, node: materialized });
-    return name;
-  };
-  const vertexBinding = isSubgraph || elem === 'vertex' ? declare(vertexRows, 'vertex') : null;
-  const edgeBinding = isSubgraph || elem === 'edge' ? declare(edgeRows, 'edge') : null;
   const boundSource = boundGraph(vertexBinding, edgeBinding);
   const boundCtx: ChainCtx = { ...ctx, source: boundSource };
   // The initial stream references the landed relation (the edges for a subgraph, else the one matching

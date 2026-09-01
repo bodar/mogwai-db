@@ -1,7 +1,8 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
+import { type Binding } from '../../rel/plan.ts';
 import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { ValueNode } from '../../gremlin/types.ts';
@@ -181,3 +182,69 @@ export function foreignRejoin(pool: Rel, elem: Elem, parentCount: number, fresh:
  *  whole label set, so the step reads its first member; an edge's is already the name. */
 export const foreignLabelValue = (landed: Rel, elem: Elem): Expr =>
   elem === 'edge' ? col(landed.id, 'label') : cellAt(col(landed.id, 'label'), 0);
+
+/** The columns a landed relation's Plan binding (and every `Ref` to it) declares: the wire payload plus
+ *  the `ord` emission-order column (`foreignRelation(withOrder)`), from which the seed and `.V()`/`.E()`
+ *  re-root mint the `encounter` channel. Every read projects the subset it needs and ignores `ord`. */
+export const landedCols = (kind: Elem): readonly ColMeta[] =>
+  [...foreignPayloadCols(kind), meta(FOREIGN_ORD, 'int')];
+
+/**
+ * LAND a barrier's awaited rows as one or two `fenced` (`AS MATERIALIZED`) CTE bindings — the physical
+ * substrate a `boundGraph` reads through.
+ *
+ * Each landed relation is declared ONCE and every read (the stream seed, each rejoin, the leaf)
+ * REFERENCES it by name (a `Ref`). That is Calcite's materialize-once (`RelOptMaterialization`): N reads
+ * share one CTE and its ONE `json_each` bind, computed once, rather than re-exploding the JSON literal
+ * per read. A binding is used rather than a structurally shared node because a shared node is duplicated
+ * by a tree-rebuild pass (the RelIR scope check refuses it) — a `Ref` is a named leaf.
+ *
+ * A SUBGRAPH result is MIXED — edges (the graph, carrying `src`/`tgt`) plus their incident vertices WITH
+ * data — so the presence of BOTH kinds IS the signal (`isSubgraph`); the edges become the stream and the
+ * vertices a bound lookup the tail's `inV`/`outV`/`bothV` join. A homogeneous result lands its one kind.
+ * A `mapValues` result lands per-key with a DISTINCT payload (one sibling element can appear under several
+ * parent keys; the payload binding stays per-element, the keyed pool preserves the multiplicity). `null`
+ * binding = the KIND is absent (a vertex list has no edges), which fails a hop closed; an EMPTY same-kind
+ * relation is still declared (a zero-row CTE), so an empty federated list frames rather than throws.
+ *
+ * Shared by `lowerForeignResume` (the top-level barrier resume) and the nested-branch federate segment.
+ */
+export function landForeignRows(
+  rows: readonly ForeignRow[], elem: Elem, fresh: Minter,
+  mapValues: Extract<ValueNode, { readonly t: 'map' }> | null = null,
+): { vertexBinding: string | null; edgeBinding: string | null; streamElem: Elem; isSubgraph: boolean; bindings: Binding[] } {
+  const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
+  const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
+  const edgeRows = dedupById(rows.filter((r) => r.kind === 'edge'));
+  const isSubgraph = edgeRows.length > 0 && vertexRows.length > 0;
+  const streamElem: Elem = isSubgraph ? 'edge' : elem;
+  const bindings: Binding[] = [];
+  const declare = (landedRows: readonly ForeignRow[], kind: Elem): string => {
+    const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
+    // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
+    // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
+    const raw = mapValues
+      ? foreignMapRelation(mapValues, kind, fresh)
+      : foreignRelation(landedRows, kind, fresh, [], undefined, true);
+    // The bound payload is one row per element. A mapValues result may carry the same sibling
+    // element under several parent keys; parent multiplicity belongs to the rejoin pool.
+    const landedRelation = mapValues
+      ? (() => {
+          const deduped = make.distinct({ id: fresh('fmd'), input: raw, channels: [], type: raw.type });
+          return make.project({
+            id: fresh('fmo'), input: deduped, channels: [], type: typeOf(...landedCols(kind)),
+            exprs: [
+              ...foreignPayloadCols(kind).map((column) => [column.name, col(deduped.id, column.name)] as const),
+              [FOREIGN_ORD, compilerInt(0)],
+            ],
+          });
+        })()
+      : raw;
+    const materialized = make.materialize({ id: fresh('bgm'), input: landedRelation, channels: [], type: landedRelation.type, name, fenced: true });
+    bindings.push({ name, node: materialized });
+    return name;
+  };
+  const vertexBinding = isSubgraph || elem === 'vertex' ? declare(vertexRows, 'vertex') : null;
+  const edgeBinding = isSubgraph || elem === 'edge' ? declare(edgeRows, 'edge') : null;
+  return { vertexBinding, edgeBinding, streamElem, isSubgraph, bindings };
+}
