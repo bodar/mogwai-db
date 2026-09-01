@@ -160,7 +160,7 @@ Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-
 | Step | | Notes |
 |---|:--:|---|
 | `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | ❌ `dedup(local)` with a label tuple or a `by()` projection; PROPERTY-member and NESTED-list member lists |
-| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over an arm-merged (`union`) list, over an ELEMENT-member list, or a non-iterable SCALAR self |
+| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over a non-iterable SCALAR self |
 | `index()` | ❌ | |
 
 ⚠️ A set-op does not yet keep its members' TYPES — `values('when').fold().merge(…)` returns raw millis.
