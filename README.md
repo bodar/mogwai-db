@@ -15,23 +15,22 @@ scale — just SQLite.
 > Actively developed on `trunk`; no auth yet, expect churn. Shared so the design and
 > progress are visible, not because it's production-ready.
 >
-> - **Understands the whole language** — 2,298 / 2,298 canonical Gremlin
->   traversals from the official corpus parse (100%).
+> - **Understands the whole language** — 2,395 / 2,395 canonical Gremlin traversals
+>   parse and chain (100%), through a parser generated from TinkerPop's own `Gremlin.g4`.
 > - **Executes correctly** — **<!-- L3:passing -->1,793<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
->   against a live server through the *unmodified* `gremlin` JS client at tinkerpop `origin/master`,
+>   through the *unmodified* `gremlin` JS client (tinkerpop `origin/master`) over the real GraphBinary wire,
 >   run as a **ratchet** (the number only goes up).
 > - **Reads + writes + strategies** land across a wide step surface. For the exact
 >   per-step edges see the **[feature support matrix](docs/feature-support-matrix.md)**.
-> - **Next:** per-graph auth, more of the OLAP algorithm library, then the conformance grind.
 
 ## SQLite is the engine
 
-Most Gremlin databases ship their own execution engine and interpret a traversal by
-walking it step-by-step, pulling rows as they go. mogwai-db doesn't — it **lowers each
-whole traversal to a single parameterised SQL statement** for SQLite to run. The
-traversal executes *in the same process as storage* — no query-engine-to-storage hop —
-and k-hop movement becomes index-only covering scans. The planner, indexes, and
-execution are SQLite's; mogwai-db's job is the compile.
+A Gremlin traversal is normally run by walking its step chain one traverser at a
+time. mogwai-db doesn't — it **lowers each whole traversal to a single parameterised
+SQL statement** for SQLite to run. The traversal executes *in the same process as
+storage* — no query-engine-to-storage hop — and k-hop movement becomes index-only
+covering scans. The planner, indexes, and execution are SQLite's; mogwai-db's job is
+the compile.
 
 ```mermaid
 flowchart LR
@@ -116,9 +115,10 @@ spec and `/docs` an interactive reference. TinkerPop has no data-plane
 database-provisioning API — here a graph springs into being on first access, and
 management is in-band on the one path.
 
-The direction of travel: that REST + OpenAPI surface makes mogwai-db a natural
-**MCP-compatible, agent-driven graph database** — an agent can create graphs, write,
-and traverse with no bespoke tooling, just the described HTTP contract.
+The direction of travel: that REST + OpenAPI surface makes mogwai-db a natural home
+for **agent tooling** — an MCP server over the OpenAPI contract, say — where an agent
+creates graphs, writes, and traverses with no bespoke integration, just the described
+HTTP.
 
 ## Develop
 
