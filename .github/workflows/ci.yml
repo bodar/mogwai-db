@@ -195,6 +195,7 @@ jobs:
       - name: Build binaries + Docker context
         id: ctx
         run: |
+          mise run install   # populate node_modules (a bare `bun` call skips the mise install dep)
           V="$(mise exec -- bun scripts/version.ts)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           mise exec -- bun scripts/package.ts --binaries=linux-x64,linux-arm64
