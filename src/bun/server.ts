@@ -1,3 +1,4 @@
+import { parseArgs } from 'node:util';
 import { application } from '../application.ts';
 import { verboseLogger } from '../router.ts';
 import { BunGraphManager } from './BunGraphManager.ts';
@@ -28,7 +29,36 @@ export function startServer(
 }
 
 if (import.meta.main) {
-  const server = startServer();
-  const prefix = Bun.env.MOGWAI_PATH_PREFIX ?? 'gremlin';
+  // CLI flags, each falling back to its env var then the built-in default (so the Docker image can set
+  // MOGWAI_DB_DIR=/data and a bare-binary user can pass --data-dir). Bun provides node:util parseArgs.
+  const { values } = parseArgs({
+    args: Bun.argv.slice(2),
+    options: {
+      port: { type: 'string' },
+      'data-dir': { type: 'string' },
+      'io-dir': { type: 'string' },
+      'path-prefix': { type: 'string' },
+      help: { type: 'boolean', short: 'h' },
+    },
+  });
+  if (values.help) {
+    console.log(
+      [
+        'mogwai-db — a TinkerPop 4 Gremlin server on SQLite',
+        '',
+        'Flags (each falls back to the env var in parens, then the default):',
+        '  --port <n>          listen port (MOGWAI_PORT, 8182)',
+        '  --data-dir <dir>    where per-graph SQLite files live (MOGWAI_DB_DIR; in-memory if unset)',
+        '  --io-dir <dir>      where io() reads/writes whole-graph documents (MOGWAI_IO_DIR; io() off if unset)',
+        '  --path-prefix <p>   graph path prefix (MOGWAI_PATH_PREFIX, "gremlin")',
+        '  -h, --help          this help',
+      ].join('\n'),
+    );
+    process.exit(0);
+  }
+  const portArg = values.port ?? Bun.env.MOGWAI_PORT;
+  // Pass `undefined` when a flag is absent so startServer's own env/default handling applies.
+  const server = startServer(portArg ? Number(portArg) : undefined, values['data-dir'], values['path-prefix'], values['io-dir']);
+  const prefix = values['path-prefix'] ?? Bun.env.MOGWAI_PATH_PREFIX ?? 'gremlin';
   console.log(`mogwai-db listening on :${server.port} (graphs at /${prefix}/{id})`);
 }

@@ -173,3 +173,49 @@ jobs:
             "dist/mogwai-db-$V-browser.zip" \
             "dist/mogwai-db-$V-cloudflare.zip" \
             dist/bin/mogwai-db-"$V"-*
+
+  # Multi-arch Docker images to GitHub Container Registry (ghcr.io) — same gate as the release: every
+  # green push to trunk publishes `ghcr.io/<repo>:<version>` and `:latest` for linux/amd64 + linux/arm64.
+  # No external secret: ghcr accepts the built-in GITHUB_TOKEN with `packages: write`. The image is a thin
+  # wrapper over the release's Linux binaries (docker/Dockerfile is COPY-only — no build toolchain, no RUN,
+  # so the cross-arch build needs no emulation).
+  docker:
+    needs: [ci]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.ci.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # scripts/version.ts needs the commit count
+      - uses: ./.github/actions/provision
+      # Build the two Linux binaries and stage them under Docker's arch names, next to the Dockerfile.
+      - name: Build binaries + Docker context
+        id: ctx
+        run: |
+          V="$(mise exec -- bun scripts/version.ts)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          mise exec -- bun scripts/package.ts --binaries=linux-x64,linux-arm64
+          mkdir -p docker-ctx
+          cp "dist/bin/mogwai-db-$V-linux-x64"   docker-ctx/mogwai-db-amd64
+          cp "dist/bin/mogwai-db-$V-linux-arm64" docker-ctx/mogwai-db-arm64
+          cp docker/Dockerfile docker-ctx/Dockerfile
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker-ctx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.ctx.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ctx.outputs.version }}
