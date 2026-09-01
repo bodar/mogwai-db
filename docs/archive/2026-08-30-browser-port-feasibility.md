@@ -1,7 +1,14 @@
 # mogwai-db in the browser — locked design + proof
 
-**Status:** design **locked** and **empirically proven** in a real browser (2026-08-31). Build in
-progress against this plan.
+**Status: ✅ LANDED AND ARCHIVED (2026-09-01).** The design is locked, empirically proven in a real
+browser, AND fully built on trunk — every item in the build plan below is ✅, the three browser leaves
+(`WasmSqlite`/`OpfsIoStore`/the SW-edge + `WorkerFactory` graph tier) ship under the interfaces Bun and
+Cloudflare already implement, the Playwright `browser` lane is a CI bracket under `mise run ci`, and
+`mise run package:browser` produces the release `dist/browser/{mogwai,service-worker,worker}.js` +
+`sqlite3.wasm` zip. Read it for the MEASURED BROWSER FACTS — the port-transfer/entanglement rules, the
+hard-kill failover timing, the no-COOP/COEP/JSPI proof — which is why it is kept rather than deleted.
+The only deferred items are the two fail-safe residues called out under "Remaining residue" (surface
+quota, the committed-but-unacked write tail); neither blocks.
 
 ## Landed
 
@@ -384,18 +391,31 @@ VFS needs `SharedArrayBuffer`) or a library swap to wa-sqlite's `OPFSCoopSyncVFS
 **high write-transaction overhead**), and buys little since even multi-connection VFSes serialize
 ("no such thing as N concurrent readers"). Not the default.
 
-## Remaining unknowns (browser-only, learn-by-building)
+## Remaining unknowns (browser-only) — all measured and RESOLVED
 
-Everything paper- and API-verifiable is done. What's left can only be measured in a real browser:
+Everything paper- and API-verifiable was done; the three browser-only unknowns have since been measured
+in a real browser and closed:
 
-1. **Crash-failover handoff.** A cleanly-closed leader releases its Web Lock and pool; confirm a
-   *hard-killed* tab releases its `opfs-sahpool` handles promptly enough for the next tab to take over
-   with no corruption, and that an in-flight write is dedup-safe (rhashimoto's tx-dedup pattern).
-2. **Storage durability.** OPFS is persistent but evictable under pressure unless
-   `navigator.storage.persist()` is requested; surface quota (the 10 GB DO-ceiling analog).
-3. **Schema recovery on Worker (re)start.** `GraphStore`'s ctor already runs idempotent DDL and sweeps
-   orphaned barrier runs (`storage.ts:137,150`) — *more* relevant here, since a tab can die
-   mid-request; confirm it fires on Worker start.
+1. ✅ **Crash-failover handoff.** MEASURED (`test/browser/failover.test.ts`): a *hard-killed* tab
+   releases its `opfs-sahpool` handles promptly enough for the next Web-Lock leader to re-open the DB
+   over the committed data with no corruption, and an in-flight call retries once across the handoff
+   rather than erroring (the dead stub HANGS until the new leader's port disposes it — a hard kill never
+   closes the MessagePort, so the Web-Lock promotion, not a port-close, is the death signal). An ACKED
+   write is applied exactly once; only the committed-but-unacked window is at-least-once (residue below).
+2. ✅ **Storage durability.** `navigator.storage.persist()` is requested on factory install
+   (`worker-factory.ts:133`). Surface-quota exposure (`navigator.storage.estimate()`, the 10 GB
+   DO-ceiling analog) is the one deferred piece — fail-safe, tracked under "Remaining residue".
+3. ✅ **Schema recovery on Worker (re)start.** Confirmed: `GraphStore`'s ctor runs the schema DDL
+   `IF NOT EXISTS`, so re-opening an existing graph's opfs-sahpool database restores a live host over its
+   data (`GraphWorkerHost.ts:57`); the failover proof exercises exactly this re-open path.
+
+### Remaining residue (deferred, fail-safe as-is)
+
+- **Surface quota** (`navigator.storage.estimate()`) — not yet exposed anywhere, because there is no
+  consumer for it yet.
+- **Write exactly-once tail.** An ACKED write is never retried, so it is applied once. A write that
+  COMMITTED on the old leader but whose ack was lost to the hard kill is retried (at-least-once) — the
+  narrow committed-but-unacked window. Exactly-once there needs write idempotency keys, out of scope.
 
 ## Testing (locked; proven)
 
