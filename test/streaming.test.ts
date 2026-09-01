@@ -87,6 +87,23 @@ describe('C — streamBuffers chunk pacing', () => {
     expect(total).toBe(multiset);
   });
 
+  test('flat frame of a collapsed traversal EXPANDS (v,N)→N — bulkResults:false is the full multiset', async () => {
+    // The complement of the bulked case, and the regression guard for a real bug: the flat frame
+    // carries no multiplicity, so a collapsed (v, N) row MUST be emitted as N identical values.
+    // Emitting it once (dropping N) silently under-returns every collapsed stream; the sync
+    // Executor.buffers expands for this reason, and the streaming edge must agree.
+    const store = seededStore();
+    const framed = await executeFramed(store, 'g.V().both().both()', {}); // collapsed: rows < traversers
+    const multiset = executeQuery(store, 'g.V().both().both()', {}).length;
+    expect(framed.length).toBeLessThan(multiset); // precondition: the input really is collapsed
+    const { buf } = await drainChunks(streamBuffers(framed, 64, false));
+    const parsed = await ioc.graphBinaryReader.readResponse(buf);
+    expect(parsed.result.bulked).toBe(false);
+    // Every traverser present individually — the flat count IS the full multiset, not the row count.
+    expect(parsed.result.data.length).toBe(multiset);
+    expect(parsed.result.data.every((v: any) => v.constructor.name === 'Vertex')).toBe(true);
+  });
+
   test('6 vertices at batch=2 ⇒ header + 3 value-batches + trailer = 5 discrete chunks', async () => {
     const { chunks } = await drainChunks(streamBuffers(await executeFramed(seededStore(), 'g.V()', {}), 2));
     expect(chunks.length).toBe(5);

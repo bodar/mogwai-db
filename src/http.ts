@@ -50,28 +50,40 @@ export function errorResponse(message: string): Response {
  * can't throw here; a client disconnect just stops further pulls.
  */
 export function streamBuffers(framed: Framed[], batchSize: number, bulked = false): Response {
-  // A bulked frame appends a Long multiplicity to each value; batchSize still counts
-  // VALUES (one value = value+bulk), so chunk pacing is unchanged. Each value is encoded
-  // AS ITS BATCH IS PULLED rather than mapping the whole array up front: the encoded copy
-  // of the result set no longer coexists with the framed one, so peak memory is the input
-  // plus one batch instead of two full sets. (The input array itself is still fully
-  // materialized — GraphStore.query() returns T[] — so this bounds the copy, not the rows.)
-  const encode = bulked ? withBulk : (f: Framed) => f.buf;
-  let i = 0;
+  // Two response contracts over the SAME collapsed input. A store row is a `(value, bulk)`
+  // pair (the compiler RLE-merges convergent traversers), and how the multiplicity is carried
+  // is the whole difference between the frames:
+  //   - BULKED: emit one value followed by its `Long` multiplicity; the client expands
+  //     Traverser(v,N) back to N. One output value per store row.
+  //   - FLAT: the un-bulked frame IS the full multiset, so a collapsed `(value, N)` row must
+  //     be emitted as N identical values. Dropping the count here silently under-returns a
+  //     collapsed stream (a `repeat(both())` fan-out would report its distinct rows, not its
+  //     traversers) — the sync `Executor.buffers` expands for exactly this reason.
+  // `values()` yields the OUTPUT value buffers for whichever contract; `pull` paces `batchSize`
+  // of them per HTTP chunk (pacing only, not a protocol boundary), so peak memory is the input
+  // array plus one batch — never the expanded multiset. (`f.buf` is shared across a row's copies,
+  // so an expanded batch is N references to one Buffer, not N copies.)
+  function* values(): Generator<Buffer> {
+    if (bulked) { for (const f of framed) yield withBulk(f); return; }
+    for (const f of framed) for (let k = f.bulk; k > 0n; k--) yield f.buf;
+  }
+  const it = values();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(bulked ? HEADER_BULKED : HEADER);
     },
     pull(controller) {
-      if (i >= framed.length) {
+      const batch: Buffer[] = [];
+      for (let n = 0; n < batchSize; n++) {
+        const next = it.next();
+        if (next.done) break;
+        batch.push(next.value);
+      }
+      if (batch.length > 0) controller.enqueue(Buffer.concat(batch));
+      if (batch.length < batchSize) {
         controller.enqueue(frameTrailer(200, null));
         controller.close();
-        return;
       }
-      const end = Math.min(i + batchSize, framed.length);
-      const batch: Buffer[] = [];
-      for (; i < end; i++) batch.push(encode(framed[i]));
-      controller.enqueue(Buffer.concat(batch));
     },
   });
   return new Response(stream, { headers: { 'Content-Type': CONTENT_TYPE } });
