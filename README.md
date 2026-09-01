@@ -4,16 +4,11 @@
 
 # mogwai-db
 
-**A TinkerPop 4 graph database with SQLite as its engine — natively targeting the browser, edge, bare metal and Docker.** 
+**A TinkerPop 4 graph database with SQLite as its engine — natively targeting the browser, edge, bare metal and Docker.**
 
 Point any TinkerPop 4 client at it and it speaks Gremlin over the standard HTTP
-wire. SQLite does the real work — storage, indexing, planning, execution — and
-mogwai-db is the Gremlin layer over it: every traversal is **compiled to one SQL
-query** and handed to SQLite's planner, never interpreted row-at-a-time. Because
-the engine is SQLite — the most widely deployed database engine there is — the same
-graph database runs client-side in a browser tab, on a Cloudflare Durable Object, or
-as a binary on your laptop, with per-tenant isolation and scale-to-zero where the
-platform offers them.
+wire — no bespoke driver. Underneath there's no graph query engine to run and
+scale — just SQLite.
 
 > ### Status: pre-alpha — design in the open, not for production
 >
@@ -25,8 +20,6 @@ platform offers them.
 > - **Executes correctly** — **<!-- L3:passing -->1,793<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin` JS client at tinkerpop `origin/master`,
 >   run as a **ratchet** (the number only goes up).
-> - **Runs natively on four targets** — browser, Cloudflare edge, native binary, and
->   Docker (multi-arch), each self-contained and published on every release.
 > - **Reads + writes + strategies** land across a wide step surface. For the exact
 >   per-step edges see the **[feature support matrix](docs/feature-support-matrix.md)**.
 > - **Next:** per-graph auth, the OLAP algorithm layer, then the conformance grind.
@@ -34,12 +27,11 @@ platform offers them.
 ## SQLite is the engine
 
 Most Gremlin databases ship their own execution engine and interpret a traversal by
-walking it step-by-step, pulling rows as they go. mogwai-db doesn't — it uses
-**SQLite as the engine** and **lowers each whole traversal to a single parameterised
-SQL statement** for SQLite to run. The traversal executes *in the same process as
-storage* — no query-engine-to-storage network hop — and k-hop movement becomes
-index-only covering scans. The planner, indexes, and query execution are SQLite's;
-mogwai-db's job is the compile.
+walking it step-by-step, pulling rows as they go. mogwai-db doesn't — it **lowers each
+whole traversal to a single parameterised SQL statement** for SQLite to run. The
+traversal executes *in the same process as storage* — no query-engine-to-storage hop —
+and k-hop movement becomes index-only covering scans. The planner, indexes, and
+execution are SQLite's; mogwai-db's job is the compile.
 
 ```mermaid
 flowchart LR
@@ -57,6 +49,30 @@ the whole plan materialises to GraphBinary only at the root. Movement, filters,
 projections, branching, recursion, paths, aggregation, side-effects and the
 collection/string/date families all lower through this one engine — no row-at-a-time
 interpreter anywhere.
+
+## Runs everywhere
+
+Because the engine is SQLite, mogwai-db runs wherever SQLite does. The parser,
+compiler, and GraphBinary wire are platform-agnostic; only the synchronous **SQLite
+leaf** changes per target — and one shared contract test runs against every backend
+over the real wire, so they're proven identical, not tested twice. Every edition is
+self-contained and published on each release ([Releases](../../releases)):
+
+- **Browser** — SQLite compiled to WebAssembly (`opfs-sahpool`) behind a Service
+  Worker; the whole database lives in the tab, no server. Unzip
+  `mogwai-db-<version>-browser.zip` into a static folder and add
+  `<script type="module" src="mogwai-db.js">` — an unmodified TinkerPop client or a
+  plain `fetch` just works.
+- **Edge — Cloudflare Durable Objects** — one DO = one isolated graph. Unzip
+  `mogwai-db-<version>-cloudflare.zip`, set `CLOUDFLARE_API_TOKEN`, run `./deploy.sh`.
+- **Bare metal** — a single self-contained binary (Linux, macOS, Windows; arm64 and
+  amd64). Download `mogwai-db-<version>-<os>-<arch>` and run `./mogwai-db --data-dir ./graphs`
+  (serves on `:8182`; `--help` for flags).
+- **Docker** — a multi-arch image:
+  `docker run -p 8182:8182 -v data:/data ghcr.io/bodar/mogwai-db:latest`.
+
+Then talk to it: `POST /gremlin/{graph}` with `{"gremlin":"g.V().count()"}`, or point a
+TinkerPop 4 GLV at the same URL. Management (`PUT`/`GET`/`DELETE`) is on the same path.
 
 ## Where it fits (and where it doesn't)
 
@@ -85,61 +101,21 @@ The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on p
 | OLAP | ❌ not yet | strong | weak | strong | strong |
 | Maturity | ❌ **pre-alpha** | GA | GA | GA | GA |
 
-Real edges: **runs anywhere** (a browser tab to the edge to a single binary),
-**idle cost**, **per-tenant isolation**, **v4 currency**. Honest concessions: **the
-scale ceiling** (structural — one SQLite database, one thread) and — for now —
-**maturity and OLAP**.
+The ❌ are honest: the scale ceiling is **structural** (one SQLite database, one
+thread per graph); maturity and OLAP are **for now**.
 
 ## Agent-driven by design
 
 Graph lifecycle is a thin **REST layer on the same `/gremlin/{graph}` path** —
-`PUT`/`GET`/`DELETE` create, inspect, and destroy a graph, identically wherever it
-runs; data-plane queries `POST` to it. The server is **self-describing**:
-`GET /openapi.json` serves an OpenAPI 3.1 spec and `/docs` an interactive reference.
-TinkerPop has no data-plane database-provisioning API — here a graph springs into
-being on first access, and management is in-band on the one path.
+`PUT`/`GET`/`DELETE` create, inspect, and destroy a graph; data-plane queries `POST`
+to it. The server is **self-describing**: `GET /openapi.json` serves an OpenAPI 3.1
+spec and `/docs` an interactive reference. TinkerPop has no data-plane
+database-provisioning API — here a graph springs into being on first access, and
+management is in-band on the one path.
 
 The direction of travel: that REST + OpenAPI surface makes mogwai-db a natural
 **MCP-compatible, agent-driven graph database** — an agent can create graphs, write,
 and traverse with no bespoke tooling, just the described HTTP contract.
-
-## One engine, everywhere
-
-Everything above storage — the parser, the compiler, the GraphBinary wire — is
-platform-agnostic; because the engine is a synchronous SQLite, only that **SQLite
-leaf** and the entry point change per target. One shared contract test runs against
-every backend over the real GraphBinary wire, so they're proven identical, not
-tested twice:
-
-- **Browser** — SQLite compiled to WebAssembly on the OPFS `opfs-sahpool` VFS,
-  fronted by a Service Worker. An unmodified TinkerPop client (or a plain `fetch`)
-  reaches a graph that lives entirely in the tab — no server, no network.
-- **Edge — Cloudflare Durable Objects** — one DO = one isolated graph over
-  `ctx.storage.sql`; the Worker routes `/gremlin/{graph}` to the right DO.
-  Scale-to-zero and per-tenant isolation come for free.
-- **Native binary & Docker** — a single self-contained executable (Linux, macOS,
-  Windows; arm64 and amd64) or a multi-arch container, SQLite on the local disk.
-
-All SQLite, all synchronous, all the same traversal compiler — so a query behaves
-identically in a browser tab, on the edge, or on your laptop.
-
-## Run it
-
-Every edition is self-contained and published on each release
-([Releases](../../releases)):
-
-- **Binary** — download `mogwai-db-<version>-<os>-<arch>` and run it:
-  `./mogwai-db --data-dir ./graphs` (serves on `:8182`; `--help` for flags).
-- **Docker** — `docker run -p 8182:8182 -v data:/data ghcr.io/bodar/mogwai-db:latest`
-  (linux/amd64 + arm64).
-- **Cloudflare** — unzip `mogwai-db-<version>-cloudflare.zip`, set `CLOUDFLARE_API_TOKEN`,
-  run `./deploy.sh`. One Durable Object per graph, scale-to-zero.
-- **Browser** — unzip `mogwai-db-<version>-browser.zip` into a static folder and add
-  `<script type="module" src="mogwai-db.js">`. The whole database runs in the page
-  (WASM SQLite); any TinkerPop client or a plain `fetch` works, unmodified.
-
-Then talk to it: `POST /gremlin/{graph}` with `{"gremlin":"g.V().count()"}`, or point a
-TinkerPop 4 GLV at the same URL. Management (`PUT`/`GET`/`DELETE`) is on the same path.
 
 ## Develop
 
