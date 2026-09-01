@@ -107,7 +107,7 @@ same: the shape follows the pushed subtree's root.
 **The compounding rule: output-side pushdown of shape X = `runForeign` recognizes the sibling's terminal
 shape X and encodes it as a `{t,v}`/`FrameNode` tree; the resume needs no per-shape change.** No new
 substrate per shape — the envelope, the element arm and the `typedNode`/`scalar` resumes already exist.
-`ForeignValueNodes` (`execute.ts`) is the PRODUCER twin of the framer's per-row arms: where `frameValues`
+`foreignValueNodes` (`execute.ts`) is the PRODUCER twin of the framer's per-row arms: where `frameValues`
 turns a row into a Buffer, it turns the SAME row into the node the Buffer would encode, so a federated
 value and a local one are one encoding and cannot diverge. This is what keeps `ForeignResult` from
 growing an ad-hoc arm per pushed feature.
@@ -171,8 +171,12 @@ Calcite's `SqlSplittableAggFunction` partials still describe why a pushed partia
 
 ## Landed
 
-Endpoint-id transport (`ENDPOINT_IDS_KEY`); the `ContentDemand` tail classifier and conditional endpoint
-fetch (skip the endpoint hop unless the tail reaches an endpoint); the `ForeignResult` shape-tagged
+Endpoint-id transport (`ENDPOINT_IDS_KEY`); the traversable-subgraph result (`.with("subgraph", true)`
+over an edge-producing sub-traversal returns the edges PLUS their distinct incident vertices WITH data —
+a heterogeneous element array the local tail walks; `withEndpoints`/`wantsSubgraph` in `federate.ts`);
+the `ContentDemand` tail classifier and conditional endpoint fetch (skip the second sibling endpoint hop
+unless the local tail reaches an endpoint — `reachesAdjacency`, the safe over-fetch when demand is
+unknown); the `ForeignResult` shape-tagged
 transport (elements | scalar | keyed map | value STREAM); arg-less pushdown (source + reducers);
 mid-traversal `count` reduction pushdown with its differential; empty-reduction semantics; the `parent`
 marker (replacing `T.value`); the mogwai.* namespace drop; the sub-traversal-as-steps refactor (string
