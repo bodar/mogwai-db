@@ -47,14 +47,19 @@ For each logical item, smallest shippable unit first:
    `git push -u origin trunk`. A non-fast-forward comes back as `RPC failed; HTTP 403` with
    `! [rejected] … (fetch first)` — that is the ordinary concurrent-push race, not an access failure:
    `git fetch origin trunk`, read what landed, rebase, push again. **Never force-push trunk.**
-6. **Update the plan, local-only.** Mark the item done / correct what you learned / adjust remaining
-   items. Commit that doc change **locally, do not push it** — the plan is the working ledger, not
-   trunk content.
+6. **Update the plan, commit local-only.** Mark the item done / correct what you learned / adjust
+   remaining items. Commit that doc change **locally and do not push it yet** — it rides along with the
+   *next* code push instead of triggering its own build. Pushing a doc-only commit would spend a full
+   CI run on a change that cannot affect the build, so the plan reaches trunk for free on the next
+   item's push. (It does get to trunk — just not on its own.)
 7. **Watch that commit's CI async, and keep moving.** Kick off a background check of the pushed
    commit's GitHub Actions run (`mcp__github__actions_list` / `actions_get` / `get_job_logs` for the
    commit you just pushed) and immediately start the next item — do not block on the run. If it comes
    back red, fix-forward on trunk as its own item before it compounds; do not let a red trunk sit while
    you build on top of it.
+
+At the end of a run, if the last thing you did was a doc-only update with no code item behind it, push
+the pending doc commit so nothing is left stranded in the ephemeral container.
 
 ## Scope is meant to grow
 
