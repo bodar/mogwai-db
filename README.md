@@ -22,7 +22,7 @@ scale — just SQLite.
 >   run as a **ratchet** (the number only goes up).
 > - **Reads + writes + strategies** land across a wide step surface. For the exact
 >   per-step edges see the **[feature support matrix](docs/feature-support-matrix.md)**.
-> - **Next:** per-graph auth, the OLAP algorithm layer, then the conformance grind.
+> - **Next:** per-graph auth, more of the OLAP algorithm library, then the conformance grind.
 
 ## SQLite is the engine
 
@@ -82,27 +82,30 @@ code that uses them — per-user knowledge graphs, per-tenant SaaS graphs, agent
 memory, in-app graphs, personal projects. One graph is one SQLite database, so
 isolation is free, and on Cloudflare an idle graph costs essentially nothing.
 
-**Poor fit:** one enormous graph or heavy analytics. A single graph is one SQLite
-file / one Durable Object (~10 GB ceiling on Cloudflare), execution is
-single-threaded per graph, and the OLAP algorithm layer isn't built yet (it's
-intended, and designed as compiled set-based passes rather than a second engine).
-Shard-one-logical-graph or PageRank-at-scale is Neptune/TigerGraph's job, not this.
+**Poor fit:** one enormous graph, or analytics *at scale*. A single graph is one
+SQLite file / one Durable Object (~10 GB ceiling on Cloudflare) and execution is
+single-threaded per graph, so shard-one-logical-graph or PageRank-over-a-billion-edges
+is Neptune/TigerGraph's job, not this. The OLAP algorithms themselves are here and
+growing — PageRank/ArticleRank/HITS, degree and betweenness centrality, connected
+components (weak + strong), peer-pressure clustering, k-core, node similarity, triangle
+count, and shortest path, all as compiled set-based passes — they just run one graph at
+a time, not across a cluster.
 
 The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on par ·
 ❌ = a weak spot for now. Other columns show where each database sits.
 
-| Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j Aura | TigerGraph |
+| Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j | TigerGraph |
 |---|---|---|---|---|---|
 | Gremlin / TinkerPop | ✅✅ **v4** | v3 | v3 | Cypher | GSQL |
-| Runs | ✅✅ browser · edge · binary · docker | managed only | managed only | managed only | managed only |
+| Runs | ✅✅ browser · edge · binary · docker | managed only | managed only | self-host · managed | self-host · managed |
 | Scale-to-zero | ✅✅ ~$0 idle | no | no | no | no |
 | Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly |
 | Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large |
-| OLAP | ❌ not yet | strong | weak | strong | strong |
+| OLAP | ✅ growing library | strong | weak | strong | strong |
 | Maturity | ❌ **pre-alpha** | GA | GA | GA | GA |
 
-The ❌ are honest: the scale ceiling is **structural** (one SQLite database, one
-thread per graph); maturity and OLAP are **for now**.
+The two ❌ are honest: the scale ceiling is **structural** — one SQLite database, one
+thread per graph — and maturity is **pre-alpha**.
 
 ## Agent-driven by design
 
