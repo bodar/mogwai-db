@@ -153,7 +153,7 @@ the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
 
 Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-lowering-plan.md`.
 
-`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family.
+`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family (full `call()` catalog in §17).
 
 ## 9. Lists & collections
 
@@ -244,4 +244,28 @@ Short on purpose: a 🚫 means **we will not build this**, never "we have not go
 Not a wall: an item here has a design doc, is unscheduled, and fails closed with a clear deferral
 until it lands — so a query never gets a silently narrower answer in the meantime. This bucket is
 empty right now: `regex` LANDED as a barrier (see §2) and the OLAP / graph-algorithm family
-(`pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`) LANDED (see §8).
+(`pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`) LANDED (see §8, §17).
+
+## 17. OLAP / graph algorithms (`call()`)
+
+Thirteen graph algorithms run as `call()` services — the compute stays set-based SQL, never a
+row-at-a-time interpreter. Each is invoked `g.V().call("<name>")`; the ones with a native TinkerPop
+step (noted below) also answer that step, which desugars to the same service.
+
+| Algorithm | `call()` name | Notes |
+|---|---|---|
+| PageRank | `pageRank` | native `pageRank()` |
+| ArticleRank | `articleRank` | |
+| Weakly-connected components | `wcc` | native `connectedComponent()` |
+| Strongly-connected components | `scc` | |
+| Peer-pressure clustering | `peerPressure` | native `peerPressure()` |
+| Betweenness centrality | `betweenness` | |
+| Closeness centrality | `closeness` | |
+| Harmonic centrality | `harmonic` | |
+| HITS | `hits` | decorates hub + authority |
+| Triangle count | `triangleCount` | |
+| Local clustering coefficient | `localClusteringCoefficient` | |
+| k-core | `kcore` | decorates the core value |
+| Node similarity | `nodeSimilarity` | yields `{node1, node2, similarity}` pairs |
+
+`shortestPath` is the path finder (§7/§8), also reachable as `call("shortestPath")`.
