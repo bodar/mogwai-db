@@ -198,10 +198,52 @@ injection. It was deleted when the `{parentId → parentValue}` map + standard-`
 The redesign removed its per-shape arms and its reach into shared filter code, replacing hidden correlation
 with the ordinary `group().by(Column.keys)` key.
 
+## Multi-graph merge — federate NESTED in a branch arm (Phase 1 ✅ LANDED)
+
+`union(federate(A).V(), federate(B).V())` now compiles and runs. The blocker was structural, not the
+identity discriminator the "Open" item once named: a barrier could only sit on the TOP-LEVEL spine
+(`barrierIn` scanned the flat step array), so a `call(federate)` inside a `union` arm compiled to one SQL
+statement that cannot cross the async RPC boundary → `UnsupportedTraversal`. The fix makes federate a
+CHAINING barrier the way the OLAP decorate/path/pair barriers already are (`src/compiler/rel/segment.ts`):
+
+- **Discovery** — `nestedBarrierIn` reuses `barrierIn` VERBATIM on each branch arm's own body (the finder
+  was always position-agnostic). Fired ONLY when no top-level barrier does, so single-spine cases are
+  untouched; pre-gated on the arm actually holding a `call()`.
+- **Land + rewrite + re-plan** — `nestedBranchSegment` runs the arm's sibling RPC, lands its rows
+  (`landForeignRows`), rewrites the arm to a marker `V()`/`E()` carrying `IRStep.landedSource` (a
+  `boundGraph` over the named CTEs), and RE-PLANS via `planOf`. The re-plan finds the NEXT un-landed arm as
+  its own segment, so N arms land N bound graphs before the SQL merge — the linear trampoline driving each
+  sibling RPC in turn. This is the compounding reuse: it opens federate at ANY depth (union/choose/…), not
+  a union special-case.
+- **Bindings via the source, not the arm** — the landed CTEs accumulate on `request.lowering.source`
+  through `withExtraBindings` (mirroring `decorateGraph`'s stack), so the arm compiles as an ordinary
+  effects-free read and the union/merge machinery (`mergeArms`) needs NO change — it never sees provenance.
+  A per-arm salt keeps two arms' fresh-minter binding names (`bgv0`/`bge0`) from colliding.
+
+**The merge point is where the two open pillars remain, and Phase 1 fails CLOSED on both** (never
+misjoins against one graph — the `safePostMergeTail` gate admits only a cardinality tail ending in
+`count()`):
+
+1. **Post-merge element reads** (`values`/`hasLabel`/a bare element return/movement) — a merged row's `id`
+   comes from one of several disjoint landed id-spaces with no per-row tag, so a single `ctx.source`
+   rejoin would silently read the wrong graph. **Phase 3:** land the arms into a graph-TAGGED unified
+   relation (`SELECT 'A' AS graph,* FROM bgv_A UNION ALL …`) and rejoin by the composite `(graph, id)`.
+2. **Cross-graph identity** (`dedup`/`has(T.id)`/`group().by(id)`) — A's id `5` and B's id `5` must not
+   collapse. **Phase 2:** a new `graph` `ChannelRole` (its own name — `origin` is taken) carried in the
+   row, threaded through `externalId` and the dedup/group keys; provably inert for single-graph queries.
+   The Phase-3 unified relation is the SAME `graph` discriminator promoted into a relation, so the two
+   pillars share one substrate.
+
+Deferred (tracked, genuinely separate): the parallel I/O barrier batch (run independent sibling RPCs
+concurrently — beneficial for the async-I/O barrier class, federate + `io()`, a no-op for the
+compute-bound OLAP barriers); `coalesce`'s priority/short-circuit interaction with firing a remote call;
+mid-position / nested-prefix federate arms; the `where(eq)` element-identity compare.
+
 ## Open, in rough priority
 
-1. **Multi-graph mixing** — the `origin`-in-row work from the identity hard edge above, gating
-   `union`-of-two-siblings + identity comparisons.
+1. **Multi-graph identity + post-merge reads** — Phase 2 (the `graph` discriminator channel role, for
+   cross-graph `dedup`/`group`/`has(id)`) and Phase 3 (the graph-tagged unified relation, for post-merge
+   `values`/`hasLabel`/element materialization). Both above; Phase 1's structural merge has landed.
 2. **Widen the side-effect boundary further** — a pre-barrier side-effect that a later local read needs
    could be threaded through the resume (today `cap` over a pre-barrier collection fails closed locally).
    Lower value.
