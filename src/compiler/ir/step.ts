@@ -24,10 +24,16 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
  *  - `unrollSuppressed` — this `repeat` sits under a `withoutStrategies(RepeatUnrollStrategy)`
  *    (`markUnrollSuppressed`). A mark on the STEP rather than a flag consulted at the root, because
  *    a body is normalized in isolation later and a root-only answer cannot reach it.
+ *  - `landedSource` — a compiler-synthesized `V()`/`E()` whose physical source is a LANDED graph
+ *    (a `boundGraph` over the named CTE bindings), not `ctx.source`. The nested-branch federate
+ *    segment writes it when it rewrites an arm's `call(federate,X).V()` to a marker read of X's landed
+ *    relation (`segment.ts`'s `nestedBranchSegment`); the `V()`/`E()` dispatch routes the scan and the
+ *    arm's own continuation through that bound source. Provenance, not shape — the same axis
+ *    `GraphSource` already abstracts, so it is a step annotation like the ones above, never a wire fact.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null } };
 
 /** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
  *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?

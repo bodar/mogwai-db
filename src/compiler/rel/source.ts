@@ -206,6 +206,19 @@ export interface GraphSource {
   bindings?(fresh: Minter): readonly Binding[];
 }
 
+/** A `GraphSource` that DECLARES extra Plan bindings beyond whatever `base` already declares — the
+ *  landed CTEs a nested-branch federate segment accumulates as it lands each arm's graph. Mirrors
+ *  `decorateGraph`'s bindings stack (`decorate.ts`): `lowered()` calls `bindings(fresh)` ONCE and
+ *  prepends the result to the chain's effects, so several landed graphs (the two arms of a `union`)
+ *  coexist under their own salted names. Every PHYSICAL read still goes through `base` — this wrapper
+ *  only carries the declarations, because a landed arm reads its bound relation through its own
+ *  `landedSource` marker (`ir/step.ts`), never through `ctx.source`. The `extra` bindings are already
+ *  built (at segment-resume time); `base.bindings` is re-read under the outer `fresh`, so a stack of
+ *  wrappers composes base-first exactly as the decorate stack does. */
+export function withExtraBindings(base: GraphSource, extra: readonly Binding[]): GraphSource {
+  return { ...base, bindings: (fresh) => [...(base.bindings?.(fresh) ?? []), ...extra] };
+}
+
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
  *  algebra used to spell, moved behind the interface so the vocabulary no longer names a table. */
 export const BaseGraph: GraphSource = {

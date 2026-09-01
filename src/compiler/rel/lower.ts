@@ -3411,7 +3411,14 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   // silently ignore it.
   if (first.modulators?.length || first.optionArms) return null;
   const elem0: Elem = first.name === 'E' ? 'edge' : 'vertex';
-  const seeded = ctx.source.elementScan(elem0, first.args, fresh);
+  // A `landedSource` marker (the nested-branch federate segment's arm rewrite) re-roots this read at a
+  // LANDED graph — a `boundGraph` over its named CTE bindings — instead of `ctx.source`. The arm's whole
+  // continuation (the source filters below and the leaf) reads through that bound source too, so every
+  // downstream call in this block goes through `readCtx`, not `ctx`.
+  const readCtx: ChainCtx = first.landedSource
+    ? { ...ctx, source: boundGraph(first.landedSource.vertexBinding, first.landedSource.edgeBinding) }
+    : ctx;
+  const seeded = readCtx.source.elementScan(elem0, first.args, fresh);
   if (!seeded) return null;
 
   // PHASE 1 — the source scan and the filters that fuse into its own WHERE. Kept separate from the
@@ -3422,7 +3429,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   let at = 1;
   let elem = elem0;
   for (; at < steps.length; at++) {
-    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
+    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
     if (!clause) break;
     pred = and(pred, clause);
   }
@@ -3445,7 +3452,7 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   });
 
   const withSack = sacked(rel);
-  return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
+  return withSack && elementTail(withSack, elem, steps, at, false, readCtx, fresh, NO_ALIASES);
 }
 
 /**

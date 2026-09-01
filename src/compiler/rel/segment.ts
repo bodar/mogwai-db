@@ -7,10 +7,14 @@ import { FEDERATE_SERVICE } from '../ir/injection.ts';
 import { labelsBoundBefore, preBarrierSelectRead } from '../ir/labels.ts';
 import { reducerOf } from '../ir/reducers.ts';
 import { isLocalScope } from '../ir/step.ts';
-import { arg } from '../../gremlin/frontend.ts';
+import { arg, isNested } from '../../gremlin/frontend.ts';
+import { minter } from './build.ts';
+import { landForeignRows } from './foreign.ts';
 import { lowerForeignResume, lowerPairResume, lowerPathResume, lowerReduceCombine, lowerScalarResume, lowerToRel, lowerTypedNodeStream, type Lowering, type RelLowering } from './lower.ts';
+import { BRANCH_HOSTS } from './lower/branch.ts';
+import { rootedSteps } from './lower/reduction.ts';
 import { decorateGraph } from './decorate.ts';
-import { BaseGraph, type GraphSource } from './source.ts';
+import { BaseGraph, withExtraBindings, type GraphSource } from './source.ts';
 import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
@@ -200,6 +204,123 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
 }
 
 /**
+ * A federate barrier NESTED in a branch arm (`union`/`choose`/`optional`/`coalesce`), or `null`.
+ *
+ * Consulted ONLY when no top-level barrier fires (a top-level `call()` always resolves first), so it
+ * opens the multi-graph merge without disturbing any single-spine case. It reuses `barrierIn` VERBATIM
+ * on each arm's OWN body — the finder was always position-agnostic, it just had never been called from a
+ * second place — so a federate call inside an arm resolves its pushdown/injection exactly as it would at
+ * the top level.
+ *
+ * Phase-scoped, fail closed on the rest: the arm's barrier must be a SOURCE-form federate at arm-local
+ * position 0 (`barrier.at === 0`, no injection), so its `apply` runs over no input and its rows land as
+ * an ordinary bound graph the arm then reads. A richer arm (a mid-form injection, a non-federate
+ * barrier) is not matched here; its `call` step then declines in the ordinary fold and the traversal
+ * raises `UnsupportedTraversal` rather than answering a different question.
+ */
+function nestedBarrierIn(
+  steps: readonly IRStep[], request: SegmentRequest,
+): { readonly branchAt: number; readonly armIndex: number; readonly barrier: Barrier } | null {
+  for (let at = 0; at < steps.length; at++) {
+    const step = steps[at]!;
+    if (!BRANCH_HOSTS.has(step.name)) continue;
+    const argVals = step.args.map((a) => a.value);
+    for (let armIndex = 0; armIndex < argVals.length; armIndex++) {
+      const v = argVals[armIndex]!;
+      if (!isNested(v)) continue;
+      const body = rootedSteps((v as { readonly nested: unknown }).nested, request.params);
+      if (!body?.length) continue;
+      // Only pay `barrierIn` (which resolves services, and THROWS on an unknown one) for an arm that
+      // actually holds a `call()` — the overwhelming majority of branch arms hold none, and this keeps a
+      // barrier-free `union(out(), in())` on its ordinary path untouched.
+      if (!body.some((s) => s.name === 'call')) continue;
+      const barrier = barrierIn(body, request);
+      // Source-form federate at arm-local position 0: no local head, no per-parent injection. Anything
+      // else stays for a later phase (and fails closed via the arm's own decline in the fold).
+      if (!barrier || barrier.at !== 0) continue;
+      if (barrier.spec.serviceName !== FEDERATE_SERVICE || barrier.spec.injectionLabel || barrier.site.mapValues) continue;
+      // A federate arm the user WANTS merged: the post-merge tail must be safe, else FAIL CLOSED
+      // (return null → the arm's call declines in the fold → `UnsupportedTraversal`), never misjoin.
+      if (!safePostMergeTail(steps, at)) return null;
+      return { branchAt: at, armIndex, barrier };
+    }
+  }
+  return null;
+}
+
+/** The steps that consume a merged multi-graph element stream WITHOUT a per-graph rejoin or a
+ *  cross-graph identity decision — cardinality and slice. Everything else needs a later phase: an
+ *  element/property/movement read needs the graph-tagged unified relation (post-merge rejoin);
+ *  `dedup`/`group`/`groupCount` need the graph discriminator (cross-graph identity). */
+const SAFE_POST_MERGE: ReadonlySet<string> = new Set(['count', 'limit', 'range', 'skip']);
+
+/** May a nested-branch federate merge be consumed by the tail after the branch (`steps` from
+ *  `branchAt + 1`)? Phase 1 admits ONLY a cardinality tail that ends in `count()` — the one terminal that
+ *  reduces the merged element stream to a scalar touching neither element payload (a per-graph rejoin,
+ *  Phase 3) nor identity (the discriminator, Phase 2). A bare element return, a `values`/`hasLabel`, a
+ *  `dedup`/`group`, or a slice with no reducer all leave elements to materialize against ONE graph's
+ *  rows, so they fail closed until their phase lands. Belt-and-suspenders: the `contentDemand` classifier
+ *  must also see no element/adjacency reach. */
+function safePostMergeTail(steps: readonly IRStep[], branchAt: number): boolean {
+  const suffix = steps.slice(branchAt + 1);
+  if (!suffix.length || !suffix.every((s) => SAFE_POST_MERGE.has(s.name)) || !suffix.some((s) => s.name === 'count')) return false;
+  const demand = contentDemand(steps, branchAt + 1);
+  return !demand.reachesElements && !demand.reachesAdjacency;
+}
+
+/**
+ * A branch (`union` …) whose arm holds a source-form federate barrier: run that ONE arm's sibling call,
+ * LAND its rows as a bound graph, REWRITE the arm to read the landed relation, and RE-PLAN the whole
+ * traversal. The re-plan finds the NEXT un-landed arm (a second sibling graph) as its own segment, so N
+ * arms land as N bound graphs before the branch's SQL merges them — the linear trampoline driving each
+ * sibling RPC in turn. Bindings accumulate on the source via `withExtraBindings`, exactly as
+ * `decorateSegment` stacks `decorateGraph` layers, so the arm compiles as an ordinary effects-free
+ * `V()`/`E()` read and the union/merge machinery needs no change (its arms never see provenance).
+ */
+function nestedBranchSegment(
+  steps: readonly IRStep[],
+  found: { readonly branchAt: number; readonly armIndex: number; readonly barrier: Barrier },
+  request: SegmentRequest,
+): SegmentPlan {
+  const { branchAt, armIndex, barrier } = found;
+  const branchStep = steps[branchAt]!;
+  const armArg = branchStep.args[armIndex]!;
+  const armBody = rootedSteps((armArg.value as { readonly nested: unknown }).nested, request.params)!;
+  // A per-arm salt so two arms' landings (each with its own fresh minter restarting at 0) cannot mint
+  // the same `bgv0`/`bge0` binding name and collide when both CTEs coexist in the merged plan.
+  const salt = `n${branchAt}a${armIndex}`;
+  const callCtx = armBody[barrier.at]!.ctx;
+  return {
+    kind: 'segment',
+    mode: 'async',
+    head: null,
+    params: barrier.site.params,
+    apply: barrier.apply,
+    applySync: barrier.applySync,
+    residency: barrier.residency,
+    resume: (out: BarrierOutput): Plan => {
+      if (!Array.isArray(out))
+        throw new Error(`federate inside a ${branchStep.name} arm produced a non-element result — only an element sub-traversal is supported in an arm yet; move a reducer/value terminal to the top-level tail`);
+      const foreign = out as ForeignRow[];
+      const elem: Elem = foreign[0]?.kind ?? 'vertex';
+      const fresh = minter();
+      const { vertexBinding, edgeBinding, streamElem, bindings } = landForeignRows(foreign, elem, fresh, null, salt);
+      // The arm becomes a marker `V()`/`E()` reading the landed relation, followed by whatever LOCAL
+      // suffix the arm had after any pushed prefix (`barrier.suffixFrom`).
+      const marker: IRStep = { name: streamElem === 'edge' ? 'E' : 'V', args: [], ctx: callCtx, landedSource: { vertexBinding, edgeBinding } };
+      const newBody: IRStep[] = [marker, ...armBody.slice(barrier.suffixFrom)];
+      const rewrittenBranch: IRStep = {
+        ...branchStep,
+        args: branchStep.args.map((a, i) => (i === armIndex ? { ...a, value: { nested: newBody } } : a)),
+      };
+      const rewrittenSteps = steps.map((s, i) => (i === branchAt ? rewrittenBranch : s));
+      const source = withExtraBindings(request.lowering.source ?? BaseGraph, bindings);
+      return planOf(rewrittenSteps, { ...request, lowering: { ...request.lowering, source } });
+    },
+  };
+}
+
+/**
  * THE INJECTION a mid-traversal call declares — the pre-barrier alias value its sibling reads.
  */
 
@@ -245,7 +366,13 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const splitAt = split ? split.at : Infinity;
   const odAt = orderDedup ? orderDedup.at : Infinity;
   const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt);
-  if (earliest === Infinity) return null;
+  if (earliest === Infinity) {
+    // No barrier on the top-level spine — look for a federate barrier NESTED in a branch arm (the
+    // multi-graph merge, `union(federate(A)…, federate(B)…)`). Only reached here, so a top-level
+    // barrier always wins and the single-spine cases are untouched.
+    const nested = nestedBarrierIn(steps, request);
+    return nested ? nestedBranchSegment(steps, nested, request) : null;
+  }
   if (earliest === splitAt) return buildSplitSegment(steps, split!.at, split!.separator, request.lowering);
   if (earliest === revAt) return buildReverseSegment(steps, reverseAt!, request.lowering);
   // order/dedup(Scope.local) over a NESTED scalar list — declines (→ inline fold) for a scalar/flat-list or

@@ -208,10 +208,15 @@ export const landedCols = (kind: Elem): readonly ColMeta[] =>
  * relation is still declared (a zero-row CTE), so an empty federated list frames rather than throws.
  *
  * Shared by `lowerForeignResume` (the top-level barrier resume) and the nested-branch federate segment.
+ * `salt` weaves a per-landing token into the binding names so that SEVERAL landings whose bindings
+ * coexist in one plan (two federate arms of a `union`, each landed by its own resume with its own fresh
+ * minter that restarts at 0) cannot mint the same `bgv0`/`bge0` name and collide. The top-level resume
+ * lands once per compile, so its default `''` is safe.
  */
 export function landForeignRows(
   rows: readonly ForeignRow[], elem: Elem, fresh: Minter,
   mapValues: Extract<ValueNode, { readonly t: 'map' }> | null = null,
+  salt = '',
 ): { vertexBinding: string | null; edgeBinding: string | null; streamElem: Elem; isSubgraph: boolean; bindings: Binding[] } {
   const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
   const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
@@ -220,7 +225,7 @@ export function landForeignRows(
   const streamElem: Elem = isSubgraph ? 'edge' : elem;
   const bindings: Binding[] = [];
   const declare = (landedRows: readonly ForeignRow[], kind: Elem): string => {
-    const name = fresh(kind === 'edge' ? 'bge' : 'bgv');
+    const name = fresh(`${kind === 'edge' ? 'bge' : 'bgv'}${salt}`);
     // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
     // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
     const raw = mapValues
