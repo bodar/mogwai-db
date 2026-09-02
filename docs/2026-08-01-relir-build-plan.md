@@ -448,7 +448,11 @@ UNEVALUABLE`.
   exact REAL→JSON (`jsonMember`/`jsonMemberByTypeof`); a GLOBAL string transform over a list = TinkerPop's
   type error (`GLOBAL_STRING_THROWS`, propagates); the LOCAL `StringLocalStep` runtime value guard
   (`localStringMemberGuard`); illegal `range(low,high)` raises (`ValueParseError`); `all`/`any`/`none` over a
-  SCALAR traverser = empty; a single shared `constantRetype` from every tail.
+  SCALAR traverser = empty; a single shared `constantRetype` from every tail; a COLLECTION literal fed
+  straight to a scalar cast (`inject([…]).asNumber()/.asBool()/.asDate()`) RAISES TinkerPop's parse error
+  (`ScalarMapStep` over the whole traverser; the inject dispatch routes a `CONSTANT_FOLDED` cast at
+  position 1 over an array/map arg to `injectSource`'s fold rather than the list/map shape source, and
+  `javaTypeName` gives the one `ArrayList`/`LinkedHashMap` class-name authority for the message).
 
 ### Still open — the worklist, in unlock order
 
