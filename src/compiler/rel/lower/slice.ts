@@ -3,7 +3,7 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, eq, typeOf, meta, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, eq, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Elem } from '../../elem.ts';
@@ -68,17 +68,8 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   if (step.name === 'sample') {
     if (bulked) return null;
     const rank = 'sample_rank';
-    const ranked = make.window({
-      id: fresh('sw'), input, channels: input.channels,
-      type: typeOf(...input.type.cols, meta(rank, 'int')),
-      specs: [[rank, {
-        kind: 'window-expr', fn: 'row_number', args: [],
-        spec: {
-          partitionBy: [],
-          orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }],
-        },
-      }]],
-    });
+    const ranked = rowNumberWindow(input, rank, input.channels,
+      { partitionBy: [], orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] }, fresh);
     // The filter reads a column computed by the window's block, so fence it rather than letting the
     // assembler inline and re-evaluate the RANDOM() expression at the clause-reader boundary.
     const frame = make.materialize({
@@ -505,21 +496,15 @@ export function dedupOn(
   // level there is no `origin`, so the dedup stays global exactly as before.
   const origin = originOf(domain.channels);
   const partitionBy = origin ? [col(domain.id, origin.col), ...keys] : keys;
-  const ranked = make.window({
-    // A `Window` may only EXTEND its input (§3.5), so its declared type is the INPUT's columns IN THE
-    // INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
-    // declares the element side's channels BETWEEN the two payload halves; the projection below is where
-    // the canonical payload-then-channels layout (`build.ts`) is restored.
-    id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...domain.type.cols, meta('rn', 'int')),
-    specs: [['rn', {
-      kind: 'window-expr', fn: 'row_number', args: [],
-      spec: {
-        partitionBy,
-        orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
-          ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
-      },
-    }]],
-  });
+  // A `Window` may only EXTEND its input (§3.5), so `rowNumberWindow` declares the INPUT's columns IN
+  // THE INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
+  // declares the element side's channels BETWEEN the two payload halves; the projection below is where
+  // the canonical payload-then-channels layout (`build.ts`) is restored.
+  const ranked = rowNumberWindow(domain, 'rn', domain.channels, {
+    partitionBy,
+    orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
+      ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
+  }, fresh);
   const survivors = make.filter({
     id: fresh('f'), input: ranked, channels: ranked.channels, type: ranked.type,
     pred: eq(col(ranked.id, 'rn'), compilerInt(1)),

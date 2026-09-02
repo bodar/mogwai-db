@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
-import { and, eq, jsonExtract, meta, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, eq, jsonExtract, meta, rowNumberWindow, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
@@ -259,10 +259,8 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
         : ex;
       // A deterministic per-key ordinal — `json_each` over an object gives no numeric index, so rank the
       // keys (the map is order-independent when compared, and this pins it under perturbation).
-      const ranked = make.window({
-        id: fresh('bvmw'), input: wanted, channels: [], type: typeOf(...wanted.type.cols, meta(VALUEMAP_PAIR.ord, 'int')),
-        specs: [[VALUEMAP_PAIR.ord, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(wanted.id, VALUEMAP_PAIR.key), dir: 'asc' }] } }]],
-      });
+      const ranked = rowNumberWindow(wanted, VALUEMAP_PAIR.ord, [],
+        { partitionBy: [], orderBy: [{ expr: col(wanted.id, VALUEMAP_PAIR.key), dir: 'asc' }] }, fresh);
       // `json()` keeps the array's JSON subtype when it is nested into the `{t:'list', v:[…]}` node —
       // without it json_each's value lands as TEXT and `frameTypedNode` sees a string, not a list.
       const valuesArray: Expr = kind === 'edge'

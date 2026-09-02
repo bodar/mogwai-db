@@ -10,7 +10,7 @@ import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamN
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstRootedValue, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
@@ -462,16 +462,10 @@ export function listMemberOp(
       // `element.id().hashCode()`), which the payload already is.
       const tag = elemOf ? undefined : memberVtype(of, members);
       const rank = 'mdr';
-      const ranked = make.window({
-        id: fresh('mdw'), input: members, channels: [], type: typeOf(...members.type.cols, meta(rank, 'int')),
-        specs: [[rank, {
-          kind: 'window-expr', fn: 'row_number', args: [],
-          spec: {
-            partitionBy: tag ? [payload, tag] : [payload],
-            orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
-          },
-        }]],
-      });
+      const ranked = rowNumberWindow(members, rank, [], {
+        partitionBy: tag ? [payload, tag] : [payload],
+        orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
+      }, fresh);
       const survivors = make.filter({
         id: fresh('mdf'), input: ranked, channels: [], type: ranked.type,
         pred: { kind: 'binary', op: '=', left: col(ranked.id, rank), right: compilerInt(1) },

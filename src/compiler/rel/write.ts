@@ -15,7 +15,7 @@ import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } f
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, meta, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyRowId } from './property.ts';
@@ -1731,10 +1731,8 @@ function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { reado
   // arbitrary but it is FIXED the moment these rows are retained, and every later reader sorts by the
   // column rather than re-deriving it. An unordered chain has no answer to "which was first"; it must
   // still have ONE answer to "which input row is this created row".
-  const positioned = make.window({
-    id: fresh('wn'), input: ordered, channels: [], type: typeOf(...ordered.type.cols, meta(ORD, 'int')),
-    specs: [[ORD, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] } }]],
-  });
+  const positioned = rowNumberWindow(ordered, ORD, [], { partitionBy: [],
+    orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] }, fresh);
   return nameBindings(positioned);
 }
 
@@ -1747,10 +1745,7 @@ const ORD = 'ord';
  *  the k-th input row; reading it off the DATA is what makes this independent of whatever order the
  *  `RETURNING` rows happened to arrive in. */
 function positioned(created: Rel, fresh: Minter): Rel {
-  return make.window({
-    id: fresh('wn'), input: created, channels: [], type: typeOf(...created.type.cols, meta(ORD, 'int')),
-    specs: [[ORD, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(created.id, 'id'), dir: 'asc' }] } }]],
-  });
+  return rowNumberWindow(created, ORD, [], { partitionBy: [], orderBy: [{ expr: col(created.id, 'id'), dir: 'asc' }] }, fresh);
 }
 
 // ---------- mergeV() ----------

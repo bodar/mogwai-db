@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, firstRootedValue, jsonOf, meta, payloadCols, propertyKeyArgs, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -386,10 +386,7 @@ export function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly So
   const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
   const RN = 'prn';
   const orderBy = order.length ? order : defaultCollation(rows);
-  const ranked = make.window({
-    id: fresh('pw'), input: rows, channels: rows.channels, type: typeOf(...rows.type.cols, meta(RN, 'int')),
-    specs: [[RN, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [partitionBy], orderBy } }]],
-  });
+  const ranked = rowNumberWindow(rows, RN, rows.channels, { partitionBy: [partitionBy], orderBy }, fresh);
   const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(slice.offset) };
   const pred: Expr = slice.limit === null ? lower
     : and(lower, { kind: 'binary', op: '<=', left: col(ranked.id, RN), right: compilerInt(slice.offset + slice.limit) });
@@ -415,10 +412,7 @@ export function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly So
 export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
   if (originOf(rel.channels)) return rel;
   const channels = withChannel(rel.channels, ORIGIN);
-  const numbered = make.window({
-    id: fresh('ow'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(ORIGIN.col, 'int')),
-    specs: [[ORIGIN.col, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [] } }]],
-  });
+  const numbered = rowNumberWindow(rel, ORIGIN.col, rel.channels, { partitionBy: [], orderBy: [] }, fresh);
   const cols = [...payloadCols(rel), ...carriedCols(channels)];
   return make.project({
     id: fresh('om'), input: numbered, channels, type: typeOf(...cols),

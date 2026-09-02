@@ -7,7 +7,7 @@ import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -923,13 +923,10 @@ function groupCollected(
 /** The pooled `dedup().fold()` barrier: one first member per `(KEY_COL, MEMBER_COL)`.  It is a window
  * rather than an aggregate because the fold needs the surviving member's encounter position intact. */
 function dedupGroupMembers(input: Rel, cols: ReturnType<typeof typeOf>, fresh: Minter): Rel {
-  const ranked = make.window({
-    id: fresh('gd'), input, channels: [], type: typeOf(...cols.cols, meta('gr', 'int')),
-    specs: [['gr', { kind: 'window-expr', fn: 'row_number', args: [], spec: {
-      partitionBy: [col(input.id, KEY_COL), col(input.id, MEMBER_COL)],
-      orderBy: [{ expr: col(input.id, ORD_COL), dir: 'asc' }],
-    } }]],
-  });
+  const ranked = rowNumberWindow(input, 'gr', [], {
+    partitionBy: [col(input.id, KEY_COL), col(input.id, MEMBER_COL)],
+    orderBy: [{ expr: col(input.id, ORD_COL), dir: 'asc' }],
+  }, fresh);
   const first = make.filter({
     id: fresh('gf'), input: ranked, channels: [], type: ranked.type,
     pred: eq(col(ranked.id, 'gr'), compilerInt(1)),

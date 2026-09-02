@@ -30,7 +30,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../..
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
-    payloadCols, propertyKeyArgs, renumber,
+    payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
@@ -1591,16 +1591,10 @@ function scalarTail(
         // both directions: SQLite orders NULLs first ascending and last descending, which is why the
         // `IS NULL` term is explicit rather than left to the direction.
         const present = rel;
-        const ranked = make.window({
-          id: fresh('rw'), input: present, channels: present.channels,
-          type: typeOf(...present.type.cols, meta(rank, 'int')),
-          specs: [[rank, {
-            kind: 'window-expr', fn: 'row_number', args: [],
-            // The single-type-space order + a total raw-value tie-break, shared with the correlated
-            // by()-reducer arm (`minMaxOrder`) so the two positions cannot drift.
-            spec: { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') },
-          }]],
-        });
+        // The single-type-space order + a total raw-value tie-break, shared with the correlated
+        // by()-reducer arm (`minMaxOrder`) so the two positions cannot drift.
+        const ranked = rowNumberWindow(present, rank, present.channels,
+          { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') }, fresh);
         // The rank filter reads a windowed column, so fence it (a window may not sit inside another
         // SELECT's WHERE without re-inlining — the rule `sample` obeys and §11 records).
         const frame = make.materialize({ id: fresh('rm'), input: ranked, channels: ranked.channels, type: ranked.type });

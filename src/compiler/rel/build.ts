@@ -4,7 +4,7 @@ import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
+import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType, type WindowSpec } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
 
@@ -704,12 +704,28 @@ export function renumber(
   // minted one — not the output's. The two differ exactly when this is a MINT rather than a re-mint:
   // there `cols` names an emission-order column the input does not have yet, and the projection below
   // is where it comes into existence.
-  const windowed = make.window({
-    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(minted, 'int')),
-    specs: [[minted, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: terms } }]],
-  });
+  const windowed = rowNumberWindow(rel, minted, rel.channels, { partitionBy: [], orderBy: terms }, fresh);
   return make.project({
     id: fresh('ro'), input: windowed, channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(windowed.id, column.name === encounter.col ? minted : column.name)] as const),
+  });
+}
+
+/**
+ * A `ROW_NUMBER()` WINDOW — mint one integer rank column `colName` over `(PARTITION BY … ORDER BY …)`,
+ * EXTENDING the input by that column (§3.5: a `Window` may only extend, so the declared type is the
+ * input's columns plus the one). The bare `row_number` window-expr was spelled out at a dozen-plus sites
+ * — every per-origin slice, keyed dedup, argmax, `sample`, emission renumber, write ordinal, valuemap
+ * ordinal — and ONE authority is what keeps that window shape from drifting between them; it is also the
+ * substrate a per-partition top-N (`dedupOn`/`perOriginWindow`) and `renumber` build on. The FILTER
+ * (`rn = 1`, a slice range) and the reprojection stay the caller's: those are genuine per-caller policy,
+ * not the window.
+ */
+export function rowNumberWindow(
+  input: Rel, colName: string, channels: Channels, spec: WindowSpec, fresh: Minter,
+): Rel {
+  return make.window({
+    id: fresh('rn'), input, channels, type: typeOf(...input.type.cols, meta(colName, 'int')),
+    specs: [[colName, { kind: 'window-expr', fn: 'row_number', args: [], spec }]],
   });
 }

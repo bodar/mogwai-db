@@ -13,7 +13,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { foldElements, foldScalars, inferredVtype, LIST_COL, NODE_COL } from './list.ts';
-import { carriedCols, collectedArray, eq, jsonOf, meta, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
+import { carriedCols, collectedArray, eq, jsonOf, meta, rowNumberWindow, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
@@ -699,17 +699,10 @@ function lastMember(site: Site, fresh: Minter): Site {
 function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): Site {
   const kept = 'sq';
   const carried = site.rel.channels;
-  const ranked = make.window({
-    id: fresh('sk'), input: site.rel, channels: carried,
-    type: typeOf(...site.rel.type.cols, meta(kept, 'int')),
-    specs: [[kept, {
-      kind: 'window-expr', fn: 'row_number', args: [],
-      spec: {
-        partitionBy: cols.map((name) => col(site.rel.id, name)),
-        orderBy: site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'asc' as const })),
-      },
-    }]],
-  });
+  const ranked = rowNumberWindow(site.rel, kept, carried, {
+    partitionBy: cols.map((name) => col(site.rel.id, name)),
+    orderBy: site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'asc' as const })),
+  }, fresh);
   return {
     rel: make.filter({
       id: fresh('sx'), input: ranked, channels: carried, type: ranked.type,
@@ -838,14 +831,8 @@ function seededFold(
   // A member's POSITION in the fold. `ROW_NUMBER` over no order terms is well-defined and arbitrary,
   // which is the same licence `foldScalars` takes over a site with no encounter channel: the reference
   // pins no order on a capped collection at all.
-  const numbered = make.window({
-    id: fresh('sw'), input: narrowed, channels: [],
-    type: typeOf(meta(MEMBER_VAL, 'any', true), ...keyCols, meta(MEMBER_ORD, 'int')),
-    specs: [[MEMBER_ORD, {
-      kind: 'window-expr', fn: 'row_number', args: [],
-      spec: { partitionBy: [], orderBy: keys.map((key) => ({ expr: col(narrowed.id, key), dir: 'asc' as const })) },
-    }]],
-  });
+  const numbered = rowNumberWindow(narrowed, MEMBER_ORD, [],
+    { partitionBy: [], orderBy: keys.map((key) => ({ expr: col(narrowed.id, key), dir: 'asc' as const })) }, fresh);
 
   const walkType = typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true));
   const walkId = fresh('sr');
