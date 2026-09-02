@@ -87,6 +87,21 @@ export const originOf = (channels: Channels): Channel | undefined =>
 export const encounterOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'encounter');
 
+/**
+ * THE ENTERING-VERTEX channel — the vertex a traverser was AT when it hopped onto the current edge,
+ * retained so `otherV()` can return the edge's OTHER endpoint (`EdgeOtherVertexStep`, which reads the
+ * nearest previous vertex out of the traverser's PATH:
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/EdgeOtherVertexStep.java`).
+ *
+ * It is the edge hop's INCOMING id — the same vertex `path()` history would name — so it is the correct
+ * entering vertex in every composition (`outE().otherV()`, but also a branch-merged or child-body edge
+ * stream whose members each carry their own incoming vertex). Minted only when an `otherV` will consume
+ * it (else a live `fromV` would make a `dedup`/collapse decline — group policy `undefined`), and dropped
+ * the moment `otherV` reads it, leaving a plain vertex stream. */
+export const FROM_V: Channel = { col: 'fromV', role: 'fromV' };
+export const fromVOf = (channels: Channels): Channel | undefined =>
+  channels.find((channel) => channel.role === 'fromV');
+
 /** THE GRAPH CHANNEL — which graph a bound element came from, carried so a multi-graph merge keeps
  *  per-graph identity (`dedup`/`group`/`has(id)` must not collapse A's id 5 with B's id 5). Its value
  *  is the federate call's own graph name, or the `$local` sentinel for the base graph. Consulted as part

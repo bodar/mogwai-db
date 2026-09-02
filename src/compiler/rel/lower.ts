@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, collectionAssert, EDGE_MOVES, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -58,7 +58,7 @@ import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
-import { HOPS, movement, reSource } from './lower/movement.ts';
+import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
@@ -3672,6 +3672,27 @@ function detachedTail(
   return continueAs(seed, { kind: 'elements', elem }, steps, from, bulked, ctx, fresh, NO_ALIASES);
 }
 
+/** The steps between an edge hop and an `otherV()` that leave the edge and its channels UNCHANGED — the
+ *  filter family, `as`, and `identity`. A `fromV` channel is minted at the edge hop only if scanning
+ *  forward through these reaches an `otherV`, so a non-transparent step in between (a movement, `dedup`,
+ *  a barrier, a branch) stops the scan and the edge stays plain — `dedup().otherV()` then declines
+ *  rather than a live `fromV` corrupting the `dedup` (group policy `undefined`). */
+const FROM_V_TRANSPARENT: ReadonlySet<string> = new Set([
+  'hasLabel', 'has', 'hasId', 'hasKey', 'hasValue', 'where', 'not', 'filter', 'and', 'or',
+  'simplePath', 'cyclicPath', 'identity', 'as',
+]);
+
+/** Does the edge stream produced at `at` flow into an `otherV()` — through `FROM_V_TRANSPARENT` steps
+ *  only — so the edge hop must retain its entering vertex? `atEnd` is what a body's LAST edge answers
+ *  when the scan runs off the end (the enclosing chain will apply `otherV` to the body's result). */
+function edgeFeedsOtherV(steps: readonly IRStep[], at: number, atEnd: boolean): boolean {
+  for (let i = at + 1; i < steps.length; i++) {
+    if (steps[i]!.name === 'otherV') return true;
+    if (!FROM_V_TRANSPARENT.has(steps[i]!.name)) return false;
+  }
+  return atEnd;
+}
+
 function elementTail(
   seed: Rel, elem0: Elem, steps: readonly IRStep[], from: number, bulked0: boolean,
   ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
@@ -3694,7 +3715,19 @@ function elementTail(
       if (step.args.length) return null;
       continue;
     }
-    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels);
+    // `otherV()` — the edge's OTHER endpoint, off the `fromV` the entering edge hop retained. Not a HOP
+    // (it reads a carried channel, not the adjacency table by direction), so it is dispatched here.
+    if (step.name === 'otherV') {
+      if (step.args.length || step.modulators?.length || step.optionArms) return null;
+      const other = otherVertex(rel, elem, ctx.source, fresh);
+      if (!other) return null;
+      rel = other.rel;
+      elem = other.elem;
+      continue;
+    }
+    // An EDGE hop retains its entering vertex (`fromV`) only when an `otherV()` will consume it.
+    const mintFromV = EDGE_MOVES.has(step.name) && edgeFeedsOtherV(steps, at, false);
+    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels, mintFromV);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
       // emission order must not collapse, whether that order was seeded at the source or minted by

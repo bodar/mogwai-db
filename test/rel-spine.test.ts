@@ -83,6 +83,10 @@ const COVERED = [
   // (`propertyOrderTerms`/`propertyIdentityKey`).
   'g.V().properties().order()', 'g.E().properties().order()', 'g.E().properties().order().by(desc).value()',
   'g.V().properties().dedup()', 'g.V().both().properties().dedup().count()', 'g.V().bothE().properties().dedup().count()',
+  // `otherV()` — the edge's OTHER endpoint off the entering vertex the edge hop retained (`fromV`). Direct,
+  // through an intervening edge filter, chained after another edge hop, and retyped past the reached vertex.
+  'g.V().outE().otherV()', 'g.V().bothE().otherV()', "g.V().bothE().has('weight',P.lt(1.0)).otherV()",
+  'g.V().outE().inV().bothE().otherV()', "g.V().bothE().otherV().values('name')", 'g.V().bothE().otherV().count()',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
@@ -539,7 +543,10 @@ const COVERED = [
  * by name. `g.V().count()` is the ordinary "step not learned yet"; the rest are the guards.
  */
 const DECLINED = [
-  "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
+  // NOTE: `g.V().bothE().otherV()` LEFT this list — `otherV()` now retains the entering vertex as the
+  // `fromV` channel the edge hop mints (`movement`/`otherVertex`, the nearest-previous-vertex
+  // `EdgeOtherVertexStep` reads) and reads the edge's other endpoint. See COVERED.
+  "g.E().otherV()",                   // no entering vertex to read — fails closed (TinkerPop throws)
   // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
   // refusal (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
   // RelIR now expresses that as the `Filter(false)` §3.3 names.

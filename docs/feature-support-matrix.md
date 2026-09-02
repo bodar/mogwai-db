@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,797<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,803<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -19,9 +19,9 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()`/`otherV()` |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()` |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | |
-| `otherV` | ❌ | |
+| `otherV` | ✅ | the edge hop retains its entering vertex (the `fromV` channel) whenever an `otherV()` consumes it, through any `where`/`filter`/`not`/`has`/`as` in between. ❌ over an edge stream a BRANCH/CHILD body produced (`coalesce(outE,outE).otherV()`, `local(bothE().limit(1)).otherV()`); an `otherV()` a BARRIER separates from its edge inside a child body (`where(outE().order().otherV())`); under `path()` |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
 | `call(service[, params])`, `.with(k,v)` | ✅ | |
 | `io(path).read()` / `.write()` | ✅ | 🚫 GraphML, Gryo; a CSV export refuses a collection-valued property or a meta-property, and declares `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |

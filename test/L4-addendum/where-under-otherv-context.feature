@@ -1,18 +1,15 @@
 # mogwai addendum — a where() body on an edge stream that CARRIES otherV() context.
 #
-# A trailing `otherV()` turns `trackFromV` on for the whole prefix, so `outE()` carries the
-# entering-vertex column. The generic child-existence gate used to decline ANY child body under a
-# fromV-carrying parent, while the inline predicate compiled it happily — so the two lowerings
-# disagreed with fast paths OFF, which L5's rotating seed found. The guard now asks whether the
-# BODY reads that context (only `otherV()` does) rather than whether the parent carries it.
-#
-# The last scenario is the other half of the fix and matters as much: a body that DOES read the
-# context still fails closed, because inside a child scope `otherV()` would see the PARENT's
-# entering vertex. It must decline on BOTH lowerings, not just the generic one.
+# A trailing `otherV()` makes the preceding `outE()` retain its entering vertex (the `fromV`
+# channel, minted because the forward scan reaches an `otherV` through fromV-transparent steps —
+# and `where`/`filter`/`not` are transparent, since an existence gate consumes the child's rows as
+# a boolean and hands the parent edge on unchanged). So a `where()` between the edge and the
+# `otherV()` composes: the gate filters, the edge keeps its `fromV`, and `otherV()` reads the OTHER
+# endpoint. The body may itself move (`inV()`) or fan out (`union()`) — it is still an existence
+# question over the edge, so nothing of the child survives to disturb the outer context.
 @gap:where-under-otherv-context
 Feature: Step - where() under otherV() context
 
-  @Unsupported
   Scenario: g_V_outE_whereXhasXweight_gtX0_2XXX_otherV_name
     Given the modern graph
     And the traversal of
@@ -28,7 +25,6 @@ Feature: Step - where() under otherV() context
       | josh |
       | ripple |
 
-  @Unsupported
   Scenario: g_V_outE_whereXhasXweight_gtX1XXX_otherV_name
     Given the modern graph
     And the traversal of
@@ -38,7 +34,6 @@ Feature: Step - where() under otherV() context
     When iterated to list
     Then the result should be empty
 
-  @Unsupported
   Scenario: g_V_outE_whereXinVXhasXname_joshXXX_otherV_name
     Given the modern graph
     And the traversal of

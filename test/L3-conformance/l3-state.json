@@ -1,5 +1,5 @@
 {
-  "passing": 1797,
+  "passing": 1803,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -201,6 +201,7 @@
     "g_VX1X_outE_asXhereX_inV_hasXname_vadasX_selectXhereX",
     "g_VX1X_outE_hasXweight_inside_0_06X_inV",
     "g_VX1X_outE_inV",
+    "g_VX1X_outE_otherV",
     "g_VX1X_outXcreatedX_discard",
     "g_VX1X_outXcreatedX_inEXcreatedX_rangeX1_3X_outV",
     "g_VX1X_outXcreatedX_inXcreatedX_cyclicPath",
@@ -250,6 +251,8 @@
     "g_VX4X_bothE",
     "g_VX4X_bothEXcreatedX",
     "g_VX4X_bothEXcreatedvarX",
+    "g_VX4X_bothE_hasXweight_lt_1X_otherV",
+    "g_VX4X_bothE_otherV",
     "g_VX4X_hasXage_gt_30X",
     "g_VX4X_localXbothEX1_createdX_limitX1XX",
     "g_VX4X_localXbothEXknows_createdX_limitX1XX",
@@ -1729,6 +1732,7 @@
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_EX12X_bothV",
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_EX9X_bothV",
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_V",
+    "g_withStrategiesXSubgraphStrategyXsubgraphCXX_VX4X_both",
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_VX4X_bothE",
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_VX4X_in",
     "g_withStrategiesXSubgraphStrategyXsubgraphCXX_VX4X_inE",
@@ -1740,6 +1744,7 @@
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_EX12X_bothV",
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_EX9X_bothV",
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_V",
+    "g_withStrategiesXSubgraphStrategyXsubgraphDXX_VX4X_both",
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_VX4X_bothE",
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_VX4X_in",
     "g_withStrategiesXSubgraphStrategyXsubgraphDXX_VX4X_inE",
@@ -1798,6 +1803,7 @@
     "g_withoutStrategiesXStandardVerificationStrategyX_V",
     "g_withoutStrategiesXVertexProgramRestrictionStrategyX_V",
     "g_withoutStrategiesXVertexProgramStrategyX_V",
+    "get_g_VX1X_outE_otherV",
     "get_g_V_whereXage_isXgt_30XX"
   ],
   "failed": [
@@ -1843,7 +1849,6 @@
     "g_VX1X_outE_inV_bothE_otherV_tree",
     "g_VX1X_outE_inV_bothE_otherV_tree_byXnameX_byXlabelX",
     "g_VX1X_outE_label_mapXlengthX",
-    "g_VX1X_outE_otherV",
     "g_VX1X_out_aggregateXxX_out_whereXnotXwithinXaXXX",
     "g_VX1X_out_hasIdX2_listXid3_id4XX",
     "g_VX1X_out_hasXid_2AsString_3AsStringX",
@@ -1885,8 +1890,6 @@
     "g_VX3X_repeatXout_order_byXperformancesX_tailX2XX_timesX2X_valuesXnameX",
     "g_VX3X_repeatXout_order_byXperformancesX_tailX3X_limitX1XX_timesX2X_valuesXnameX",
     "g_VX3X_repeatXout_order_byXperformances_descX_limitX5X_tailX1XX_timesX2X_valuesXnameX",
-    "g_VX4X_bothE_hasXweight_lt_1X_otherV",
-    "g_VX4X_bothE_otherV",
     "g_VX4X_localXbothE_limitX1XX_otherV_name",
     "g_VX4X_localXbothE_limitX2XX_otherV_name",
     "g_VX5X_repeatXlimitX1X_inX_untilXloopsXisX2XXX_valuesXnameX",
@@ -2269,8 +2272,6 @@
     "g_withStrategiesXSubgraphStrategyXsubgraphBXX_VX4X_outE",
     "g_withStrategiesXSubgraphStrategyXsubgraphBXX_VX4X_outV_outE",
     "g_withStrategiesXSubgraphStrategyXsubgraphBXX_VX4X_outXcreatedX",
-    "g_withStrategiesXSubgraphStrategyXsubgraphCXX_VX4X_both",
-    "g_withStrategiesXSubgraphStrategyXsubgraphDXX_VX4X_both",
     "g_withStrategiesXSubgraphStrategyXvertexProperties_hasXstartTime_gtX2005XXXX_V_asXaX_propertiesXlocationX_asXbX_selectXaX_outE_properties_selectXbX_value_dedup",
     "g_withStrategiesXSubgraphStrategyXvertexProperties_hasXstartTime_gtX2005XXXX_V_asXaX_valuesXlocationX_asXbX_selectXaX_outE_properties_selectXbX_dedup",
     "g_withStrategiesXSubgraphStrategyXvertexProperties_hasXstartTime_gtX2005XXXX_V_propertiesXlocationX_value",
@@ -2288,7 +2289,6 @@
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXin_hasXage_gtX20XXX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXoutX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXout_hasXname_notStartingWithXzXXX_timesX2X",
-    "get_g_VX1X_outE_otherV",
     "get_g_addVXpersonX_propertyXsingle_name_stephenX_propertyXsingle_name_stephenm_since_2010X"
   ],
   "_comment": "L3 conformance last-known run: the passing/failing scenario sets are the floor. A clean local run rewrites it (CI never does). It is a hard ratchet — the run fails on any scenario that regresses and on a lower count. `passing` = passed.length. Commit this file with every bump. Never hand-edit `passed` to hide a regression."

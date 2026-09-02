@@ -17,7 +17,7 @@ scale — just SQLite.
 >
 > - **Understands the whole language** — 2,395 / 2,395 canonical Gremlin traversals
 >   parse and chain (100%), through a parser generated from TinkerPop's own `Gremlin.g4`.
-> - **Executes correctly** — **<!-- L3:passing -->1,797<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly** — **<!-- L3:passing -->1,803<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
 >   through the *unmodified* `gremlin` JS client (tinkerpop `origin/master`) over the real GraphBinary wire,
 >   run as a **ratchet** (the number only goes up).
 > - **Reads + writes + strategies** land across a wide step surface. For the exact

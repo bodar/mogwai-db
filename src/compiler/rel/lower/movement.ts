@@ -13,7 +13,7 @@ import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { CONSTANT } from '../predicate.ts';
 import { extendPath, pathCarried } from '../path.ts';
-import { BULK, ENCOUNTER, encounterOf, type ChainCtx } from './chain.ts';
+import { BULK, ENCOUNTER, encounterOf, FROM_V, fromVOf, type ChainCtx } from './chain.ts';
 import { remintOrder } from '../lower.ts';
 
 export function reSource(
@@ -139,7 +139,7 @@ const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
 const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
 
-export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter, withLabels = false): { rel: Rel; elem: Elem } | null {
+export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter, withLabels = false, mintFromV = false): { rel: Rel; elem: Elem } | null {
   const hops = HOPS[step.name];
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
@@ -162,7 +162,13 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
   // `EXISTS`, which asks whether a row is there and never in what order — so its `bulk` is synthetic
   // and it carries no position.
   const carried = input ? input.channels : BULK;
-  const armCols = elementCols(carried);
+  // `otherV()` needs the entering vertex retained: an EDGE hop mints a `fromV` channel = the incoming
+  // vertex id (the edge column this hop matched against, `hop.from`), which is exactly the nearest
+  // previous vertex `EdgeOtherVertexStep` reads from the path. Only an edge-producing hop and only when
+  // an `otherV` will consume it (`mintFromV`); a vertex hop or a correlated body never carries it.
+  const wantFromV = mintFromV && input != null && hops.every((hop) => hop.to === 'id');
+  const outChannels = wantFromV ? withChannel(carried, FROM_V) : carried;
+  const armCols = elementCols(outChannels);
   const arms = hops.map((hop) => {
     const e = graph.adjacencyEdges(fresh);
     const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
@@ -191,13 +197,16 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
       })
       : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
     // The arm carries the INCOMING position through unchanged; re-minting happens once over the
-    // whole fan-out below, not per arm — two arms each numbering from 1 would interleave.
+    // whole fan-out below, not per arm — two arms each numbering from 1 would interleave. A `fromV`
+    // channel (edge hops, under `mintFromV`) takes this hop's incoming end (`hop.from`) — the vertex
+    // this arm entered from — so `bothE`'s two arms each carry their own entering vertex.
     return make.project({
-      id: fresh('m'), input: source, channels: carried, type: typeOf(...armCols),
+      id: fresh('m'), input: source, channels: outChannels, type: typeOf(...armCols),
       exprs: [['id', col(source.id, hop.to)],
-        ...(input
-          ? carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)
-          : [['bulk', compilerInt(1)] as const])],
+        ...outChannels.map((channel) =>
+          channel.role === 'fromV' ? [channel.col, col(source.id, hop.from)] as const
+          : !input && channel.role === 'bulk' ? [channel.col, compilerInt(1)] as const
+          : [channel.col, col(source.id, channel.col)] as const)],
     });
   });
   const [first, ...rest] = arms;
@@ -205,12 +214,54 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
   // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
   // reachable both ways is two traversers.
   let fanned: Rel = rest.length
-    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: carried, type: typeOf(...armCols) })
+    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: outChannels, type: typeOf(...armCols) })
     : first;
   if (pathCarried(fanned))
     fanned = extendPath(fanned, { kind: 'element', elem: hops[0]!.elem, id: col(fanned.id, 'id') }, fresh, withLabels);
   const encounter = encounterOf(carried);
   return { rel: encounter ? remintOrder(fanned, encounter, fresh) : fanned, elem: hops[0]!.elem };
+}
+
+/**
+ * `otherV()` — the edge's OTHER endpoint, given the vertex the traverser entered from.
+ *
+ * `EdgeOtherVertexStep` reads the nearest previous vertex out of the traverser's path and returns
+ * whichever endpoint is not it (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/EdgeOtherVertexStep.java`),
+ * throwing when the path holds no previous vertex. We carry that vertex as the `fromV` channel the
+ * preceding edge hop minted; absent it — `E().otherV()`, or a stream that never retained one — this
+ * DECLINES, which is the same fail-closed answer.
+ *
+ * The reached vertex is `tgt` when we entered from `src`, else `src` — read off the edge row rejoined
+ * by id (a UNIQUE key, so the join is 1:1 and the emission order rides through unchanged). A self-loop
+ * (`src == tgt == fromV`) yields the vertex itself, as it must. `fromV` is spent here and dropped;
+ * every other channel passes through.
+ */
+export function otherVertex(rel: Rel, elem: Elem, graph: GraphSource, fresh: Minter): { rel: Rel; elem: Elem } | null {
+  if (elem !== 'edge') return null;
+  const fromV = fromVOf(rel.channels);
+  if (!fromV) return null;
+  // A path position would need appending here; `otherV()` under `path()` is a separate combination.
+  if (pathCarried(rel)) return null;
+  const e = graph.adjacencyEdges(fresh);
+  // The right side's `id` is declared `eid` — a Join's output names are POSITIONAL and must be unique.
+  const joined = make.join({
+    id: fresh('j'), left: rel, right: e, join: 'inner', ordered: true, channels: rel.channels,
+    type: typeOf(...elementCols(rel.channels), meta('eid', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    on: eq(col(e.id, 'id'), col(rel.id, 'id')),
+  });
+  const outChannels = rel.channels.filter((channel) => channel.role !== 'fromV');
+  const reached: Expr = {
+    kind: 'case',
+    whens: [[eq(col(joined.id, 'src'), col(joined.id, fromV.col)), col(joined.id, 'tgt')]],
+    else: col(joined.id, 'src'),
+  };
+  return {
+    elem: 'vertex',
+    rel: make.project({
+      id: fresh('ov'), input: joined, channels: outChannels, type: typeOf(...elementCols(outChannels)),
+      exprs: [['id', reached], ...outChannels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
+    }),
+  };
 }
 
 /**

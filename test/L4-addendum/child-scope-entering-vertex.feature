@@ -21,7 +21,6 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
   # @gap:child-scope-entering-vertex marks the family.
 
   @gap:child-scope-entering-vertex
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_whereXoutE_unionXidentity_identityXX_outE_otherV
     Given the modern graph
     And the traversal of
