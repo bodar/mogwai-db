@@ -141,6 +141,20 @@ export function orderLocalValue(value: unknown): unknown {
     .map(([v]) => v);
 }
 
+/** `order()` (GLOBAL, identity comparator) over a STREAM of values: a STABLE sort of the whole stream by
+ *  ORDERABILITY. `orderLocalValue` sorts WITHIN one list; this reorders the TRAVERSER STREAM itself —
+ *  each `values[i]` is one traverser's whole value (a list, compared to the others by `cmpIterable`), and
+ *  the sorted array position becomes the emission order. Recursion-free SQL cannot express the recursive
+ *  compare, so this runs in the SAME sync value-transform barrier `order(Scope.local)` uses, only over the
+ *  whole stream rather than per row. Stable by an original-index tie-break, as the reference's
+ *  `Collections.sort` is. */
+export function orderStreamValue(values: readonly unknown[]): readonly unknown[] {
+  return values
+    .map((v, i) => [v, i] as const)
+    .sort((a, b) => orderabilityCompare(a[0], b[0]) || a[1] - b[1])
+    .map(([v]) => v);
+}
+
 /** `dedup(Scope.local)` over one list: FIRST occurrence wins, surviving order preserved
  *  (`DedupLocalStep`'s `LinkedHashSet`). O(n²) on the member count, which is fine for a local list. */
 export function dedupLocalValue(value: unknown): unknown {

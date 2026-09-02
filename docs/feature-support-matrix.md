@@ -88,7 +88,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | |
 | `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | ❌ `Column`-keyed order forms |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`). ❌ `Column`-keyed order forms; a global order over a MAP stream (a `mapValue` head the barrier does not yet accept); an element-membered list (cannot round-trip) |
 
 ## 5. Branching
 

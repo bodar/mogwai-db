@@ -3180,10 +3180,18 @@ function valueResume(
   // No channel crossed the boundary — a tail that DEMANDS an encounter or a path cannot be seeded from a
   // bare value list, so it declines rather than compile a plan with the column silently missing.
   if (facts.demandsEncounter || facts.tracksPath) return null;
-  const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh);
+  // Bind the array index (`json_each.key`) as `RESUME_ORD`: it IS each value's STREAM POSITION, which the
+  // list seed threads as an encounter channel so a later re-explode (`unfold()`) emits an earlier
+  // traverser's members before a later one's, rather than sorting by the inner member ordinal alone (a
+  // total order only within one list). The scalar seed ignores it.
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh, undefined, RESUME_ORD);
   const chain = tail(seed(exploded, fresh), ctx, fresh);
   return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
+
+/** The column `valueResume` binds each value's array index (stream position) to — the list seed carries
+ *  it as an encounter channel so re-injected stream order survives a later re-explode. */
+const RESUME_ORD = 'so';
 
 export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
   return valueResume(values, steps, from, opts,
@@ -3225,9 +3233,14 @@ export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: 
   // case) needs no wrap: `sv` is already the scalar. `of` IS the member descriptor.
   const nested = of.kind === 'list' || of.kind === 'map';
   return valueResume(lists, steps, from, opts,
+    // Carry the array index as an ENCOUNTER channel: each row is one traverser's list, and its stream
+    // position is the emission order a later `unfold()` must lead its member sort with (`unfoldList`'s
+    // `carried` reason). `renumber` in the framing/reduction path reads it identically.
     (exploded, fresh) => make.project({
-      id: fresh('lrp'), input: exploded, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
-      exprs: [[LIST_COL, nested ? jsonOf(col(exploded.id, 'sv')) : col(exploded.id, 'sv')]],
+      id: fresh('lrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta(LIST_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [[LIST_COL, nested ? jsonOf(col(exploded.id, 'sv')) : col(exploded.id, 'sv')],
+        [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
     }),
     (seed, ctx, fresh) => continueAs(seed, { kind: 'list', of }, steps, from, false, ctx, fresh, NO_ALIASES));
 }

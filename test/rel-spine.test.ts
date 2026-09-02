@@ -729,6 +729,23 @@ describe('the RelIR spine', () => {
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(expected);
   });
 
+  // A GLOBAL bare `order()` over a stream whose TRAVERSERS are LISTS sorts the STREAM by ORDERABILITY —
+  // the recursive total order SQL cannot express — through the whole-stream value-transform barrier
+  // (`orderStreamValue`), the stream-level twin of `order(Scope.local)`. A SCALAR stream stays in SQL
+  // (SQLite orders by storage class), so the barrier fires only for a list stream and declines the rest.
+  test('a global order() over a list stream sorts by orderability; scalar stays in SQL', async () => {
+    const want: [string, unknown[]][] = [
+      ['g.inject([3,1],[2,2],[1,9]).order()', [[1, 9], [2, 2], [3, 1]]], // first-member compare
+      ['g.inject([1,2,3],[1,2]).order()', [[1, 2], [1, 2, 3]]],           // shorter-as-prefix first
+      ["g.inject(['b','a'],['a','a']).order()", [['a', 'a'], ['b', 'a']]],
+      ['g.inject([3,1],[2,2]).order().unfold()', [2, 2, 3, 1]],           // sorted stream, earlier list first
+      ['g.inject([3,1],[2,2]).order().count()', [2]],
+      ["g.V().values('age').order()", [27, 29, 32, 35]],                  // SCALAR stream → SQL, unchanged
+    ];
+    for (const [gremlin, expected] of want)
+      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(expected);
+  });
+
   test('a re-source carries an alias into a following write', async () => {
     // `GraphStep` splits the incoming traverser, rather than creating a fresh one: `from('a')`
     // therefore still names marko after the current object was replaced by vadas. Counting the

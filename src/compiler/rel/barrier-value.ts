@@ -53,3 +53,32 @@ export function buildValueTransformSegment(
     },
   };
 }
+
+/**
+ * Plan a SYNC value-transform barrier whose transform reads the WHOLE STREAM at once — a global
+ * `order()`/`dedup()` over a collection stream, where reordering or collapsing a traverser needs to see
+ * its neighbours (`buildValueTransformSegment`'s per-row map cannot). `streamTransform` takes the array of
+ * head values (one per traverser, in stream order) and returns the surviving values in emission order;
+ * `resume` re-injects them (`lowerListResumeOf`), the sorted/collapsed array position becoming the output
+ * stream order. Same head, decline and raise-on-uncovered-tail contract as the per-row shell.
+ */
+export function buildValueStreamTransformSegment(
+  steps: readonly Step[], at: number, lowering: Lowering,
+  streamTransform: (values: readonly unknown[]) => readonly unknown[],
+  resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
+  label: string,
+): SegmentPlan | null {
+  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  if (!head) return null;
+  return {
+    kind: 'segment',
+    mode: 'sync',
+    head,
+    resume: (headRows: readonly BarrierInput[]): Plan => {
+      const transformed = streamTransform(headRows.map((row) => row.injectedValue));
+      const resumed = resume(transformed, steps, at + 1, lowering);
+      if (!resumed) throw new Error(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
+      return { kind: 'sql', compiled: finishLowering(resumed) };
+    },
+  };
+}

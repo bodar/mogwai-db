@@ -52,6 +52,11 @@ describe('split() — at depth (the list re-enters the ordinary list vocabulary)
   test('split(sep).unfold() explodes the produced lists', async () => {
     expect(await run('g.inject("a,b,c").split(",").unfold()')).toEqual(['a', 'b', 'c']);
   });
+  test('a MULTI-traverser split().unfold() keeps stream order (earlier list before later)', async () => {
+    // The re-injected list stream carries its position as an encounter channel; without it, unfold()
+    // sorted by the inner member ordinal alone and interleaved the lists (x,p,y,q instead of x,y,p,q).
+    expect(await run('g.inject("x,y","p,q").split(",").unfold()')).toEqual(['x', 'y', 'p', 'q']);
+  });
   test('runs on the SYNC framed() path too (atomic sync barrier)', async () => {
     const out = await Promise.all(mgr.executor('home').framed('g.inject("a,b,c").split(",")', {}).map(dec));
     expect(out).toEqual([['a', 'b', 'c']]);

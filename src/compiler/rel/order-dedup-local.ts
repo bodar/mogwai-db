@@ -4,8 +4,8 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
 import { lowerListResumeOf, lowerToRel, type Lowering } from './lower.ts';
-import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
-import { dedupLocalValue, orderLocalValue } from './orderability.ts';
+import { buildValueStreamTransformSegment, buildValueTransformSegment, valueHead } from './barrier-value.ts';
+import { dedupLocalValue, orderLocalValue, orderStreamValue } from './orderability.ts';
 
 // ---------- order/dedup(Scope.local) over a NESTED list, as a value-transform BARRIER ----------
 //
@@ -70,4 +70,53 @@ export function buildOrderDedupSegment(
   // op then re-reads the members correctly.
   return buildValueTransformSegment(steps, at, lowering, transform,
     (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), op);
+}
+
+// ---------- order() (GLOBAL) over a STREAM OF LISTS, as a whole-stream value-transform BARRIER ----------
+//
+// A bare GLOBAL `order()` (identity comparator, no `by()`) over a stream whose TRAVERSERS are LISTS sorts
+// the stream by TinkerPop's ORDERABILITY — a total order that compares two lists element-wise and RECURSES
+// into nested collections (`orderability.ts`), which recursion-free SQL cannot express. So it takes the
+// same sync value-transform barrier `order(Scope.local)` uses, only the transform reads the WHOLE stream
+// at once (`orderStreamValue`) rather than each list in isolation: the SQL head reads one list per
+// traverser, one batched JS sort reorders the array, and `lowerListResumeOf` re-injects the lists in the
+// sorted order (the array position IS the emission order).
+//
+// It fires ONLY for a LIST stream (a `jsonbList` head) with NO element leaf. It DECLINES (→ the inline SQL
+// fold, which already covers these):
+//  - a SCALAR stream (`values('age').order()`) — a plain `value` head SQLite orders by storage class;
+//  - an element-membered list — the barrier ships MATERIALIZED elements to JS (the rowid is gone once they
+//    round-trip through JSON), so the result cannot re-enter the graph. A rare, non-corpus shape, so it
+//    stays a clean fail-closed decline (never a wrong answer).
+// Global `dedup()` is NOT this barrier's: the inline list RowShape already collapses a stream of lists.
+
+/** A bare GLOBAL `order()` step (no `Scope.local`, no `by()`, no option arms), and its position — the
+ *  whole-stream orderability sort. Shape-agnostic here; the scalar-vs-list-vs-element decision is the
+ *  head's descriptor, read at build time. A modulated order is the inline path's job. */
+export function orderGlobalBarrierIn(steps: readonly IRStep[]): { at: number } | null {
+  for (let at = 0; at < steps.length; at++) {
+    const step = steps[at]!;
+    if (step.name !== 'order' || isLocalScope(step)) continue;
+    if (step.modulators?.length || step.optionArms) continue;
+    if (step.args.some((a) => !isScopeArg(a.value))) continue;
+    return { at };
+  }
+  return null;
+}
+
+export function buildOrderGlobalSegment(
+  steps: readonly IRStep[], at: number, lowering: Lowering,
+): SegmentPlan | null {
+  // Only a LIST stream reaches the barrier: a `jsonbList` head carries one list per traverser. A scalar
+  // `value` head (declined here) is the SQL path's — SQLite orders scalars by storage class. An element
+  // leaf cannot round-trip (see the decline note above).
+  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  if (!head || head.shape.kind !== 'jsonbList') return null;
+  const of = head.shape.items;
+  if (hasElementLeaf(of)) return null;
+  // Re-inject each list under the pre-barrier member shape (`head.shape.items`), unchanged — a global
+  // `order()` only reorders the stream, it does not touch any list's contents. A following list op reads
+  // the members correctly.
+  return buildValueStreamTransformSegment(steps, at, lowering, orderStreamValue,
+    (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order');
 }

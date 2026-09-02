@@ -300,12 +300,19 @@ export const notProduced = (pred: Expr): Expr =>
  * `V()`/`E()` id list needs to route a JSON number to the rowid column and a JSON string to `uid`,
  * decided PER MEMBER by json_each's own type rather than at compile time (so a heterogeneous bound id
  * list is faithful without our reading its data).
+ *
+ * `ordCol`, when given (a SET whose ORDER is meaningful — the value-resume seed, where the array index
+ * IS the traverser's stream position), also binds `json_each.key` under that name, so a caller can thread
+ * it as an encounter channel and preserve stream order across a later re-explode (`unfold()`). Mutually
+ * exclusive with `jsonTypes` (a membership set has no meaningful order) — the resume path never uses both.
  */
-export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[]): Rel {
+export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[], ordCol?: string): Rel {
   const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(value), name)] };
   const exploded = make.explode(jsonTypes
     ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
-    : { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)) });
+    : ordCol
+      ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', ord: ordCol }, type: typeOf(meta('sv', 'any', true), meta(ordCol, 'int')) }
+      : { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)) });
   if (!jsonTypes) return exploded;
   const kept = make.filter({
     id: fresh('jesf'), input: exploded, channels: [], type: exploded.type,
