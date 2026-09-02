@@ -434,8 +434,9 @@ UNEVALUABLE`.
   arm, which keeps the FIRST occurrence's whole traverser (`DedupGlobalStep`'s rule) — so the collapse is a pure
   SQL optimization, `V().as('a').both().dedup().select('a')` now lowers, and the lift COMPOUNDS (every shape gets
   per-origin dedup, graph identity, the ordered first-occurrence, the deterministic tie for free). `natural` is
-  absent for scalar/record/list/map so a bare `order()` with no comparator DECLINES rather than inventing a total
-  order (a Java `Map` is not `Comparable`) — the honest boundary. The ordered-dedup aggregate CONDITIONALLY fences
+  absent for scalar/record/list/map so a bare `order()` DECLINES rather than inventing an order — TinkerPop 4's
+  Orderability (a recursive total order over all types) is a tracked SEMANTICS feature we do not yet encode, NOT
+  "no comparator" (see the §10 note). The ordered-dedup aggregate CONDITIONALLY fences
   a computed payload (`AS MATERIALIZED`) so a scalar `label()`/`values(k)` subquery is not re-evaluated in both
   `GROUP BY` and `SELECT`; a physical `id` groups directly, byte-unchanged.
 - ✅ **Fan-out / child seam.** `flatMap`/`local` fan-out rejoin (`flatMapRejoin`); per-origin SLICE
@@ -497,10 +498,15 @@ UNEVALUABLE`.
   (a per-arm gate, not the shared-input one); an ALIAS through a collapsed arm (the barrier drops the label);
   a NESTED branch inside a sliced arm (a key STACK).
 - ✅ **`RowShape` — CLOSED.** All six streams (element/property/scalar/record/list/map) route `order`/`dedup`/slice
-  through the one `rowOp` engine (see the Landed-substrate `RowShape` line). Scalar/record/list/map dedup, and the
-  element alias/sack first-occurrence dedup, all lifted; bare `order()` over list/map declines (no comparator).
-  LEFT as leaf follow-ons, not engine gaps: a LEXICOGRAPHIC `natural` for a bare list `order()` (a recursive
-  element-wise compare SQL cannot state), and a `map`-host `by()` projection for `order().by(Column.values)`.
+  through the one `rowOp` engine (see the Landed-substrate `RowShape` line). Scalar/record/list/map dedup, the
+  element alias/sack first-occurrence dedup, and `order().by(Column.values)`/`by(Column.keys)` over an unfolded
+  Map.Entry stream (`byExpr`'s `column` arm reads the entry side under the compare wrapper its `$.t` names) all
+  lifted. LEFT — NOT engine gaps but a genuine SEMANTICS feature: bare `order()` over a list/map/mixed stream needs
+  TinkerPop 4's **Orderability** (`GremlinValueComparator` — a total order over ALL types: a cross-type precedence
+  ladder plus a RECURSIVE element-wise compare for collections). SQL has no such comparator; a sortable-key
+  encoding would be the build, tracked as its own item. The `order()`-declines are that, not "no comparator" — a
+  Java `Map`/`List` IS orderable in v4; we just don't yet encode it. (`order(Scope.local).by(Column.values)` —
+  sorting one map's entries in place — is the other open leaf, a `mapRange`-family local op, not the row engine.)
 - 🚧 **Property-stream vocabulary:** the `by()` vocabulary (`T.key`/`T.value` absent from `TOKENS`), the
   `id()`/`label()` retypes off a property row, `where(<body>)` over a property host, and META-properties
   (`properties().properties()`). `project`/`select` over a property needs FRAMER work — the record→map wire

@@ -383,6 +383,7 @@ ran	4	4	82d18f98ff56b3f1	4129310d9d87fc7a	g.V().hasLabel("person").dropLabel("pe
 ran	4	4	82d18f98ff56b3f1	4129310d9d87fc7a	g.V().hasLabel("person").dropLabels()
 ran	1	1	89c0e2f0a6338e24	b30a658f2cdad2a0	g.V().hasLabel("person").fold().order(Scope.local).by("age")
 ran	4	4	13076aec768f355a	1bf730164e4c2a30	g.V().hasLabel("person").format("%{_} %{_} %{_}").by(constant("hello")).by(values("name"))
+ran	3	3	c17ebb8d0a304a12	31289f4dc8151564	g.V().hasLabel("person").group().by("name").by(__.outE().values("weight").sum()).unfold().order().by(Column.values, Order.desc)
 ran	2	2	4325e972567950d6	113d4446818ed6ef	g.V().hasLabel("person").has("age", P.not(P.lte(10).and(P.not(P.between(11, 20)))).and(P.lt(29).or(P.eq(35)))).values("name")
 ran	1	1	03ebbcfcb9a5a627	bd5293ba4b4a6fa1	g.V().hasLabel("person").has("name", "marko").addLabel("employee").labels().fold()
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().hasLabel("person").hasLabel("software")

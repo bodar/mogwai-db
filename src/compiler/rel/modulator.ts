@@ -208,7 +208,21 @@ export function byExpr(
 ): Expr | null {
   const { key } = modulation;
 
-  if (key.kind === 'column') return null;
+  if (key.kind === 'column') {
+    // `by(Column.keys)`/`by(Column.values)` over a Map.Entry host — the entry's key or value
+    // (`Column.getKey`/`getValue`, `vendor/tinkerpop/gremlin-core/.../structure/Column.java`). Only an
+    // entry-shaped host (a scalar host carrying `entry`) has them; anything else declines. The side rides
+    // as a `{t,v}` node, so the comparable value is `$.v` under the compare wrapper its own `$.t` names —
+    // the same unwrap `sideOf` does for `select(Column.values)`, so `order().by(Column.values)` and
+    // `select(Column.values)` cannot disagree about the value. A list/map value side has no single
+    // comparable value and declines.
+    if (host.kind !== 'scalar' || !host.entry) return null;
+    const node = key.column === 'keys' ? host.entry.key : host.entry.val;
+    const of = key.column === 'keys' ? host.entry.keyOf : host.entry.valOf;
+    if (of.kind !== 'scalar') return null;
+    const value = jsonField(node, 'v');
+    return ordering ? storedCompareOn(jsonField(node, 't'))(value) : value;
+  }
 
   if (key.kind === 'child') {
     if (!child) return null;

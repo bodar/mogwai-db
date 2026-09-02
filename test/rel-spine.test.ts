@@ -937,13 +937,17 @@ describe('the RelIR spine', () => {
     // `by(T.label)` and a `label()` CHILD body have always worked. The element tail had simply never
     // been handed that expression — the "cannot be HANDED" vs "cannot EXPRESS" distinction
     // applied to a step. It was the last thing blocking a nested label on BOTH write hosts.
+    // ONE store for the whole (read-only) test: seeding a fresh graph per traversal was ~15 store
+    // builds in one `test()`, which put it on the edge of the per-test timeout; reuse is faster (a warm
+    // statement cache) and, for the determinism check below, MORE correct — two runs over the same data.
+    const store = seededStore();
     for (const gremlin of [
       'g.V().label()', 'g.E().label()', 'g.V().label().dedup()',
       'g.V().has("name","marko").label()', 'g.V().label().count()',
       'g.V().hasLabel("person").label().dedup()', 'g.V().label().order()',
     ]) {
       expect(read(gremlin).kind, gremlin).toBe('read');
-      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
+      expect(await decodeAll(exec(store).buffers(gremlin, {}, {})), gremlin).toBeDefined();
     }
 
     // The WRITE host is the payoff and is a program, not a read — this is the shape that was blocked
@@ -957,7 +961,7 @@ describe('the RelIR spine', () => {
     for (const gremlin of ['g.V().id()', 'g.E().id()', 'g.V().id().count()', 'g.V().hasLabel("person").id()']) {
       expect(read(gremlin).kind, gremlin).toBe('read');
       const via = () =>
-        decodeAll(exec(seededStore()).buffers(gremlin, {}, {}));
+        decodeAll(exec(store).buffers(gremlin, {}, {}));
       expect(sorted(await via()), gremlin).toEqual(sorted(await via()));
     }
   });

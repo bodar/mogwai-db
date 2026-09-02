@@ -2398,7 +2398,7 @@ function mapEntryTail(
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
-    if ((step.modulators?.length && step.name !== 'group' && step.name !== 'groupCount') || step.optionArms) return null;
+    if ((step.modulators?.length && !BY_READERS.has(step.name)) || step.optionArms) return null;
 
     if (step.name === 'count' && !isLocalScope(step)) {
       if (args.length) return null;
@@ -2427,6 +2427,12 @@ function mapEntryTail(
       return scalarTail(side, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
     }
 
+    // GLOBAL order/dedup/slice over the STREAM of Map.Entry traversers route through `rowOp`. An entry is
+    // a scalar-shaped host (`entryHost`), so `scalarRowShape` carries it; `order().by(Column.values)` reads
+    // the value side off the entry (`byExpr`'s `column` arm), `order().by(Column.keys)` the key. A bare
+    // `order()` declines (no comparator), a local-scope op declines back to the slice below.
+    const row = rowOp(step, rel, scalarRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh);
+    if (row) { rel = row; continue; }
     const sliced = sliceOp(step, rel, false, fresh);
     if (!sliced) return null;
     rel = sliced;
