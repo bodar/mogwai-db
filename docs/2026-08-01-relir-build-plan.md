@@ -626,6 +626,12 @@ select alias needs a `Materialize` fence — the FIRST reader only. A window may
 column; the ASSEMBLER closes the block. Relation ids are minted PER LOWERING (a module-global counter
 makes two compiles emit different SQL) and a replicated subplan carries FRESH ids. A `Project` over a
 whole-relation `Aggregate` that reads none of its outputs ERASES the aggregation — the emitter blocks
-it (Calcite's `fieldsUsed.isEmpty()`).
+it (Calcite's `fieldsUsed.isEmpty()`). Two shared authorities keep a repeated SQL shape from drifting
+between its sites (§6·6's rule applied to the emitter, not just the fold): `rowNumberWindow` (`build.ts`)
+is the ONE `ROW_NUMBER() OVER (…)` mint — every per-origin slice, keyed dedup, argmax, `sample`,
+`renumber` and write ordinal extend the input through it, keeping only their own filter/reprojection;
+`firstRootedValue` (`build.ts`) is the ONE "a rooted operand's FIRST value" (`ORDER BY encounter LIMIT
+1`), shared by `nestedFirstValue` and the list-member-predicate seam — a hand-rolled copy of the latter
+had drifted to a scan-order value.
 
 **Consulting the reference is the root `CLAUDE.md`'s rule, not repeated here.**
