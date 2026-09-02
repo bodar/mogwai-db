@@ -236,12 +236,10 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
  * (`src == tgt == fromV`) yields the vertex itself, as it must. `fromV` is spent here and dropped;
  * every other channel passes through.
  */
-export function otherVertex(rel: Rel, elem: Elem, graph: GraphSource, fresh: Minter): { rel: Rel; elem: Elem } | null {
+export function otherVertex(rel: Rel, elem: Elem, graph: GraphSource, fresh: Minter, withLabels = false): { rel: Rel; elem: Elem } | null {
   if (elem !== 'edge') return null;
   const fromV = fromVOf(rel.channels);
   if (!fromV) return null;
-  // A path position would need appending here; `otherV()` under `path()` is a separate combination.
-  if (pathCarried(rel)) return null;
   const e = graph.adjacencyEdges(fresh);
   // The right side's `id` is declared `eid` — a Join's output names are POSITIONAL and must be unique.
   const joined = make.join({
@@ -255,13 +253,13 @@ export function otherVertex(rel: Rel, elem: Elem, graph: GraphSource, fresh: Min
     whens: [[eq(col(joined.id, 'src'), col(joined.id, fromV.col)), col(joined.id, 'tgt')]],
     else: col(joined.id, 'src'),
   };
-  return {
-    elem: 'vertex',
-    rel: make.project({
-      id: fresh('ov'), input: joined, channels: outChannels, type: typeOf(...elementCols(outChannels)),
-      exprs: [['id', reached], ...outChannels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
-    }),
-  };
+  const projected = make.project({
+    id: fresh('ov'), input: joined, channels: outChannels, type: typeOf(...elementCols(outChannels)),
+    exprs: [['id', reached], ...outChannels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
+  });
+  // Under `path()` the reached vertex is the next path position — `[startV, edge, otherV]`. The entering
+  // edge hop already appended the edge; `otherV` appends this vertex, exactly as a movement hop does.
+  return { elem: 'vertex', rel: pathCarried(projected) ? extendPath(projected, { kind: 'element', elem: 'vertex', id: col(projected.id, 'id') }, fresh, withLabels) : projected };
 }
 
 /**

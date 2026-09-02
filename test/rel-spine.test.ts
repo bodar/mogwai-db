@@ -96,6 +96,8 @@ const COVERED = [
   // uniformly, so the peer merge carries it as a shared rigid channel (`mergeArms` compares arms to
   // each other). An arm of another shape makes them disagree and the merge declines (see DECLINED).
   'g.V().coalesce(__.outE("knows"), __.outE("created")).otherV()', 'g.V().union(__.outE(), __.inE()).otherV().values("name")',
+  // Under `path()` the reached vertex is the next path position — `[startV, edge, otherV]`.
+  'g.V().outE().otherV().path()', 'g.V().coalesce(__.outE("knows"), __.outE("created")).otherV().path().by("name").by(T.label)',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",

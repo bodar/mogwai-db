@@ -3721,7 +3721,7 @@ function elementTail(
     // (it reads a carried channel, not the adjacency table by direction), so it is dispatched here.
     if (step.name === 'otherV') {
       if (step.args.length || step.modulators?.length || step.optionArms) return null;
-      const other = otherVertex(rel, elem, ctx.source, fresh);
+      const other = otherVertex(rel, elem, ctx.source, fresh, ctx.demandsPathLabels);
       if (!other) return null;
       rel = other.rel;
       elem = other.elem;

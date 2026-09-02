@@ -1,5 +1,5 @@
 {
-  "passing": 1806,
+  "passing": 1807,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -433,6 +433,7 @@
     "g_V_chooseXout_countX_optionX2L_nameX_optionX3L_ageX_optionXnone_discardX",
     "g_V_chooseXvaluesXageX_isXlteX30XX_localXout_order_byXnameX_limitX1XX_localXout_order_byXnameX_limitX2XXX",
     "g_V_chooseXvaluesXageX_isXlteX30XX_out_order_byXnameX_limitX1X_out_order_byXnameX_limitX2XX",
+    "g_V_coalesceXoutEXknowsX_outEXcreatedXX_otherV_path_byXnameX_byXlabelX",
     "g_V_coalesceXoutXfooX_outXbarXX",
     "g_V_coalesceXoutXlikesX_outXknowsX_inXcreatedXX_groupCount_byXnameX",
     "g_V_connectedComponent_hasXcomponentX",
@@ -1953,7 +1954,6 @@
     "g_V_chooseXoutE_count_isX0X__asXaX__asXbXX_chooseXselectXaX__selectXaX__selectXbXX",
     "g_V_classic_recommendation",
     "g_V_classic_recommendation_ranked",
-    "g_V_coalesceXoutEXknowsX_outEXcreatedXX_otherV_path_byXnameX_byXlabelX",
     "g_V_coworker",
     "g_V_coworker_with_midV",
     "g_V_discard_discard",
