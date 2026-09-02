@@ -38,7 +38,7 @@ import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, sel
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
-import { REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
@@ -1750,12 +1750,6 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
   if (!args.length) return null;
-  // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
-  // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Flattening
-  // it — the historical representation, held until a scalar stream gains a per-row shape discriminant —
-  // is an approximation, and reproducing an approximation is not the same as reproducing an answer, so
-  // this declines instead.
-  if (args.some((arg) => Array.isArray(arg))) return null;
 
   // THE LEADING COERCION PREFIX IS FOLDED AT COMPILE TIME.
   // `asNumber`/`asBool`/`asDate` raise TinkerPop's exact parse and overflow messages, which SQL
@@ -1776,6 +1770,15 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   // `ValueParseError` is the traversal's answer and travels on.
   try { folded = foldConstantCoercions(steps as IRStep[], vals); }
   catch (error) { if (error instanceof CoercionDeferral) return null; throw error; }
+
+  // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
+  // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Flattening
+  // it — the historical representation, held until a scalar stream gains a per-row shape discriminant —
+  // is an approximation, and reproducing an approximation is not the same as reproducing an answer, so
+  // this declines. (A single-list inject took the `injectList` arm before reaching here; a mixed inject
+  // is what survives to this point.) The check is POST-fold so a leading cast that RAISES on a list
+  // member — the traversal's ANSWER — reaches its throw first (`foldConstantCoercions` above).
+  if (vals.some((v) => Array.isArray(v))) return null;
 
   // The type each row inlines under: a coercion fold (`asNumber`/`asBool`/…) has already retyped the
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
@@ -3325,17 +3328,26 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   }
 
   if (first.name === 'inject') {
+    // A scalar CAST directly on a COLLECTION traverser RAISES, and that answer beats the collection
+    // shape. `asNumber`/`asBool`/`asDate` are `ScalarMapStep`s over the whole traverser, and a list or
+    // map is parseable as none of number/bool/date — `AsNumberStep.map` throws *"Can't parse type
+    // ArrayList as number."*. So `inject([…]).asBool()` is not a list to slice; it is a compile-time
+    // fold that raises (SQL cannot). Skipping the map/list arms routes it to `injectSource`, whose fold
+    // is the one authority for that message. Gated on the cast at POSITION 1: an `unfold()`/`local`
+    // between has already decomposed the collection, so those keep the collection-shape lowering.
+    const castsCollection = steps[1] != null && CONSTANT_FOLDED.has(steps[1]!.name)
+      && first.args.some((a) => Array.isArray(a.value) || a.value instanceof Map);
     // A MAP literal seeds a MAP traverser, a COLLECTION literal a LIST one, an ordinary value a SCALAR
     // one — three shapes, and the ARGUMENT decides which. A `Map` is neither an array nor a scalar, so
     // the arms are disjoint and their order is only which decline is spelled first.
-    const mapped = injectMap(first, ordered, fresh);
+    const mapped = castsCollection ? null : injectMap(first, ordered, fresh);
     if (mapped) {
       const withSack = sacked(mapped.rel);
       return withSack && continueAs(withSack, mapped.framing, steps, 1, false, ctx, fresh, NO_ALIASES);
     }
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
-    const listed = injectList(first, ordered, fresh);
+    const listed = castsCollection ? null : injectList(first, ordered, fresh);
     if (listed) {
       const withSack = sacked(listed.rel);
       return withSack && listTail(withSack, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);

@@ -178,15 +178,19 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
   },
 };
 
-/** The transforms whose CONSTANT form raises a TinkerPop parse/overflow error SQL cannot express, so
- *  over a compile-time literal they are a fold and not this module's cast. See `transformExpr`.
+/** The cast subfamily — `ScalarMapStep`s whose parse/overflow errors SQL cannot raise, so over a
+ *  compile-time literal they are a fold and not this module's cast (`transformExpr`). Each also raises
+ *  over a NON-SCALAR traverser (a list/map can be parsed as neither number, bool nor date —
+ *  `AsNumberStep.map` throws *"Can't parse type ArrayList as number."*), so a collection-literal inject
+ *  fed straight to one routes through the same fold rather than the collection-shape source (`lower.ts`
+ *  inject dispatch).
  *
  *  `dateAdd`/`dateDiff` are deliberately NOT here, and the difference
  *  is the reason: their fold is an OPTIMIZATION (one bind instead of a literal plus an offset), not a
  *  semantic requirement — the arithmetic answers identically, verified row-for-row. Constant folding is
  *  a `Pass` over `Values` + `Lit` (§4), and declining because that pass is unwritten is exactly the
  *  reasoning that makes coverage stall. Measured: including them costs 7 corpus traversals. */
-const CONSTANT_FOLDED = new Set(['asNumber', 'asDate', 'asBool']);
+export const CONSTANT_FOLDED: ReadonlySet<string> = new Set(['asNumber', 'asDate', 'asBool']);
 
 /** Every name in this family, whether or not it is covered — the set a fold checks membership in
  *  BEFORE asking for a lowering, so an unlowerable member ends the transform run rather than falling

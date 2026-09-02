@@ -56,7 +56,10 @@ export function asBoolConst(v: any): boolean {
     if (s === 'true') return true;
     if (s === 'false') return false;
   }
-  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : v} as Boolean.`);
+  // AsBoolStep renders a failing STRING's value (the corpus pins `Can't parse hello as Boolean.`) but a
+  // non-scalar's class name (`AsBoolStep.java:53` — `getClass().getName()`); paraphrased to the simple
+  // name, so a list reads `ArrayList` rather than its JS `toString()`.
+  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : typeof v === 'object' ? javaTypeName(v) : v} as Boolean.`);
 }
 
 // asNumber(GType.X): GType token → framing tag + integer range (for overflow) / real
@@ -82,6 +85,16 @@ const NUMERIC_GTYPES: Record<string, { as: ValueType; disp: string; int: boolean
 };
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 
+/** The Java class simple-name a `Can't parse type X …` message reports —
+ *  `object.getClass().getSimpleName()` (`AsNumberStep.java:71`). A Gremlin list literal is a Java
+ *  `ArrayList` and a map a `LinkedHashMap`; a boxed scalar's simple name already matches its
+ *  capitalized JS `typeof` (`Boolean`). Not derivable from the JS value's `typeof` (an array and a
+ *  map are both `object`), so named here rather than re-guessed. */
+const javaTypeName = (v: unknown): string =>
+  Array.isArray(v) ? 'ArrayList'
+  : v instanceof Map || (v !== null && typeof v === 'object') ? 'LinkedHashMap'
+  : cap(typeof v);
+
 /** asNumber's GType arg → its numeric spec. `null` = bare asNumber() (no arg — needs
  *  the input subtype, which the frontend flattens away, so it defers). A non-numeric
  *  token (e.g. GType.VERTEX) raises TinkerPop's error. */
@@ -103,7 +116,7 @@ export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numeri
   // Number('') / Number('  ') are 0, not NaN — reject blank strings explicitly so they
   // raise the parse error like any other non-numeric string rather than becoming 0.
   else if (typeof v === 'string') { n = v.trim() === '' ? NaN : Number(v); if (Number.isNaN(n)) throw new ValueParseError(`Can't parse string '${v}' as number.`); }
-  else throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+  else throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : javaTypeName(v)} as number.`);
   if (spec.int) {
     n = Math.trunc(n);
     if (spec.min !== undefined && (n < spec.min || n > spec.max!))
@@ -140,7 +153,7 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
     // like AsNumberStep — NOT by whether the value is whole ("5.0" is double, not int).
     return { val: Number(t), as: /[.eE]/.test(t) ? 'double' : 'int' };
   }
-  throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+  throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : javaTypeName(v)} as number.`);
 }
 
 // ---------- date casts (asDate / dateAdd / dateDiff) ----------
@@ -176,7 +189,9 @@ export function asDateConst(v: any, subtype: string | null): number {
     if (Number.isNaN(ms)) throw new ValueParseError(`Can't parse '${v}' as an ISO-8601 Date.`);
     return ms;
   }
-  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : cap(typeof v)} as a Date.`);
+  // AsDateStep renders a non-scalar's class name (`AsDateStep.java:75` — `getClass().getName()`);
+  // paraphrased to the simple name so a list reads `ArrayList` rather than `Object`.
+  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : javaTypeName(v)} as a Date.`);
 }
 
 /** dateDiff's other operand in millis (result = self − other). A datetime literal
