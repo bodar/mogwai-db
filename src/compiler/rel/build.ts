@@ -6,6 +6,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
+import type { RootedRead } from './child.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -628,6 +629,39 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
     exprs: [['v', col(one.id, 'v')]],
   });
   return { kind: 'scalar', plan: only };
+}
+
+/**
+ * THE FIRST VALUE of a ROOTED scalar body (`__.V(2).values(k).order()`), as a correlated scalar
+ * subquery — `P.resolve(traverser)` takes the operand's FIRST result (`vendor/tinkerpop/gremlin-core/
+ * src/main/java/org/apache/tinkerpop/gremlin/process/traversal/P.java:328-373`, `tv.next()`), so where
+ * the operand ends in `order()` the first is the ORDERED first. The read carries that emission order on
+ * its `encounter` channel, but projecting only `v` lets `prune` drop the channel and with it the order,
+ * so a bare `v` subquery takes a SCAN-order value. Hence ORDER BY the encounter and LIMIT 1; an
+ * unordered operand has no encounter channel and yields one arbitrary-but-single row.
+ *
+ * Declines a body with EFFECTS (a mutation inside a read operand — no scalar arm) or a non-scalar
+ * result. ONE authority for the two seams that resolve a rooted operand to its first value — the
+ * predicate-operand seam (`nestedFirstValue`, `lower/reduction.ts`) and the list-member-predicate seam
+ * (`list.ts`'s rooted `resolveScalar`) — which had drifted: the list copy projected `v` with no
+ * order/limit, so `none(P.eq(__.V(x).values(k).order()))` took a scan-order value, the exact
+ * non-determinism this rule exists to prevent.
+ */
+export function firstRootedValue(read: RootedRead, fresh: Minter): Expr | null {
+  if (read.effects?.length || read.framing.kind !== 'scalar') return null;
+  const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
+  const ordered = encounter
+    ? make.limit({
+      id: fresh('rfl'),
+      input: make.sort({ id: fresh('rfs'), input: read.rel, channels: read.rel.channels, type: read.rel.type,
+        terms: [{ expr: col(read.rel.id, encounter.col), dir: 'asc' }] }),
+      channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
+    })
+    : read.rel;
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('rfv'), input: ordered, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', col(ordered.id, 'v')]],
+  }) };
 }
 
 /**

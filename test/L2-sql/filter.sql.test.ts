@@ -226,4 +226,18 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(b('g.V().has("age", P.between(xx1,xx2))', { xx1: 29, xx2: 35 })).toEqual([29, 35]); // each bound once
   });
 
+  // A ROOTED nested operand ending in `order()` resolves to its ORDERED first, never a scan-order value.
+  // `P.resolve(traverser)` takes `tv.next()`, so a barrier-ordered operand's first is the sorted first —
+  // the operand's emission order rides its `encounter` channel and the pick is `ORDER BY encounter LIMIT
+  // 1`. The list-member-predicate seam once hand-rolled a copy that projected the value with NO
+  // order/limit (a scan-order value); both seams now share `firstRootedValue`, so a regression here
+  // would be a re-inlined copy. (No corpus scenario exercises this ceiling case — hence the SQL pin.)
+  test('a rooted ORDERED operand takes its ordered first, in both operand seams', () => {
+    const orderedFirst = /ORDER BY[^)]*\bencounter\b[^)]*ASC LIMIT 1/i;
+    // The list-member-predicate seam (`list.ts` resolveScalar → firstRootedValue) — the one that drifted.
+    expect(read('g.inject([1,2,3]).none(P.eq(__.V().values("age").order()))').sql).toMatch(orderedFirst);
+    // The predicate-operand seam (`nestedFirstValue` → firstRootedValue) — behaviour-preserved.
+    expect(read('g.V().has("name", P.gt(__.V().values("age").order()))').sql).toMatch(orderedFirst);
+  });
+
 });

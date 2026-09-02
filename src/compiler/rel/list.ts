@@ -10,7 +10,7 @@ import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamN
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstRootedValue, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
@@ -584,17 +584,15 @@ export function listMemberOp(
     const members = membersOf(list, fresh);
     // A member predicate operand that is a ROOTED nested traversal (`none(P.eq(__.V(9999).values(k)))`)
     // resolves to its FIRST value — the operand form the seam owns, here via the child seam's `rooted`
-    // read (a member list has no element host, so only the rooted arm applies). Mirrors
-    // `nestedFirstValue`'s rooted branch across the module boundary (`list.ts` cannot reach `lower.ts`).
+    // read (a member list has no element host, so only the rooted arm applies). `firstRootedValue`
+    // (`build.ts`) is the ONE authority for that first-value rule, shared with `nestedFirstValue`; a
+    // hand-rolled copy here had drifted, projecting `v` with no `ORDER BY encounter`/`LIMIT 1` so an
+    // ordered operand (`none(P.eq(__.V(x).values(k).order()))`) took a scan-order value.
     const resolveScalar = child ? (nested: unknown): Expr | null => {
       const steps = child.body(isNested(nested) ? nested.nested : nested, 'rooted');
       if (!steps?.length) return null;
       const read = child.rooted(steps);
-      if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
-      return { kind: 'scalar', plan: make.project({
-        id: fresh('lmv'), input: read.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-        exprs: [['v', col(read.rel.id, 'v')]],
-      }) };
+      return read ? firstRootedValue(read, fresh) : null;
     } : undefined;
     const pred = memberPredicate(memberPayload(of, members), args[0], resolveScalar);
     if (!pred) return null;

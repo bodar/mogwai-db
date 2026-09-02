@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, jsonOf, meta, payloadCols, propertyKeyArgs, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonOf, meta, payloadCols, propertyKeyArgs, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -593,28 +593,11 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
     && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') return ctx.entryValue;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh);
-    if (!read || read.effects?.length || read.framing.kind !== 'scalar') return null;
-    // `P.resolve(traverser)` takes the operand's FIRST result (`vendor/tinkerpop/.../P.java:328-373`,
-    // `tv.next()`), so where the operand ends in `order()` the first is the ORDERED first. The read
-    // carries the operand's own emission order on its `encounter` channel — but projecting only `v` here
-    // let `prune` drop the channel and with it the order, so a bare scalar subquery took a SCAN-order
-    // value (`has("name", __.V(x).out().values("name").order())` picked an arbitrary neighbour, not the
-    // sorted first — non-deterministic, and the defect that read as a flaky L3 regression). So ORDER BY
-    // the encounter and LIMIT 1: the pick is the operand's true first. Unordered operand → no encounter
-    // channel, one arbitrary-but-single row exactly as before.
-    const enc = encounterOf(read.rel.channels);
-    const ordered = enc
-      ? make.limit({
-        id: fresh('nfl'),
-        input: make.sort({ id: fresh('nfs'), input: read.rel, channels: read.rel.channels, type: read.rel.type,
-          terms: [{ expr: col(read.rel.id, enc.col), dir: 'asc' }] }),
-        channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
-      })
-      : read.rel;
-    return { kind: 'scalar', plan: make.project({
-      id: fresh('nfv'), input: ordered, channels: [], type: typeOf(meta('v', 'any', true)),
-      exprs: [['v', col(ordered.id, 'v')]],
-    }) };
+    if (!read) return null;
+    // `P.resolve(traverser)` takes the operand's FIRST result (ORDER BY encounter, LIMIT 1); the whole
+    // rule — and the decline for an effectful or non-scalar body — is `firstRootedValue` (`build.ts`),
+    // shared with `list.ts`'s member-predicate operand so the two cannot drift.
+    return firstRootedValue(read, fresh);
   }
   if (!host) return null;
   // The alias scope rides on the host's `row` so a `select(<label>)`-led operand can RE-ROOT to the
