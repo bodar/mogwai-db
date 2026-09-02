@@ -3672,14 +3672,16 @@ function detachedTail(
   return continueAs(seed, { kind: 'elements', elem }, steps, from, bulked, ctx, fresh, NO_ALIASES);
 }
 
-/** The steps between an edge hop and an `otherV()` that leave the edge and its channels UNCHANGED — the
- *  filter family, `as`, and `identity`. A `fromV` channel is minted at the edge hop only if scanning
- *  forward through these reaches an `otherV`, so a non-transparent step in between (a movement, `dedup`,
- *  a barrier, a branch) stops the scan and the edge stays plain — `dedup().otherV()` then declines
- *  rather than a live `fromV` corrupting the `dedup` (group policy `undefined`). */
+/** The steps between an edge hop and an `otherV()` that leave the EDGE and its `fromV` channel intact —
+ *  the filter family, `as`, `identity`, and the order/slice family (a sort or window carries every
+ *  channel through). A `fromV` channel is minted at the edge hop only if scanning forward through these
+ *  reaches an `otherV`, so a non-transparent step in between stops the scan and the edge stays plain.
+ *  `dedup` is DELIBERATELY absent: it GROUPS by id (group policy `undefined` for `fromV`), so a live
+ *  `fromV` would either mis-collapse or decline — `bothE().dedup().otherV()` fails closed instead, its
+ *  entering vertex genuinely ambiguous once convergent edges merge. */
 const FROM_V_TRANSPARENT: ReadonlySet<string> = new Set([
   'hasLabel', 'has', 'hasId', 'hasKey', 'hasValue', 'where', 'not', 'filter', 'and', 'or',
-  'simplePath', 'cyclicPath', 'identity', 'as',
+  'simplePath', 'cyclicPath', 'identity', 'as', 'order', 'limit', 'range', 'skip', 'tail',
 ]);
 
 /** Does the edge stream produced at `at` flow into an `otherV()` — through `FROM_V_TRANSPARENT` steps

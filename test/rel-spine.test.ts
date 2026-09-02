@@ -87,6 +87,8 @@ const COVERED = [
   // through an intervening edge filter, chained after another edge hop, and retyped past the reached vertex.
   'g.V().outE().otherV()', 'g.V().bothE().otherV()', "g.V().bothE().has('weight',P.lt(1.0)).otherV()",
   'g.V().outE().inV().bothE().otherV()', "g.V().bothE().otherV().values('name')", 'g.V().bothE().otherV().count()',
+  // A sort/slice between the edge and `otherV()` is fromV-transparent — it carries the entering vertex through.
+  'g.V().bothE().limit(1).otherV()', 'g.V().bothE().order().by("weight").otherV()',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
