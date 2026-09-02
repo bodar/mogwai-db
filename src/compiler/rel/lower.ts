@@ -3819,7 +3819,11 @@ function elementTail(
     }
     if (BRANCH_HOSTS.has(step.name)) {
       const framing = { kind: 'elements', elem } as const;
-      const merged = branchArms(step, rel, framing, bulked, ctx, fresh, labels);
+      // An `otherV()` reading the merged edge stream (`coalesce(outE,outE).otherV()`): every arm's tail
+      // edge mints `fromV`, and the peer merge carries it because all arms mint it uniformly (`mergeArms`).
+      const feeds = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
+      const hostCtx = feeds === (ctx.needsFromV ?? false) ? ctx : { ...ctx, needsFromV: feeds };
+      const merged = branchArms(step, rel, framing, bulked, hostCtx, fresh, labels);
       if (!merged) return null;
       // `bulked` after a merge is the value that ENTERED it, and it no longer needs the `|| ctx.collapse`
       // conservatism it used to carry. That existed because "an arm may have collapsed and the arm

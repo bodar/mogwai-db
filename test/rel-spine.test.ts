@@ -92,6 +92,10 @@ const COVERED = [
   // A `local`/`flatMap` body producing edges, consumed by an outer `otherV()` — the demand rides into the
   // body (`needsFromV`) so its tail edge hop mints the entering vertex the rejoin carries out.
   'g.V().local(__.bothE("created").limit(1)).otherV()', 'g.V().flatMap(__.bothE()).otherV().values("name")',
+  // A BRANCH-MERGE arm producing edges, consumed by an outer `otherV()` — every arm mints `fromV`
+  // uniformly, so the peer merge carries it as a shared rigid channel (`mergeArms` compares arms to
+  // each other). An arm of another shape makes them disagree and the merge declines (see DECLINED).
+  'g.V().coalesce(__.outE("knows"), __.outE("created")).otherV()', 'g.V().union(__.outE(), __.inE()).otherV().values("name")',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
@@ -552,6 +556,8 @@ const DECLINED = [
   // `fromV` channel the edge hop mints (`movement`/`otherVertex`, the nearest-previous-vertex
   // `EdgeOtherVertexStep` reads) and reads the edge's other endpoint. See COVERED.
   "g.E().otherV()",                   // no entering vertex to read — fails closed (TinkerPop throws)
+  "g.V().optional(__.outE()).otherV()", // arms disagree: an edge arm mints fromV, the identity arm does not
+  "g.V().union(__.outE(), __.out()).otherV()", // a MIXED edge/vertex fan-out — otherV over it is ill-typed
   // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
   // refusal (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
   // RelIR now expresses that as the `Filter(false)` §3.3 names.

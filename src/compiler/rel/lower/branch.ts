@@ -18,7 +18,7 @@ import type { AliasMap } from '../../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
-import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inBody, type ChainCtx, type Tail } from './chain.ts';
+import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inArmBody, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
@@ -202,7 +202,7 @@ export function unionArms(
   // label or a SLICE-demanded one carry merge questions the multi-arm path owns — all three decline here.
   if (args.length === 1) {
     if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
-    const only = continueAs(input, framing, bodies[0]!, 0, bulked, inBody(ctx), fresh, labels);
+    const only = continueAs(input, framing, bodies[0]!, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!only || only.aliases.size !== labels.size) return null;
     return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing }, ctx, fresh);
   }
@@ -217,7 +217,7 @@ export function unionArms(
   const source = slice ? augmentParent(input, fresh) : input;
   const arms: Tail[] = [];
   for (const body of bodies) {
-    const arm = continueAs(source, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
+    const arm = continueAs(source, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!arm) return null;
     arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
@@ -444,20 +444,23 @@ export function mergeArms(
   if (rest.some((arm) => !sameColumns(first.rel.type.cols, arm.rel.type.cols))) return null;
   // An arm that bound a label would have to be remapped onto a canonical column (see above).
   if (arms.some((arm) => arm.aliases.size !== labels.size)) return null;
-  // AN ARM THAT MINTS RIGID STATE DECLINES, and this is the check the channel core would otherwise
+  // ARMS THAT DISAGREE ON RIGID STATE DECLINE, and this is the check the channel core would otherwise
   // make by THROWING — which is right inside the core and wrong here, where the contract is `null`.
-  // The reachable case is an arm-local `order()`: it mints an emission order INSIDE the arm, so two
-  // arms arrive independently numbered from 1 and the merged stream has two positions claiming to be
-  // one. `rigidChannels` is why the peer merge refuses it rather than picking a winner, and asking
-  // here is what turns that refusal into a deferral (found by `rel-sweep` on
-  // `union(out(…).order().by(k).limit(2), …)`).
-  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
+  // The comparison is arm-TO-ARM, not arm-to-`base`: a channel EVERY arm mints uniformly (the `fromV`
+  // an edge hop retains under an outer `otherV()`) is consistent — each row is a distinct traverser, so
+  // a `UNION ALL` keeps its own value — and the merge carries it. What still declines is a PARTIAL mint:
+  // an arm-local `order()` numbers one arm's emission from 1 while its sibling has no such column, so
+  // the merged stream would have two positions claiming to be one (`rel-sweep`,
+  // `union(out(…).order().by(k).limit(2), …)`). The merge base becomes the arms' common set, so an added
+  // rigid channel rides out; for arms that agree with `base` (every case before `otherV`) it is `base`.
+  const merged = arms[0]!.rel.channels;
+  if (arms.some((arm) => !sameChannels(merged, arm.rel.channels))) return null;
 
-  // The merged list, from the core rather than assembled here. Today the arms are required to agree,
-  // so the peer merge has nothing to reconcile and this is a derivation rather than a reconciliation
-  // — it earns its keep when the alias half lands, since an alias is the one FORKABLE role and a
-  // label bound in one arm is exactly what `union` merge policy exists for.
-  const channels = mergeChannels(base, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
+  // The merged list, from the core rather than assembled here. Rooted at the arms' common channels so a
+  // uniformly-minted rigid channel is emitted; when the arms agree with `base` this is `base` exactly.
+  // It earns its keep for the FORKABLE alias role too — a label bound in one arm is what `union` merge
+  // policy exists for.
+  const channels = mergeChannels(merged, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
   return {
     rel: make.union({
       id: fresh('un'), inputs: arms.map((arm) => arm.rel), all: true,
@@ -635,7 +638,7 @@ export function chooseOptions(
   for (const { arm, ordinal } of gated) {
     const body = seam.body(arm.nested, 'child');
     if (!body?.length) return null;
-    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, inBody(ctx), fresh, labels);
+    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!lowered) return null;
     built.push(lowered);
   }
@@ -735,7 +738,7 @@ export function coalesceMerge(
     // (a `FlatMapStep`, per-traverser) — routed through the child seam, one row per host carrying every
     // channel; a movement/transform arm returns null and stays the ordinary `continueAs`. See `reductionArm`.
     const arm = reductionArm(domain, framing, body!, ctx, fresh, labels, bulked)
-      ?? continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
+      ?? continueAs(domain, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!arm) return null;
     // The slice path keeps each arm's within-arm order for `mintTraverserMajor` to consume; every
     // other path drops it, as a fresh unordered stream carries none.
@@ -809,9 +812,9 @@ export function chooseArms(
     pred: negated ? notProduced(pred) : pred,
   });
 
-  const armThen = continueAs(guarded(false), framing, then, 0, bulked, inBody(ctx), fresh, labels);
+  const armThen = continueAs(guarded(false), framing, then, 0, bulked, inArmBody(ctx), fresh, labels);
   // The else arm over ZERO steps is `identity` on the complement — see above.
-  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inBody(ctx), fresh, labels);
+  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inArmBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
   const arms = [armThen, armElse];
   if (slice) return mintTraverserMajor(arms, source, labels, ctx.source, fresh);

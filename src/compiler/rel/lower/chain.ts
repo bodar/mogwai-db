@@ -195,6 +195,14 @@ export interface ChainCtx extends FilterCtx {
 export const inBody = (ctx: ChainCtx): ChainCtx =>
   (ctx.collapse || ctx.needsFromV ? { ...ctx, collapse: false, needsFromV: false } : ctx);
 
+/** A BRANCH ARM whose merged result an outer `otherV()` reads — `inBody` but RE-INJECTING `needsFromV`,
+ *  so each arm's tail edge hop mints its entering vertex. Every arm mints it UNIFORMLY (same column), so
+ *  the peer merge carries it as a shared rigid channel (`mergeArms`); an arm that does not (a non-edge
+ *  shape) makes the arms disagree and the merge declines. The value host `flatMapRejoin` uses `childRows`'s
+ *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. */
+export const inArmBody = (ctx: ChainCtx): ChainCtx =>
+  (ctx.needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx));
+
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
 export const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null => {
