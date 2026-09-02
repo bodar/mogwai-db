@@ -165,8 +165,9 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
   // `otherV()` needs the entering vertex retained: an EDGE hop mints a `fromV` channel = the incoming
   // vertex id (the edge column this hop matched against, `hop.from`), which is exactly the nearest
   // previous vertex `EdgeOtherVertexStep` reads from the path. Only an edge-producing hop and only when
-  // an `otherV` will consume it (`mintFromV`); a vertex hop or a correlated body never carries it.
-  const wantFromV = mintFromV && input != null && hops.every((hop) => hop.to === 'id');
+  // an `otherV` will consume it (`mintFromV`) — for a CORRELATED body too (`hop.from` is the matched
+  // endpoint, i.e. the subject vertex the EXISTS is rooted at), so `where(outE().order().otherV())` works.
+  const wantFromV = mintFromV && hops.every((hop) => hop.to === 'id');
   const outChannels = wantFromV ? withChannel(carried, FROM_V) : carried;
   const armCols = elementCols(outChannels);
   const arms = hops.map((hop) => {

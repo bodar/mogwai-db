@@ -16,7 +16,7 @@ import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, inBody, type ChainCtx, type ElementSubject } from './chain.ts';
-import { continueAs } from '../lower.ts';
+import { continueAs, edgeFeedsOtherV } from '../lower.ts';
 import { foldedListSet, nestedFirstValue, scalarChild } from './reduction.ts';
 
 // FILTER / PREDICATE FAMILY — a step or a sub-traversal body lowered to a boolean `Expr`:
@@ -43,7 +43,9 @@ export function correlatedExists(
   // the two that do.
   if (subject.kind !== 'element') return null;
   const elem = subject.elem;
-  const child = movement(body[0]!, { correlated: subject.id }, elem, ctx.source, fresh);
+  // An `otherV()` later in the body needs the entering vertex retained even here, where the child is a
+  // correlated EXISTS: the subject vertex IS the entering one (`where(outE().order().otherV())`).
+  const child = movement(body[0]!, { correlated: subject.id }, elem, ctx.source, fresh, false, edgeFeedsOtherV(body, 0, false));
   if (!child) return null;
   // THE REST OF THE BODY IS THE ORDINARY FOLD, started at the correlated child — the same insight the
   // arm merge rests on, one position further in. This used to be a hand-rolled movement|filter walk,

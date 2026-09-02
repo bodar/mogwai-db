@@ -3687,7 +3687,7 @@ const FROM_V_TRANSPARENT: ReadonlySet<string> = new Set([
 /** Does the edge stream produced at `at` flow into an `otherV()` — through `FROM_V_TRANSPARENT` steps
  *  only — so the edge hop must retain its entering vertex? `atEnd` is what a body's LAST edge answers
  *  when the scan runs off the end (the enclosing chain will apply `otherV` to the body's result). */
-function edgeFeedsOtherV(steps: readonly IRStep[], at: number, atEnd: boolean): boolean {
+export function edgeFeedsOtherV(steps: readonly IRStep[], at: number, atEnd: boolean): boolean {
   for (let i = at + 1; i < steps.length; i++) {
     if (steps[i]!.name === 'otherV') return true;
     if (!FROM_V_TRANSPARENT.has(steps[i]!.name)) return false;

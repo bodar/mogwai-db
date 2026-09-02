@@ -1,24 +1,18 @@
 Feature: mogwai addendum — a child scope does not inherit the parent chain's entering-vertex context
 
-  # `trackFromV` is a demand of the CHAIN THAT ASKED: a trailing `otherV()` turns it on at the
-  # source, so every edge movement in that chain retains the vertex it entered from. A child scope
-  # is a different chain — its movements are implementation detail — and carrying the demand in
-  # anyway had a measurable cost: the child's own edge steps minted an `fv` nobody read, and
-  # `assertForkSafe` then refused a `union()` inside the body for state belonging to a traverser
-  # the child is not part of.
+  # The `otherV()` demand (`needsFromV`) is carried per SCOPE, not chain-global: `inBody` CLEARS it, so
+  # no child body inherits it by default. The distinction that matters is whether the child's rows BECOME
+  # the traverser. An existence gate (`where`/`not`/`filter`) consumes them as a boolean, so nothing of
+  # the child survives to the outer `otherV()` and the demand stays cleared; a value host (`local`/
+  # `flatMap`, and a `union`/`coalesce`/`choose` arm) HANDS its rows on, so the demand rides IN — the
+  # host re-injects it (`childRows`'s parameter / `inArmBody`) and the body's own edge hop mints the
+  # entering vertex the outer `otherV()` reads. The second scenario is the counterexample that proves it:
+  # its body mentions no `otherV()`, yet its `bothE()` must mint `fromV` because the outer `otherV()` reads it.
   #
-  # Found by L5's rotating seed, and it was the worst shape the differential can report: with
-  # `predicateInlining` OFF the generic route THREW `otherV() context through union() not yet
-  # supported`, while the inlined predicate answered — the semantic authority unable to compile
-  # what its accelerator can.
-  #
-  # THE DISTINCTION IS NOT "does the body mention otherV()". It is whether the child's rows BECOME
-  # the traverser. An existence gate (`where`/`not`) consumes them as a boolean, so nothing of the
-  # child survives and the context can be dropped; `map`/`local`/`flatMap` hand their rows on, and
-  # the second scenario below is the counterexample that proves it — its body mentions no
-  # `otherV()` at all, yet the outer chain's `otherV()` reads the `fv` that body's own edge step
-  # has to mint. Getting that backwards cost four L3 scenarios.
-  # @gap:child-scope-entering-vertex marks the family.
+  # A body may also read the context IT minted (the barrier-split scenarios below): the forward scan to an
+  # `otherV()` is transparent across `order`/`range`/a filter, so the edge before the barrier still mints,
+  # and a correlated existence body roots that mint at the subject vertex. @gap:child-scope-entering-vertex
+  # marks the family.
 
   @gap:child-scope-entering-vertex
   Scenario: g_V_hasLabelXpersonX_whereXoutE_unionXidentity_identityXX_outE_otherV
@@ -77,7 +71,6 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
   # out-edge" does not depend on which. That is the same care the `limit(1)` scenario above takes.
 
   @gap:child-scope-entering-vertex
-  @Unsupported
   Scenario: g_V_whereXoutE_order_byXweightX_otherVX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -92,7 +85,6 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | peter |
 
   @gap:child-scope-entering-vertex
-  @Unsupported
   Scenario: g_V_whereXoutE_rangeX0_2X_otherVX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -107,7 +99,6 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | peter |
 
   @gap:child-scope-entering-vertex
-  @Unsupported
   Scenario: g_V_whereXbothE_order_otherV_hasLabelXpersonXX_valuesXnameX
     Given the modern graph
     And the traversal of

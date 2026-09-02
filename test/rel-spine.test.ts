@@ -98,6 +98,8 @@ const COVERED = [
   'g.V().coalesce(__.outE("knows"), __.outE("created")).otherV()', 'g.V().union(__.outE(), __.inE()).otherV().values("name")',
   // Under `path()` the reached vertex is the next path position — `[startV, edge, otherV]`.
   'g.V().outE().otherV().path()', 'g.V().coalesce(__.outE("knows"), __.outE("created")).otherV().path().by("name").by(T.label)',
+  // `otherV()` inside an existence gate, across a barrier — the correlated EXISTS roots fromV at the subject.
+  'g.V().where(__.outE().order().by("weight").otherV()).values("name")', 'g.V().where(__.bothE().order().otherV().hasLabel("person")).values("name")',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",

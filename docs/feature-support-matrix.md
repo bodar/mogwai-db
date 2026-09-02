@@ -21,7 +21,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 |---|:--:|---|
 | `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()` |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | |
-| `otherV` | ✅ | the edge hop retains its entering vertex (the `fromV` channel) whenever an `otherV()` consumes it — through any `where`/`filter`/`not`/`has`/`as`/`order`/slice in between, through a `local`/`flatMap` body (`local(bothE().limit(1)).otherV()`), and through a `union`/`coalesce`/`choose` whose every arm is an edge (`coalesce(outE,outE).otherV()` — the arms mint `fromV` uniformly, so the peer merge carries it). Composes with `path()` (the reached vertex is the next path position). ❌ a MIXED-shape branch (`union(outE,out).otherV()`); an `otherV()` a BARRIER separates from its edge INSIDE an existence gate (`where(outE().order().otherV())`) |
+| `otherV` | ✅ | the edge hop retains its entering vertex (the `fromV` channel) whenever an `otherV()` consumes it — at any depth: through any `where`/`filter`/`not`/`has`/`as`/`order`/slice between the edge and the `otherV()`, inside a `local`/`flatMap` body or a `union`/`coalesce`/`choose` edge-arm, inside an existence gate across a barrier, and with `path()`. Refuses (ill-typed) only a MIXED vertex/edge branch (`union(outE,out).otherV()`), and `E().otherV()` (no entering vertex) |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
 | `call(service[, params])`, `.with(k,v)` | ✅ | |
 | `io(path).read()` / `.write()` | ✅ | 🚫 GraphML, Gryo; a CSV export refuses a collection-valued property or a meta-property, and declares `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |
