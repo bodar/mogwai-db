@@ -424,7 +424,20 @@ UNEVALUABLE`.
   and SCALAR members (`by(__.unfold().count()|sum()|max()|min()|fold())`, the member position carried as the
   `encounter` channel so `fold()` preserves list order); `by(<pre>.fold())` collect + fence (`recordToMap`
   `Materialize` when self-contained).
-- ✅ **`RowShape`** — one row-algebra engine (`orderRows`/`rowOp`/`dedupOn`) for the element and property streams.
+- ✅ **`RowShape`** — one row-algebra engine (`orderRows`/`rowOp`/`dedupOn`) for **all six streams**: element,
+  property, scalar, record, list, map (`elementRowShape`/`propertyRowShape`/`scalarRowShape`/`payloadRowShape`,
+  the last shared by record/list/map). `order`/`dedup`/slice ARE one operation over the traverser stream
+  (TinkerPop's `OrderGlobalStep<S>`/`DedupGlobalStep<S>` are generic in `S`); the only per-shape input is
+  compare/equality/position/host, which is the `RowShape`. Three moves made it the single authority: the
+  collapsing `Distinct`/`Aggregate` arms are payload-GENERAL (project `payloadCols`, group by `shape.identity`,
+  not a hard-coded `id`); a non-collapsible channel (an alias/sack) no longer declines but routes to the window
+  arm, which keeps the FIRST occurrence's whole traverser (`DedupGlobalStep`'s rule) — so the collapse is a pure
+  SQL optimization, `V().as('a').both().dedup().select('a')` now lowers, and the lift COMPOUNDS (every shape gets
+  per-origin dedup, graph identity, the ordered first-occurrence, the deterministic tie for free). `natural` is
+  absent for scalar/record/list/map so a bare `order()` with no comparator DECLINES rather than inventing a total
+  order (a Java `Map` is not `Comparable`) — the honest boundary. The ordered-dedup aggregate CONDITIONALLY fences
+  a computed payload (`AS MATERIALIZED`) so a scalar `label()`/`values(k)` subquery is not re-evaluated in both
+  `GROUP BY` and `SELECT`; a physical `id` groups directly, byte-unchanged.
 - ✅ **Fan-out / child seam.** `flatMap`/`local` fan-out rejoin (`flatMapRejoin`); per-origin SLICE
   (`partitionedSlice`, = Calcite `convertDistinctOn`) and FOLD (correlated list subquery, seed-free);
   `coalesce`/`optional` reduction arm (`reductionArm`, seeded `count`/`fold` only); `optional` lowering;
@@ -483,8 +496,11 @@ UNEVALUABLE`.
 - 🚧 **Branch / slice residue:** a variant with a MAP/RECORD/PATH/PROPERTY arm (no `vk`); a batched `choose`
   (a per-arm gate, not the shared-input one); an ALIAS through a collapsed arm (the barrier drops the label);
   a NESTED branch inside a sliced arm (a key STACK).
-- 🚧 **`RowShape` gaps:** the SCALAR and RECORD tails call `orderRows` from their own loops (so neither gets
-  `dedup`'s identity rule); the MAP/LIST tails are not in it at all.
+- ✅ **`RowShape` — CLOSED.** All six streams (element/property/scalar/record/list/map) route `order`/`dedup`/slice
+  through the one `rowOp` engine (see the Landed-substrate `RowShape` line). Scalar/record/list/map dedup, and the
+  element alias/sack first-occurrence dedup, all lifted; bare `order()` over list/map declines (no comparator).
+  LEFT as leaf follow-ons, not engine gaps: a LEXICOGRAPHIC `natural` for a bare list `order()` (a recursive
+  element-wise compare SQL cannot state), and a `map`-host `by()` projection for `order().by(Column.values)`.
 - 🚧 **Property-stream vocabulary:** the `by()` vocabulary (`T.key`/`T.value` absent from `TOKENS`), the
   `id()`/`label()` retypes off a property row, `where(<body>)` over a property host, and META-properties
   (`properties().properties()`). `project`/`select` over a property needs FRAMER work — the record→map wire

@@ -253,6 +253,7 @@ export function byExpr(
   // (the identity arm reads it off the host framing), and a `by(key)`/`by(token)` over a collection has
   // no value to read — the by()-over-a-list vocabulary is `unfold()` in the CHILD arm, not this one.
   if (host.kind === 'list') return null;
+  if (host.kind === 'map') return null;
 
   if (host.kind === 'property') {
     // `T.key` / `T.value` — a property's OWN two tokens, read off the stored row through the one
@@ -476,6 +477,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
   // A LIST as a map-value node is the FIELD vocabulary's business too (`fieldNode`'s list arm, reached
   // through `byField`'s child path); this non-field node projection over a collection declines.
   if (host.kind === 'list') return null;
+  if (host.kind === 'map') return null;
 
   if (host.kind === 'property') {
     // A bare `by()` over a PROPERTY projects the VertexProperty itself, and unlike the element case
@@ -653,7 +655,7 @@ export function byField(
   // ELEMENT vocabulary (a stored property of the traverser), and none of the three has one. A property's
   // own three projections are STEPS reached through the child arm above; a list's `by(key)` is likewise
   // not a stored-property read.
-  if (host.kind === 'scalar' || host.kind === 'property' || host.kind === 'list') return null;
+  if (host.kind === 'scalar' || host.kind === 'property' || host.kind === 'list' || host.kind === 'map') return null;
 
   // A PROPERTY FIELD keeps its stored type, so it is TWO correlated reads of the same property row —
   // the value and its `vtype`. They cannot share one subquery (SQL's scalar subquery yields one

@@ -2318,9 +2318,15 @@ function mapTail(
       return mapEntryTail(positioned, keyOf, valOf, steps, at + 1, ctx, fresh, labels);
     }
 
-    const sliced = sliceOp(step, rel, false, fresh);
-    if (!sliced) return null;
-    rel = sliced;
+    // GLOBAL order/dedup/slice over the STREAM of map traversers route through the shape-parameterised
+    // `rowOp`: a map is another shape (`payloadRowShape`), its dedup identity the whole `MAP_COL` JSON (a
+    // canonical-key-order `LinkedHashMap` compares by entries). `order()` with no comparator DECLINES —
+    // a Java `Map` is not `Comparable`, so the map host's `by()` arms return null and no total order is
+    // invented, exactly as the reference refuses one. A LOCAL-scope op was handled above.
+    const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels } };
+    const row = rowOp(step, rel, payloadRowShape(mapHost), false, ctx, fresh);
+    if (!row) return null;
+    rel = row;
   }
   return { rel, framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, aliases: labels, bulked: false };
 }

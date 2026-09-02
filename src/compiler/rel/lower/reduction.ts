@@ -698,6 +698,10 @@ export function hostSelf(host: ChildHost): { readonly framing: RelFraming; reado
   // element/scalar identity arms project theirs.
   if (host.kind === 'list')
     return { framing: { kind: 'list', of: host.of }, col: (name) => (name === LIST_COL ? host.list : compilerNull()) };
+  // A MAP host's identity `by()` is the whole map — the `map` framing over the host's own map value, the
+  // twin of the list arm above.
+  if (host.kind === 'map')
+    return { framing: { kind: 'map', keyOf: host.keyOf, valOf: host.valOf }, col: (name) => (name === MAP_COL ? host.map : compilerNull()) };
   return { framing: { kind: 'property', ownerElem: host.ownerElem }, col: () => compilerNull() };
 }
 

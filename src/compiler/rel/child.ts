@@ -245,7 +245,13 @@ export type ChildHost =
    *  expression (a JSONB array) and `of` its member encoding, exactly the pair the `list` framing carries
    *  — so the child body re-enters the list vocabulary correlated to this one host, the same way the
    *  element host re-enters the element loop. */
-  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf; readonly row?: HostRow };
+  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf; readonly row?: HostRow }
+  /** A MAP traverser — a `valueMap()`/`group()` map VALUE. It exists so the shape-parameterised row-op
+   *  engine (`rowOp`) can carry a map like any other stream: its DEDUP identity is the whole `MAP_COL`
+   *  JSON (a `LinkedHashMap` in canonical key order compares by entries), and its ORDER declines — a Java
+   *  `Map` is not `Comparable`, so every `by()`/order arm below returns `null` for it (there is no scalar
+   *  value to project). `map` is the value expression (a JSONB object); `keyOf`/`valOf` its encodings. */
+  | { readonly kind: 'map'; readonly map: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf; readonly row?: HostRow };
 
 /**
  * THE ROW the host traverser rides on — its relation and the labels bound on it.
