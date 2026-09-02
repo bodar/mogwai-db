@@ -167,6 +167,15 @@ export interface ChainCtx extends FilterCtx {
   readonly mutating: boolean;
   /** A map-entry child reads `select(Column.values)` from this correlated value cell. */
   readonly entryValue?: import('../../../rel/expr.ts').Expr;
+  /**
+   * Will the stream THIS scope produces be consumed by an `otherV()` in the enclosing chain? Set by
+   * `elementTail` on a VALUE-producing child host (`local`/`flatMap`) when an `otherV()` follows it, so
+   * the body's tail edge hop mints its entering vertex (`fromV`) even though the `otherV` is not in the
+   * body's own step slice. No body inherits it by default (`inBody` clears it) — an existence gate
+   * consumes its child as a boolean, and a branch arm cannot carry a uniformly-minted rigid channel — so
+   * the one host that honours it (`flatMapRejoin`) re-injects it through `childRows`'s explicit parameter.
+   */
+  readonly needsFromV?: boolean;
 }
 
 /**
@@ -178,7 +187,13 @@ export interface ChainCtx extends FilterCtx {
  * wire — the arm of a `union`, an `option()` arm, a `where()` child or a recursive term all continue
  * into an enclosing context the body cannot see. So: one named narrowing at every body re-entry.
  */
-export const inBody = (ctx: ChainCtx): ChainCtx => (ctx.collapse ? { ...ctx, collapse: false } : ctx);
+// A body does NOT inherit the enclosing chain's otherV() demand by default: an existence gate consumes
+// its child as a boolean, a branch arm cannot carry a uniformly-minted rigid channel through the peer
+// merge, and a recursive term cannot mint one either. So `inBody` CLEARS `needsFromV`, and the ONE value
+// host that CAN honour it — `flatMapRejoin`, no peer merge — re-injects it through `childRows`'s explicit
+// parameter instead of through here.
+export const inBody = (ctx: ChainCtx): ChainCtx =>
+  (ctx.collapse || ctx.needsFromV ? { ...ctx, collapse: false, needsFromV: false } : ctx);
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */

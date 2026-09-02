@@ -329,7 +329,7 @@ export function flatMapRejoin(
   // (framing-changing, and a reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE
   // — a wrong answer if run across all origins at once.
   if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name))) return null;
-  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh, true);
+  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh, true, ctx.needsFromV ?? false);
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
@@ -459,7 +459,7 @@ export function dropOrigin(rel: Rel, fresh: Minter): Rel {
  */
 export function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
-  perRow = false,
+  perRow = false, needsFromV = false,
 ): ChildRows | null {
   if (!body.length || originOf(input.channels)) return null;
   const channels = withChannel(input.channels, ORIGIN);
@@ -477,7 +477,11 @@ export function childRows(
   // and since an unresolvable `select()` is now the EMPTY RESULT it would pool ZERO rows and answer an
   // empty map. §6·6's rule with the sharpest witness yet — check what a seam HANDS OVER, because the
   // combination of two correct rules made one of them silently produce the other's answer.
-  const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, inBody(ctx), fresh, aliases);
+  // `needsFromV` rides IN only for a `flatMap`/`local` fan-out whose result an outer `otherV()` reads:
+  // `inBody` cleared the demand (a body does not inherit it), so re-inject it here — the body's tail
+  // edge hop then mints its entering vertex, which the rejoin carries out to the outer `otherV`.
+  const bodyCtx = needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx);
+  const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, bodyCtx, fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
   if (!tail || tail.effects?.length || !originOf(tail.rel.channels)) return null;

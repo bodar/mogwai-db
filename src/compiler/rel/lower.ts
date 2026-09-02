@@ -3727,8 +3727,10 @@ function elementTail(
       elem = other.elem;
       continue;
     }
-    // An EDGE hop retains its entering vertex (`fromV`) only when an `otherV()` will consume it.
-    const mintFromV = EDGE_MOVES.has(step.name) && edgeFeedsOtherV(steps, at, false);
+    // An EDGE hop retains its entering vertex (`fromV`) only when an `otherV()` will consume it — after
+    // this edge in the current slice, or (a `local`/`flatMap` body's tail edge) an `otherV()` the
+    // enclosing chain applies to the body's result (`ctx.needsFromV`).
+    const mintFromV = EDGE_MOVES.has(step.name) && edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, ctx.source, fresh, ctx.demandsPathLabels, mintFromV);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
@@ -3807,8 +3809,14 @@ function elementTail(
       return continueAs(matched.rel, matched.framing, steps, at + 1, false, ctx, fresh, matched.aliases);
     }
     // THE PER-TRAVERSER CHILD HOSTS — one lowering, three cardinality policies (`perTraverserChild`).
-    if (PER_TRAVERSER_HOSTS.has(step.name))
-      return perTraverserChild(step, rel, { kind: 'elements', elem }, steps, at, bulked, ctx, fresh, labels);
+    // When an `otherV()` reads what this host produces (`local(bothE()).otherV()`), the body's tail edge
+    // must retain its entering vertex — signalled by `needsFromV`, honoured only on the `flatMap`/`local`
+    // rejoin (no peer merge). A vertex/scalar host result declines `otherV` at the consumer, harmlessly.
+    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+      const feeds = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
+      const hostCtx = feeds === (ctx.needsFromV ?? false) ? ctx : { ...ctx, needsFromV: feeds };
+      return perTraverserChild(step, rel, { kind: 'elements', elem }, steps, at, bulked, hostCtx, fresh, labels);
+    }
     if (BRANCH_HOSTS.has(step.name)) {
       const framing = { kind: 'elements', elem } as const;
       const merged = branchArms(step, rel, framing, bulked, ctx, fresh, labels);

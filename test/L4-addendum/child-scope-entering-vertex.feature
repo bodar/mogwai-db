@@ -40,7 +40,6 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | v[lop] |
 
   @gap:child-scope-entering-vertex
-  @Unsupported
   Scenario: g_V_hasXname_within_marko_rippleX_localXbothEXcreatedX_limitX1XX_otherV_valuesXnameX
     Given the modern graph
     And the traversal of

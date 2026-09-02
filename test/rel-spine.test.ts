@@ -89,6 +89,9 @@ const COVERED = [
   'g.V().outE().inV().bothE().otherV()', "g.V().bothE().otherV().values('name')", 'g.V().bothE().otherV().count()',
   // A sort/slice between the edge and `otherV()` is fromV-transparent — it carries the entering vertex through.
   'g.V().bothE().limit(1).otherV()', 'g.V().bothE().order().by("weight").otherV()',
+  // A `local`/`flatMap` body producing edges, consumed by an outer `otherV()` — the demand rides into the
+  // body (`needsFromV`) so its tail edge hop mints the entering vertex the rejoin carries out.
+  'g.V().local(__.bothE("created").limit(1)).otherV()', 'g.V().flatMap(__.bothE()).otherV().values("name")',
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
