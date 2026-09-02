@@ -3,7 +3,7 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, eq, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
+import { and, carriedCols, eq, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Elem } from '../../elem.ts';
@@ -336,6 +336,20 @@ export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): Row
   natural: (rel) => propertyOrderTerms(rel, elem),
 });
 
+/** The SCALAR shape — a value stream. Identity IS the whole payload (the value, plus a `vtype` column
+ *  where the type rides per row), so two rows are the same traverser iff they are the same value of the
+ *  same type — which is exactly `S.equals()` for the scalar `S` a `DedupGlobalStep` collapses on. The
+ *  tie is the value itself: the sort key of a value stream derives from the value, so a value tie-break
+ *  falls only between EQUAL values (a no-op that changes no order) and is the deterministic survivor a
+ *  dedup keeps. `natural` is absent — `order()` over a scalar sorts by the value expression the host
+ *  already yields (`sortTerms`), so there is no term LIST only the host can state. */
+export const scalarRowShape = (host: ChildHost): RowShape => ({
+  host,
+  tie: (rel) => col(rel.id, 'v'),
+  identity: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
+  identifiedByPayload: true,
+});
+
 export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: ChainCtx, fresh: Minter): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
@@ -370,16 +384,23 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
   if (originOf(input.channels)) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
 
-  // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(id, bulk[, encounter])`, so the
-  // channel policy table decides whether they may carry what the relation carries — an ALIAS binding
-  // belongs to ONE of the merged rows, and keeping it would distinguish two traversers reaching the same
-  // element by the label they bound (a different multiset). So decline rather than take an arbitrary one
-  // — a clean deferral, not a wrong answer; the window arms above are the honest lowering where a
-  // traverser is more than its identity, and they have already claimed the `origin`/property cases.
-  // `graph` (a multi-graph merge) is excluded like `origin`: it is not a group PASSENGER but part of the
-  // identity KEY (spliced into the `Distinct`/group-by below), so its `undefined` group policy must not
-  // veto the dedup — it is consulted, not averaged.
-  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) return null;
+  // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(payload, bulk[, encounter])`, so
+  // they may carry ONLY the channels with a defined N→1 answer — `bulk`/`encounter`; an ALIAS/`sack`
+  // binding belongs to ONE of the merged rows and a collapse has no answer for it. But that is a reason
+  // to take the OTHER correct lowering, not to decline: `dedup()` keeps the FIRST occurrence's WHOLE
+  // traverser (`DedupGlobalStep` retains the first `Traverser`, bindings and all), which is exactly what
+  // the window arm emits — `ORDER BY (encounter, tie)`, `rn = 1`, every column and channel carried. So a
+  // non-collapsible channel routes to `dedupOn`, keeping the survivor's own alias/sack, rather than
+  // dropping it. This is the same honest lowering the `!identifiedByPayload`/`origin` cases already take;
+  // the collapse below is the pure SQL optimization for the case with nothing but identity to keep.
+  // `graph` (a multi-graph merge) is part of the identity KEY, not a passenger: it is spliced into the
+  // partition (`dedupOn` via the keys, the `Distinct`/group-by below directly) so A's id 5 and B's id 5
+  // stay distinct, and its `undefined` group policy must not veto the dedup.
+  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
+    const g = graphOf(input.channels);
+    const keys = g ? [...shape.identity(input), col(input.id, g.col)] : shape.identity(input);
+    return dedupOn(keys, input, [shape.tie(input)], fresh);
+  }
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -391,15 +412,19 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   // may carry a role only where N-rows-into-one has a defined answer, which `bulk` and `encounter`
   // have and an alias, a path or a sack do not.
   if (!ordered) {
-    // A `graph` channel (a multi-graph merge) is part of element IDENTITY: dedup on `(id, graph)`, not
-    // `id` alone, so A's id 5 and B's id 5 do not collapse. `bulk` stays the constant 1 (the survivor
-    // stands for itself), so a `Distinct` over `(id, graph, 1)` collapses exactly the duplicate
-    // `(id, graph)` pairs. Absent a graph channel this is the ordinary `(id, 1)` dedup, byte-unchanged.
+    // A `graph` channel (a multi-graph merge) is part of element IDENTITY: dedup on `(payload, graph)`,
+    // not the payload alone, so A's id 5 and B's id 5 do not collapse. `bulk` stays the constant 1 (the
+    // survivor stands for itself), so a `Distinct` over `(payload, graph, 1)` collapses exactly the
+    // duplicate `(payload, graph)` rows. Absent a graph channel this is the ordinary `(payload, 1)`
+    // dedup. **The payload is `payloadCols`, not a hard-coded `id`** — that is what makes this ONE arm
+    // serve every shape whose identity IS its whole payload (an element's `id`, a scalar's `(v, vtype)`,
+    // a list's `list` JSON, a record's fields); for an element `payloadCols` IS `[id]`, byte-unchanged.
     const graph = graphOf(input.channels);
     const chans = graph ? withChannel(BULK, graph) : BULK;
+    const pcols = payloadCols(input);
     const projected = make.project({
-      id: fresh('dd'), input, channels: chans, type: typeOf(meta('id', 'int'), ...carriedCols(chans)),
-      exprs: [['id', col(input.id, 'id')],
+      id: fresh('dd'), input, channels: chans, type: typeOf(...pcols, ...carriedCols(chans)),
+      exprs: [...pcols.map((c) => [c.name, col(input.id, c.name)] as const),
         ...chans.map((c) => [c.col, c.role === 'graph' ? col(input.id, c.col) : compilerInt(1)] as const)],
     });
     return make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
@@ -424,7 +449,11 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
     else return null;
   }
   return make.aggregate({
-    id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(input.channels)),
+    // The group keys are the whole payload (`payloadCols`, matching `shape.identity` for an
+    // identity-IS-payload shape), then the aggregates — so this ordered dedup serves every such shape,
+    // not just an element's `id`. The declared type names the keys positionally (`factory.aggregate`).
+    id: fresh('dd'), input, channels: input.channels,
+    type: typeOf(...payloadCols(input), ...carriedCols(input.channels)),
     groupBy: shape.identity(input),
     aggs: reductions,
   });

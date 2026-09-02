@@ -59,7 +59,7 @@ import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
-import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
+import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail } from './lower/branch.ts';
@@ -1314,17 +1314,14 @@ function scalarTail(
       continue;
     }
 
-    // `orderRows` owns the whole rule (re-mint, productivity drop, stability). No `tie`: equal keys over
-    // a VALUE stream are interchangeable, so the sort terms are the whole order.
-    if (step.name === 'order') {
-      const ordered = orderRows(step, rel, host, ctx, fresh);
-      if (!ordered) return null;
-      rel = ordered;
-      continue;
-    }
-
-    const sliced = sliceOp(step, rel, bulked, fresh);
-    if (sliced) { rel = sliced; continue; }
+    // ORDER / DEDUP / SLICE go through the ONE shape-parameterised row-op engine (`rowOp`), the same
+    // door the element and property tails use — a scalar is just another shape (`scalarRowShape`): its
+    // identity is the value, its tie the value, its order the value's `sortTerms`. This is what gives a
+    // value stream the same row-op vocabulary every other shape has (per-origin dedup, the ordered
+    // first-occurrence, the deterministic tie) instead of a hand-rolled subset. A `dedup` reset the
+    // multiplicity, so the fold learns `bulked = false` exactly as the element tail does.
+    const row = rowOp(step, rel, scalarRowShape(host), bulked, ctx, fresh);
+    if (row) { rel = row; if (step.name === 'dedup') bulked = false; continue; }
 
     // `concat(__.<t>…)` — a TRAVERSAL operand is a per-traverser CHILD value (`TraversalUtil.apply`),
     // which makes concat a row boundary the pure `VALUE_TX.concat` declines. Each operand resolves as a
@@ -1515,37 +1512,6 @@ function scalarTail(
       continue;
     }
 
-    if (step.name === 'dedup') {
-      // `Distinct` is WHOLE-ROW and only whole row (§3.3), so what the row IS decides the answer —
-      // and a channel must not be in it. Two reasons, both load-bearing:
-      //
-      //  - a dedup must not DISTINGUISH rows by their multiplicity. Keeping `bulk` in the key means
-      //    the same value at bulk 1 and bulk 3 survives twice, which is a wrong answer the moment a
-      //    collapse upstream makes bulk anything but 1 — invisible on a fixture where it never is.
-      //  - the survivor STANDS FOR ITSELF, not for the sum of the duplicates it replaced, so the
-      //    multiplicity is dropped rather than carried: a following `count()` then reads
-      //    `COUNT(*)`, which is what the traversers actually number.
-      //
-      // The emission order goes with it for the same reason — a survivor has no one position — so
-      // the scalar dedup projects the payload alone.
-      //
-      // A `by()` here is IDENTITY or nothing, and that is not a gap: over a value stream the only
-      // projection available IS the value, so `dedup().by()` and bare `dedup()` are the same question
-      // (the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
-      // through the vocabulary, which is where the "a value has no properties" rule lives.
-      if (args.length || isLocalScope(step)) return null;
-      const deduped = modulations(step, 1, childSeam(ctx, fresh));
-      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, ctx.source, fresh, false, childSeam(ctx, fresh)))) return null;
-      if (deduped[0]?.order !== undefined) return null;
-      const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
-      if (!payload.length) return null;
-      const projected = make.project({
-        id: fresh('dp'), input: rel, channels: [], type: typeOf(...payload),
-        exprs: payload.map((column) => [column.name, col(rel.id, column.name)] as const),
-      });
-      rel = make.distinct({ id: fresh('d'), input: projected, channels: [], type: projected.type });
-      continue;
-    }
 
     // THE REDUCER FAMILY — one `Aggregate`, four step names, and the barrier that ENDS the tail's
     // channels: a reducing aggregate collapses the whole multiset into one row, so nothing survives it
