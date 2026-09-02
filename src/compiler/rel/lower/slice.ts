@@ -307,7 +307,7 @@ export function bulkSlice(
  */
 export type RowShape = {
   readonly host: ChildHost;
-  readonly tie: (input: Rel) => Expr;
+  readonly tie: (input: Rel) => readonly Expr[];
   readonly identity: (input: Rel) => readonly Expr[];
   /** True when `identity` NAMES THE WHOLE PAYLOAD, so a bare `dedup()` may use the cheap set forms
    *  (`Distinct` / a grouped aggregate) instead of a ranked window. An element relation's payload IS its
@@ -319,7 +319,7 @@ export type RowShape = {
 /** The ELEMENT shape — `id` is at once the payload, the identity and the tie-break. */
 export const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowShape => ({
   host: elementHost(input, elem, aliases),
-  tie: (rel) => col(rel.id, 'id'),
+  tie: (rel) => [col(rel.id, 'id')],
   identity: (rel) => [col(rel.id, 'id')],
   identifiedByPayload: true,
 });
@@ -330,7 +330,7 @@ export const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowS
 export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowShape => ({
   host: { kind: 'property', id: propertyRowId(input), ownerElem: elem, row: { rel: input, aliases } },
   // The property row's own rowid: deterministic for both owner kinds, even where it is not the identity.
-  tie: propertyRowId,
+  tie: (rel) => [propertyRowId(rel)],
   identity: (rel) => propertyIdentityKey(rel, elem),
   identifiedByPayload: false,
   natural: (rel) => propertyOrderTerms(rel, elem),
@@ -345,7 +345,22 @@ export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): Row
  *  already yields (`sortTerms`), so there is no term LIST only the host can state. */
 export const scalarRowShape = (host: ChildHost): RowShape => ({
   host,
-  tie: (rel) => col(rel.id, 'v'),
+  tie: (rel) => [col(rel.id, 'v')],
+  identity: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
+  identifiedByPayload: true,
+});
+
+/** A shape whose IDENTITY IS ITS WHOLE PAYLOAD — a RECORD's fields, a LIST's JSON, a MAP's JSON. Two
+ *  traversers are the same iff their payloads are equal, which for these shapes IS value equality: a
+ *  record and a map compare by entries in a canonical key order (`LinkedHashMap`), a list by its ordered
+ *  members, so byte-identity over the payload column(s) is exactly `S.equals()`. Both the dedup identity
+ *  and the deterministic order tie are that whole payload — hence `tie` is a list, not one column.
+ *  `natural` is absent: `order()` sorts by a `by()` projection off the host, and a bare `order()` with
+ *  no comparator declines rather than inventing a total order the shape may not have (a Java `Map` is
+ *  not `Comparable`; a list is, lexicographically, but SQL cannot state that element-wise compare). */
+export const payloadRowShape = (host: ChildHost): RowShape => ({
+  host,
+  tie: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
   identity: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
   identifiedByPayload: true,
 });
@@ -381,8 +396,8 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   //    key and erase the rest, which is wrong where the payload is more than the key;
   //  - a PER-ORIGIN body (`origin` live) — `dedupOn` partitions by `(origin, id)`, DISTINCT within each
   //    parent, and the set arms cannot carry `origin` (its group policy is `undefined`).
-  if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
-  if (originOf(input.channels)) return dedupOn(shape.identity(input), input, [shape.tie(input)], fresh);
+  if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
+  if (originOf(input.channels)) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
 
   // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(payload, bulk[, encounter])`, so
   // they may carry ONLY the channels with a defined N→1 answer — `bulk`/`encounter`; an ALIAS/`sack`
@@ -399,7 +414,7 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
     const g = graphOf(input.channels);
     const keys = g ? [...shape.identity(input), col(input.id, g.col)] : shape.identity(input);
-    return dedupOn(keys, input, [shape.tie(input)], fresh);
+    return dedupOn(keys, input, shape.tie(input), fresh);
   }
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
@@ -442,19 +457,45 @@ export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean
   // into a plausible value. `bulk` is the constant 1 because a dedup survivor stands for ITSELF
   // (`DedupGlobalStep.filter`'s unconditional `setBulk(1L)`), and `encounter` is the FIRST occurrence's
   // position, which is what makes the survivor the one TinkerPop keeps.
+  // MATERIALISE the payload into named columns BEFORE grouping: an aggregate names its group keys once
+  // in `GROUP BY` and again in `SELECT`, so grouping by a payload EXPRESSION re-evaluates it twice per
+  // row — and a scalar's payload can be a correlated subquery (`label()`/`values(k)` read `v` as a
+  // per-row `SELECT … LIMIT 1`). For an element the payload is the physical `id`, so this projection is
+  // fused away and the SQL is byte-unchanged; for a subquery payload it becomes a derived table the
+  // GROUP BY references by name, evaluating it once. (The `Distinct` arm above already projects first,
+  // which is why the unordered dedup never had this cost.)
+  const pcols = payloadCols(input);
+  const carried = carriedCols(input.channels);
+  // An aggregate names its group keys TWICE (in `GROUP BY` and in `SELECT`), so grouping directly by a
+  // payload EXPRESSION re-evaluates it per row twice over. That is free for a PHYSICAL payload (an
+  // element's `id` is a bare column) but pathological for a COMPUTED one — a scalar `label()`/`values(k)`
+  // reads `v` as a correlated `SELECT … LIMIT 1`. So when the payload is computed, FENCE a projection of
+  // it (`AS MATERIALIZED`) first, evaluating each value once and letting `GROUP BY` name a column; when
+  // it is physical, group directly on the input exactly as the element dedup always has (byte-unchanged).
+  const computed = input.kind === 'project'
+    && pcols.some((column) => input.exprs.find(([name]) => name === column.name)?.[1]?.kind !== 'col');
+  const grouped = computed
+    ? make.materialize({
+      id: fresh('df'), channels: input.channels, type: typeOf(...pcols, ...carried),
+      input: make.project({
+        id: fresh('dm'), input, channels: input.channels, type: typeOf(...pcols, ...carried),
+        exprs: [...pcols, ...carried].map((column) => [column.name, col(input.id, column.name)] as const),
+      }),
+    })
+    : input;
   const reductions: (readonly [string, Expr])[] = [];
-  for (const channel of input.channels) {
+  for (const channel of grouped.channels) {
     if (channel.role === 'bulk') reductions.push([channel.col, compilerInt(1)]);
-    else if (channel.role === 'encounter') reductions.push([channel.col, { kind: 'agg', fn: 'min', args: [col(input.id, channel.col)] }]);
+    else if (channel.role === 'encounter') reductions.push([channel.col, { kind: 'agg', fn: 'min', args: [col(grouped.id, channel.col)] }]);
     else return null;
   }
   return make.aggregate({
     // The group keys are the whole payload (`payloadCols`, matching `shape.identity` for an
     // identity-IS-payload shape), then the aggregates — so this ordered dedup serves every such shape,
     // not just an element's `id`. The declared type names the keys positionally (`factory.aggregate`).
-    id: fresh('dd'), input, channels: input.channels,
-    type: typeOf(...payloadCols(input), ...carriedCols(input.channels)),
-    groupBy: shape.identity(input),
+    id: fresh('dd'), input: grouped, channels: grouped.channels,
+    type: typeOf(...pcols, ...carried),
+    groupBy: computed ? pcols.map((column) => col(grouped.id, column.name)) : shape.identity(input),
     aggs: reductions,
   });
 }
@@ -479,7 +520,7 @@ function dedupBy(
   const domain = productive
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
     : input;
-  return dedupOn([key], domain, [shape.tie(domain)], fresh);
+  return dedupOn([key], domain, shape.tie(domain), fresh);
 }
 
 /**

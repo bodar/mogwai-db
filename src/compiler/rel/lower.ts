@@ -59,7 +59,7 @@ import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, reSource } from './lower/movement.ts';
-import { dedupByLabels, elementRowShape, propertyRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
+import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail } from './lower/branch.ts';
@@ -904,7 +904,7 @@ function sortTerms(
  */
 export function orderRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
-  opts: { readonly tie?: (input: Rel) => Expr; readonly natural?: (input: Rel) => readonly Expr[] } = {},
+  opts: { readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[] } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
   if (!sort) return null;
@@ -913,10 +913,13 @@ export function orderRows(
     : rel;
   const carried = encounterOf(domain.channels);
   const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
-  const tie = carried ? col(domain.id, carried.col) : opts.tie?.(domain);
+  // The deterministic tie-break: the carried emission position where there is one (a STABLE re-mint), else
+  // the shape's own last resort — an element's id, a scalar's value, a record's whole field tuple. A shape
+  // that mints fresh has nothing to be stable against, so a MULTI-column tie is spelled here in full.
+  const tie: readonly Expr[] = carried ? [col(domain.id, carried.col)] : (opts.tie?.(domain) ?? []);
   return renumber(
     domain,
-    tie ? [...sort.terms, { expr: tie, dir: 'asc' }] : sort.terms,
+    tie.length ? [...sort.terms, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))] : sort.terms,
     [...payloadCols(domain), ...carriedCols(channels)],
     channels, fresh,
   );
@@ -2032,9 +2035,15 @@ function listTail(
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
-    // A GLOBAL row op slices the stream's rows, not one traverser's members.
-    const sliced = sliceOp(step, rel, false, fresh);
-    if (sliced) { rel = sliced; continue; }
+    // A GLOBAL row op works on the STREAM of list traversers — not one list's members, which is
+    // `listMemberOp`'s Scope.local below. order/dedup/slice route through the shape-parameterised
+    // `rowOp`: a list is another shape (`payloadRowShape`), its identity and tie the whole `LIST_COL`
+    // JSON — two lists are equal iff their ordered members are, so byte-identity IS list equality and a
+    // global `dedup()` keeps the first occurrence's list. A LOCAL-scope op declines out of `rowOp` and
+    // falls to `listMemberOp`.
+    const listHost: ChildHost = { kind: 'list', list: col(rel.id, LIST_COL), of: items };
+    const row = rowOp(step, rel, payloadRowShape(listHost), false, ctx, fresh);
+    if (row) { rel = row; continue; }
 
     const member = listMemberOp(step, rel, items, ctx.source, fresh, seam);
     if (member) {
@@ -4402,12 +4411,13 @@ function recordTail(
       return selected && continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    if (step.name === 'order') {
-      const ordered = orderRows(step, rel, host, ctx, fresh);
-      if (!ordered) return null;
-      rel = ordered;
-      continue;
-    }
+    // ORDER / bare DEDUP / global SLICE go through the shape-parameterised `rowOp` — a record is just
+    // another shape (`payloadRowShape`): identity and tie are the whole field tuple, order is a `by()` of
+    // its fields. A LABELLED `dedup(k…)` (it carries args) and every LOCAL-scope op decline out of
+    // `rowOp` and fall to their own handlers below; a bare `dedup()` — long expressible, previously
+    // declined as "a separate increment" — now lowers here, keeping the first occurrence's whole record.
+    const row = rowOp(step, rel, payloadRowShape(host), bulked, ctx, fresh);
+    if (row) { rel = row; if (step.name === 'dedup') bulked = false; continue; }
 
     // A LOCAL op reads the record AS A MAP — `count(Scope.local)` is its entry count and a
     // `limit`/`range`/`tail`(Scope.local) is an order-preserving entry slice, both the same question
@@ -4420,13 +4430,6 @@ function recordTail(
       if (!mapped) return null;
       return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
     }
-
-    // THE ROW-ALGEBRAIC OPS ARE SHAPE-AGNOSTIC, which is the whole reason a record needs no copy of
-    // them: a slice reads the emission-order channel and a `count()` reads the bulk channel, and
-    // neither asks what the payload IS. `sliceOp` and `countExpr` are the same functions every other
-    // tail calls.
-    const sliced = sliceOp(step, rel, bulked, fresh);
-    if (sliced) { rel = sliced; continue; }
 
     if (step.name === 'count') {
       if (step.args.length) return null;
