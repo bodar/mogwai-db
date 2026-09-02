@@ -3246,6 +3246,25 @@ export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: 
 }
 
 /**
+ * THE MAP-SOURCE RESUME — substrate A's value arm for a barrier whose per-traverser output is a MAP (a
+ * global `order()` over a map stream), the map-shaped twin of `lowerListResumeOf`. Each datum is a map's
+ * PAIRS array `[[keyNode,valNode],…]` (self-describing `{t,v}` sides); the maps cross as ONE `json_each`
+ * bind and re-enter as a `MAP_COL`-carrying read framed `{kind:'map', keyOf/valOf: scalar}` — the same
+ * shape `inject($map)` produces, so a following map op (`unfold()`, `select`, `count(local)`) composes.
+ * `json(sv)` turns each member back into the JSONB pairs blob the map framer reads (json_each hands it
+ * back as TEXT). The array index rides as an ENCOUNTER channel for the `unfold()` stream-order reason.
+ */
+export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  return valueResume(maps, steps, from, opts,
+    (exploded, fresh) => make.project({
+      id: fresh('mrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta(MAP_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [[MAP_COL, jsonOf(col(exploded.id, 'sv'))], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
+    }),
+    (seed, ctx, fresh) => continueAs(seed, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, steps, from, false, ctx, fresh, NO_ALIASES));
+}
+
+/**
  * THE CHAIN, lowered to a bare RELATION — the same fold, minus the naming and the budget.
  *
  * The split exists so a chain can be lowered INSIDE another one. A rooted sub-read used as a VALUE

@@ -3,9 +3,9 @@ import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import { lowerListResumeOf, lowerToRel, type Lowering } from './lower.ts';
-import { buildValueStreamTransformSegment, buildValueTransformSegment, valueHead } from './barrier-value.ts';
-import { dedupLocalValue, orderLocalValue, orderStreamValue } from './orderability.ts';
+import { lowerListResumeOf, lowerMapResumeOf, lowerToRel, type Lowering } from './lower.ts';
+import { buildValueStreamTransformSegment, buildValueTransformSegment, mapHead, valueHead } from './barrier-value.ts';
+import { dedupLocalValue, orderLocalValue, orderMapStreamValue, orderStreamValue } from './orderability.ts';
 
 // ---------- order/dedup(Scope.local) over a NESTED list, as a value-transform BARRIER ----------
 //
@@ -82,8 +82,9 @@ export function buildOrderDedupSegment(
 // traverser, one batched JS sort reorders the array, and `lowerListResumeOf` re-injects the lists in the
 // sorted order (the array position IS the emission order).
 //
-// It fires ONLY for a LIST stream (a `jsonbList` head) with NO element leaf. It DECLINES (→ the inline SQL
-// fold, which already covers these):
+// It fires for a LIST stream (a `jsonbList` head, no element leaf) and a MAP stream (a `mapValue` head — a
+// map orders by its sorted entry-set, `orderMapStreamValue`). It DECLINES (→ the inline SQL fold, which
+// already covers these):
 //  - a SCALAR stream (`values('age').order()`) — a plain `value` head SQLite orders by storage class;
 //  - an element-membered list — the barrier ships MATERIALIZED elements to JS (the rowid is gone once they
 //    round-trip through JSON), so the result cannot re-enter the graph. A rare, non-corpus shape, so it
@@ -107,16 +108,25 @@ export function orderGlobalBarrierIn(steps: readonly IRStep[]): { at: number } |
 export function buildOrderGlobalSegment(
   steps: readonly IRStep[], at: number, lowering: Lowering,
 ): SegmentPlan | null {
-  // Only a LIST stream reaches the barrier: a `jsonbList` head carries one list per traverser. A scalar
-  // `value` head (declined here) is the SQL path's — SQLite orders scalars by storage class. An element
-  // leaf cannot round-trip (see the decline note above).
-  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
-  if (!head || head.shape.kind !== 'jsonbList') return null;
-  const of = head.shape.items;
-  if (hasElementLeaf(of)) return null;
-  // Re-inject each list under the pre-barrier member shape (`head.shape.items`), unchanged — a global
-  // `order()` only reorders the stream, it does not touch any list's contents. A following list op reads
-  // the members correctly.
-  return buildValueStreamTransformSegment(steps, at, lowering, orderStreamValue,
-    (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order');
+  // The head decides list-vs-map-vs-scalar. A `jsonbList` head carries one list per traverser (LIST
+  // stream); a `mapValue` head one map (MAP stream). A scalar `value` head is the SQL path's (SQLite
+  // orders scalars by storage class), so both `valueHead` and `mapHead` decline it here.
+  const lowered = lowerToRel(steps.slice(0, at), lowering);
+  const listHead = valueHead(lowered);
+  if (listHead && listHead.shape.kind === 'jsonbList') {
+    const of = listHead.shape.items;
+    // An element leaf cannot round-trip (see the decline note above).
+    if (hasElementLeaf(of)) return null;
+    // Re-inject each list under the pre-barrier member shape, unchanged — a global `order()` only reorders
+    // the stream, not any list's contents. A following list op reads the members correctly.
+    return buildValueStreamTransformSegment(steps, at, lowering, orderStreamValue,
+      (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order');
+  }
+  // A MAP stream: sort by the sorted-entry-set order (`orderMapStreamValue`) and re-inject each map's pairs
+  // array under the self-describing map framing (`inject($map)`'s shape).
+  if (mapHead(lowered)) {
+    return buildValueStreamTransformSegment(steps, at, lowering, orderMapStreamValue,
+      (maps, s, from, opts) => lowerMapResumeOf(maps, s, from, opts), 'order', mapHead);
+  }
+  return null;
 }

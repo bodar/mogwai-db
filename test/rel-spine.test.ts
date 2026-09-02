@@ -746,6 +746,24 @@ describe('the RelIR spine', () => {
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(expected);
   });
 
+  // A MAP stream (a `mapValue` head) orders by ORDERABILITY's map rule — the sorted ENTRY-SET compared
+  // element-wise, each entry by key then value (`mapComparator`). `valueMap('name','age')` sorts by AGE
+  // first: the entry-set sorts to [(age,…),(name,…)] (key "age" < "name"), so the leading entry the maps
+  // compare on is age. `orderMapStreamValue` runs it in JS; `lowerMapResumeOf` re-injects the sorted maps.
+  test('a global order() over a map stream sorts by the sorted entry-set (orderability)', async () => {
+    const want: [string, unknown[]][] = [
+      // by name alone: josh < marko < peter < vadas (scan order was marko, vadas, josh, peter).
+      ["g.V().hasLabel('person').valueMap('name').order()",
+        [new Map([['name', ['josh']]]), new Map([['name', ['marko']]]), new Map([['name', ['peter']]]), new Map([['name', ['vadas']]])]],
+      // two-key maps sort by AGE first (the "age" entry leads the sorted entry-set): 27, 29, 32, 35.
+      ["g.V().hasLabel('person').valueMap('name','age').order()",
+        [new Map<string, unknown>([['name', ['vadas']], ['age', [27]]]), new Map<string, unknown>([['name', ['marko']], ['age', [29]]]),
+          new Map<string, unknown>([['name', ['josh']], ['age', [32]]]), new Map<string, unknown>([['name', ['peter']], ['age', [35]]])]],
+    ];
+    for (const [gremlin, expected] of want)
+      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(expected);
+  });
+
   test('a re-source carries an alias into a following write', async () => {
     // `GraphStep` splits the incoming traverser, rather than creating a fresh one: `from('a')`
     // therefore still names marko after the current object was replaced by vadas. Counting the

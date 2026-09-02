@@ -436,8 +436,8 @@ UNEVALUABLE`.
   per-origin dedup, graph identity, the ordered first-occurrence, the deterministic tie for free). `natural` is
   absent for scalar/record/list/map so a bare `order()` does not invent an order in SQL — TinkerPop 4's
   Orderability (a recursive total order over all types) is a SEMANTICS feature that runs in JS where SQL cannot
-  express it, NOT "no comparator" (see the §10 note; a LIST stream now lands via the whole-stream barrier, a MAP/
-  mixed stream still declines). The ordered-dedup aggregate CONDITIONALLY fences
+  express it, NOT "no comparator" (see the §10 note; a LIST and a MAP stream now land via the whole-stream barrier,
+  a mixed stream still declines). The ordered-dedup aggregate CONDITIONALLY fences
   a computed payload (`AS MATERIALIZED`) so a scalar `label()`/`values(k)` subquery is not re-evaluated in both
   `GROUP BY` and `SELECT`; a physical `id` groups directly, byte-unchanged.
 - ✅ **Fan-out / child seam.** `flatMap`/`local` fan-out rejoin (`flatMapRejoin`); per-origin SLICE
@@ -502,21 +502,21 @@ UNEVALUABLE`.
   through the one `rowOp` engine (see the Landed-substrate `RowShape` line). Scalar/record/list/map dedup, the
   element alias/sack first-occurrence dedup, and `order().by(Column.values)`/`by(Column.keys)` over an unfolded
   Map.Entry stream (`byExpr`'s `column` arm reads the entry side under the compare wrapper its `$.t` names) all
-  lifted. LEFT — NOT engine gaps but a genuine SEMANTICS feature: bare `order()` over a map/mixed stream needs
-  TinkerPop 4's **Orderability** (`GremlinValueComparator` — a total order over ALL types: a cross-type precedence
-  ladder plus a RECURSIVE element-wise compare for collections). SQL has no such comparator, so it runs in JS.
-  ✅ **The LIST-stream half landed (2026-09-02):** a bare global `order()` over a stream whose traversers are lists
-  sorts by ORDERABILITY through the WHOLE-STREAM value-transform barrier — `orderStreamValue` reorders the array of
-  head values by `orderabilityCompare`, `lowerListResumeOf` re-injects in sorted order (`order-dedup-local.ts`
-  `buildOrderGlobalSegment`, `barrier-value.ts` `buildValueStreamTransformSegment`). This is the stream twin of the
+  lifted. ✅ **Bare global `order()` over a LIST and MAP stream landed (2026-09-02)** via TinkerPop 4's
+  **Orderability** (`GremlinValueComparator` — a total order over ALL types: a cross-type precedence ladder plus a
+  RECURSIVE element-wise compare for collections). SQL has no such comparator, so it runs in JS through the
+  WHOLE-STREAM value-transform barrier: `orderStreamValue`/`orderMapStreamValue` reorder the array of head values by
+  `orderabilityCompare` (a map by its sorted ENTRY-SET, `mapComparator`), and `lowerListResumeOf`/`lowerMapResumeOf`
+  re-inject in sorted order (`order-dedup-local.ts` `buildOrderGlobalSegment`, `barrier-value.ts`
+  `buildValueStreamTransformSegment` with a `valueHead`/`mapHead` resolver). This is the stream twin of the
   `order(Scope.local)` barrier and reuses the SAME `orderability.ts` comparator, not a sortable-key SQL encoding —
   the recursion boundary the codebase already draws for `order(Scope.local)`. It also fixed a shared substrate bug:
   the value-resume seed now carries the array index as an ENCOUNTER channel (`lower.ts` `RESUME_ORD`), so a re-
-  injected list stream keeps stream order across a later `unfold()` — `split()`/`reverse()` re-injects shared the
-  bug (they interleaved lists: `x,p,y,q` for `split(',').unfold()` over `'x,y','p,q'`). LEFT: a global order over a
-  MAP stream (a `mapValue` head the `valueHead` barrier does not yet accept) and an element-membered list (cannot
-  round-trip — the rowid is gone once it JSONs through the barrier). (`order(Scope.local).by(Column.values)` —
-  sorting one map's entries in place — is the other open leaf, a `mapRange`-family local op, not the row engine.)
+  injected list/map stream keeps stream order across a later `unfold()` — `split()`/`reverse()` re-injects shared the
+  bug (they interleaved lists: `x,p,y,q` for `split(',').unfold()` over `'x,y','p,q'`). LEFT: an element-membered
+  list (cannot round-trip — the rowid is gone once it JSONs through the barrier — fail-closed decline). A SCALAR
+  stream stays in SQL (SQLite orders by storage class). (`order(Scope.local).by(Column.values)` — sorting one map's
+  entries in place — is the other open leaf, a `mapRange`-family local op, not the row engine.)
 - 🚧 **Property-stream vocabulary:** the `by()` vocabulary (`T.key`/`T.value` absent from `TOKENS`), the
   `id()`/`label()` retypes off a property row, `where(<body>)` over a property host, and META-properties
   (`properties().properties()`). `project`/`select` over a property needs FRAMER work — the record→map wire

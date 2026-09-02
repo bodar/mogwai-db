@@ -54,3 +54,38 @@ Feature: mogwai addendum — order() (GLOBAL) over a STREAM OF LISTS (JS ORDERAB
       | d[2].i |
       | d[3].i |
       | d[1].i |
+
+  # A MAP stream (a valueMap() head) orders by ORDERABILITY's map rule — the sorted ENTRY-SET compared
+  # element-wise, each entry by key then value (mapComparator). A single-key name map therefore sorts by
+  # the name value: josh < marko < peter < vadas (scan order is marko, vadas, josh, peter).
+  @gap:stream-order
+  Scenario: g_V_hasLabelXpersonX_valueMapXnameX_order
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").valueMap("name").order()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | m[{"name":"l[josh]"}] |
+      | m[{"name":"l[marko]"}] |
+      | m[{"name":"l[peter]"}] |
+      | m[{"name":"l[vadas]"}] |
+
+  # Two-key maps sort by AGE first: the entry-set sorts to [(age,…),(name,…)] (key "age" < "name"), so the
+  # leading entry the maps compare on is age — 27, 29, 32, 35.
+  @gap:stream-order
+  Scenario: g_V_hasLabelXpersonX_valueMapXname_ageX_order_by_age
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").valueMap("name","age").order()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | m[{"name":"l[vadas]","age":"l[d[27].i]"}] |
+      | m[{"name":"l[marko]","age":"l[d[29].i]"}] |
+      | m[{"name":"l[josh]","age":"l[d[32].i]"}] |
+      | m[{"name":"l[peter]","age":"l[d[35].i]"}] |

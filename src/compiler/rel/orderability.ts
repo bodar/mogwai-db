@@ -155,6 +155,15 @@ export function orderStreamValue(values: readonly unknown[]): readonly unknown[]
     .map(([v]) => v);
 }
 
+/** `order()` (GLOBAL) over a STREAM OF MAPS. Each `maps[i]` is a map's PAIRS array `[[keyNode,valNode],…]`
+ *  (`mapValue` head). A map orders by its SORTED ENTRY-SET compared element-wise (`mapComparator` —
+ *  order-independent, each entry by key then value), which `orderabilityCompare` already does for a `map`
+ *  node, so wrap each pairs array as a `{t:'map'}` node to sort by that path, then unwrap to the pairs the
+ *  re-inject seeds `MAP_COL` with. Stable, like `orderStreamValue`. */
+export function orderMapStreamValue(maps: readonly unknown[]): readonly unknown[] {
+  return orderStreamValue(maps.map((pairs) => ({ t: 'map', v: pairs }))).map((m) => (m as { v: unknown }).v);
+}
+
 /** `dedup(Scope.local)` over one list: FIRST occurrence wins, surviving order preserved
  *  (`DedupLocalStep`'s `LinkedHashSet`). O(n²) on the member count, which is fine for a local list. */
 export function dedupLocalValue(value: unknown): unknown {

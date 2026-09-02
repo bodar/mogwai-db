@@ -275,7 +275,7 @@ deferred	this traversal is not supported yet: no lowering covers g.V().until(__.
 deferred	this traversal is not supported yet: no lowering covers g.V().until(__.out().out()).repeat(__.in().as("a")).select("a").by(__.tail(Scope.local).values("name"))	g.V().until(__.out().out()).repeat(__.in().as("a")).select("a").by(__.tail(Scope.local).values("name"))
 deferred	this traversal is not supported yet: no lowering covers g.V().until(__.out().out()).repeat(__.in().as("a").in().as("b")).select("a", "b").by("name")	g.V().until(__.out().out()).repeat(__.in().as("a").in().as("b")).select("a", "b").by("name")
 deferred	this traversal is not supported yet: no lowering covers g.V().valueMap("name").asString()	g.V().valueMap("name").asString()
-deferred	this traversal is not supported yet: no lowering covers g.V().valueMap("name").order().fold().asString(Scope.local)	g.V().valueMap("name").order().fold().asString(Scope.local)
+deferred	order() barrier resume: no lowering covers the traversal after order()	g.V().valueMap("name").order().fold().asString(Scope.local)
 deferred	valueMap()/propertyMap() step can only have one by modulator	g.V().valueMap("name", "age").by(__.is("x")).by(__.unfold())
 deferred	this traversal is not supported yet: no lowering covers g.V().valueMap("name", "age").with(WithOptions.tokens, WithOptions.ids).by(__.unfold())	g.V().valueMap("name", "age").with(WithOptions.tokens, WithOptions.ids).by(__.unfold())
 deferred	this traversal is not supported yet: no lowering covers g.V().valueMap().match(__.as("a").select("name").as("b"))	g.V().valueMap().match(__.as("a").select("name").as("b"))

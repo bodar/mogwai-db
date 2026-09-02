@@ -26,6 +26,16 @@ export function valueHead(lowered: RelLowering | null): Compiled | null {
   return head.kind === 'read' && (head.shape.kind === 'value' || head.shape.kind === 'jsonbList') ? head : null;
 }
 
+/** The head of a MAP-stream value-transform barrier: the lowered prefix IF it is a `mapValue` read (a
+ *  global `order()` over a map stream — `readSegmentHead` delivers each map's pairs array as
+ *  `injectedValue`); else `null`. Kept separate from `valueHead` so `reverse()`/`split()` (whose
+ *  transforms are string/list, not map) never accept a map head. */
+export function mapHead(lowered: RelLowering | null): Compiled | null {
+  if (!lowered) return null;
+  const head = finishLowering(lowered);
+  return head.kind === 'read' && head.shape.kind === 'mapValue' ? head : null;
+}
+
 /**
  * Plan a SYNC value-transform barrier — the whole of `reverse()`/`split()`. The head is the value
  * stream up to `at`; `transform` maps each head value in JS; the results re-inject through `resume`
@@ -67,8 +77,9 @@ export function buildValueStreamTransformSegment(
   streamTransform: (values: readonly unknown[]) => readonly unknown[],
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
+  headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
 ): SegmentPlan | null {
-  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  const head = headOf(lowerToRel(steps.slice(0, at), lowering));
   if (!head) return null;
   return {
     kind: 'segment',

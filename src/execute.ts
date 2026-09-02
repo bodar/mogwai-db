@@ -974,6 +974,9 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // materialized the whole parent tuple to reach the same one field.
   if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
   if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list) }));
+  // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same
+  // encoding the `map` column carries (a global `order()` over a map stream reads it, `orderMapStreamValue`).
+  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: JSON.parse(r.map) }));
   // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
   // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
   // not framed). `injVal` is absent on a source-form head (which never reaches this method).
