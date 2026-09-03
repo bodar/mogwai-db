@@ -192,22 +192,40 @@ function shadowDelete(store: GraphStore, gid: string, revText: string | null, ki
 function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   if (!deletes.length) return;
   const vRow = resolveGids(store, 'nodes', deletes.filter((d) => d.kind === 'vertex').map((d) => upper(d.gid)));
-  const eIds = [...resolveGids(store, 'edges', deletes.filter((d) => d.kind === 'edge').map((d) => upper(d.gid))).values()];
+  const eRow = resolveGids(store, 'edges', deletes.filter((d) => d.kind === 'edge').map((d) => upper(d.gid)));
+  const vLocal = localRevs(store, 'nodes', [...vRow.keys()]); // gid → local LIVE rev, for the concurrency check
+  const eLocal = localRevs(store, 'edges', [...eRow.keys()]);
 
-  // Which of the to-be-deleted vertices are still endpoints of a LIVE edge → resurrect them.
+  // Which of the to-be-deleted vertices are still endpoints of a LIVE edge → resurrect them (referential).
   const vIds = [...vRow.values()];
   const referenced = new Set(vIds.length ? store.query<{ id: number }>(
     `SELECT src AS id FROM edges WHERE src IN (SELECT value FROM json_each(?))
      UNION SELECT tgt AS id FROM edges WHERE tgt IN (SELECT value FROM json_each(?))`,
     [JSON.stringify(vIds), JSON.stringify(vIds)]).map((r) => r.id) : []);
 
-  const removeV: number[] = [];
-  const resurrected = new Set<string>(); // gids whose delete was refused (referential) — surfaced, not applied
+  // A delete is REFUSED (surfaced, not applied) when it conflicts with the LIVE element (§6·3): a vertex
+  // a live edge references (existence-claim), OR a delete that does not DESCEND the local live rev — a
+  // concurrent edit, so not-deleted beats deleted. A delete that descends (a normal delete-after-edit) or
+  // meets no live element applies. A delete without a rev (a direct, non-replicated call) always applies.
+  const removeV: number[] = [], removeE: number[] = [];
+  const refused = new Set<string>();
+  const concurrent = (d: ReplDelete, local: Rev | undefined): boolean => {
+    const del = parseRev(d.rev);
+    return local !== undefined && del !== null && !descendsFrom(del, local);
+  };
   for (const d of deletes) {
-    if (d.kind !== 'vertex') continue;
-    const rowid = vRow.get(upper(d.gid));
-    if (rowid !== undefined && referenced.has(rowid)) { shadowDelete(store, d.gid, d.rev, 'vertex'); resurrected.add(upper(d.gid)); }
-    else if (rowid !== undefined) removeV.push(rowid);
+    const g = upper(d.gid);
+    if (d.kind === 'vertex') {
+      const rowid = vRow.get(g);
+      if (rowid === undefined) continue; // no local live vertex — nothing to remove (still tombstoned below)
+      if (referenced.has(rowid) || concurrent(d, vLocal.get(g))) { shadowDelete(store, d.gid, d.rev, 'vertex'); refused.add(g); }
+      else removeV.push(rowid);
+    } else {
+      const rowid = eRow.get(g);
+      if (rowid === undefined) continue;
+      if (concurrent(d, eLocal.get(g))) { shadowDelete(store, d.gid, d.rev, 'edge'); refused.add(g); }
+      else removeE.push(rowid);
+    }
   }
 
   if (removeV.length) {
@@ -217,15 +235,15 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     store.query("DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(removeV)]);
     deleteMembers(store, 'nodes', 'id', removeV);
   }
-  if (eIds.length) {
-    deleteMembers(store, 'edge_properties', 'edge', eIds);
-    store.query("DELETE FROM property_fts WHERE owner_elem = 'edge' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(eIds)]);
-    deleteMembers(store, 'edges', 'id', eIds);
+  if (removeE.length) {
+    deleteMembers(store, 'edge_properties', 'edge', removeE);
+    store.query("DELETE FROM property_fts WHERE owner_elem = 'edge' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(removeE)]);
+    deleteMembers(store, 'edges', 'id', removeE);
   }
 
-  // A tombstone per APPLIED delete (a resurrected vertex is not deleted, so it gets none), skipping a gid
-  // already tombstoned. gid crosses as hex→unhex, rev as jsonb text, seq NULL (the refresh assigns it).
-  const applied = deletes.filter((d) => !resurrected.has(upper(d.gid)));
+  // A tombstone per APPLIED delete (a refused one is surfaced, not tombstoned), skipping a gid already
+  // tombstoned. gid crosses as hex→unhex, rev as jsonb text, seq NULL (the refresh assigns it).
+  const applied = deletes.filter((d) => !refused.has(upper(d.gid)));
   const already = new Set(store.query<{ gid: string }>(
     'SELECT hex(gid) AS gid FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))',
     [JSON.stringify(applied.map((d) => upper(d.gid)))]).map((r) => r.gid));

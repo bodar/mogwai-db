@@ -244,7 +244,7 @@ export interface ChangeRow {
   readonly seq: number;
   readonly id: string; // hex gid
   readonly kind: 'vertex' | 'edge';
-  readonly rev: { readonly gen: number; readonly hash: string } | null;
+  readonly rev: WireRev | null;
   readonly deleted?: true;
   /** The element's shadowed conflict-LOSER leaf revs (§6·3), when it has any — CouchDB's
    *  `?style=all_docs`. A replicator fetches these too, so a peer that already holds the winner still
@@ -259,8 +259,11 @@ export interface ChangesFeed {
   readonly last_seq: number;
 }
 
-/** A rev on the wire (`{gen, hash}`), as the feed and diff carry it. */
-export interface WireRev { readonly gen: number; readonly hash: string }
+/** A rev on the wire (`{gen, hash}`), as the feed and diff carry it. `ids` (the stemmed ancestry) is
+ *  carried ONLY on a DELETE (a tombstone has no body, so the feed is the only carrier of its lineage —
+ *  what lets apply tell a normal delete-after-edit from a concurrent one, §6·3); a live rev omits it (its
+ *  ancestry stays in the store, read by `_revs_diff`). */
+export interface WireRev { readonly gen: number; readonly hash: string; readonly ids?: readonly string[] }
 
 /** `_revs_diff` request (§4 primitive 2): a peer offers, per element gid (hex), the revs it holds. */
 export type RevsDiffRequest = Readonly<Record<string, readonly WireRev[]>>;

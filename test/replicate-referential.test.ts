@@ -45,6 +45,33 @@ describe('replication — the referential rule + resurrect (§6·3)', () => {
     expect(n(s, 'SELECT count(*) AS n FROM tombstones WHERE hex(gid) = ?', uGid)).toBe(1); // tombstoned
   });
 
+  test('delete-vs-CONCURRENT-edit: the live edit wins, the delete is surfaced (not-deleted beats deleted)', async () => {
+    // Two peers diverge: one deletes V, the other edits V (same element, no referencing edge). The edit
+    // must win and the delete be surfaced — proven order-independently through the loop.
+    let router: import('../src/api.ts').Http;
+    const m = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    router = (await import('../src/router.ts')).makeRouter(m);
+    const url = (g: string) => `http://peer/gremlin/${g}`;
+    const feed = async (g: string) => (await router(new Request(`${url(g)}/_changes?since=0`))).json() as Promise<import('../src/api.ts').ChangesFeed>;
+    await m.executor('seed').framedAsync('g.addV("person").property("name","v")', {});
+    for (const g of ['a', 'b']) await m.replicate(g, { source: url('seed') });
+    await m.executor('a').framedAsync('g.V().property("age",99)', {}); // a EDITS V
+    await m.executor('b').framedAsync('g.V().drop()', {}); // b DELETES V (concurrent)
+
+    await m.replicate('a', { source: url('b') }); // a gets b's delete of a rev it has concurrently edited
+    await m.replicate('b', { source: url('a') }); // b gets a's live edit — resurrects
+
+    // Both converge on V LIVE (the edit won), with the delete surfaced.
+    const gid = (await feed('a')).results.find((r) => !r.deleted)!.id;
+    expect((await m.info('a')).vertexCount).toBe(1);
+    expect((await m.info('b')).vertexCount).toBe(1);
+    expect(conflictsFor(m.storeOf('a'), gid).some((c) => (c.doc as { deleted?: boolean }).deleted)).toBe(true);
+    expect(conflictsFor(m.storeOf('b'), gid).some((c) => (c.doc as { deleted?: boolean }).deleted)).toBe(true);
+    // The edit's content survived on both.
+    for (const g of ['a', 'b'])
+      expect(n(m.storeOf(g), "SELECT count(*) AS n FROM vertex_properties p JOIN nodes nn ON nn.id=p.node WHERE hex(nn.gid)=? AND p.key='age'", gid)).toBe(1);
+  });
+
   test('resurrect-on-upsert: a live version supersedes a local tombstone, surfacing the delete', async () => {
     const m = mgr();
     await m.executor('g').framedAsync('g.addV("person").property("name","v").property("age",29)', {});

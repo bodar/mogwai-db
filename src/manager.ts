@@ -47,7 +47,9 @@ export function changesFeed(store: GraphStore, since: number): ChangesFeed {
   const conflicts = conflictLeaves(store, rows.filter((r) => !r.deleted).map((r) => r.id)); // gid → loser leaf revs (4b-2)
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
-    rev: leafRev(r.rev), // the feed carries the LEAF only; the ancestry stays in the store (revs_diff reads it)
+    // A live row carries the LEAF only (its ancestry stays in the store, revs_diff reads it); a DELETE
+    // carries the FULL ancestry, since a tombstone has no body and the feed is its only lineage carrier.
+    rev: r.deleted ? fullRev(r.rev) : leafRev(r.rev),
     ...(r.deleted ? { deleted: true as const } : {}),
     ...(conflicts.get(r.id)?.length ? { conflicts: conflicts.get(r.id) } : {}),
   }));
@@ -78,6 +80,14 @@ const leafRev = (raw: string | null): { gen: number; hash: string } | null => {
   if (!raw) return null;
   const r = JSON.parse(raw) as { gen: number; hash: string };
   return { gen: r.gen, hash: r.hash };
+};
+
+/** The stored rev WITH its ancestry (`ids`) — a delete's feed shape, so apply can classify it against a
+ *  peer's live edit (§6·3). Seeds `[hash]` for a pre-tree rev. */
+const fullRev = (raw: string | null): WireRev | null => {
+  if (!raw) return null;
+  const r = JSON.parse(raw) as { gen: number; hash: string; ids?: string[] };
+  return { gen: r.gen, hash: r.hash, ids: r.ids ?? [r.hash] };
 };
 
 /**

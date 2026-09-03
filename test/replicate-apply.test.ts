@@ -74,14 +74,16 @@ describe('applyChanges — landing a peer\'s changes by gid', () => {
   test('a delete removes the element and records a tombstone at the carried rev; re-apply is a no-op', () => {
     const s = store();
     applyChanges(s, { vertices: [v(A, rev(1, 'aa'), ['person'])] });
-    applyChanges(s, { deletes: [{ gid: A, rev: rev(2, 'del'), kind: 'vertex' }] });
+    // A realistic delete DESCENDS the element's rev (a delete-after-edit) — its ancestry includes 'aa'.
+    const del = JSON.stringify({ gen: 2, hash: 'del', ids: ['del', 'aa'] });
+    applyChanges(s, { deletes: [{ gid: A, rev: del, kind: 'vertex' }] });
     expect(counts(s)).toEqual({ v: 0, e: 0 }); // gone
     const t = s.query<{ gid: string; rev: string; seq: number | null; kind: string }>(
       'SELECT hex(gid) AS gid, json(rev) AS rev, seq, kind FROM tombstones');
     expect(t).toHaveLength(1);
-    expect(t[0]!).toMatchObject({ gid: A, rev: rev(2, 'del'), kind: 'vertex' });
+    expect(t[0]!).toMatchObject({ gid: A, rev: del, kind: 'vertex' });
     expect(t[0]!.seq!).toBeGreaterThan(0); // a fresh LOCAL seq — the delete enters the feed
-    applyChanges(s, { deletes: [{ gid: A, rev: rev(2, 'del'), kind: 'vertex' }] });
+    applyChanges(s, { deletes: [{ gid: A, rev: del, kind: 'vertex' }] });
     expect(s.query<{ n: number }>('SELECT count(*) AS n FROM tombstones')[0]!.n).toBe(1); // deduped
   });
 
