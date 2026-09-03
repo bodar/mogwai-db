@@ -410,11 +410,32 @@ Each phase is independently valuable and lands green before the next.
   from its native source: Bun flags/env, a Worker's `env` (a structured `CONFIG` object var), and in the
   browser the page's inline-`<script>` JSON read by the bootstrap and handed to each Worker at boot
   (`configFromBrowser`). Test: `test/graph-worker-http.test.ts` (in-memory WASM, under Bun).
-- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5).** Add `gid` (uuid_v7, immutable, indexed) and
-  `rev` (bounded rev-tree JSONB) columns on `nodes`/`edges`; the touch-rev-on-write hook (edge rev references
-  endpoints by `gid`); thread through format adapters. Local substrate, no networking. *Gate: every element
-  has a stable `gid`/`rev`; identical content converges to the same rev; they survive an `io()` round-trip;
-  two independent graphs never collide on `gid`.*
+- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5). 🚧 LARGELY LANDED.** `gid` (uuid_v7 BLOB,
+  immutable, UNIQUE-indexed) and `rev` (`{gen, hash}` JSONB) columns are on `nodes`/`edges` (`src/storage.ts`).
+  A portable pure-JS uuid_v7 minter (`src/uuid.ts`) and SHA-256 (`src/hash.ts`, vector-tested), and the rev
+  model (`src/rev.ts`, CouchDB's chained `new_revid`). Both derived columns are (re)computed by ONE post-write
+  refresh (`src/refresh.ts`) run by `frameResolved`, keyed on a UNIFORM `dirty` flag (+ partial index) — the
+  single recompute marker for gid, rev, and any future derived column. **The write barrier was examined and
+  rejected as the mechanism** (a write frames its own output, entangled with its `RETURNING` bindings — a
+  post-write refresh is the honest shape; recorded in the commit history). Landed + green on trunk:
+  - ✅ `gid` on the bulk/format path (mint-on-load, GraphSON preserve / CSV re-mint) and the compiled path
+    (addV/addE/mergeV/mergeE via the refresh); two graphs never collide; gid survives an `io()` round-trip.
+  - ✅ the unified `dirty` marker (`gid IS NULL` → `dirty` flag); a create is born dirty, the refresh clears it.
+  - ✅ `rev` on the compiled CREATE path: every created element gets `{gen:1, hash}`; identical content
+    converges across independent graphs; an edge's rev references its endpoint gids.
+  - ⏳ **REMAINING (a focused follow-up — intricate write-path surgery):**
+    1. **rev recompute on MUTATION (touch-on-write).** A content mutation must set `dirty = 1` so the refresh
+       recomputes+chains the rev. The marker is a `markDirty(owners)` RelIR `update` (the `update` factory +
+       emitter exist) spliced into every content-mutation site — `propertyStatements` (add/remove),
+       `propertyDrop`, `labelMutationScope`, and merge's onMatch arm (which reuses those helpers). Note the
+       THREE differing binding styles across those functions (`bind` / explicit `bindings[]` / `effectScope`).
+    2. **rev through the bulk/format path.** GraphSON carries `rev` (writer emits `json(rev)`, reader parses;
+       parallels the gid field already added), and the bulk loader PRESERVES a document's rev / computes one
+       when absent — so rev survives an `io()` round-trip, completing the gate. (bulk currently leaves rev
+       null; a mogwai dump→reload preserves once the format carries it.)
+  *Gate: every element has a stable `gid`/`rev`; identical content converges to the same rev; they survive an
+  `io()` round-trip; two independent graphs never collide on `gid`.* (gid: fully met; rev: create + convergence
+  met, the two ⏳ items complete mutation-tracking + round-trip.)
 - **Phase 2 — the by-seq feed + read side (§5·2, §6·4).** Per-element `seq` (indexed, bumped on write) +
   tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct deltas incl. deletes;
   `since=0` enumerates full current state; the feed stays current-state-sized under repeated updates.*
