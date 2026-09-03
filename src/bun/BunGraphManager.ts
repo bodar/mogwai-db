@@ -1,7 +1,8 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { GraphStore, type Sql } from '../storage.ts';
-import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
+import { type GraphManager, type GraphInfo, graphInfo, changesFeed } from '../manager.ts';
+import type { ChangesFeed } from '../api.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi, Http } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
@@ -118,6 +119,10 @@ export class BunGraphManager implements GraphManager {
 
   async info(id: string): Promise<GraphInfo> {
     return graphInfo(this.resolve(id).store);
+  }
+
+  async changes(id: string, since: number): Promise<ChangesFeed> {
+    return changesFeed(this.resolve(id).store, since);
   }
 
   async destroy(id: string): Promise<void> {

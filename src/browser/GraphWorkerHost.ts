@@ -10,7 +10,8 @@
 // drive it directly and prove the whole compiler+executor+wire stack runs in a browser over the REAL
 // opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
-import { graphInfo, type GraphInfo } from '../manager.ts';
+import { graphInfo, changesFeed, type GraphInfo } from '../manager.ts';
+import type { ChangesFeed } from '../api.ts';
 import { Executor, type Framed } from '../execute.ts';
 import type { ForeignResult, ForeignTerminal } from '../api.ts';
 import type { TypeNode } from '../gremlin/types.ts';
@@ -109,6 +110,11 @@ export class GraphWorkerHost extends RpcTarget {
   /** Element counts (the management GET). */
   info(): GraphInfo {
     return graphInfo(this.store);
+  }
+
+  /** The by-sequence change feed (§5·2) — store-tier read, run inside this graph's Worker. */
+  changes(since: number): ChangesFeed {
+    return changesFeed(this.store, since);
   }
 }
 // Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's

@@ -81,6 +81,9 @@ export function makeRouter(
   log: QueryLogger = silentLogger,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
+  // Peer-facing sync endpoints (§9), CouchDB-shaped under the `_` system prefix: `/{prefix}/{g}/_changes`
+  // and (2d) `/{prefix}/{g}/_revs_diff`. A second, longer path so a graph id can never be read as one.
+  const systemPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/(_[a-z_]+)/?$`);
   // The GraphQL edge is a SEPARATE, fixed path (§5): a GraphQL client speaks its own
   // over-HTTP protocol and JSON envelope, never the Gremlin wire, so it does not share the
   // configurable gremlin prefix or the verb-dispatch below.
@@ -109,6 +112,21 @@ export function makeRouter(
       if (req.method === 'POST') return handlePost(mgr.executor(gid), req);
       if (req.method === 'GET') return handleGet(mgr.executor(gid), req);
       return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
+    }
+
+    // Peer-facing replication endpoints (§9) — the `_`-prefixed system routes, matched before the
+    // graph path so `{g}/_changes` never reads `_changes` as a query verb. Store-tier reads framed as
+    // JSON, the shape a mogwai peer (Phase 3) consumes.
+    const sysMatch = pathname.match(systemPath);
+    if (sysMatch) {
+      const gid = decodeURIComponent(sysMatch[1]!);
+      const endpoint = sysMatch[2]!;
+      if (endpoint === '_changes') {
+        if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+        const since = Math.max(0, Number(new URL(req.url).searchParams.get('since') ?? 0) || 0);
+        return json(await mgr.changes(gid, since));
+      }
+      return new Response('Not found', { status: 404 });
     }
 
     // Bare gremlin endpoint: a stock TinkerPop client POSTs to one URL and names the

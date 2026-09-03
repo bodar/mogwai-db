@@ -28,7 +28,7 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync, readdi
 import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
-import type { RemoteExecutor } from '../../src/api.ts';
+import type { RemoteExecutor, ChangesFeed } from '../../src/api.ts';
 import { isExcludedScenario, isIgnoredScenario } from './tags.ts';
 
 export interface QueryRecord {
@@ -83,6 +83,7 @@ export class LoggingGraphManager implements GraphManager {
   }
   create(id: string): Promise<void> { return this.inner.create(id); }
   info(id: string): Promise<GraphInfo> { return this.inner.info(id); }
+  changes(id: string, since: number): Promise<ChangesFeed> { return this.inner.changes(id, since); }
   destroy(id: string): Promise<void> { return this.inner.destroy(id); }
 
   private log(rec: QueryRecord): void {

@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
-import { graphInfo } from '../manager.ts';
-import type { GraphInfo, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
+import { graphInfo, changesFeed } from '../manager.ts';
+import type { GraphInfo, ChangesFeed, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
@@ -133,6 +133,11 @@ export class GraphDatabase extends DurableObject<Env> {
   info(): GraphInfo {
     this.ensureLive();
     return graphInfo(this.store);
+  }
+
+  changes(since: number): ChangesFeed {
+    this.ensureLive();
+    return changesFeed(this.store, since);
   }
 
   /** Fully remove this graph's storage. `deleteAll()` is the only way to clear

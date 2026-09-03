@@ -237,6 +237,24 @@ export interface GraphInfo {
   edgeCount: number;
 }
 
+/** One entry in the `_changes` feed (§5·2) — an element's LATEST state at its `seq`. Keyed by `gid`
+ *  (cross-peer identity, never the local rowid); `rev` is its `{gen, hash}`; `kind` is vertex/edge;
+ *  `deleted` marks a tombstone (CouchDB's `_deleted`). One entry per element (moved, not appended). */
+export interface ChangeRow {
+  readonly seq: number;
+  readonly id: string; // hex gid
+  readonly kind: 'vertex' | 'edge';
+  readonly rev: { readonly gen: number; readonly hash: string } | null;
+  readonly deleted?: true;
+}
+
+/** The `_changes?since=N` response (§5·2), CouchDB-shaped: the ordered deltas plus `last_seq`, the
+ *  graph's `update_seq` at response time — a client checkpoints it and resumes with `since=last_seq`. */
+export interface ChangesFeed {
+  readonly results: readonly ChangeRow[];
+  readonly last_seq: number;
+}
+
 /** The graph-lifecycle seam AND the executor factory. `executor(id)` resolves a graph (creating
  *  it on demand) and returns its per-graph Executor — the single home for id→graph resolution,
  *  which is what federation reaches through (a sibling is just another graph THIS manager owns).
@@ -252,6 +270,9 @@ export interface GraphManager {
   create(id: string): Promise<void>;
   /** Element counts for graph `id`, creating it on demand (fresh = 0, 0). */
   info(id: string): Promise<GraphInfo>;
+  /** The by-sequence change feed for graph `id` since cursor `since` (§5·2) — store-tier read work,
+   *  the peer-facing replication source. Creating the graph on demand, like `info`. */
+  changes(id: string, since: number): Promise<ChangesFeed>;
   /** Destroy graph `id` and all its storage. Idempotent. */
   destroy(id: string): Promise<void>;
 }
