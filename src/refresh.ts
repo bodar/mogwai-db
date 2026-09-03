@@ -80,10 +80,22 @@ function refreshEdges(store: GraphStore): void {
   updateSet(store, 'edges', 'id', [GID, REV, SEQ, DIRTY], updates);
 }
 
-/** Refresh the replication metadata (gid + rev) of the elements a write just touched — called by
- *  `frameResolved` after a write program commits (`plan.kind === 'program'`). Vertices before edges,
- *  so an edge's rev sees its endpoints' minted gids. */
+/** Assign a fresh local seq to every tombstone a `drop()` just recorded (`seq IS NULL`, §6·4), so a
+ *  delete enters the by-seq feed after the same write's live elements. The gid/rev were captured by the
+ *  compiled drop; only the local seq is the refresh's to assign. A no-op when nothing was deleted. */
+function refreshTombstones(store: GraphStore): void {
+  const rows = store.query<{ id: number }>('SELECT id FROM tombstones WHERE seq IS NULL');
+  if (!rows.length) return;
+  const base = store.nextSeqBlock(rows.length);
+  updateSet(store, 'tombstones', 'id', [SEQ], rows.map((r, i) => [r.id, base + i + 1]));
+}
+
+/** Refresh the replication metadata (gid + rev + seq) of the elements a write just touched, and assign
+ *  seqs to any new tombstones — called by `frameResolved` after a write program commits
+ *  (`plan.kind === 'program'`). Vertices before edges (an edge's rev sees its endpoints' minted gids),
+ *  then tombstones (a delete's seq follows the same write's live seqs, §6·2). */
 export function refreshElements(store: GraphStore): void {
   refreshNodes(store);
   refreshEdges(store);
+  refreshTombstones(store);
 }

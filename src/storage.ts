@@ -83,6 +83,16 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS edge_properties(
      id INTEGER PRIMARY KEY, edge INTEGER NOT NULL REFERENCES edges(id),
      key TEXT NOT NULL, value, vtype TEXT, UNIQUE(edge, key))`,
+  // Deletes leave a TOMBSTONE (§6·4/§6·5): `drop()` hard-deletes, so a live-set diff cannot tell
+  // "deleted on source" from "not yet created" — the tombstone is what makes a delete propagate,
+  // appearing in `_changes` exactly as CouchDB ships a `_deleted` rev. It carries the deleted element's
+  // `gid` (which element), its last `rev` (which version — for the conflict winner, §6·3), a fresh local
+  // `seq` (assigned by the refresh, so it enters the feed like any write), and `kind` ('vertex'|'edge').
+  // ONLY elements that HAD a gid are recorded — an element created and dropped in one program never
+  // committed a gid and no peer ever saw it, so it needs no tombstone (`drop()` filters `gid IS NOT NULL`).
+  // Kept, not pruned (§6·4): deletes are infrequent and a tombstone is tiny; a manual purge is Phase 6.
+  `CREATE TABLE IF NOT EXISTS tombstones(
+     id INTEGER PRIMARY KEY, gid BLOB NOT NULL, rev BLOB, seq INTEGER, kind TEXT NOT NULL)`,
   // What cardinality a vertex-property key takes when a `property()` DECLARES none. TinkerPop asks
   // the graph this (`Graph.Features.VertexFeatures.getCardinality(key)`) and its javadoc splits
   // providers in two — "implementations that employ a schema can consult it", the rest "return their
@@ -124,6 +134,10 @@ const SCHEMA = [
   // run-to-completion. Seeded to 0; `OR IGNORE` keeps re-init a no-op.
   `CREATE INDEX IF NOT EXISTS nodes_seq ON nodes(seq) WHERE seq IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS edges_seq ON edges(seq) WHERE seq IS NOT NULL`,
+  // Tombstones ride the same by-seq feed (`_changes` UNIONs them in) and answer a gid lookup for
+  // `_revs_diff`/apply ("is this element already deleted here?"). A partial seq index like the elements'.
+  `CREATE INDEX IF NOT EXISTS tombstones_seq ON tombstones(seq) WHERE seq IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS tombstones_gid ON tombstones(gid)`,
   `CREATE TABLE IF NOT EXISTS update_seq(value INTEGER NOT NULL)`,
   `INSERT OR IGNORE INTO update_seq(rowid, value) VALUES (1, 0)`,
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,

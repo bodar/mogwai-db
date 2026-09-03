@@ -124,6 +124,31 @@ function markDirty(elem: Elem, owners: Rel, fresh: Minter): Stmt {
   });
 }
 
+/**
+ * Record a TOMBSTONE per deleted element (§6·4) — `INSERT INTO tombstones (gid, rev, kind) SELECT gid,
+ * rev, '<kind>' FROM <nodes|edges> WHERE id IN <snapshot> AND gid IS NOT NULL`. Run BEFORE the element
+ * row is deleted, so its gid/rev are still readable; it reads the LIVE table (not the id-only snapshot)
+ * for those columns. `gid IS NOT NULL` skips an element created and dropped in one program — it never
+ * committed a gid and no peer ever saw it, so a tombstone for it would be a dangling delete. `seq` is
+ * left NULL: the post-write refresh assigns a fresh LOCAL one, so a delete enters the by-seq feed like
+ * any write (§5·2). O(plan size) via `InQuery`, never a data-sized bind list (§6·2), like the deletes.
+ */
+function recordTombstones(elem: Elem, owners: Rel, fresh: Minter): Stmt {
+  const source = OWNED_BY[elem === 'edge' ? 'edges' : 'nodes'].table;
+  const scan = make.scan({ id: fresh('t'), table: source, alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('gid', 'blob', true), meta('rev', 'blob', true)) });
+  const matching = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and({ kind: 'in-query', expr: col(scan.id, 'id'), plan: owners, negated: false },
+      { kind: 'binary', op: 'is not', left: col(scan.id, 'gid'), right: compilerNull('blob') }),
+  });
+  const rows = make.project({
+    id: fresh('p'), input: matching, channels: [], type: typeOf(meta('gid', 'blob', true), meta('rev', 'blob', true), meta('kind', 'text')),
+    exprs: [['gid', col(matching.id, 'gid')], ['rev', col(matching.id, 'rev')], ['kind', text(elem === 'edge' ? 'edge' : 'vertex')]],
+  });
+  const target = make.scan({ id: fresh('t'), table: 'tombstones', alias: fresh('wt'), channels: [], type: typeOf(meta('gid', 'blob', true), meta('rev', 'blob', true), meta('kind', 'text')) });
+  return insert({ target, cols: ['gid', 'rev', 'kind'], source: rows, channels: [], type: typeOf(), returning: [] });
+}
+
 /** The FTS rows owned by a set of elements. Its own function because the owner column is `owner` on
  *  a virtual table with no `id`, and because the element-kind equality rides with it. */
 function deleteFts(elem: Elem, owners: Rel, fresh: Minter): Stmt {
@@ -177,7 +202,10 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
 
   const statements: Stmt[] = [];
   if (elem === 'edge') {
-    statements.push(deleteFts('edge', owners, fresh),
+    statements.push(
+      // Tombstone the edges FIRST, while their gid/rev are still on the row (§6·4).
+      recordTombstones('edge', owners, fresh),
+      deleteFts('edge', owners, fresh),
       deleteOwnedBy('edgeProps', owners, fresh),
       deleteOwnedBy('edges', owners, fresh));
   } else {
@@ -185,6 +213,10 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
     bindings.push({ name: incident, node: incidentEdges(owners, fresh), snapshot: true });
     const edges = make.ref({ id: fresh('r'), name: incident, channels: [], type: ID_TYPE });
     statements.push(
+      // Tombstone the vertex AND its incident edges (both are being deleted, so both must propagate)
+      // before any element row is removed — the gid/rev they carry are read off the live tables.
+      recordTombstones('vertex', owners, fresh),
+      recordTombstones('edge', edges, fresh),
       deleteFts('edge', edges, fresh),
       deleteFts('vertex', owners, fresh),
       deleteOwnedBy('edgeProps', edges, fresh),
