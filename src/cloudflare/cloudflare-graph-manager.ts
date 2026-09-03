@@ -106,8 +106,8 @@ export class CloudflareGraphManager implements GraphManager {
   info(id: string): Promise<GraphInfo> {
     return this.ns.getByName(id).info();
   }
-  changes(id: string, since: number): Promise<ChangesFeed> {
-    return this.ns.getByName(id).changes(since);
+  changes(id: string, since: number, limit?: number): Promise<ChangesFeed> {
+    return this.ns.getByName(id).changes(since, limit);
   }
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
     return this.ns.getByName(id).revsDiff(request);

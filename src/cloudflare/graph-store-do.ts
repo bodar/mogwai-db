@@ -136,9 +136,9 @@ export class GraphDatabase extends DurableObject<Env> {
     return graphInfo(this.store);
   }
 
-  changes(since: number): ChangesFeed {
+  changes(since: number, limit?: number): ChangesFeed {
     this.ensureLive();
-    return changesFeed(this.store, since);
+    return changesFeed(this.store, since, limit);
   }
 
   revsDiff(request: RevsDiffRequest): RevsDiffResponse {

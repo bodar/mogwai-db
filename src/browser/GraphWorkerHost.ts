@@ -116,9 +116,10 @@ export class GraphWorkerHost extends RpcTarget {
     return graphInfo(this.store);
   }
 
-  /** The by-sequence change feed (§5·2) — store-tier read, run inside this graph's Worker. */
-  changes(since: number): ChangesFeed {
-    return changesFeed(this.store, since);
+  /** The by-sequence change feed (§5·2) — store-tier read, run inside this graph's Worker. `limit` pages
+   *  the feed so a large-graph pull drains in bounded batches (the pacing substrate). */
+  changes(since: number, limit?: number): ChangesFeed {
+    return changesFeed(this.store, since, limit);
   }
 
   /** The `_revs_diff` lookup (§4 primitive 2) — store-tier, run inside this graph's Worker. */

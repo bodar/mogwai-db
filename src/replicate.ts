@@ -439,7 +439,7 @@ export function checkpoint(store: GraphStore, replicationId: string, seq?: numbe
 /** A replication PEER — the four protocol operations, direction-agnostic. A local peer binds a manager's
  *  own methods; a remote peer is an `Http` caller over the `_` endpoints. The loop drives two of them. */
 export interface Peer {
-  changes(since: number): Promise<ChangesFeed>;
+  changes(since: number, limit?: number): Promise<ChangesFeed>;
   revsDiff(request: RevsDiffRequest): Promise<RevsDiffResponse>;
   bulkGet(refs: readonly BulkGetRef[]): Promise<WireChangeSet>;
   bulkDocs(changes: WireChangeSet): Promise<void>;
@@ -448,7 +448,7 @@ export interface Peer {
 /** A local peer over a manager's own graph — no HTTP hop, just the in-process (or DO-RPC) methods. */
 export function localPeer(mgr: GraphManager, id: string): Peer {
   return {
-    changes: (since) => mgr.changes(id, since),
+    changes: (since, limit) => mgr.changes(id, since, limit),
     revsDiff: (request) => mgr.revsDiff(id, request),
     bulkGet: (refs) => mgr.bulkGet(id, refs),
     bulkDocs: (changes) => mgr.bulkDocs(id, changes),
@@ -459,7 +459,7 @@ export function localPeer(mgr: GraphManager, id: string): Peer {
  *  holds a store + http but is not a manager). Reuses the shared store-tier functions. */
 export function storePeer(store: GraphStore): Peer {
   return {
-    changes: async (since) => changesFeed(store, since),
+    changes: async (since, limit) => changesFeed(store, since, limit),
     revsDiff: async (request) => revsDiff(store, request),
     bulkGet: async (refs) => bulkGet(store, refs),
     bulkDocs: async (changes) => applyWire(store, changes),
@@ -486,8 +486,9 @@ export function remotePeer(http: Http, url: string): Peer {
     return res.json() as Promise<T>;
   };
   return {
-    changes: async (since) => {
-      const res = await http(new Request(`${base}/_changes?since=${since}`));
+    changes: async (since, limit) => {
+      const q = limit != null && limit > 0 ? `?since=${since}&limit=${limit}` : `?since=${since}`;
+      const res = await http(new Request(`${base}/_changes${q}`));
       if (!res.ok) throw new Error(`replication: _changes on ${base} returned ${res.status}`);
       return res.json() as Promise<ChangesFeed>;
     },
@@ -497,15 +498,43 @@ export function remotePeer(http: Http, url: string): Peer {
   };
 }
 
-/** ONE replication pass, direction-agnostic (§4·4): read the source feed from the checkpoint, ask the
- *  target which revs it lacks, fetch only those bodies, apply them WITH the deletes, advance the
- *  checkpoint. Idempotent: a re-run with no source change reads the (empty) tail and writes nothing. The
- *  feed is current-state-sized, so one pass catches a fresh target up; pagination is a later refinement. */
-export async function runReplication(
-  source: Peer, target: Peer, cp: { read(): Promise<number>; write(seq: number): Promise<void> },
-): Promise<ReplicationStats> {
+/** The default page size for a paged pull (CouchDB's `worker_batch_size` default). Bounds how many change
+ *  entries — and thus element bodies — one pass fetches and applies, so no single `applyWire` span
+ *  busy-locks the single-threaded store. Follows CouchDB (§4 governing principle); tune by measurement. */
+export const DEFAULT_REPLICATION_BATCH = 500;
+
+/** A replicator's checkpoint accessors — read the resume cursor, write it after a page commits. */
+export interface Checkpoint { read(): Promise<number>; write(seq: number): Promise<void>; }
+
+/** Pacing controls for {@link runReplication} — the "breakpoints" that keep replication from running at
+ *  max speed and busy-locking a single-threaded store (the plan's Phase-5 pacing requirement). */
+export interface PaceOptions {
+  /** Change entries fetched + applied per page (default {@link DEFAULT_REPLICATION_BATCH}). Bounds each
+   *  synchronous apply span. `<= 0` disables paging (one unbounded pass — the pre-5a behaviour). */
+  batchSize?: number;
+  /** Awaited AFTER each page commits and BEFORE the next — the pacing breakpoint. A scheduler yields the
+   *  DO / sleeps here so ordinary requests are served between pages. Default: a microtask yield. */
+  pace?: (progress: { batches: number; read: number; written: number; deleted: number }) => Promise<void> | void;
+  /** Stop after this many pages even if more remains (the per-wake bound a scheduler re-arms on). Default:
+   *  drain fully. When it stops with work still pending, the result's `more` is true. */
+  maxBatches?: number;
+}
+
+/** {@link ReplicationStats} plus whether the run stopped with work still pending (`maxBatches` reached) —
+ *  what a scheduler reads to decide whether to re-arm soon (more) or at the poll interval (caught up). */
+export interface ReplicationRunStats extends ReplicationStats { readonly batches: number; readonly more: boolean; }
+
+/** ONE bounded replication page, direction-agnostic (§4·4): read the source feed from the checkpoint (at
+ *  most `batchSize` entries), ask the target which revs it lacks, fetch only those bodies, apply them WITH
+ *  the deletes, then the conflict-loser leg, and advance the checkpoint. Idempotent. `more` is true when
+ *  the page filled (there is likely another page). This is the pacing primitive — one span, bounded by
+ *  `batchSize` — that both the one-shot drain and the scheduler's per-wake work are built from. */
+export async function runReplicationPass(
+  source: Peer, target: Peer, cp: Checkpoint, batchSize = DEFAULT_REPLICATION_BATCH,
+): Promise<ReplicationRunStats> {
   const since = await cp.read();
-  const feed = await source.changes(since);
+  const limit = batchSize > 0 ? batchSize : undefined;
+  const feed = await source.changes(since, limit);
   const live = feed.results.filter((r) => !r.deleted && r.rev);
   const deletes: WireDelete[] = feed.results.filter((r) => r.deleted)
     .map((r) => ({ gid: r.id, rev: r.rev ? JSON.stringify(r.rev) : null, kind: r.kind }));
@@ -532,7 +561,33 @@ export async function runReplication(
   if (loserRefs.length) { await target.bulkDocs(await source.bulkGet(loserRefs)); written += loserRefs.length; }
 
   await cp.write(feed.last_seq);
-  return { read: feed.results.length, written, deleted: deletes.length, last_seq: feed.last_seq };
+  // A full page (`limit` rows) means the feed was truncated, so another page likely remains; a short page
+  // means the source is drained through `last_seq`.
+  const more = limit != null && feed.results.length >= limit;
+  return { read: feed.results.length, written, deleted: deletes.length, last_seq: feed.last_seq, batches: 1, more };
+}
+
+/** Direction-agnostic replication (§4·4): drive {@link runReplicationPass} in a PAGED, PACED loop until
+ *  the source is drained (or `maxBatches` is reached). Each page is bounded by `batchSize` and the loop
+ *  awaits `pace()` between pages, so a large-graph pull never busy-locks the store — the pacing substrate
+ *  (Phase 5a). The one-shot `_replicate` drains fully (no `maxBatches`); a scheduler bounds it per wake
+ *  and re-arms while `more`. Resumable: every page advances the checkpoint, so an interrupted drain
+ *  resumes from the last committed page. */
+export async function runReplication(
+  source: Peer, target: Peer, cp: Checkpoint, opts: PaceOptions = {},
+): Promise<ReplicationRunStats> {
+  const batchSize = opts.batchSize ?? DEFAULT_REPLICATION_BATCH;
+  const pace = opts.pace ?? (() => Promise.resolve());
+  const total = { read: 0, written: 0, deleted: 0, last_seq: await cp.read(), batches: 0, more: false };
+  for (;;) {
+    const p = await runReplicationPass(source, target, cp, batchSize);
+    total.read += p.read; total.written += p.written; total.deleted += p.deleted;
+    total.last_seq = p.last_seq; total.batches += 1;
+    if (!p.more) break; // source drained
+    if (opts.maxBatches != null && total.batches >= opts.maxBatches) { total.more = true; break; }
+    await pace({ batches: total.batches, read: total.read, written: total.written, deleted: total.deleted });
+  }
+  return total;
 }
 
 /** A deterministic replication id (§5): stable across runs so a re-run resumes from the same checkpoint,

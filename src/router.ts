@@ -123,8 +123,13 @@ export function makeRouter(
       const endpoint = sysMatch[2]!;
       if (endpoint === '_changes') {
         if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-        const since = Math.max(0, Number(new URL(req.url).searchParams.get('since') ?? 0) || 0);
-        return json(await mgr.changes(gid, since));
+        const params = new URL(req.url).searchParams;
+        const since = Math.max(0, Number(params.get('since') ?? 0) || 0);
+        // `?limit=N` pages the feed (CouchDB `_changes?limit=N`) so a replicator drains a large graph in
+        // bounded batches; absent/≤0 ⇒ the whole feed (unpaged).
+        const rawLimit = Number(params.get('limit'));
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : undefined;
+        return json(await mgr.changes(gid, since, limit));
       }
       if (endpoint === '_revs_diff') {
         if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });

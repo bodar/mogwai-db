@@ -122,8 +122,8 @@ export class BunGraphManager implements GraphManager {
     return graphInfo(this.resolve(id).store);
   }
 
-  async changes(id: string, since: number): Promise<ChangesFeed> {
-    return changesFeed(this.resolve(id).store, since);
+  async changes(id: string, since: number, limit?: number): Promise<ChangesFeed> {
+    return changesFeed(this.resolve(id).store, since, limit);
   }
 
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {

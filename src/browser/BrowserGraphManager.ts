@@ -70,8 +70,8 @@ export class BrowserGraphManager implements GraphManager {
     return this.call(id, ((s) => s.info()) as Awaited$<GraphInfo>);
   }
 
-  async changes(id: string, since: number): Promise<ChangesFeed> {
-    return this.call(id, ((s) => s.changes(since)) as Awaited$<ChangesFeed>);
+  async changes(id: string, since: number, limit?: number): Promise<ChangesFeed> {
+    return this.call(id, ((s) => s.changes(since, limit)) as Awaited$<ChangesFeed>);
   }
 
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {

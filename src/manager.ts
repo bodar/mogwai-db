@@ -36,14 +36,21 @@ export function graphInfo(store: GraphStore): GraphInfo {
  * it has no identity to ship. `last_seq` is the graph's `update_seq`: a client checkpoints it and
  * resumes with `since = last_seq`.
  */
-export function changesFeed(store: GraphStore, since: number): ChangesFeed {
+export function changesFeed(store: GraphStore, since: number, limit?: number): ChangesFeed {
+  // A `limit` PAGES the feed (CouchDB `_changes?limit=N`): the replicator drains a large graph in bounded
+  // batches so no single `applyWire` span busy-locks the single-threaded store — the pacing substrate
+  // (§7 / the replication plan Phase 5a). Safe to page by `seq` because every element/tombstone carries a
+  // DISTINCT, strictly-monotonic seq (assigned `base + i + 1` from `nextSeqBlock`, refresh.ts), so no two
+  // rows share a boundary seq — a `LIMIT` can never split a seq-group and drop a row.
+  const paged = limit != null && limit > 0;
   const rows = store.query<{ seq: number; id: string; kind: string; rev: string | null; deleted: number }>(
     `SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes WHERE seq > ? AND gid IS NOT NULL
      UNION ALL
      SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges WHERE seq > ? AND gid IS NOT NULL
      UNION ALL
      SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
-     ORDER BY seq`, [since, since, since]);
+     ORDER BY seq${paged ? ' LIMIT ?' : ''}`,
+    paged ? [since, since, since, limit] : [since, since, since]);
   const conflicts = conflictLeaves(store, rows.filter((r) => !r.deleted).map((r) => r.id)); // gid → loser leaf revs (4b-2)
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
@@ -53,7 +60,12 @@ export function changesFeed(store: GraphStore, since: number): ChangesFeed {
     ...(r.deleted ? { deleted: true as const } : {}),
     ...(conflicts.get(r.id)?.length ? { conflicts: conflicts.get(r.id) } : {}),
   }));
-  return { results, last_seq: store.nextSeqBlock(0) };
+  // When a page was TRUNCATED (a full batch), the cursor resumes at the last row's seq so the next page
+  // reads strictly after it; otherwise the feed is fully drained and `last_seq` is the graph's `update_seq`
+  // (a re-pull from there reads nothing, even if the highest element seq is below the counter).
+  const truncated = paged && rows.length === limit;
+  const last_seq = truncated ? rows[rows.length - 1]!.seq : store.nextSeqBlock(0);
+  return { results, last_seq };
 }
 
 /** gid → its shadowed conflict-LOSER leaf revs (4b-2), so the feed advertises them (`?style=all_docs`).

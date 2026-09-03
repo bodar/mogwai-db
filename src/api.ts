@@ -354,8 +354,11 @@ export interface GraphManager {
   /** Element counts for graph `id`, creating it on demand (fresh = 0, 0). */
   info(id: string): Promise<GraphInfo>;
   /** The by-sequence change feed for graph `id` since cursor `since` (§5·2) — store-tier read work,
-   *  the peer-facing replication source. Creating the graph on demand, like `info`. */
-  changes(id: string, since: number): Promise<ChangesFeed>;
+   *  the peer-facing replication source. Creating the graph on demand, like `info`. An optional `limit`
+   *  PAGES the feed (CouchDB `_changes?limit=N`): the replicator drains a large graph in bounded batches
+   *  so no single apply span busy-locks the store (the pacing substrate). When a page is truncated,
+   *  `last_seq` is the resume cursor; otherwise it is the graph's `update_seq` (fully caught up). */
+  changes(id: string, since: number, limit?: number): Promise<ChangesFeed>;
   /** Given the revs a peer holds per gid, return which ones graph `id` is MISSING (§4 primitive 2) —
    *  the cheap "what should I send you?" diff. A pure gid/rev key lookup, store-tier. */
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse>;
