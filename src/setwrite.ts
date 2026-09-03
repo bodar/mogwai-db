@@ -104,3 +104,38 @@ export function deleteMembers(store: RowSource, table: string, column: string, i
   store.query(`DELETE FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`, [JSON.stringify([...ids])]);
   return 1;
 }
+
+/**
+ * SET-BASED UPDATE — write `columns` onto every row of `table` named by its key, as ONE
+ * `UPDATE … FROM json_each(?)` with ONE JSON bind. Each `rows` tuple is `[keyValue, col0, col1, …]`:
+ * `keyValue` matches `table.keyColumn`, the rest fill `columns` positionally. Returns statements
+ * issued (0 for an empty batch, 1 otherwise). Used by the post-write gid/rev refresh (§5·1/§6·1) to
+ * write a data-sized batch of freshly-minted gids / recomputed revs back in one statement.
+ *
+ * The Update half of the set-based write substrate, a DIRECT fixed-shape statement for the same reason
+ * `deleteMembers` is: the write is a membership against LITERAL rows, so there is no relation to render
+ * and a RelIR program would add ceremony and no property. `json_each` explodes the batch; each cell is
+ * `json_extract`ed by position (a `blob` column `unhex()`es hex text → bytes; a `jsonb` column wraps
+ * the TEXT in `jsonb()`), the same per-column shaping `insertSet` does. UPDATE…FROM (SQLite ≥3.33),
+ * `json_each`, and `unhex` (≥3.41) are all present on both runtimes.
+ */
+export function updateSet(
+  store: RowSource, table: string, keyColumn: string, columns: readonly SetColumn[],
+  rows: readonly (readonly unknown[])[],
+): number {
+  if (!rows.length) return 0;
+  for (const row of rows)
+    if (row.length !== columns.length + 1)
+      throw new Error(`updateSet(${table}): row has ${row.length} values for a key + ${columns.length} columns`);
+  const cell = (at: number): string => {
+    const extract = `json_extract(u.value, '$[${at}]')`;
+    const col = columns[at - 1]!;
+    return col.blob ? `unhex(${extract})` : col.jsonb ? `jsonb(${extract})` : extract;
+  };
+  const assignments = columns.map((c, i) => `${c.name} = ${cell(i + 1)}`).join(', ');
+  store.query(
+    `UPDATE ${table} SET ${assignments} FROM json_each(?) AS u WHERE ${table}.${keyColumn} = json_extract(u.value, '$[0]')`,
+    [JSON.stringify(rows)],
+  );
+  return 1;
+}

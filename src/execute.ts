@@ -9,6 +9,7 @@ import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runSteps } from './program.ts';
+import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
 
@@ -607,6 +608,12 @@ export function* frameResolved(store: GraphStore, plan: Executable): Generator<F
   // effects change WHERE the rows come from and nothing about how they are framed.
   try {
     const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
+    // A WRITE (a `program`) may have created elements; mint a gid for each (and, later, recompute rev)
+    // now that its effects have committed — the post-write refresh (§6·1). Keyed on `gid IS NULL`, so a
+    // write that created nothing is a no-op. Pure side-effect: gid/rev are not framed, so this never
+    // touches the rows above. This is the ONE seam both runtimes cross (Bun's Executor and the DO's
+    // runFramed both frame here), so a compiled write gets its gid wherever it runs.
+    if (plan.kind === 'program') refreshElements(store);
     const shape = plan.shape;
     if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
     if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }

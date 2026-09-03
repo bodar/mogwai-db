@@ -55,12 +55,14 @@ describe('gid — the bulk/format path', () => {
     expect(new Set([...vs.values(), ...es.values()]).size).toBe(12); // all distinct
   });
 
-  test('two independent graphs never collide on gid', () => {
+  test('loading the SAME gid-carrying document converges (two replicas share gids)', () => {
+    // The replication property: gid is PRESERVED on load, so two graphs seeded from one document
+    // agree element-for-element. (Independent CREATION producing disjoint gids is the separate gate,
+    // covered by the compiled-path test below and the two-mints check above.)
     const a = freshStore(), b = freshStore();
     seed(a); seed(b);
-    const A = new Set([...gids(a, 'nodes').values(), ...gids(a, 'edges').values()]);
-    const B = new Set([...gids(b, 'nodes').values(), ...gids(b, 'edges').values()]);
-    for (const g of B) expect(A.has(g)).toBe(false); // disjoint despite identical content
+    expect(gids(a, 'nodes')).toEqual(gids(b, 'nodes'));
+    expect(gids(a, 'edges')).toEqual(gids(b, 'edges'));
   });
 
   test('GraphSON round-trip PRESERVES gid (the io() backup contract)', () => {
@@ -85,5 +87,50 @@ describe('gid — the bulk/format path', () => {
     expect(roundV.size).toBe(srcV.size);
     // same elements (by rowid), but every gid is freshly minted — none survives.
     for (const [id, g] of roundV) expect(g).not.toBe(srcV.get(id));
+  });
+});
+
+describe('gid — the compiled write path (post-write refresh)', () => {
+  const mgr = () => new BunGraphManager(undefined, standardRegistry);
+  const nodeGids = (m: BunGraphManager, id: string) =>
+    m.storeOf(id).query<{ id: number; gid: string | null }>('SELECT id, hex(gid) AS gid FROM nodes ORDER BY id');
+  const edgeGids = (m: BunGraphManager, id: string) =>
+    m.storeOf(id).query<{ id: number; gid: string | null }>('SELECT id, hex(gid) AS gid FROM edges ORDER BY id');
+
+  test('a compiled addV gets a gid minted by the post-write refresh', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko")', {});
+    const vs = nodeGids(m, 'g');
+    expect(vs).toHaveLength(1);
+    expect(vs[0]!.gid).toMatch(/^[0-9A-F]{32}$/);
+  });
+
+  test('a multi-table chain (addV.addV.addE) gids every created element, all distinct', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync(
+      'g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b")', {});
+    const vs = nodeGids(m, 'g'), es = edgeGids(m, 'g');
+    expect(vs).toHaveLength(2);
+    expect(es).toHaveLength(1);
+    const all = [...vs, ...es].map((r) => r.gid!);
+    for (const g of all) expect(g).toMatch(/^[0-9A-F]{32}$/);
+    expect(new Set(all).size).toBe(3); // vertex, vertex, edge — all gidded, all distinct
+  });
+
+  test('a property mutation does NOT change an existing gid (immutable identity)', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko")', {});
+    const before = nodeGids(m, 'g')[0]!.gid;
+    await m.executor('g').framedAsync('g.V().property("age",29)', {});
+    const after = nodeGids(m, 'g')[0]!.gid;
+    expect(after).toBe(before);              // gid survives the mutation
+    expect(nodeGids(m, 'g')).toHaveLength(1); // no phantom null-gid element created
+  });
+
+  test('two independent graphs never collide on compiled-created gid', async () => {
+    const m = mgr();
+    await m.executor('a').framedAsync('g.addV("person").property("name","marko")', {});
+    await m.executor('b').framedAsync('g.addV("person").property("name","marko")', {});
+    expect(nodeGids(m, 'a')[0]!.gid).not.toBe(nodeGids(m, 'b')[0]!.gid);
   });
 });
