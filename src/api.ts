@@ -246,6 +246,10 @@ export interface ChangeRow {
   readonly kind: 'vertex' | 'edge';
   readonly rev: { readonly gen: number; readonly hash: string } | null;
   readonly deleted?: true;
+  /** The element's shadowed conflict-LOSER leaf revs (§6·3), when it has any — CouchDB's
+   *  `?style=all_docs`. A replicator fetches these too, so a peer that already holds the winner still
+   *  learns the loser and CONVERGES (4b-2). Absent when the element is unconflicted (the common case). */
+  readonly conflicts?: readonly WireRev[];
 }
 
 /** The `_changes?since=N` response (§5·2), CouchDB-shaped: the ordered deltas plus `last_seq`, the
@@ -270,8 +274,9 @@ export type RevsDiffResponse = Readonly<Record<string, { readonly missing: reado
 // Element BODIES keyed by GID; properties in GraphSON typed-value form (wire-safe, full-fidelity — a
 // collection `Map`/`Set` cannot ride a bare value). `src/replicate.ts` produces and applies these.
 
-/** A reference `_bulk_get` fetches the body of. */
-export interface BulkGetRef { readonly gid: string; readonly kind: 'vertex' | 'edge'; }
+/** A reference `_bulk_get` fetches the body of. `rev` (a leaf hash) requests a SPECIFIC version — the
+ *  live one if it matches, else a shadowed conflict loser (4b-2); omitted → the live winner. */
+export interface BulkGetRef { readonly gid: string; readonly kind: 'vertex' | 'edge'; readonly rev?: string; }
 
 /** A vertex on the wire — GraphSON `{key: [{id, value, properties?}, …]}` properties, keyed by gid.
  *  `uid` is the user-supplied per-graph id (§6·1), carried so it replicates; a cross-peer collision

@@ -80,6 +80,30 @@ describe('replication conflicts — preserve, deterministic winner, surface', ()
     expect((await s.conflicts('b')).conflicts).toEqual([]);
   });
 
+  test('cross-replication CONVERGES through the loop — losers propagate (4b-2)', async () => {
+    const s = setup();
+    await s.run('seed', 'g.addV("person").property("name","marko")');
+    for (const g of ['a', 'b']) await s.mgr.replicate(g, { source: s.url('seed') });
+    await s.run('a', 'g.V().property("age",1)'); // a: hA
+    await s.run('b', 'g.V().property("age",2)'); // b: hB (divergent)
+
+    // One pull each way. Whoever resolves first advertises the conflict in its feed, so the second
+    // puller learns the loser even when it already holds the winner — the case that failed pre-4b-2.
+    await s.mgr.replicate('a', { source: s.url('b') });
+    await s.mgr.replicate('b', { source: s.url('a') });
+
+    const gid = (await s.feed('a')).results[0]!.id;
+    const liveA = (await s.feed('a')).results.find((r) => r.id === gid)!.rev;
+    const liveB = (await s.feed('b')).results.find((r) => r.id === gid)!.rev;
+    expect(liveA).toEqual(liveB); // same live winner
+
+    const losers = (g: string) => conflictsFor(s.mgr.storeOf(g), gid)
+      .filter((c) => !(c.doc as { deleted?: boolean; uidConflict?: string }).deleted && !(c.doc as { uidConflict?: string }).uidConflict)
+      .map((c) => c.rev_hash).sort();
+    expect(losers('a')).toEqual(losers('b')); // same shadowed loser on both — converged
+    expect(losers('a')).toHaveLength(1);
+  });
+
   test('a fast-forward is NOT a conflict — no shadow, just an advance', async () => {
     const s = setup();
     await s.run('seed', 'g.addV("person").property("name","marko")');

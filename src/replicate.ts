@@ -243,6 +243,27 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
  * does not hold is simply absent from the reply (it may have been deleted since the feed was read).
  */
 export function bulkGet(store: GraphStore, refs: readonly BulkGetRef[]): WireChangeSet {
+  const vertices: WireVertex[] = [];
+  const edges: WireEdge[] = [];
+  // A ref naming a SPECIFIC rev wants a shadowed conflict LOSER (4b-2): serve it from the conflict store;
+  // if there is no such shadow the rev is the live one, so it falls through to the live body below.
+  const plain: BulkGetRef[] = [];
+  for (const ref of refs) {
+    if (!ref.rev) { plain.push(ref); continue; }
+    const row = store.query<{ doc: string }>('SELECT json(doc) AS doc FROM conflicts WHERE hex(gid) = ? AND rev_hash = ?', [upper(ref.gid), ref.rev])[0];
+    if (row) {
+      const doc = JSON.parse(row.doc) as WireVertex & WireEdge & { deleted?: boolean; uidConflict?: string };
+      if (!doc.deleted && !doc.uidConflict) (ref.kind === 'vertex' ? vertices : edges).push(doc);
+    } else plain.push({ gid: ref.gid, kind: ref.kind });
+  }
+  const live = liveBodies(store, plain);
+  vertices.push(...live.vertices!);
+  edges.push(...live.edges!);
+  return { vertices, edges };
+}
+
+/** The LIVE bodies (winners) of the referenced elements, keyed by gid — the ordinary transfer payload. */
+function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices: WireVertex[]; edges: WireEdge[] } {
   const vGids = refs.filter((r) => r.kind === 'vertex').map((r) => upper(r.gid));
   const eGids = refs.filter((r) => r.kind === 'edge').map((r) => upper(r.gid));
 
@@ -477,8 +498,20 @@ export async function runReplication(
   const refs: BulkGetRef[] = live.filter((r) => missing[r.id]).map((r) => ({ gid: r.id, kind: r.kind }));
 
   const bodies = refs.length ? await source.bulkGet(refs) : {};
-  const written = (bodies.vertices?.length ?? 0) + (bodies.edges?.length ?? 0);
+  let written = (bodies.vertices?.length ?? 0) + (bodies.edges?.length ?? 0);
   if (written || deletes.length) await target.bulkDocs({ ...bodies, deletes });
+
+  // Phase B — conflict LOSER propagation (4b-2): the feed advertises each element's shadowed losing
+  // leaves (`change.conflicts`). Fetch any the target lacks and apply them SEPARATELY (after the winners,
+  // so each is one leaf per gid classified against the now-live winner → shadowed). This is what makes
+  // convergence ORDER-INDEPENDENT: a peer that already holds the winner still learns the loser.
+  const loserOffer: Record<string, WireRev[]> = {};
+  const loserKind = new Map<string, 'vertex' | 'edge'>();
+  for (const c of live) for (const lr of c.conflicts ?? []) { (loserOffer[c.id] ??= []).push(lr); loserKind.set(c.id, c.kind); }
+  const loserMissing = Object.keys(loserOffer).length ? await target.revsDiff(loserOffer) : {};
+  const loserRefs: BulkGetRef[] = [];
+  for (const [gid, { missing }] of Object.entries(loserMissing)) for (const r of missing) loserRefs.push({ gid, kind: loserKind.get(gid)!, rev: r.hash });
+  if (loserRefs.length) { await target.bulkDocs(await source.bulkGet(loserRefs)); written += loserRefs.length; }
 
   await cp.write(feed.last_seq);
   return { read: feed.results.length, written, deleted: deletes.length, last_seq: feed.last_seq };

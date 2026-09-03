@@ -44,12 +44,32 @@ export function changesFeed(store: GraphStore, since: number): ChangesFeed {
      UNION ALL
      SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
      ORDER BY seq`, [since, since, since]);
+  const conflicts = conflictLeaves(store, rows.filter((r) => !r.deleted).map((r) => r.id)); // gid → loser leaf revs (4b-2)
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
     rev: leafRev(r.rev), // the feed carries the LEAF only; the ancestry stays in the store (revs_diff reads it)
     ...(r.deleted ? { deleted: true as const } : {}),
+    ...(conflicts.get(r.id)?.length ? { conflicts: conflicts.get(r.id) } : {}),
   }));
   return { results, last_seq: store.nextSeqBlock(0) };
+}
+
+/** gid → its shadowed conflict-LOSER leaf revs (4b-2), so the feed advertises them (`?style=all_docs`).
+ *  Only real divergent-content leaves — a delete marker (`{deleted}`) or uid marker (`{uidConflict}`) is
+ *  a local surfacing, not a leaf a peer fetches. */
+function conflictLeaves(store: GraphStore, gids: readonly string[]): Map<string, WireRev[]> {
+  const out = new Map<string, WireRev[]>();
+  if (!gids.length) return out;
+  const rows = store.query<{ gid: string; doc: string }>(
+    'SELECT hex(gid) AS gid, json(doc) AS doc FROM conflicts WHERE hex(gid) IN (SELECT value FROM json_each(?))',
+    [JSON.stringify(gids)]);
+  for (const r of rows) {
+    const doc = JSON.parse(r.doc) as { deleted?: boolean; uidConflict?: string; rev?: string };
+    if (doc.deleted || doc.uidConflict) continue; // not a content leaf
+    const rev = leafRev(doc.rev ?? null);
+    if (rev) (out.get(r.gid) ?? out.set(r.gid, []).get(r.gid)!).push(rev);
+  }
+  return out;
 }
 
 /** The stored rev's LEAF `{gen, hash}` — the feed's shape, dropping the rev-tree `ids` (a `_changes`
