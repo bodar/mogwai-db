@@ -263,11 +263,12 @@ export class BulkLoader {
   private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
     // gid is minted only for a fresh row; a REPLACE match keeps its existing gid (immutable identity),
     // so no gid is recomputed when the `nodes` row is not re-pushed. gid is preserve-or-mint INLINE, so
-    // it is always present; `rev` is preserve-or-COMPUTE: a carried rev lands verbatim and the row is
-    // born CLEAN (dirty=0, the refresh skips it, idempotent replay); an ABSENT rev lands NULL and the
-    // row is born DIRTY, so `flush`'s `refreshElements` computes `{gen:1, hash}` from the element's
-    // content — the SAME authority the compiled path uses, so identical content converges (§5·1).
-    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), v.rev ?? null, v.rev == null ? 1 : 0]);
+    // it is always present; `rev` is preserve-or-COMPUTE: an ABSENT rev lands NULL born dirty=1 (a
+    // CREATE), so `flush`'s `refreshElements` computes `{gen:1, hash}` from content — the SAME authority
+    // the compiled path uses, so identical content converges (§5·1). A CARRIED rev lands verbatim born
+    // dirty=3 (PRESERVE): the refresh keeps the rev but still assigns a fresh LOCAL seq (§5·2 — a load is
+    // a local write event, so the element must enter this graph's `_changes` feed).
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), v.rev ?? null, v.rev == null ? 1 : 3]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -290,11 +291,11 @@ export class BulkLoader {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
     // Mint the gid ONCE here (not at flush) so the deferred path carries the same value it would land.
-    // `rev` is preserve-or-compute exactly as a vertex's (see `bufferVertex`): a carried rev born clean,
-    // an absent one born dirty for `flush`'s refresh — which reads the endpoints' minted gids, so it
-    // runs AFTER the vertices refresh (§6·5).
+    // `rev` is preserve-or-compute exactly as a vertex's (see `bufferVertex`): an absent rev born dirty=1
+    // (a CREATE, refresh computes), a carried one born dirty=3 (PRESERVE, refresh keeps the rev + assigns
+    // a local seq). The refresh reads the endpoints' minted gids, so it runs AFTER the vertices' (§6·5).
     const gid = e.gid ?? mintGid();
-    const dirty = e.rev == null ? 1 : 0;
+    const dirty = e.rev == null ? 1 : 3;
     if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, e.rev ?? null, dirty]);
     else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });
     for (const p of e.properties ?? [])
@@ -346,7 +347,7 @@ export class BulkLoader {
     for (const { edge, id, uid, gid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, edge.rev ?? null, edge.rev == null ? 1 : 0]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, edge.rev ?? null, edge.rev == null ? 1 : 3]);
     }
     this.pendingEdges = [];
     this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'rev', 'dirty'], this.edgeRows);

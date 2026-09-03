@@ -27,14 +27,20 @@ const SCHEMA = [
   // store the key string on EVERY element plus a second index (double-digit GB at 10^8), and it is
   // more CouchDB-faithful. Nullable so a graph created before this column, and an element not yet
   // touched by the rev barrier, are representable.
-  // `dirty` is the UNIFORM recompute marker for the derived replication columns (gid, rev, and any
-  // future one): a row with `dirty != 0` needs the post-write refresh (`src/refresh.ts`) to (re)compute
-  // them. A create is born dirty (DEFAULT 1); a mutation sets it (increment 2); the refresh clears it.
-  // It is the EXPLICIT generalization of the implicit `gid IS NULL` marker — and unlike a null it is a
-  // flag SEPARATE from the value, so marking a row stale does not destroy the OLD rev the next rev must
-  // chain from. The partial index below keeps the sweep O(dirty count), never a full scan.
+  // `dirty` is the UNIFORM recompute marker for the derived replication columns (gid, rev, seq): a row
+  // with `dirty != 0` needs the post-write refresh (`src/refresh.ts`) to (re)compute them, and the value
+  // is a small enum telling it HOW — 1 = a fresh CREATE (rev null → compute `{gen:1, …}`), 2 = a MUTATION
+  // (rev present → chain gen+1), 3 = PRESERVE (a bulk-loaded/replicated rev kept verbatim; seq+gid only,
+  // rev untouched). The refresh clears it to 0. It is the EXPLICIT generalization of the implicit
+  // `gid IS NULL` marker — and unlike a null it is a flag SEPARATE from the value, so marking a row stale
+  // does not destroy the OLD rev the next rev must chain from. The partial index keeps the sweep O(dirty
+  // count), never a full scan.
+  // `seq` is the by-sequence cursor (§5·2): a LOCAL, per-graph monotonic last-modified sequence assigned
+  // by the refresh from `update_seq`, so `_changes?since=N` is `WHERE seq > N ORDER BY seq` — one entry per
+  // element, MOVED (not appended) on each write, so the feed is current-state-sized. NOT preserved across
+  // peers (unlike gid/rev): it is this graph's own clock, so a replicated element takes a fresh LOCAL seq.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB, dirty INTEGER NOT NULL DEFAULT 1)`,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1)`,
   // A vertex's labels are a SET (TinkerPop 4 multi-label), so they normalize out of `nodes`
   // exactly as properties did — the rule being "normalize where cardinality is 0..N, keep
   // inline where it is exactly 1", which is also why an EDGE label stays on `edges` (upstream
@@ -68,7 +74,7 @@ const SCHEMA = [
   // endpoints by `gid` (§6·5), so a replicated edge converges across peers that preserved those gids.
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL, gid BLOB, rev BLOB, dirty INTEGER NOT NULL DEFAULT 1)`,
+     tgt INTEGER NOT NULL, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1)`,
   // Edge properties are ALSO normalized rows (the typed-property-values rework retired
   // the flat JSONB blob): TinkerPop's edge Property has no id/meta/multi, so ONE row per
   // (edge,key) — the UNIQUE constraint enforces that single cardinality and doubles as
@@ -111,6 +117,15 @@ const SCHEMA = [
   // the index is empty once refreshed, so a write that touched nothing pays no scan.
   `CREATE INDEX IF NOT EXISTS nodes_dirty ON nodes(id) WHERE dirty`,
   `CREATE INDEX IF NOT EXISTS edges_dirty ON edges(id) WHERE dirty`,
+  // The by-sequence cursor's index — `_changes?since=N` seeks `WHERE seq > N ORDER BY seq` and never a
+  // scan. Partial (seq NOT NULL) so a pre-column row costs nothing. `update_seq` is the per-graph
+  // monotonic counter (CouchDB's db header field, §5·2): ONE row, bumped by a block per write via
+  // `UPDATE … RETURNING`, so a write allocates a contiguous seq range atomically under the DO's
+  // run-to-completion. Seeded to 0; `OR IGNORE` keeps re-init a no-op.
+  `CREATE INDEX IF NOT EXISTS nodes_seq ON nodes(seq) WHERE seq IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS edges_seq ON edges(seq) WHERE seq IS NOT NULL`,
+  `CREATE TABLE IF NOT EXISTS update_seq(value INTEGER NOT NULL)`,
+  `INSERT OR IGNORE INTO update_seq(rowid, value) VALUES (1, 0)`,
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,
@@ -197,6 +212,16 @@ export class GraphStore {
    *  has been framed (`frameResolved`). Idempotent: a run with no rows is a no-op. */
   dropBarrierRun(run: number): void {
     this.query('DELETE FROM barrier_state WHERE run = ?', [run]);
+  }
+
+  /** Allocate a contiguous block of `count` by-sequence values (§5·2) — returns the BASE, so the block
+   *  is `base+1 … base+count`. ONE `UPDATE … RETURNING` bumps the per-graph counter atomically (safe
+   *  under the DO's run-to-completion, like {@link allocBarrierRun}), so a write's elements and a
+   *  delete's tombstones draw monotonically increasing seqs from one source. `count <= 0` is a no-op. */
+  nextSeqBlock(count: number): number {
+    if (count <= 0) return this.query<{ value: number }>('SELECT value FROM update_seq WHERE rowid = 1')[0].value;
+    return this.query<{ value: number }>(
+      'UPDATE update_seq SET value = value + ? WHERE rowid = 1 RETURNING value', [count])[0].value - count;
   }
 
   labelId(name: string): number {
