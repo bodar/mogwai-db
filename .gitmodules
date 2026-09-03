@@ -34,3 +34,18 @@
 	# Provisioned shallow+sparse by scripts/init-submodule.sh, skipped under MOGWAI_SKIP_REFERENCE.
 	shallow = true
 	ignore = all
+
+[submodule "vendor/couchdb"]
+	path = vendor/couchdb
+	url = https://github.com/apache/couchdb.git
+	# READ-ONLY prior art for the replication + HTTP-interop layer
+	# (docs/2026-09-02-replication-and-http-interop-plan.md §14) — never built, never
+	# imported, no Erlang toolchain implied (same standing as gremlin-core / calcite / gds).
+	# CouchDB is the DESIGN AUTHORITY for replication; its `.rst` docs are the normative
+	# protocol and its `couch_key_tree.erl`/`couch_doc.erl`/`couch_uuids.erl` are the code-level
+	# rev-tree / rev-id / uuid facts §5–§6 cite. Apache-2.0 (like tinkerpop/calcite), unlike gds.
+	# Provisioned shallow+sparse by scripts/init-submodule.sh, skipped under MOGWAI_SKIP_REFERENCE.
+	shallow = true
+	# In a linked worktree this path is a SYMLINK to the main checkout's copy (share_from_main),
+	# which git would report as a typechange against the gitlink — ignore all working-tree state.
+	ignore = all

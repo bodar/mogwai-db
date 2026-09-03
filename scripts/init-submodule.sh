@@ -282,7 +282,7 @@ PINNED="$PROVISIONED_SHA"
 # Self-healing: `provision` re-asserts the sparse set every run, so unsetting the variable restores
 # gremlin-core on the next run and re-provisions calcite from scratch.
 if [ -n "${MOGWAI_SKIP_REFERENCE:-}" ]; then
-  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, tinkergraph-gremlin, vendor/calcite, vendor/gds)"
+  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, tinkergraph-gremlin, vendor/calcite, vendor/gds, vendor/couchdb)"
 fi
 
 # ── calcite: READ-ONLY prior art for the RelIR ────────────────────────────────────────────────
@@ -334,6 +334,29 @@ GDS_SRC=src/main/java/org/neo4j/gds
 if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
   provision vendor/gds https://github.com/neo4j/graph-data-science.git shallow \
     "pregel/$GDS_SRC" "algo/$GDS_SRC" "algo-common/$GDS_SRC" "core/$GDS_SRC"
+fi
+
+# ── couchdb: READ-ONLY prior art for the replication + HTTP-interop layer ───────────────────────
+#
+# Never built, never imported, no Erlang toolchain implied — the same standing as gremlin-core,
+# calcite and gds, and vendored for the same reason: docs/2026-09-02-replication-and-http-interop-plan.md
+# names CouchDB as the DESIGN AUTHORITY for replication, so its normative protocol docs and its
+# code-level rev-tree / rev-id / uuid facts must resolve at a pin everyone (and CI) can check. At the
+# pin, `vendor/couchdb/src/couch/src/couch_key_tree.erl:NNN` resolves for everyone. Apache-2.0.
+#
+# The sparse set is exactly the replication reference surface §14 names, cone-mode (whole dirs):
+#   src/docs/src/replication  — protocol.rst / conflicts.rst / intro.rst / replicator.rst (the
+#                               normative protocol, conflict model, and _replicator/scheduler shape)
+#   src/docs/src/api/database — changes.rst / misc.rst (_revs_diff) / bulk-api.rst (the wire shapes);
+#                               cone-mode also lands the direct file src/docs/src/api/local.rst
+#                               (the _local checkpoint doc) sitting in the parent dir
+#   src/couch/src             — couch_key_tree.erl (rev-tree merge/find_missing/stem), couch_doc.erl
+#                               (new_revid, to_doc_info_path), couch_db.erl (get_missing_revs),
+#                               couch_uuids.erl (uuid_v7 / sequential)
+CDB_DOCS=src/docs/src
+if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
+  provision vendor/couchdb https://github.com/apache/couchdb.git shallow \
+    "$CDB_DOCS/replication" "$CDB_DOCS/api/database" "src/couch/src"
 fi
 
 # ── the gremlin client: install deps, build, register the link ─────────────────────────────────
