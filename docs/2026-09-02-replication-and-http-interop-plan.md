@@ -514,11 +514,27 @@ Each phase is independently valuable and lands green before the next.
     `POST /gremlin/{g}/_replicate` drives it. Gate MET: pull reconstructs a remote in a fresh local
     (matching gid+rev fingerprints), re-pull is a resumable no-op that picks up a later delta, push swaps
     roles, deletes propagate. The outbound peer CLIENT (folded here) is `remotePeer`.
-- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
+- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4). 🚧 IN PROGRESS.** Rev-tree + shadow store;
   deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
   the uid conflict (not-deleted > lower-gid, loser's uid shadowed — §6·3) + carrying uid on the wire;
   depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
   never lost; a delete racing an incident edge resurrects-and-surfaces; deletes otherwise propagate.*
+  - ✅ **4a — the rev-tree.** `rev` carries stemmed ancestry (`ids`, newest-first, CouchDB's `_revisions`,
+    capped at 1000); `descendsFrom`/`revWins` primitives; `_revs_diff` gains ancestry subsumption; the feed
+    still carries only the leaf.
+  - ✅ **4b — conflict detection + shadow store.** `applyWire` classifies incoming vs the local rev-tree
+    (new/ff → apply; identical/ancestor → skip; divergent → conflict): winner (`revWins`) live, loser to
+    the `conflicts` shadow table as its wire doc (never lost). `conflictsFor` is the conflict-aware read.
+    `applyChanges` stays the pure upsert substrate. Deterministic ⇒ order-independent convergence at the
+    apply layer.
+  - ⏳ **4b-2 — loser propagation for order-independent convergence through the feed**: an all-leaves
+    `_changes` (each change lists its conflict-loser revs) + `_bulk_get` by (gid, rev) + multi-leaf
+    resolution, so a peer that already holds the winner still learns the loser.
+  - ⏳ **4c — conflict surfacing endpoint** (`~conflicts` / `?conflicts`): the live winner + shadow losers.
+  - ⏳ **4d — the referential rule** (§6·3): a delete racing an incident edge resurrects the endpoint and
+    surfaces the delete (also the delete-vs-live-edit conflict: not-deleted wins, resurrect).
+  - ⏳ **4e — the uid conflict + carrying uid on the wire** (§6·3): not-deleted > lower-gid, loser's uid
+    shadowed + surfaced.
 - **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
   DO-alarm scheduler (continuous = periodic pull; one-shot = run once), introspection, and the
   OpenAPI-generated UI. *Gate: a config keeps a local graph synced from a remote one on a schedule, editable
