@@ -514,7 +514,7 @@ Each phase is independently valuable and lands green before the next.
     `POST /gremlin/{g}/_replicate` drives it. Gate MET: pull reconstructs a remote in a fresh local
     (matching gid+rev fingerprints), re-pull is a resumable no-op that picks up a later delta, push swaps
     roles, deletes propagate. The outbound peer CLIENT (folded here) is `remotePeer`.
-- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4). 🚧 IN PROGRESS.** Rev-tree + shadow store;
+- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4). ✅ LANDED.** Rev-tree + shadow store;
   deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
   the uid conflict (not-deleted > lower-gid, loser's uid shadowed — §6·3) + carrying uid on the wire;
   depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
@@ -527,9 +527,11 @@ Each phase is independently valuable and lands green before the next.
     the `conflicts` shadow table as its wire doc (never lost). `conflictsFor` is the conflict-aware read.
     `applyChanges` stays the pure upsert substrate. Deterministic ⇒ order-independent convergence at the
     apply layer.
-  - ⏳ **4b-2 — loser propagation for order-independent convergence through the feed**: an all-leaves
-    `_changes` (each change lists its conflict-loser revs) + `_bulk_get` by (gid, rev) + multi-leaf
-    resolution, so a peer that already holds the winner still learns the loser.
+  - ✅ **4b-2 — loser propagation for order-independent convergence.** `_changes` attaches each element's
+    conflict-loser leaf revs (`ChangeRow.conflicts`, CouchDB's `?style=all_docs`); `_bulk_get` serves a
+    specific rev (`BulkGetRef.rev`) from the shadow; `runReplication` applies winners then losers
+    separately (one leaf per gid per batch, so a loser is shadowed against the now-live winner). Gate MET:
+    two peers cross-replicate and converge order-independently.
   - ✅ **4c — conflict surfacing endpoint.** `GET /gremlin/{g}/_conflicts` (the `?conflicts=true` analog):
     per conflicted element, the live winner rev + shadowed loser versions (rev + wire doc). `conflictsFeed`
     joins the shadow to the live winner; plumbed through every runtime. Ordinary reads never see it.
