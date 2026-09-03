@@ -27,7 +27,7 @@ import { changesFeed, revsDiff } from './manager.ts';
 import { parseRev, descendsFrom, revWins, type Rev } from './rev.ts';
 import type {
   BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete, WireRev, ChangesFeed, RevsDiffRequest,
-  RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats,
+  RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats, ConflictEntry,
 } from './api.ts';
 
 /** A replicated vertex document (what `_bulk_get` returns / `_bulk_docs` applies): identity + version +
@@ -266,6 +266,38 @@ export function conflictsFor(store: GraphStore, gidHex: string): { rev_hash: str
   return store.query<{ rev_hash: string; kind: string; doc: string }>(
     'SELECT rev_hash, kind, json(doc) AS doc FROM conflicts WHERE hex(gid) = ?', [gidHex.toUpperCase()])
     .map((r) => ({ rev_hash: r.rev_hash, kind: r.kind, doc: JSON.parse(r.doc) as unknown }));
+}
+
+/** hex(gid) → live leaf rev, for a set of conflicted gids (nodes + edges). */
+function liveRevs(store: GraphStore, gids: readonly string[]): Map<string, WireRev> {
+  const out = new Map<string, WireRev>();
+  if (!gids.length) return out;
+  const j = JSON.stringify(gids);
+  const rows = store.query<{ gid: string; rev: string | null }>(
+    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+     UNION ALL
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))`,
+    [j, j]);
+  for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, { gen: rev.gen, hash: rev.hash }); }
+  return out;
+}
+
+/** Every surfaced conflict (§6·3): the live winner + shadowed losers per conflicted element. The
+ *  `?conflicts=true` analog — the ONLY read that sees a conflict; ordinary traversal returns the winner
+ *  alone. Empty in the common (read≫write) case, since the shadow store is seldom populated. */
+export function conflictsFeed(store: GraphStore): ConflictEntry[] {
+  const rows = store.query<{ gid: string; kind: string; doc: string }>(
+    'SELECT hex(gid) AS gid, kind, json(doc) AS doc FROM conflicts ORDER BY gid, rev_hash');
+  if (!rows.length) return [];
+  const byGid = new Map<string, { kind: 'vertex' | 'edge'; losers: { rev: WireRev; doc: unknown }[] }>();
+  for (const r of rows) {
+    const doc = JSON.parse(r.doc) as { rev: string };
+    const rev = parseRev(doc.rev);
+    const e = byGid.get(r.gid) ?? byGid.set(r.gid, { kind: r.kind as 'vertex' | 'edge', losers: [] }).get(r.gid)!;
+    e.losers.push({ rev: rev ? { gen: rev.gen, hash: rev.hash } : { gen: 0, hash: '' }, doc });
+  }
+  const winners = liveRevs(store, [...byGid.keys()]);
+  return [...byGid].map(([gid, e]) => ({ gid, kind: e.kind, winner: winners.get(gid) ?? null, losers: e.losers }));
 }
 
 // ---------- the replicator: the pull/push loop + checkpoint + peer client (§9, §5) ----------

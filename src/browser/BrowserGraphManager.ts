@@ -11,7 +11,7 @@
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import type { Framed } from '../execute.ts';
-import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../api.ts';
+import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
@@ -94,6 +94,10 @@ export class BrowserGraphManager implements GraphManager {
   // routes the call — the browser twin of the CF Worker→DO split.
   async replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> {
     return this.call(id, ((s) => s.replicate(opts)) as Awaited$<ReplicationStats>);
+  }
+
+  async conflicts(id: string): Promise<readonly ConflictEntry[]> {
+    return this.call(id, ((s) => s.conflicts()) as Awaited$<readonly ConflictEntry[]>);
   }
 
   async destroy(id: string): Promise<void> {

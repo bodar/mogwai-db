@@ -1,4 +1,4 @@
-import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
+import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
 import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { managerReplicate } from '../replicate.ts';
 import { type Framed } from '../execute.ts';
@@ -125,6 +125,9 @@ export class CloudflareGraphManager implements GraphManager {
   // http caller, so the DO is never blocked on an outbound wait.
   replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> {
     return managerReplicate(this, this.http, id, opts);
+  }
+  conflicts(id: string): Promise<readonly ConflictEntry[]> {
+    return this.ns.getByName(id).conflicts();
   }
   destroy(id: string): Promise<void> {
     return this.ns.getByName(id).destroy();

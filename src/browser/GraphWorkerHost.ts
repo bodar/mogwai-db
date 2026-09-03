@@ -11,8 +11,8 @@
 // opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff, type GraphInfo } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint, storeReplicate } from '../replicate.ts';
-import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../api.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, storeReplicate, conflictsFeed } from '../replicate.ts';
+import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import { Executor, type Framed } from '../execute.ts';
 import type { ForeignResult, ForeignTerminal } from '../api.ts';
 import type { TypeNode } from '../gremlin/types.ts';
@@ -145,6 +145,11 @@ export class GraphWorkerHost extends RpcTarget {
    *  store AND the outbound http), the browser twin of the CF Worker driving a DO (§7). */
   replicate(opts: ReplicateOptions): Promise<ReplicationStats> {
     return storeReplicate(this.store, this.graphId, this.http, opts);
+  }
+
+  /** Surfaced conflicts (§6·3), store-tier inside this Worker. */
+  conflicts(): readonly ConflictEntry[] {
+    return conflictsFeed(this.store);
   }
 }
 // Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's

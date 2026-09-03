@@ -18,8 +18,10 @@ const setup = () => {
   const run = (g: string, q: string) => mgr.executor(g).framedAsync(q, {});
   const feed = async (g: string): Promise<ChangesFeed> =>
     (await router(new Request(`http://peer/gremlin/${g}/_changes?since=0`))).json() as Promise<ChangesFeed>;
+  const conflicts = async (g: string) =>
+    (await router(new Request(`http://peer/gremlin/${g}/_conflicts`))).json() as Promise<{ conflicts: { gid: string; kind: string; winner: { gen: number; hash: string } | null; losers: { rev: { gen: number; hash: string }; doc: unknown }[] }[] }>;
   const url = (g: string) => `http://peer/gremlin/${g}`;
-  return { mgr, run, feed, url };
+  return { mgr, run, feed, conflicts, url };
 };
 
 describe('replication conflicts — preserve, deterministic winner, surface', () => {
@@ -54,6 +56,28 @@ describe('replication conflicts — preserve, deterministic winner, surface', ()
     expect(new Set([liveX.hash, shX[0]!.rev_hash])).toEqual(new Set([hA, hB]));
     // The higher hash wins (both gen 2, not deleted) — §6·3.
     expect(liveX.hash).toBe(hA > hB ? hA : hB);
+  });
+
+  test('GET _conflicts surfaces the winner + shadowed loser (invisible to ordinary reads)', async () => {
+    const s = setup();
+    await s.run('seed', 'g.addV("person").property("name","marko")');
+    for (const g of ['a', 'b']) await s.mgr.replicate(g, { source: s.url('seed') });
+    await s.run('a', 'g.V().property("age",1)'); // a: hA
+    await s.run('b', 'g.V().property("age",2)'); // b: hB
+    const gid = (await s.feed('a')).results[0]!.id;
+    const hA = revHash(bulkGet(s.mgr.storeOf('a'), [{ gid, kind: 'vertex' }]));
+    const hB = revHash(bulkGet(s.mgr.storeOf('b'), [{ gid, kind: 'vertex' }]));
+    // 'a' already holds hA; apply hB → a conflict recorded on 'a'.
+    applyWire(s.mgr.storeOf('a'), bulkGet(s.mgr.storeOf('b'), [{ gid, kind: 'vertex' }]));
+
+    const { conflicts } = await s.conflicts('a');
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]!.gid).toBe(gid);
+    expect(conflicts[0]!.winner!.hash).toBe(hA > hB ? hA : hB); // live winner
+    expect(conflicts[0]!.losers).toHaveLength(1);
+    expect(conflicts[0]!.losers[0]!.rev.hash).toBe(hA > hB ? hB : hA); // the shadowed loser
+    // An unconflicted graph surfaces nothing.
+    expect((await s.conflicts('b')).conflicts).toEqual([]);
   });
 
   test('a fast-forward is NOT a conflict — no shadow, just an advance', async () => {

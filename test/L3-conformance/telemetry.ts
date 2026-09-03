@@ -28,7 +28,7 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync, readdi
 import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
-import type { RemoteExecutor, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../../src/api.ts';
+import type { RemoteExecutor, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../../src/api.ts';
 import { isExcludedScenario, isIgnoredScenario } from './tags.ts';
 
 export interface QueryRecord {
@@ -89,6 +89,7 @@ export class LoggingGraphManager implements GraphManager {
   bulkDocs(id: string, changes: WireChangeSet): Promise<void> { return this.inner.bulkDocs(id, changes); }
   checkpoint(id: string, replicationId: string, seq?: number): Promise<number> { return this.inner.checkpoint(id, replicationId, seq); }
   replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> { return this.inner.replicate(id, opts); }
+  conflicts(id: string): Promise<readonly ConflictEntry[]> { return this.inner.conflicts(id); }
   destroy(id: string): Promise<void> { return this.inner.destroy(id); }
 
   private log(rec: QueryRecord): void {

@@ -149,6 +149,12 @@ export function makeRouter(
         try { return json(await mgr.replicate(gid, await req.json())); }
         catch (e: any) { return json({ error: e.message }, 400); }
       }
+      if (endpoint === '_conflicts') {
+        // Surfaced conflicts (§6·3) — winner + shadowed losers per conflicted element, the read that
+        // ordinary traversal never shows.
+        if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+        return json({ conflicts: await mgr.conflicts(gid) });
+      }
       return new Response('Not found', { status: 404 });
     }
 

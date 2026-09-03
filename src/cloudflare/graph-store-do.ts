@@ -2,8 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint } from '../replicate.ts';
-import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, conflictsFeed } from '../replicate.ts';
+import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ConflictEntry, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
@@ -159,6 +159,11 @@ export class GraphDatabase extends DurableObject<Env> {
   checkpoint(replicationId: string, seq?: number): number {
     this.ensureLive();
     return storeCheckpoint(this.store, replicationId, seq);
+  }
+
+  conflicts(): readonly ConflictEntry[] {
+    this.ensureLive();
+    return conflictsFeed(this.store);
   }
 
   /** Fully remove this graph's storage. `deleteAll()` is the only way to clear

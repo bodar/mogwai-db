@@ -314,6 +314,18 @@ export interface ReplicationStats {
   readonly last_seq: number;
 }
 
+/** A surfaced conflict (§6·3): an element whose live row is the deterministic WINNER, with its shadowed
+ *  losing versions — the `?conflicts=true` analog. Invisible to ordinary reads; only this endpoint shows
+ *  it. Resolution (delete a loser, or merge) is the app's. */
+export interface ConflictEntry {
+  readonly gid: string;
+  readonly kind: 'vertex' | 'edge';
+  /** The live winner's rev, or null if the winner is gone (a tombstone). */
+  readonly winner: WireRev | null;
+  /** The shadowed losing versions — each its rev + full wire document. */
+  readonly losers: readonly { readonly rev: WireRev; readonly doc: unknown }[];
+}
+
 /** The graph-lifecycle seam AND the executor factory. `executor(id)` resolves a graph (creating
  *  it on demand) and returns its per-graph Executor — the single home for id→graph resolution,
  *  which is what federation reaches through (a sibling is just another graph THIS manager owns).
@@ -347,6 +359,9 @@ export interface GraphManager {
    *  `_changes` → `_revs_diff` → `_bulk_get` → apply → checkpoint. Resumable — a re-run from the stored
    *  checkpoint is a no-op when nothing changed. */
   replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats>;
+  /** The surfaced conflicts in graph `id` (§6·3) — the winner + shadowed losers per conflicted element.
+   *  Store-tier read; empty when there are none (the common case). */
+  conflicts(id: string): Promise<readonly ConflictEntry[]>;
   /** Destroy graph `id` and all its storage. Idempotent. */
   destroy(id: string): Promise<void>;
 }

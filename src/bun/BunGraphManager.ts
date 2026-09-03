@@ -2,8 +2,8 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { GraphStore, type Sql } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint, managerReplicate } from '../replicate.ts';
-import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../api.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, managerReplicate, conflictsFeed } from '../replicate.ts';
+import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi, Http } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
@@ -144,6 +144,10 @@ export class BunGraphManager implements GraphManager {
 
   replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> {
     return managerReplicate(this, this.http, id, opts);
+  }
+
+  async conflicts(id: string): Promise<readonly ConflictEntry[]> {
+    return conflictsFeed(this.resolve(id).store);
   }
 
   async destroy(id: string): Promise<void> {
