@@ -348,12 +348,40 @@ a *one-shot* language (even `io()` is a one-shot bulk load) with no idiom for a 
   `federate` with a URI (§8); bulk *transfer* via `io()` with a URL (`g.io(url).read()`/`.write()` — the io
   registry just interprets the string; today an R2 key, tomorrow another database over HTTP).
 - **Ongoing replication is a persistent config + a scheduler — the management API, NOT Gremlin.** CouchDB's
-  shape (`replicator.rst`): a replication is a *document* in `_replicator` (`source`, `target`, `continuous`,
-  `filter`, `checkpoint_interval`) run by a scheduler with a state machine and introspection at
-  `_scheduler/jobs`/`_scheduler/docs`. The mogwai analog: a CRUD management interface over persistent configs
-  on the existing REST router (`src/router.ts`); a **DO-alarm-driven scheduler** ("continuous" is a periodic
-  wake→`_changes`→apply→sleep with crash-backoff, since a DO hibernates — not a held connection); and
-  introspection endpoints.
+  shape (`vendor/couchdb/src/docs/src/replication/replicator.rst`): a replication is a standalone *document* in
+  a node-global `_replicator` DB (`source`, `target`, both URLs — neither is "the current DB" — plus
+  `continuous`, `filter`, `checkpoint_interval`), and a **separate scheduler component** runs it *as an HTTP
+  client of both source and target* ("the scheduler … periodically stops some jobs and starts others … failing
+  jobs penalized with exponential backoff"; `max_jobs`/`interval`/`max_churn`, fair-share). The DBs being
+  replicated never run the replication — they just answer `_changes`/`_revs_diff`/`_bulk_docs`. Introspection is
+  top-level `_scheduler/jobs`/`_scheduler/docs`.
+- **The mogwai analog: a WORKER-RESIDENCY scheduler + a control-plane REGISTRY — NOT a DO alarm (revised
+  2026-09-04).** The earlier "DO-alarm-driven scheduler" was WRONG: an alarm runs *inside* the graph DO, so a
+  paced pull would occupy the single-threaded SQL instance's one invocation slot — exactly the busy-lock this
+  design must avoid, and NOT how CouchDB works (its scheduler is a third party, not the DB). Confirmed:
+  Cloudflare **Worker Cron Triggers** (`scheduled(controller, env, ctx)` on a `[triggers] crons` entry) are a
+  Worker feature entirely separate from Durable Objects, and `env` carries the DO namespace + outbound `fetch`,
+  so a cron-driven Worker acts as a client of the graph DOs and remote peers without ever running inside one
+  (docs: `workers/runtime-apis/handlers/scheduled/`; 1-min granularity, 15-min wall limit). So:
+    - **The runner is worker-residency** — the `scheduled()` handler runs due jobs via the paged engine
+      (`runReplication`, §7 residency), so **multiple jobs run concurrently** and each graph DO stays a pure
+      data-plane client. `managerReplicate` (CF) already runs at worker residency; the scheduler just calls it.
+    - **A job is a standalone `{source, target}`** (both graph refs — local id or remote URL; "in worker
+      space," not attached to a graph), persisted in a **`ReplicatorRegistry`** the runner can enumerate. On CF
+      the registry is a **singleton control-plane DO** — a data store ONLY, never a runner; its RPC boundary is
+      async but its contention is trivial (a claim + a state write per job per tick). Bun/browser implement the
+      same seam over native sqlite wrapped in no-op promises. (D1 was considered and rejected: async, so it
+      can't reuse the sync `Sql`/`GraphStore` substrate, CF-only, and a new binding — no benefit at
+      control-plane scale. Registry backend = singleton DO.)
+    - **Continuous = periodic poll, not a held connection** (we can't hold long-poll on CF/DO anyway): CF a
+      cron tick, Bun a `setInterval`, the browser a Service-Worker timer (NEVER inside the SQL Worker thread) —
+      three thin drivers over ONE shared `runDueReplications(registry, http, now)`.
+    - **A job claim guards overlap**: the registry marks a job running with an owner + lease, so two overlapping
+      ticks never run one job twice; a stale lease is reclaimable (crash recovery) — CouchDB's "one job at a
+      time." Fair-share/`max_jobs`/backoff are ours to implement (small, matches CouchDB), swappable to
+      Cloudflare **Workflows** later behind the `Scheduler` seam if platform-durable execution is ever wanted
+      (rejected now: new product, CF-only → forks the shared runner, harder to test in Bun; our per-page
+      checkpoint already makes a run resumable).
 - **The UI falls out of OpenAPI for free.** We already generate an OpenAPI spec + docs UI (`src/docs.ts`,
   `/docs` + `/openapi.json`). Documenting the config CRUD + introspection there gives a Fauxton-equivalent with
   no bespoke front-end. Default to documenting everything publicly.
@@ -370,15 +398,20 @@ A generic CouchDB replicator moving our elements as documents would ignore verti
 not a replica. We follow CouchDB's *design* and mirror its endpoint *shapes*; wire-compat with a real CouchDB
 is out of scope. Our peer protocol is mogwai↔mogwai.
 
-### §9·2 The control-plane store — dedicated tables, CouchDB-named
+### §9·2 The control-plane store — a singleton REGISTRY, dedicated tables, CouchDB-named
 
-Scheduler/config/job state lives in **dedicated tables in the graph's own DO SQLite — not dogfooded as a
-graph.** Dogfooding is right where data is genuinely graph-shaped and user-facing (the replication payload IS
-a graph; federation IS the engine), but control-plane metadata is the wrong fit: our "graph" unit is a whole
-DO with the full schema (vs CouchDB's lightweight db), the state is tiny/local/churny/hot-path, and it must
-NOT be replicated or versioned (you never replicate your job state; CouchDB itself excludes
-`_replicator`/`_local`). A plain table is non-replicated by construction; the queryable surface comes from
-REST + OpenAPI, not graph storage. Field names mirror CouchDB (SQL-formatted):
+**Config/job state lives in a singleton control-plane `ReplicatorRegistry` — NOT in each graph's DO (revised
+2026-09-04).** The registry is a data store the worker-residency runner enumerates for due jobs (§9); it is NOT
+dogfooded as a graph (control-plane metadata is tiny/local/churny and must NOT be replicated or versioned —
+CouchDB itself excludes `_replicator`/`_local`). Placing it per-graph was the wrong call once the scheduler
+moved to the worker: a global cron cannot enumerate DOs, and a job is a standalone `{source, target}` "in
+worker space," not attached to any one graph. So the seam is one registry (CouchDB's node-global `_replicator`),
+with a runtime backend: a **singleton DO on CF**, native sqlite on Bun/browser. The queryable surface is
+top-level REST (`_replicator[/{id}]`, `_scheduler/jobs`, `_scheduler/docs`) + OpenAPI, not graph storage. The
+one control-plane table that STAYS per-graph is the existing `replication_checkpoint` (a graph's own resume
+cursor, already in `src/storage.ts`); a scheduled job's checkpoint MAY instead live in the registry keyed by
+`replication_id` (decided in the 5c/5d build — the registry is the durable scheduler state either way). Field
+names mirror CouchDB (SQL-formatted):
 
 - **`replication_checkpoint`** (CouchDB `_local/{replication_id}`): `replication_id TEXT PRIMARY KEY,
   session_id TEXT, source_last_seq, replication_id_version INTEGER, history BLOB` — `history` a JSONB array of
@@ -548,10 +581,39 @@ Each phase is independently valuable and lands green before the next.
     claiming one uid) reconciles in a post-`loadBulk` `applyUids` pass — winner (not-deleted > lower gid)
     keeps it, loser's uid shadowed + surfaced, both survive, order-independent. Also re-mints a property's
     source VertexProperty id on apply (a property rowid is local — preserving it collided cross-peer).
-- **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
-  DO-alarm scheduler (continuous = periodic pull; one-shot = run once), introspection, and the
-  OpenAPI-generated UI. *Gate: a config keeps a local graph synced from a remote one on a schedule, editable
-  in the generated UI.*
+- **Phase 5 — persistent replication: config CRUD + worker-residency scheduler + OpenAPI UI (§9).** Persistent
+  standalone jobs, a WORKER-residency scheduler (CF cron / Bun interval / browser SW timer — NOT a DO alarm,
+  §9), introspection, and the OpenAPI-generated UI. *Gate: a config keeps a graph synced from a remote one on a
+  schedule, editable in the generated UI, without busy-locking any SQL instance.*
+  - ✅ **5a — the paged/paced replication substrate (the pacing foundation).** `runReplication` drained the
+    whole `_changes` feed and applied it in one synchronous `bulkDocs` — a large `since=0` pull would busy-lock
+    the single-threaded store. Now `_changes` takes an optional `limit` (CouchDB `_changes?limit=N`), threaded
+    end to end (`changesFeed` → `GraphManager.changes` → all three runtime managers + DO RPC + browser host →
+    `Peer.changes`/`remotePeer` → the router `?limit=`); paging by `seq` is safe because every element/tombstone
+    has a distinct monotonic seq. `runReplication` is refactored into `runReplicationPass` (ONE bounded page:
+    changes→revs_diff→bulk_get→apply + conflict-loser leg, advancing the checkpoint, reporting `more`) + a
+    paged, PACED loop over it — `PaceOptions` makes pacing first-class: `batchSize` bounds each apply span,
+    `pace()` is the breakpoint between pages, `maxBatches` bounds a run so the scheduler does bounded per-wake
+    work and re-arms while `more`. Every page advances the checkpoint (resumable). The one-shot `_replicate` is
+    unchanged in behaviour (drains fully) but now internally paged (default 500) + memory-bounded. Gate MET
+    (`test/replicate-paging.test.ts`): paged HTTP feed with a resuming cursor; a 12-element pull drains in 3
+    bounded pages with a pacing breakpoint between each, no page over `batchSize`; a `maxBatches`-bounded run
+    resumes from its checkpoint; the one-shot path still drains fully.
+  - **5b — the `ReplicatorRegistry` seam + top-level config CRUD + OpenAPI.** The singleton control-plane store
+    (DO on CF, native sqlite on Bun/browser) holding `replication_config`; CRUD free functions over the store;
+    the registry seam + its three runtime backends; top-level `_replicator[/{id}]` routes (the system-path
+    regex broadens to admit a `{id}` sub-segment); the OpenAPI `paths` entries so `/docs` documents them.
+    *Gate: create/read/update/delete a replication job via REST, visible in the generated UI.*
+  - **5c — the `Scheduler` seam + the shared `runDueReplications` + `replication_job` + introspection.** CF cron
+    `scheduled()` / Bun `setInterval` / browser SW timer, all calling ONE shared runner that reads due jobs
+    (with the job-claim/lease guard), runs each as a bounded paced pull at worker residency, records
+    `replication_job` state (CouchDB's `initializing/running/pending/crashing/completed/failed` + error_count
+    backoff), and re-arms. `_scheduler/jobs`/`_scheduler/docs` introspection. *Gate: a continuous job keeps a
+    graph synced on a schedule (Bun test drives the tick manually + a real-timer test), no SQL instance
+    busy-locked; overlapping ticks never double-run a job.*
+  - **5d — checkpoint session history (§9·2) + reconciliation.** Extend the checkpoint with CouchDB's
+    session-record `history` array; decide the scheduled-job checkpoint home (registry vs per-graph); surface it
+    in `_scheduler/docs`. *Gate: a job's checkpoint carries CouchDB-shaped session history, visible in the UI.*
 - **Phase 6 — optional manual tombstone purge (§6·4).** Opt-in, CouchDB-style. (No Merkle backstop — §5·3.)
 
 ---
@@ -567,12 +629,20 @@ All under the governing principle (§4). Locked:
 - **Conflicts** = CouchDB preservation (keep leaves, winner-on-read, surface); the referential conflict
   resurrects the endpoint and surfaces the delete — never reject, never lose (§6·3).
 - **Tombstones** kept, no up-front pruning; rev-ancestry depth cap = CouchDB's `_revs_limit` default 1000
-  (§6·4). ONE `since=N` transport mechanism (§7).
+  (§6·4). ONE `since=N` transport mechanism (§7), PAGED by an optional `limit` for pacing (Phase 5a).
 - **DX** splits by idiom: one-shot pulls are STANDARD-GLV Gremlin (`federate` URI, `io()` URL); ongoing
-  replication is a persistent config + scheduler in the management API with an OpenAPI UI (§9); standard-GLV-only
-  is LAW.
+  replication is a persistent standalone `{source, target}` job + scheduler in the management API with an
+  OpenAPI UI (§9); standard-GLV-only is LAW.
+- **Scheduler** (revised 2026-09-04) = WORKER-residency, NOT a DO alarm: CF Worker Cron Trigger / Bun interval /
+  browser SW timer over ONE shared `runDueReplications`; the graph DOs stay pure data-plane clients; jobs run
+  concurrently and paced (§9, §5a). CouchDB-faithful (the scheduler is a client of both DBs, not the DB).
+- **Registry** (revised 2026-09-04) = a singleton control-plane `ReplicatorRegistry` (a DO on CF, native sqlite
+  on Bun/browser) — a data store the runner enumerates, NOT a runner. Chosen over D1 (async ⇒ can't reuse the
+  sync `Sql` substrate; CF-only; new binding — no benefit at control-plane scale) and over per-graph configs (a
+  global runner can't enumerate DOs; a job is standalone, not attached to a graph).
 - **Schema** = `gid`/`rev`/`seq` + `tombstones`, CouchDB-named columns (§6·5); control-plane state in dedicated
-  CouchDB-named tables, not dogfooded (§9·2); system URLs take the `_` prefix (§9·2).
+  CouchDB-named tables in the singleton registry, not dogfooded (§9·2); system URLs take the `_` prefix (§9·2),
+  with `_replicator`/`_scheduler` now TOP-LEVEL (not per-graph), matching CouchDB.
 - **Non-goals**: CouchDB wire interop (§9·1); a Merkle tree (§5·3). **Vendor** CouchDB for reference (§14).
 
 One feature is designed but deferred to the build: **filtered replication** is a *captured traversal* (the
