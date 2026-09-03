@@ -427,9 +427,11 @@ entry the application resolves later: re-confirm the delete and cascade to E, or
 never loses (the delete is preserved as a losing leaf), and keeps the live graph referentially consistent by
 construction (V is back, so E does not dangle) — with no quarantine machinery. The alternative (delete-wins,
 edge quarantined-and-surfaced) is defensible if you want deletes to be sticky, but it needs a quarantine
-store and leaves an element in limbo; edge-resurrects-endpoint is the recommendation, and that a/b choice is
-the only remaining knob (§11). This plus the transfer ordering (§6·2) are the only two graph-forced
-deviations, and both share one root: an edge is the JOIN CouchDB documents lack.
+store and leaves an element in limbo. So edge-resurrects-endpoint is **DECIDED, not a knob**: delete-wins is
+itself a CouchDB *deviation* — it inverts CouchDB's rule (deletion beating existence) and needs quarantine
+machinery CouchDB doesn't have — so under §4 it is rejected, not an option. This plus the transfer ordering
+(§6·2) are the only two graph-forced deviations, and both share one root: an edge is the JOIN CouchDB
+documents lack.
 
 The cost (honest): preserving conflicts is heavier substrate than discarding — an element's content becomes
 rev-versioned (winner live in the normal rows; losing leaves in a shadow/conflict store) and `~rev` holds a
@@ -658,10 +660,7 @@ edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
    clock dependence) vs Snowflake time+peer+seq. A tuning decision, not a mechanism.
 2. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
 3. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
-4. **Referential-conflict winner** (§6·3): edge-resurrects-endpoint (recommended — mirrors
-   not-deleted-beats-deleted, keeps the live graph consistent, no quarantine store) vs
-   delete-wins-edge-quarantined. Never reject / never lose is locked either way.
-5. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
+4. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
    the replicated subgraph) is the natural analog and composes with our engine — in scope for the design,
    later for the build. Interacts with referential integrity (a filtered subgraph can produce dangling
    edges by construction).
