@@ -27,8 +27,14 @@ const SCHEMA = [
   // store the key string on EVERY element plus a second index (double-digit GB at 10^8), and it is
   // more CouchDB-faithful. Nullable so a graph created before this column, and an element not yet
   // touched by the rev barrier, are representable.
+  // `dirty` is the UNIFORM recompute marker for the derived replication columns (gid, rev, and any
+  // future one): a row with `dirty != 0` needs the post-write refresh (`src/refresh.ts`) to (re)compute
+  // them. A create is born dirty (DEFAULT 1); a mutation sets it (increment 2); the refresh clears it.
+  // It is the EXPLICIT generalization of the implicit `gid IS NULL` marker — and unlike a null it is a
+  // flag SEPARATE from the value, so marking a row stale does not destroy the OLD rev the next rev must
+  // chain from. The partial index below keeps the sweep O(dirty count), never a full scan.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB)`,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB, dirty INTEGER NOT NULL DEFAULT 1)`,
   // A vertex's labels are a SET (TinkerPop 4 multi-label), so they normalize out of `nodes`
   // exactly as properties did — the rule being "normalize where cardinality is 0..N, keep
   // inline where it is exactly 1", which is also why an EDGE label stays on `edges` (upstream
@@ -62,7 +68,7 @@ const SCHEMA = [
   // endpoints by `gid` (§6·5), so a replicated edge converges across peers that preserved those gids.
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL, gid BLOB, rev BLOB)`,
+     tgt INTEGER NOT NULL, gid BLOB, rev BLOB, dirty INTEGER NOT NULL DEFAULT 1)`,
   // Edge properties are ALSO normalized rows (the typed-property-values rework retired
   // the flat JSONB blob): TinkerPop's edge Property has no id/meta/multi, so ONE row per
   // (edge,key) — the UNIQUE constraint enforces that single cardinality and doubles as
@@ -101,6 +107,10 @@ const SCHEMA = [
   // yet carrying a gid (a pre-column graph, an untouched element) coexist until minted.
   `CREATE UNIQUE INDEX IF NOT EXISTS nodes_gid ON nodes(gid)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS edges_gid ON edges(gid)`,
+  // PARTIAL indexes over ONLY the dirty rows — the recompute sweep (`WHERE dirty`) is index-served and
+  // the index is empty once refreshed, so a write that touched nothing pays no scan.
+  `CREATE INDEX IF NOT EXISTS nodes_dirty ON nodes(id) WHERE dirty`,
+  `CREATE INDEX IF NOT EXISTS edges_dirty ON edges(id) WHERE dirty`,
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,

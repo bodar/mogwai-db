@@ -253,8 +253,10 @@ export class BulkLoader {
    *  only its owned property rows are wiped and re-landed. */
   private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
     // gid is minted only for a fresh row; a REPLACE match keeps its existing gid (immutable identity),
-    // so no gid is recomputed when the `nodes` row is not re-pushed.
-    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid()]);
+    // so no gid is recomputed when the `nodes` row is not re-pushed. A bulk row is born CLEAN
+    // (dirty=0): it computes its gid inline here, so the post-write refresh has nothing to do (and the
+    // bulk path bypasses that refresh anyway — it never runs through frameResolved).
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), 0]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -278,7 +280,7 @@ export class BulkLoader {
     const tgt = this.vertexIds.get(String(e.tgt));
     // Mint the gid ONCE here (not at flush) so the deferred path carries the same value it would land.
     const gid = e.gid ?? mintGid();
-    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid]);
+    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, 0]);
     else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
@@ -318,7 +320,7 @@ export class BulkLoader {
     // it owns collision handling, so the append-only collision CHECK is exactly what it replaces.
     if (this.onCollision === 'replace') this.resolveReplace();
     else this.assertNoCollisions();
-    this.land('nodes', ['id', 'uid', 'gid'], this.nodeRows);
+    this.land('nodes', ['id', 'uid', 'gid', 'dirty'], this.nodeRows);
     this.land('vertex_labels', ['node', 'label'], this.vertexLabelRows);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.scalar);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.collection, true);
@@ -329,10 +331,10 @@ export class BulkLoader {
     for (const { edge, id, uid, gid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, 0]);
     }
     this.pendingEdges = [];
-    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid'], this.edgeRows);
+    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'dirty'], this.edgeRows);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.scalar);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.collection, true);
     const fts = this.ftsRows.length;
