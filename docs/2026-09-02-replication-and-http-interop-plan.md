@@ -249,21 +249,38 @@ plumbing in the format adapters (`src/formats/`) so they round-trip.
 
 ---
 
-## §7. The transport — mogwai as an outbound HTTP client
+## §7. The transport — mogwai as an outbound HTTP client — ✅ LANDED (federation half, Phase 0)
 
-Both features need mogwai to call out over HTTP; the driver already exists in the tree:
+Both features need mogwai to call out over HTTP. The transport is modelled as ONE uniform seam,
+`Http = (Request) => Promise<Response>` (`src/api.ts`) — the exact shape a server handler already has
+(`makeRouter` returns one; a Worker `fetch` export is one; global `fetch` satisfies it). Every outbound
+caller takes an injected `Http`; the ONLY place that touches global `fetch` is the production default
+(`defaultHttp`, `src/http-federation.ts`). That uniformity is load-bearing, not cosmetic: a test hands the
+outbound client a *server's own router handler* and the whole hop runs IN MEMORY, no socket — the same
+discipline L3's cucumber runner already uses (`test/support/in-memory-transport.ts`).
 
-- **The vendored `gremlin` client is a `fetch`-based outbound driver** (`Client.submit(gremlin, parameters)`,
-  `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`), a production dependency
-  already imported for GraphBinary serializers; `fetch` is native in a Worker/DO. This serves the
-  *Gremlin-speaking* outbound call (external federation, §8). **One small, known extension:** the stock
-  client's vertex/edge (de)serializers hardcode empty properties — which is exactly why we hand-roll
-  `vertexBuffer`/`edgeBuffer`/`vertexPropertyBuffer` on the server side (`execute.ts`, root `CLAUDE.md`
-  decision #4). As an *outbound* client we must register property-carrying element serializers on the `Client`
-  instance so it can decode a vertex/edge response; we already have them, so it is a small wiring step — and a
-  candidate upstream PR (like the `inject` varargs one), since complete element serializers logically belong
-  in the client anyway.
-- **The replication peer client** is a thin `fetch` wrapper over the §9 endpoints, decoding the same
+- **We build the GraphBinary REQUEST directly, NOT via `Client.submit` — a deliberate, measured deviation.**
+  Three findings against the vendored client as the driver, each grounded in the code (the authority):
+  1. **Its read/`deserializeValue` side already keeps properties** — only its *write*/`serialize` side
+     hardcodes them empty (which is why the server hand-rolls `vertexBuffer` etc.). So the earlier claim
+     that we must "register property-carrying element serializers to *decode* a response" was WRONG (it
+     retired the note that shipped in `ca88e61`). The real gap is that the stock reader **type-collapses**
+     (a Long → a JS Number, a UUID → a String), which a federated element's props and a pushed reducer's
+     scalar cannot afford — a LOCAL tail over the detached result (`has("age", gt(30))`, `order().by("age")`)
+     must be correct at depth. So we own the decode: `decodeForeignResult` (`src/foreign-decode.ts`), a
+     TYPE-PRESERVING GraphBinary response decoder — the exact inverse of `execute.ts`'s framing, capturing
+     each value's wire DataType as its `{t,v}` tag, decoding elements at any depth (a `fold()` of vertices).
+  2. **`inject($map)` must reach the peer verbatim.** The federate barrier's mid-traversal correlation
+     synthesizes `g.inject($map).unfold().group().by(Column.keys).by(…)`, which only parses because of our
+     carried grammar patch. The vendored client builds/validates the request client-side and encodes params
+     as a gremlin-lang string, so it could reject it; we pass the string untouched.
+  3. **the `$map` binding is a typed `Map`** (parent-ordinal → injected value) — JSON cannot carry it, but a
+     GraphBinary MAP does. So the request is the exact inverse of the server's `wire.ts parseRequest`
+     (`encodeGraphBinaryRequest`, `src/http-federation.ts`), reusing the same `ioc` serializers as the decode.
+  Net: we reuse the client's GraphBinary SERIALIZERS (decision #4, reuse-first) and hand-roll only the thin
+  request/response framing our wire layer already owns — and gain portability (no undici/dispatcher to bundle
+  on a Worker) and in-memory testability for free.
+- **The replication peer client** is a thin `Http` caller over the §9 endpoints, decoding the same
   GraphBinary/JSON shapes our server produces (`src/http.ts`, `src/wire.ts`).
 - **ONE mechanism — `_changes?since=N`.** Because the by-seq feed is current-state-sized and we keep
   everything (§5·2, §6·4), `since=0` reconstructs a full replica and `since=checkpoint` an incremental one —
@@ -288,14 +305,22 @@ concepts:
   (`src/compiler/segment.ts`): a one-method `executor(id).runForeign(gremlin, params, depth) →
   Promise<ForeignResult>`. RPC is not hardwired — the CF/Bun managers just happen to implement it; `federate.ts`
   imports no RPC types.
-- **The trigger is the `graph` param becoming a URI — no new Gremlin surface.** A *relative* URI is a local
-  sibling (today); a *fully-qualified* URI dispatches to an `HttpFederationSource` that `POST`s
-  `{gremlin, bindings}` (via the vendored `Client.submit`) and maps the response into the closed
-  `ForeignResult` contract (`elements|scalar|map|values`, `src/api.ts`). Downstream cares only about the
-  contract, not how the bytes arrived.
+- **The trigger is the `graph` param becoming a URI — no new Gremlin surface. ✅ LANDED.** A *relative* id is
+  a local sibling; a *fully-qualified* `http(s)` URI dispatches to an `HttpForeignExecutor`
+  (`src/http-federation.ts`) that POSTs a GraphBinary request (§7) and maps the response into the closed
+  `ForeignResult` contract (`elements|scalar|map|values`, `src/api.ts`) via `decodeForeignResult`. The
+  dispatch is one shared line, `remoteOrLocal(id, http, local)`, called by BOTH managers' `executor(id)`
+  (`BunGraphManager`, `CloudflareGraphManager`), so `federate.ts` is UNTOUCHED — it still just calls
+  `source.executor(graph).runForeign(…)`. Downstream cares only about the contract, not how the bytes arrived.
+  Verified end to end in memory (`test/http-federation.test.ts`): source form with typed props, a pushed
+  `count()` scalar, a value-stream tail, a map terminal, a peer error surfacing as a throw, and — the critical
+  barrier path — the `as()/select()` mid injection carrying its bound `Map` through `inject($map)` over the wire.
 - **Honor two invariants**: thread + increment `depth` (`guardFederationDepth`) so a hop stays bounded; and
   translate faithfully into `ForeignResult` (fail closed on a shape mismatch). `rpcTry` (`src/rpc.ts`) is
-  DO-RPC-only — an HTTP backend uses ordinary `throw`/`catch`.
+  DO-RPC-only — an HTTP backend uses ordinary `throw`/`catch`. **Follow-up (noted, not a Phase 0 gate):** the
+  local depth guard bounds the local chain, but `depth` is not yet threaded to the peer (which compiles a fresh
+  request at depth 0), so a cyclic *cross-server* federate is bounded per-server, not globally — hardening is a
+  `federationDepth` request field the peer honours (touches `framedAsync`'s signature across implementations).
 
 ---
 
