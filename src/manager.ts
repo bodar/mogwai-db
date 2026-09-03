@@ -11,7 +11,7 @@
 // So no verb 404s on a well-formed id — GET/POST auto-create an empty graph,
 // PUT is create-if-absent, DELETE is a no-op when there's nothing to remove.
 import type { GraphStore } from './storage.ts';
-import type { ChangesFeed, ChangeRow, GraphInfo } from './api.ts';
+import type { ChangesFeed, ChangeRow, GraphInfo, RevsDiffRequest, RevsDiffResponse, WireRev } from './api.ts';
 // The GraphManager / GraphInfo / Executor seams now live in the API surface (src/api.ts).
 // Re-exported here so existing `import { GraphManager } from './manager.ts'` sites keep working.
 export type { GraphManager, GraphInfo, Executor, RemoteExecutor } from './api.ts';
@@ -50,4 +50,46 @@ export function changesFeed(store: GraphStore, since: number): ChangesFeed {
     ...(r.deleted ? { deleted: true as const } : {}),
   }));
   return { results, last_seq: store.nextSeqBlock(0) };
+}
+
+/** A rev as a canonical comparison key — CouchDB's `gen-hash`. */
+const revKey = (r: WireRev): string => `${r.gen}-${r.hash}`;
+
+/**
+ * The `_revs_diff` lookup (§4 primitive 2), shared like `changesFeed`: given the revs a peer holds per
+ * element gid, return which this graph is MISSING, so the source ships only those. A pure gid/rev key
+ * lookup — the efficiency engine that never touches a body.
+ *
+ * "Has gid@rev" here is an EXACT {gen,hash} match against this graph's LIVE row for that gid OR a
+ * tombstone for it (a delete at that rev is still "had"). This is the single-leaf answer; the rev-TREE
+ * ancestry check (a newer rev subsumes an offered ancestor, so it is not missing) is Phase 4 — until
+ * then the diff is conservative (it may re-offer an ancestor), which the idempotent apply makes safe.
+ * Gids are hex (as `_changes` emits); the lookup is `hex(gid) IN (json_each(?))` — ONE JSON bind, never
+ * a data-sized placeholder list (§6·2).
+ */
+export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffResponse {
+  const gids = Object.keys(request).map((g) => g.toUpperCase());
+  if (!gids.length) return {};
+  const gidsJson = JSON.stringify(gids);
+  const rows = store.query<{ gid: string; rev: string | null }>(
+    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+     UNION ALL
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+     UNION ALL
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))`,
+    [gidsJson, gidsJson, gidsJson]);
+  // gid (upper hex) → the set of rev keys this graph holds for it.
+  const held = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!r.rev) continue;
+    const rev = JSON.parse(r.rev) as WireRev;
+    (held.get(r.gid) ?? held.set(r.gid, new Set()).get(r.gid)!).add(revKey(rev));
+  }
+  const out: Record<string, { missing: WireRev[] }> = {};
+  for (const [gid, revs] of Object.entries(request)) {
+    const have = held.get(gid.toUpperCase());
+    const missing = revs.filter((r) => !have?.has(revKey(r)));
+    if (missing.length) out[gid] = { missing };
+  }
+  return out;
 }

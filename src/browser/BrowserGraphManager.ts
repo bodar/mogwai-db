@@ -11,7 +11,7 @@
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import type { Framed } from '../execute.ts';
-import type { ForeignResult, ChangesFeed } from '../api.ts';
+import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
@@ -72,6 +72,10 @@ export class BrowserGraphManager implements GraphManager {
 
   async changes(id: string, since: number): Promise<ChangesFeed> {
     return this.call(id, ((s) => s.changes(since)) as Awaited$<ChangesFeed>);
+  }
+
+  async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
+    return this.call(id, ((s) => s.revsDiff(request)) as Awaited$<RevsDiffResponse>);
   }
 
   async destroy(id: string): Promise<void> {

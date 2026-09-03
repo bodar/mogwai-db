@@ -255,6 +255,17 @@ export interface ChangesFeed {
   readonly last_seq: number;
 }
 
+/** A rev on the wire (`{gen, hash}`), as the feed and diff carry it. */
+export interface WireRev { readonly gen: number; readonly hash: string }
+
+/** `_revs_diff` request (§4 primitive 2): a peer offers, per element gid (hex), the revs it holds. */
+export type RevsDiffRequest = Readonly<Record<string, readonly WireRev[]>>;
+
+/** `_revs_diff` response: per gid, the offered revs THIS graph does not have — so the source ships only
+ *  those. A pure key lookup over gid/rev (live rows + tombstones), never a body. Gids with nothing
+ *  missing are omitted. */
+export type RevsDiffResponse = Readonly<Record<string, { readonly missing: readonly WireRev[] }>>;
+
 /** The graph-lifecycle seam AND the executor factory. `executor(id)` resolves a graph (creating
  *  it on demand) and returns its per-graph Executor — the single home for id→graph resolution,
  *  which is what federation reaches through (a sibling is just another graph THIS manager owns).
@@ -273,6 +284,9 @@ export interface GraphManager {
   /** The by-sequence change feed for graph `id` since cursor `since` (§5·2) — store-tier read work,
    *  the peer-facing replication source. Creating the graph on demand, like `info`. */
   changes(id: string, since: number): Promise<ChangesFeed>;
+  /** Given the revs a peer holds per gid, return which ones graph `id` is MISSING (§4 primitive 2) —
+   *  the cheap "what should I send you?" diff. A pure gid/rev key lookup, store-tier. */
+  revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse>;
   /** Destroy graph `id` and all its storage. Idempotent. */
   destroy(id: string): Promise<void>;
 }
