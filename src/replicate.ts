@@ -115,26 +115,67 @@ export function applyChanges(store: GraphStore, cs: ChangeSet): void {
     properties: [...e.properties], gid: upper(e.gid), rev: e.rev,
   }));
 
-  if (bulkV.length || bulkE.length) loadBulk(store, bulkV, bulkE, { idPolicy: 'preserve', onCollision: 'replace' });
-  else if (deletes.length) refreshElements(store); // no upsert flush to piggyback on — assign the tombstones' seqs
+  if (bulkV.length || bulkE.length) {
+    loadBulk(store, bulkV, bulkE, { idPolicy: 'preserve', onCollision: 'replace' });
+    // RESURRECT (§6·3, not-deleted beats deleted): a live version supersedes a local tombstone for the
+    // same gid, so drop the tombstone and SURFACE the superseded delete as a conflict (never lost).
+    resurrect(store, [...bulkV.map((v) => v.gid!), ...bulkE.map((e) => e.gid!)]);
+  } else if (deletes.length) refreshElements(store); // no upsert flush to piggyback on — assign the tombstones' seqs
 }
 
-/** Remove each deleted element's live rows + owned children (NOT a cascade — the source sends every
- *  cascade-deleted element as its own delete), and record a tombstone at the carried rev, deduped by gid
- *  so a re-apply is a no-op. The tombstone's local seq is assigned by `applyChanges`'s later refresh. */
+/** A live upsert supersedes a local tombstone for the same gid (not-deleted beats deleted, §6·3): drop
+ *  the tombstone (the element is back) and shadow the superseded delete so it is surfaced, not lost. */
+function resurrect(store: GraphStore, gids: readonly string[]): void {
+  if (!gids.length) return;
+  const j = JSON.stringify(gids.map(upper));
+  const toms = store.query<{ gid: string; rev: string | null; kind: string }>(
+    'SELECT hex(gid) AS gid, json(rev) AS rev, kind FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))', [j]);
+  if (!toms.length) return;
+  for (const t of toms) shadowDelete(store, t.gid, t.rev, t.kind as 'vertex' | 'edge');
+  store.query('DELETE FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))', [j]);
+}
+
+/** Surface a losing DELETE in the shadow store — a delete carries no body, so its "doc" is a marker
+ *  `{deleted, rev, kind}`, keyed by its rev hash (or `deleted` when it has none). */
+function shadowDelete(store: GraphStore, gid: string, revText: string | null, kind: 'vertex' | 'edge'): void {
+  shadowLeaf(store, gid, parseRev(revText)?.hash ?? 'deleted', kind, { deleted: true, rev: revText, kind });
+}
+
+/** Apply each incoming delete — remove the element's live rows + owned children (NOT a cascade: the
+ *  source sends every cascade-deleted element as its own delete) and record a tombstone at the carried
+ *  rev, deduped by gid (idempotent). The seq is assigned by `applyChanges`'s later refresh.
+ *
+ *  THE REFERENTIAL RULE (§6·3, no CouchDB analog): a vertex delete whose vertex is still referenced by a
+ *  LIVE edge is REFUSED — a referencing edge is an existence-claim, so the vertex is RESURRECTED (kept
+ *  live, not removed, no tombstone) and the delete is surfaced as a conflict. Never rejects the delete,
+ *  never drops the edge — the live graph stays consistent by construction (V is back, E doesn't dangle). */
 function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   if (!deletes.length) return;
-  const vGids = deletes.filter((d) => d.kind === 'vertex').map((d) => upper(d.gid));
-  const eGids = deletes.filter((d) => d.kind === 'edge').map((d) => upper(d.gid));
-  const vIds = [...resolveGids(store, 'nodes', vGids).values()];
-  const eIds = [...resolveGids(store, 'edges', eGids).values()];
+  const vRow = resolveGids(store, 'nodes', deletes.filter((d) => d.kind === 'vertex').map((d) => upper(d.gid)));
+  const eIds = [...resolveGids(store, 'edges', deletes.filter((d) => d.kind === 'edge').map((d) => upper(d.gid))).values()];
 
-  if (vIds.length) {
-    deleteMembers(store, 'vertex_properties', 'node', vIds);
-    deleteMembers(store, 'vertex_labels', 'node', vIds);
-    deleteMembers(store, 'vertex_property_cardinality', 'node', vIds);
-    store.query("DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(vIds)]);
-    deleteMembers(store, 'nodes', 'id', vIds);
+  // Which of the to-be-deleted vertices are still endpoints of a LIVE edge → resurrect them.
+  const vIds = [...vRow.values()];
+  const referenced = new Set(vIds.length ? store.query<{ id: number }>(
+    `SELECT src AS id FROM edges WHERE src IN (SELECT value FROM json_each(?))
+     UNION SELECT tgt AS id FROM edges WHERE tgt IN (SELECT value FROM json_each(?))`,
+    [JSON.stringify(vIds), JSON.stringify(vIds)]).map((r) => r.id) : []);
+
+  const removeV: number[] = [];
+  const resurrected = new Set<string>(); // gids whose delete was refused (referential) — surfaced, not applied
+  for (const d of deletes) {
+    if (d.kind !== 'vertex') continue;
+    const rowid = vRow.get(upper(d.gid));
+    if (rowid !== undefined && referenced.has(rowid)) { shadowDelete(store, d.gid, d.rev, 'vertex'); resurrected.add(upper(d.gid)); }
+    else if (rowid !== undefined) removeV.push(rowid);
+  }
+
+  if (removeV.length) {
+    deleteMembers(store, 'vertex_properties', 'node', removeV);
+    deleteMembers(store, 'vertex_labels', 'node', removeV);
+    deleteMembers(store, 'vertex_property_cardinality', 'node', removeV);
+    store.query("DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(removeV)]);
+    deleteMembers(store, 'nodes', 'id', removeV);
   }
   if (eIds.length) {
     deleteMembers(store, 'edge_properties', 'edge', eIds);
@@ -142,13 +183,13 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     deleteMembers(store, 'edges', 'id', eIds);
   }
 
-  // A tombstone per delete, skipping a gid already tombstoned (idempotent). gid crosses as hex→unhex,
-  // rev as jsonb text, seq NULL (the refresh assigns it).
-  const allGids = deletes.map((d) => upper(d.gid));
+  // A tombstone per APPLIED delete (a resurrected vertex is not deleted, so it gets none), skipping a gid
+  // already tombstoned. gid crosses as hex→unhex, rev as jsonb text, seq NULL (the refresh assigns it).
+  const applied = deletes.filter((d) => !resurrected.has(upper(d.gid)));
   const already = new Set(store.query<{ gid: string }>(
     'SELECT hex(gid) AS gid FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))',
-    [JSON.stringify(allGids)]).map((r) => r.gid));
-  const record = deletes.filter((d) => !already.has(upper(d.gid)));
+    [JSON.stringify(applied.map((d) => upper(d.gid)))]).map((r) => r.gid));
+  const record = applied.filter((d) => !already.has(upper(d.gid)));
   if (record.length) insertSet(store, 'tombstones',
     [{ name: 'gid', type: 'blob', blob: true }, { name: 'rev', type: 'blob', jsonb: true }, { name: 'kind', type: 'any' }],
     record.map((d) => [upper(d.gid), d.rev, d.kind]));
