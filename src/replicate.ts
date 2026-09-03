@@ -240,8 +240,18 @@ export function storePeer(store: GraphStore): Peer {
   };
 }
 
-/** A remote peer over the `_` HTTP endpoints of a graph URL, spoken through the injected `Http` seam
- *  (the exact transport federation and `io()` use — so a test drives it in memory against a router). */
+/**
+ * A remote peer over the `_` HTTP endpoints of a graph URL, spoken through the injected `Http` seam.
+ *
+ * **SSRF is closed at the seam, not here.** The `url` comes from a `_replicate` request, so a naive
+ * fetch would be a textbook server-side request forgery — but `http` is the SAME injected transport
+ * `io()`/`federate` use, and every production entry point wraps it in `allowlistedHttp`
+ * (`src/http-allowlist.ts`): empty allowlist ⇒ DENY ALL (fail closed), hostname-matched (never a
+ * resolved IP, so DNS-rebinding-proof and Worker-portable), non-http(s) refused, redirects refused. So
+ * replication reaches ONLY operator-allowlisted peers, by construction — a raw `http` here (a test's
+ * in-memory router) is the only way past it, and that never touches a real network. Do NOT pass an
+ * unwrapped transport to this in a runtime path.
+ */
 export function remotePeer(http: Http, url: string): Peer {
   const base = url.replace(/\/$/, '');
   const post = async <T>(ep: string, body: unknown): Promise<T> => {

@@ -2,6 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
+import { allowlistedHttp } from '../src/http-allowlist.ts';
 import type { ChangesFeed, Http, ReplicationStats } from '../src/api.ts';
 
 // Phase 3 step 3c (docs/2026-09-02-replication-and-http-interop-plan.md §9, §5): the pull/push loop +
@@ -80,5 +81,26 @@ describe('replication — the pull/push loop', () => {
       method: 'POST', body: JSON.stringify({ source: 'sibling' }), headers: { 'Content-Type': 'application/json' },
     }));
     expect(bad.status).toBe(400); // no remote http(s) end
+  });
+
+  // The replication path inherits the ONE outbound SSRF guard (`allowlistedHttp`, §7 / Phase 0): the
+  // remote peer speaks through the manager's injected http, which every production entry point wraps.
+  test('replication is fail-CLOSED against a non-allowlisted peer, and reaches an allowlisted one', async () => {
+    // A manager whose outbound http is allowlist-guarded, empty ⇒ DENY ALL — the secure default.
+    let router: Http;
+    const denied = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, allowlistedHttp([], (req) => router(req)));
+    router = makeRouter(denied);
+    await denied.executor('remote').framedAsync('g.addV("person")', {});
+    // A pull to any host is refused BEFORE the fetch — no SSRF reach.
+    await expect(denied.replicate('local', { source: 'http://peer/gremlin/remote' })).rejects.toThrow(/outbound HTTP is disabled/);
+    expect((await denied.info('local')).vertexCount).toBe(0); // nothing pulled
+
+    // Allowlist the peer host → the same replication runs.
+    let r2: Http;
+    const allowed = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, allowlistedHttp(['peer'], (req) => r2(req)));
+    r2 = makeRouter(allowed);
+    await allowed.executor('remote').framedAsync('g.addV("person")', {});
+    const stats = await allowed.replicate('local', { source: 'http://peer/gremlin/remote' });
+    expect(stats.written).toBe(1);
   });
 });
