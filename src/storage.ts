@@ -140,6 +140,16 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS tombstones_gid ON tombstones(gid)`,
   `CREATE TABLE IF NOT EXISTS update_seq(value INTEGER NOT NULL)`,
   `INSERT OR IGNORE INTO update_seq(rowid, value) VALUES (1, 0)`,
+  // The conflict SHADOW store (§5·1/§6·3): a divergent leaf that LOST the deterministic winner. The
+  // winner stays in the live `nodes`/`edges` row (the hot path never sees a conflict), so this holds only
+  // the losers — seldom populated (read≫write). Each is the losing element's full wire document (`doc`,
+  // so the version is not lost — "never lose a write"), keyed by (gid, its leaf hash) so several losing
+  // leaves per element coexist. A conflict-aware read UNIONs the live winner with these; resolution is
+  // the app's (delete a loser, or merge). NOT replicated as such — it re-derives on each peer, since the
+  // winner is deterministic and both peers shadow the same loser.
+  `CREATE TABLE IF NOT EXISTS conflicts(
+     gid BLOB NOT NULL, rev_hash TEXT NOT NULL, kind TEXT NOT NULL, doc BLOB NOT NULL,
+     PRIMARY KEY (gid, rev_hash))`,
   // A replicator's resumable checkpoint (§9·2, CouchDB's `_local/{replication_id}`): where THIS graph is
   // caught up to on a given peer, keyed by a deterministic replication id. NOT replicated — it is local
   // job state (CouchDB excludes `_local` from replication), so it lives in its own table, never in the

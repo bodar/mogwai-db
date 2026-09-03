@@ -24,6 +24,7 @@ import { refreshElements } from './refresh.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
 import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
 import { changesFeed, revsDiff } from './manager.ts';
+import { parseRev, descendsFrom, revWins, type Rev } from './rev.ts';
 import type {
   BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete, WireRev, ChangesFeed, RevsDiffRequest,
   RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats,
@@ -189,14 +190,82 @@ export function bulkGet(store: GraphStore, refs: readonly BulkGetRef[]): WireCha
   return { vertices, edges };
 }
 
-/** Apply a WIRE change set (`_bulk_docs`): parse each element's GraphSON typed properties back to
- *  `BulkProperty` via the shared codec, then hand the format-free `ChangeSet` to {@link applyChanges}. */
+/** hex(gid) → the live rev-tree this graph holds for it, for a set of gids. */
+function localRevs(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, Rev> {
+  if (!gids.length) return new Map();
+  const rows = store.query<{ gid: string; rev: string | null }>(
+    `SELECT hex(gid) AS gid, json(rev) AS rev FROM ${table} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))`,
+    [JSON.stringify(gids.map(upper))]);
+  const out = new Map<string, Rev>();
+  for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, rev); }
+  return out;
+}
+
+/** Record a LOSING leaf in the shadow store (§6·3), deduped by (gid, hash). `doc` is the loser's wire
+ *  document, so its version is not lost. Fixed-shape insert (never a data-sized bind list). */
+function shadowLeaf(store: GraphStore, gid: string, revHash: string, kind: 'vertex' | 'edge', doc: unknown): void {
+  store.query('INSERT OR IGNORE INTO conflicts(gid, rev_hash, kind, doc) VALUES (unhex(?), ?, ?, jsonb(?))',
+    [upper(gid), revHash, kind, JSON.stringify(doc)]);
+}
+
+/**
+ * Classify each incoming wire element against this graph's live rev-tree (§6·3), returning the ones to
+ * APPLY (the rest are skipped or shadowed):
+ *   - no local, or a fast-forward (incoming descends local) → APPLY (advance).
+ *   - identical, or incoming is an ANCESTOR of local → skip (already have it).
+ *   - DIVERGENT (neither descends) → a conflict, resolved by `revWins`: if the incoming wins, shadow the
+ *     LOCAL version (its content read before apply overwrites it) and APPLY the incoming; if the local
+ *     wins, shadow the INCOMING and skip it. Either way BOTH versions survive.
+ */
+function classifyWire<W extends { gid: string; rev: string }, R>(
+  store: GraphStore, table: 'nodes' | 'edges', kind: 'vertex' | 'edge', incoming: readonly W[], toRepl: (w: W) => R,
+): R[] {
+  if (!incoming.length) return [];
+  const local = localRevs(store, table, incoming.map((w) => w.gid));
+  const accept: R[] = [];
+  const shadowLocal: string[] = [];   // gids whose CURRENT local content must be shadowed (incoming wins)
+  const shadowIncoming: W[] = [];      // incoming losers (local wins) — shadow the wire doc itself
+  for (const w of incoming) {
+    const loc = local.get(upper(w.gid));
+    const inc = parseRev(w.rev);
+    if (!loc || !inc) { accept.push(toRepl(w)); continue; }        // new (or unparseable rev — apply, fail-safe)
+    if (inc.hash === loc.hash) continue;                            // identical → already have it
+    if (descendsFrom(inc, loc)) { accept.push(toRepl(w)); continue; } // fast-forward → advance
+    if (descendsFrom(loc, inc)) continue;                          // incoming is an ancestor → already have
+    if (revWins(inc, false, loc, false)) { shadowLocal.push(upper(w.gid)); accept.push(toRepl(w)); } // incoming wins
+    else shadowIncoming.push(w);                                    // local wins → incoming loses
+  }
+  // Shadow the local losers with their CURRENT content (read before `applyChanges` overwrites it).
+  if (shadowLocal.length) {
+    const docs = bulkGet(store, shadowLocal.map((gid) => ({ gid, kind })));
+    for (const d of (kind === 'vertex' ? docs.vertices ?? [] : docs.edges ?? []))
+      shadowLeaf(store, d.gid, parseRev(d.rev)!.hash, kind, d);
+  }
+  for (const w of shadowIncoming) shadowLeaf(store, w.gid, parseRev(w.rev)!.hash, kind, w);
+  return accept;
+}
+
+/**
+ * Apply a WIRE change set (`_bulk_docs`): classify each element against the local rev-tree, PRESERVING a
+ * divergent conflict in the shadow store (§6·3) rather than losing a write, then hand the accepted
+ * (new / fast-forward / conflict-winning) elements to {@link applyChanges} as a format-free `ChangeSet`.
+ * Two peers cross-replicating CONVERGE: `revWins` is deterministic, so each keeps the same winner live
+ * and shadows the same loser.
+ */
 export function applyWire(store: GraphStore, ws: WireChangeSet): void {
-  applyChanges(store, {
-    vertices: (ws.vertices ?? []).map((v) => ({ gid: v.gid, rev: v.rev, labels: v.labels, properties: vertexProperties(v.properties) })),
-    edges: (ws.edges ?? []).map((e) => ({ gid: e.gid, rev: e.rev, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: edgeProperties(e.properties) })),
-    deletes: ws.deletes ?? [],
-  });
+  const vertices = classifyWire(store, 'nodes', 'vertex', ws.vertices ?? [],
+    (v) => ({ gid: v.gid, rev: v.rev, labels: v.labels, properties: vertexProperties(v.properties) }));
+  const edges = classifyWire(store, 'edges', 'edge', ws.edges ?? [],
+    (e) => ({ gid: e.gid, rev: e.rev, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: edgeProperties(e.properties) }));
+  applyChanges(store, { vertices, edges, deletes: ws.deletes ?? [] });
+}
+
+/** The conflict LOSERS shadowed for an element (§6·3) — the conflict-aware read a surfacing query needs
+ *  (the live winner is the ordinary row). Each is the losing wire document at its rev. */
+export function conflictsFor(store: GraphStore, gidHex: string): { rev_hash: string; kind: string; doc: unknown }[] {
+  return store.query<{ rev_hash: string; kind: string; doc: string }>(
+    'SELECT rev_hash, kind, json(doc) AS doc FROM conflicts WHERE hex(gid) = ?', [gidHex.toUpperCase()])
+    .map((r) => ({ rev_hash: r.rev_hash, kind: r.kind, doc: JSON.parse(r.doc) as unknown }));
 }
 
 // ---------- the replicator: the pull/push loop + checkpoint + peer client (§9, §5) ----------
