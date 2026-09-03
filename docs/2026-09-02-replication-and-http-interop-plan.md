@@ -453,8 +453,11 @@ Each phase is independently valuable and lands green before the next.
     rows land dirty=3 so an io()/replicated element takes a fresh LOCAL seq while keeping its rev. Gate met:
     every write bumps seq; a mutation moves the element forward; a sibling is unchanged; every live element
     has seq > 0.
-  - ⏳ **2b — the `tombstones` table + `drop()` records one** (§6·4, §6·5): a delete records a tombstone
-    carrying its gid/rev/seq/kind, so the feed can ship a `_deleted`.
+  - ✅ **2b — the `tombstones` table + `drop()` records one** (§6·4, §6·5). A `tombstones(gid, rev, seq,
+    kind)` table; `recordTombstones` is one RelIR INSERT-from-SELECT spliced into the compiled
+    `elementDrop` cascade BEFORE the element row goes (gid/rev still readable). A vertex drop tombstones
+    the vertex AND its cascade-deleted incident edges; `gid IS NOT NULL` skips a create-and-drop (no gid
+    committed); `refreshTombstones` assigns the seq after the write's live seqs. Gate met.
   - ⏳ **2c — the `_changes?since=N` endpoint**: a UNION of live nodes/edges `WHERE seq > N` and tombstones
     `WHERE seq > N`, ordered by seq.
   - ⏳ **2d — the `_revs_diff` endpoint**: a pure gid/rev key lookup — "what are you missing?".
