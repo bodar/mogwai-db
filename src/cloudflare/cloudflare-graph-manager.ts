@@ -1,4 +1,5 @@
-import type { GraphManager, GraphInfo, RemoteExecutor, ForeignResult, ForeignTerminal } from '../api.ts';
+import type { GraphManager, GraphInfo, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
+import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { type Framed } from '../execute.ts';
 import type { TypeNode } from '../gremlin/types.ts';
 import { compilePlan } from '../compiler/compiler.ts';
@@ -91,10 +92,12 @@ export class CloudflareGraphManager implements GraphManager {
    *  imported by both, so the config cannot drift. `source: this` lets a Worker-driven federate `apply`
    *  hop siblings through this same manager (it IS a `FederationSource`); inert at compile (§4·3). */
   private readonly compileScope = createCompileScope(extendedRegistry, { source: this });
-  constructor(private ns: DurableObjectNamespace<GraphDatabase>) {}
+  /** `http` is the outbound transport a remote-URI federated `graph` runs through (§8) — global
+   *  `fetch` in the Worker by default; injectable for tests. A local graph id never touches it. */
+  constructor(private ns: DurableObjectNamespace<GraphDatabase>, private readonly http: Http = defaultHttp) {}
 
   executor(id: string): RemoteExecutor {
-    return new EdgeExecutor(this.ns.getByName(id), this.compileScope);
+    return remoteOrLocal(id, this.http, () => new EdgeExecutor(this.ns.getByName(id), this.compileScope));
   }
   create(id: string): Promise<void> {
     return this.ns.getByName(id).create();

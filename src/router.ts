@@ -13,6 +13,7 @@
 // endpoint is NOT prefixed — it is a fixed TinkerPop HTTP convention (and the path
 // the official cucumber harness / stock GLVs POST to), so it stays regardless.
 import type { GraphManager } from './manager.ts';
+import type { Http } from './api.ts';
 import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs } from './docs.ts';
@@ -78,7 +79,7 @@ export function makeRouter(
   mgr: GraphManager,
   pathPrefix = 'gremlin',
   log: QueryLogger = silentLogger,
-): (req: Request) => Promise<Response> {
+): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The GraphQL edge is a SEPARATE, fixed path (§5): a GraphQL client speaks its own
   // over-HTTP protocol and JSON envelope, never the Gremlin wire, so it does not share the

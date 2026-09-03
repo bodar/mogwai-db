@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import { GraphStore, type Sql } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
-import type { Executor as ExecutorApi } from '../api.ts';
+import type { Executor as ExecutorApi, Http } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
 import type { IoStore } from '../iostore.ts';
 import type { FastPathConfig } from '../compiler/options/fast-paths.ts';
+import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -57,6 +58,11 @@ export class BunGraphManager implements GraphManager {
      *  full conformance coverage in-process. `dir` file persistence is a property of the default
      *  bun:sqlite factory; an injected memory-only factory ignores the path. */
     private readonly makeSql: (source: string) => Sql = (source) => new BunSqlite(source),
+    /** The outbound HTTP transport a federated call to a remote-URI `graph` runs through
+     *  (`docs/2026-09-02-…-plan.md` §8). Defaults to the platform's global `fetch`; a test injects a
+     *  server's own router handler to run the hop in memory. Threaded to `HttpForeignExecutor` when
+     *  `executor(id)` resolves a remote URI, unused for a local graph. */
+    private readonly http: Http = defaultHttp,
   ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
@@ -79,9 +85,12 @@ export class BunGraphManager implements GraphManager {
   }
 
   /** The per-graph executor, bound to that graph's store + the registry + this manager as the
-   *  federation source. Created on demand; a sibling federated call reaches this same method. */
+   *  federation source. Created on demand; a sibling federated call reaches this same method. A
+   *  fully-qualified `http(s)` URI id resolves to a remote peer over the injected `http` transport
+   *  instead of a local graph (§8), so `federate` reaches an external graph through the same seam. */
   executor(id: string): ExecutorApi {
-    return new Executor(this.resolve(id).store, this.registry, this, this.fastPaths, this.io);
+    return remoteOrLocal(id, this.http, () =>
+      new Executor(this.resolve(id).store, this.registry, this, this.fastPaths, this.io));
   }
 
   /**

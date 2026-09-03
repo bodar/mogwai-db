@@ -15,6 +15,18 @@
 import type { Framed } from './execute.ts';
 import type { FrameNode, TypeNode, ValueNode } from './gremlin/types.ts';
 
+// ---- HTTP transport ----
+
+/** The whole HTTP seam, one uniform interface on BOTH sides of the wire: a function from a `Request`
+ *  to a `Promise<Response>`. It is exactly the shape a server handler already has — `makeRouter`
+ *  returns one, a Worker's `fetch` export is one, the browser service-worker's handler is one — and
+ *  the shape the global `fetch` satisfies. Modelling the outbound client's transport as this same type
+ *  is what lets a test wire the client straight to a server handler IN MEMORY (no socket), and what
+ *  keeps client and server symmetric. Every dependency other than the request (a target URL, config)
+ *  is baked into the `Request` or injected when the caller is constructed — never a second argument
+ *  here, so the interface stays this one clean shape. */
+export type Http = (request: Request) => Promise<Response>;
+
 // ---- storage transport ----
 
 /** The minimal synchronous SQLite driver both runtimes implement: `bun:sqlite` (dev) and DO
