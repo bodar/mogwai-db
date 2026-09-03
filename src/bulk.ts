@@ -38,7 +38,8 @@
 // message naming the option — never a silent merge, and never a raw UNIQUE constraint error.
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
-import { deleteMembers, insertSet, type SetColumn } from './setwrite.ts';
+import { refreshElements } from './refresh.ts';
+import { deleteMembers, insertSet, markMembersDirty, type SetColumn } from './setwrite.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -66,6 +67,12 @@ export interface BulkVertex {
    *  keeps its gid across peers); absent → a fresh one is minted at load. Same preserve-or-mint policy
    *  the document `id` follows. */
   readonly gid?: string | null;
+  /** The rev (§5·1) as JSON TEXT (`{"gen":N,"hash":"…"}`). Present → PRESERVED verbatim so an `io()`
+   *  round-trip (and replication replay) is idempotent — the element keeps its generation and lineage;
+   *  absent → the post-write refresh COMPUTES a fresh `{gen:1, hash}` from the element's content, the
+   *  SAME authority the compiled path uses, so identical content converges. Preserve-or-COMPUTE (a
+   *  content hash), not preserve-or-mint (`gid`). */
+  readonly rev?: string | null;
 }
 
 /** An edge to land. `src`/`tgt` name vertices by the id the SOURCE used — a number matches a landed
@@ -79,6 +86,8 @@ export interface BulkEdge {
   readonly properties?: readonly BulkProperty[];
   /** Global identity (§6·1) — preserve-or-mint, as {@link BulkVertex.gid}. */
   readonly gid?: string | null;
+  /** The rev (§5·1) — preserve-or-compute, as {@link BulkVertex.rev}. */
+  readonly rev?: string | null;
 }
 
 /**
@@ -253,10 +262,12 @@ export class BulkLoader {
    *  only its owned property rows are wiped and re-landed. */
   private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
     // gid is minted only for a fresh row; a REPLACE match keeps its existing gid (immutable identity),
-    // so no gid is recomputed when the `nodes` row is not re-pushed. A bulk row is born CLEAN
-    // (dirty=0): it computes its gid inline here, so the post-write refresh has nothing to do (and the
-    // bulk path bypasses that refresh anyway — it never runs through frameResolved).
-    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), 0]);
+    // so no gid is recomputed when the `nodes` row is not re-pushed. gid is preserve-or-mint INLINE, so
+    // it is always present; `rev` is preserve-or-COMPUTE: a carried rev lands verbatim and the row is
+    // born CLEAN (dirty=0, the refresh skips it, idempotent replay); an ABSENT rev lands NULL and the
+    // row is born DIRTY, so `flush`'s `refreshElements` computes `{gen:1, hash}` from the element's
+    // content — the SAME authority the compiled path uses, so identical content converges (§5·1).
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), v.rev ?? null, v.rev == null ? 1 : 0]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -279,8 +290,12 @@ export class BulkLoader {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
     // Mint the gid ONCE here (not at flush) so the deferred path carries the same value it would land.
+    // `rev` is preserve-or-compute exactly as a vertex's (see `bufferVertex`): a carried rev born clean,
+    // an absent one born dirty for `flush`'s refresh — which reads the endpoints' minted gids, so it
+    // runs AFTER the vertices refresh (§6·5).
     const gid = e.gid ?? mintGid();
-    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, 0]);
+    const dirty = e.rev == null ? 1 : 0;
+    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, e.rev ?? null, dirty]);
     else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
@@ -320,7 +335,7 @@ export class BulkLoader {
     // it owns collision handling, so the append-only collision CHECK is exactly what it replaces.
     if (this.onCollision === 'replace') this.resolveReplace();
     else this.assertNoCollisions();
-    this.land('nodes', ['id', 'uid', 'gid', 'dirty'], this.nodeRows);
+    this.land('nodes', ['id', 'uid', 'gid', 'rev', 'dirty'], this.nodeRows);
     this.land('vertex_labels', ['node', 'label'], this.vertexLabelRows);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.scalar);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.collection, true);
@@ -331,14 +346,20 @@ export class BulkLoader {
     for (const { edge, id, uid, gid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, 0]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, edge.rev ?? null, edge.rev == null ? 1 : 0]);
     }
     this.pendingEdges = [];
-    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'dirty'], this.edgeRows);
+    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'rev', 'dirty'], this.edgeRows);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.scalar);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.collection, true);
     const fts = this.ftsRows.length;
     this.land('property_fts', PROPERTY_FTS_COLUMNS, this.ftsRows);
+
+    // Compute the rev of every row landed WITHOUT a carried one (born dirty), via the single
+    // gid/rev authority — vertices before edges, so an edge's rev sees its endpoints' gids (§6·5). A
+    // carried-rev load lands all rows clean, so this is an index-served no-op; on a streaming load it
+    // runs per flush over only that flush's dirty rows, so peak memory stays one page (BatchingLoader).
+    refreshElements(this.store);
 
     this.nodeRows = []; this.vertexLabelRows = []; this.edgeRows = [];
     this.vertexProps = { scalar: [], collection: [] };
@@ -389,6 +410,11 @@ export class BulkLoader {
     }
     // A vertex keeps its rowid and edges; only its owned property rows go, to be re-landed by `flush`.
     this.wipeVertexChildren(matchedVertices);
+    // A matched vertex's row is NOT re-pushed (its gid/edges survive), so it stays clean unless flagged —
+    // but its content just changed, so its rev must chain. Mark it dirty for `flush`'s refresh, which
+    // reads the OLD rev and computes gen+1 (a re-import is a mutation, §5·1). A matched EDGE is fully
+    // deleted and reinserted, so it is born fresh through `bufferEdge` and needs no flag.
+    markMembersDirty(this.store, 'nodes', 'id', matchedVertices);
 
     const edges = dedupeByKey(this.rawEdges, (e) => e.id);
     const numericE = edges.filter((e) => typeof e.id === 'number').map((e) => e.id as number);

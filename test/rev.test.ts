@@ -1,6 +1,10 @@
 import { test, expect, describe } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { loadGraphson, writeGraphson } from '../src/formats/graphson.ts';
+import { loadBulk } from '../src/bulk.ts';
 
 // Phase 2b (docs/2026-09-02-replication-and-http-interop-plan.md §5·1): every created element carries a
 // rev {gen, hash} computed by the post-write refresh on the unified dirty sweep. Here on the compiled
@@ -128,5 +132,48 @@ describe('rev — the post-write refresh (compiled path)', () => {
     await other.executor('g').framedAsync(
       'g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b").property("weight",0.5)', {});
     expect(eRevs[0]!.hash).not.toBe(revs(other, 'g', 'edges')[0]!.hash); // different endpoint gids → different edge rev
+  });
+});
+
+// Phase 1 item 2: rev through the bulk/format path — a mogwai GraphSON dump carries `rev`, so an io()
+// round-trip PRESERVES it (idempotent replay); a rev-less load COMPUTES one via the single refresh
+// authority, so it converges with the compiled path for identical content.
+describe('rev — the bulk/format path', () => {
+  const store = (): GraphStore => new GraphStore(new BunSqlite(':memory:'));
+  const storeRevs = (s: GraphStore, table: 'nodes' | 'edges'): Rev[] =>
+    s.query<{ rev: string | null }>(`SELECT json(rev) AS rev FROM ${table} ORDER BY id`).map((r) => JSON.parse(r.rev!) as Rev);
+
+  test('a GraphSON round-trip PRESERVES rev verbatim, including a chained generation', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync(
+      'g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b").property("weight",0.5)', {});
+    await m.executor('g').framedAsync('g.V().limit(1).property("age",29)', {}); // bump one vertex to gen 2
+    const srcV = revs(m, 'g', 'nodes'), srcE = revs(m, 'g', 'edges');
+    expect(srcV.some((r) => r.gen === 2)).toBe(true); // a mutated vertex exists
+
+    const dump = writeGraphson(m.storeOf('g'));
+    const reloaded = store();
+    loadGraphson(reloaded, dump);
+    expect(storeRevs(reloaded, 'nodes')).toEqual(srcV); // preserved verbatim, gen and hash
+    expect(storeRevs(reloaded, 'edges')).toEqual(srcE);
+  });
+
+  test('a rev-LESS bulk load COMPUTES a rev that converges with the compiled path', async () => {
+    // Same content two ways: a compiled create, and a rev-less bulk load.
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko").property("age",29)', {});
+    const compiled = revs(m, 'g', 'nodes')[0]!;
+
+    const bulk = store();
+    loadBulk(bulk, [{ id: 1, labels: ['person'], properties: [{ key: 'name', value: 'marko' }, { key: 'age', value: 29 }] }]);
+    const computed = storeRevs(bulk, 'nodes')[0]!;
+    expect(computed).toEqual(compiled); // one authority (refresh.ts) → identical content, identical rev
+  });
+
+  test('a bulk load without rev mints a fresh rev; the dirty flag is cleared afterwards', () => {
+    const bulk = store();
+    loadBulk(bulk, [{ id: 1, labels: ['person'], properties: [{ key: 'name', value: 'a' }] }]);
+    expect(storeRevs(bulk, 'nodes')[0]!.gen).toBe(1);
+    expect(bulk.query<{ n: number }>('SELECT count(*) AS n FROM nodes WHERE dirty')[0]!.n).toBe(0);
   });
 });

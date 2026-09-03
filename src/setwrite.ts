@@ -105,6 +105,17 @@ export function deleteMembers(store: RowSource, table: string, column: string, i
   return 1;
 }
 
+/** Mark a set of rows dirty (the rev-recompute marker, §5·1) by natural key — the set-based twin of
+ *  {@link deleteMembers}, one `json_each` bind (never a data-sized placeholder list). `dirty = 2` is a
+ *  touch, distinct from the DEFAULT 1 a create is born with; the post-write refresh reads neither value
+ *  (gen is driven off whether a `rev` exists), so the split is a diagnostic. Used where a set-based write
+ *  changes content without re-landing the element row (bulk `'replace'`, and replication apply). */
+export function markMembersDirty(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
+  if (!ids.length) return 0;
+  store.query(`UPDATE ${table} SET dirty = 2 WHERE ${column} IN (SELECT value FROM json_each(?))`, [JSON.stringify([...ids])]);
+  return 1;
+}
+
 /**
  * SET-BASED UPDATE — write `columns` onto every row of `table` named by its key, as ONE
  * `UPDATE … FROM json_each(?)` with ONE JSON bind. Each `rows` tuple is `[keyValue, col0, col1, …]`:
