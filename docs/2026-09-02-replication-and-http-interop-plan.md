@@ -535,11 +535,15 @@ Each phase is independently valuable and lands green before the next.
   - ✅ **4c — conflict surfacing endpoint.** `GET /gremlin/{g}/_conflicts` (the `?conflicts=true` analog):
     per conflicted element, the live winner rev + shadowed loser versions (rev + wire doc). `conflictsFeed`
     joins the shadow to the live winner; plumbed through every runtime. Ordinary reads never see it.
-  - ✅ **4d — the referential rule + resurrect-on-upsert** (§6·3). `applyDeletes` refuses a vertex delete
-    a LIVE edge references — the vertex resurrects (kept live, no tombstone), the delete surfaced; the edge
-    never dangles. A live upsert over a local tombstone drops it (not-deleted beats deleted) and surfaces
-    the delete. Gate: delete-racing-an-edge resurrects-and-surfaces; a normal delete propagates; content
-    survives resurrect. (Same-element delete-vs-CONCURRENT-edit needs delete ancestry on the wire → 4b-2.)
+  - ✅ **4d — the referential rule + resurrect-on-upsert + delete-vs-concurrent-edit** (§6·3). `applyDeletes`
+    refuses a vertex delete a LIVE edge references — the vertex resurrects (kept live, no tombstone), the
+    delete surfaced; the edge never dangles. A live upsert over a local tombstone drops it (not-deleted
+    beats deleted) and surfaces the delete. And a delete that DIVERGES from the local live rev (a concurrent
+    edit) is refused + surfaced while one that DESCENDS it (normal delete-after-edit) applies — the
+    residual, closed: the feed now ships a delete's FULL ancestry (`WireRev.ids`, a tombstone's only
+    lineage carrier) so `descendsFrom` can classify it. Gate: delete-racing-an-edge resurrects; a normal
+    delete propagates (even to a peer that missed the intermediate edits); a delete-vs-concurrent-edit
+    converges on the edit, delete surfaced.
   - ✅ **4e — uid replication + the uid conflict** (§6·1/§6·3). `uid` rides the wire; a collision (two gids
     claiming one uid) reconciles in a post-`loadBulk` `applyUids` pass — winner (not-deleted > lower gid)
     keeps it, loser's uid shadowed + surfaced, both survive, order-independent. Also re-mints a property's
