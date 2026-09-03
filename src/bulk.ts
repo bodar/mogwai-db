@@ -39,7 +39,12 @@
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { refreshElements } from './refresh.ts';
-import { deleteMembers, insertSet, markMembersDirty, type SetColumn } from './setwrite.ts';
+import { deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
+
+/** Landing a PRESERVED rev on a matched vertex during `'replace'` (replication apply): the rev crosses
+ *  as its `{gen, hash}` JSON text wrapped in `jsonb()`, and dirty=3 tells the refresh to keep it. */
+const BULK_REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
+const BULK_DIRTY: SetColumn = { name: 'dirty', type: 'any' };
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -394,28 +399,34 @@ export class BulkLoader {
     const existingId = this.existing('nodes', 'id', numericV);
     const existingUid = this.existingUid('nodes', uidV);
 
-    const matchedVertices: number[] = [];
+    // rowid → the incoming rev (null when none carried) for every MATCHED vertex. A matched vertex's
+    // `nodes` row is not re-pushed (its gid/edges survive), so its rev is settled here, not by `flush`.
+    const matchedRev = new Map<number, string | null>();
     for (const v of vertices) {
       if (typeof v.id === 'number') {
         const matched = existingId.has(v.id);
-        if (matched) matchedVertices.push(v.id);
+        if (matched) matchedRev.set(v.id, v.rev ?? null);
         if (v.id >= this.nextNode) this.nextNode = v.id + 1;
         this.bufferVertex(v.id, null, v, !matched);
       } else if (typeof v.id === 'string') {
         const rowid = existingUid.get(v.id);
-        if (rowid !== undefined) { matchedVertices.push(rowid); this.bufferVertex(rowid, v.id, v, false); }
+        if (rowid !== undefined) { matchedRev.set(rowid, v.rev ?? null); this.bufferVertex(rowid, v.id, v, false); }
         else this.bufferVertex(this.nextNode++, v.id, v, true);
       } else {
         this.bufferVertex(this.nextNode++, null, v, true);
       }
     }
+    const matchedVertices = [...matchedRev.keys()];
     // A vertex keeps its rowid and edges; only its owned property rows go, to be re-landed by `flush`.
     this.wipeVertexChildren(matchedVertices);
-    // A matched vertex's row is NOT re-pushed (its gid/edges survive), so it stays clean unless flagged —
-    // but its content just changed, so its rev must chain. Mark it dirty for `flush`'s refresh, which
-    // reads the OLD rev and computes gen+1 (a re-import is a mutation, §5·1). A matched EDGE is fully
-    // deleted and reinserted, so it is born fresh through `bufferEdge` and needs no flag.
-    markMembersDirty(this.store, 'nodes', 'id', matchedVertices);
+    // A matched vertex's content changed, so its rev must move — and HOW is the replication-vs-reimport
+    // distinction (§5·1). A CARRIED rev is PRESERVED verbatim (dirty=3): the source's authoritative
+    // version lands, so replication apply is idempotent. An ABSENT rev CHAINS (dirty=2): a local
+    // re-import is a mutation, so the refresh reads the old rev and computes gen+1. Both take a fresh
+    // local seq. A matched EDGE is deleted and reinserted, so it is born fresh through `bufferEdge`.
+    const preserve = matchedVertices.filter((id) => matchedRev.get(id) != null).map((id) => [id, matchedRev.get(id), 3]);
+    if (preserve.length) updateSet(this.store, 'nodes', 'id', [BULK_REV, BULK_DIRTY], preserve);
+    markMembersDirty(this.store, 'nodes', 'id', matchedVertices.filter((id) => matchedRev.get(id) == null));
 
     const edges = dedupeByKey(this.rawEdges, (e) => e.id);
     const numericE = edges.filter((e) => typeof e.id === 'number').map((e) => e.id as number);
