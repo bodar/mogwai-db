@@ -207,8 +207,10 @@ Two honest costs, both real, neither fatal:
     that independently made the *same* edit still look divergent).
   - **generation + hash** (`N-hash`, full CouchDB rev) — carries a generation counter, which is what makes
     CouchDB's deterministic conflict winner (higher generation wins) work. Cheap add-on to the hash form.
-  - *Leaning:* generation + content hash — it is the CouchDB-faithful choice, gives idempotent replay AND
-    a deterministic winner for §6 conflicts, and the generation is one integer.
+  - **DECIDED: generation + content hash** — the CouchDB-faithful choice: idempotent replay AND a
+    deterministic winner for §6 conflicts, and the generation is one integer. Generation is a *logical*
+    clock (it increments from the parent rev), deliberately NOT wall-clock time — a time-based rev would
+    make the conflict winner depend on whose clock was right across peers. The content hash is the entropy.
 
 ### §5·3 Job 2 — the `since` cursor: a change-log is the tractable primary
 
@@ -289,21 +291,51 @@ Phase 0–1):**
 These are the consequences of §4's inversion. None is optional for a *faithful* replica; each is where "a
 trained monkey could design it" stops being true for a graph.
 
-### §6·1 Cross-peer identity — the biggest hidden prerequisite
+### §6·1 Cross-peer identity — the native id becomes a 64-bit global integer
 
-**Our element ids are integer rowids** (`nodes.id` / `edges.id`), faced externally as `COALESCE(uid, id)`
-(`src/storage.ts`). Two independently-created graphs mint rowids **independently** — vertex 5 on peer A is
-unrelated to vertex 5 on peer B. CouchDB requires a globally-unique `_id` per document and mints a UUID by
-default. **Replication is meaningless without a stable cross-peer identity**, and a bare `addV()` today has
-only a rowid, which is local.
+**Our element ids are per-DO integer rowids** (`nodes.id` / `edges.id`), faced externally as
+`COALESCE(uid, id)` (`src/storage.ts`). Two independently-created graphs mint rowids **independently** —
+vertex 5 on peer A is unrelated to vertex 5 on peer B. Replication is meaningless without a stable
+cross-peer identity, and a bare `addV()` today has only a local rowid.
 
-So a prerequisite of replication is: **every replicated element carries a stable, cross-peer id.** The
-natural home is the existing `uid TEXT UNIQUE` column — promote it from "optional user id" to "the
-replication identity," minting a UUID into `uid` when the user supplied none. This interacts with job 1
-(the rev is keyed by the stable id, and an edge's rev must reference its endpoints *by stable id*, not
-rowid, or the same edge hashes differently on two peers). This is a write-path + schema-usage change and
-is on the critical path — flagged here so it is not discovered late. It is also the single most likely
-reason a naive prototype "works" on one machine and is incoherent across two.
+**DECIDED: change the NATIVE id to a 64-bit globally-unique integer — do not co-opt `uid`.** TinkerPop
+does not require integer ids (element ids are arbitrary `Object`s; Neptune uses strings, JanusGraph
+custom); we chose integer rowids for *performance* — the covering indexes `e_out(src,label,tgt)` /
+`e_in(tgt,label,src)` do integer src/tgt joins for index-only traversal (`src/storage.ts`). So we are free
+to change the id's *value scheme* while keeping it an integer, which keeps that performance intact — a
+128-bit UUID stored as TEXT would widen every join key and lose it. `uid` is then freed entirely for
+users, rather than us co-opting it. (Identity needs *uniqueness*, not content: two structurally-identical
+elements are still two elements, so the id's entropy is the prefix+counter — content addressing is the
+rev's job, §5·2. This is exactly why CouchDB's `_id` is a random/time token and its content hash lives in
+`_rev`.)
+
+**Structure: a per-instance prefix + a monotonic counter** — CouchDB's own `sequential` algorithm
+(`couch_uuids.erl`: a random prefix plus an incrementing counter) is the proven prior art for
+"collision-safe id that keeps insert locality." The counter gives B-tree insert locality; the prefix
+namespaces the peer so two peers minting locally-originated ids never collide. Counter-only (no wall-clock)
+is the leaning (§11) — it removes any clock-skew / time-going-backward dependency and still orders inserts;
+a Snowflake time+peer+seq layout is the alternative.
+
+**The prefix identifies the physical INSTANCE, never the graph name — a correctness point, not a
+preference.** The canonical replication case is *the same logical graph on two peers* (pull prod `social`
+onto a laptop, also `social`). A `hash(graph name)` prefix would give both instances the same namespace,
+so their independently-created elements would collide — exactly what the prefix exists to prevent. (Graph
+names are not globally unique across deployments anyway.) So the prefix is a random per-instance id
+assigned at graph creation and stored in graph metadata — analogous to CouchDB's per-server UUID. It
+doubles as **origin provenance**: a replicated element keeps its origin's id (prefix and all), and a peer
+mints ids only for elements *created locally* — so after a pull, prod-origin elements carry prod's prefix
+and your local debugging edits carry the laptop's, and you can tell which is which. (Relatedly, TinkerPop
+has no rename-graph primitive and neither do we — a graph is a DO addressed by `idFromName`, management is
+create/info/destroy on `/gremlin/{g}`, `.claude/rules/management-api.md` — so "rename" is itself a
+copy/replication, and name-derived identity would be doubly wrong.)
+
+The rev (§5·2) is keyed by this global id, and an edge's rev references its endpoints *by global id*, so
+the same edge hashes identically on every peer. Costs, all bounded: a 64-bit id exceeds 2^53, so it needs
+the lossless-int64 handling the codebase **already has** (bigint binds + CAST-AS-TEXT reads, the DO
+precision work — `src/gremlin/types.ts`, `src/storage.ts`); the write path mints the id (prefix + counter
+from a metadata/singleton row) instead of leaning on SQLite's auto-rowid. Interned label ids stay *local*
+(peer A's label 3 ≠ peer B's), so replication carries label/property-key NAMES, which `io()`/GraphSON
+already do — only the element id needs to be global. This is the quiet gating item for Phase 1.
 
 ### §6·2 Referential integrity and ordering — we already solved the read half
 
@@ -332,30 +364,43 @@ generation > higher rev-hash lexically; `to_doc_info_path` in `couch_doc.erl`), 
   a *referential* conflict (an edge to a tombstone). No amount of rev-tree bookkeeping resolves it; it is
   a graph-invariant decision.
 
-Options, to discuss:
+**DECIDED: last-writer-wins, discard the loser** — reuse CouchDB's deterministic winner rule (generation,
+then rev-hash) *per element*, so both peers converge without coordination; the losing version is discarded
+(not kept). This diverges deliberately from CouchDB, which keeps *all* leaves and SURFACES the losers
+(`GET /doc?conflicts=true` → a `_conflicts` array) for the application to resolve — "in the data model
+there is no merge." We take the simpler discard because a graph cannot keep divergent leaves of an element
+another element references (the structural reason above), and LWW is enough for the target DX.
 
-- **Last-writer-wins by deterministic winner** (recommended default): reuse CouchDB's winner rule
-  (generation, then rev-hash) *per element*, so both peers converge without coordination, and handle
-  referential conflicts with a fail-closed rule (an edge to a deleted vertex is dropped, or the delete is
-  refused — a policy choice). Simple, converges, never dangles.
-- **Conflict *detection*, surfaced not resolved** — keep the winner live but record that a conflict
-  occurred (a `~conflict` hidden property / a side list), so a human or an application traversal can
-  reconcile. Couch's "co-flicked" spirit without the tree.
-- **Full multi-leaf MVCC** — rejected for the structural reason above; recorded so it is not re-proposed.
+Two riders on the decision:
 
-This is the decision most in need of your steer, and it is downstream of the rev choice (§5·2), which is
-why they are flagged together.
+- **The referential conflict stays fail-closed** — an edge whose endpoint was deleted on the other peer is
+  a *structural* conflict, not a value fork, and no LWW rule resolves it: the edge is dropped (default) or
+  the delete refused. Which of those is a small policy knob (§11).
+- **Conflict *surfacing* is a cheap future opt-in, not built now** — once revs exist, recording that a
+  conflict occurred (a `~conflict` shadow property, Couch's "co-flicked" spirit without the tree) is small,
+  and some users will want it. Default is discard; surfacing is a later toggle.
+
+**Full multi-leaf MVCC is rejected** for the structural reason above; recorded so it is not re-proposed.
 
 ### §6·4 Deletes / tombstones — we have none today
 
 `drop()` deletes rows; there is no tombstone, no record that something *was* deleted (confirmed: no
 `deleted`/tombstone concept anywhere in `src/`). Replication must propagate deletions, and a pure "diff
 the live sets" approach cannot tell "deleted on the source" from "not yet created on the source." So
-replication needs **tombstones**: the change-log records a delete (kind, stable id, rev, `deleted:true`),
-and a delete replicates as a marker, exactly as CouchDB ships a `_deleted` rev in `_changes`. Costs: a
-tombstone lives until every peer has seen it (or until a purge horizon), so the log grows; a pruning
-policy (CouchDB's revision-pruning analog) is a later concern but a real one. Tombstones also interact
-with §6·3 (a delete is a rev like any other, and can lose to a concurrent update).
+replication needs **tombstones**: the change-log records a delete (kind, global id, rev, `deleted:true`),
+and a delete replicates as a marker, exactly as CouchDB ships a `_deleted` rev in `_changes`. A delete is a
+rev like any other and can lose to a concurrent update (§6·3).
+
+**Pruning is designed in, not deferred — because the pruning horizon and the snapshot boundary (§7) are
+the same line.** A tombstone (and any superseded change-log entry) may be pruned once every replicating
+peer's checkpoint has passed it — i.e. prune below the minimum live checkpoint. For ad-hoc pulls with no
+fixed peer set, that minimum is unknowable, so pruning is governed by a **retention horizon** (keep the
+last N changes / T time). The consequence is not a correctness hazard: a peer whose checkpoint has fallen
+below the pruned floor cannot catch up incrementally, so it re-bootstraps from a full snapshot — which is
+exactly the §7 first-contact path. So the retention horizon IS the incremental-vs-snapshot boundary: one
+knob, with the snapshot path as its safety net. The horizon's *value* is a tuning decision (§11), not a
+mechanism, and the mechanism (record tombstones, prune below a horizon) is small — which is why it belongs
+in the design rather than deferred.
 
 ---
 
@@ -373,10 +418,19 @@ the outbound driver already exists in the tree and is a production dependency.
 - **For the replication peer protocol**, the peer speaks a small set of endpoints (§9), not Gremlin — so
   the replication client is a thin `fetch` wrapper over those endpoints, decoding the same GraphBinary/JSON
   value shapes our own server produces (`src/http.ts`, `src/wire.ts` document both sides).
-- **Bootstrap reuses `io()`.** A first-contact full sync is a snapshot transfer, which is exactly what
-  `io()` + `IoStore` already stream, bounded-memory, both ways (`src/services/catalog/io.ts`,
-  `src/iostore.ts`). Neo4j's catchup protocol validates the shape: **snapshot to bootstrap, incremental to
-  stay current.** The replication engine is "io()-snapshot for the initial pull, then `_changes` deltas."
+- **Bootstrap reuses `io()`, and it is ONE decision, not Neo4j's two-mechanism catchup.** CouchDB has no
+  separate snapshot step — full replication is literally `_changes?since=0`, because CouchDB stores current
+  state *indexed by sequence* (the by-seq B-tree), unifying state and history in one index so "since 0"
+  walks every current doc. We keep them SEPARATE — current state is the live tables, history is the
+  change-log — and that is an advantage: a full/first-contact sync (or a peer past the retention horizon,
+  §6·4) reads the **live tables directly** (every element + its current rev), streamed bounded-memory by
+  `io()` + `IoStore` (`src/services/catalog/io.ts`, `src/iostore.ts`) — O(graph), unavoidable for any full
+  copy — and never replays history. An incremental sync reads the change-log since the checkpoint (a cheap
+  indexed range scan). So the whole engine is ONE decision: *do I hold a valid checkpoint within the
+  retention horizon?* No → snapshot (live tables); yes → incremental (change-log). Neo4j needs two
+  mechanisms with a gap threshold only because its transaction log rotates; our state/history split gives
+  us the snapshot for free and makes a full copy read just current state — cheaper than CouchDB's since-0
+  history replay.
 
 **LAW: the HTTP edge stays out of the store tier.** Adding replication must not put `fetch` inside the DO's
 compile/run path. Outbound calls belong at the worker/edge residency, the way federate's barrier declares
@@ -451,12 +505,12 @@ the smallest proof come first, and the genuinely hard graph semantics come after
   TinkerPop server); proves the outbound client and residency story that replication will reuse. No schema
   change, no rev, no change-log. *Gate: a mogwai graph federates a sub-traversal to an external Gremlin
   server and merges the result.*
-- **Phase 1 — cross-peer identity + the rev property (§6·1, §5·2).** Promote `uid` to the stable
-  replication id (mint a UUID when absent); add the `~rev` hidden property and the touch-on-write hook
-  (generation + content hash, keyed by stable id; edge rev references endpoints by stable id). Pure local
-  substrate — no networking yet — and independently testable (a graph's revs are stable across
-  export/reimport). *Gate: every element has a stable id and a rev; identical content converges to the same
-  rev; revs survive an `io()` round-trip.*
+- **Phase 1 — the global id + the rev property (§6·1, §5·2).** Change the native element id to a 64-bit
+  globally-unique integer (per-instance prefix + monotonic counter, minted on write; `uid` freed for
+  users); add the `~rev` hidden property and the touch-on-write hook (generation + content hash, edge rev
+  referencing endpoints by global id). Pure local substrate — no networking yet — and independently
+  testable. *Gate: every element has a global id and a rev; identical content converges to the same rev;
+  ids and revs survive an `io()` round-trip; two graphs mint non-colliding ids.*
 - **Phase 2 — the change-log + the read side (§5·3, §6·4).** Add the change-log table + append-on-write
   (including tombstones for deletes). Expose the `_changes`-equivalent (a since-cursor scan) and the
   revs-diff query. Still server-only — no replication engine, but a peer can now be *asked* what changed
@@ -466,10 +520,12 @@ the smallest proof come first, and the genuinely hard graph semantics come after
   apply idempotently → checkpoint (`_local`-analog, deterministic replication id). Wire up both skins
   (Gremlin service + `_replicate` endpoint). *Gate: pull a remote graph to a fresh local graph; re-pull is
   a resumable no-op; push is the same with roles swapped.*
-- **Phase 4 — conflicts + continuous (§6·3).** Deterministic-winner convergence, referential-conflict
-  policy (edge-to-tombstone), optional conflict *surfacing*; continuous replication (a live `_changes`
-  tail, or interval-poll). *Gate: two peers each mutate and cross-replicate; both converge; no dangling
-  edge; deletes propagate.*
+- **Phase 4 — conflicts, tombstones + pruning, continuous (§6·3, §6·4).** Deterministic-winner
+  convergence; the referential-conflict rule (edge-to-tombstone); tombstone tracking AND the
+  retention-horizon pruning (designed in, not deferred); continuous replication (a live `_changes` tail, or
+  interval-poll). *Gate: two peers each mutate and cross-replicate; both converge; no dangling edge; deletes
+  propagate; pruned tombstones don't resurrect deleted elements, and a peer past the horizon
+  re-bootstraps.*
 - **Phase 5 — the anti-entropy backstop (§5·4).** On-demand Merkle over `(id, ~rev)`, watermark-bounded,
   for first-contact reconciliation and integrity verification. Optional — the layering is designed so
   Phases 1–4 are complete without it. *Gate: two peers with divergent/absent history reconcile without a
@@ -479,16 +535,23 @@ the smallest proof come first, and the genuinely hard graph semantics come after
 
 ## §11. Open design decisions — to resolve in discussion
 
-1. **Rev content** (§5·2): generation+hash (leaning) vs opaque token vs plain hash.
-2. **Conflict policy** (§6·3): deterministic LWW (default) vs LWW + conflict surfacing vs — rejected —
-   multi-leaf. Referential-conflict rule for edge-to-deleted-vertex (drop edge vs refuse delete).
-3. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
-4. **Backstop in v1?** (§5·4/§5·5): ship the Merkle anti-entropy in the first cut or defer to Phase 5.
-5. **Tombstone pruning horizon** (§6·4): when may a delete marker be reclaimed.
+Resolved in review (recorded so they are not reopened): **rev = generation + content hash** (§5·2);
+**native id = 64-bit global integer, per-instance prefix + counter, `uid` freed** (§6·1); **conflicts =
+discard-loser LWW + fail-closed referential rule, surfacing a later opt-in** (§6·3); **tombstone pruning
+designed in via a retention horizon** (§6·4); **transport = one checkpoint-validity decision, no Neo4j
+two-tier** (§7). Still open:
+
+1. **Id layout detail** (§6·1): the bit split (prefix width vs counter width), and counter-only (leaning,
+   no clock dependence) vs Snowflake time+peer+seq. A tuning decision, not a mechanism.
+2. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
+3. **Backstop in v1?** (§5·4/§5·5): ship the Merkle anti-entropy in the first cut or defer to Phase 5.
+4. **Retention-horizon value** (§6·4): how much change-log/tombstone history to keep — the
+   incremental-vs-snapshot boundary.
+5. **Referential-conflict knob** (§6·3): drop the dangling edge (default) vs refuse the delete.
 6. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
    the replicated subgraph) is the natural analog and composes with our engine — in scope for the design,
-   later for the build. Note it interacts with referential integrity (a filtered subgraph can produce
-   dangling edges by construction).
+   later for the build. Interacts with referential integrity (a filtered subgraph can produce dangling
+   edges by construction).
 
 ---
 
@@ -497,9 +560,11 @@ the smallest proof come first, and the genuinely hard graph semantics come after
 - **The session extension will lie to you** (§2). It is present in `bun:sqlite` and absent on DO, so a
   changeset-based prototype passes every dev test and cannot ship. Any change-tracking must be plain SQL on
   both runtimes.
-- **rowid is not identity** (§6·1). Keying replication on rowid works on one machine and is incoherent
-  across two. The stable id is `uid`, minted if absent, and an edge's rev must reference endpoints by
-  stable id, not rowid.
+- **The native id must be global, and its peer-prefix must NOT be the graph name** (§6·1). Keying on a
+  per-DO rowid is incoherent across peers. The native id is a 64-bit global integer (per-instance prefix +
+  counter); the prefix identifies the physical INSTANCE, not the logical name — the canonical case is the
+  same-named graph on two peers, which a name-hash prefix would collide. A replicated element keeps its
+  ORIGIN id; only locally-originated elements are minted here (so the prefix doubles as provenance).
 - **A Merkle tree is not free even "on demand"** (§5·3). Its O(diff) is *comparison*; construction is
   O(size). Use it as a watermark-bounded backstop, never the hot path — the field (AT Protocol, Cassandra,
   Dolt) re-derived this repeatedly.
