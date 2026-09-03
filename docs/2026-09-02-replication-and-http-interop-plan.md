@@ -171,22 +171,20 @@ replacing the mechanism but by **decomposing it**, then holding each piece again
 (conflicts) we now do NOT, and the place we thought needed new machinery (pruning) turns out not to, once
 CouchDB's *actual* mechanism is understood.
 
-### §5·1 "Rev" is secretly doing three jobs
+### §5·1 "Rev" is secretly doing two jobs (and a tempting third we don't need)
 
-CouchDB's `_rev` bundles three responsibilities that are separable, and separating them is what makes the
-problem tractable:
+CouchDB's `_rev` bundles responsibilities that are separable, and separating them is what makes the problem
+tractable:
 
 1. **Identity / idempotency / conflict** — "are these the same version; what are you missing; is replaying
    this a no-op." Answered by a per-element content signature.
 2. **The `since` cursor** — "enumerate what changed after checkpoint X." Answered by an *ordering*, which a
    content hash alone cannot provide (a hash tells you *whether* something differs, not *when*).
-3. **The backstop** — "reconcile two peers with no shared history, or catch silent divergence / bit-rot."
-   Answered by comparing the whole set, made affordable by a tree.
 
-CouchDB answers job 1 with the rev (a bounded rev-tree per doc), job 2 with a by-sequence index, and does
-not really do job 3 (it trusts the log). We keep the same split — and, following the governing principle,
-land on CouchDB's own answers for 1 and 2, adding job 3 only as an optional backstop our substrate makes
-cheap.
+A tempting third — **a backstop** ("reconcile peers with no shared history, or catch bit-rot," via a Merkle
+tree) — turns out NOT to be needed: CouchDB does not have one, and its absence is not graph-forced (§5·4).
+CouchDB answers job 1 with the rev (a bounded rev-tree per doc) and job 2 with a by-sequence index; we land
+on both of CouchDB's answers, and stop there.
 
 ### §5·2 Job 1 — identity: the rev is a hidden property (the faithful port)
 
@@ -254,7 +252,8 @@ so a delete still appears in the feed — §6·4.)
 
 Two rejected alternatives, for the record: an **append-only change-log table** grows O(writes) and needs
 pruning the by-seq index does not; **full-set reconciliation every sync** (compare every `(id,rev)`) needs
-no cursor but is O(size) each time — that is job 3's backstop, not the continuous path.
+no cursor but is O(size) each time — a fallback for the no-shared-checkpoint case (`since=0` handles it),
+not the continuous path.
 
 **The Merkle/prolly reframe — honestly costed.** Content-addressed, deterministically-chunked trees
 (Noms → Dolt, AT Protocol's MST, Cassandra/Dynamo anti-entropy) do give O(differences) *tree comparison*.
@@ -276,20 +275,27 @@ source of truth:
   repair* gated by a persisted "repaired-up-to" watermark — which is structurally a checkpoint/seq again
   ([Cassandra repair / node density](https://rustyrazorblade.com/post/2025/repair-and-node-density/)).
 
-### §5·4 Job 3 — the backstop: an on-demand Merkle tree over the `~rev` properties
+### §5·4 The backstop is NOT needed — a Merkle tree is a CouchDB deviation we can't justify
 
-Here the reframe earns its keep, and it composes beautifully with §5·2 *because the rev is a property*:
+The reframe (§13) genuinely works — an on-demand Merkle tree over `(id, rev)`, computed by scanning the rev
+properties, would give O(diff) reconciliation and bit-rot detection with no maintained shadow store. But
+leaning harder into CouchDB (§4) settles it the other way: **CouchDB has no Merkle tree, and we don't need
+one either.** Checking what it would uniquely buy, against the governing principle:
 
-- A Merkle tree over `(id, ~rev)` can be **computed on demand by scanning the rev properties** — no
-  maintained shadow store, no second embedded storage engine, no GC, none of the write amplification Dolt
-  suffered. Cassandra's on-demand model, minus Cassandra's 10TB-scan pain, because a DO caps at 10GB and
-  the tree is over compact `(id, rev)` pairs, not full bodies.
-- It is bounded by the job-2 watermark (Cassandra's incremental-repair trick): only rehash the range newer
-  than the last checkpoint for routine verification; do the full tree only for first-contact or an
-  integrity audit.
-- It buys exactly what the change-log cannot: **checkpoint-free reconciliation** (two peers that have never
-  synced, or whose logs diverged) and **silent-divergence / bit-rot detection** (a monotonic seq cannot
-  see corruption that does not advance it).
+- **First-contact / no-common-checkpoint reconciliation** — already handled by `since=0` (a full sync). No
+  Merkle needed.
+- **Bit-rot / silent-corruption detection** — the one thing a Merkle tree adds that rev+seq cannot. But
+  **CouchDB does not do this either**, it is not graph-forced, and we have no measured need — so it is not a
+  justified deviation.
+- **Efficient whole-graph equality for two large, mostly-synced peers that lost their checkpoints** — Merkle
+  is O(diff) where a `since=0` revs-diff is O(elements). Real, but a rare degenerate case; CouchDB's answer is
+  to keep checkpoints reliably (they are tiny) so you almost never hit it, and eat the slow path when you do.
+  We follow suit.
+
+So the Merkle tree is **dropped from the plan.** It was always the cleanly-separable "optional / last /
+can-be-never" piece, so removing it costs nothing and simplifies the model to two jobs (§5·1). Recorded here
+so it is not re-proposed; the obvious place to revisit **only if** a measured need appears — huge graphs that
+frequently reconcile without checkpoints, or a hard integrity-audit requirement.
 
 ### §5·5 The resolution
 
@@ -301,13 +307,13 @@ isolated to §6:
 - **Job 2 — the cursor** — a per-element `seq` (by-sequence index, current-state-sized), driving
   `_changes?since=N` and a revs-diff query. `since=0` is a full sync; there is ONE mechanism, not a
   snapshot/incremental split (§7).
-- **Job 3 — the backstop** — an on-demand Merkle tree over `(id, rev)`, for checkpoint-free reconciliation
-  and bit-rot detection. Optional; can land last or never without blocking 1–2.
+- **No job 3.** The Merkle backstop is dropped (§5·4) — CouchDB works without one and we have no justified
+  reason to add it.
 
-What stays open is small and none of it blocks §10 Phase 0–1: whether the **Merkle backstop** ships in v1
-(§5·4), the **rev-tree depth cap** (`_revs_limit` analog, §6·4), and the **id layout detail** (§6·1). The
-conflict and pruning questions that were open are now resolved — preserve conflicts; keep tombstones with no
-up-front pruning.
+What stays open is small and none of it blocks §10 Phase 0–1: the **rev-tree depth cap** (`_revs_limit`
+analog, §6·4) and the **id layout detail** (§6·1). The conflict, pruning, and backstop questions that were
+open are resolved — preserve conflicts (never reject, never lose); keep tombstones with no up-front pruning;
+no Merkle tree.
 
 ---
 
@@ -362,6 +368,25 @@ from a metadata/singleton row) instead of leaning on SQLite's auto-rowid. Intern
 (peer A's label 3 ≠ peer B's), so replication carries label/property-key NAMES, which `io()`/GraphSON
 already do — only the element id needs to be global. This is the quiet gating item for Phase 1.
 
+**A compounding payoff: the global id deletes ~375 LOC of federation machinery and closes the last open
+federate item.** Multigraph federation today keeps sibling ids from colliding *only* when several landed
+graphs are UNIONed into one stream, via a first-class `graph` provenance channel + a composite `(graph, id)`
+rejoin (`unifiedBoundGraph`, the `graph` `ChannelRole` and its four policy-table entries, `graphTag` /
+`LOCAL_GRAPH`, and `postMergeTail`'s fail-closed allow-list — `src/compiler/rel/{boundgraph,segment,lower/
+slice}.ts`, `src/channels.ts`, `src/compiler/ir/step.ts`, ~375 LOC). All of it exists ONLY because two
+graphs can each mint id 5. Global ids remove the premise: the discriminator is baked into the id's prefix, so
+a merged federated stream rejoins by bare (global) `id` through the ORDINARY `BoundGraph`, and the whole
+`graph`-channel apparatus is deletable. This closes the deferred gaps it only partly covered —
+`hasLabel` / `has` / movement / `group` / `groupCount` over a merged multi-graph stream (today `'unsafe'`,
+fail-closed in `segment.ts`; the last "multi-graph mixing / cross-graph identity" item in
+`docs/outstanding-work.md`) all just compose. (The separate ~640 LOC of id-carry+rejoin for a *detached*
+foreign element — `foreign.ts`, single-sibling `boundgraph.ts` — is a physical-distribution concern,
+unaffected in kind, though "which graph" could then be derived from the prefix instead of a carried token.)
+So the global id is not only a replication prerequisite; it pays for itself in federation simplification —
+exactly the substrate win to bank. It also generalizes the base+federate mixed-merge case
+(`segment.ts` `nestedBarrierIn`, today fail-closed) once EVERY graph — local included — mints from the same
+prefixed-global scheme, which this decision already implies.
+
 ### §6·2 Referential integrity and ordering — we already solved the read half
 
 An edge references two vertices; applying an edge before its endpoints exist is a dangling write. CouchDB
@@ -391,11 +416,20 @@ property/label conflict on a vertex is *pure* CouchDB and we follow it exactly. 
 single element is CouchDB-shaped: a delete is a `_deleted` leaf, and CouchDB's "not-deleted beats deleted"
 rule sensibly resurrects an element that has a concurrent update.
 
-The **one** place with no CouchDB analog is the **referential** conflict: an edge whose endpoint is
-deleted-and-stays-deleted on another peer. Documents have no referential constraints, so CouchDB never faces
-a dangling reference; a graph must. This stays fail-closed — the dangling edge is dropped (default) or the
-delete refused, a small policy knob (§11). This plus the transfer ordering (§6·2) are the only two
-graph-forced deviations, and both share one root: an edge is the JOIN CouchDB documents lack.
+The **one** place with no CouchDB analog is the **referential** conflict: peer A deletes vertex V while peer
+B keeps (or adds) an edge E→V. Documents have no referential constraints, so CouchDB never faces a dangling
+reference; a graph must. But the CouchDB PRINCIPLE still binds: **replication always succeeds — never reject
+a write, never silently lose one.** So both naive options are out — "refuse the delete" *rejects* (forbidden),
+and "drop the dangling edge" *silently loses data* (forbidden). Instead we extend CouchDB's own winner rule:
+**"not-deleted beats deleted", and a referencing edge is an existence-claim on its endpoint.** So E's
+existence beats V's delete — **V is resurrected and its delete becomes the surfaced conflict** (a `~conflicts`
+entry the application resolves later: re-confirm the delete and cascade to E, or keep V). This never rejects,
+never loses (the delete is preserved as a losing leaf), and keeps the live graph referentially consistent by
+construction (V is back, so E does not dangle) — with no quarantine machinery. The alternative (delete-wins,
+edge quarantined-and-surfaced) is defensible if you want deletes to be sticky, but it needs a quarantine
+store and leaves an element in limbo; edge-resurrects-endpoint is the recommendation, and that a/b choice is
+the only remaining knob (§11). This plus the transfer ordering (§6·2) are the only two graph-forced
+deviations, and both share one root: an edge is the JOIN CouchDB documents lack.
 
 The cost (honest): preserving conflicts is heavier substrate than discarding — an element's content becomes
 rev-versioned (winner live in the normal rows; losing leaves in a shadow/conflict store) and `~rev` holds a
@@ -588,19 +622,20 @@ the smallest proof come first, and the genuinely hard graph semantics come after
   push is the same with roles swapped.*
 - **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** The rev-tree + shadow/conflict store;
   deterministic-winner-on-read; conflict surfacing (`~conflicts`); the referential-conflict rule
-  (edge-to-tombstone); rev-ancestry depth-stemming (`_revs_limit` analog); keep tombstones (no up-front
-  pruning). *Gate: two peers each mutate and cross-replicate; both converge; conflicts are preserved and
-  surfaced, never silently lost; no dangling edge; deletes propagate.*
+  (edge-resurrects-endpoint — never reject, never lose, §6·3); rev-ancestry depth-stemming (`_revs_limit`
+  analog); keep tombstones (no up-front pruning). *Gate: two peers each mutate and cross-replicate; both
+  converge; conflicts are preserved and surfaced, never silently lost; a delete racing an incident edge
+  resurrects-and-surfaces rather than dangling or rejecting; deletes otherwise propagate.*
 - **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** A CRUD management
   interface over persistent source→target configs; a DO-alarm-driven scheduler that runs them (continuous =
   periodic pull with crash-backoff; one-shot = run once); introspection (a `_scheduler/jobs` analog); and the
   OpenAPI spec + generated docs UI over all of it (`src/docs.ts`) — our Fauxton for free. *Gate: create a
   config that keeps a local graph synced from a remote one on a schedule, visible + editable in the generated
   UI.*
-- **Phase 6 — the anti-entropy backstop + optional purge (§5·4, §6·4).** On-demand Merkle over `(id, rev)`,
-  watermark-bounded, for first-contact reconciliation and integrity verification; and a manual tombstone
-  purge. Optional — the layering is designed so Phases 1–5 are complete without it. *Gate: two peers with
-  divergent/absent history reconcile without a shared checkpoint; a silently-corrupted row is detected.*
+- **Phase 6 — optional manual tombstone purge (§6·4).** A manual purge for the rare graph that accumulates
+  enough tombstones to matter (CouchDB-style, opt-in). The Merkle anti-entropy backstop is NOT planned (§5·4)
+  — dropped as an unjustified CouchDB deviation. *Gate: a purge reclaims tombstones without breaking a peer
+  that is still current.*
 
 ---
 
@@ -615,15 +650,18 @@ referential exception** (§6·3); **cursor = a per-element by-sequence index, cu
 Two more, added in review: **the DX splits by idiom — one-shot pulls are STANDARD-GLV Gremlin (`federate`
 with a URI, `io()` with a URL), ongoing replication is a persistent config + scheduler in the management API
 with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **CouchDB wire interop is a non-goal**
-(§9·1); **CouchDB is vendored for reference** (§14). Still open:
+(§9·1); **CouchDB is vendored for reference** (§14); **the Merkle backstop is dropped — CouchDB has none and
+it is not graph-forced** (§5·4); **the referential conflict never rejects and never loses — a referencing
+edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
 
 1. **Id layout detail** (§6·1): the bit split (prefix width vs counter width), and counter-only (leaning, no
    clock dependence) vs Snowflake time+peer+seq. A tuning decision, not a mechanism.
 2. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
-3. **Backstop in v1?** (§5·4/§5·5): ship the Merkle anti-entropy in the first cut or defer to Phase 5.
-4. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
-5. **Referential-conflict knob** (§6·3): drop the dangling edge (default) vs refuse the delete.
-6. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
+3. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
+4. **Referential-conflict winner** (§6·3): edge-resurrects-endpoint (recommended — mirrors
+   not-deleted-beats-deleted, keeps the live graph consistent, no quarantine store) vs
+   delete-wins-edge-quarantined. Never reject / never lose is locked either way.
+5. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
    the replicated subgraph) is the natural analog and composes with our engine — in scope for the design,
    later for the build. Interacts with referential integrity (a filtered subgraph can produce dangling
    edges by construction).
@@ -640,9 +678,12 @@ with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **Couch
   counter); the prefix identifies the physical INSTANCE, not the logical name — the canonical case is the
   same-named graph on two peers, which a name-hash prefix would collide. A replicated element keeps its
   ORIGIN id; only locally-originated elements are minted here (so the prefix doubles as provenance).
-- **A Merkle tree is not free even "on demand"** (§5·3). Its O(diff) is *comparison*; construction is
-  O(size). Use it as a watermark-bounded backstop, never the hot path — the field (AT Protocol, Cassandra,
-  Dolt) re-derived this repeatedly.
+- **Don't add a Merkle tree** (§5·4). It's a CouchDB deviation with no justification — its O(diff) is only
+  *comparison* (construction is O(size)), CouchDB reconciles without one, `since=0` covers first-contact, and
+  bit-rot detection isn't graph-forced. Revisit only on a measured need.
+- **Never reject or silently drop on a referential conflict** (§6·3). Replication always succeeds: an
+  edge-to-deleted-endpoint *resurrects* the endpoint and *surfaces* the delete — it does not refuse the delete
+  (rejection) or drop the edge (data loss).
 - **Never re-execute the query on the far side** (§3). Ship materialized mutations (effects), not Gremlin
   to replay — replaying a non-deterministic traversal diverges peers.
 - **Dangling edges** (§6·2). Vertices before edges, always; a cross-batch edge to an unreplicated endpoint
@@ -698,7 +739,7 @@ facts (rev hash `new_revid`, deterministic winner `to_doc_info_path`, `couch_key
 [FalkorDB replication](https://docs.falkordb.com/operations/replication.html) ·
 [GUN conflict resolution](https://github.com/amark/gun/wiki/Conflict-Resolution-with-Guns).
 
-**Merkle / prolly-tree reframe** (real, but a backstop not the hot path):
+**Merkle / prolly-tree reframe** (researched; dropped — CouchDB has none, §5·4):
 [Dolt: prolly trees](https://www.dolthub.com/blog/2024-03-03-prolly-trees/) ·
 [Dolt: prolly tree balance](https://www.dolthub.com/blog/2025-06-26-prolly-tree-balance/) ·
 [Dolt: prolly trees + columnar storage](https://www.dolthub.com/blog/2025-09-10-challenges-with-prolly-trees-and-columnar-storage/) ·
