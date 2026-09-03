@@ -442,7 +442,7 @@ Each phase is independently valuable and lands green before the next.
   *Gate MET: every element has a stable `gid`/`rev`; identical content converges to the same rev (compiled
   path AND bulk); rev survives an `io()` round-trip verbatim incl. a chained generation; two independent
   graphs never collide on `gid`.*
-- **Phase 2 — the by-seq feed + read side (§5·2, §6·4). 🚧 IN PROGRESS.** Per-element `seq` (indexed,
+- **Phase 2 — the by-seq feed + read side (§5·2, §6·4). ✅ LANDED.** Per-element `seq` (indexed,
   bumped on write) + tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct
   deltas incl. deletes; `since=0` enumerates full current state; the feed stays current-state-sized under
   repeated updates.*
@@ -464,7 +464,12 @@ Each phase is independently valuable and lands green before the next.
     deleted:true. Plumbed through the manager seam like `info` (Bun / CF DO RPC / browser Worker); the
     router adds an `_`-prefixed system-path matcher (`GET /gremlin/{g}/_changes`). `last_seq` = update_seq
     for checkpoint-and-resume. Gate met (full state at since=0, current-state-sized, deletes, incremental).
-  - ⏳ **2d — the `_revs_diff` endpoint**: a pure gid/rev key lookup — "what are you missing?".
+  - ✅ **2d — the `_revs_diff` endpoint**. `revsDiff(store, request)` (shared, beside `changesFeed`): a
+    peer offers `{gid: [rev,…]}`, the target returns which it is MISSING via `hex(gid) IN (json_each(?))`
+    (one JSON bind) and a `gen-hash` set difference — "has" = an EXACT match in a live row OR a tombstone
+    (rev-tree ancestry is Phase 4). `POST /gremlin/{g}/_revs_diff`, plumbed through every runtime like
+    `changes`. Gate met (held not missing, unknown gid all missing, all-held empty, deleted=had, case-
+    insensitive gid).
 - **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5).** The pull/push loop:
   `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices before
   edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
