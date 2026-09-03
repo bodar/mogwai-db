@@ -32,13 +32,20 @@ export interface SetColumn {
   readonly name: string;
   readonly type: SqlType;
   readonly jsonb?: boolean;
+  /** A BLOB column whose value crosses the JSON wire as HEX text and is materialized with `unhex()`
+   *  (a raw blob bind diverges across runtimes and cannot ride JSON — storage.ts / program.ts). The
+   *  gid column (a 16-byte uuid_v7) is the one user. */
+  readonly blob?: boolean;
 }
 
 /** `json_extract(<row>, '$[i]')` — a landed row's cell by position, the path a compiler constant so the
- *  statement text stays fixed however many rows landed. A `jsonb` column re-wraps the extracted TEXT. */
-const cellAt = (row: Expr, at: number, asJsonb: boolean): Expr => {
+ *  statement text stays fixed however many rows landed. A `jsonb` column re-wraps the extracted TEXT; a
+ *  `blob` column `unhex()`es the extracted hex text into the raw bytes. */
+const cellAt = (row: Expr, at: number, col: SetColumn): Expr => {
   const extract: Expr = { kind: 'call', fn: 'json_extract', args: [row, compilerText(`$[${at}]`)] };
-  return asJsonb ? { kind: 'call', fn: 'jsonb', args: [extract] } : extract;
+  if (col.jsonb) return { kind: 'call', fn: 'jsonb', args: [extract] };
+  if (col.blob) return { kind: 'call', fn: 'unhex', args: [extract] };
+  return extract;
 };
 
 /**
@@ -65,7 +72,7 @@ export function insertSet(
   const exploded = jsonEachSet('rows', rows as readonly unknown[], fresh);
   const source = make.project({
     id: fresh('sp'), input: exploded, channels: [], type: typeOf(...cols),
-    exprs: columns.map((c, at) => [c.name, cellAt(col(exploded.id, 'sv'), at, c.jsonb === true)] as const),
+    exprs: columns.map((c, at) => [c.name, cellAt(col(exploded.id, 'sv'), at, c)] as const),
   });
   const target = make.scan({ id: fresh('t'), table: table as never, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
   const stmt = insert({

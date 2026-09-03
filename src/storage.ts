@@ -19,8 +19,16 @@ const SCHEMA = [
   // index-only-scan perf story rides on integer src/tgt joins. `uid` is the
   // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
   // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
+  // `gid` (global identity, §6·1) and `rev` (generation + content hash, §5·1) are the replication
+  // deltas (docs/2026-09-02-replication-and-http-interop-plan.md). `gid` is a 16-byte uuid_v7 BLOB,
+  // minted once at creation and IMMUTABLE — cross-peer identity, separate from the local rowid, which
+  // stays the fast join key. `rev` is a JSONB `{gen, hash}` recomputed on every mutation (the
+  // touch-rev-on-write barrier). Both are dedicated columns, not properties: a property row would
+  // store the key string on EVERY element plus a second index (double-digit GB at 10^8), and it is
+  // more CouchDB-faithful. Nullable so a graph created before this column, and an element not yet
+  // touched by the rev barrier, are representable.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE)`,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB)`,
   // A vertex's labels are a SET (TinkerPop 4 multi-label), so they normalize out of `nodes`
   // exactly as properties did — the rule being "normalize where cardinality is 0..N, keep
   // inline where it is exactly 1", which is also why an EDGE label stays on `edges` (upstream
@@ -50,9 +58,11 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS vertex_properties(
      id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
      key TEXT NOT NULL, value, vtype TEXT, meta BLOB)`,
+  // `gid`/`rev` mirror `nodes` (see that comment). An edge's `rev` content hash references its
+  // endpoints by `gid` (§6·5), so a replicated edge converges across peers that preserved those gids.
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL)`,
+     tgt INTEGER NOT NULL, gid BLOB, rev BLOB)`,
   // Edge properties are ALSO normalized rows (the typed-property-values rework retired
   // the flat JSONB blob): TinkerPop's edge Property has no id/meta/multi, so ONE row per
   // (edge,key) — the UNIQUE constraint enforces that single cardinality and doubles as
@@ -86,6 +96,11 @@ const SCHEMA = [
      PRIMARY KEY (node, key))`,
   // Replaces n_label: (label, node) is the seek order hasLabel wants — find the label id,
   // read the node ids off the index without touching `nodes` at all.
+  // Global identity is UNIQUE per graph and indexed for the gid→rowid resolution replication/merge
+  // does (§6·1). A UNIQUE index over a NULLABLE column admits many NULLs in SQLite, so elements not
+  // yet carrying a gid (a pre-column graph, an untouched element) coexist until minted.
+  `CREATE UNIQUE INDEX IF NOT EXISTS nodes_gid ON nodes(gid)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS edges_gid ON edges(gid)`,
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,

@@ -245,11 +245,11 @@ const flatVtype = (t: TypeNode | null): CanonicalType | null =>
 /** One adjacency line, JSON-parsed and validated but not yet split into vertex vs edges — the shared
  *  half of the two parses, so a STREAMING two-pass reader (`loadGraphsonStreaming`) reuses the
  *  `JSON.parse` + guards and builds only the half each pass needs. */
-interface RawAdjacency { id: number | string; label: unknown; properties: unknown; outE: Record<string, unknown[]> }
+interface RawAdjacency { id: number | string; label: unknown; properties: unknown; outE: Record<string, unknown[]>; gid?: string }
 
 function parseAdjacency(line: string): RawAdjacency {
   const v = JSON.parse(quoteExactNumbers(line)) as {
-    '@type'?: string; id?: unknown; label?: unknown; properties?: unknown;
+    '@type'?: string; id?: unknown; label?: unknown; properties?: unknown; gid?: unknown;
     outE?: Record<string, unknown[]>; inE?: Record<string, unknown[]>;
   };
   // Fail closed on the OTHER two artefacts that share the name (see the header): a `g:Vertex`- or
@@ -259,11 +259,11 @@ function parseAdjacency(line: string): RawAdjacency {
     throw new Error(`GraphSON: "${v['@type']}" is not the line-oriented adjacency form `
       + '(one bare vertex object per line, with embedded outE) — a g:Vertex/g:graph document is a different artefact');
   if (v.id === undefined || v.id === null) throw new Error('GraphSON: adjacency vertex has no id');
-  return { id: idOf(v.id), label: v.label, properties: v.properties, outE: v.outE ?? {} };
+  return { id: idOf(v.id), label: v.label, properties: v.properties, outE: v.outE ?? {}, gid: typeof v.gid === 'string' ? v.gid : undefined };
 }
 
 const vertexFromRaw = (raw: RawAdjacency): BulkVertex =>
-  ({ id: raw.id, labels: labelsOf(raw.label), properties: vertexProperties(raw.properties) });
+  ({ id: raw.id, labels: labelsOf(raw.label), properties: vertexProperties(raw.properties), gid: raw.gid });
 
 /** The edges a vertex line embeds. Only `outE` is read: `inE` is the same edge from the other side,
  *  so reading both would double every edge. Every edge appears exactly once as some vertex's outE
@@ -272,10 +272,11 @@ function edgesFromRaw(raw: RawAdjacency): BulkEdge[] {
   const edges: BulkEdge[] = [];
   for (const [label, list] of Object.entries(raw.outE))
     for (const e of list) {
-      const edge = e as { id?: unknown; inV: unknown; properties?: unknown };
+      const edge = e as { id?: unknown; inV: unknown; properties?: unknown; gid?: unknown };
       edges.push({
         id: edge.id === undefined ? undefined : idOf(edge.id),
         label, src: raw.id, tgt: idOf(edge.inV), properties: edgeProperties(edge.properties),
+        gid: typeof edge.gid === 'string' ? edge.gid : undefined,
       });
     }
   return edges;
@@ -424,7 +425,7 @@ const idJson = (id: number | string): unknown =>
   typeof id === 'string' ? id
     : typed(id >= -2147483648 && id <= 2147483647 ? 'int' : 'long', id);
 
-interface EdgeRow { id: number; uid: string | null; src: number; tgt: number; label: string; owner: number }
+interface EdgeRow { id: number; uid: string | null; src: number; tgt: number; label: string; owner: number; gid: string | null }
 
 /** `{key: <typed value>}` for an edge's properties. */
 const edgePropsJson = (rows: readonly PropRow[]): Record<string, unknown> =>
@@ -465,6 +466,7 @@ function incidenceJson(
     const entry = {
       id: idJson(e.uid ?? e.id),
       [endpoint]: idJson(extId(other)),
+      ...(e.gid ? { gid: e.gid } : {}),
       ...(p.length ? { properties: edgePropsJson(p) } : {}),
     };
     const list = out[e.label];
@@ -482,7 +484,8 @@ function incidenceJson(
  * rather than only on a machine that can hold the graph twice.
  */
 export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<string> {
-  for (const page of keysetPages<{ id: number; uid: string | null }>(store, 'nodes', ['id', 'uid'], pageSize)) {
+  // `hex(gid)` so the 16-byte BLOB rides as a hex string on both runtimes (a raw BLOB read diverges).
+  for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null }>(store, 'nodes', ['id', 'uid', 'hex(gid) AS gid'], pageSize)) {
     const ids = page.map((v) => v.id);
     const extId = new Map<number, number | string>(page.map((v) => [v.id, v.uid ?? v.id]));
 
@@ -491,7 +494,7 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
 
     // Both incidence directions, per the header. `owner` is the vertex this side hangs off.
     const edgeSql = (endpointCol: 'src' | 'tgt') => (ph: string) =>
-      `SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, e.${endpointCol} AS owner
+      `SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, e.${endpointCol} AS owner, hex(e.gid) AS gid
        FROM edges e JOIN labels l ON l.id = e.label WHERE e.${endpointCol} IN (${ph}) ORDER BY e.${endpointCol}, e.id`;
     const outE = rowsForOwners<EdgeRow>(store, edgeSql('src'), ids);
     const inE = rowsForOwners<EdgeRow>(store, edgeSql('tgt'), ids);
@@ -518,6 +521,9 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
         id: idJson(v.uid ?? v.id),
         // v4: a label ARRAY, which is what makes a multi-label vertex representable at all.
         label: (labels.get(v.id) ?? []).map((l) => l.name),
+        // `gid` (global identity) rides as a bare hex string under a private key — mogwai replication
+        // metadata, not part of TinkerPop's element model; a reader that lacks it re-mints (bulk.ts).
+        ...(v.gid ? { gid: v.gid } : {}),
         ...(vp.length ? { properties: vertexPropsJson(vp) } : {}),
         ...(out.length ? { outE: incidenceJson(out, edgeProps, 'inV', resolveExt) } : {}),
         ...(incoming.length ? { inE: incidenceJson(incoming, edgeProps, 'outV', resolveExt) } : {}),

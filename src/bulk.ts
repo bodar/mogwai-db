@@ -37,6 +37,7 @@
 // one pass with no schema change. Under the default `'preserve'` a collision fails closed with a
 // message naming the option — never a silent merge, and never a raw UNIQUE constraint error.
 import type { GraphStore } from './storage.ts';
+import { mintGid } from './uuid.ts';
 import { deleteMembers, insertSet, type SetColumn } from './setwrite.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
@@ -61,6 +62,10 @@ export interface BulkVertex {
   readonly id?: number | string | null;
   readonly labels: readonly string[];
   readonly properties?: readonly BulkProperty[];
+  /** Global identity (§6·1), a 32-char hex uuid_v7. Present → PRESERVED verbatim (a replicated element
+   *  keeps its gid across peers); absent → a fresh one is minted at load. Same preserve-or-mint policy
+   *  the document `id` follows. */
+  readonly gid?: string | null;
 }
 
 /** An edge to land. `src`/`tgt` name vertices by the id the SOURCE used — a number matches a landed
@@ -72,6 +77,8 @@ export interface BulkEdge {
   readonly src: number | string;
   readonly tgt: number | string;
   readonly properties?: readonly BulkProperty[];
+  /** Global identity (§6·1) — preserve-or-mint, as {@link BulkVertex.gid}. */
+  readonly gid?: string | null;
 }
 
 /**
@@ -170,7 +177,7 @@ export class BulkLoader {
    *  vertices land. `uid` is carried rather than re-derived: it is `idOf`'s output, so it already
    *  reflects the id POLICY (under `'remap'` a numeric source id becomes a uid, under `'renumber'`
    *  nothing does), which a second `typeof edge.id === 'string'` test at flush time cannot know. */
-  private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null }> = [];
+  private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null; gid: string }> = [];
   /** Under `onCollision: 'replace'` the elements are buffered RAW and resolved at `flush`: a rowid
    *  cannot be assigned until a batched read has decided which keys already exist, and an in-batch
    *  duplicate must collapse to its LAST definition before anything is materialized. The append modes
@@ -245,7 +252,9 @@ export class BulkLoader {
    *  false for a REPLACE match, whose `nodes` row already exists and is kept (rowid + edges survive) —
    *  only its owned property rows are wiped and re-landed. */
   private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
-    if (pushRow) this.nodeRows.push([rowid, uid]);
+    // gid is minted only for a fresh row; a REPLACE match keeps its existing gid (immutable identity),
+    // so no gid is recomputed when the `nodes` row is not re-pushed.
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid()]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -267,8 +276,10 @@ export class BulkLoader {
   private bufferEdge(rowid: number, uid: string | null, e: BulkEdge): void {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
-    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt]);
-    else this.pendingEdges.push({ edge: e, id: rowid, uid });
+    // Mint the gid ONCE here (not at flush) so the deferred path carries the same value it would land.
+    const gid = e.gid ?? mintGid();
+    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid]);
+    else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
     this.counts.edges++;
@@ -307,7 +318,7 @@ export class BulkLoader {
     // it owns collision handling, so the append-only collision CHECK is exactly what it replaces.
     if (this.onCollision === 'replace') this.resolveReplace();
     else this.assertNoCollisions();
-    this.land('nodes', ['id', 'uid'], this.nodeRows);
+    this.land('nodes', ['id', 'uid', 'gid'], this.nodeRows);
     this.land('vertex_labels', ['node', 'label'], this.vertexLabelRows);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.scalar);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.collection, true);
@@ -315,13 +326,13 @@ export class BulkLoader {
     // Endpoints resolve AFTER the vertices land, so a store lookup can see this batch's own rows —
     // which is what makes an edge referencing a MINTED id (no source id to remember it by) resolvable
     // at all, not just one referencing a source id.
-    for (const { edge, id, uid } of this.pendingEdges) {
+    for (const { edge, id, uid, gid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid]);
     }
     this.pendingEdges = [];
-    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt'], this.edgeRows);
+    this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid'], this.edgeRows);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.scalar);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.collection, true);
     const fts = this.ftsRows.length;
@@ -501,8 +512,11 @@ export class BulkLoader {
   private land(table: string, columns: readonly string[], rows: unknown[][], jsonbValue = false): void {
     // A JSONB column carries its JSON TEXT wrapped in `jsonb(<text>)`. `meta` always rides that shape —
     // `jsonb(NULL)` is NULL (verified), so a nullable JSONB column needs no second batch.
-    const isJsonb = (c: string) => c === 'meta' || (jsonbValue && c === 'value');
-    const spec: SetColumn[] = columns.map((c) => ({ name: c, type: isJsonb(c) ? 'blob' : 'any', jsonb: isJsonb(c) }));
+    const isJsonb = (c: string) => c === 'meta' || c === 'rev' || (jsonbValue && c === 'value');
+    const isBlob = (c: string) => c === 'gid'; // a raw BLOB, crossed as hex + unhex()'d (setwrite.ts)
+    const spec: SetColumn[] = columns.map((c) => ({
+      name: c, type: isJsonb(c) || isBlob(c) ? 'blob' : 'any', jsonb: isJsonb(c), blob: isBlob(c),
+    }));
     this.counts.statements += insertSet(this.store, table, spec, rows);
   }
 
