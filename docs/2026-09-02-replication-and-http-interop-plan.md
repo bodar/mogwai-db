@@ -390,12 +390,17 @@ layer keeps its own authoritative marker; the difference signals the layer bound
 
 Each phase is independently valuable and lands green before the next.
 
-- **Phase 0 — outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9).** URI-aware `federate`
-  (relative = local sibling, absolute = remote HTTP via `HttpFederationSource`) + `io()` from a URL — both
-  STANDARD GLV, no schema change. Smallest win, ships two real features, proves the client + worker-residency.
-  Includes registering our property-carrying element serializers on the outbound `Client` (§7). Best done
-  alongside vendoring CouchDB (§14). *Gate: federate a sub-traversal to an external Gremlin server, decoding
-  vertices/edges WITH properties; `g.io(url).read()` imports another graph over HTTP.*
+- **Phase 0 — outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9). ✅ LANDED.** URI-aware
+  `federate` (relative = local sibling, absolute = remote HTTP via `HttpForeignExecutor`) + `io()` from a URL —
+  both STANDARD GLV, no schema change. The transport is the one `Http = (Request)=>Promise<Response>` seam
+  (`src/api.ts`), so both features are validated ENTIRELY IN MEMORY against a server's own router handler (no
+  socket): `test/foreign-decode.test.ts`, `test/http-federation.test.ts`, `test/http-io.test.ts`. CouchDB
+  vendored alongside (§14). *Gate MET: federate a sub-traversal to a peer, decoding vertices/edges WITH typed
+  props (and the `inject($map)` mid-injection barrier path); `g.io(url).read()` imports a GraphSON document
+  over HTTP.* Two things turned out NOT as §7 first sketched, both corrected there: no custom element
+  DESERIALIZER is needed (the client's read side keeps props; we own the decode only for type-fidelity), and
+  we build the GraphBinary request directly rather than via `Client.submit`. io()-from-URL is a document
+  fetch (GraphSON/CSV) — a live-peer full pull is Phase 3's job, and io WRITE to a URL fails closed.
 - **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5).** Add `gid` (uuid_v7, immutable, indexed) and
   `rev` (bounded rev-tree JSONB) columns on `nodes`/`edges`; the touch-rev-on-write hook (edge rev references
   endpoints by `gid`); thread through format adapters. Local substrate, no networking. *Gate: every element
