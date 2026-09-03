@@ -470,11 +470,23 @@ Each phase is independently valuable and lands green before the next.
     (rev-tree ancestry is Phase 4). `POST /gremlin/{g}/_revs_diff`, plumbed through every runtime like
     `changes`. Gate met (held not missing, unknown gid all missing, all-held empty, deleted=had, case-
     insensitive gid).
-- **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5).** The pull/push loop:
-  `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices before
-  edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
+- **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5). 🚧 IN PROGRESS.** The pull/push
+  loop: `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices
+  before edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
   `POST /gremlin/{g}/_replicate {source, target}`. *Gate: pull a remote graph to a fresh local one; re-pull is
   a resumable no-op; push is the same with roles swapped.*
+  - ✅ **3a — `applyChanges`, the gid-keyed idempotent apply substrate.** Resolves every referenced gid
+    (elements + edge endpoints) to a LOCAL rowid (fresh for an unseen gid, reused for a known one), upserts
+    via `loadBulk(replace)` re-keyed to local rowids (vertices before edges), deletes directly (remove +
+    tombstone, NOT the drop() cascade — the source sends each cascaded element as its own delete). The bulk
+    loader's replace path is now rev-AWARE: a carried rev is PRESERVED (dirty=3, idempotent replay), an absent
+    one CHAINS (a local re-import). Gate met (fresh apply, idempotent re-apply, in-place update preserving the
+    incoming rev, delete+tombstone, cross-batch endpoint resolution). uid replication deferred (needs a
+    cross-peer collision policy).
+  - ⏳ **3b — the peer client + `_bulk_get`/`_bulk_docs` endpoints**: an outbound `Http` caller over the §9
+    endpoints; `_bulk_get` returns element bodies (the ReplVertex/ReplEdge form), `_bulk_docs` applies them.
+  - ⏳ **3c — the pull/push loop + checkpoint + `_replicate`**: `_changes` → `_revs_diff` → `_bulk_get` →
+    `applyChanges` → checkpoint (`replication_checkpoint`, §9·2); `POST /gremlin/{g}/_replicate {source, target}`.
 - **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
   deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
   depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
