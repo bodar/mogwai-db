@@ -107,13 +107,17 @@ mtime-based (fails safe — any edit reruns); the two inputs it can't see are th
 remains the gate of record — see the `sources` comment block in `mise.toml`.
 
 **`mise run ci`'s EXIT CODE is truthful, but a PIPE hides it — this is a green-that-was-red trap that
-shipped a red commit once.** mise exits non-zero on any failed task (a failed dependency propagates its
-code and the parent `run` is skipped — measured). But `mise run ci 2>&1 | tail`/`| grep` makes the
-PIPELINE return `tail`'s exit 0 (no `pipefail` in the ambient shell), so a red run reads green. No exit
-code survives a pipe — shell semantics, unfixable — so the survivable signal is a terminal LINE: **run
-`bash scripts/ci.sh`, which prints `CI: PASS` / `CI: FAIL (exit N)` as its LAST line and exits with the
-true code.** When you must read a piped run, grep the verdict line (or the presence of the ci task's
-`CI passed`), NEVER trust the pipeline's exit code.
+shipped a red commit once, so read the VERDICT IN THE OUTPUT, never a piped exit code.** mise exits
+non-zero on any failed task (a failed dependency propagates its code and the parent `run` is skipped —
+measured), so run UNPIPED and `$?` is truthful. But `mise run ci 2>&1 | tail`/`| grep` makes the
+PIPELINE return `tail`'s exit 0 (no `pipefail` in the ambient shell), so a red run's *exit code* reads
+green — shell semantics, unfixable. The survivable signal is the TEXT, and the text already tells the
+truth: a green run ends with the `ci` task's **`CI passed`**; a red run prints mise's own terminal
+**`ERROR task failed`** (measured: reliably the last line) plus, from the tee shell, a loud
+**`── ✗ FAILED (exit N): <task> — log: …`** per failing task. So `| tail` is fine *if you read it* — grep
+for `CI passed` (pass) or `ERROR task failed` (fail); for a programmatic gate run unpiped and test `$?`.
+(There is deliberately no separate ci-verdict wrapper script: mise + the tee shell already put an
+accurate verdict in the output, so a wrapper would only reformat it.)
 
 Every tool below is driven by the LSP inside our **pinned `typescript`** (`tsc --lsp --stdio`), so
 none of them can disagree with what `mise run check` gates on. That property is the whole point —

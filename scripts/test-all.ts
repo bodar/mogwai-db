@@ -15,6 +15,15 @@
  * single legible PASS/FAIL report, and its bracket set would have to be hand-listed (losing the
  * derived-totality property). Same reasoning as rel-sweep.ts's self-sharding. See the plan/CLAUDE.md.
  *
+ * ## Output — the answer to interwoven parallel output
+ *
+ * Each bracket's full raw output is captured to its OWN file, `.logs/test-<bracket>.log` (routed exactly
+ * where teeshell.sh sends task logs, so they sit beside `mise run test`'s own `.logs/test.log`). The
+ * console stays clean: one `── PASS: <bracket> → <log>` line per bracket as it finishes, and a final
+ * aggregate. A FAILING bracket is the exception — its output is echoed inline under a header (and still
+ * saved) so the failure is visible in a `tail` of the run without opening a file. So you never read a
+ * tangle of eight concurrent reporters; you read the one bracket's log, or the inlined failure.
+ *
  * ## Two modes
  *
  *   mise run test              → NO args: fan every bracket out concurrently, aggregate, summarise.
@@ -29,10 +38,19 @@
  * have already run before this script starts; this script only runs tests.
  */
 
+import { mkdirSync } from 'node:fs';
 import { brackets, REPO_ROOT } from './brackets.ts';
 
 const root = REPO_ROOT;
 const cores = navigator.hardwareConcurrency || 1;
+
+// Per-bracket logs go where teeshell.sh routes task logs — `$MISE_PROJECT_ROOT/.logs` — so `mise run
+// test`'s own `.logs/test.log` (the aggregate console this script prints) sits beside `.logs/test-L3.log`
+// et al. (each bracket's full raw output). This is the answer to interwoven parallel output: you read the
+// one bracket's file, never a tangle of eight.
+const logdir = `${process.env.MISE_PROJECT_ROOT ?? root}/.logs`;
+mkdirSync(logdir, { recursive: true });
+const logPathFor = (bracket: string) => `${logdir}/test-${bracket}.log`;
 
 // Passthrough args (everything after the script name). Present ⇒ targeted single-process run.
 const passthrough = Bun.argv.slice(2);
@@ -45,34 +63,28 @@ function envFor(bracket: string): Record<string, string> | undefined {
   return bracket === 'browser' ? { ...process.env, MOGWAI_RUN_BROWSER: '1' } : undefined;
 }
 
-/** Stream a child's piped output live, every line prefixed with the bracket label so N concurrent
- *  children stay navigable. Piped (non-TTY) `bun test` emits plain lines (no spinner), so prefixing is
- *  safe. Returns nothing; the caller awaits process exit separately. */
-async function pump(label: string, stream: ReadableStream<Uint8Array>, sink: NodeJS.WriteStream): Promise<void> {
+/** Collect a child's stdout+stderr into one string (arrival order; `bun test` writes essentially one
+ *  stream, so this reads cleanly). We do NOT stream live — concurrent brackets would interleave — the
+ *  captured text goes to the bracket's log file, and only a failing bracket is echoed to the console. */
+async function collect(stream: ReadableStream<Uint8Array>, chunks: string[]): Promise<void> {
   const decoder = new TextDecoder();
-  let buf = '';
-  for await (const chunk of stream) {
-    buf += decoder.decode(chunk, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
-    for (const line of lines) sink.write(`[${label}] ${line}\n`);
-  }
-  if (buf.length) sink.write(`[${label}] ${buf}\n`);
+  for await (const chunk of stream) chunks.push(decoder.decode(chunk, { stream: true }));
 }
 
-/** Run one bracket as a child `bun test <files>`, streaming its output prefixed. Resolves to the exit
- *  code (0 = pass). */
-async function runBracket(bracket: string, files: string[]): Promise<number> {
+/** Run one bracket as a child `bun test <files>`, capturing its output to `.logs/test-<bracket>.log`.
+ *  Resolves to `{ code, output }` (code 0 = pass). */
+async function runBracket(bracket: string, files: string[]): Promise<{ code: number; output: string }> {
   const child = Bun.spawn(['bun', 'test', ...files], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: envFor(bracket),
   });
-  await Promise.all([
-    pump(bracket, child.stdout, process.stdout),
-    pump(bracket, child.stderr, process.stderr),
-  ]);
-  return child.exited;
+  const chunks: string[] = [];
+  await Promise.all([collect(child.stdout, chunks), collect(child.stderr, chunks)]);
+  const code = await child.exited;
+  const output = chunks.join('');
+  await Bun.write(logPathFor(bracket), output);
+  return { code, output };
 }
 
 /** A tiny concurrency pool: run `tasks` with at most `limit` in flight. Preserves nothing about order
@@ -106,14 +118,23 @@ if (passthrough.length) {
 // self-limits to min(6, cores) the same way.
 const limit = Math.max(1, cores - 2);
 const groups = brackets(root);
-console.log(`test-all: ${groups.size} brackets [${[...groups.keys()].join(', ')}] · up to ${limit} concurrent (of ${cores} cores)`);
-
 const entries = [...groups.entries()];
+console.log(`test-all: ${groups.size} brackets [${entries.map(([k]) => k).join(', ')}] · up to ${limit} concurrent (of ${cores} cores) · per-bracket logs in .logs/test-<bracket>.log`);
+
 const codes = await pool(
   limit,
   entries.map(([bracket, files]) => async () => {
-    const code = await runBracket(bracket, files);
-    console.log(`── ${code === 0 ? 'PASS' : `FAIL (exit ${code})`}: ${bracket} (${files.length} file(s))`);
+    const { code, output } = await runBracket(bracket, files);
+    if (code === 0) {
+      // Pass: stay quiet — the full output is in the log file.
+      console.log(`── PASS: ${bracket} (${files.length} file(s)) → ${logPathFor(bracket)}`);
+    } else {
+      // Fail: echo the bracket's output inline (headed) so the failure is visible in a `tail` of the
+      // run, THEN the verdict line + log path. This is the loud, read-the-text signal.
+      console.log(`\n╭── FAIL (exit ${code}): ${bracket} — output follows (also ${logPathFor(bracket)})`);
+      process.stdout.write(output.endsWith('\n') ? output : output + '\n');
+      console.log(`╰── ✗ FAILED: ${bracket} (${files.length} file(s)) → ${logPathFor(bracket)}`);
+    }
     return code;
   }),
 );
@@ -121,7 +142,7 @@ const codes = await pool(
 const failed = entries.filter((_e, i) => codes[i] !== 0).map(([b]) => b);
 console.log(
   failed.length
-    ? `test-all: FAIL — ${failed.length}/${entries.length} bracket(s) red: ${failed.join(', ')}`
+    ? `test-all: FAIL — ${failed.length}/${entries.length} bracket(s) red: ${failed.join(', ')} (see .logs/test-<bracket>.log)`
     : `test-all: PASS — all ${entries.length} brackets green`,
 );
 process.exit(failed.length ? 1 : 0);

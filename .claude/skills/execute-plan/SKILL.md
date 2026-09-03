@@ -39,10 +39,14 @@ For each logical item, smallest shippable unit first:
    `gremlin-test`) for Gremlin's WHAT and WHY, `vendor/calcite/...` for algebra and rel→SQL lowering.
    In doubt about semantics, read the vendored reference — do not reason it out (CLAUDE.md, "Semantics
    traps").
-4. **Prove it green.** Run **`bash scripts/ci.sh`** — its last line is the truthful `CI: PASS` /
-   `CI: FAIL (exit N)`. Do NOT trust `mise run ci 2>&1 | tail`/`| grep`: a pipe drops the exit code and
-   a red run reads green (this shipped a red commit once — CLAUDE.md, "Tooling"). If a task is red,
-   `grep`/`Read` its `.logs/<task>.log` rather than re-running to re-scroll.
+4. **Prove it green.** Run **`mise run ci`** and read the VERDICT IN THE OUTPUT — never trust a piped
+   exit code, which is always the pager's, not the task's (a pipe drops the real code; this shipped a
+   red commit once — CLAUDE.md, "Tooling"). A green run ends with the `ci` task's `CI passed`; a red run
+   prints mise's terminal `ERROR task failed` plus a loud `── ✗ FAILED (exit N): <task>` line per failing
+   task (from the tee shell). So `mise run ci 2>&1 | tail` now tells the truth if you READ it; for a
+   programmatic gate, run it UNPIPED (`mise run ci; [ $? -eq 0 ]` — mise's own exit is truthful) or
+   `grep -q 'CI passed'`. If a task is red, `grep`/`Read` its `.logs/<task>.log` (a red `test` bracket is
+   `.logs/test-<bracket>.log`) rather than re-running to re-scroll.
 5. **Land the code on trunk.** Green → commit the code change with a clear message and
    `git push -u origin trunk`. A non-fast-forward comes back as `RPC failed; HTTP 403` with
    `! [rejected] … (fetch first)` — that is the ordinary concurrent-push race, not an access failure:
@@ -94,7 +98,8 @@ those are work, not stopping points.
 
 - **Verify before you build, always.** The doc lies by omission and by age; the code and the vendored
   references are the authority.
-- **`bash scripts/ci.sh` is the gate**, and its verdict line is the only truthful signal through a pipe.
+- **`mise run ci` is the gate.** Read the verdict in the OUTPUT (`CI passed` / mise's `ERROR task
+  failed`), or run it unpiped for a truthful exit code — never trust a piped exit code.
 - **Never force-push trunk**; a 403 with `(fetch first)` is a rebase-and-retry, not an incident.
 - **No new dependencies** (runtime, dev, or a second build/test tool) without explicit approval —
   including defaults a skill or doc pulls in.

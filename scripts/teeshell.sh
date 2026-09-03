@@ -26,7 +26,16 @@ log="${log:-$logdir/task.log}"
 
 bash -c "$2" 2>&1 | tee "$log"
 ec="${PIPESTATUS[0]}"
-# Announce on stderr only — mise shows it (prefixed with the task label) but it stays
-# OUT of the log file, keeping the file pure task output.
-echo "── log: $log" >&2
+# Announce on stderr only — mise shows it (prefixed with the task label) but it stays OUT of the log
+# file, keeping the file pure task output. On FAILURE the announcement is a loud, unmissable verdict
+# naming the task, its exit code, and its log — so a piped `mise run <task> | tail` shows the truth in
+# the TEXT (the piped exit code is always the pager's, never the task's; read the output, or run
+# unpiped where mise's own exit is truthful). This is why there is no separate ci-verdict wrapper: the
+# per-task FAIL line here + mise's own terminal `ERROR task failed` + the `ci` task's `CI passed` echo
+# already put an accurate verdict in the output.
+if [ "$ec" -eq 0 ]; then
+  echo "── log: $log" >&2
+else
+  echo "── ✗ FAILED (exit $ec): ${MISE_TASK_NAME:-task} — log: $log" >&2
+fi
 exit "$ec"
