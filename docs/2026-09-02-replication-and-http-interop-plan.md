@@ -410,7 +410,7 @@ Each phase is independently valuable and lands green before the next.
   from its native source: Bun flags/env, a Worker's `env` (a structured `CONFIG` object var), and in the
   browser the page's inline-`<script>` JSON read by the bootstrap and handed to each Worker at boot
   (`configFromBrowser`). Test: `test/graph-worker-http.test.ts` (in-memory WASM, under Bun).
-- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5). 🚧 LARGELY LANDED.** `gid` (uuid_v7 BLOB,
+- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5). ✅ LANDED.** `gid` (uuid_v7 BLOB,
   immutable, UNIQUE-indexed) and `rev` (`{gen, hash}` JSONB) columns are on `nodes`/`edges` (`src/storage.ts`).
   A portable pure-JS uuid_v7 minter (`src/uuid.ts`) and SHA-256 (`src/hash.ts`, vector-tested), and the rev
   model (`src/rev.ts`, CouchDB's chained `new_revid`). Both derived columns are (re)computed by ONE post-write
@@ -431,14 +431,17 @@ Each phase is independently valuable and lands green before the next.
     new `propertyOwnerId`; its snapshot now carries both the property row id and the owner id from one
     lowering), and both merge onMatch/tail arms (mergeV/mergeE, guarded on there being a write, so a pure
     match bumps nothing). A mutation chains the rev (gen 2, new hash); an untouched sibling keeps its rev.
-  - ⏳ **REMAINING (a focused follow-up):**
-    2. **rev through the bulk/format path.** GraphSON carries `rev` (writer emits `json(rev)`, reader parses;
-       parallels the gid field already added), and the bulk loader PRESERVES a document's rev / computes one
-       when absent — so rev survives an `io()` round-trip, completing the gate. (bulk currently leaves rev
-       null; a mogwai dump→reload preserves once the format carries it.)
-  *Gate: every element has a stable `gid`/`rev`; identical content converges to the same rev; they survive an
-  `io()` round-trip; two independent graphs never collide on `gid`.* (gid: fully met; rev: create + convergence
-  met, the two ⏳ items complete mutation-tracking + round-trip.)
+  - ✅ **rev through the bulk/format path.** The bulk loader unifies onto the ONE gid/rev authority
+    (`src/refresh.ts`): gid stays preserve-or-mint inline (always present); `rev` is preserve-or-COMPUTE —
+    a carried rev (a mogwai GraphSON dump ships one) lands verbatim born CLEAN (idempotent replay), an
+    absent rev lands born DIRTY so `flush`'s `refreshElements` computes `{gen:1, hash}` from content, the
+    SAME authority the compiled path uses (so a rev-less bulk load and a compiled create converge). Bulk
+    refreshes per flush over only that flush's dirty rows (streaming-safe). GraphSON carries `rev` as a
+    nested `{gen, hash}` object mirroring gid; `'replace'` chains a matched vertex's rev via the new
+    reusable `markMembersDirty` (`setwrite.ts`, the set-based twin of `deleteMembers`).
+  *Gate MET: every element has a stable `gid`/`rev`; identical content converges to the same rev (compiled
+  path AND bulk); rev survives an `io()` round-trip verbatim incl. a chained generation; two independent
+  graphs never collide on `gid`.*
 - **Phase 2 — the by-seq feed + read side (§5·2, §6·4).** Per-element `seq` (indexed, bumped on write) +
   tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct deltas incl. deletes;
   `since=0` enumerates full current state; the feed stays current-state-sized under repeated updates.*
