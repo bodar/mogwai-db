@@ -475,12 +475,15 @@ almost no new concepts.
   …) → Promise<ForeignResult>`. RPC is *not* hardwired; the Cloudflare and Bun managers each just happen to
   implement it over DO RPC / in-process calls (`src/cloudflare/cloudflare-graph-manager.ts`,
   `src/bun/BunGraphManager.ts`). `federate.ts` imports no RPC types.
-- **The new backend is a plain implementer.** An `HttpFederationSource.executor(url).runForeign(...)`:
-  resolve the `graph` param to a configured external base URL, `POST {gremlin, bindings}` via the vendored
-  `Client.submit` (or a direct `fetch` of the JSON wire shape `src/wire.ts` documents), decode the
-  response, and **map it into the closed `ForeignResult` contract** (`elements | scalar | map | values`,
-  `src/api.ts`). Nothing downstream (`src/compiler/rel/foreign.ts`, `src/execute.ts`) cares how the bytes
-  arrived.
+- **The trigger is the `graph` param becoming a URI — no new Gremlin surface (§9).** A *relative* URI stays
+  a local sibling graph (today); a *fully-qualified* URI dispatches to the HTTP backend. So the seam is a
+  `FederationSource` that inspects the id: local ids resolve through the existing manager, absolute URIs
+  through an `HttpFederationSource`. External federation is thus just `call("federate", {graph})` with a URL.
+- **The new backend is a plain implementer.** `HttpFederationSource.executor(uri).runForeign(...)`:
+  `POST {gremlin, bindings}` to the URI via the vendored `Client.submit` (or a direct `fetch` of the JSON
+  wire shape `src/wire.ts` documents), decode the response, and **map it into the closed `ForeignResult`
+  contract** (`elements | scalar | map | values`, `src/api.ts`). Nothing downstream
+  (`src/compiler/rel/foreign.ts`, `src/execute.ts`) cares how the bytes arrived.
 - **Two invariants to honor**, both visible in the seam: thread and increment `depth`
   (`guardFederationDepth`, `src/services/params/federation-depth.ts`) so a hop out to an external server
   and back stays bounded; and translate the external response into `ForeignResult` faithfully (a scalar
@@ -498,24 +501,59 @@ different protocols, one client foundation, one residency discipline.
 
 ---
 
-## §9. The DX — engine with two skins, and the single URL
+## §9. The DX — one-shot lives in Gremlin (standard GLV); ongoing replication lives in the management API
 
-**Decision (from our discussion): build the replication engine once; expose it as BOTH a Gremlin service
-and a thin HTTP endpoint.** The engine is the reusable core; the skins are ergonomics.
+**LAW: the GLV is not ours to extend — we use STANDARD Gremlin only.** No invented step, no non-standard
+method on the client (`g.io(url).pull()` in an earlier draft was exactly this mistake — `pull()` is not a
+GLV step). Any GLV change needs a compelling reason AND an upstream PR — the bar we already cleared once for
+federate's `inject($map)` varargs (`patches/upstream/tinkerpop-06-inject-generic-argument-varargs.patch`).
+This law decides the split below, and it decides it cleanly.
 
-- **Gremlin-service skin** — on-brand with `io()` (which is itself a service, `io.ts`) and the "no separate
-  control plane" guardrail (`.claude/rules/management-api.md`). E.g. `g.call("replicate", {from: "<url>"})`
-  / `{to: "<url>"}`, or an `io()`-shaped `g.io("<url>").pull()`. Reuses the barrier/segment substrate and
-  the worker residency.
-- **HTTP-endpoint skin** — the CouchDB single-URL DX you want: a `POST /gremlin/{g}/_replicate {source,
-  target, continuous?}` on the existing router (`src/router.ts`; new routes slot in beside the GraphQL edge,
-  matched before the generic `{g}` path). "Point a local graph at production and pull it down" is one
-  request.
-- **The peer-facing endpoints** the engine speaks between two mogwai servers — the mogwai-native analog of
-  CouchDB's protocol. Either literally adopt CouchDB's names (`_changes`, `_revs_diff`, `_bulk_docs`,
-  `_local/{id}`) for familiarity and possible interop, or a mogwai-native set. Recommendation: mirror
-  CouchDB's *shapes* (they are well-designed and §5's model maps onto them), on mogwai routes. Direction is
-  the caller's: pull = "I am target, you are source"; push = the reverse; same engine, roles swapped (§4·4).
+**The split follows an idiom boundary, not taste.** Gremlin is a *one-shot* language — run a query, get
+results; even `io()` is a one-shot bulk load. There is no prior art anywhere in Gremlin for a query that
+keeps running in the background, and we won't invent one. So:
+
+- **One-shot pulls stay in Gremlin, and both are already STANDARD GLV — no new surface:**
+  - **Cross-graph query → `federate` with a URI.** `federate`'s `graph` param is just a string
+    (`graphOf`, `federate.ts`); make it URI-aware — a *relative* URI is a local sibling graph (today's
+    behavior), a *fully-qualified* URI is a remote graph pulled over HTTP (the §8 backend). External
+    federation then needs no new surface at all; it is the same `call("federate", {graph})` with a URL.
+  - **Bulk transfer → `io()` with a URL.** `g.io(url).read()` / `.write()` are standard GLV steps; the
+    argument is just a string the provider's io registry interprets. Today it names an R2 key / file; let it
+    also name another database over HTTP. "Slurp from another graph instead of from R2" is a pure `io()`
+    feature — one-shot, idiomatic, no GLV change.
+
+- **Ongoing replication is a persistent config + a scheduler — it lives in the management API, NOT Gremlin.**
+  CouchDB confirms the shape (`replicator.rst`): a replication is a *document* in the `_replicator` database
+  (`source`, `target`, `continuous`, `filter`, `checkpoint_interval`), run by a **scheduler** that
+  periodically starts/stops jobs (`max_jobs`/`interval`/`max_churn`), with a state machine and introspection
+  at `_scheduler/jobs` / `_scheduler/docs`. The mogwai analog:
+  - **A CRUD management interface over persistent replication configs** (create / edit / delete a
+    source→target config), on the existing thin REST router (`src/router.ts`), the same shape as the graph
+    lifecycle verbs — no new control plane, just more of the one we have.
+  - **A scheduler that runs them.** On a Durable Object "continuous" is not a held connection (a DO
+    hibernates) — it is a **DO alarm-driven periodic pull** (wake → `_changes` since checkpoint → apply →
+    sleep), with the crash-backoff CouchDB uses. One-shot configs run once and complete.
+  - **Introspection endpoints** — a `_scheduler/jobs` analog: job status + history.
+- **The cheap UI falls out of OpenAPI.** We already generate an OpenAPI spec and a docs UI over the
+  management API (`buildDocs`, `src/docs.ts`, served at `/docs` + `/openapi.json`, `src/router.ts`). Document
+  the replication config CRUD + introspection there and the UI is generated for free — our Fauxton, no
+  bespoke front-end. Default is to document *everything* publicly (it helps anyone extend), so the
+  peer-facing sync endpoints go in the spec too.
+
+**The peer-facing sync endpoints** (what two mogwai servers speak) mirror CouchDB's *shapes* on mogwai
+routes — `_changes?since=N`, a revs-diff, a bulk apply, a checkpoint (`_local`-analog). We adopt the shapes
+because they are well-designed and §5's model maps onto them, NOT for wire interop (§9·1). Direction is the
+caller's: pull = "I am target, you are source"; push = the reverse; one engine, roles swapped (§4).
+
+### §9·1 Interoperating with CouchDB itself is a non-goal
+
+Tempting — "edges and vertices are the world's smallest documents" — but no. A generic CouchDB replicator
+moving our elements as documents would not honor vertices-before-edges ordering (§6·2), would break
+referential integrity, and does not share our id/rev/conflict semantics — it would produce a dangling,
+corrupt graph, not a replica. So we follow CouchDB's *design* as the gold standard (§4) and mirror its
+endpoint *shapes* for familiarity, but wire-level interop with a real CouchDB is out of scope: our peer
+protocol is mogwai↔mogwai.
 
 ---
 
@@ -524,11 +562,13 @@ and a thin HTTP endpoint.** The engine is the reusable core; the skins are ergon
 Each phase is independently valuable and lands green before the next. Ordered so the shared substrate and
 the smallest proof come first, and the genuinely hard graph semantics come after the transport is trusted.
 
-- **Phase 0 — the outbound HTTP client + external federation.** Build `HttpFederationSource` (§8) on the
-  vendored `gremlin` client. Smallest, most independent win; ships a real feature (federate to an external
-  TinkerPop server); proves the outbound client and residency story that replication will reuse. No schema
-  change, no rev, no change-log. *Gate: a mogwai graph federates a sub-traversal to an external Gremlin
-  server and merges the result.*
+- **Phase 0 — the outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9).** Make `federate`'s
+  `graph` param URI-aware (relative = local sibling, absolute = remote HTTP via `HttpFederationSource`) and
+  let `io()` accept a URL source — both STANDARD GLV, no new surface. Build the outbound client on the
+  vendored `gremlin` driver. Smallest, most independent win; ships two real features (federate to an external
+  graph; bulk-slurp another graph by URL) and proves the outbound client + worker-residency that replication
+  reuses. No schema change, no rev, no seq. *Gate: a mogwai graph federates a sub-traversal to an external
+  Gremlin server; `g.io(url).read()` imports another graph over HTTP.*
 - **Phase 1 — the global id + the rev property (§6·1, §5·2).** Change the native element id to a 64-bit
   globally-unique integer (per-instance prefix + monotonic counter, minted on write; `uid` freed for
   users); add the `~rev` hidden property and the touch-on-write hook (generation + content hash, edge rev
@@ -540,20 +580,26 @@ the smallest proof come first, and the genuinely hard graph semantics come after
   server-only — no replication engine, but a peer can now be *asked* what changed and what it's missing.
   *Gate: `_changes?since=N` and revs-diff return correct deltas incl. deletes; `since=0` enumerates full
   current state; the feed stays current-state-sized under repeated updates.*
-- **Phase 3 — the replication engine + checkpoint + skins (§9, §5).** The pull/push loop — ONE mechanism:
-  `_changes?since=N` (N=0 for first contact, `io()`-streamed for the bulk case) → revs-diff → transfer
-  (vertices before edges, §6·2) → apply idempotently → checkpoint (`_local`-analog, deterministic replication
-  id). Wire up both skins (Gremlin service + `_replicate` endpoint). *Gate: pull a remote graph to a fresh
-  local graph; re-pull is a resumable no-op; push is the same with roles swapped.*
-- **Phase 4 — conflict preservation, tombstones, continuous (§6·3, §6·4).** The rev-tree + shadow/conflict
-  store; deterministic-winner-on-read; conflict surfacing (`~conflicts`); the referential-conflict rule
+- **Phase 3 — the replication engine + checkpoint + the peer protocol (§9, §5).** The pull/push loop — ONE
+  mechanism: `_changes?since=N` (N=0 for first contact, `io()`-streamed for the bulk case) → revs-diff →
+  transfer (vertices before edges, §6·2) → apply idempotently → checkpoint (`_local`-analog, deterministic
+  replication id). Expose the peer-facing sync endpoints and a transient one-shot `POST /gremlin/{g}/_replicate
+  {source, target}` trigger. *Gate: pull a remote graph to a fresh local graph; re-pull is a resumable no-op;
+  push is the same with roles swapped.*
+- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** The rev-tree + shadow/conflict store;
+  deterministic-winner-on-read; conflict surfacing (`~conflicts`); the referential-conflict rule
   (edge-to-tombstone); rev-ancestry depth-stemming (`_revs_limit` analog); keep tombstones (no up-front
-  pruning); continuous replication (a live `_changes` tail, or interval-poll). *Gate: two peers each mutate
-  and cross-replicate; both converge; conflicts are preserved and surfaced, never silently lost; no dangling
-  edge; deletes propagate.*
-- **Phase 5 — the anti-entropy backstop + optional purge (§5·4, §6·4).** On-demand Merkle over `(id, rev)`,
+  pruning). *Gate: two peers each mutate and cross-replicate; both converge; conflicts are preserved and
+  surfaced, never silently lost; no dangling edge; deletes propagate.*
+- **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** A CRUD management
+  interface over persistent source→target configs; a DO-alarm-driven scheduler that runs them (continuous =
+  periodic pull with crash-backoff; one-shot = run once); introspection (a `_scheduler/jobs` analog); and the
+  OpenAPI spec + generated docs UI over all of it (`src/docs.ts`) — our Fauxton for free. *Gate: create a
+  config that keeps a local graph synced from a remote one on a schedule, visible + editable in the generated
+  UI.*
+- **Phase 6 — the anti-entropy backstop + optional purge (§5·4, §6·4).** On-demand Merkle over `(id, rev)`,
   watermark-bounded, for first-contact reconciliation and integrity verification; and a manual tombstone
-  purge. Optional — the layering is designed so Phases 1–4 are complete without it. *Gate: two peers with
+  purge. Optional — the layering is designed so Phases 1–5 are complete without it. *Gate: two peers with
   divergent/absent history reconcile without a shared checkpoint; a silently-corrupted row is detected.*
 
 ---
@@ -566,7 +612,10 @@ in `~rev`** (§5·2); **native id = 64-bit global integer, per-instance prefix +
 **conflicts = CouchDB preservation (keep leaves, winner-on-read, surface, resolve) + one graph-forced
 referential exception** (§6·3); **cursor = a per-element by-sequence index, current-state-sized** (§5·3);
 **tombstones kept (no up-front pruning); rev-ancestry depth-stemmed; ONE `since=N` mechanism** (§6·4, §7).
-Still open:
+Two more, added in review: **the DX splits by idiom — one-shot pulls are STANDARD-GLV Gremlin (`federate`
+with a URI, `io()` with a URL), ongoing replication is a persistent config + scheduler in the management API
+with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **CouchDB wire interop is a non-goal**
+(§9·1); **CouchDB is vendored for reference** (§14). Still open:
 
 1. **Id layout detail** (§6·1): the bit split (prefix width vs counter width), and counter-only (leaning, no
    clock dependence) vs Snowflake time+peer+seq. A tuning decision, not a mechanism.
@@ -665,3 +714,30 @@ facts (rev hash `new_revid`, deterministic winner `to_doc_info_path`, `couch_key
 `src/services/catalog/federate.ts`, `src/api.ts` (`ForeignResult`), `src/wire.ts`, `src/http.ts`,
 `src/cf-limits.ts`, `.claude/rules/{management-api,schema-storage,wire-protocol}.md`, and the vendored
 `gremlin` client at `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`.
+
+---
+
+## §14. Vendor CouchDB as reference — it is the gold standard, so keep the code at hand
+
+Per the governing principle (§4), CouchDB is the design authority for this whole feature, so it earns a
+vendored, reference-only submodule beside `vendor/tinkerpop`, `vendor/calcite`, and `vendor/gds` — same
+discipline (blobless + sparse, gitlink-only, never built, never imported; provisioned by
+`scripts/init-submodule.sh`; cite at the pin so claims are checkable by CI and by others, unlike the
+session-local clone this doc currently cites). This doc's CouchDB citations should move to
+`vendor/couchdb/...` paths once it lands. It is `shallow` (read only at the pin), like calcite/gds.
+
+**The parts to sparse-checkout** (the replication reference surface, ~a handful of dirs/files):
+
+- `src/docs/src/replication/` — `protocol.rst` (the normative spec), `conflicts.rst` (the rev-tree +
+  winner model + the "Is it like Git?" essay), `intro.rst`, `replicator.rst` (the `_replicator` DB +
+  scheduler + states — §9).
+- `src/docs/src/api/database/{changes,misc,bulk-api}.rst` and `src/docs/src/api/local.rst` — the
+  `_changes`, `_revs_diff`, `_bulk_docs`, `_local` endpoint references.
+- `src/couch/src/` — `couch_key_tree.erl` (the rev-tree: `merge`, `find_missing`, `stem`), `couch_doc.erl`
+  (`new_revid`, the deterministic winner `to_doc_info_path`), `couch_db.erl` (`get_missing_revs`),
+  `couch_uuids.erl` (the id algorithms — §6·1's `sequential` prior art).
+- `src/couch_replicator/src/` — `couch_replicator_ids.erl` (the checkpoint/replication-id derivation) and
+  the scheduler modules (the persistent-job model behind §9).
+
+Actual vendoring is a discrete, reviewed change (submodule + `init-submodule.sh` sparse config), best done
+alongside Phase 0 so every later phase can cite the gold standard at the pin.
