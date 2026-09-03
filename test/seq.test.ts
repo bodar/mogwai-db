@@ -90,7 +90,7 @@ describe('seq — the bulk/format path', () => {
     const s = store();
     // A carried rev (as a replicated/dumped element ships) — preserved, but seq is this graph's own.
     loadBulk(s, [{ id: 1, labels: ['person'], gid: 'a'.repeat(32), rev: JSON.stringify({ gen: 5, hash: 'deadbeef' }), properties: [] }]);
-    expect(s.query<{ rev: string }>('SELECT json(rev) AS rev FROM nodes')[0]!.rev).toBe(JSON.stringify({ gen: 5, hash: 'deadbeef' })); // rev preserved verbatim
+    expect(JSON.parse(s.query<{ rev: string }>('SELECT json(rev) AS rev FROM nodes')[0]!.rev)).toMatchObject({ gen: 5, hash: 'deadbeef' }); // rev preserved (leaf)
     expect(storeSeqs(s, 'nodes')[0]!).toBeGreaterThan(0); // but a local seq was assigned
     expect(s.query<{ n: number }>('SELECT count(*) AS n FROM nodes WHERE dirty')[0]!.n).toBe(0); // dirty cleared
   });

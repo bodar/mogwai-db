@@ -46,26 +46,30 @@ export function changesFeed(store: GraphStore, since: number): ChangesFeed {
      ORDER BY seq`, [since, since, since]);
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
-    rev: r.rev ? JSON.parse(r.rev) as { gen: number; hash: string } : null,
+    rev: leafRev(r.rev), // the feed carries the LEAF only; the ancestry stays in the store (revs_diff reads it)
     ...(r.deleted ? { deleted: true as const } : {}),
   }));
   return { results, last_seq: store.nextSeqBlock(0) };
 }
 
-/** A rev as a canonical comparison key — CouchDB's `gen-hash`. */
-const revKey = (r: WireRev): string => `${r.gen}-${r.hash}`;
+/** The stored rev's LEAF `{gen, hash}` — the feed's shape, dropping the rev-tree `ids` (a `_changes`
+ *  entry is a leaf pointer; ancestry is the store's business). */
+const leafRev = (raw: string | null): { gen: number; hash: string } | null => {
+  if (!raw) return null;
+  const r = JSON.parse(raw) as { gen: number; hash: string };
+  return { gen: r.gen, hash: r.hash };
+};
 
 /**
  * The `_revs_diff` lookup (§4 primitive 2), shared like `changesFeed`: given the revs a peer holds per
  * element gid, return which this graph is MISSING, so the source ships only those. A pure gid/rev key
  * lookup — the efficiency engine that never touches a body.
  *
- * "Has gid@rev" here is an EXACT {gen,hash} match against this graph's LIVE row for that gid OR a
- * tombstone for it (a delete at that rev is still "had"). This is the single-leaf answer; the rev-TREE
- * ancestry check (a newer rev subsumes an offered ancestor, so it is not missing) is Phase 4 — until
- * then the diff is conservative (it may re-offer an ancestor), which the idempotent apply makes safe.
- * Gids are hex (as `_changes` emits); the lookup is `hex(gid) IN (json_each(?))` — ONE JSON bind, never
- * a data-sized placeholder list (§6·2).
+ * "Has gid@rev" is: the offered leaf hash appears ANYWHERE in this graph's rev-TREE for that gid — its
+ * live row's tree OR a tombstone's — so a newer local rev SUBSUMES an offered ancestor (that hash is on
+ * the ancestry line) and the ancestor is not re-fetched (§6·4). Membership is by HASH (the tree's `ids`
+ * are hashes); gids are hex (as `_changes` emits), looked up via `hex(gid) IN (json_each(?))` — ONE JSON
+ * bind, never a data-sized placeholder list (§6·2).
  */
 export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffResponse {
   const gids = Object.keys(request).map((g) => g.toUpperCase());
@@ -78,17 +82,19 @@ export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffR
      UNION ALL
      SELECT hex(gid) AS gid, json(rev) AS rev FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))`,
     [gidsJson, gidsJson, gidsJson]);
-  // gid (upper hex) → the set of rev keys this graph holds for it.
+  // gid (upper hex) → every hash on this graph's rev-tree(s) for it (leaf + ancestry), so an offered
+  // ancestor is recognised as already held.
   const held = new Map<string, Set<string>>();
   for (const r of rows) {
     if (!r.rev) continue;
-    const rev = JSON.parse(r.rev) as WireRev;
-    (held.get(r.gid) ?? held.set(r.gid, new Set()).get(r.gid)!).add(revKey(rev));
+    const rev = JSON.parse(r.rev) as { hash: string; ids?: string[] };
+    const set = held.get(r.gid) ?? held.set(r.gid, new Set()).get(r.gid)!;
+    for (const h of rev.ids ?? [rev.hash]) set.add(h);
   }
   const out: Record<string, { missing: WireRev[] }> = {};
   for (const [gid, revs] of Object.entries(request)) {
     const have = held.get(gid.toUpperCase());
-    const missing = revs.filter((r) => !have?.has(revKey(r)));
+    const missing = revs.filter((r) => !have?.has(r.hash)); // by hash: the offer is a leaf, matched against the tree
     if (missing.length) out[gid] = { missing };
   }
   return out;

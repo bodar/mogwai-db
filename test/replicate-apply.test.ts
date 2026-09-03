@@ -15,8 +15,14 @@ const v = (gid: string, r: string, labels: string[], props: Record<string, unkno
   ({ gid, rev: r, labels, properties: Object.entries(props).map(([key, value]) => ({ key, value })) });
 const e = (gid: string, r: string, label: string, srcGid: string, tgtGid: string, props: Record<string, unknown> = {}): ReplEdge =>
   ({ gid, rev: r, label, srcGid, tgtGid, properties: Object.entries(props).map(([key, value]) => ({ key, value })) });
-const storedRev = (s: GraphStore, table: 'nodes' | 'edges', gid: string) =>
-  s.query<{ rev: string }>(`SELECT json(rev) AS rev FROM ${table} WHERE hex(gid) = ?`, [gid])[0]?.rev;
+// The stored rev's LEAF (gen/hash) as a normalized string — the rev now also carries the tree `ids`
+// (Phase 4a), which these assertions don't pin.
+const storedRev = (s: GraphStore, table: 'nodes' | 'edges', gid: string) => {
+  const raw = s.query<{ rev: string }>(`SELECT json(rev) AS rev FROM ${table} WHERE hex(gid) = ?`, [gid])[0]?.rev;
+  if (!raw) return undefined;
+  const { gen, hash } = JSON.parse(raw) as { gen: number; hash: string };
+  return JSON.stringify({ gen, hash });
+};
 const counts = (s: GraphStore) => ({
   v: s.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0]!.n,
   e: s.query<{ n: number }>('SELECT count(*) AS n FROM edges')[0]!.n,

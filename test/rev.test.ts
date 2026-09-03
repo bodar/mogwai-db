@@ -5,6 +5,32 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { loadGraphson, writeGraphson } from '../src/formats/graphson.ts';
 import { loadBulk } from '../src/bulk.ts';
+import { computeRev, descendsFrom, revWins } from '../src/rev.ts';
+
+// Phase 4 step 4a: the rev-TREE. A rev carries its stemmed ancestry (newest-first), so apply can tell a
+// fast-forward from a divergent conflict; `descendsFrom`/`revWins` are the primitives conflict handling
+// (4b) and `_revs_diff` build on.
+describe('rev — the rev-tree (Phase 4a)', () => {
+  test('chains ancestry newest-first; descendsFrom tracks the line; divergent leaves do not', () => {
+    const r1 = computeRev(null, 'a'), r2 = computeRev(r1, 'b'), r3 = computeRev(r2, 'c');
+    expect(r1.ids).toEqual([r1.hash]);
+    expect(r3.ids).toEqual([r3.hash, r2.hash, r1.hash]); // full lineage
+    expect(descendsFrom(r3, r1)).toBe(true); // r3 is a descendant of r1 (fast-forward)
+    expect(descendsFrom(r1, r3)).toBe(false); // r1 is an ancestor, not a descendant
+    const a = computeRev(r1, 'x'), b = computeRev(r1, 'y'); // two gen-2 siblings off r1
+    expect(descendsFrom(a, b)).toBe(false);
+    expect(descendsFrom(b, a)).toBe(false); // divergent → neither descends → a conflict
+  });
+
+  test('revWins is the deterministic winner: not-deleted > higher gen > higher hash', () => {
+    const g1 = computeRev(null, 'a'), g2 = computeRev(g1, 'b');
+    expect(revWins(g2, false, g1, false)).toBe(true); // higher gen
+    const a = computeRev(g1, 'x'), b = computeRev(g1, 'y'); // same gen
+    expect(revWins(a, false, b, false)).toBe(a.hash > b.hash); // higher hash lexically
+    expect(revWins(a, true, b, false)).toBe(false); // deleted loses to not-deleted
+    expect(revWins(a, false, b, true)).toBe(true);
+  });
+});
 
 // Phase 2b (docs/2026-09-02-replication-and-http-interop-plan.md §5·1): every created element carries a
 // rev {gen, hash} computed by the post-write refresh on the unified dirty sweep. Here on the compiled

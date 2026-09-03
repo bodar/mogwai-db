@@ -62,6 +62,20 @@ describe('_revs_diff — the "what are you missing?" lookup', () => {
     expect(body).toEqual({}); // already had it (as a tombstone) — do not re-ship
   });
 
+  test('an offered ANCESTOR is not missing — a newer local rev subsumes it (rev-tree, Phase 4a)', async () => {
+    const { run, feed, diff } = setup();
+    await run('g.addV("person").property("name","v1")'); // gen 1
+    const gen1 = (await feed(0)).results[0]!.rev!; // the leaf {gen:1, hash}
+    await run('g.V().property("name","v2")'); // gen 2
+    await run('g.V().property("name","v3")'); // gen 3 — its tree includes gen1's hash
+    const row = (await feed(0)).results[0]!;
+    expect(row.rev!.gen).toBe(3);
+    // Offering the gen-1 ancestor: subsumed by the local gen-3 tree → nothing to ship.
+    expect(await diff({ [row.id]: [gen1] }).then((r) => r.body)).toEqual({});
+    // A rev off the tree is still missing.
+    expect((await diff({ [row.id]: [{ gen: 4, hash: 'ff'.repeat(16) }] })).body[row.id]!.missing).toHaveLength(1);
+  });
+
   test('gid hex is matched case-insensitively; a GET is 405; a bad body is 400', async () => {
     const { run, feed, diff, http } = setup();
     await run('g.addV("person")');
