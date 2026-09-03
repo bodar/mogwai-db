@@ -17,5 +17,14 @@
   // provisions a LOCAL bucket, which is what lets the shared runtime contract exercise the R2 half of
   // the seam on workerd instead of only the filesystem half on Bun.
   "r2_buckets": [{ "binding": "IO", "bucket_name": "mogwai-io" }],
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GraphDatabase"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GraphDatabase"] }],
+
+  // Outbound-HTTP host allowlist for io()/federate over HTTP (src/config.ts, src/http-allowlist.ts).
+  // The URL in `g.io("https://…")` / `federate("https://…")` comes from a client's query, so it is
+  // confined to these hosts — an SSRF guard. UNSET (as here) ⇒ outbound HTTP is DISABLED (deny all,
+  // fail closed). To permit hosts, uncomment ONE of:
+  //   "vars": { "HTTP_ALLOWLIST": "backup.example,peer.internal" }
+  // or the structured form (same shape the Bun config uses), which also carries PATH_PREFIX etc.:
+  //   "vars": { "CONFIG": { "httpAllowlist": ["backup.example", "peer.internal"], "pathPrefix": "gremlin" } }
+  "vars": {}
 }

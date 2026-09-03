@@ -4,6 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { writeGraphson } from '../src/formats/graphson.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode } from './support/decode.ts';
+import { allowlistedHttp } from '../src/http-allowlist.ts';
 import type { Http } from '../src/api.ts';
 
 // io() over HTTP: `g.io("https://…/modern.json").read()` imports a whole GraphSON DOCUMENT over the
@@ -52,5 +53,20 @@ describe('io() from a URL — a GraphSON document fetched over the Http seam', (
     const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, serveDoc);
     await expect(mgr.executor('target').framedAsync('g.io("data/local.json").read()', {}))
       .rejects.toThrow(/no io binding/);
+  });
+
+  // The SSRF guard end-to-end through the io() path: the entry points wrap the Http seam with
+  // allowlistedHttp (src/http-allowlist.ts), so a URL io() only reaches allowlisted hosts. Here the
+  // decorated transport is injected exactly as the entry points inject it.
+  test('io() over HTTP is DENIED when the host allowlist is empty (deny-all default)', async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, allowlistedHttp([], serveDoc));
+    await expect(mgr.executor('target').framedAsync(`g.io("${DOC_URL}").read()`, {}))
+      .rejects.toThrow(/allowlist/);
+  });
+
+  test('io() over HTTP succeeds once the host is allowlisted', async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, allowlistedHttp(['backup.example'], serveDoc));
+    await mgr.executor('target').framedAsync(`g.io("${DOC_URL}").read()`, {});
+    expect(await count(mgr, 'target', 'g.V().count()')).toBe(6);
   });
 });

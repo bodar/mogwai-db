@@ -11,16 +11,16 @@ import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { R2IoStore } from './R2IoStore.ts';
 import { NO_IO_STORE } from '../iostore.ts';
-import { defaultHttp } from '../http-federation.ts';
+import { allowlistedHttp } from '../http-allowlist.ts';
+import { configFromWorkerEnv, type WorkerConfigEnv } from '../config.ts';
 import { httpAwareIoStore } from '../http-io.ts';
 import { rpcTry, type RpcFailure, type RpcResult } from '../rpc.ts';
 
-export interface Env {
+// Env extends WorkerConfigEnv, which carries the shared config source: `PATH_PREFIX`, the outbound-HTTP
+// `HTTP_ALLOWLIST`, and the structured `CONFIG` object var (Wrangler `vars` can hold a JSON object, so
+// io()/federate config rides in `env` as an adjacent object — see src/config.ts).
+export interface Env extends WorkerConfigEnv {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
-  /** Optional graph-path prefix (`/{PATH_PREFIX}/{id}`); defaults to `gremlin`. Set as
-   *  a Worker `var` in wrangler config to change it. The bare `/gremlin`
-   *  stock-client endpoint is fixed and unaffected. */
-  PATH_PREFIX?: string;
   /** Optional R2 bucket backing io() — where `io("data/x.json")` resolves. A binding, so an
    *  operator opts in per deployment; absent, io() fails closed naming it (NO_IO_STORE). */
   IO?: R2Bucket;
@@ -66,10 +66,13 @@ export class GraphDatabase extends DurableObject<Env> {
     this.ensureLive();
     // The R2 binding is read INSIDE the DO (bindings are a property of a DO's env exactly as they
     // are a Worker's), so a whole-graph read/write happens where the graph lives.
-    // io() URL-aware: an http(s) path fetches a document over the DO's global fetch (`defaultHttp`),
-    // any other path resolves against the R2 binding (fail-closed NO_IO_STORE when unbound).
-    const io = httpAwareIoStore(this.env.IO ? new R2IoStore(this.env.IO) : NO_IO_STORE, defaultHttp);
-    return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH), undefined, io);
+    // io() and any http(s) federate target go through the ALLOWLISTED transport (SSRF guard,
+    // src/http-allowlist.ts): the URL comes from a client's Gremlin query, so it is confined to the
+    // operator's host allowlist (empty ⇒ deny all). Both the io store AND the sibling-federate manager
+    // get the same guarded `http`; any non-URL io path still resolves against the R2 binding.
+    const http = allowlistedHttp(configFromWorkerEnv(this.env).httpAllowlist);
+    const io = httpAwareIoStore(this.env.IO ? new R2IoStore(this.env.IO) : NO_IO_STORE, http);
+    return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH, http), undefined, io);
   }
 
   /** Data-plane RPC: compile + run + FRAME inside the DO (concern B, client wire path). The edge

@@ -1,4 +1,6 @@
 import { application } from '../application.ts';
+import { allowlistedHttp } from '../http-allowlist.ts';
+import { configFromWorkerEnv } from '../config.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { GraphDatabase, type Env } from './graph-store-do.ts';
 
@@ -15,9 +17,13 @@ export type { Env };
 // identical to the Bun server.
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Build the shared config from `env` (a structured CONFIG object var, or the flat vars) — the same
+    // shape the Bun server builds from flags/env. `federate("http://…")` at the edge runs through the
+    // allowlisted transport (SSRF guard); empty allowlist ⇒ deny all.
+    const config = configFromWorkerEnv(env);
     const app = application({
-      manager: new CloudflareGraphManager(env.GRAPH),
-      pathPrefix: env.PATH_PREFIX,
+      manager: new CloudflareGraphManager(env.GRAPH, allowlistedHttp(config.httpAllowlist)),
+      pathPrefix: config.pathPrefix,
     });
     return app.router(request);
   },
