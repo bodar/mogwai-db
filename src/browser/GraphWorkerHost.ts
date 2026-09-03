@@ -16,7 +16,10 @@ import type { ForeignResult, ForeignTerminal } from '../api.ts';
 import type { TypeNode } from '../gremlin/types.ts';
 import type { RegistryProvider } from '../scopes.ts';
 import type { FederationSource } from '../compiler/segment.ts';
-import type { IoStore } from '../iostore.ts';
+import type { Http } from '../api.ts';
+import { type IoStore, NO_IO_STORE } from '../iostore.ts';
+import { httpAwareIoStore } from '../http-io.ts';
+import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { opfsSahpoolWasmSql } from './WasmSqlite.ts';
 import { RpcTarget } from 'capnweb';
@@ -30,11 +33,17 @@ const opfsSahpoolFactory: GraphSqlFactory = (graphId) => opfsSahpoolWasmSql(`.mo
 export interface GraphWorkerHostOptions {
   /** The service registry (federation on by default). */
   registry?: RegistryProvider;
-  /** Where io() reads/writes documents — the browser's OpfsIoStore in production. Omitted → io() fails
-   *  closed naming the missing binding. */
+  /** Where a RELATIVE io() path reads/writes documents — the browser's OpfsIoStore in production. An
+   *  http(s) URL bypasses this and fetches over `http` instead (see below). Omitted → a relative path's
+   *  io() fails closed naming the missing binding. */
   io?: IoStore;
   /** How to open this graph's store. Defaults to its opfs-sahpool database. */
   makeSql?: GraphSqlFactory;
+  /** The outbound HTTP transport (`Request => Promise<Response>`) for io()/federate to an http(s) URL —
+   *  the Worker's global `fetch` by default, wrapped with the allowlist by the entry (worker.ts); a test
+   *  injects an in-memory transport. This is the ONE seam Phase 0 (§7/§8) uses on Bun/CF, lifted here so
+   *  the browser gains the same http io/federate. */
+  http?: Http;
 }
 
 // Extends capnweb's RpcTarget so the manager can hold it by REFERENCE across the page↔Worker
@@ -59,20 +68,28 @@ export class GraphWorkerHost extends RpcTarget {
   static async open(graphId: string, opts: GraphWorkerHostOptions = {}): Promise<GraphWorkerHost> {
     const sql = await (opts.makeSql ?? opfsSahpoolFactory)(graphId);
     const store = new GraphStore(sql);
+    // The outbound Http seam (§7). Making the io store URL-aware and dispatching an http(s) federate id
+    // to an HttpForeignExecutor is EXACTLY what BunGraphManager/CloudflareGraphManager do — lifted here
+    // over the same `httpAwareIoStore`/`remoteOrLocal` so the browser behaves identically:
+    //   io("relative") → OPFS base store; io("https://…") → fetch the document over `http`.
+    const http = opts.http ?? defaultHttp;
+    const io = httpAwareIoStore(opts.io ?? NO_IO_STORE, http);
     let host: GraphWorkerHost;
-    // Federation source: SELF resolves to this graph's own executor (a federate to one's own graph is
-    // in-process); a SIBLING is a cross-Worker hop the manager routes, so fail closed here naming it
-    // rather than silently opening the sibling's data in the wrong Worker. The closure reads `host` only
+    // Federation source dispatched by id (`remoteOrLocal`): an http(s) URI → an HttpForeignExecutor over
+    // `http` (a REMOTE peer); otherwise local — SELF resolves to this graph's own executor (a federate to
+    // one's own graph is in-process), a SIBLING is a cross-Worker hop the manager routes, so fail closed
+    // naming it rather than opening the sibling's data in the wrong Worker. The closure reads `host` only
     // at federate time, by when it is assigned.
     const source: FederationSource = {
-      executor: (id) => {
-        if (id === graphId) return host.executor;
-        throw new Error(
-          `graph worker "${graphId}": cross-worker federation to "${id}" is routed by the manager, not the graph worker`,
-        );
-      },
+      executor: (id) =>
+        remoteOrLocal(id, http, () => {
+          if (id === graphId) return host.executor;
+          throw new Error(
+            `graph worker "${graphId}": cross-worker federation to "${id}" is routed by the manager, not the graph worker`,
+          );
+        }),
     };
-    const executor = new Executor(store, opts.registry ?? extendedRegistry, source, undefined, opts.io);
+    const executor = new Executor(store, opts.registry ?? extendedRegistry, source, undefined, io);
     host = new GraphWorkerHost(graphId, store, executor);
     return host;
   }

@@ -8,6 +8,8 @@
 // messages carry ONLY a port (+ a tag) or nothing, so there is no application payload to grow — everything
 // with meaning is a typed capnweb call.
 
+import type { MogwaiConfig } from '../config.ts';
+
 /** The native messages between the Service Worker edge and a WorkerFactory page. All are transport
  *  bootstraps: `*-port` hands a MessagePort over (transferred), `need-control` is the SW re-soliciting a
  *  control session after it (or its ports) was reaped. */
@@ -18,18 +20,20 @@ export type BootstrapMessage =
 
 /** Boot a NEW capnweb session on an already-spawned graph Worker: make a channel, hand the Worker one end
  *  (it serves `newMessagePortRpcSession(port, host)` over it), and return the other end for the caller to
- *  wrap or forward. The Worker opens its host once and serves every session over that one host. */
-export function bootSession(worker: Worker, graphId: string): MessagePort {
+ *  wrap or forward. The Worker opens its host once and serves every session over that one host. `config`
+ *  rides the boot message so the Worker can build its allowlisted Http seam (io()/federate over http);
+ *  it is consumed only on the FIRST boot (the one that opens the host), harmless on later sessions. */
+export function bootSession(worker: Worker, graphId: string, config?: MogwaiConfig): MessagePort {
   const channel = new MessageChannel();
-  worker.postMessage({ port: channel.port1, graphId }, [channel.port1]);
+  worker.postMessage({ port: channel.port1, graphId, config }, [channel.port1]);
   return channel.port2;
 }
 
 /** Spawn graph `graphId`'s dedicated Worker and boot its first session. Only a Window can spawn a
  *  dedicated Worker, and the Worker dies with its owner document — so the spawner is also the owner. */
-export function spawnGraphWorker(workerUrl: string | URL, graphId: string): { worker: Worker; port: MessagePort } {
+export function spawnGraphWorker(workerUrl: string | URL, graphId: string, config?: MogwaiConfig): { worker: Worker; port: MessagePort } {
   const worker = new Worker(workerUrl, { type: 'module', name: graphId });
-  return { worker, port: bootSession(worker, graphId) };
+  return { worker, port: bootSession(worker, graphId, config) };
 }
 
 /** Remove a graph's OPFS database directory (recursively) if present; a missing directory is a no-op.

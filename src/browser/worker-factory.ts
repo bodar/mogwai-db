@@ -8,6 +8,7 @@
 // capnweb cannot itself carry (worker-spawn.ts).
 import { newMessagePortRpcSession, RpcTarget } from 'capnweb';
 import { spawnGraphWorker, bootSession, removeOpfsDir, type BootstrapMessage } from './worker-spawn.ts';
+import type { MogwaiConfig } from '../config.ts';
 
 /** This tab's stake in one graph: a queued (or granted) per-graph Web Lock and, once granted, the Worker
  *  it owns. `abort` cancels the queue / releases the lock on destroy. */
@@ -29,8 +30,10 @@ interface Leadership {
 export class WorkerFactory extends RpcTarget {
   private readonly graphs = new Map<string, Leadership>();
 
-  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) the page serves. */
-  constructor(private readonly workerUrl: string | URL) {
+  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) the page serves; `config` (read from
+   *  the page's inline `<script>` JSON) rides each Worker's boot so it can build its allowlisted Http
+   *  seam for io()/federate over http. */
+  constructor(private readonly workerUrl: string | URL, private readonly config?: MogwaiConfig) {
     super();
   }
 
@@ -76,8 +79,8 @@ export class WorkerFactory extends RpcTarget {
   /** As leader for `id`: spawn its Worker if we don't own one yet (on failover this re-opens opfs-sahpool
    *  over the committed data), then hand the controlling SW a fresh session port to it. */
   private deliver(id: string, g: Leadership): void {
-    const port = g.worker ? bootSession(g.worker, id) : (() => {
-      const s = spawnGraphWorker(this.workerUrl, id);
+    const port = g.worker ? bootSession(g.worker, id, this.config) : (() => {
+      const s = spawnGraphWorker(this.workerUrl, id, this.config);
       g.worker = s.worker;
       return s.port;
     })();
@@ -110,6 +113,10 @@ export interface MogwaiOptions {
   /** The Service Worker scope. Default: the SW's own directory (root, for a root deploy) — widen it (and
    *  serve the SW with `Service-Worker-Allowed`) only to intercept `/gremlin/*` above the SW's path. */
   scope?: string;
+  /** The runtime config (io()/federate host allowlist, etc.), handed to each graph Worker at boot. The
+   *  `mogwai.ts` entry reads it from the page's inline `<script>` JSON; a programmatic caller passes it
+   *  directly. Omitted ⇒ deny-all (io()/federate over http off until an allowlist is set). */
+  config?: MogwaiConfig;
 }
 
 /** The page bootstrap: register the Service Worker and install this tab's WorkerFactory. This is the whole
@@ -119,19 +126,19 @@ export async function installMogwai(opts: MogwaiOptions = {}): Promise<() => voi
   const serviceWorker = opts.serviceWorker ?? new URL('./service-worker.js', import.meta.url);
   const worker = opts.worker ?? new URL('./worker.js', import.meta.url);
   await registerServiceWorker(serviceWorker, opts.scope); // resolves once the SW controls this page
-  return installWorkerFactory(worker);
+  return installWorkerFactory(worker, opts.config);
 }
 
 /** Install the page-side factory: open a control-plane capnweb session with the Service Worker (so the SW
  *  can call `openGraph`), and re-open one whenever the SW solicits (`mogwai-need-control`, after the SW or
  *  its ports were reaped). Returns a disposer that removes the listener. Call once, after the SW controls
  *  the page (see {@link registerServiceWorker}). */
-export function installWorkerFactory(workerUrl: string | URL): () => void {
+export function installWorkerFactory(workerUrl: string | URL, config?: MogwaiConfig): () => void {
   // Ask the browser to make this origin's OPFS PERSISTENT — otherwise it is evictable under storage
   // pressure, which would silently drop a graph's committed data (the 10 GB DO ceiling has no such risk).
   // Fire-and-forget: it may prompt, be auto-granted, or be denied; storage still works either way.
   void navigator.storage?.persist?.().catch(() => {});
-  const factory = new WorkerFactory(workerUrl);
+  const factory = new WorkerFactory(workerUrl, config);
   const openControl = () => {
     const channel = new MessageChannel();
     newMessagePortRpcSession(channel.port1, factory); // this page exposes the factory over port1

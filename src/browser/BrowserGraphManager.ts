@@ -14,6 +14,7 @@ import type { Framed } from '../execute.ts';
 import type { ForeignResult } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
+import type { MogwaiConfig } from '../config.ts';
 
 // capnweb stub methods return an `RpcPromise` whose type `Stubify`s the payload (an over-approximation for
 // a proxy we never pipeline — we `await` it immediately, and the real value crosses as plain structured
@@ -81,13 +82,14 @@ export class BrowserGraphManager implements GraphManager {
 export class LocalWorkerSource implements GraphStubSource {
   private readonly graphs = new Map<string, { worker: Worker; stub: RpcStub<GraphWorkerHost> }>();
 
-  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) served by the host. */
-  constructor(private readonly workerUrl: string | URL) {}
+  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) served by the host; `config` (io()/
+   *  federate host allowlist, etc.) rides each Worker's boot, matching the WorkerFactory path. */
+  constructor(private readonly workerUrl: string | URL, private readonly config?: MogwaiConfig) {}
 
   open(id: string): Promise<RpcStub<GraphWorkerHost>> {
     let g = this.graphs.get(id);
     if (!g) {
-      const { worker, port } = spawnGraphWorker(this.workerUrl, id);
+      const { worker, port } = spawnGraphWorker(this.workerUrl, id, this.config);
       g = { worker, stub: newMessagePortRpcSession<GraphWorkerHost>(port) };
       this.graphs.set(id, g);
     }

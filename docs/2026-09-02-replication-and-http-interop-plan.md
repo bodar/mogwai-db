@@ -401,6 +401,15 @@ Each phase is independently valuable and lands green before the next.
   DESERIALIZER is needed (the client's read side keeps props; we own the decode only for type-fidelity), and
   we build the GraphBinary request directly rather than via `Client.submit`. io()-from-URL is a document
   fetch (GraphSON/CSV) — a live-peer full pull is Phase 3's job, and io WRITE to a URL fails closed.
+  **Browser lift (2026-09-03) — the one runtime Phase 0 first missed.** The per-graph Worker
+  (`GraphWorkerHost`) now takes the same injected `Http` seam and wires `httpAwareIoStore` +
+  `remoteOrLocal`, so io()/federate over an http(s) URL works in the browser exactly as on Bun/CF (a
+  relative id/path stays local — OPFS / a sibling Worker — a URL fetches over the seam). All three
+  runtimes now match. The seam is ALLOWLISTED (the SSRF guard added alongside — `src/http-allowlist.ts`,
+  empty allowlist ⇒ deny all), fed by one unified `MogwaiConfig` (`src/config.ts`) each runtime builds
+  from its native source: Bun flags/env, a Worker's `env` (a structured `CONFIG` object var), and in the
+  browser the page's inline-`<script>` JSON read by the bootstrap and handed to each Worker at boot
+  (`configFromBrowser`). Test: `test/graph-worker-http.test.ts` (in-memory WASM, under Bun).
 - **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5).** Add `gid` (uuid_v7, immutable, indexed) and
   `rev` (bounded rev-tree JSONB) columns on `nodes`/`edges`; the touch-rev-on-write hook (edge rev references
   endpoints by `gid`); thread through format adapters. Local substrate, no networking. *Gate: every element

@@ -68,3 +68,16 @@ export function configFromWorkerEnv(env: WorkerConfigEnv): MogwaiConfig {
     log: c?.log ?? (env.MOGWAI_LOG ? true : undefined),
   };
 }
+
+/** Build a config from a value already parsed out of the browser's inline `<script>` JSON block (the
+ *  page bootstrap reads the DOM; this stays DOM-free so it lives beside the other builders). Same shape,
+ *  browser-sourced — the "lift and shift" the inline JSON gives you. A missing/garbage value ⇒ deny-all
+ *  defaults. `pathPrefix`/`log` are carried for parity though the browser edge doesn't consume them yet. */
+export function configFromBrowser(raw: unknown): MogwaiConfig {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  return {
+    httpAllowlist: toAllowlist(o.httpAllowlist as string | readonly string[] | undefined),
+    pathPrefix: typeof o.pathPrefix === 'string' ? o.pathPrefix : undefined,
+    log: o.log === true || undefined,
+  };
+}

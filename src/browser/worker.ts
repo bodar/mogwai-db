@@ -12,20 +12,29 @@ import './buffer-global.ts'; // MUST be first — installs Buffer before the wir
 import { newMessagePortRpcSession, RpcPromise } from 'capnweb';
 import { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { OpfsIoStore } from './OpfsIoStore.ts';
+import { allowlistedHttp } from '../http-allowlist.ts';
+import type { MogwaiConfig } from '../config.ts';
 
-/** The boot message: the RPC port to serve on plus which graph this Worker hosts. The Worker may receive
- *  SEVERAL over its life — one per capnweb session it should serve (the page-side manager, or the Service
- *  Worker edge after a cold-start re-handshake) — but it opens the host exactly ONCE and serves every
- *  session over that same host. */
+/** The boot message: the RPC port to serve on, which graph this Worker hosts, and the config the page
+ *  read from its inline `<script>` JSON. The Worker may receive SEVERAL over its life — one per capnweb
+ *  session it should serve (the page-side manager, or the Service Worker edge after a cold-start
+ *  re-handshake) — but it opens the host exactly ONCE and serves every session over that same host, so
+ *  `config` is read only on the first boot. */
 interface Boot {
   port: MessagePort;
   graphId: string;
+  config?: MogwaiConfig;
 }
 
 let host: Promise<GraphWorkerHost> | undefined;
 
 self.onmessage = (e: MessageEvent<Boot>) => {
-  const { port, graphId } = e.data;
-  host ??= GraphWorkerHost.open(graphId, { io: new OpfsIoStore(['io']) });
+  const { port, graphId, config } = e.data;
+  // The outbound Http seam is the Worker's global `fetch`, ALLOWLISTED (SSRF guard) from the config the
+  // page injected — empty allowlist ⇒ io()/federate over http is denied (fail closed), exactly as Bun/CF.
+  host ??= GraphWorkerHost.open(graphId, {
+    io: new OpfsIoStore(['io']),
+    http: allowlistedHttp(config?.httpAllowlist ?? []),
+  });
   newMessagePortRpcSession(port, new RpcPromise(host));
 };
