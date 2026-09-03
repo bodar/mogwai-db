@@ -530,7 +530,9 @@ Each phase is independently valuable and lands green before the next.
   - ⏳ **4b-2 — loser propagation for order-independent convergence through the feed**: an all-leaves
     `_changes` (each change lists its conflict-loser revs) + `_bulk_get` by (gid, rev) + multi-leaf
     resolution, so a peer that already holds the winner still learns the loser.
-  - ⏳ **4c — conflict surfacing endpoint** (`~conflicts` / `?conflicts`): the live winner + shadow losers.
+  - ✅ **4c — conflict surfacing endpoint.** `GET /gremlin/{g}/_conflicts` (the `?conflicts=true` analog):
+    per conflicted element, the live winner rev + shadowed loser versions (rev + wire doc). `conflictsFeed`
+    joins the shadow to the live winner; plumbed through every runtime. Ordinary reads never see it.
   - ⏳ **4d — the referential rule** (§6·3): a delete racing an incident edge resurrects the endpoint and
     surfaces the delete (also the delete-vs-live-edit conflict: not-deleted wins, resurrect).
   - ⏳ **4e — the uid conflict + carrying uid on the wire** (§6·3): not-deleted > lower-gid, loser's uid
