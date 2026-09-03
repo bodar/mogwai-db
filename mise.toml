@@ -89,8 +89,10 @@ outputs = ["node_modules", "node_modules/gremlin"]
 #   2. L5's seed is derived from git HEAD, so a re-run at the SAME commit is genuinely identical
 #      (deterministic → safe to skip), but a re-run after a NEW commit that touched no `src/`/`test/`
 #      file would skip L5 with the old seed and miss that HEAD's exploration locally.
-# After a pin bump or when you specifically want a fresh L5 seed locally, `touch` any source (or clear
-# the task's mise state) to force a rerun.
+# After a pin bump or when you specifically want a fresh L5 seed locally, force a rerun with
+# `mise run --force <task>` (cascades to deps, so `--force ci` re-runs the whole gate) — or `touch` a
+# source. The skip STATE lives in mise's global state dir, ~/.local/state/mise/task-sources/ (one small
+# hash-named file per project+task), NOT in the repo or .logs/; `rm -rf` that dir resets every task.
 [tasks.check]
 description = "Type-check (tsc --noEmit); no emit — Bun/esbuild run the TS directly"
 depends = ["install"]
