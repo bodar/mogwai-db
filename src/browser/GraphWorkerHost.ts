@@ -11,8 +11,8 @@
 // opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff, type GraphInfo } from '../manager.ts';
-import { bulkGet, applyWire } from '../replicate.ts';
-import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet } from '../api.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, storeReplicate } from '../replicate.ts';
+import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../api.ts';
 import { Executor, type Framed } from '../execute.ts';
 import type { ForeignResult, ForeignTerminal } from '../api.ts';
 import type { TypeNode } from '../gremlin/types.ts';
@@ -60,6 +60,9 @@ export class GraphWorkerHost extends RpcTarget {
     /** This graph's executor — also the endpoint a manager routes a SIBLING'S federated hop INTO
      *  (its `runForeign`), which is the cross-Worker twin of the Cloudflare DO's `raw`/`runForeign` RPC. */
     readonly executor: Executor,
+    /** The outbound Http seam — the remote peer of a replication runs through it (§7), the same transport
+     *  io()/federate use, so a browser graph replicates to an http(s) peer exactly as Bun/CF do. */
+    private readonly http: Http,
   ) {
     super();
   }
@@ -92,7 +95,7 @@ export class GraphWorkerHost extends RpcTarget {
         }),
     };
     const executor = new Executor(store, opts.registry ?? extendedRegistry, source, undefined, io);
-    host = new GraphWorkerHost(graphId, store, executor);
+    host = new GraphWorkerHost(graphId, store, executor, http);
     return host;
   }
 
@@ -131,6 +134,17 @@ export class GraphWorkerHost extends RpcTarget {
   /** `_bulk_docs` — apply a change set, store-tier, inside this graph's Worker. */
   bulkDocs(changes: WireChangeSet): void {
     applyWire(this.store, changes);
+  }
+
+  /** Read/write this graph's replication checkpoint (§9·2), store-tier inside this Worker. */
+  checkpoint(replicationId: string, seq?: number): number {
+    return storeCheckpoint(this.store, replicationId, seq);
+  }
+
+  /** Run one replication pass against the peer in `opts` — the loop runs HERE (this Worker holds the
+   *  store AND the outbound http), the browser twin of the CF Worker driving a DO (§7). */
+  replicate(opts: ReplicateOptions): Promise<ReplicationStats> {
+    return storeReplicate(this.store, this.graphId, this.http, opts);
   }
 }
 // Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's

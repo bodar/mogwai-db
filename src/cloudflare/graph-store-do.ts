@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import { bulkGet, applyWire } from '../replicate.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint } from '../replicate.ts';
 import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
@@ -154,6 +154,11 @@ export class GraphDatabase extends DurableObject<Env> {
   bulkDocs(changes: WireChangeSet): void {
     this.ensureLive();
     applyWire(this.store, changes);
+  }
+
+  checkpoint(replicationId: string, seq?: number): number {
+    this.ensureLive();
+    return storeCheckpoint(this.store, replicationId, seq);
   }
 
   /** Fully remove this graph's storage. `deleteAll()` is the only way to clear

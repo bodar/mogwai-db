@@ -11,7 +11,7 @@
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import type { Framed } from '../execute.ts';
-import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet } from '../api.ts';
+import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
@@ -84,6 +84,16 @@ export class BrowserGraphManager implements GraphManager {
 
   async bulkDocs(id: string, changes: WireChangeSet): Promise<void> {
     await this.call(id, ((s) => s.bulkDocs(changes)) as Awaited$<void>);
+  }
+
+  async checkpoint(id: string, replicationId: string, seq?: number): Promise<number> {
+    return this.call(id, ((s) => s.checkpoint(replicationId, seq)) as Awaited$<number>);
+  }
+
+  // The loop runs INSIDE the graph's Worker (it holds the store + outbound http), so the manager just
+  // routes the call — the browser twin of the CF Worker→DO split.
+  async replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> {
+    return this.call(id, ((s) => s.replicate(opts)) as Awaited$<ReplicationStats>);
   }
 
   async destroy(id: string): Promise<void> {

@@ -142,6 +142,13 @@ export function makeRouter(
         try { await mgr.bulkDocs(gid, await req.json()); return json({ ok: true }); }
         catch (e: any) { return json({ error: e.message }, 400); }
       }
+      if (endpoint === '_replicate') {
+        // One-shot replication (§9): `{source: url}` PULLS a remote into {g}, `{target: url}` PUSHES {g}
+        // out. The loop runs at manager (worker) residency, out of the store tier.
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        try { return json(await mgr.replicate(gid, await req.json())); }
+        catch (e: any) { return json({ error: e.message }, 400); }
+      }
       return new Response('Not found', { status: 404 });
     }
 

@@ -23,7 +23,11 @@ import { deleteMembers, insertSet } from './setwrite.ts';
 import { refreshElements } from './refresh.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
 import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
-import type { BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete } from './api.ts';
+import { changesFeed, revsDiff } from './manager.ts';
+import type {
+  BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete, WireRev, ChangesFeed, RevsDiffRequest,
+  RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats,
+} from './api.ts';
 
 /** A replicated vertex document (what `_bulk_get` returns / `_bulk_docs` applies): identity + version +
  *  content, keyed by GID. `rev` is the `{gen, hash}` JSON text, preserved verbatim on apply. */
@@ -193,4 +197,132 @@ export function applyWire(store: GraphStore, ws: WireChangeSet): void {
     edges: (ws.edges ?? []).map((e) => ({ gid: e.gid, rev: e.rev, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: edgeProperties(e.properties) })),
     deletes: ws.deletes ?? [],
   });
+}
+
+// ---------- the replicator: the pull/push loop + checkpoint + peer client (§9, §5) ----------
+
+/** A replication CHECKPOINT (§9·2): read (`seq` omitted) or write graph-local cursor for a replication
+ *  id. Not replicated — pure local job state, so a plain table, `INSERT OR REPLACE` by construction. */
+export function checkpoint(store: GraphStore, replicationId: string, seq?: number): number {
+  if (seq === undefined)
+    return store.query<{ s: number }>('SELECT source_last_seq AS s FROM replication_checkpoint WHERE replication_id = ?', [replicationId])[0]?.s ?? 0;
+  store.query('INSERT OR REPLACE INTO replication_checkpoint(replication_id, source_last_seq) VALUES (?, ?)', [replicationId, seq]);
+  return seq;
+}
+
+/** A replication PEER — the four protocol operations, direction-agnostic. A local peer binds a manager's
+ *  own methods; a remote peer is an `Http` caller over the `_` endpoints. The loop drives two of them. */
+export interface Peer {
+  changes(since: number): Promise<ChangesFeed>;
+  revsDiff(request: RevsDiffRequest): Promise<RevsDiffResponse>;
+  bulkGet(refs: readonly BulkGetRef[]): Promise<WireChangeSet>;
+  bulkDocs(changes: WireChangeSet): Promise<void>;
+}
+
+/** A local peer over a manager's own graph — no HTTP hop, just the in-process (or DO-RPC) methods. */
+export function localPeer(mgr: GraphManager, id: string): Peer {
+  return {
+    changes: (since) => mgr.changes(id, since),
+    revsDiff: (request) => mgr.revsDiff(id, request),
+    bulkGet: (refs) => mgr.bulkGet(id, refs),
+    bulkDocs: (changes) => mgr.bulkDocs(id, changes),
+  };
+}
+
+/** A local peer over a raw store — the same four operations run in-process (the browser Worker, which
+ *  holds a store + http but is not a manager). Reuses the shared store-tier functions. */
+export function storePeer(store: GraphStore): Peer {
+  return {
+    changes: async (since) => changesFeed(store, since),
+    revsDiff: async (request) => revsDiff(store, request),
+    bulkGet: async (refs) => bulkGet(store, refs),
+    bulkDocs: async (changes) => applyWire(store, changes),
+  };
+}
+
+/** A remote peer over the `_` HTTP endpoints of a graph URL, spoken through the injected `Http` seam
+ *  (the exact transport federation and `io()` use — so a test drives it in memory against a router). */
+export function remotePeer(http: Http, url: string): Peer {
+  const base = url.replace(/\/$/, '');
+  const post = async <T>(ep: string, body: unknown): Promise<T> => {
+    const res = await http(new Request(`${base}/${ep}`, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }));
+    if (!res.ok) throw new Error(`replication: ${ep} on ${base} returned ${res.status}`);
+    return res.json() as Promise<T>;
+  };
+  return {
+    changes: async (since) => {
+      const res = await http(new Request(`${base}/_changes?since=${since}`));
+      if (!res.ok) throw new Error(`replication: _changes on ${base} returned ${res.status}`);
+      return res.json() as Promise<ChangesFeed>;
+    },
+    revsDiff: (request) => post('_revs_diff', request),
+    bulkGet: (refs) => post('_bulk_get', refs),
+    bulkDocs: async (changes) => { await post('_bulk_docs', changes); },
+  };
+}
+
+/** ONE replication pass, direction-agnostic (§4·4): read the source feed from the checkpoint, ask the
+ *  target which revs it lacks, fetch only those bodies, apply them WITH the deletes, advance the
+ *  checkpoint. Idempotent: a re-run with no source change reads the (empty) tail and writes nothing. The
+ *  feed is current-state-sized, so one pass catches a fresh target up; pagination is a later refinement. */
+export async function runReplication(
+  source: Peer, target: Peer, cp: { read(): Promise<number>; write(seq: number): Promise<void> },
+): Promise<ReplicationStats> {
+  const since = await cp.read();
+  const feed = await source.changes(since);
+  const live = feed.results.filter((r) => !r.deleted && r.rev);
+  const deletes: WireDelete[] = feed.results.filter((r) => r.deleted)
+    .map((r) => ({ gid: r.id, rev: r.rev ? JSON.stringify(r.rev) : null, kind: r.kind }));
+
+  const offer: Record<string, WireRev[]> = {};
+  for (const r of live) offer[r.id] = [r.rev!];
+  const missing = live.length ? await target.revsDiff(offer) : {};
+  const refs: BulkGetRef[] = live.filter((r) => missing[r.id]).map((r) => ({ gid: r.id, kind: r.kind }));
+
+  const bodies = refs.length ? await source.bulkGet(refs) : {};
+  const written = (bodies.vertices?.length ?? 0) + (bodies.edges?.length ?? 0);
+  if (written || deletes.length) await target.bulkDocs({ ...bodies, deletes });
+
+  await cp.write(feed.last_seq);
+  return { read: feed.results.length, written, deleted: deletes.length, last_seq: feed.last_seq };
+}
+
+/** A deterministic replication id (§5): stable across runs so a re-run resumes from the same checkpoint,
+ *  and distinct per (direction, peer, local graph) so two replications never share a cursor. */
+export const replicationId = (direction: 'pull' | 'push', remote: string, local: string): string =>
+  `${direction}:${remote}:${local}`;
+
+const isUrl = (s: string): boolean => /^https?:\/\//i.test(s);
+
+/**
+ * The direction-agnostic core (§4·4): resolve `{source|target: url}` to a pull or a push around the given
+ * LOCAL peer, then run one pass with the given checkpoint accessors. `{source: url}` PULLS the remote into
+ * the local graph; `{target: url}` PUSHES the local graph out. Orchestrated at worker/edge residency (§7)
+ * — the remote peer's waits never touch the store tier.
+ */
+function replicateWith(
+  local: Peer, localRef: string, http: Http, opts: ReplicateOptions,
+  cp: (replId: string, seq?: number) => number | Promise<number>,
+): Promise<ReplicationStats> {
+  let source: Peer, target: Peer, direction: 'pull' | 'push', remote: string;
+  if (opts.source && isUrl(opts.source)) { direction = 'pull'; remote = opts.source; source = remotePeer(http, opts.source); target = local; }
+  else if (opts.target && isUrl(opts.target)) { direction = 'push'; remote = opts.target; source = local; target = remotePeer(http, opts.target); }
+  else return Promise.reject(new Error('_replicate needs exactly one remote http(s) `source` or `target`'));
+  const replId = replicationId(direction, remote, localRef);
+  return runReplication(source, target, {
+    read: async () => cp(replId),
+    write: async (seq) => { await cp(replId, seq); },
+  });
+}
+
+/** A one-shot replication for `localId` via a manager's own methods (Bun in-process, CF over DO RPC) —
+ *  the local peer, checkpoint, and http all reached through the manager. */
+export function managerReplicate(mgr: GraphManager, http: Http, localId: string, opts: ReplicateOptions): Promise<ReplicationStats> {
+  return replicateWith(localPeer(mgr, localId), localId, http, opts, (replId, seq) => mgr.checkpoint(localId, replId, seq));
+}
+
+/** A one-shot replication run entirely over a raw store + http (the browser Worker) — the local peer,
+ *  checkpoint and store all in-process, only the remote peer crossing the wire. */
+export function storeReplicate(store: GraphStore, localRef: string, http: Http, opts: ReplicateOptions): Promise<ReplicationStats> {
+  return replicateWith(storePeer(store), localRef, http, opts, (replId, seq) => checkpoint(store, replId, seq));
 }

@@ -1,5 +1,6 @@
-import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
+import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
 import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
+import { managerReplicate } from '../replicate.ts';
 import { type Framed } from '../execute.ts';
 import type { TypeNode } from '../gremlin/types.ts';
 import { compilePlan } from '../compiler/compiler.ts';
@@ -116,6 +117,14 @@ export class CloudflareGraphManager implements GraphManager {
   }
   bulkDocs(id: string, changes: WireChangeSet): Promise<void> {
     return this.ns.getByName(id).bulkDocs(changes);
+  }
+  checkpoint(id: string, replicationId: string, seq?: number): Promise<number> {
+    return this.ns.getByName(id).checkpoint(replicationId, seq);
+  }
+  // The loop runs HERE, at worker residency (§7): the local peer is the DO over RPC, the remote peer an
+  // http caller, so the DO is never blocked on an outbound wait.
+  replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats> {
+    return managerReplicate(this, this.http, id, opts);
   }
   destroy(id: string): Promise<void> {
     return this.ns.getByName(id).destroy();

@@ -140,6 +140,12 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS tombstones_gid ON tombstones(gid)`,
   `CREATE TABLE IF NOT EXISTS update_seq(value INTEGER NOT NULL)`,
   `INSERT OR IGNORE INTO update_seq(rowid, value) VALUES (1, 0)`,
+  // A replicator's resumable checkpoint (§9·2, CouchDB's `_local/{replication_id}`): where THIS graph is
+  // caught up to on a given peer, keyed by a deterministic replication id. NOT replicated — it is local
+  // job state (CouchDB excludes `_local` from replication), so it lives in its own table, never in the
+  // feed. Minimal for Phase 3 (`source_last_seq`); Phase 5 extends it with the session history (§9·2).
+  `CREATE TABLE IF NOT EXISTS replication_checkpoint(
+     replication_id TEXT PRIMARY KEY, source_last_seq INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,

@@ -301,6 +301,19 @@ export interface WireChangeSet {
   readonly deletes?: readonly WireDelete[];
 }
 
+/** A one-shot `_replicate` request (§9): exactly one of `source`/`target` is a remote `http(s)` graph
+ *  URL, the other is (or defaults to) this graph — so `{source: url}` PULLS and `{target: url}` PUSHES. */
+export interface ReplicateOptions { readonly source?: string; readonly target?: string; }
+
+/** What one replication pass moved: entries read from the source feed, element bodies written, deletes
+ *  applied, and the source cursor reached (the new checkpoint). */
+export interface ReplicationStats {
+  readonly read: number;
+  readonly written: number;
+  readonly deleted: number;
+  readonly last_seq: number;
+}
+
 /** The graph-lifecycle seam AND the executor factory. `executor(id)` resolves a graph (creating
  *  it on demand) and returns its per-graph Executor — the single home for id→graph resolution,
  *  which is what federation reaches through (a sibling is just another graph THIS manager owns).
@@ -327,6 +340,13 @@ export interface GraphManager {
   /** Apply a change set to graph `id` (`_bulk_docs {new_edits:false}`) — land a peer's changes at their
    *  stated rev, idempotently and keyed by gid (§4·5). Store-tier write. */
   bulkDocs(id: string, changes: WireChangeSet): Promise<void>;
+  /** Read (`seq` omitted) or write (`seq` given) graph `id`'s replication checkpoint for `replicationId`
+   *  (§9·2) — where a replicator is caught up to on a peer. Returns the stored/written seq (0 if none). */
+  checkpoint(id: string, replicationId: string, seq?: number): Promise<number>;
+  /** Run ONE replication pass for graph `id` against the remote peer named in `opts` (§9): pull or push,
+   *  `_changes` → `_revs_diff` → `_bulk_get` → apply → checkpoint. Resumable — a re-run from the stored
+   *  checkpoint is a no-op when nothing changed. */
+  replicate(id: string, opts: ReplicateOptions): Promise<ReplicationStats>;
   /** Destroy graph `id` and all its storage. Idempotent. */
   destroy(id: string): Promise<void>;
 }
