@@ -450,6 +450,24 @@ keep "all history," and what it *does* keep is either self-bounding or cheap:
 So there is no retention horizon and no mandatory pruning in v1: keep everything, `since=0` is the full sync,
 and a purge mechanism is a later, optional addition — not a prerequisite.
 
+### §6·5 The schema deltas — CouchDB-named where it makes sense
+
+The element-level additions are three columns on `nodes` and `edges`, named to mirror CouchDB's document
+fields (SQL-formatted — snake_case, no `_` field-prefix, since a SQL column needs no "reserved" marker):
+
+| CouchDB field | mogwai column | type | notes |
+|---|---|---|---|
+| `_id` | `gid` | BLOB (16-byte uuid_v7), indexed | global identity (§6·1). NOT `id` — that stays the local rowid. |
+| `_rev` / `_revisions` | `rev` | BLOB (JSONB) | generation + content hash + bounded rev-tree (§5·2). |
+| `seq` / `update_seq` | `seq` | INTEGER, indexed | the by-sequence cursor (§5·3); `_changes?since=N` is `WHERE seq > N`. |
+
+`id` (rowid) and `uid` (now free for users) are unchanged. Deletes (CouchDB `_deleted`) are a small
+**`tombstones`** table, not a `deleted` flag on live rows — a flag would force `WHERE deleted=0` on every
+traversal (hot path); a side table keeps live reads clean while still feeding the cursor:
+`tombstones(gid BLOB, rev BLOB, seq INTEGER, kind TEXT)`, so `_changes?since=N` is a UNION of live
+`nodes`/`edges` `WHERE seq > N` and `tombstones WHERE seq > N`, and a delete replicates as a
+`_deleted`-style marker (§6·4).
+
 ---
 
 ## §7. The transport — mogwai as an outbound HTTP client (the shared foundation)
@@ -575,6 +593,38 @@ corrupt graph, not a replica. So we follow CouchDB's *design* as the gold standa
 endpoint *shapes* for familiarity, but wire-level interop with a real CouchDB is out of scope: our peer
 protocol is mogwai↔mogwai.
 
+### §9·2 The control-plane store — dedicated tables, CouchDB-named (not dogfooded as a graph)
+
+The scheduler/config/job state lives in **dedicated tables in the graph's own DO SQLite — not stored as a
+graph.** Dogfooding our engine is right where data is genuinely graph-shaped and user-facing (the replication
+payload IS a graph; federation IS the engine), but control-plane metadata is the wrong fit: our "graph" unit
+is a whole DO with the full schema (vs CouchDB's lightweight db), the state is tiny, local, churny, read on
+the hot alarm path, and — decisively — must NOT be replicated or versioned (you never replicate your
+replication job state; CouchDB itself excludes `_replicator`/`_local` from replication). A plain table is
+non-replicated by construction (not an element table); a graph would need a special "don't replicate this"
+exception. The queryable/introspectable benefit comes from the management REST + OpenAPI surface, not from
+graph storage. So: small tables, **field names mirroring CouchDB** (SQL-formatted) so a CouchDB user reads
+them fluently:
+
+- **`replication_checkpoint`** (CouchDB `_local/{replication_id}`): `replication_id TEXT PRIMARY KEY,
+  session_id TEXT, source_last_seq, replication_id_version INTEGER, history BLOB` — `history` a JSONB array of
+  session records with CouchDB's own field names (`session_id, start_last_seq, end_last_seq, recorded_seq,
+  start_time, end_time, docs_read, docs_written, doc_write_failures, missing_checked, missing_found`).
+- **`replication_config`** (CouchDB `_replicator` doc): `id TEXT PRIMARY KEY, source TEXT, target TEXT,
+  continuous INTEGER, create_target INTEGER, filter TEXT, checkpoint_interval INTEGER, use_checkpoints
+  INTEGER` — `filter` holds the captured traversal for filtered replication (§11).
+- **`replication_job`** (CouchDB `_scheduler/docs` + `_scheduler/jobs`): `config_id TEXT, replication_id
+  TEXT, state TEXT, error_count INTEGER, info BLOB, last_updated, start_time` — `state` uses CouchDB's own
+  vocabulary (`initializing / running / pending / crashing / completed / failed`).
+
+**System HTTP URLs take the `_` prefix (CouchDB's convention), not `~`.** `~` is TinkerPop's *hidden-property*
+marker (and `_` is a legal Gremlin property key, so `_` can't be the hidden marker in property space); but in
+URL space `_` is the near-universal REST "system endpoint" marker (CouchDB `_changes`, ES `_search`), it is
+what CouchDB's endpoint *names* already carry (so keeping it follows the governing principle, not a cosmetic
+rename), and it reserves the namespace cleanly for a future CouchDB-style `_design`/`_view` rendering surface.
+Each layer keeps its own authoritative marker — `~` for Gremlin hidden properties, `_` for system HTTP URLs —
+and the difference signals the layer boundary.
+
 ---
 
 ## §10. The phased plan — unlock order
@@ -626,7 +676,7 @@ the smallest proof come first, and the genuinely hard graph semantics come after
 
 ---
 
-## §11. Open design decisions — to resolve in discussion
+## §11. Design decisions — resolved; what remains is the build (§10)
 
 Governing principle (§4): **follow CouchDB; deviate only when empirically better or graph-forced.** Resolved
 in review (recorded so they are not reopened): **rev = generation + content hash, held as a bounded rev-tree
@@ -640,14 +690,17 @@ with a URI, `io()` with a URL), ongoing replication is a persistent config + sch
 with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **CouchDB wire interop is a non-goal**
 (§9·1); **CouchDB is vendored for reference** (§14); **the Merkle backstop is dropped — CouchDB has none and
 it is not graph-forced** (§5·4); **the referential conflict never rejects and never loses — a referencing
-edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
+edge resurrects a deleted endpoint, the delete surfaced** (§6·3); **peer protocol + system URLs = CouchDB's
+names with the `_` prefix** (§9·2); **rev-tree depth cap = CouchDB's `_revs_limit` default 1000, configurable**
+(§6·4); **control-plane state in dedicated CouchDB-named tables, not dogfooded as a graph** (§9·2); **element
+schema deltas (`gid`/`rev`/`seq` + `tombstones`) CouchDB-named** (§6·5).
 
-1. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
-2. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
-3. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
-   the replicated subgraph) is the natural analog and composes with our engine — in scope for the design,
-   later for the build. Interacts with referential integrity (a filtered subgraph can produce dangling
-   edges by construction).
+**No open design decisions remain** — what is left is the build (§10). One feature is designed but deferred:
+**filtered replication** is a *captured traversal* (the vertex selector — CouchDB's selector/`doc_ids`
+analog, stored in `replication_config.filter`) plus the never-dangle resolution we already defined (§6·3): an
+edge to a boundary endpoint the filter didn't select pulls that endpoint in (edge-as-existence-claim), so a
+filtered pull always yields a valid edge-closed subgraph, never a dangling one. No new machinery — a
+traversal plus a rule we already have.
 
 ---
 
