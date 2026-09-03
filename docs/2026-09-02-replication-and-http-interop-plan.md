@@ -423,12 +423,15 @@ Each phase is independently valuable and lands green before the next.
   - ✅ the unified `dirty` marker (`gid IS NULL` → `dirty` flag); a create is born dirty, the refresh clears it.
   - ✅ `rev` on the compiled CREATE path: every created element gets `{gen:1, hash}`; identical content
     converges across independent graphs; an edge's rev references its endpoint gids.
-  - ⏳ **REMAINING (a focused follow-up — intricate write-path surgery):**
-    1. **rev recompute on MUTATION (touch-on-write).** A content mutation must set `dirty = 1` so the refresh
-       recomputes+chains the rev. The marker is a `markDirty(owners)` RelIR `update` (the `update` factory +
-       emitter exist) spliced into every content-mutation site — `propertyStatements` (add/remove),
-       `propertyDrop`, `labelMutationScope`, and merge's onMatch arm (which reuses those helpers). Note the
-       THREE differing binding styles across those functions (`bind` / explicit `bindings[]` / `effectScope`).
+  - ✅ **rev recompute on MUTATION (touch-on-write).** `markDirty(elem, owners)` is one RelIR `update`
+    (`UPDATE <nodes|edges> SET dirty = 2 WHERE id IN <owner ids>`, the twin of `deleteOwnedBy`, O(plan
+    size) via `InQuery`), spliced once per content-mutation site over the OWNER ELEMENTS only — a create
+    is already born dirty so it never marks. Sites: `elementProperty` (property add/remove),
+    `labelMutationScope` (addLabel/dropLabel, vertex-only), `propertyDrop` (owner element derived via the
+    new `propertyOwnerId`; its snapshot now carries both the property row id and the owner id from one
+    lowering), and both merge onMatch/tail arms (mergeV/mergeE, guarded on there being a write, so a pure
+    match bumps nothing). A mutation chains the rev (gen 2, new hash); an untouched sibling keeps its rev.
+  - ⏳ **REMAINING (a focused follow-up):**
     2. **rev through the bulk/format path.** GraphSON carries `rev` (writer emits `json(rev)`, reader parses;
        parallels the gid field already added), and the bulk loader PRESERVES a document's rev / computes one
        when absent — so rev survives an `io()` round-trip, completing the gate. (bulk currently leaves rev
