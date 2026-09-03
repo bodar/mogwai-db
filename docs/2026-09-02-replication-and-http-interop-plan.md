@@ -1,828 +1,488 @@
 # Replication, and mogwai as an HTTP client of another graph — design + plan
 
-_Design doc AND phased plan. This is not a changelog and not a commitment to build tomorrow — it records
-what a CouchDB-grade replication experience WOULD take on top of what we already have, where the genuine
-design choices are, and the order to build in. The authority is the code; where this cites CouchDB or
-prior art it cites the canonical source so the claim is checkable. The one decision this doc deliberately
-does NOT foreclose is the change-detection model (§5) — that is a discussion, and the doc's job is to make
-it a well-shaped one, not to pick for you._
+_Settled design + phased build plan (not a changelog). It records what a CouchDB-grade replication
+experience takes on top of what we have, the decisions (all made — §11), and the build order (§10). The
+authority is the code; CouchDB / prior-art claims cite the canonical source. Governing rule throughout (§4):
+**follow CouchDB; deviate only when empirically better or graph-forced.**_
 
-Two features share one foundation and so share one doc:
+Two features, one foundation:
 
-1. **Replication** — the CouchDB developer experience: point a local graph at a remote one over HTTP and
-   pull it down (or push it up), incrementally, resumably, in a direction you control. Debug a production
-   graph on your laptop by syncing it, through a single URL.
-2. **External-HTTP federation** — `federate()` today crosses to a sibling graph over Durable Object RPC
-   (`src/services/catalog/federate.ts`). The same seam can reach an *external* TinkerPop graph server over
-   HTTP.
+1. **Replication** — the CouchDB DX: point a local graph at a remote one over HTTP and pull it down (or push
+   up), incrementally, resumably, direction your choice. Debug a production graph on your laptop through one URL.
+2. **External-HTTP federation** — `federate()` crosses to a sibling graph over DO RPC today
+   (`src/services/catalog/federate.ts`); the same seam can reach an *external* TinkerPop server over HTTP.
 
-The foundation both need is the one thing mogwai has never been: **an outbound HTTP client of another
-graph.** Today mogwai is only ever a server. Build the client once and both features stand on it.
+Both need the one thing mogwai has never been: **an outbound HTTP client of another graph.** Build it once.
 
 ---
 
 ## §1. The experience we are chasing, and why it does not exist yet
 
-CouchDB's replication DX is justly loved: `POST /_replicate {"source": "...url...", "target": "...url..."}`
-and you are done. Push and pull are the same operation with the endpoints swapped. It survives
-disconnection, resumes from where it stopped, and never silently loses a write. The canonical description
-is worth reading in full — the "Is it like Git?" essay
-([couchdb replication/conflicts, "What is the CouchDB replication protocol?"](https://docs.couchdb.org/en/stable/replication/conflicts.html)):
+CouchDB's DX: `POST /_replicate {source, target}` and you are done — push and pull are one operation with the
+endpoints swapped, it survives disconnection, resumes, and never silently loses a write ("a replicator simply
+connects to two DBs as a client, reads from one and writes to the other" —
+[couchdb "Is it like Git?"](https://docs.couchdb.org/en/stable/replication/conflicts.html)).
 
-> A replicator simply connects to two DBs as a client, then reads from one and writes to the other. …
-> CouchDB has no way of knowing who is a normal client and who is a replicator … It all looks like client
-> connections. Some of them read records. Some of them write records.
-
-**This DX does not exist for graph databases.** The prior-art sweep (§3) is unambiguous: every mainstream
-property-graph database does replication as *intra-cluster* consensus (Raft) plus async read-replica
-log-shipping. Where a change feed exists, the vendor disclaims replication with it — Neo4j states its CDC
-"is not the right tool to create an exact copy of a Neo4j database"
-([Neo4j CDC intro](https://neo4j.com/docs/cdc/current/)). The one vendor that built cross-deployment async
-logical replication (ArangoDB DC2DC) *retired* it. The only genuinely CouchDB-like graph system, GUN.js,
-buys the DX by giving up rich querying and resolving conflicts at the key/value level, beneath the
-graph-structural invariants a Gremlin-over-SQL engine must protect
-([GUN conflict resolution](https://github.com/amark/gun/wiki/Conflict-Resolution-with-Guns)).
-
-So this is whitespace: **"point a URL at a remote graph and pull it, independent of any cluster, over
-HTTP" is a first-class feature no serious graph query engine offers.** It is also a natural fit for our
-substrate — one graph is one Durable Object, addressed by a URL already (`/gremlin/{g}`), created on first
-access, torn down idempotently. A DO *is* a standalone, independently-addressable graph. That is exactly
-the topology CouchDB replication assumes and Neo4j's cluster model forbids.
+**No graph database offers this.** Mainstream graph DBs replicate via *intra-cluster* Raft + async
+read-replica log-shipping — never independent-instance sync. Where a change feed exists the vendor disclaims
+it (Neo4j: CDC "is not the right tool to create an exact copy of a Neo4j database"); the one cross-deployment
+logical attempt (ArangoDB DC2DC) was *retired*; the only CouchDB-like graph system (GUN.js) gets the DX only
+by dropping rich querying and resolving conflicts below graph invariants. So this is real whitespace — and a
+natural fit: one graph is one Durable Object, already a standalone URL-addressed graph (`/gremlin/{g}`),
+exactly the topology CouchDB assumes and clusters forbid. (Sources: §13.)
 
 ---
 
 ## §2. The platform envelope — LAW, do not re-derive
 
-**Replication for mogwai must be LOGICAL (graph elements over HTTP), never physical (storage/WAL). This is
-forced, not chosen.** On Cloudflare Durable Objects we get `ctx.storage.sql` — a synchronous, sandboxed,
-SQL-only surface — and nothing beneath it. Every physical-replication mechanism needs a hook we do not
-have:
+**Replication must be LOGICAL (graph elements over HTTP), never physical (storage/WAL) — forced, not
+chosen.** On Cloudflare DO we get `ctx.storage.sql` and nothing beneath it: no file/WAL, no VFS, no FUSE, no
+loadable extensions (only FTS5/JSON/math). So every physical mechanism is out — Litestream/LiteFS (file/WAL),
+dqlite/libSQL (VFS/frame), cr-sqlite (loadable extension), and Cloudflare's own DO WAL replication (exists,
+but platform-internal, no developer hook). **The sharpest trap: the SQLite session extension is in
+`bun:sqlite` but NOT on DO** — a changeset prototype passes every dev test and cannot ship. *A mechanism not
+present on BOTH runtimes is not a mechanism* (the `src/cf-limits.ts` discipline).
 
-| Mechanism | Needs | Available to us on DO? |
-|---|---|---|
-| Litestream | direct `-wal` file access + checkpoint control | No — no filesystem ([litestream how-it-works](https://litestream.io/how-it-works/)) |
-| LiteFS | a FUSE mount interposed on SQLite's file I/O | No — no filesystem ([LiteFS architecture](https://github.com/superfly/litefs/blob/main/docs/ARCHITECTURE.md)) |
-| dqlite | a custom VFS compiled into SQLite | No — no native extensions ([dqlite replication](https://canonical.com/dqlite/docs/explanation/replication)) |
-| Turso/libSQL embedded replicas | a WAL-frame client/server below SQL | No — same |
-| cr-sqlite | a **loadable** native extension | No — DO enables only FTS5/JSON/math; loadable extensions unsupported ([workerd#6878](https://github.com/cloudflare/workerd/issues/6878)) |
-| SQLite session extension (changesets) | the compiled-in `sqlite3session_*` C API | **Bun yes, DO no** — asymmetric, so unusable as the shared mechanism ([Bun Session](https://bun.com/reference/node/sqlite/Session), [DO SQL API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)) |
-| Cloudflare's own DO WAL replication (PITR, read-replicas) | it exists — but is platform-internal | No hook — the same sandbox boundary that gives Cloudflare its exclusivity walls it off from us ([sqlite-in-DO](https://blog.cloudflare.com/sqlite-in-durable-objects/)) |
-
-The session extension is the sharpest trap: it is right there in `bun:sqlite`, so a dev-only prototype
-would work and then be impossible to ship. **A mechanism that is not present on BOTH runtimes is not a
-mechanism** (this is the same discipline `src/cf-limits.ts` enforces for binds).
-
-What the constraint LEAVES is exactly the logical model, and two production systems validate it from
-different angles: **rqlite** proves that replicating the *deterministic operation* (not storage bytes)
-through an ordinary SQL path is production-grade ([rqlite FAQ](https://rqlite.io/docs/faq/)); **cr-sqlite**
-proves a per-row/per-column logical-clock changes-table, merged by ordinary `SELECT`/`INSERT`, is a
-production-grade *conflict* strategy ([cr-sqlite](https://github.com/vlcn-io/cr-sqlite)) — and it needs
-nothing a plain `sql.exec()` cannot do. We re-implement the *model*, in application code, on plain SQL.
-That is not a compromise imposed on us; it is precisely why lifting CouchDB's *logical* protocol is the
-correct instinct.
+What is left is exactly the logical model, in application code on plain SQL — validated by rqlite (replicate
+the deterministic operation, not bytes) and cr-sqlite (a logical-clock changes model merged by ordinary SQL).
+That is precisely why lifting CouchDB's logical protocol is right, not a compromise.
 
 ---
 
-## §3. Prior art — where everyone else landed, and the one line worth stealing from each
+## §3. Prior art — the gap, and the few lines worth stealing
 
-Full citations in the research appendix (§13). The landscape, along one axis — *can two independently-run
-instances, not members of one live cluster, be pointed at each other and synced, tolerating
-disconnection?*:
+Full landscape in §13; three takeaways are load-bearing rather than survey noise:
 
-- **Neo4j** — Raft among core servers (synchronous), transaction-log shipping to read replicas
-  (asynchronous), both strictly intra-cluster. No independent-instance sync. Its **catchup protocol** is
-  two-tier — incremental log-ship when the gap is small, **fall back to a full store copy** when the gap
-  exceeds retained history — but that split is a *retention artifact*: Neo4j's transaction log rotates, so a
-  far-behind replica can't be served incrementally. We deliberately do NOT copy this (§7): keeping the by-seq
-  feed current-state-sized (§5·3) means `since=0` is always a valid full sync, so one mechanism covers both
-  cases. Its **bookmarks** (a write returns a token; a read can block until a replica has caught up to it)
-  are a clean causal read-your-writes primitive worth stealing. Neo4j **CDC** is a cursor feed
-  (`db.cdc.current` / `db.cdc.query(since, selectors)`) but is explicitly *not for making an exact copy*.
-- **Dgraph** — Raft per predicate-shard. Predicate-as-shard-key is an interesting *sharding* axis, nothing
-  new for async logical replication.
-- **JanusGraph** — has no replication of its own; delegates to the storage backend (Cassandra). This is
-  the option we structurally *cannot* take — there is no storage seam below us to delegate to. Worth
-  stating precisely because it is the reflex answer ("just let the store replicate") and it is unavailable.
-- **TigerGraph / Neptune** — async cross-region via Kafka-mirrored change log (TigerGraph CRR) or
-  storage-layer volume replication + a CDC stream (Neptune). Neptune Streams is the one case a vendor
-  *does* reuse its change feed as the replication payload — but only inside AWS-managed infrastructure.
-- **ArangoDB** — Active Failover (async, read-only followers pulling the leader's WAL). DC2DC, the one
-  cross-cluster async logical option, was **removed in 3.12** — a cautionary data point on the cost of
-  maintaining exactly this.
-- **FalkorDB/RedisGraph** — Redis primary/replica; ships *effects*, not query replay. The universal
-  principle: **ship the materialized mutation, never re-execute the query on the far side.**
-- **GUN.js** — the only real CouchDB-like graph sync (CRDT/HAM, multi-master, offline). Proves the *DX
-  category* is achievable; its trade-offs (no rich query engine, conflict resolution below graph
-  invariants) are exactly what we will not accept, which is what makes this hard rather than solved.
+- **The gap is real** (§1) — no serious graph query engine offers independent-instance, over-HTTP,
+  disconnection-tolerant sync. We are not missing a standard solution.
+- **A change feed is not a replication protocol** (Neo4j CDC; Neptune Streams only within AWS infra) — an
+  exact copy needs the rev/checkpoint discipline, not just a feed.
+- **Ship the materialized mutation, never re-execute the query on the far side** (FalkorDB and all) — a
+  replayed non-deterministic traversal diverges peers. (Trap, §12.)
 
-The synthesis: mainstream graph DBs converge on Raft + async read-replica log-shipping, sometimes with a
-CDC feed *deliberately scoped to feed other systems*; the one cross-deployment logical attempt was
-withdrawn; and the CouchDB DX shows up only in a CRDT-first system that is not in our class of engine. The
-gap is real.
+One mechanism we explicitly REJECT: Neo4j's two-tier catchup (incremental + full-store-copy fallback) — it
+exists only because Neo4j's tx log rotates, a premise our design avoids (§7).
 
 ---
 
-## §4. What ports from CouchDB, and the one thing that inverts
+## §4. What ports from CouchDB, the inversion, and the governing principle
 
-The transferable core of CouchDB is **five primitives**, none of which is the document data model
-([couchdb replication protocol](https://docs.couchdb.org/en/stable/replication/protocol.html)):
+The transferable core is **five primitives**, none of which is the document data model
+([replication protocol](https://docs.couchdb.org/en/stable/replication/protocol.html)):
 
-1. A **monotonic change sequence** — `_changes?since=<seq>`, an *opaque* cursor over write history
-   (CouchDB is explicit: the seq "MUST be incremental, but MAY NOT always be an integer" — never parse it).
-2. A **cheap "what are you missing?" diff** — `POST /_revs_diff {id: [rev,…]}` → the subset the target
-   lacks. A pure key lookup that never touches a body. *This is the efficiency engine.*
-3. A **resumable checkpoint** — a deterministic replication-id keyed to the config, stored in a
-   non-replicated `_local/{id}` doc; both peers record it, and resume from the latest *common* session.
-4. **Direction-agnostic roles** — source is read-from, target is written-to; push = pull with the roles
-   swapped; the replicator is just an HTTP client of both.
-5. **Idempotent replay** — `_bulk_docs {new_edits:false}` writes documents at their stated rev, so
-   re-running a batch is a no-op.
+1. A **monotonic change cursor** — `_changes?since=N`, an *opaque* cursor (never parse it).
+2. A **cheap "what are you missing?" diff** — `_revs_diff`, a pure key lookup that never touches a body. *The
+   efficiency engine.*
+3. A **resumable checkpoint** — a deterministic replication-id, stored in a non-replicated `_local/{id}`.
+4. **Direction-agnostic roles** — push = pull with source/target swapped; the replicator is just an HTTP
+   client of both.
+5. **Idempotent replay** — writes at a stated rev (`_bulk_docs {new_edits:false}`), so re-running is a no-op.
 
-**The one thing that does NOT port is the reason CouchDB's replicator is "trivial."** From the essay
-again: *"Every record in CouchDB is completely independent of all others. That sucks if you want to do a
-JOIN or a transaction, but it's awesome if you want to write a replicator. Just figure out how to
-replicate one record, and then repeat that for each record."*
+**What does NOT port is the reason Couch's replicator is "trivial": every record is independent.** A graph is
+nothing but joins — an edge references two vertices by identity. That inversion is the root of every
+graph-specific hard part in §6.
 
-A graph is nothing *but* joins. An edge is a join made durable — it references two vertices by identity. So
-the graph *inverts* CouchDB's founding assumption, and that inversion is where every graph-specific hard
-part in §6 comes from: you cannot replicate one element in isolation, order does not commute (an edge
-needs its endpoints first), a "conflict" can violate a structural invariant rather than just fork a
-value, and deletion has referential consequences. The five primitives port; the triviality does not.
-
-**Governing principle (LAW): CouchDB is the gold standard; we deviate ONLY when we can empirically do
-better, or when graph semantics force it.** "Simpler for us" is not a licence — it is the reasoning that
-produced a wrong first cut here (a discard-LWW conflict model, since corrected). Measured against this
-principle the whole design has exactly **two** graph-forced deviations, each recorded at its section: the
-**transfer ordering** vertices-before-edges (§6·2) and the **referential conflict** rule for an edge to a
-deleted endpoint (§6·3), neither of which has a document-store analog. Everything else follows CouchDB — the
-identity (a `uuid_v7` `gid`, CouchDB's own default), the rev (generation + content hash), conflict
-preservation, the by-sequence feed, keeping tombstones — because CouchDB is right and we have no empirical
-reason to differ. (One thing is *orthogonal* to CouchDB rather than a deviation: a local integer rowid as the
-fast join key, separate from the `gid` — §6·1 — an internal optimization SQLite hands us that a document
-store has no need for.) The two graph-forced deviations share one root: **an edge is the JOIN that CouchDB
-documents do not have.**
+**Governing principle (LAW): CouchDB is the gold standard; deviate ONLY when we can empirically do better or
+when graph semantics force it.** "Simpler for us" is not a licence (it produced a wrong first cut — see the
+traps in §12). Measured against it, the design has exactly **two** graph-forced deviations: the **transfer
+ordering** vertices-before-edges (§6·2) and the **referential conflict** rule (§6·3) — both rooted in "an
+edge is the JOIN documents don't have." Everything else follows CouchDB. (One thing is *orthogonal*, not a
+deviation: a local integer rowid as the fast join key — §6·1 — an SQLite optimization a document store has no
+need for.)
 
 ---
 
-## §5. The central axis — the change model (resolved)
+## §5. The change model
 
-The research (§13) shaped this, and the reframe — "is there a more tractable way?" — resolved not by
-replacing the mechanism but by **decomposing it**, then holding each piece against the governing principle
-(§4). The resolution below is CouchDB's model almost wholesale: the one place we thought we'd deviate
-(conflicts) we now do NOT, and the place we thought needed new machinery (pruning) turns out not to, once
-CouchDB's *actual* mechanism is understood.
+CouchDB's `_rev` bundles two separable jobs, and separating them is what makes this tractable:
 
-### §5·1 "Rev" is secretly doing two jobs (and a tempting third we don't need)
+1. **Identity / version / conflict** — answered by the rev (a per-element `generation-hash`), §5·1.
+2. **The `since` cursor** — answered by a by-sequence index, §5·2.
 
-CouchDB's `_rev` bundles responsibilities that are separable, and separating them is what makes the problem
-tractable:
+A tempting third job — a **Merkle-tree backstop** for checkpoint-free reconciliation / bit-rot — is NOT
+needed (§5·3). We land on CouchDB's answers for 1 and 2 and stop there.
 
-1. **Identity / idempotency / conflict** — "are these the same version; what are you missing; is replaying
-   this a no-op." Answered by a per-element content signature.
-2. **The `since` cursor** — "enumerate what changed after checkpoint X." Answered by an *ordering*, which a
-   content hash alone cannot provide (a hash tells you *whether* something differs, not *when*).
+### §5·1 The rev — generation + content hash, a dedicated column
 
-A tempting third — **a backstop** ("reconcile peers with no shared history, or catch bit-rot," via a Merkle
-tree) — turns out NOT to be needed: CouchDB does not have one, and its absence is not graph-forced (§5·4).
-CouchDB answers job 1 with the rev (a bounded rev-tree per doc) and job 2 with a by-sequence index; we land
-on both of CouchDB's answers, and stop there.
+**DECIDED: `rev` = generation + content hash, a dedicated column on `nodes`/`edges`** (alongside `gid`, §6·1;
+both columns, not properties — §6·5 for why). This is CouchDB's model. Generation is a *logical* clock
+(increments from the parent rev), deliberately NOT wall-clock time — a time-based rev would make the conflict
+winner depend on whose clock was right. Content hash is the entropy. Together: idempotent replay (identical
+writes converge to the same rev) AND the deterministic conflict winner §6·3 needs (higher generation, then
+higher hash). `_revs_diff` is then a query over the `gid`/`rev` columns, not a bespoke mechanism.
 
-### §5·2 Job 1 — the rev: generation + content hash, a dedicated column
+The real cost is *maintenance*, not storage: every mutation recomputes the rev, which means reading the
+element's current content (O(element size) per write) — a "touch the rev on write" hook, cheapest as an
+in-place column update (§6·5). Because we preserve conflicts (§6·3), `rev` holds a bounded rev-TREE (current
+leaf(s) + stemmed ancestry) as a JSONB blob, winner cheap off the front; losing leaves live in a
+shadow/conflict store read only by a conflict-aware query.
 
-**DECIDED: `rev` = generation + content hash, stored as a dedicated column on `nodes`/`edges`** (alongside
-`gid`, §6·1 — both columns, not hidden properties, for the storage/perf reasons there). This IS CouchDB's
-model — `_rev` is a `generation-hash` pair. Generation is a *logical* clock (it increments from the parent
-rev), deliberately NOT wall-clock time: a time-based rev would make the conflict winner depend on whose clock
-was right across peers. The content hash is the entropy. Together they give idempotent replay (identical
-writes converge to the same rev, so re-sync dedups) AND the deterministic conflict winner §6·3 needs (higher
-generation, then higher hash).
+### §5·2 The `since` cursor — a by-sequence index, exactly like CouchDB
 
-- **`_revs_diff` is a query, not a mechanism.** "Which of your `(gid, rev)` do I lack?" is a predicate over
-  the `gid`/`rev` columns — it compiles to SQL like any traversal, dead-on for "compile to SQL, never
-  interpret."
-- **The maintenance is the real work; the storage is cheap.** Every mutation recomputes and rewrites the
-  element's `rev`, and to content-hash it the write path gathers the element's current content (O(element
-  size) per write). That "touch the rev on write" hook is model-independent — any rev scheme needs something
-  to bump the version on write — and the dedicated column makes it an in-place update on the row already being
-  written (§6·1), the cheapest place to put a thing that fires on every write.
-- **Conflict preservation (§6·3) makes `rev` a bounded rev-TREE, not a scalar** — the current leaf(s) plus a
-  stemmed ancestry (`_revs_limit`-style depth cap), enough to select a deterministic winner and graft an
-  incoming rev for revs-diff. Stored as a JSONB blob in the column (winner cheap off the front); the winner's
-  content stays in the normal live rows (query hot path untouched), losing leaves in a shadow/conflict store
-  read only by a conflict-aware query.
+**CouchDB's `_changes` is not an append-only op-log; it is a by-sequence index with ONE entry per document**
+(the doc's latest seq — a write *moves* the entry, doesn't append). So the feed is **current-state-sized
+(O(elements), not O(writes))**, and `since=0` returns each live doc once — which is why "keep everything from
+0" is cheap (it is just current state, which we already store).
 
-### §5·3 Job 2 — the `since` cursor: a by-sequence index, exactly like CouchDB
+**DECIDED: a per-element `seq` column (last-modified sequence from a per-graph monotonic counter), indexed.**
+`_changes?since=N` is `WHERE seq > N ORDER BY seq`; a write bumps the element's `seq` (and rev). This is
+strictly better than an append-only change-log table (which grows O(writes) and needs pruning the by-seq
+index does not — trap, §12).
 
-The content hash does not give a resumable ordered cursor. Something must — and CouchDB's answer, correctly
-understood, is the one to copy. **CouchDB's `_changes` is NOT an append-only op-log; it is a by-sequence
-index with ONE entry per document** (the doc's *latest* seq). Updating a doc *moves* its entry to a higher
-seq rather than appending, so the feed is **current-state-sized — O(elements), not O(writes)** — and
-`_changes?since=0` returns each live doc once (plus tombstones), not every write ever. This is the fact that
-makes "just keep everything from 0" cheap: "everything" is current state, which we already store.
+### §5·3 No Merkle backstop
 
-**DECIDED: a per-element `seq` (last-modified sequence, from a per-graph monotonic counter), indexed.**
-`_changes?since=N` is a range scan `WHERE seq > N ORDER BY seq` over an index holding one row per element; a
-write bumps the element's `seq` (and rev). This is CouchDB's by-seq, and it is strictly better than the
-append-only "change-log table" a first cut reaches for: no unbounded growth from writes (the index is
-graph-sized), and no separate log structure to maintain or prune. (A tombstone keeps a small retained entry
-so a delete still appears in the feed — §6·4.)
-
-Two rejected alternatives, for the record: an **append-only change-log table** grows O(writes) and needs
-pruning the by-seq index does not; **full-set reconciliation every sync** (compare every `(id,rev)`) needs
-no cursor but is O(size) each time — a fallback for the no-shared-checkpoint case (`since=0` handles it),
-not the continuous path.
-
-**The Merkle/prolly reframe — honestly costed.** Content-addressed, deterministically-chunked trees
-(Noms → Dolt, AT Protocol's MST, Cassandra/Dynamo anti-entropy) do give O(differences) *tree comparison*.
-But the research is decisive that this does not make it the everyday change detector for a normalized-SQL
-source of truth:
-
-- O(diff) is the cost of comparing two *already-built* trees. **Building and maintaining** the tree is the
-  real cost, paid on every write ([Dolt: prolly tree balance](https://www.dolthub.com/blog/2025-06-26-prolly-tree-balance/)).
-- The closest analogue to us — Dolt putting prolly trees over *columnar* (multi-structure) storage — hit
-  **multiplicative write amplification**: one logical write touches N independent structures, each needing
-  its own chunk-rewrite ([Dolt: prolly trees and columnar storage](https://www.dolthub.com/blog/2025-09-10-challenges-with-prolly-trees-and-columnar-storage/)).
-  Our schema is exactly that shape: one `addEdge` touches `edges`, two adjacency index positions, and
-  `edge_properties`.
-- **AT Protocol (Bluesky), a purpose-built greenfield MST system, moved its *sync* path off tree-diffing
-  onto a causally-ordered append log**, keeping the MST only for content-addressing/verification
-  ([atproto#1410](https://github.com/bluesky-social/atproto/discussions/1410)). The strongest field signal
-  there is: even from scratch, the log won the sync-critical role.
-- Cassandra builds Merkle trees **on demand** (O(size) to build) and makes it tractable via *incremental
-  repair* gated by a persisted "repaired-up-to" watermark — which is structurally a checkpoint/seq again
-  ([Cassandra repair / node density](https://rustyrazorblade.com/post/2025/repair-and-node-density/)).
-
-### §5·4 The backstop is NOT needed — a Merkle tree is a CouchDB deviation we can't justify
-
-The reframe (§13) genuinely works — an on-demand Merkle tree over `(id, rev)`, computed by scanning the rev
-properties, would give O(diff) reconciliation and bit-rot detection with no maintained shadow store. But
-leaning harder into CouchDB (§4) settles it the other way: **CouchDB has no Merkle tree, and we don't need
-one either.** Checking what it would uniquely buy, against the governing principle:
-
-- **First-contact / no-common-checkpoint reconciliation** — already handled by `since=0` (a full sync). No
-  Merkle needed.
-- **Bit-rot / silent-corruption detection** — the one thing a Merkle tree adds that rev+seq cannot. But
-  **CouchDB does not do this either**, it is not graph-forced, and we have no measured need — so it is not a
-  justified deviation.
-- **Efficient whole-graph equality for two large, mostly-synced peers that lost their checkpoints** — Merkle
-  is O(diff) where a `since=0` revs-diff is O(elements). Real, but a rare degenerate case; CouchDB's answer is
-  to keep checkpoints reliably (they are tiny) so you almost never hit it, and eat the slow path when you do.
-  We follow suit.
-
-So the Merkle tree is **dropped from the plan.** It was always the cleanly-separable "optional / last /
-can-be-never" piece, so removing it costs nothing and simplifies the model to two jobs (§5·1). Recorded here
-so it is not re-proposed; the obvious place to revisit **only if** a measured need appears — huge graphs that
-frequently reconcile without checkpoints, or a hard integrity-audit requirement.
-
-### §5·5 The resolution
-
-Following the governing principle (§4), the change model is CouchDB's, with the two graph-forced deviations
-isolated to §6:
-
-- **Job 1 — identity + version** — a `gid` column (uuid_v7, global identity) + a `rev` column (generation +
-  content hash, a bounded rev-tree); conflicts PRESERVED (CouchDB, §6·3), winner-on-read. Both dedicated
-  columns on `nodes`/`edges`, not hidden properties (§6·1).
-- **Job 2 — the cursor** — a per-element `seq` (by-sequence index, current-state-sized), driving
-  `_changes?since=N` and a revs-diff query. `since=0` is a full sync; there is ONE mechanism, not a
-  snapshot/incremental split (§7).
-- **No job 3.** The Merkle backstop is dropped (§5·4) — CouchDB works without one and we have no justified
-  reason to add it.
-
-What stays open is small and none of it blocks §10 Phase 0–1: the **rev-tree depth cap** (`_revs_limit`
-analog, §6·4) and the **id layout detail** (§6·1). The conflict, pruning, and backstop questions that were
-open are resolved — preserve conflicts (never reject, never lose); keep tombstones with no up-front pruning;
-no Merkle tree.
+The content-addressed-tree reframe (prolly/Merkle) genuinely gives O(diff) comparison, but it is **dropped**:
+CouchDB has no Merkle tree and doesn't need one, and neither do we. First-contact / no-shared-checkpoint
+reconciliation is already `since=0`; bit-rot detection is the only thing it uniquely adds and is not
+graph-forced. And the tree isn't free — building/maintaining it is O(size) write-amplifying work (AT
+Protocol's greenfield MST *retreated* to a causal log for its sync path). Revisit only on a measured need
+(huge graphs reconciling frequently without checkpoints, or a hard integrity-audit requirement). Trap, §12.
 
 ---
 
-## §6. The graph-specific hard parts — each a real sub-problem, not a footnote
+## §6. The graph-specific hard parts
 
-These are the consequences of §4's inversion. None is optional for a *faithful* replica; each is where "a
-trained monkey could design it" stops being true for a graph.
+These are the consequences of §4's inversion — where "a trained monkey could design it" stops being true.
 
 ### §6·1 Cross-peer identity — a uuid_v7 `gid`, separate from the local rowid
 
-**Our element ids are per-DO integer rowids** (`nodes.id` / `edges.id`, faced externally as
-`COALESCE(uid, id)`, `src/storage.ts`), and a rowid can NEVER be the cross-peer identity — not only across
-*different* graphs, but between two **replicas of the same graph, both writing**: prod and a laptop in sync
-(counters at 1000), prod creates a vertex → rowid 1001, the laptop creates a *different* vertex → also rowid
-1001, they replicate, and `1001` names two distinct vertices. A per-store sequential rowid is structurally
-unusable as identity.
+**A rowid can never be cross-peer identity.** Two instances mint rowids independently — including two
+*replicas of the same graph, both writing*: prod and a laptop in sync (counters at 1000) each create a
+different vertex → both rowid 1001 → they name two distinct vertices on replication. A per-store sequential
+rowid is structurally unusable as identity.
 
-**DECIDED: split the two jobs — the rowid stays a purely-local fast join key; a separate `gid` carries global
-identity.**
+**DECIDED: split the two jobs.**
 
-- **`rowid` — local, sequential, fast; a pure internal optimization, unchanged.** It is the
-  `INTEGER PRIMARY KEY`; it owns B-tree insert locality (sequential → inserts append, no mid-tree splits —
-  the SQLite version of the append-only-B-tree concern CouchDB documents for its own ids) and it is the
-  covering-index join key (`e_out`/`e_in`). It never leaves the store as identity. This is the *only* place
-  the "sequential is load-bearing" property lives.
-- **`gid` — global identity: a `uuid_v7` (RFC 9562), following CouchDB exactly** (uuid_v7 is CouchDB's own
-  default id since 3.6, `couch_uuids.erl`). 128 bits = a 48-bit ms timestamp + **74 random bits**, and it is
-  those 74 random bits that make it **globally unique with NO instance prefix, NO coordination, NO collision
-  fragility**: two independent deployments collide only on the same millisecond *and* the same 74-bit draw —
-  never. This **dissolves the entire prefix / instance-id / composite / bit-split analysis** an earlier draft
-  agonized over — that fragility was purely an artifact of trying to pack global uniqueness into the 64-bit
-  rowid; a separate 128-bit `gid` simply has enough bits. Immutable, assigned at element creation. (uuid_v7's
-  timestamp buys only secondary-index locality on bulk `gid`-index inserts — never uniqueness — so it does
-  NOT reintroduce a clock-skew *correctness* dependency: a backwards clock perturbs gid ordering slightly,
-  never uniqueness. That is why time is harmless here yet was rightly rejected for the rev winner.)
-- **`rev` — version (§5·2), separate from `gid`.** `gid` is *which* element (immutable); `rev` is *which
-  version* (changes per write) — CouchDB's `_id` vs `_rev` distinction.
+- **`rowid` — the local, sequential, fast join key; unchanged.** `INTEGER PRIMARY KEY`; owns B-tree insert
+  locality and is the covering-index join key (`e_out`/`e_in`). Never leaves the store as identity. The only
+  place "sequential is load-bearing" lives.
+- **`gid` — global identity: a `uuid_v7` (RFC 9562), CouchDB's own default id.** 128 bits = 48-bit ms
+  timestamp + **74 random bits**; those random bits make it globally unique with **no instance prefix, no
+  coordination, no collision fragility** (two independent deployments collide only on the same ms *and* the
+  same 74-bit draw — never). uuid_v7's timestamp buys only secondary-index locality, never uniqueness, so it
+  does not reintroduce a clock-skew *correctness* dependency. Immutable, assigned at element creation. (Packing
+  identity into the 64-bit rowid with a random prefix was explored and rejected — it made every prefix clash a
+  *total* collision; trap, §12.)
 
-**Both `gid` and `rev` are DEDICATED COLUMNS on `nodes`/`edges`, not hidden properties.** A property row
-stores its key string (`~gid`/`~rev`) inline on *every* element (keys aren't interned) plus a second index —
-at ~10⁸ elements that runs to double-digit GB of metadata against the 10 GB DO ceiling. Dedicated columns are
-far cheaper (no repeated key, one index) and faster on the two hot paths: the **write path** touches `rev`
-in-place on the element row it is already writing (vs inserting a property row + two index entries, on every
-mutation), and **replication-apply** resolves `gid`→element with one index seek (vs a property seek + join).
-It is also *more* CouchDB-faithful — Couch stores `_id`/`_rev` as cheap inline fields, not separate indexed
-rows. `gid` is a 16-byte value with its own index (gid→rowid lookup); `rev` is a JSONB blob holding the
-bounded rev-tree (§5·2), winner cheap off the front. The cost is a schema change plus explicit `gid`/`rev`
-plumbing in the format adapters (`src/formats/`) so they round-trip through io/export/import — a small,
-bounded addition (columns aren't carried automatically the way a property would be).
+**The local↔global mapping is the one real cost, and it rides existing machinery.** A replicated element gets
+a fresh local rowid; its immutable `gid` travels with it. Edges reference endpoints by `gid` on the wire; on
+apply we translate `gid`→local rowid — exactly the endpoint resolution `BatchingLoader` already does
+(`src/bulk.ts`), keyed on the indexed `gid` column. Ordinary single-graph traversal touches only rowids;
+`gid` surfaces at replication and federation-merge boundaries. `uid` stays free for users; interned label ids
+stay local (replication carries label/key NAMES, as `io()`/GraphSON already do).
 
-**The local↔global mapping is the one real cost, and it rides existing machinery.** A replicated element
-gets a *fresh local rowid* on the target (its origin rowid is meaningless here); its immutable `gid` travels
-with it. An edge's `rev` references its endpoints *by `gid`* (so the same edge hashes identically on every
-peer), and edges cross the wire referencing endpoints by `gid`; on apply we translate `gid`→local rowid to
-store `src`/`tgt` as fast local integers — exactly the endpoint resolution the `BatchingLoader` already does
-(`src/bulk.ts`), now keyed on the indexed `gid` column. Within ordinary single-graph traversal nothing but
-rowids is touched; `gid` surfaces only at replication and federation-merge boundaries. `uid` stays free for
-users — we never co-opt it; interned label ids stay *local* (replication carries label/property-key NAMES,
-which `io()`/GraphSON already do — only identity needs to be global). This is the quiet gating item for
-Phase 1.
+**Payoff — `gid` deletes ~375 LOC of federation machinery and closes the last open federate item.** Multigraph
+federation today disambiguates colliding sibling rowids in a merged stream via a first-class `graph`
+provenance channel + composite `(graph, id)` rejoin (`unifiedBoundGraph`, the `graph` `ChannelRole` + its four
+policy-table entries, `graphTag`/`LOCAL_GRAPH`, `postMergeTail`'s allow-list —
+`src/compiler/rel/{boundgraph,segment,lower/slice}.ts`, `src/channels.ts`, ~375 LOC). It exists only because
+two graphs can each mint rowid 5. With a globally-unique `gid`, a merged stream dedups/groups/rejoins by bare
+`gid` through the ordinary `BoundGraph`; the `graph`-channel apparatus deletes, and the deferred gaps it only
+partly covered (`hasLabel`/`has`/movement/`group` over a merged multi-graph stream — the last "multi-graph
+mixing / cross-graph identity" item in `docs/outstanding-work.md`) just compose. (The separate ~640 LOC of
+id-carry+rejoin for a *detached* foreign element — `foreign.ts` — is a physical-distribution concern,
+unaffected.)
 
-**A compounding payoff: `gid` deletes ~375 LOC of federation machinery and closes the last open federate
-item.** Multigraph federation today keeps sibling ids from colliding *only* when several landed graphs are
-UNIONed into one stream, via a first-class `graph` provenance channel + a composite `(graph, id)` rejoin
-(`unifiedBoundGraph`, the `graph` `ChannelRole` and its four policy-table entries, `graphTag` / `LOCAL_GRAPH`,
-and `postMergeTail`'s fail-closed allow-list — `src/compiler/rel/{boundgraph,segment,lower/slice}.ts`,
-`src/channels.ts`, `src/compiler/ir/step.ts`, ~375 LOC). All of it exists ONLY because two graphs can each
-mint rowid 5. A globally-unique `gid` removes the premise: a merged federated stream's identity is a **single
-globally-unique column**, so it dedups/groups/rejoins by bare `gid` through the ORDINARY `BoundGraph`, and the
-whole `graph`-channel apparatus is deletable. This closes the deferred gaps it only partly covered —
-`hasLabel` / `has` / movement / `group` / `groupCount` over a merged multi-graph stream (today `'unsafe'`,
-fail-closed in `segment.ts`; the last "multi-graph mixing / cross-graph identity" item in
-`docs/outstanding-work.md`) all just compose. (The separate ~640 LOC of id-carry+rejoin for a *detached*
-foreign element — `foreign.ts`, single-sibling `boundgraph.ts` — is a physical-distribution concern,
-unaffected in kind.) So `gid` is not only a replication prerequisite; it pays for itself in federation
-simplification — exactly the substrate win to bank. It also generalizes the base+federate mixed-merge case
-(`segment.ts` `nestedBarrierIn`, today fail-closed): every element already carries a `gid`, local ones
-included, so a base+federate merge is just another `gid`-keyed merge.
+### §6·2 Referential integrity and ordering — the read half is already solved
 
-### §6·2 Referential integrity and ordering — we already solved the read half
-
-An edge references two vertices; applying an edge before its endpoints exist is a dangling write. CouchDB
-never faces this (independent records). We already face and solve it *on load*: **the GraphSON two-pass
-loader lands every vertex, then every edge** (`loadGraphsonStreaming`, `src/formats/graphson.ts`), because
-an adjacency line's edge may target a later line. Replication is the same discipline over the wire:
-**transfer and apply vertices before edges**, and within a batch resolve endpoints against already-landed
-rows (the `BatchingLoader` pattern, `src/bulk.ts`). The unit of replication is therefore the *element*
-(vertex or edge), not a CouchDB-style "document" — but the *ordering* between the two element kinds is a
-hard constraint, not a convenience. A cross-batch edge whose endpoint has not yet replicated must either
-wait (buffer) or fail-closed and retry on a later pass — never write a dangling edge.
+An edge references two vertices; applying it before its endpoints is a dangling write. We already solve this
+on load: **the GraphSON two-pass loader lands every vertex, then every edge** (`loadGraphsonStreaming`,
+`src/formats/graphson.ts`). Replication is the same discipline over the wire: **transfer vertices before
+edges**, resolve endpoints against already-landed rows (`BatchingLoader`, `src/bulk.ts`). A cross-batch edge
+whose endpoint has not yet arrived waits or fails closed — never a dangling row (trap, §12).
 
 ### §6·3 Conflicts — CouchDB preservation, with one graph-forced exception
 
-**DECIDED: preserve conflicts, CouchDB-style — do NOT discard-LWW.** (This reverses a first cut that
-discarded the loser; under the governing principle §4, "simpler for us" was never a licence to deviate, and
-here it is not empirically better either — it silently loses writes.) So: keep *all* divergent leaves, pick
-a deterministic winner on read (not-deleted > higher generation > higher rev-hash lexically —
-`to_doc_info_path` in `couch_doc.erl`), resolve nothing automatically, and surface the losers to the
-application (a `~conflicts` analog of CouchDB's `?conflicts=true`) to resolve. Reads return the winner's
-content (the normal live rows — the query hot path is untouched); conflicts are invisible unless asked for.
+**DECIDED: preserve conflicts, CouchDB-style — never discard-LWW.** Keep all divergent leaves, pick a
+deterministic winner on read (not-deleted > higher generation > higher rev-hash lexically —
+`to_doc_info_path`, `couch_doc.erl`), resolve nothing automatically, surface losers to the application (a
+`~conflicts` analog of `?conflicts=true`). Reads return the winner from the normal live rows (hot path
+untouched); conflicts are invisible unless asked for. Multi-leaf does NOT break graph invariants — an edge
+references a vertex by stable id, constant across leaves; the divergent leaves are about *content*
+(properties/labels), which is pure CouchDB.
 
-**The earlier "multi-leaf breaks graph invariants" objection was overstated, and the real deviation is
-narrower.** An edge references a vertex by its stable id, and **the id is constant across leaves** — the
-divergent leaves are about an element's *content* (properties/labels), not its identity or existence. So a
-property/label conflict on a vertex is *pure* CouchDB and we follow it exactly. Even delete-vs-update on a
-single element is CouchDB-shaped: a delete is a `_deleted` leaf, and CouchDB's "not-deleted beats deleted"
-rule sensibly resurrects an element that has a concurrent update.
+**The one place with no CouchDB analog is the referential conflict**: peer A deletes vertex V while peer B
+keeps/adds an edge E→V. The CouchDB principle still binds — **replication always succeeds; never reject a
+write, never silently lose one** — so "refuse the delete" (rejection) and "drop the dangling edge" (data
+loss) are both out. Instead we extend CouchDB's own rule ("not-deleted beats deleted"): **a referencing edge
+is an existence-claim, so E resurrects V and V's delete becomes the surfaced conflict** — never rejects, never
+loses, and keeps the live graph consistent by construction (V is back, E doesn't dangle), no quarantine store.
+This is DECIDED, not a knob: delete-wins would invert CouchDB's rule and add machinery it doesn't have. (Trap,
+§12.)
 
-The **one** place with no CouchDB analog is the **referential** conflict: peer A deletes vertex V while peer
-B keeps (or adds) an edge E→V. Documents have no referential constraints, so CouchDB never faces a dangling
-reference; a graph must. But the CouchDB PRINCIPLE still binds: **replication always succeeds — never reject
-a write, never silently lose one.** So both naive options are out — "refuse the delete" *rejects* (forbidden),
-and "drop the dangling edge" *silently loses data* (forbidden). Instead we extend CouchDB's own winner rule:
-**"not-deleted beats deleted", and a referencing edge is an existence-claim on its endpoint.** So E's
-existence beats V's delete — **V is resurrected and its delete becomes the surfaced conflict** (a `~conflicts`
-entry the application resolves later: re-confirm the delete and cascade to E, or keep V). This never rejects,
-never loses (the delete is preserved as a losing leaf), and keeps the live graph referentially consistent by
-construction (V is back, so E does not dangle) — with no quarantine machinery. The alternative (delete-wins,
-edge quarantined-and-surfaced) is defensible if you want deletes to be sticky, but it needs a quarantine
-store and leaves an element in limbo. So edge-resurrects-endpoint is **DECIDED, not a knob**: delete-wins is
-itself a CouchDB *deviation* — it inverts CouchDB's rule (deletion beating existence) and needs quarantine
-machinery CouchDB doesn't have — so under §4 it is rejected, not an option. This plus the transfer ordering
-(§6·2) are the only two graph-forced deviations, and both share one root: an edge is the JOIN CouchDB
-documents lack.
-
-The cost (honest): preserving conflicts is heavier substrate than discarding — an element's content becomes
-rev-versioned (winner live in the normal rows; losing leaves in a shadow/conflict store) and the `rev` column
-holds a bounded rev-tree (§5·2). The read≫write reality softens it: conflicts are rare, so the shadow store is
-seldom populated. Under the governing principle this is the right price — it is what "never silently lose a
-write" costs, and CouchDB pays it.
+Honest cost: preserving conflicts is heavier than discarding — content becomes rev-versioned (winner live,
+losers in the shadow store). Read≫write makes conflicts rare, so the shadow store is seldom populated; it is
+what "never lose a write" costs, and CouchDB pays it too.
 
 ### §6·4 Deletes / tombstones, and why up-front pruning is NOT needed
 
-`drop()` deletes rows; there is no tombstone, no record that something *was* deleted (confirmed: no
-`deleted`/tombstone concept anywhere in `src/`). Replication must propagate deletions, and a pure "diff the
-live sets" approach cannot tell "deleted on the source" from "not yet created on the source." So replication
-needs **tombstones**: a small retained entry (kind, global id, rev, `deleted`) carrying its own `seq`, so a
-delete appears in the by-seq feed exactly as CouchDB ships a `_deleted` rev in `_changes`. A delete is a rev
-like any other and can lose to a concurrent update (§6·3).
+`drop()` hard-deletes and there is no tombstone today, but replication must propagate deletes (a live-set diff
+can't tell "deleted on source" from "not yet created"). So a delete records a **tombstone** (§6·5) carrying
+its own `seq`, appearing in the `_changes` feed exactly as CouchDB ships a `_deleted` rev.
 
-**Up-front pruning is NOT needed — a first cut over-engineered it.** Correctly understood, CouchDB does not
-keep "all history," and what it *does* keep is either self-bounding or cheap:
-
-- **The by-seq feed is current-state-sized** (§5·3): one entry per element, moved (not appended) on write.
-  It needs no pruning — it is graph-sized by construction. This is why `since=0` always reconstructs a full
-  replica, and why the snapshot/incremental split collapses to CouchDB's one mechanism (§7).
-- **Rev-tree ancestry is depth-stemmed**, automatically and cheaply — CouchDB's `_revs_limit` (default
-  1000): beyond a depth cap, old rev-ids drop off the tree. We do the same; it is bounded, not a horizon.
-  **DECIDED: copy CouchDB's default of 1000** (a config knob, but no known reason to differ).
-- **Only tombstones truly accumulate**, and CouchDB itself does not auto-prune them (purge is manual and
-  discouraged, because a peer that has not seen the delete would resurrect it). Following the governing
-  principle we match CouchDB: keep tombstones, offer a manual purge later. Deletes are infrequent
-  (read≫write) and a tombstone is tens of bytes, so accumulation is tolerable for a long time — the same
-  trade CouchDB lives with.
-
-So there is no retention horizon and no mandatory pruning in v1: keep everything, `since=0` is the full sync,
-and a purge mechanism is a later, optional addition — not a prerequisite.
+**No up-front pruning.** The by-seq feed is current-state-sized (self-bounding, §5·2). Rev-tree ancestry is
+depth-stemmed — **DECIDED: copy CouchDB's `_revs_limit` default of 1000** (a config knob, no known reason to
+differ). Only tombstones truly accumulate, and CouchDB itself keeps them (purge is manual, discouraged);
+deletes are infrequent and a tombstone is tiny, so we match CouchDB — keep them, offer a manual purge later
+(§10 Phase 6). `since=0` is always the full sync; a retention horizon is not needed.
 
 ### §6·5 The schema deltas — CouchDB-named where it makes sense
 
-The element-level additions are three columns on `nodes` and `edges`, named to mirror CouchDB's document
-fields (SQL-formatted — snake_case, no `_` field-prefix, since a SQL column needs no "reserved" marker):
+Three columns on `nodes` and `edges`, named to mirror CouchDB's document fields (SQL-formatted — snake_case,
+no `_` field-prefix, since a column needs no "reserved" marker):
 
 | CouchDB field | mogwai column | type | notes |
 |---|---|---|---|
-| `_id` | `gid` | BLOB (16-byte uuid_v7), indexed | global identity (§6·1). NOT `id` — that stays the local rowid. |
-| `_rev` / `_revisions` | `rev` | BLOB (JSONB) | generation + content hash + bounded rev-tree (§5·2). |
-| `seq` / `update_seq` | `seq` | INTEGER, indexed | the by-sequence cursor (§5·3); `_changes?since=N` is `WHERE seq > N`. |
+| `_id` | `gid` | BLOB (16-byte uuid_v7), indexed | global identity (§6·1). NOT `id` — that stays the rowid. |
+| `_rev` / `_revisions` | `rev` | BLOB (JSONB) | generation + content hash + bounded rev-tree (§5·1). |
+| `seq` / `update_seq` | `seq` | INTEGER, indexed | the by-sequence cursor (§5·2). |
 
-`id` (rowid) and `uid` (now free for users) are unchanged. Deletes (CouchDB `_deleted`) are a small
-**`tombstones`** table, not a `deleted` flag on live rows — a flag would force `WHERE deleted=0` on every
-traversal (hot path); a side table keeps live reads clean while still feeding the cursor:
+`id` (rowid) and `uid` (now free for users) are unchanged. Deletes (`_deleted`) go to a small **`tombstones`**
+table, not a `deleted` flag on live rows — a flag would force `WHERE deleted=0` on every traversal (hot path).
 `tombstones(gid BLOB, rev BLOB, seq INTEGER, kind TEXT)`, so `_changes?since=N` is a UNION of live
-`nodes`/`edges` `WHERE seq > N` and `tombstones WHERE seq > N`, and a delete replicates as a
-`_deleted`-style marker (§6·4).
+`nodes`/`edges` `WHERE seq > N` and `tombstones WHERE seq > N`. These are dedicated columns (not hidden
+properties) for storage/perf: a property row would store the key string inline on *every* element (keys aren't
+interned) plus a second index — double-digit GB at ~10⁸ elements against the 10 GB DO ceiling — and it is also
+more CouchDB-faithful (Couch stores `_id`/`_rev` as cheap inline fields). Cost: a schema change + `gid`/`rev`
+plumbing in the format adapters (`src/formats/`) so they round-trip.
 
 ---
 
-## §7. The transport — mogwai as an outbound HTTP client (the shared foundation)
+## §7. The transport — mogwai as an outbound HTTP client
 
-Both features need mogwai to *call out* over HTTP to another graph. Today it never does. The good news:
-the outbound driver already exists in the tree and is a production dependency.
+Both features need mogwai to call out over HTTP; the driver already exists in the tree:
 
-- **The vendored `gremlin` client is a `fetch`-based outbound driver** (`Client.submit(gremlin,
-  parameters)`, `Connection.#makeHttpRequest` uses `fetch` —
-  `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`), exported from the
-  top-level package mogwai already imports for its GraphBinary serializers (decision #4 in root
-  `CLAUDE.md`). `fetch` is native inside a Worker/DO, so it works on both runtimes. This is the reuse-first
-  path for the *Gremlin-speaking* outbound call (external federation, §8).
-- **For the replication peer protocol**, the peer speaks a small set of endpoints (§9), not Gremlin — so
-  the replication client is a thin `fetch` wrapper over those endpoints, decoding the same GraphBinary/JSON
-  value shapes our own server produces (`src/http.ts`, `src/wire.ts` document both sides).
-- **ONE mechanism — `_changes?since=N` — with `io()` as an efficient `since=0`.** Because the by-seq feed is
-  current-state-sized and we keep everything (§5·3, §6·4), `since=0` reconstructs a full replica and
-  `since=checkpoint` an incremental one — the *same* mechanism, exactly like CouchDB. There is no
-  snapshot-vs-incremental *tier* and no retention horizon to fall off (the earlier two-tier framing, and the
-  Neo4j catchup it borrowed, are gone — Neo4j needs two mechanisms only because its transaction log rotates).
-  The one refinement: a fresh full pull of a large graph is better streamed in bulk than driven through a
-  chatty changes→revs-diff→bulk loop, so **`io()` + `IoStore` (`src/services/catalog/io.ts`,
-  `src/iostore.ts`) is the efficient *implementation* of the `since=0` case** — bounded-memory, R2 multipart
-  — an optimization of one mechanism, not a second one.
+- **The vendored `gremlin` client is a `fetch`-based outbound driver** (`Client.submit(gremlin, parameters)`,
+  `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`), a production dependency
+  already imported for GraphBinary serializers; `fetch` is native in a Worker/DO. This serves the
+  *Gremlin-speaking* outbound call (external federation, §8).
+- **The replication peer client** is a thin `fetch` wrapper over the §9 endpoints, decoding the same
+  GraphBinary/JSON shapes our server produces (`src/http.ts`, `src/wire.ts`).
+- **ONE mechanism — `_changes?since=N`.** Because the by-seq feed is current-state-sized and we keep
+  everything (§5·2, §6·4), `since=0` reconstructs a full replica and `since=checkpoint` an incremental one —
+  the same mechanism, no snapshot-vs-incremental tier and no retention horizon (this is why we reject Neo4j's
+  two-tier catchup, §3). The one refinement: a fresh full pull of a large graph is better bulk-streamed than
+  driven through a chatty changes→revs-diff loop, so **`io()` + `IoStore` is the efficient *implementation* of
+  the `since=0` case** (bounded-memory, R2 multipart) — an optimization of one mechanism, not a second one.
 
-**LAW: the HTTP edge stays out of the store tier.** Adding replication must not put `fetch` inside the DO's
-compile/run path. Outbound calls belong at the worker/edge residency, the way federate's barrier declares
-`residency: 'worker'` so the Worker drives the remote wait and frees the DO (`src/compiler/segment.ts`,
-`src/services/catalog/federate.ts`). A replication *pull* driven from the Worker across the peer HTTP call
-is the same residency story; a *server* answering `_changes`/`_revs_diff` is ordinary read work in the
-store tier.
+**LAW: the HTTP edge stays out of the store tier.** Outbound calls belong at worker/edge residency, the way
+federate's barrier declares `residency: 'worker'` to free the DO across the wait (`src/compiler/segment.ts`).
+A replication *pull* driven from the Worker is the same story; a *server* answering `_changes`/`_revs_diff` is
+ordinary read work.
 
 ---
 
-## §8. The federation half — an external-HTTP `FederationSource`
+## §8. External-HTTP federation — a `FederationSource` over the wire
 
-This is the smaller, cleaner feature and a perfect Phase 0 because it proves the outbound client with
-almost no new concepts.
+The smaller, cleaner feature and a perfect Phase 0 — it proves the outbound client with almost no new
+concepts:
 
 - **The seam is already abstract.** `federate()` depends only on `FederationSource`
-  (`src/compiler/segment.ts`): a one-method interface, `executor(id).runForeign(gremlin, params, depth,
-  …) → Promise<ForeignResult>`. RPC is *not* hardwired; the Cloudflare and Bun managers each just happen to
-  implement it over DO RPC / in-process calls (`src/cloudflare/cloudflare-graph-manager.ts`,
-  `src/bun/BunGraphManager.ts`). `federate.ts` imports no RPC types.
-- **The trigger is the `graph` param becoming a URI — no new Gremlin surface (§9).** A *relative* URI stays
-  a local sibling graph (today); a *fully-qualified* URI dispatches to the HTTP backend. So the seam is a
-  `FederationSource` that inspects the id: local ids resolve through the existing manager, absolute URIs
-  through an `HttpFederationSource`. External federation is thus just `call("federate", {graph})` with a URL.
-- **The new backend is a plain implementer.** `HttpFederationSource.executor(uri).runForeign(...)`:
-  `POST {gremlin, bindings}` to the URI via the vendored `Client.submit` (or a direct `fetch` of the JSON
-  wire shape `src/wire.ts` documents), decode the response, and **map it into the closed `ForeignResult`
-  contract** (`elements | scalar | map | values`, `src/api.ts`). Nothing downstream
-  (`src/compiler/rel/foreign.ts`, `src/execute.ts`) cares how the bytes arrived.
-- **Two invariants to honor**, both visible in the seam: thread and increment `depth`
-  (`guardFederationDepth`, `src/services/params/federation-depth.ts`) so a hop out to an external server
-  and back stays bounded; and translate the external response into `ForeignResult` faithfully (a scalar
-  where elements are expected is a contract violation, fail closed — `federate.ts` already does this for
-  the RPC backend). Note `RpcPayload`/`rpcTry` (`src/rpc.ts`) is a DO-RPC-only convention — an HTTP backend
-  uses ordinary `throw`/`catch` around `fetch`, no failure-as-value dance.
-- **The mapValues/`inject($map)` round-trip** federate uses for mid-traversal calls
-  (`mapValuesGremlin`, `federate.ts`; the grammar delta
-  `patches/upstream/tinkerpop-06-inject-generic-argument-varargs.patch`) is *pure Gremlin* — it rides an
-  external HTTP hop for free, since the payload is one bound param in the request body.
-
-The shared substrate with replication is precisely the outbound HTTP client (§7). Federation sends
-*queries* and gets *live detached results*; replication sends *sync requests* and gets *state deltas* —
-different protocols, one client foundation, one residency discipline.
+  (`src/compiler/segment.ts`): a one-method `executor(id).runForeign(gremlin, params, depth) →
+  Promise<ForeignResult>`. RPC is not hardwired — the CF/Bun managers just happen to implement it; `federate.ts`
+  imports no RPC types.
+- **The trigger is the `graph` param becoming a URI — no new Gremlin surface.** A *relative* URI is a local
+  sibling (today); a *fully-qualified* URI dispatches to an `HttpFederationSource` that `POST`s
+  `{gremlin, bindings}` (via the vendored `Client.submit`) and maps the response into the closed
+  `ForeignResult` contract (`elements|scalar|map|values`, `src/api.ts`). Downstream cares only about the
+  contract, not how the bytes arrived.
+- **Honor two invariants**: thread + increment `depth` (`guardFederationDepth`) so a hop stays bounded; and
+  translate faithfully into `ForeignResult` (fail closed on a shape mismatch). `rpcTry` (`src/rpc.ts`) is
+  DO-RPC-only — an HTTP backend uses ordinary `throw`/`catch`.
 
 ---
 
-## §9. The DX — one-shot lives in Gremlin (standard GLV); ongoing replication lives in the management API
+## §9. The DX — one-shot in Gremlin (standard GLV); ongoing replication in the management API
 
-**LAW: the GLV is not ours to extend — we use STANDARD Gremlin only.** No invented step, no non-standard
-method on the client (`g.io(url).pull()` in an earlier draft was exactly this mistake — `pull()` is not a
-GLV step). Any GLV change needs a compelling reason AND an upstream PR — the bar we already cleared once for
-federate's `inject($map)` varargs (`patches/upstream/tinkerpop-06-inject-generic-argument-varargs.patch`).
-This law decides the split below, and it decides it cleanly.
+**LAW: the GLV is not ours to extend — STANDARD Gremlin only.** No invented step or method (`g.io(url).pull()`
+in an early draft was exactly this mistake). A GLV change needs a compelling reason AND an upstream PR — the
+bar we cleared once for federate's `inject($map)` varargs. This decides the split cleanly, because Gremlin is
+a *one-shot* language (even `io()` is a one-shot bulk load) with no idiom for a background-running query.
 
-**The split follows an idiom boundary, not taste.** Gremlin is a *one-shot* language — run a query, get
-results; even `io()` is a one-shot bulk load. There is no prior art anywhere in Gremlin for a query that
-keeps running in the background, and we won't invent one. So:
+- **One-shot pulls stay in Gremlin, already STANDARD GLV — no new surface:** cross-graph *query* via
+  `federate` with a URI (§8); bulk *transfer* via `io()` with a URL (`g.io(url).read()`/`.write()` — the io
+  registry just interprets the string; today an R2 key, tomorrow another database over HTTP).
+- **Ongoing replication is a persistent config + a scheduler — the management API, NOT Gremlin.** CouchDB's
+  shape (`replicator.rst`): a replication is a *document* in `_replicator` (`source`, `target`, `continuous`,
+  `filter`, `checkpoint_interval`) run by a scheduler with a state machine and introspection at
+  `_scheduler/jobs`/`_scheduler/docs`. The mogwai analog: a CRUD management interface over persistent configs
+  on the existing REST router (`src/router.ts`); a **DO-alarm-driven scheduler** ("continuous" is a periodic
+  wake→`_changes`→apply→sleep with crash-backoff, since a DO hibernates — not a held connection); and
+  introspection endpoints.
+- **The UI falls out of OpenAPI for free.** We already generate an OpenAPI spec + docs UI (`src/docs.ts`,
+  `/docs` + `/openapi.json`). Documenting the config CRUD + introspection there gives a Fauxton-equivalent with
+  no bespoke front-end. Default to documenting everything publicly.
 
-- **One-shot pulls stay in Gremlin, and both are already STANDARD GLV — no new surface:**
-  - **Cross-graph query → `federate` with a URI.** `federate`'s `graph` param is just a string
-    (`graphOf`, `federate.ts`); make it URI-aware — a *relative* URI is a local sibling graph (today's
-    behavior), a *fully-qualified* URI is a remote graph pulled over HTTP (the §8 backend). External
-    federation then needs no new surface at all; it is the same `call("federate", {graph})` with a URL.
-  - **Bulk transfer → `io()` with a URL.** `g.io(url).read()` / `.write()` are standard GLV steps; the
-    argument is just a string the provider's io registry interprets. Today it names an R2 key / file; let it
-    also name another database over HTTP. "Slurp from another graph instead of from R2" is a pure `io()`
-    feature — one-shot, idiomatic, no GLV change.
+**Peer-facing sync endpoints** mirror CouchDB's shapes on mogwai routes — `_changes?since=N`, revs-diff, bulk
+apply, `_local`-analog checkpoint. We adopt the shapes because they are good and §5 maps onto them, NOT for
+wire interop (§9·1). Direction is the caller's: pull = "I am target, you are source"; push = the reverse; one
+engine, roles swapped.
 
-- **Ongoing replication is a persistent config + a scheduler — it lives in the management API, NOT Gremlin.**
-  CouchDB confirms the shape (`replicator.rst`): a replication is a *document* in the `_replicator` database
-  (`source`, `target`, `continuous`, `filter`, `checkpoint_interval`), run by a **scheduler** that
-  periodically starts/stops jobs (`max_jobs`/`interval`/`max_churn`), with a state machine and introspection
-  at `_scheduler/jobs` / `_scheduler/docs`. The mogwai analog:
-  - **A CRUD management interface over persistent replication configs** (create / edit / delete a
-    source→target config), on the existing thin REST router (`src/router.ts`), the same shape as the graph
-    lifecycle verbs — no new control plane, just more of the one we have.
-  - **A scheduler that runs them.** On a Durable Object "continuous" is not a held connection (a DO
-    hibernates) — it is a **DO alarm-driven periodic pull** (wake → `_changes` since checkpoint → apply →
-    sleep), with the crash-backoff CouchDB uses. One-shot configs run once and complete.
-  - **Introspection endpoints** — a `_scheduler/jobs` analog: job status + history.
-- **The cheap UI falls out of OpenAPI.** We already generate an OpenAPI spec and a docs UI over the
-  management API (`buildDocs`, `src/docs.ts`, served at `/docs` + `/openapi.json`, `src/router.ts`). Document
-  the replication config CRUD + introspection there and the UI is generated for free — our Fauxton, no
-  bespoke front-end. Default is to document *everything* publicly (it helps anyone extend), so the
-  peer-facing sync endpoints go in the spec too.
+### §9·1 CouchDB wire interop is a non-goal
 
-**The peer-facing sync endpoints** (what two mogwai servers speak) mirror CouchDB's *shapes* on mogwai
-routes — `_changes?since=N`, a revs-diff, a bulk apply, a checkpoint (`_local`-analog). We adopt the shapes
-because they are well-designed and §5's model maps onto them, NOT for wire interop (§9·1). Direction is the
-caller's: pull = "I am target, you are source"; push = the reverse; one engine, roles swapped (§4).
+A generic CouchDB replicator moving our elements as documents would ignore vertices-before-edges ordering
+(§6·2), break referential integrity, and not share our id/rev/conflict semantics — a dangling, corrupt graph,
+not a replica. We follow CouchDB's *design* and mirror its endpoint *shapes*; wire-compat with a real CouchDB
+is out of scope. Our peer protocol is mogwai↔mogwai.
 
-### §9·1 Interoperating with CouchDB itself is a non-goal
+### §9·2 The control-plane store — dedicated tables, CouchDB-named
 
-Tempting — "edges and vertices are the world's smallest documents" — but no. A generic CouchDB replicator
-moving our elements as documents would not honor vertices-before-edges ordering (§6·2), would break
-referential integrity, and does not share our id/rev/conflict semantics — it would produce a dangling,
-corrupt graph, not a replica. So we follow CouchDB's *design* as the gold standard (§4) and mirror its
-endpoint *shapes* for familiarity, but wire-level interop with a real CouchDB is out of scope: our peer
-protocol is mogwai↔mogwai.
-
-### §9·2 The control-plane store — dedicated tables, CouchDB-named (not dogfooded as a graph)
-
-The scheduler/config/job state lives in **dedicated tables in the graph's own DO SQLite — not stored as a
-graph.** Dogfooding our engine is right where data is genuinely graph-shaped and user-facing (the replication
-payload IS a graph; federation IS the engine), but control-plane metadata is the wrong fit: our "graph" unit
-is a whole DO with the full schema (vs CouchDB's lightweight db), the state is tiny, local, churny, read on
-the hot alarm path, and — decisively — must NOT be replicated or versioned (you never replicate your
-replication job state; CouchDB itself excludes `_replicator`/`_local` from replication). A plain table is
-non-replicated by construction (not an element table); a graph would need a special "don't replicate this"
-exception. The queryable/introspectable benefit comes from the management REST + OpenAPI surface, not from
-graph storage. So: small tables, **field names mirroring CouchDB** (SQL-formatted) so a CouchDB user reads
-them fluently:
+Scheduler/config/job state lives in **dedicated tables in the graph's own DO SQLite — not dogfooded as a
+graph.** Dogfooding is right where data is genuinely graph-shaped and user-facing (the replication payload IS
+a graph; federation IS the engine), but control-plane metadata is the wrong fit: our "graph" unit is a whole
+DO with the full schema (vs CouchDB's lightweight db), the state is tiny/local/churny/hot-path, and it must
+NOT be replicated or versioned (you never replicate your job state; CouchDB itself excludes
+`_replicator`/`_local`). A plain table is non-replicated by construction; the queryable surface comes from
+REST + OpenAPI, not graph storage. Field names mirror CouchDB (SQL-formatted):
 
 - **`replication_checkpoint`** (CouchDB `_local/{replication_id}`): `replication_id TEXT PRIMARY KEY,
   session_id TEXT, source_last_seq, replication_id_version INTEGER, history BLOB` — `history` a JSONB array of
-  session records with CouchDB's own field names (`session_id, start_last_seq, end_last_seq, recorded_seq,
+  session records with CouchDB's field names (`session_id, start_last_seq, end_last_seq, recorded_seq,
   start_time, end_time, docs_read, docs_written, doc_write_failures, missing_checked, missing_found`).
 - **`replication_config`** (CouchDB `_replicator` doc): `id TEXT PRIMARY KEY, source TEXT, target TEXT,
   continuous INTEGER, create_target INTEGER, filter TEXT, checkpoint_interval INTEGER, use_checkpoints
   INTEGER` — `filter` holds the captured traversal for filtered replication (§11).
-- **`replication_job`** (CouchDB `_scheduler/docs` + `_scheduler/jobs`): `config_id TEXT, replication_id
-  TEXT, state TEXT, error_count INTEGER, info BLOB, last_updated, start_time` — `state` uses CouchDB's own
-  vocabulary (`initializing / running / pending / crashing / completed / failed`).
+- **`replication_job`** (CouchDB `_scheduler/docs`+`jobs`): `config_id TEXT, replication_id TEXT, state TEXT,
+  error_count INTEGER, info BLOB, last_updated, start_time` — `state` uses CouchDB's vocabulary
+  (`initializing / running / pending / crashing / completed / failed`).
 
 **System HTTP URLs take the `_` prefix (CouchDB's convention), not `~`.** `~` is TinkerPop's *hidden-property*
-marker (and `_` is a legal Gremlin property key, so `_` can't be the hidden marker in property space); but in
-URL space `_` is the near-universal REST "system endpoint" marker (CouchDB `_changes`, ES `_search`), it is
-what CouchDB's endpoint *names* already carry (so keeping it follows the governing principle, not a cosmetic
-rename), and it reserves the namespace cleanly for a future CouchDB-style `_design`/`_view` rendering surface.
-Each layer keeps its own authoritative marker — `~` for Gremlin hidden properties, `_` for system HTTP URLs —
-and the difference signals the layer boundary.
+marker (and `_` is a legal Gremlin property key, so `_` can't be the hidden marker in property space); in URL
+space `_` is the near-universal REST system-endpoint marker, it is what CouchDB's endpoint names already
+carry, and it reserves the namespace for a future CouchDB-style `_design`/`_view` rendering surface. Each
+layer keeps its own authoritative marker; the difference signals the layer boundary.
 
 ---
 
 ## §10. The phased plan — unlock order
 
-Each phase is independently valuable and lands green before the next. Ordered so the shared substrate and
-the smallest proof come first, and the genuinely hard graph semantics come after the transport is trusted.
+Each phase is independently valuable and lands green before the next.
 
-- **Phase 0 — the outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9).** Make `federate`'s
-  `graph` param URI-aware (relative = local sibling, absolute = remote HTTP via `HttpFederationSource`) and
-  let `io()` accept a URL source — both STANDARD GLV, no new surface. Build the outbound client on the
-  vendored `gremlin` driver. Smallest, most independent win; ships two real features (federate to an external
-  graph; bulk-slurp another graph by URL) and proves the outbound client + worker-residency that replication
-  reuses. No schema change, no rev, no seq. *Gate: a mogwai graph federates a sub-traversal to an external
-  Gremlin server; `g.io(url).read()` imports another graph over HTTP.*
-- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·2).** Add `gid` (uuid_v7, immutable, assigned at creation,
-  indexed) and `rev` (generation + content hash, bounded rev-tree JSONB) as dedicated columns on
-  `nodes`/`edges`; wire the touch-rev-on-write hook (edge rev references endpoints by `gid`); keep the local
-  rowid unchanged as the join key; `uid` freed for users. Thread `gid`/`rev` through the format adapters so
-  they round-trip. Pure local substrate — no networking yet — independently testable. *Gate: every element
-  has a stable `gid` and a `rev`; identical content converges to the same rev; `gid`/`rev` survive an `io()`
-  round-trip; two independently-built graphs never collide on `gid`.*
-- **Phase 2 — the by-seq feed + the read side (§5·3, §6·4).** Add the per-element `seq` (indexed) bumped on
-  write, and tombstone entries for deletes. Expose the `_changes?since=N` scan and the revs-diff query. Still
-  server-only — no replication engine, but a peer can now be *asked* what changed and what it's missing.
-  *Gate: `_changes?since=N` and revs-diff return correct deltas incl. deletes; `since=0` enumerates full
-  current state; the feed stays current-state-sized under repeated updates.*
-- **Phase 3 — the replication engine + checkpoint + the peer protocol (§9, §5).** The pull/push loop — ONE
-  mechanism: `_changes?since=N` (N=0 for first contact, `io()`-streamed for the bulk case) → revs-diff →
-  transfer (vertices before edges, §6·2) → apply idempotently → checkpoint (`_local`-analog, deterministic
-  replication id). Expose the peer-facing sync endpoints and a transient one-shot `POST /gremlin/{g}/_replicate
-  {source, target}` trigger. *Gate: pull a remote graph to a fresh local graph; re-pull is a resumable no-op;
-  push is the same with roles swapped.*
-- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** The rev-tree + shadow/conflict store;
-  deterministic-winner-on-read; conflict surfacing (`~conflicts`); the referential-conflict rule
-  (edge-resurrects-endpoint — never reject, never lose, §6·3); rev-ancestry depth-stemming (`_revs_limit`
-  analog); keep tombstones (no up-front pruning). *Gate: two peers each mutate and cross-replicate; both
-  converge; conflicts are preserved and surfaced, never silently lost; a delete racing an incident edge
-  resurrects-and-surfaces rather than dangling or rejecting; deletes otherwise propagate.*
-- **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** A CRUD management
-  interface over persistent source→target configs; a DO-alarm-driven scheduler that runs them (continuous =
-  periodic pull with crash-backoff; one-shot = run once); introspection (a `_scheduler/jobs` analog); and the
-  OpenAPI spec + generated docs UI over all of it (`src/docs.ts`) — our Fauxton for free. *Gate: create a
-  config that keeps a local graph synced from a remote one on a schedule, visible + editable in the generated
-  UI.*
-- **Phase 6 — optional manual tombstone purge (§6·4).** A manual purge for the rare graph that accumulates
-  enough tombstones to matter (CouchDB-style, opt-in). The Merkle anti-entropy backstop is NOT planned (§5·4)
-  — dropped as an unjustified CouchDB deviation. *Gate: a purge reclaims tombstones without breaking a peer
-  that is still current.*
+- **Phase 0 — outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9).** URI-aware `federate`
+  (relative = local sibling, absolute = remote HTTP via `HttpFederationSource`) + `io()` from a URL — both
+  STANDARD GLV, no schema change. Smallest win, ships two real features, proves the client + worker-residency.
+  Best done alongside vendoring CouchDB (§14). *Gate: federate a sub-traversal to an external Gremlin server;
+  `g.io(url).read()` imports another graph over HTTP.*
+- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5).** Add `gid` (uuid_v7, immutable, indexed) and
+  `rev` (bounded rev-tree JSONB) columns on `nodes`/`edges`; the touch-rev-on-write hook (edge rev references
+  endpoints by `gid`); thread through format adapters. Local substrate, no networking. *Gate: every element
+  has a stable `gid`/`rev`; identical content converges to the same rev; they survive an `io()` round-trip;
+  two independent graphs never collide on `gid`.*
+- **Phase 2 — the by-seq feed + read side (§5·2, §6·4).** Per-element `seq` (indexed, bumped on write) +
+  tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct deltas incl. deletes;
+  `since=0` enumerates full current state; the feed stays current-state-sized under repeated updates.*
+- **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5).** The pull/push loop:
+  `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices before
+  edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
+  `POST /gremlin/{g}/_replicate {source, target}`. *Gate: pull a remote graph to a fresh local one; re-pull is
+  a resumable no-op; push is the same with roles swapped.*
+- **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
+  deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
+  depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
+  never lost; a delete racing an incident edge resurrects-and-surfaces; deletes otherwise propagate.*
+- **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
+  DO-alarm scheduler (continuous = periodic pull; one-shot = run once), introspection, and the
+  OpenAPI-generated UI. *Gate: a config keeps a local graph synced from a remote one on a schedule, editable
+  in the generated UI.*
+- **Phase 6 — optional manual tombstone purge (§6·4).** Opt-in, CouchDB-style. (No Merkle backstop — §5·3.)
 
 ---
 
-## §11. Design decisions — resolved; what remains is the build (§10)
+## §11. Decisions — locked; what remains is the build (§10)
 
-Governing principle (§4): **follow CouchDB; deviate only when empirically better or graph-forced.** Resolved
-in review (recorded so they are not reopened): **rev = generation + content hash, held as a bounded rev-tree
-in the `rev` column** (§5·2); **identity = a uuid_v7 `gid` column (globally unique, no prefix/coordination)
-separate from the local rowid join key; `gid` + `rev` are dedicated columns; `uid` freed** (§6·1);
-**conflicts = CouchDB preservation (keep leaves, winner-on-read, surface, resolve) + one graph-forced
-referential exception** (§6·3); **cursor = a per-element by-sequence index, current-state-sized** (§5·3);
-**tombstones kept (no up-front pruning); rev-ancestry depth-stemmed; ONE `since=N` mechanism** (§6·4, §7).
-Two more, added in review: **the DX splits by idiom — one-shot pulls are STANDARD-GLV Gremlin (`federate`
-with a URI, `io()` with a URL), ongoing replication is a persistent config + scheduler in the management API
-with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **CouchDB wire interop is a non-goal**
-(§9·1); **CouchDB is vendored for reference** (§14); **the Merkle backstop is dropped — CouchDB has none and
-it is not graph-forced** (§5·4); **the referential conflict never rejects and never loses — a referencing
-edge resurrects a deleted endpoint, the delete surfaced** (§6·3); **peer protocol + system URLs = CouchDB's
-names with the `_` prefix** (§9·2); **rev-tree depth cap = CouchDB's `_revs_limit` default 1000, configurable**
-(§6·4); **control-plane state in dedicated CouchDB-named tables, not dogfooded as a graph** (§9·2); **element
-schema deltas (`gid`/`rev`/`seq` + `tombstones`) CouchDB-named** (§6·5).
+All under the governing principle (§4). Locked:
 
-**No open design decisions remain** — what is left is the build (§10). One feature is designed but deferred:
-**filtered replication** is a *captured traversal* (the vertex selector — CouchDB's selector/`doc_ids`
-analog, stored in `replication_config.filter`) plus the never-dangle resolution we already defined (§6·3): an
-edge to a boundary endpoint the filter didn't select pulls that endpoint in (edge-as-existence-claim), so a
-filtered pull always yields a valid edge-closed subgraph, never a dangling one. No new machinery — a
-traversal plus a rule we already have.
+- **Identity** = a `uuid_v7` `gid` column (globally unique, no prefix/coordination), separate from the local
+  rowid join key; `uid` freed (§6·1).
+- **Rev** = generation + content hash, a bounded rev-tree in the `rev` column (§5·1).
+- **Cursor** = a per-element by-sequence index, current-state-sized (§5·2). No Merkle backstop (§5·3).
+- **Conflicts** = CouchDB preservation (keep leaves, winner-on-read, surface); the referential conflict
+  resurrects the endpoint and surfaces the delete — never reject, never lose (§6·3).
+- **Tombstones** kept, no up-front pruning; rev-ancestry depth cap = CouchDB's `_revs_limit` default 1000
+  (§6·4). ONE `since=N` transport mechanism (§7).
+- **DX** splits by idiom: one-shot pulls are STANDARD-GLV Gremlin (`federate` URI, `io()` URL); ongoing
+  replication is a persistent config + scheduler in the management API with an OpenAPI UI (§9); standard-GLV-only
+  is LAW.
+- **Schema** = `gid`/`rev`/`seq` + `tombstones`, CouchDB-named columns (§6·5); control-plane state in dedicated
+  CouchDB-named tables, not dogfooded (§9·2); system URLs take the `_` prefix (§9·2).
+- **Non-goals**: CouchDB wire interop (§9·1); a Merkle tree (§5·3). **Vendor** CouchDB for reference (§14).
+
+One feature is designed but deferred to the build: **filtered replication** is a *captured traversal* (the
+vertex selector — CouchDB's selector/`doc_ids` analog, stored in `replication_config.filter`) plus the
+never-dangle resolution we already have (§6·3): an edge to a boundary endpoint pulls that endpoint in, so a
+filtered pull yields a valid edge-closed subgraph. No new machinery.
 
 ---
 
 ## §12. Traps — recorded so they are not rediscovered
 
-- **The session extension will lie to you** (§2). It is present in `bun:sqlite` and absent on DO, so a
-  changeset-based prototype passes every dev test and cannot ship. Any change-tracking must be plain SQL on
-  both runtimes.
-- **rowid is never cross-peer identity; the `gid` is** (§6·1). A per-store sequential rowid collides across
-  instances — including two replicas of one graph both writing (both mint rowid 1001). Identity is a separate
-  `uuid_v7` `gid` column, globally unique by its 74 random bits — no prefix, no coordination. Don't try to
-  pack global uniqueness into the 64-bit rowid: that forced a fragile small random prefix (explored,
-  superseded). The rowid stays a purely-local join key; a replicated element gets a fresh local rowid and its
-  `gid` travels with it.
-- **Don't add a Merkle tree** (§5·4). It's a CouchDB deviation with no justification — its O(diff) is only
-  *comparison* (construction is O(size)), CouchDB reconciles without one, `since=0` covers first-contact, and
-  bit-rot detection isn't graph-forced. Revisit only on a measured need.
-- **Never reject or silently drop on a referential conflict** (§6·3). Replication always succeeds: an
-  edge-to-deleted-endpoint *resurrects* the endpoint and *surfaces* the delete — it does not refuse the delete
-  (rejection) or drop the edge (data loss).
-- **Never re-execute the query on the far side** (§3). Ship materialized mutations (effects), not Gremlin
-  to replay — replaying a non-deterministic traversal diverges peers.
+- **The session extension will lie to you** (§2). In `bun:sqlite`, not on DO — a changeset prototype ships
+  green and then can't ship. Change-tracking must be plain SQL on both runtimes.
+- **rowid is never cross-peer identity; the `gid` is** (§6·1). A sequential rowid collides across instances
+  (two replicas both writing → both rowid 1001). Don't pack global uniqueness into the 64-bit rowid — a random
+  prefix makes every clash a *total* collision. rowid stays a local join key; a replicated element gets a fresh
+  rowid and its `gid` travels with it.
+- **Don't discard-LWW to "keep it simple"; don't reject or drop on a referential conflict** (§6·3). Preserve
+  conflicts (CouchDB); an edge-to-deleted-endpoint resurrects the endpoint and surfaces the delete — it never
+  refuses the delete (rejection) or drops the edge (data loss). Multi-leaf does NOT break integrity (leaves
+  differ in content; the id is constant).
+- **The `_changes` feed is current-state-sized, not an op-log** (§5·2). One entry per element (moved on write).
+  Don't build an append-only change-log table — it grows O(writes) and needs pruning the by-seq index doesn't.
+- **Don't add a Merkle tree** (§5·3). CouchDB reconciles without one; `since=0` covers first-contact; bit-rot
+  detection isn't graph-forced. Revisit only on a measured need.
 - **Dangling edges** (§6·2). Vertices before edges, always; a cross-batch edge to an unreplicated endpoint
-  waits or fails closed — never writes a dangling row. We already enforce this on load; the wire is the
-  same discipline.
-- **Don't put `fetch` in the store tier / DO compile path** (§7). Outbound waits are worker-residency, like
-  federate's barrier.
-- **Don't discard-LWW to "keep it simple"** (§6·3, §4). Preserving conflicts is the CouchDB gold standard;
-  discarding the loser silently loses writes and is a deviation with neither an empirical nor a graph-forced
-  justification. The rev-tree IS the right port — divergent leaves are about an element's *content*, and an
-  edge references it by stable id (constant across leaves), so multi-leaf does NOT break referential
-  integrity. The only graph-forced conflict deviation is the narrow edge-to-deleted-endpoint case.
-- **The `_changes` feed is current-state-sized, not an op-log** (§5·3, §6·4). It is a by-sequence index with
-  one entry per element (moved on write, not appended), so it needs no pruning and `since=0` is the full
-  sync. Don't build an append-only change-log table — it grows O(writes) and reintroduces a pruning problem
-  the by-seq index doesn't have.
+  waits or fails closed.
+- **Never re-execute the query on the far side** (§3). Ship materialized mutations, not Gremlin to replay.
+- **Don't put `fetch` in the store tier / DO compile path** (§7). Outbound waits are worker-residency.
 
 ---
 
 ## §13. Research appendix — sources
 
-**CouchDB protocol** (the normative model): [Replication Protocol](https://docs.couchdb.org/en/stable/replication/protocol.html) ·
-[Replication intro](https://docs.couchdb.org/en/stable/replication/intro.html) ·
-[Conflicts + "Is it like Git?"](https://docs.couchdb.org/en/stable/replication/conflicts.html) ·
+**CouchDB (the normative model):** [Replication Protocol](https://docs.couchdb.org/en/stable/replication/protocol.html) ·
+[Conflicts / "Is it like Git?"](https://docs.couchdb.org/en/stable/replication/conflicts.html) ·
+[`_changes`](https://docs.couchdb.org/en/stable/api/database/changes.html) ·
 [`_revs_diff`](https://docs.couchdb.org/en/stable/api/database/misc.html) ·
-[`_changes`](https://docs.couchdb.org/en/stable/api/database/changes.html). Local checkout for the code-level
-facts (rev hash `new_revid`, deterministic winner `to_doc_info_path`, `couch_key_tree:find_missing`):
-`/home/dan/Projects/couchdb` (session-added; cite the URLs above for anything durable).
+[`_replicator`/scheduler](https://docs.couchdb.org/en/stable/replication/replicator.html). Code-level facts
+(`new_revid`, `to_doc_info_path`, `couch_key_tree:find_missing`, `couch_uuids.erl`) — vendor at the pin (§14).
 
-**SQLite / storage-layer landscape** (why physical replication is off the table):
-[Litestream](https://litestream.io/how-it-works/) ·
-[LiteFS](https://github.com/superfly/litefs/blob/main/docs/ARCHITECTURE.md) ·
-[dqlite](https://canonical.com/dqlite/docs/explanation/replication) ·
-[rqlite FAQ](https://rqlite.io/docs/faq/) ·
-[cr-sqlite](https://github.com/vlcn-io/cr-sqlite) · [crsql_changes](https://vlcn.io/docs/cr-sqlite/api-methods/crsql_changes) ·
-[SQLite session extension](https://sqlite.org/sessionintro.html) · [Bun Session](https://bun.com/reference/node/sqlite/Session) ·
-[DO SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) ·
-[SQLite in Durable Objects](https://blog.cloudflare.com/sqlite-in-durable-objects/) ·
-[D1 read replication](https://blog.cloudflare.com/d1-read-replication-beta/) ·
+**Why physical replication is impossible for us:** [DO SQLite API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) ·
 [workerd extensions unsupported](https://github.com/cloudflare/workerd/issues/6878) ·
-[ElectricSQL](https://electric.ax/sync/postgres-sync) · [PowerSync](https://powersync.com/sync-postgres) ·
-[Turso embedded replicas](https://docs.turso.tech/features/embedded-replicas/introduction).
+[SQLite session ext](https://sqlite.org/sessionintro.html) / [Bun Session](https://bun.com/reference/node/sqlite/Session) (asymmetric) ·
+[rqlite](https://rqlite.io/docs/faq/) · [cr-sqlite](https://github.com/vlcn-io/cr-sqlite) (the logical model that IS reproducible).
 
-**Graph-DB replication prior art** (the gap):
-[Neo4j clustering](https://neo4j.com/docs/operations-manual/current/clustering/introduction/) ·
-[Neo4j CDC](https://neo4j.com/docs/cdc/current/) · [Neo4j Fabric](https://neo4j.com/docs/operations-manual/4.0/fabric/introduction/) ·
-[APOC export/import](https://neo4j.com/docs/apoc/current/export/) ·
-[Dgraph architecture](https://docs.dgraph.io/installation/dgraph-architecture/) ·
-[JanusGraph architecture](https://docs.janusgraph.org/getting-started/architecture/) ·
-[ArangoDB replication](https://www.arangodb.com/docs/stable/architecture-replication.html) · [DC2DC (retired)](https://docs.arangodb.com/3.10/deploy/arangosync/) ·
-[TigerGraph CRR](https://www.tigergraph.com/docs/tigergraph-server/current/cluster-and-ha-management/crr-index) ·
-[Neptune global database](https://docs.aws.amazon.com/neptune/latest/userguide/neptune-global-database.html) · [Neptune Streams](https://docs.aws.amazon.com/neptune/latest/userguide/streams.html) ·
-[FalkorDB replication](https://docs.falkordb.com/operations/replication.html) ·
-[GUN conflict resolution](https://github.com/amark/gun/wiki/Conflict-Resolution-with-Guns).
+**Graph-DB prior art (the gap):** [Neo4j CDC](https://neo4j.com/docs/cdc/current/) ("not for an exact copy") ·
+[ArangoDB DC2DC (retired)](https://docs.arangodb.com/3.10/deploy/arangosync/) ·
+[FalkorDB replication](https://docs.falkordb.com/operations/replication.html) (ship effects) ·
+[GUN conflict resolution](https://github.com/amark/gun/wiki/Conflict-Resolution-with-Guns) (the only CouchDB-like graph sync).
 
-**Merkle / prolly-tree reframe** (researched; dropped — CouchDB has none, §5·4):
-[Dolt: prolly trees](https://www.dolthub.com/blog/2024-03-03-prolly-trees/) ·
-[Dolt: prolly tree balance](https://www.dolthub.com/blog/2025-06-26-prolly-tree-balance/) ·
-[Dolt: prolly trees + columnar storage](https://www.dolthub.com/blog/2025-09-10-challenges-with-prolly-trees-and-columnar-storage/) ·
-[Dolt: push/pull on a Merkle DAG](https://www.dolthub.com/blog/2020-09-09-push-pull-on-a-merkle-dag/) ·
-[Dolt: garbage collection](https://www.dolthub.com/blog/2020-10-16-garbage-collection-in-dolt/) ·
-[Noms intro](https://github.com/attic-labs/noms/blob/master/doc/intro.md) ·
-[Cassandra repair / node density](https://rustyrazorblade.com/post/2025/repair-and-node-density/) ·
-[AT Protocol repository (MST)](https://atproto.com/specs/repository) · [AT Proto: sync history removal](https://github.com/bluesky-social/atproto/discussions/1410).
+**Merkle/prolly (surveyed, dropped — §5·3):** [Dolt prolly trees](https://www.dolthub.com/blog/2024-03-03-prolly-trees/) /
+[+ columnar cost](https://www.dolthub.com/blog/2025-09-10-challenges-with-prolly-trees-and-columnar-storage/) ·
+[AT Proto MST → log](https://github.com/bluesky-social/atproto/discussions/1410) ·
+[Cassandra anti-entropy](https://rustyrazorblade.com/post/2025/repair-and-node-density/).
 
-**ID schemes** (§6·1 — the global `gid` is `uuid_v7`, following CouchDB; the local rowid stays the join key):
-[RFC 9562 (UUIDv7)](https://www.rfc-editor.org/rfc/rfc9562) · CouchDB `uuid_v7`/`sequential`
-(`couch_uuids.erl`, `config/misc.rst` — the B-tree-locality rationale) · [KSUID](https://github.com/segmentio/ksuid) ·
-[ULID spec](https://github.com/ulid/spec) · Snowflake. Surveyed; the packed-64-bit prefix+counter and the
-KSUID/ULID-sortability lines were explored and superseded once identity (`gid`) split from the local join
-key (rowid). Local reference: `/home/dan/Downloads/ULID.ts`.
+**ID schemes (§6·1):** [RFC 9562 UUIDv7](https://www.rfc-editor.org/rfc/rfc9562) · CouchDB `uuid_v7`/`sequential`
+(`couch_uuids.erl`). (KSUID/ULID/Snowflake surveyed; packed-64-bit and string-sortability were explored and
+superseded once identity split from the rowid.)
 
-**mogwai code cited** (the authority): `src/iostore.ts`, `src/services/catalog/io.ts`,
-`src/cloudflare/R2IoStore.ts`, `src/formats/{graphson,drain,csv}.ts`, `src/bulk.ts`, `src/setwrite.ts`,
-`src/storage.ts`, `src/router.ts`, `src/compiler/segment.ts` (`FederationSource`),
-`src/services/catalog/federate.ts`, `src/api.ts` (`ForeignResult`), `src/wire.ts`, `src/http.ts`,
-`src/cf-limits.ts`, `.claude/rules/{management-api,schema-storage,wire-protocol}.md`, and the vendored
-`gremlin` client at `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`.
+**mogwai code (the authority):** `src/iostore.ts`, `src/services/catalog/io.ts`, `src/formats/*`, `src/bulk.ts`,
+`src/setwrite.ts`, `src/storage.ts`, `src/router.ts`, `src/docs.ts`, `src/compiler/segment.ts`
+(`FederationSource`), `src/services/catalog/federate.ts`, `src/api.ts` (`ForeignResult`), `src/wire.ts`,
+`src/http.ts`, `src/cf-limits.ts`, and the vendored `gremlin` client at
+`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`.
 
 ---
 
-## §14. Vendor CouchDB as reference — it is the gold standard, so keep the code at hand
+## §14. Vendor CouchDB as reference
 
-Per the governing principle (§4), CouchDB is the design authority for this whole feature, so it earns a
-vendored, reference-only submodule beside `vendor/tinkerpop`, `vendor/calcite`, and `vendor/gds` — same
-discipline (blobless + sparse, gitlink-only, never built, never imported; provisioned by
-`scripts/init-submodule.sh`; cite at the pin so claims are checkable by CI and by others, unlike the
-session-local clone this doc currently cites). This doc's CouchDB citations should move to
-`vendor/couchdb/...` paths once it lands. It is `shallow` (read only at the pin), like calcite/gds.
+CouchDB is the design authority here, so it earns a vendored, reference-only submodule beside
+`vendor/tinkerpop`/`calcite`/`gds` — same discipline (blobless + sparse, gitlink-only, never built/imported,
+provisioned by `scripts/init-submodule.sh`, `shallow`, cited at the pin). This doc's CouchDB citations move to
+`vendor/couchdb/...` once it lands. Sparse-checkout the replication reference surface:
 
-**The parts to sparse-checkout** (the replication reference surface, ~a handful of dirs/files):
+- `src/docs/src/replication/` (`protocol.rst`, `conflicts.rst`, `intro.rst`, `replicator.rst`) and
+  `src/docs/src/api/database/{changes,misc,bulk-api}.rst` + `api/local.rst`.
+- `src/couch/src/` — `couch_key_tree.erl` (rev-tree `merge`/`find_missing`/`stem`), `couch_doc.erl`
+  (`new_revid`, `to_doc_info_path`), `couch_db.erl` (`get_missing_revs`), `couch_uuids.erl`.
 
-- `src/docs/src/replication/` — `protocol.rst` (the normative spec), `conflicts.rst` (the rev-tree +
-  winner model + the "Is it like Git?" essay), `intro.rst`, `replicator.rst` (the `_replicator` DB +
-  scheduler + states — §9).
-- `src/docs/src/api/database/{changes,misc,bulk-api}.rst` and `src/docs/src/api/local.rst` — the
-  `_changes`, `_revs_diff`, `_bulk_docs`, `_local` endpoint references.
-- `src/couch/src/` — `couch_key_tree.erl` (the rev-tree: `merge`, `find_missing`, `stem`), `couch_doc.erl`
-  (`new_revid`, the deterministic winner `to_doc_info_path`), `couch_db.erl` (`get_missing_revs`),
-  `couch_uuids.erl` (the id algorithms — §6·1's `sequential` prior art).
-- `src/couch_replicator/src/` — `couch_replicator_ids.erl` (the checkpoint/replication-id derivation) and
-  the scheduler modules (the persistent-job model behind §9).
-
-Actual vendoring is a discrete, reviewed change (submodule + `init-submodule.sh` sparse config), best done
-alongside Phase 0 so every later phase can cite the gold standard at the pin.
+Best done alongside Phase 0.
