@@ -458,8 +458,12 @@ Each phase is independently valuable and lands green before the next.
     `elementDrop` cascade BEFORE the element row goes (gid/rev still readable). A vertex drop tombstones
     the vertex AND its cascade-deleted incident edges; `gid IS NOT NULL` skips a create-and-drop (no gid
     committed); `refreshTombstones` assigns the seq after the write's live seqs. Gate met.
-  - ⏳ **2c — the `_changes?since=N` endpoint**: a UNION of live nodes/edges `WHERE seq > N` and tombstones
-    `WHERE seq > N`, ordered by seq.
+  - ✅ **2c — the `_changes?since=N` endpoint**. `changesFeed(store, since)` (shared, beside `graphInfo`):
+    a UNION of live nodes/edges `WHERE seq > N AND gid IS NOT NULL` and tombstones `WHERE seq > N`, ordered
+    by the globally-unique seq — one entry per element at its latest state, keyed by gid, a delete as
+    deleted:true. Plumbed through the manager seam like `info` (Bun / CF DO RPC / browser Worker); the
+    router adds an `_`-prefixed system-path matcher (`GET /gremlin/{g}/_changes`). `last_seq` = update_seq
+    for checkpoint-and-resume. Gate met (full state at since=0, current-state-sized, deletes, incremental).
   - ⏳ **2d — the `_revs_diff` endpoint**: a pure gid/rev key lookup — "what are you missing?".
 - **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5).** The pull/push loop:
   `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices before
