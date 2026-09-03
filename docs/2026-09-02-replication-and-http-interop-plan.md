@@ -255,7 +255,13 @@ Both features need mogwai to call out over HTTP; the driver already exists in th
 - **The vendored `gremlin` client is a `fetch`-based outbound driver** (`Client.submit(gremlin, parameters)`,
   `vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/{client,connection}.ts`), a production dependency
   already imported for GraphBinary serializers; `fetch` is native in a Worker/DO. This serves the
-  *Gremlin-speaking* outbound call (external federation, §8).
+  *Gremlin-speaking* outbound call (external federation, §8). **One small, known extension:** the stock
+  client's vertex/edge (de)serializers hardcode empty properties — which is exactly why we hand-roll
+  `vertexBuffer`/`edgeBuffer`/`vertexPropertyBuffer` on the server side (`execute.ts`, root `CLAUDE.md`
+  decision #4). As an *outbound* client we must register property-carrying element serializers on the `Client`
+  instance so it can decode a vertex/edge response; we already have them, so it is a small wiring step — and a
+  candidate upstream PR (like the `inject` varargs one), since complete element serializers logically belong
+  in the client anyway.
 - **The replication peer client** is a thin `fetch` wrapper over the §9 endpoints, decoding the same
   GraphBinary/JSON shapes our server produces (`src/http.ts`, `src/wire.ts`).
 - **ONE mechanism — `_changes?since=N`.** Because the by-seq feed is current-state-sized and we keep
@@ -361,8 +367,9 @@ Each phase is independently valuable and lands green before the next.
 - **Phase 0 — outbound HTTP client + the one-shot Gremlin surfaces (§7, §8, §9).** URI-aware `federate`
   (relative = local sibling, absolute = remote HTTP via `HttpFederationSource`) + `io()` from a URL — both
   STANDARD GLV, no schema change. Smallest win, ships two real features, proves the client + worker-residency.
-  Best done alongside vendoring CouchDB (§14). *Gate: federate a sub-traversal to an external Gremlin server;
-  `g.io(url).read()` imports another graph over HTTP.*
+  Includes registering our property-carrying element serializers on the outbound `Client` (§7). Best done
+  alongside vendoring CouchDB (§14). *Gate: federate a sub-traversal to an external Gremlin server, decoding
+  vertices/edges WITH properties; `g.io(url).read()` imports another graph over HTTP.*
 - **Phase 1 — the `gid` + `rev` columns (§6·1, §5·1, §6·5).** Add `gid` (uuid_v7, immutable, indexed) and
   `rev` (bounded rev-tree JSONB) columns on `nodes`/`edges`; the touch-rev-on-write hook (edge rev references
   endpoints by `gid`); thread through format adapters. Local substrate, no networking. *Gate: every element
