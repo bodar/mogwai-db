@@ -4,7 +4,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
 import type { Channels } from '../../channels.ts';
-import { insert, remove } from '../../rel/stmt-factory.ts';
+import { insert, remove, update } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
@@ -18,7 +18,7 @@ import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
-import { propertyRowId } from './property.ts';
+import { propertyOwnerId, propertyRowId } from './property.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
@@ -95,6 +95,31 @@ function deleteOwnedBy(spec: keyof typeof OWNED_BY, owners: Rel, fresh: Minter):
   return remove({
     target, channels: [], type: typeOf(),
     where: { kind: 'in-query', expr: col(target.id, owner), plan: owners, negated: false },
+    returning: [],
+  });
+}
+
+/**
+ * `UPDATE <nodes|edges> SET dirty = 2 WHERE id IN <owner ids>` — the touch-rev-on-write marker
+ * (docs/2026-09-02-replication-and-http-interop-plan.md §5·1). A content mutation over EXISTING
+ * elements changes their `rev`, but the recompute is a JS content-hash the set-based SQL cannot do
+ * inline, so the mutation only FLAGS the elements and the post-write refresh (`src/refresh.ts`)
+ * recomputes gid/rev over `WHERE dirty` after the program commits. `owners` is a bare `(id)` relation
+ * of the OWNER ELEMENTS (a `property()`'s vertices, a `dropLabel`'s vertices, a `mergeV` onMatch's
+ * matched vertices — never the property rows), so `InQuery` over it is O(plan size), never a data-sized
+ * bind list (§6·2), exactly as `deleteOwnedBy` is.
+ *
+ * `dirty = 2` (a mutation), distinct from the DEFAULT 1 a create is born with (`storage.ts`); the
+ * refresh reads neither value, driving gen off whether a `rev` already exists (null → gen 1 create,
+ * present → gen+1 chain), so the 1-vs-2 split is a diagnostic, not load-bearing. A CREATE path never
+ * calls this — its rows are already dirty — so this fires once per mutation site, over existing rows only.
+ */
+function markDirty(elem: Elem, owners: Rel, fresh: Minter): Stmt {
+  const { table } = OWNED_BY[elem === 'edge' ? 'edges' : 'nodes'];
+  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('dirty', 'int')) });
+  return update({
+    target, channels: [], type: typeOf(), set: [['dirty', compilerInt(2)]],
+    where: { kind: 'in-query', expr: col(target.id, 'id'), plan: owners, negated: false },
     returning: [],
   });
 }
@@ -193,18 +218,27 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  */
 export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   // Snapshot first, for `elementDrop`'s reason: the rows to delete must be decided before the first
-  // statement changes what a later one would select.
+  // statement changes what a later one would select. The snapshot carries BOTH the property ROW id
+  // (what the deletes address) and its OWNER ELEMENT id (what the rev touch marks dirty, §5·1) — one
+  // lowering of the target, so the owner is captured before the property rows are gone.
+  const PDROP_TYPE = typeOf(meta('id', 'int'), meta('owner', 'int'));
   const targetPlan = nameBindings(make.project({
-    id: fresh('w'), input: target, channels: [], type: ID_TYPE, exprs: [['id', propertyRowId(target)]],
+    id: fresh('w'), input: target, channels: [], type: PDROP_TYPE,
+    exprs: [['id', propertyRowId(target)], ['owner', propertyOwnerId(target, elem)]],
   }));
   const ids = fresh('pdrop');
-  const rows = make.ref({ id: fresh('r'), name: ids, channels: [], type: ID_TYPE });
+  const snap = make.ref({ id: fresh('r'), name: ids, channels: [], type: PDROP_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
+  // A FRESH single-column projection per consumer — an `InQuery` matches one column, and a shared
+  // node would be the two-column `IN` SQLite refuses (the `mergeE` snapshot reads `idsOf` the same way).
+  const rowIds = (): Rel => make.project({ id: fresh('w'), input: snap, channels: [], type: ID_TYPE, exprs: [['id', col(snap.id, 'id')]] });
 
   // The index text before the row it describes — the referencing direction `elementDrop` states once.
+  // The rev touch marks the OWNER ELEMENTS dirty: dropping a property changes their content hash (§5·1).
   const statements: Stmt[] = [
-    dropStaleIndex(elem, rows, fresh),
-    deleteOwnedBy(elem === 'edge' ? 'edgePropRows' : 'vertexPropRows', rows, fresh),
+    dropStaleIndex(elem, rowIds(), fresh),
+    deleteOwnedBy(elem === 'edge' ? 'edgePropRows' : 'vertexPropRows', rowIds(), fresh),
+    markDirty(elem, make.project({ id: fresh('w'), input: snap, channels: [], type: ID_TYPE, exprs: [['id', col(snap.id, 'owner')]] }), fresh),
   ];
   // A per-element cardinality DECLARATION is deliberately untouched: it is scoped to (node, key) and
   // describes the KEY's schema, not the value that happened to be stored under it. Dropping the last
@@ -568,6 +602,8 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
   const { bindings, bind } = effectScope(fresh);
   const owners = bind(seeded.result, true, carried);
   for (const write of writes) propertyStatements(elem, owners, write, bind, fresh);
+  // Touch the rev of every mutated element: a `property()` write changed their content (§5·1).
+  bind(markDirty(elem, idsOf(owners, fresh), fresh));
   // Back to an ELEMENT relation. `property()` is element-PRESERVING, so this IS the snapshot — no
   // correlation to do, unlike a creation, whose output rows say nothing about which input made them.
   // `bulk` is re-minted at 1 because the snapshot did not carry it: a multiplicity is a fact about
@@ -708,6 +744,9 @@ function labelMutationScope(input: Rel, fresh: Minter): {
   const seeded = inputRows(input, writeInputCols(input), fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const owners = bind(seeded.result, true, carried);
+  // Touch the rev of every mutated vertex: an add/drop of a label changed its content (§5·1). This
+  // scope is vertex-only (`addLabel`/`dropLabel` decline edges above), so the element kind is fixed.
+  bind(markDirty('vertex', make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] }), fresh));
   return {
     bind, guard,
     ownerIds: () => make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] }),
@@ -1864,6 +1903,9 @@ export function elementMergeV(
   // tables, so the order is the reference's rather than a constraint.
   if (appended.length) bindLabels(matched, appended, bind, fresh);
   for (const write of matchWrites) propertyStatements('vertex', matched, write, bind, fresh);
+  // Touch the rev of the MATCHED (existing) vertices whenever onMatch or the tail `property()` run
+  // mutated them (§5·1); created vertices are already born dirty, and an empty `matched` is a no-op.
+  if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', matched, fresh));
 
   // ONE row off the input, because a create happens once however many traversers asked for it. The
   // incoming columns are dropped first: what the creation needs from it is its ROW COUNT, and
@@ -2050,6 +2092,10 @@ export function elementMergeE(
   // `onMatch` write can change a property the search asked about.
   const matched = bind(pairedWith(pairs, criteria, { bySrc: matchOut !== undefined, byTgt: matchIn !== undefined }, fresh), true);
   for (const write of matchWrites) propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh);
+  // Touch the rev of the MATCHED (existing) edges whenever onMatch or the tail `property()` run mutated
+  // them (§5·1); created edges are born dirty, and an empty `matched` is a no-op. Placed before the
+  // create/match branch, so it covers the tail writes both branches run over the matched subset.
+  if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));
 
   // ONE EDGE PER DISTINCT PAIR THAT FOUND NOTHING. `Distinct` is the whole duplicate rule: two
   // traversers naming the same endpoints create one edge between them and both carry it away.

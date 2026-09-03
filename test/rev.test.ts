@@ -48,6 +48,72 @@ describe('rev — the post-write refresh (compiled path)', () => {
     expect(revs(m, 'a', 'nodes')[0]!.hash).not.toBe(revs(m, 'b', 'nodes')[0]!.hash);
   });
 
+  test('a property() mutation on an existing vertex chains the rev (gen 2, new hash)', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko")', {});
+    const before = revs(m, 'g', 'nodes')[0]!;
+    expect(before.gen).toBe(1);
+    await m.executor('g').framedAsync('g.V().property("age",29)', {});
+    const after = revs(m, 'g', 'nodes')[0]!;
+    expect(after.gen).toBe(2); // chained from the parent
+    expect(after.hash).not.toBe(before.hash); // content changed (age added) and lineage chained
+  });
+
+  test('a property() REMOVAL (property(k,null)) chains the rev', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko").property("age",29)', {});
+    const before = revs(m, 'g', 'nodes')[0]!;
+    await m.executor('g').framedAsync('g.V().property("age",null)', {}); // TinkerPop removal rule
+    const after = revs(m, 'g', 'nodes')[0]!;
+    expect(after.gen).toBe(2);
+    expect(after.hash).not.toBe(before.hash);
+  });
+
+  test('properties().drop() chains the owner element rev', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko").property("age",29)', {});
+    const before = revs(m, 'g', 'nodes')[0]!;
+    await m.executor('g').framedAsync('g.V().properties("age").drop()', {});
+    const after = revs(m, 'g', 'nodes')[0]!;
+    expect(after.gen).toBe(2);
+    expect(after.hash).not.toBe(before.hash);
+  });
+
+  test('a label mutation (addLabel/dropLabel) chains the rev', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person")', {});
+    const before = revs(m, 'g', 'nodes')[0]!;
+    await m.executor('g').framedAsync('g.V().addLabel("employee")', {});
+    const after = revs(m, 'g', 'nodes')[0]!;
+    expect(after.gen).toBe(2);
+    expect(after.hash).not.toBe(before.hash); // the label set is part of the content
+  });
+
+  test("mergeV onMatch chains the matched element's rev; a pure match does not", async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","marko")', {});
+    const born = revs(m, 'g', 'nodes')[0]!;
+    // A pure match with no writes leaves the element untouched — no rev bump.
+    await m.executor('g').framedAsync('g.mergeV([(T.label):"person","name":"marko"])', {});
+    expect(revs(m, 'g', 'nodes')[0]!.gen).toBe(born.gen);
+    // onMatch mutates it — the rev chains.
+    await m.executor('g').framedAsync('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,["age":29])', {});
+    const after = revs(m, 'g', 'nodes')[0]!;
+    expect(after.gen).toBe(2);
+    expect(after.hash).not.toBe(born.hash);
+  });
+
+  test('an untouched element keeps its rev while a sibling mutates', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("person").property("name","a").addV("person").property("name","b")', {});
+    const before = revs(m, 'g', 'nodes');
+    // Mutate only the first vertex.
+    await m.executor('g').framedAsync('g.V().has("name","a").property("age",1)', {});
+    const after = revs(m, 'g', 'nodes');
+    expect(after[0]!.gen).toBe(2); // mutated
+    expect(after[1]!).toEqual(before[1]!); // untouched — same rev, no spurious bump
+  });
+
   test('a multi-table chain gives every element a rev; the edge rev references endpoint gids', async () => {
     const m = mgr();
     await m.executor('g').framedAsync(

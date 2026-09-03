@@ -267,6 +267,11 @@ const carryThrough = (input: Rel) =>
  */
 export const propertyRowId = (props: Rel): Expr => col(props.id, PROP('id'));
 
+/** The OWNER ELEMENT's id (`p_node`/`p_edge`) a property stream carries — the twin of
+ *  `propertyRowId`, needed where a property mutation must mark its owner element dirty (a rev
+ *  recompute, §5·1) rather than address the property row itself. */
+export const propertyOwnerId = (props: Rel, elem: Elem): Expr => col(props.id, PROP(PROPERTIES[elem].owner));
+
 /** `key()` — the property's KEY as a string scalar. Always a string, so a STATIC tag is honest here
  *  where the VALUE's is not. */
 export function propertyKey(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {
