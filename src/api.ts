@@ -266,6 +266,41 @@ export type RevsDiffRequest = Readonly<Record<string, readonly WireRev[]>>;
  *  missing are omitted. */
 export type RevsDiffResponse = Readonly<Record<string, { readonly missing: readonly WireRev[] }>>;
 
+// ---- the replication transfer payload (`_bulk_get` reply / `_bulk_docs` request), §4·5 ----
+// Element BODIES keyed by GID; properties in GraphSON typed-value form (wire-safe, full-fidelity — a
+// collection `Map`/`Set` cannot ride a bare value). `src/replicate.ts` produces and applies these.
+
+/** A reference `_bulk_get` fetches the body of. */
+export interface BulkGetRef { readonly gid: string; readonly kind: 'vertex' | 'edge'; }
+
+/** A vertex on the wire — GraphSON `{key: [{id, value, properties?}, …]}` properties, keyed by gid. */
+export interface WireVertex {
+  readonly gid: string;
+  readonly rev: string;
+  readonly labels: readonly string[];
+  readonly properties: Record<string, unknown[]>;
+}
+
+/** An edge on the wire — GraphSON `{key: value}` properties, endpoints by gid. */
+export interface WireEdge {
+  readonly gid: string;
+  readonly rev: string;
+  readonly label: string;
+  readonly srcGid: string;
+  readonly tgtGid: string;
+  readonly properties: Record<string, unknown>;
+}
+
+/** A delete on the wire (a `_changes` `deleted` entry): the element's gid, tombstone rev, and kind. */
+export interface WireDelete { readonly gid: string; readonly rev: string | null; readonly kind: 'vertex' | 'edge'; }
+
+/** The `_bulk_get` reply / `_bulk_docs` request — the wire form of a change set. */
+export interface WireChangeSet {
+  readonly vertices?: readonly WireVertex[];
+  readonly edges?: readonly WireEdge[];
+  readonly deletes?: readonly WireDelete[];
+}
+
 /** The graph-lifecycle seam AND the executor factory. `executor(id)` resolves a graph (creating
  *  it on demand) and returns its per-graph Executor — the single home for id→graph resolution,
  *  which is what federation reaches through (a sibling is just another graph THIS manager owns).
@@ -287,6 +322,11 @@ export interface GraphManager {
   /** Given the revs a peer holds per gid, return which ones graph `id` is MISSING (§4 primitive 2) —
    *  the cheap "what should I send you?" diff. A pure gid/rev key lookup, store-tier. */
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse>;
+  /** Read the BODIES of the referenced elements from graph `id` (`_bulk_get`) — the transfer payload. */
+  bulkGet(id: string, refs: readonly BulkGetRef[]): Promise<WireChangeSet>;
+  /** Apply a change set to graph `id` (`_bulk_docs {new_edits:false}`) — land a peer's changes at their
+   *  stated rev, idempotently and keyed by gid (§4·5). Store-tier write. */
+  bulkDocs(id: string, changes: WireChangeSet): Promise<void>;
   /** Destroy graph `id` and all its storage. Idempotent. */
   destroy(id: string): Promise<void>;
 }

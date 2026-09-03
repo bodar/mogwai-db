@@ -132,6 +132,16 @@ export function makeRouter(
           return json(await mgr.revsDiff(gid, (await req.json()) as Record<string, { gen: number; hash: string }[]>));
         } catch (e: any) { return json({ error: e.message }, 400); }
       }
+      if (endpoint === '_bulk_get') {
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        try { return json(await mgr.bulkGet(gid, (await req.json()) as { gid: string; kind: 'vertex' | 'edge' }[])); }
+        catch (e: any) { return json({ error: e.message }, 400); }
+      }
+      if (endpoint === '_bulk_docs') {
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        try { await mgr.bulkDocs(gid, await req.json()); return json({ ok: true }); }
+        catch (e: any) { return json({ error: e.message }, 400); }
+      }
       return new Response('Not found', { status: 404 });
     }
 

@@ -2,7 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
+import { bulkGet, applyWire } from '../replicate.ts';
+import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
@@ -143,6 +144,16 @@ export class GraphDatabase extends DurableObject<Env> {
   revsDiff(request: RevsDiffRequest): RevsDiffResponse {
     this.ensureLive();
     return revsDiff(this.store, request);
+  }
+
+  bulkGet(refs: readonly BulkGetRef[]): WireChangeSet {
+    this.ensureLive();
+    return bulkGet(this.store, refs);
+  }
+
+  bulkDocs(changes: WireChangeSet): void {
+    this.ensureLive();
+    applyWire(this.store, changes);
   }
 
   /** Fully remove this graph's storage. `deleteAll()` is the only way to clear

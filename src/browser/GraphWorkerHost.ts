@@ -11,7 +11,8 @@
 // opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff, type GraphInfo } from '../manager.ts';
-import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse } from '../api.ts';
+import { bulkGet, applyWire } from '../replicate.ts';
+import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet } from '../api.ts';
 import { Executor, type Framed } from '../execute.ts';
 import type { ForeignResult, ForeignTerminal } from '../api.ts';
 import type { TypeNode } from '../gremlin/types.ts';
@@ -120,6 +121,16 @@ export class GraphWorkerHost extends RpcTarget {
   /** The `_revs_diff` lookup (§4 primitive 2) — store-tier, run inside this graph's Worker. */
   revsDiff(request: RevsDiffRequest): RevsDiffResponse {
     return revsDiff(this.store, request);
+  }
+
+  /** `_bulk_get` — read element bodies, store-tier, inside this graph's Worker. */
+  bulkGet(refs: readonly BulkGetRef[]): WireChangeSet {
+    return bulkGet(this.store, refs);
+  }
+
+  /** `_bulk_docs` — apply a change set, store-tier, inside this graph's Worker. */
+  bulkDocs(changes: WireChangeSet): void {
+    applyWire(this.store, changes);
   }
 }
 // Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's

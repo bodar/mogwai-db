@@ -1,4 +1,4 @@
-import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
+import type { GraphManager, GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, RemoteExecutor, ForeignResult, ForeignTerminal, Http } from '../api.ts';
 import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { type Framed } from '../execute.ts';
 import type { TypeNode } from '../gremlin/types.ts';
@@ -110,6 +110,12 @@ export class CloudflareGraphManager implements GraphManager {
   }
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
     return this.ns.getByName(id).revsDiff(request);
+  }
+  bulkGet(id: string, refs: readonly BulkGetRef[]): Promise<WireChangeSet> {
+    return this.ns.getByName(id).bulkGet(refs);
+  }
+  bulkDocs(id: string, changes: WireChangeSet): Promise<void> {
+    return this.ns.getByName(id).bulkDocs(changes);
   }
   destroy(id: string): Promise<void> {
     return this.ns.getByName(id).destroy();

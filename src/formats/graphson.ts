@@ -205,7 +205,7 @@ function labelsOf(label: unknown): string[] {
 
 /** A vertex's properties: `{key: [{id, value, properties?}, …]}` — one entry per VertexProperty
  *  INSTANCE, so multi-properties and their ids and meta-properties all survive. */
-function vertexProperties(properties: unknown): BulkProperty[] {
+export function vertexProperties(properties: unknown): BulkProperty[] {
   const out: BulkProperty[] = [];
   for (const [key, instances] of Object.entries((properties ?? {}) as Record<string, unknown[]>)) {
     for (const vp of instances) {
@@ -229,7 +229,7 @@ function vertexProperties(properties: unknown): BulkProperty[] {
 
 /** An edge's properties: `{key: <typed value>}` — one row per (edge,key), no ids, no meta (TinkerPop's
  *  edge Property has neither). */
-function edgeProperties(properties: unknown): BulkProperty[] {
+export function edgeProperties(properties: unknown): BulkProperty[] {
   return Object.entries((properties ?? {}) as Record<string, unknown>).map(([key, v]) => {
     const decoded = graphsonValue(v);
     return { key, value: decoded.value, vtype: flatVtype(decoded.type), typeNode: decoded.type };
@@ -434,7 +434,7 @@ const idJson = (id: number | string): unknown =>
 interface EdgeRow { id: number; uid: string | null; src: number; tgt: number; label: string; owner: number; gid: string | null; rev: string | null }
 
 /** `{key: <typed value>}` for an edge's properties. */
-const edgePropsJson = (rows: readonly PropRow[]): Record<string, unknown> =>
+export const edgePropsJson = (rows: readonly PropRow[]): Record<string, unknown> =>
   Object.fromEntries(rows.map((p) => [p.key, graphsonNode(valueNodeFromStored(p.value, p.vtype))]));
 
 /** `{key: [{id, value, properties?}, …]}` for a vertex's properties — one entry per VertexProperty
@@ -443,7 +443,7 @@ const edgePropsJson = (rows: readonly PropRow[]): Record<string, unknown> =>
  *  KNOWN LOSS, and it is in STORAGE rather than in the format: `vertex_properties.meta` is a flat
  *  `{metaKey: scalar}` JSONB bag with no per-value type, so a meta value round-trips as whatever JSON
  *  gives back (int/double/string/bool). GraphSON could carry more; we have nothing more to give it. */
-function vertexPropsJson(rows: readonly PropRow[]): Record<string, unknown[]> {
+export function vertexPropsJson(rows: readonly PropRow[]): Record<string, unknown[]> {
   const out: Record<string, unknown[]> = {};
   for (const p of rows) {
     const meta = p.meta === null ? null : JSON.parse(p.meta) as Record<string, unknown>;

@@ -21,6 +21,9 @@ import type { GraphStore } from './storage.ts';
 import { loadBulk, type BulkEdge, type BulkProperty, type BulkVertex } from './bulk.ts';
 import { deleteMembers, insertSet } from './setwrite.ts';
 import { refreshElements } from './refresh.ts';
+import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
+import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
+import type { BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete } from './api.ts';
 
 /** A replicated vertex document (what `_bulk_get` returns / `_bulk_docs` applies): identity + version +
  *  content, keyed by GID. `rev` is the `{gen, hash}` JSON text, preserved verbatim on apply. */
@@ -42,12 +45,9 @@ export interface ReplEdge {
 }
 
 /** A replicated delete (a `_changes` entry with `deleted: true`): the element's gid, its tombstone rev,
- *  and which kind — no body, since there is nothing left to carry. */
-export interface ReplDelete {
-  readonly gid: string;
-  readonly rev: string | null;
-  readonly kind: 'vertex' | 'edge';
-}
+ *  and which kind — no body. The same shape as the wire's `WireDelete` (a delete needs no serialization,
+ *  so the apply substrate and the wire share it). */
+export type ReplDelete = WireDelete;
 
 /** One batch to apply: live upserts (vertices before edges by construction) and deletes. */
 export interface ChangeSet {
@@ -55,6 +55,14 @@ export interface ChangeSet {
   readonly edges?: readonly ReplEdge[];
   readonly deletes?: readonly ReplDelete[];
 }
+
+// The WIRE document (`_bulk_get` reply / `_bulk_docs` request) — `WireVertex`/`WireEdge`/`WireChangeSet`/
+// `BulkGetRef` — lives in the manager seam (`src/api.ts`), because the manager methods carry it and
+// `api.ts` is the base of the import graph. Properties cross as their GraphSON TYPED-VALUE form, NOT as
+// bare `BulkProperty`: a collection value is a `Map`/`Set` that JSON-drops, while the GraphSON form is
+// wire-safe and round-trips every type + multi-property + meta through the one proven codec
+// (`src/formats/graphson.ts`). `applyWire` parses it back to a `BulkProperty` `ChangeSet` and hands it to
+// `applyChanges` — so the apply substrate stays format-free.
 
 const upper = (gid: string): string => gid.toUpperCase();
 
@@ -139,4 +147,50 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   if (record.length) insertSet(store, 'tombstones',
     [{ name: 'gid', type: 'blob', blob: true }, { name: 'rev', type: 'blob', jsonb: true }, { name: 'kind', type: 'any' }],
     record.map((d) => [upper(d.gid), d.rev, d.kind]));
+}
+
+/**
+ * Read the BODIES of the elements a peer asked for (`_bulk_get`), as wire documents keyed by gid. The
+ * source of the transfer's payload: `_changes` gives gid+rev, `_revs_diff` narrows to what is missing,
+ * and this returns the labels + typed properties + endpoint gids to actually apply. Properties ride the
+ * GraphSON typed-value form (wire-safe, full-fidelity) via the shared codec. A ref whose gid this graph
+ * does not hold is simply absent from the reply (it may have been deleted since the feed was read).
+ */
+export function bulkGet(store: GraphStore, refs: readonly BulkGetRef[]): WireChangeSet {
+  const vGids = refs.filter((r) => r.kind === 'vertex').map((r) => upper(r.gid));
+  const eGids = refs.filter((r) => r.kind === 'edge').map((r) => upper(r.gid));
+
+  const vRows = vGids.length ? store.query<{ id: number; gid: string; rev: string }>(
+    'SELECT id, hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))',
+    [JSON.stringify(vGids)]) : [];
+  const vIds = vRows.map((r) => r.id);
+  const labels = labelsForOwners(store, vIds);
+  const vprops = vertexPropsForOwners(store, vIds, true); // collection values as json() text
+  const vertices: WireVertex[] = vRows.map((r) => ({
+    gid: r.gid, rev: r.rev,
+    labels: (labels.get(r.id) ?? []).map((l) => l.name),
+    properties: vertexPropsJson(vprops.get(r.id) ?? []),
+  }));
+
+  const eRows = eGids.length ? store.query<{ id: number; gid: string; rev: string; label: string; src: string; tgt: string }>(
+    `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
+     FROM edges e JOIN labels l ON l.id = e.label JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
+     WHERE e.gid IS NOT NULL AND hex(e.gid) IN (SELECT value FROM json_each(?))`, [JSON.stringify(eGids)]) : [];
+  const eprops = edgePropsForOwners(store, eRows.map((r) => r.id), true);
+  const edges: WireEdge[] = eRows.map((r) => ({
+    gid: r.gid, rev: r.rev, label: r.label, srcGid: r.src, tgtGid: r.tgt,
+    properties: edgePropsJson(eprops.get(r.id) ?? []),
+  }));
+
+  return { vertices, edges };
+}
+
+/** Apply a WIRE change set (`_bulk_docs`): parse each element's GraphSON typed properties back to
+ *  `BulkProperty` via the shared codec, then hand the format-free `ChangeSet` to {@link applyChanges}. */
+export function applyWire(store: GraphStore, ws: WireChangeSet): void {
+  applyChanges(store, {
+    vertices: (ws.vertices ?? []).map((v) => ({ gid: v.gid, rev: v.rev, labels: v.labels, properties: vertexProperties(v.properties) })),
+    edges: (ws.edges ?? []).map((e) => ({ gid: e.gid, rev: e.rev, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: edgeProperties(e.properties) })),
+    deletes: ws.deletes ?? [],
+  });
 }

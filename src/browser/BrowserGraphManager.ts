@@ -11,7 +11,7 @@
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import type { Framed } from '../execute.ts';
-import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse } from '../api.ts';
+import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
@@ -76,6 +76,14 @@ export class BrowserGraphManager implements GraphManager {
 
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
     return this.call(id, ((s) => s.revsDiff(request)) as Awaited$<RevsDiffResponse>);
+  }
+
+  async bulkGet(id: string, refs: readonly BulkGetRef[]): Promise<WireChangeSet> {
+    return this.call(id, ((s) => s.bulkGet(refs)) as Awaited$<WireChangeSet>);
+  }
+
+  async bulkDocs(id: string, changes: WireChangeSet): Promise<void> {
+    await this.call(id, ((s) => s.bulkDocs(changes)) as Awaited$<void>);
   }
 
   async destroy(id: string): Promise<void> {
