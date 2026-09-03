@@ -538,8 +538,10 @@ Each phase is independently valuable and lands green before the next.
     never dangles. A live upsert over a local tombstone drops it (not-deleted beats deleted) and surfaces
     the delete. Gate: delete-racing-an-edge resurrects-and-surfaces; a normal delete propagates; content
     survives resurrect. (Same-element delete-vs-CONCURRENT-edit needs delete ancestry on the wire → 4b-2.)
-  - ⏳ **4e — the uid conflict + carrying uid on the wire** (§6·3): not-deleted > lower-gid, loser's uid
-    shadowed + surfaced.
+  - ✅ **4e — uid replication + the uid conflict** (§6·1/§6·3). `uid` rides the wire; a collision (two gids
+    claiming one uid) reconciles in a post-`loadBulk` `applyUids` pass — winner (not-deleted > lower gid)
+    keeps it, loser's uid shadowed + surfaced, both survive, order-independent. Also re-mints a property's
+    source VertexProperty id on apply (a property rowid is local — preserving it collided cross-peer).
 - **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
   DO-alarm scheduler (continuous = periodic pull; one-shot = run once), introspection, and the
   OpenAPI-generated UI. *Gate: a config keeps a local graph synced from a remote one on a schedule, editable
