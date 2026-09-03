@@ -2,6 +2,7 @@ import { LazyMap } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
 import type { GraphManager } from './manager.ts';
 import { makeRouter, type QueryLogger } from './router.ts';
+import type { ReplicatorRegistry } from './replicator-registry.ts';
 
 // The runtime-agnostic dependency graph. Platform entry points provide the one
 // leaf that differs — a `GraphManager` abstracting graph lifecycle over Bun's
@@ -16,9 +17,12 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
   /** Per-query stdout reporter. Defaults to the verbose one-line log; the L3 conformance
    *  host injects a compact `.`/`E` progress reporter. */
   log?: QueryLogger;
+  /** The control-plane store for ongoing replication (§9), serving the top-level `/_replicator` CRUD.
+   *  Optional — absent, those routes return 501 (a runtime without a scheduler yet). */
+  registry?: ReplicatorRegistry;
 }
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log));
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry));
 }

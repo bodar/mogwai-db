@@ -18,6 +18,7 @@ import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs } from './docs.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
+import { type ReplicatorRegistry, type ReplicationConfig, newConfigId } from './replicator-registry.ts';
 
 /** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
@@ -75,12 +76,73 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
   }
 }
 
+/** Parse a replication-config request body into a stored {@link ReplicationConfig} at `id`, failing closed
+ *  on a missing/blank `source` or `target` (the two required fields — both graph refs; direction validity is
+ *  a run-time check, since a local→local job is legitimate). Unknown fields are ignored. */
+function parseConfig(id: string, body: any): ReplicationConfig {
+  const source = typeof body?.source === 'string' ? body.source.trim() : '';
+  const target = typeof body?.target === 'string' ? body.target.trim() : '';
+  if (!source || !target) throw new Error('a replication config needs a non-empty `source` and `target`');
+  return {
+    id, source, target,
+    continuous: body.continuous === true,
+    createTarget: body.create_target === true || body.createTarget === true,
+    filter: typeof body.filter === 'string' ? body.filter : null,
+    checkpointInterval: Number.isFinite(body.checkpoint_interval) ? body.checkpoint_interval
+      : Number.isFinite(body.checkpointInterval) ? body.checkpointInterval : null,
+    useCheckpoints: !(body.use_checkpoints === false || body.useCheckpoints === false),
+  };
+}
+
+/** The replicator control-plane CRUD (§9): `/_replicator` (list/create) and `/_replicator/{id}`
+ *  (get/replace/delete). All JSON, all idempotent + create-on-demand like the graph-lifecycle verbs. */
+async function handleReplicator(registry: ReplicatorRegistry, id: string | null, req: Request): Promise<Response> {
+  try {
+    if (id === null) {
+      if (req.method === 'GET') return json({ configs: await registry.listConfigs() });
+      if (req.method === 'POST') {
+        const body = (await req.json()) as any;
+        const cid = typeof body?.id === 'string' && body.id ? body.id : newConfigId();
+        const config = parseConfig(cid, body);
+        await registry.putConfig(config);
+        return json({ id: cid, ok: true }, 201);
+      }
+      return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
+    }
+    switch (req.method) {
+      case 'GET': {
+        const config = await registry.getConfig(id);
+        return config ? json(config) : json({ error: 'not found', id }, 404);
+      }
+      case 'PUT': {
+        await registry.putConfig(parseConfig(id, (await req.json()) as any));
+        return json({ id, ok: true }, 201);
+      }
+      case 'DELETE':
+        await registry.deleteConfig(id); // idempotent — deleting an absent job succeeds
+        return new Response(null, { status: 204 });
+      default:
+        return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, PUT, DELETE' } });
+    }
+  } catch (e: any) {
+    return json({ error: e.message }, 400);
+  }
+}
+
 export function makeRouter(
   mgr: GraphManager,
   pathPrefix = 'gremlin',
   log: QueryLogger = silentLogger,
+  /** The control-plane store for ongoing replication (§9). TOP-LEVEL (`/_replicator[/{id}]`), CouchDB's
+   *  node-global `_replicator` — NOT per-graph, since a job is a standalone `{source, target}` run by the
+   *  worker-residency scheduler. Optional: a runtime without one (the browser edge until Phase 5c) returns
+   *  501 on those routes rather than pretending. */
+  registry?: ReplicatorRegistry,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
+  // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
+  // (list/create) and `/_replicator/{id}` (get/replace/delete). CouchDB's `_replicator` DB shape.
+  const replicatorPath = new RegExp('^/_replicator(?:/([^/]+))?/?$');
   // Peer-facing sync endpoints (§9), CouchDB-shaped under the `_` system prefix: `/{prefix}/{g}/_changes`
   // and (2d) `/{prefix}/{g}/_revs_diff`. A second, longer path so a graph id can never be read as one.
   const systemPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/(_[a-z_]+)/?$`);
@@ -100,6 +162,14 @@ export function makeRouter(
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       if (pathname === '/openapi.json')
         return new Response(OPENAPI_JSON, { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // The replicator control plane (§9) — top-level CRUD over persistent replication jobs. Matched before
+    // the graph path (a distinct root, so no collision) and independent of the configurable graph prefix.
+    const repMatch = pathname.match(replicatorPath);
+    if (repMatch) {
+      if (!registry) return json({ error: 'replication registry not configured' }, 501);
+      return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req);
     }
 
     // The GraphQL edge — GraphQL-over-HTTP on `POST /graphql/{g}` (JSON body) and `GET /graphql/{g}`

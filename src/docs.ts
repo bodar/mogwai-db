@@ -153,9 +153,86 @@ export function buildOpenApiSpec(pathPrefix: string) {
         responses: { '204': { description: 'Destroyed (or already absent).' } },
       },
     },
+    '/_replicator': {
+      get: {
+        summary: 'List replication jobs',
+        description:
+          'List all persistent replication jobs (§9). Ongoing replication is a standalone job — a ' +
+          '`{source, target, continuous, …}` document run by the worker-residency scheduler — kept in the ' +
+          'top-level `_replicator` control plane, CouchDB-style. NOT per-graph.',
+        responses: {
+          '200': {
+            description: 'The stored replication jobs.',
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { configs: { type: 'array', items: REPLICATION_CONFIG_SCHEMA } } },
+              },
+            },
+          },
+          '501': { description: 'This runtime has no replication registry configured.' },
+        },
+      },
+      post: {
+        summary: 'Create a replication job',
+        description: 'Create a replication job (an `id` is generated if omitted). Idempotent per id.',
+        requestBody: { required: true, content: { 'application/json': {
+          schema: REPLICATION_CONFIG_INPUT_SCHEMA,
+          examples: {
+            pull: { summary: 'Continuously pull a remote graph', value: { source: 'https://peer.example/gremlin/prod', target: 'local', continuous: true } },
+            push: { summary: 'One-shot push to a remote', value: { source: 'local', target: 'https://peer.example/gremlin/backup' } },
+          },
+        } } },
+        responses: { '201': {
+          description: 'Created.',
+          content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' }, ok: { type: 'boolean' } } }, example: { id: 'job-1', ok: true } } },
+        } },
+      },
+    },
+    '/_replicator/{configId}': {
+      parameters: [{ name: 'configId', in: 'path', required: true, description: 'Replication job id.', schema: { type: 'string' }, example: 'job-1' }],
+      get: {
+        summary: 'Get a replication job',
+        responses: {
+          '200': { description: 'The job.', content: { 'application/json': { schema: REPLICATION_CONFIG_SCHEMA } } },
+          '404': { description: 'No such job.' },
+        },
+      },
+      put: {
+        summary: 'Create or replace a replication job',
+        description: 'Upsert the job at `configId`. Idempotent.',
+        requestBody: { required: true, content: { 'application/json': { schema: REPLICATION_CONFIG_INPUT_SCHEMA } } },
+        responses: { '201': { description: 'Created or replaced.', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' }, ok: { type: 'boolean' } } } } } } },
+      },
+      delete: {
+        summary: 'Delete a replication job',
+        description: 'Delete the job. Idempotent — deleting an absent job succeeds.',
+        responses: { '204': { description: 'Deleted (or already absent).' } },
+      },
+    },
   },
  } as const;
 }
+
+// A stored replication job (§9·2). `source`/`target` are graph refs — a local graph id or a remote
+// `http(s)` graph URL. The INPUT form omits `id` (generated on POST, path-supplied on PUT).
+const REPLICATION_CONFIG_INPUT_SCHEMA = {
+  type: 'object',
+  required: ['source', 'target'],
+  properties: {
+    source: { type: 'string', description: 'Source graph ref (local id or http(s) URL).' },
+    target: { type: 'string', description: 'Target graph ref (local id or http(s) URL).' },
+    continuous: { type: 'boolean', description: 'Keep syncing on a schedule (else run once).' },
+    create_target: { type: 'boolean', description: 'Create the target if absent.' },
+    filter: { type: 'string', description: 'Captured selector for filtered replication.' },
+    checkpoint_interval: { type: 'integer', description: 'Continuous poll interval (ms).' },
+    use_checkpoints: { type: 'boolean', description: 'Persist a resume checkpoint (default true).' },
+  },
+} as const;
+
+const REPLICATION_CONFIG_SCHEMA = {
+  type: 'object',
+  properties: { id: { type: 'string' }, ...REPLICATION_CONFIG_INPUT_SCHEMA.properties },
+} as const;
 
 // Minimal Scalar shell. Same-origin, so no proxyUrl (requests hit this server
 // directly, never scalar.com's proxy). Prefix-independent — it just points at

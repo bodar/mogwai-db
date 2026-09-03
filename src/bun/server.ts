@@ -1,10 +1,14 @@
 import { parseArgs } from 'node:util';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { application } from '../application.ts';
 import { verboseLogger } from '../router.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromBun, type MogwaiConfig } from '../config.ts';
 import { BunGraphManager } from './BunGraphManager.ts';
+import { BunSqlite } from './BunSqlite.ts';
 import { FileIoStore } from './FileIoStore.ts';
+import { ReplicatorStore, storeRegistry } from '../replicator-registry.ts';
 import { extendedRegistry } from '../services/standard.ts';
 
 /** Bun entry point: build the multi-graph manager (in-memory by default, or a
@@ -28,9 +32,21 @@ export function startServer(config: Partial<MogwaiConfig> = {}) {
     undefined, // makeSql (default bun:sqlite)
     allowlistedHttp(httpAllowlist),
   );
+  // The replicator control-plane store (§9) — a SINGLETON, separate from any graph. Persisted under a
+  // `_control/` subdirectory when `dataDir` is set (a subdir can never collide with a graph file
+  // `{dir}/{id}.sqlite`, since an id encodes its `/` away), else in-memory. Serves `/_replicator` CRUD.
+  let registrySql;
+  if (dataDir) {
+    const controlDir = join(dataDir, '_control');
+    mkdirSync(controlDir, { recursive: true });
+    registrySql = new BunSqlite(join(controlDir, 'replicator.sqlite'));
+  } else {
+    registrySql = new BunSqlite(':memory:');
+  }
+  const registry = storeRegistry(new ReplicatorStore(registrySql));
   // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
   // is its channel). `log` (from `$MOGWAI_LOG`) turns the one-line-per-query access log back on.
-  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined });
+  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined, registry });
   return Bun.serve({ port, fetch: app.router });
 }
 
