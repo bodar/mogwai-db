@@ -470,7 +470,7 @@ Each phase is independently valuable and lands green before the next.
     (rev-tree ancestry is Phase 4). `POST /gremlin/{g}/_revs_diff`, plumbed through every runtime like
     `changes`. Gate met (held not missing, unknown gid all missing, all-held empty, deleted=had, case-
     insensitive gid).
-- **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5). 🚧 IN PROGRESS.** The pull/push
+- **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5). ✅ LANDED.** The pull/push
   loop: `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices
   before edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
   `POST /gremlin/{g}/_replicate {source, target}`. *Gate: pull a remote graph to a fresh local one; re-pull is
@@ -491,8 +491,16 @@ Each phase is independently valuable and lands green before the next.
     faithfully in memory (gids/revs preserved, edges reconnected by gid, typed long+list survive),
     idempotent, deletes propagate. (The outbound peer CLIENT — the `Http` caller — is folded into 3c, where
     the loop drives it.)
-  - ⏳ **3c — the pull/push loop + checkpoint + `_replicate`**: `_changes` → `_revs_diff` → `_bulk_get` →
-    `applyChanges` → checkpoint (`replication_checkpoint`, §9·2); `POST /gremlin/{g}/_replicate {source, target}`.
+  - ✅ **3c — the pull/push loop + checkpoint + `_replicate`.** `runReplication(source, target, checkpoint)`
+    is one direction-agnostic pass: `_changes` from the checkpoint → `_revs_diff` → `_bulk_get` only the
+    missing bodies → apply WITH deletes → advance the checkpoint. A `Peer` is the four ops; `remotePeer(http,
+    url)` speaks them over the SAME Http seam federation/io() use (in-memory testable), `localPeer`/`storePeer`
+    run in-process. `replicationId` is deterministic (resumable); `replication_checkpoint` holds the cursor
+    (not replicated — local job state). `{source: url}` pulls, `{target: url}` pushes; the loop runs at
+    worker/edge residency (§7). Wired through every runtime (Bun in-process, CF Worker→DO, browser Worker);
+    `POST /gremlin/{g}/_replicate` drives it. Gate MET: pull reconstructs a remote in a fresh local
+    (matching gid+rev fingerprints), re-pull is a resumable no-op that picks up a later delta, push swaps
+    roles, deletes propagate. The outbound peer CLIENT (folded here) is `remotePeer`.
 - **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
   deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
   depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
