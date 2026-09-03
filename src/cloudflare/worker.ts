@@ -3,10 +3,11 @@ import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromWorkerEnv } from '../config.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { GraphDatabase, type Env } from './graph-store-do.ts';
+import { ReplicatorRegistryDO, CloudflareReplicatorRegistry } from './replicator-registry-do.ts';
 
-// The Durable Object class must be exported from the Worker's entry module so
-// wrangler can bind it (the [[durable_objects]] class_name).
-export { GraphDatabase };
+// Both Durable Object classes must be exported from the Worker's entry module so
+// wrangler can bind them (the durable_objects class_name entries).
+export { GraphDatabase, ReplicatorRegistryDO };
 export type { Env };
 
 // Worker: wire the shared router over a Cloudflare-backed manager. The graph id
@@ -24,6 +25,8 @@ export default {
     const app = application({
       manager: new CloudflareGraphManager(env.GRAPH, allowlistedHttp(config.httpAllowlist)),
       pathPrefix: config.pathPrefix,
+      // The control-plane registry (§9·2) — the singleton DO, forwarded over RPC; serves `/_replicator`.
+      registry: new CloudflareReplicatorRegistry(env.REPLICATOR),
     });
     return app.router(request);
   },

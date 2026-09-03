@@ -16,12 +16,16 @@ import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromWorkerEnv, type WorkerConfigEnv } from '../config.ts';
 import { httpAwareIoStore } from '../http-io.ts';
 import { rpcTry, type RpcFailure, type RpcResult } from '../rpc.ts';
+import type { ReplicatorRegistryDO } from './replicator-registry-do.ts';
 
 // Env extends WorkerConfigEnv, which carries the shared config source: `PATH_PREFIX`, the outbound-HTTP
 // `HTTP_ALLOWLIST`, and the structured `CONFIG` object var (Wrangler `vars` can hold a JSON object, so
 // io()/federate config rides in `env` as an adjacent object — see src/config.ts).
 export interface Env extends WorkerConfigEnv {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
+  /** The singleton control-plane registry DO (§9·2) — holds ongoing-replication config/job state, read by
+   *  the worker-residency scheduler; serves the top-level `/_replicator` CRUD. Bound in wrangler.jsonc. */
+  REPLICATOR: DurableObjectNamespace<ReplicatorRegistryDO>;
   /** Optional R2 bucket backing io() — where `io("data/x.json")` resolves. A binding, so an
    *  operator opts in per deployment; absent, io() fails closed naming it (NO_IO_STORE). */
   IO?: R2Bucket;

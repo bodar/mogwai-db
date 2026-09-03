@@ -6,6 +6,7 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { FileIoStore } from '../src/bun/FileIoStore.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { memoryWasmSqlFactory } from '../src/browser/WasmSqlite.ts';
+import { ReplicatorStore, storeRegistry } from '../src/replicator-registry.ts';
 import { graphContract } from './contract.ts';
 
 // The browser SQL leaf (`WasmSqlite`, src/browser/WasmSqlite.ts) run against the WHOLE conformance
@@ -30,7 +31,10 @@ graphContract('bun-wasm', {
     // the io test would assert only that. extendedRegistry turns federation on for the federation test.
     const io = new FileIoStore(mkdtempSync(join(tmpdir(), 'mogwai-wasm-io-')));
     const manager = new BunGraphManager(undefined, extendedRegistry, io, undefined, makeSql);
-    const app = application({ manager });
+    // The replicator control-plane registry on the WASM SQL leaf too, so the shared contract exercises
+    // `/_replicator` CRUD on the browser's engine (proving parity for the registry, not just the graph).
+    const registry = storeRegistry(new ReplicatorStore(makeSql(':memory:')));
+    const app = application({ manager, registry });
     server = Bun.serve({ port: 0, fetch: app.router });
     return `http://localhost:${server.port}`;
   },

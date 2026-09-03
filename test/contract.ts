@@ -38,6 +38,50 @@ export function graphContract(name: string, harness: Harness) {
     ioContract(() => origin);
     federationContract(() => origin);
     olapContract(() => origin);
+    replicatorContract(() => origin);
+  });
+}
+
+/**
+ * The replicator control plane (§9) on the REAL runtime: top-level `/_replicator` CRUD over HTTP. On
+ * Cloudflare this is the ONLY place the singleton registry DO is exercised on real workerd — a DO-boundary
+ * fault (RPC clone, binding wiring, the `v2` migration) is invisible on Bun and surfaces only here, the same
+ * lesson as the OLAP/federation contracts. Runs on Bun (in-process store) and the WASM leaf too, proving the
+ * registry is parity-correct across every backend.
+ */
+function replicatorContract(getOrigin: () => string) {
+  describe('replicator config', () => {
+    const rid = `contract-${Date.now()}`; // per-run id so a persisted DO never collides across runs
+    test('create → list → read → update → delete a replication job', async () => {
+      const put = await fetch(`${getOrigin()}/_replicator/${rid}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'http://peer.example/gremlin/prod', target: 'local', continuous: true }),
+      });
+      expect(put.status).toBe(201);
+
+      const one = (await (await fetch(`${getOrigin()}/_replicator/${rid}`)).json()) as any;
+      expect(one).toMatchObject({ id: rid, source: 'http://peer.example/gremlin/prod', target: 'local', continuous: true });
+
+      const list = (await (await fetch(`${getOrigin()}/_replicator`)).json()) as { configs: any[] };
+      expect(list.configs.some((c) => c.id === rid)).toBe(true);
+
+      // Upsert: flip continuous off.
+      await fetch(`${getOrigin()}/_replicator/${rid}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'http://peer.example/gremlin/prod', target: 'local', continuous: false }),
+      });
+      expect(((await (await fetch(`${getOrigin()}/_replicator/${rid}`)).json()) as any).continuous).toBe(false);
+
+      expect((await fetch(`${getOrigin()}/_replicator/${rid}`, { method: 'DELETE' })).status).toBe(204);
+      expect((await fetch(`${getOrigin()}/_replicator/${rid}`)).status).toBe(404);
+    });
+
+    test('a job missing source/target is rejected', async () => {
+      const res = await fetch(`${getOrigin()}/_replicator`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'x' }),
+      });
+      expect(res.status).toBe(400);
+    });
   });
 }
 
