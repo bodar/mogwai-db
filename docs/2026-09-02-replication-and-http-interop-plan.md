@@ -611,11 +611,16 @@ Each phase is independently valuable and lands green before the next.
     Gate MET for Bun (`test/replicator-config.test.ts`): CRUD incl. generated/chosen id, idempotent delete,
     404/400/501, store round-trip, OpenAPI surface. The **CF singleton-DO backend is the next step (5b-cf)**
     and the browser backend lands with its scheduler (5c); until each is wired those edges return 501.
-  - **5b-cf — the CF singleton registry DO.** A `ReplicatorRegistryDO` (its own `ReplicatorStore` over
-    `ctx.storage.sql`) + a `CloudflareReplicatorRegistry` forwarding over RPC to a fixed singleton id; the
-    `REPLICATOR` binding + a `v2` migration in `wrangler.jsonc`; the worker entry constructs + injects it and
-    exports the class. *Gate: `_replicator` CRUD works over real `wrangler dev` (workerd), since green Bun CI
-    does not cover the DO boundary.*
+  - ✅ **5b-cf — the CF singleton registry DO + cross-runtime parity.** `ReplicatorRegistryDO` (a singleton
+    control-plane DO holding a `ReplicatorStore` over `ctx.storage.sql`, a data store only) +
+    `CloudflareReplicatorRegistry` forwarding to a fixed singleton id over RPC (config objects are plain JSON,
+    so they clone across the DO boundary with none of the graph plane's Stmt/closure hazards); the `REPLICATOR`
+    binding + a `v2` migration in `wrangler.jsonc`; the worker entry injects it + exports the class. The
+    bun-wasm harness got a registry on the WASM leaf, and a shared `replicatorContract` now runs in
+    `graphContract`, so `_replicator` CRUD is validated over the real edge on Bun, the WASM leaf, AND workerd
+    (the only place the singleton-DO boundary is exercised). Gate MET — full CI green incl. the cloudflare
+    bracket over real `wrangler dev`. (Browser SW backend still returns 501 until 5c wires it with the
+    scheduler.)
   - **5c — the `Scheduler` seam + the shared `runDueReplications` + `replication_job` + introspection.** CF cron
     `scheduled()` / Bun `setInterval` / browser SW timer, all calling ONE shared runner that reads due jobs
     (with the job-claim/lease guard), runs each as a bounded paced pull at worker residency, records
