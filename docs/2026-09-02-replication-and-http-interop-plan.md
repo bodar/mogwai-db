@@ -439,8 +439,8 @@ keep "all history," and what it *does* keep is either self-bounding or cheap:
   It needs no pruning — it is graph-sized by construction. This is why `since=0` always reconstructs a full
   replica, and why the snapshot/incremental split collapses to CouchDB's one mechanism (§7).
 - **Rev-tree ancestry is depth-stemmed**, automatically and cheaply — CouchDB's `_revs_limit` (default
-  1000): beyond a depth cap, old rev-ids drop off the tree. We do the same; it is bounded, not a horizon
-  (the depth value is the one tuning knob, §11).
+  1000): beyond a depth cap, old rev-ids drop off the tree. We do the same; it is bounded, not a horizon.
+  **DECIDED: copy CouchDB's default of 1000** (a config knob, but no known reason to differ).
 - **Only tombstones truly accumulate**, and CouchDB itself does not auto-prune them (purge is manual and
   discouraged, because a peer that has not seen the delete would resurrect it). Following the governing
   principle we match CouchDB: keep tombstones, offer a manual purge later. Deletes are infrequent
