@@ -599,11 +599,23 @@ Each phase is independently valuable and lands green before the next.
     (`test/replicate-paging.test.ts`): paged HTTP feed with a resuming cursor; a 12-element pull drains in 3
     bounded pages with a pacing breakpoint between each, no page over `batchSize`; a `maxBatches`-bounded run
     resumes from its checkpoint; the one-shot path still drains fully.
-  - **5b — the `ReplicatorRegistry` seam + top-level config CRUD + OpenAPI.** The singleton control-plane store
-    (DO on CF, native sqlite on Bun/browser) holding `replication_config`; CRUD free functions over the store;
-    the registry seam + its three runtime backends; top-level `_replicator[/{id}]` routes (the system-path
-    regex broadens to admit a `{id}` sub-segment); the OpenAPI `paths` entries so `/docs` documents them.
-    *Gate: create/read/update/delete a replication job via REST, visible in the generated UI.*
+  - ✅ **5b — the `ReplicatorRegistry` seam + top-level config CRUD + OpenAPI (Bun backend).** A synchronous
+    `ReplicatorStore` over the `Sql` transport (`src/replicator-registry.ts`, its own `replication_config`
+    schema + put/get/list/delete), the async `ReplicatorRegistry` seam, and `storeRegistry` (the
+    sync-store-in-no-op-promises backend, mirroring how `BunGraphManager` wraps `GraphStore`). Top-level
+    `/_replicator` (list/create) + `/_replicator/{id}` (get/replace/delete) routes — CouchDB-style, NOT under
+    the graph prefix (a distinct top-level matcher, so no `{id}`-regex broadening was needed); the registry is
+    an OPTIONAL injected router dependency (a runtime without one returns 501). Threaded through
+    `application()` and constructed as a singleton in the Bun composition root (persisted under a `_control/`
+    subdir, else in-memory). OpenAPI `paths` for both, so `/docs` renders them with an interactive panel.
+    Gate MET for Bun (`test/replicator-config.test.ts`): CRUD incl. generated/chosen id, idempotent delete,
+    404/400/501, store round-trip, OpenAPI surface. The **CF singleton-DO backend is the next step (5b-cf)**
+    and the browser backend lands with its scheduler (5c); until each is wired those edges return 501.
+  - **5b-cf — the CF singleton registry DO.** A `ReplicatorRegistryDO` (its own `ReplicatorStore` over
+    `ctx.storage.sql`) + a `CloudflareReplicatorRegistry` forwarding over RPC to a fixed singleton id; the
+    `REPLICATOR` binding + a `v2` migration in `wrangler.jsonc`; the worker entry constructs + injects it and
+    exports the class. *Gate: `_replicator` CRUD works over real `wrangler dev` (workerd), since green Bun CI
+    does not cover the DO boundary.*
   - **5c — the `Scheduler` seam + the shared `runDueReplications` + `replication_job` + introspection.** CF cron
     `scheduled()` / Bun `setInterval` / browser SW timer, all calling ONE shared runner that reads due jobs
     (with the job-claim/lease guard), runs each as a bounded paced pull at worker residency, records
