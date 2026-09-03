@@ -344,8 +344,31 @@ rev's job, §5·2. This is exactly why CouchDB's `_id` is a random/time token an
 (`couch_uuids.erl`: a random prefix plus an incrementing counter) is the proven prior art for
 "collision-safe id that keeps insert locality." The counter gives B-tree insert locality; the prefix
 namespaces the peer so two peers minting locally-originated ids never collide. Counter-only (no wall-clock)
-is the leaning (§11) — it removes any clock-skew / time-going-backward dependency and still orders inserts;
-a Snowflake time+peer+seq layout is the alternative.
+is DECIDED — it removes any clock-skew / time-going-backward dependency and still orders a peer's own
+inserts; a Snowflake time+peer+seq layout is rejected (its only gain, global time-ordering, we cannot honor
+across peers without a shared clock anyway).
+
+**Bit layout — and why the KSUID-vs-ULID sortability debate is moot for us.** As a 64-bit INTEGER the id has
+exactly one order — numeric — and SQLite's `INTEGER PRIMARY KEY` B-tree *is* that order. Byte- vs
+lexical-sortability is a property of how a large value is ENCODED into a string or byte array (base32/base62
+text, or a 16/20-byte binary); an integer isn't encoded, so the distinction that separates KSUID from ULID
+does not apply. (For the record both are binary- *and* string-sortable — ULID's 128-bit form is
+network-byte-order, timestamp-first, so byte-sortable too; the real ULID/KSUID differences are size,
+entropy, and base32-vs-base62 text, not a sortability gap.) The only layout choice is which field takes the
+high bits, and it is forced: **prefix in the high bits, per-peer counter in the low bits**, so a peer's own
+inserts are numerically contiguous and ascending (per-peer B-tree locality); cross-peer order is meaningless
+by design. This is **Snowflake's structure minus the timestamp** (`prefix`≈machine, `counter`≈sequence) and
+CouchDB `sequential`'s structure as an integer. Use the 63 positive bits (reserve the sign bit — a 63-bit id
+already needs the >2^53 int64 read path, `src/gremlin/types.ts`; staying unsigned keeps JSON/JS transport
+clean): a recommended **~23-bit prefix** (8M instances, birthday-safe for realistic fleets, reassignable on
+the replication handshake) **+ ~40-bit counter** (a 10 GB DO holds ~2²⁷ elements — ample headroom). The
+exact split stays a tunable (§11); the shape is settled.
+
+**Keep KSUID's one genuinely transferable property: inspectability.** A structured id should decode to its
+parts — `peer = id >> COUNTER_BITS`, `seq = id & COUNTER_MASK` — so document the field layout and ship a
+small decode helper (the analog of KSUID's `inspect`). If a humane EXTERNAL string form is ever wanted (a
+compact copy-paste id for URLs/logs), base62/Crockford-encoding the integer gives one that stays
+order-preserving; but the NATIVE, stored, join-key id remains the integer.
 
 **The prefix identifies the physical INSTANCE, never the graph name — a correctness point, not a
 preference.** The canonical replication case is *the same logical graph on two peers* (pull prod `social`
@@ -656,8 +679,9 @@ with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **Couch
 it is not graph-forced** (§5·4); **the referential conflict never rejects and never loses — a referencing
 edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
 
-1. **Id layout detail** (§6·1): the bit split (prefix width vs counter width), and counter-only (leaning, no
-   clock dependence) vs Snowflake time+peer+seq. A tuning decision, not a mechanism.
+1. **Id bit split** (§6·1): only the exact prefix/counter widths (recommended ~23/40 in 63 positive bits) —
+   a tunable. Resolved in review: layout is prefix-high / counter-low (Snowflake-minus-time), counter-only
+   (no wall-clock), sortability is moot for an integer, and the id is inspectable via documented fields.
 2. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
 3. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
 4. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
@@ -747,6 +771,11 @@ facts (rev hash `new_revid`, deterministic winner `to_doc_info_path`, `couch_key
 [Noms intro](https://github.com/attic-labs/noms/blob/master/doc/intro.md) ·
 [Cassandra repair / node density](https://rustyrazorblade.com/post/2025/repair-and-node-density/) ·
 [AT Protocol repository (MST)](https://atproto.com/specs/repository) · [AT Proto: sync history removal](https://github.com/bluesky-social/atproto/discussions/1410).
+
+**ID schemes** (structure + inspectability, §6·1; sortability moot for an integer):
+[KSUID](https://github.com/segmentio/ksuid) · [ULID spec](https://github.com/ulid/spec) ·
+Snowflake (timestamp+machine+sequence) · CouchDB `sequential` (`couch_uuids.erl`). Local reference:
+`/home/dan/Downloads/ULID.ts` (Coder base32/base62 + inspectable parse).
 
 **mogwai code cited** (the authority): `src/iostore.ts`, `src/services/catalog/io.ts`,
 `src/cloudflare/R2IoStore.ts`, `src/formats/{graphson,drain,csv}.ts`, `src/bulk.ts`, `src/setwrite.ts`,
