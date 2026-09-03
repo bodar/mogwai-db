@@ -442,9 +442,22 @@ Each phase is independently valuable and lands green before the next.
   *Gate MET: every element has a stable `gid`/`rev`; identical content converges to the same rev (compiled
   path AND bulk); rev survives an `io()` round-trip verbatim incl. a chained generation; two independent
   graphs never collide on `gid`.*
-- **Phase 2 — the by-seq feed + read side (§5·2, §6·4).** Per-element `seq` (indexed, bumped on write) +
-  tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct deltas incl. deletes;
-  `since=0` enumerates full current state; the feed stays current-state-sized under repeated updates.*
+- **Phase 2 — the by-seq feed + read side (§5·2, §6·4). 🚧 IN PROGRESS.** Per-element `seq` (indexed,
+  bumped on write) + tombstones. Expose `_changes?since=N` and revs-diff. Server-only. *Gate: correct
+  deltas incl. deletes; `since=0` enumerates full current state; the feed stays current-state-sized under
+  repeated updates.*
+  - ✅ **2a — the `seq` column + monotonic counter, assigned by the refresh.** `seq` joins gid/rev as a
+    derived column the ONE post-write refresh assigns (the "any future one" the dirty marker anticipated);
+    the dirty flag is now a small enum (1 = create, 2 = mutation, 3 = preserve). A single-row `update_seq`
+    counter, bumped a block per write via `nextSeqBlock`; node seqs precede edge seqs (§6·2). Bulk-preserved
+    rows land dirty=3 so an io()/replicated element takes a fresh LOCAL seq while keeping its rev. Gate met:
+    every write bumps seq; a mutation moves the element forward; a sibling is unchanged; every live element
+    has seq > 0.
+  - ⏳ **2b — the `tombstones` table + `drop()` records one** (§6·4, §6·5): a delete records a tombstone
+    carrying its gid/rev/seq/kind, so the feed can ship a `_deleted`.
+  - ⏳ **2c — the `_changes?since=N` endpoint**: a UNION of live nodes/edges `WHERE seq > N` and tombstones
+    `WHERE seq > N`, ordered by seq.
+  - ⏳ **2d — the `_revs_diff` endpoint**: a pure gid/rev key lookup — "what are you missing?".
 - **Phase 3 — the replication engine + checkpoint + peer protocol (§9, §5).** The pull/push loop:
   `_changes?since=N` (N=0 for first contact, `io()`-streamed for bulk) → revs-diff → transfer (vertices before
   edges) → apply idempotently → checkpoint. Expose the peer endpoints + a transient one-shot
