@@ -16,6 +16,18 @@ node = "22.22.2"
 # Keep wrangler non-interactive in CI (no telemetry prompt / phone-home).
 WRANGLER_SEND_METRICS = "false"
 
+# How many TASKS mise may run concurrently (default is a fixed 8, not core-scaled). Must be a static
+# integer — `"{{ num_cpus() }}"` is rejected (`expected usize`), and setting MISE_JOBS via [env] is
+# resolved too late to affect scheduling (both measured). 24 guarantees our ~9-task-wide DAG (the 3 top
+# `ci` tasks + `gates`' 6 deps) never waits on a slot on this box, and is harmless on a 4-core CI runner
+# (it only lets `gates`' six ~7s deps briefly oversubscribe). NOTE this is NOT the workload's real
+# parallelism knob: the heavy CPU load is the CHILD PROCESSES the orchestrator scripts spawn
+# (scripts/test-all.ts ≈ one `bun test` per bracket; scripts/rel-sweep.ts = min(6, cores)), which read
+# the core count themselves and ignore `jobs`. The "leave cores free" headroom lives THERE
+# (test-all.ts caps at cores−2), not here.
+[settings]
+jobs = 24
+
 # Every task runs through scripts/teeshell.sh, which tees its combined stdout+stderr to
 # `.logs/<task>.log` (the last run of that task) and prints the path. So a run's full output
 # is always in a file to `grep`/`Read` — no re-running a suite just because a `tail` or `grep`
@@ -55,10 +67,35 @@ sources = ["package.json", "bun.lock"]
 # `node_modules` listed, `mise run install` printed "sources up-to-date, skipping" and left no link.
 outputs = ["node_modules", "node_modules/gremlin"]
 
+# ── INCREMENTAL: `sources` so a re-run skips when nothing changed ────────────────────────────────
+# Every deterministic, file-driven task below carries a `sources` glob. mise then skips it
+# ("sources up-to-date, skipping") when no listed file has a newer mtime than the last run, and reruns
+# otherwise. This is what makes the LLM double-run cheap — `mise run test` then `mise run ci` no longer
+# re-executes the identical suite (the whole `ci` graph — gates + rel-sweep + test — becomes a no-op on
+# the second call when the tree is unchanged). It is invisible to CI, which starts from a fresh checkout
+# every time.
+#
+# Freshness is mtime-based, which is the SAFE direction: any edit, `git checkout`, or `touch` bumps the
+# mtime and forces a rerun, so it can never WRONGLY SKIP after a change to a listed file. The globs are a
+# deliberate SUPERSET of what each task reads (over-listing only costs an occasional extra run;
+# UNDER-listing could ship a stale green, so we never trim below what a task consumes).
+#
+# TWO inputs the globs deliberately do NOT capture — both caught by CI, which starts from a fresh
+# checkout on every push and is the gate of record (see the "CI green only after push" rule), so
+# neither is ever lost at the real gate; the skip is a purely LOCAL convenience:
+#   1. The L3/L4 conformance corpus (`.feature` files) is read straight from the `vendor/tinkerpop`
+#      submodule (a symlink in a linked worktree; globbing it is fragile), so a submodule PIN BUMP that
+#      changes the corpus without touching `src/`/`test/` would be skipped locally.
+#   2. L5's seed is derived from git HEAD, so a re-run at the SAME commit is genuinely identical
+#      (deterministic → safe to skip), but a re-run after a NEW commit that touched no `src/`/`test/`
+#      file would skip L5 with the old seed and miss that HEAD's exploration locally.
+# After a pin bump or when you specifically want a fresh L5 seed locally, `touch` any source (or clear
+# the task's mise state) to force a rerun.
 [tasks.check]
 description = "Type-check (tsc --noEmit); no emit — Bun/esbuild run the TS directly"
 depends = ["install"]
 run = "bunx tsc --noEmit"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # Sits next to `check`, NOT in the ladder. L1–L5 assert runtime behaviour over traversals; this
 # asserts a STATIC property of the source, so numbering it "L6" would break what the ladder means.
@@ -72,6 +109,7 @@ run = "bunx tsc --noEmit"
 description = "Architectural invariants: no Pass reaches ChainFacts or the fast-path layer"
 depends = ["install"]
 run = "bun scripts/arch-check.ts"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # The three unused-code flags, which cannot live in tsconfig.json because generated `parser/` fails
 # them and must never be hand-edited. Every config-level exemption was measured and none work — the
@@ -82,6 +120,7 @@ run = "bun scripts/arch-check.ts"
 description = "Unused-code checks over our source (generated parser/ is exempt — see tsconfig.json)"
 depends = ["install"]
 run = "bun scripts/lint.ts"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # The third gate in the `arch`/`lint` mould, and the one that stops the DO 100-bind class of defect
 # coming back: no statement's bind list may be a function of ROW COUNT (src/rowbatch.ts is the
@@ -94,6 +133,7 @@ run = "bun scripts/lint.ts"
 description = "Bind-budget invariants: no bind list sized by row count outside RowBatch"
 depends = ["install"]
 run = "bun scripts/binds-check.ts"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # An INSTRUMENT, not a gate, and deliberately absent from `ci`. An export with zero references is a
 # question, not a verdict: DI-registered leaves, names reached through the service registry, symbols
@@ -116,6 +156,10 @@ run = "bun scripts/rel-blockers.ts"
 description = "RelIR decline contract: lowerToRel returns a plan or null over every corpus prefix, never throws"
 depends = ["install"]
 run = "bun scripts/rel-sweep.ts"
+# Deterministic and file-driven: it sweeps test/L1-corpus/corpus.txt through the src compiler, so its
+# inputs are entirely within these globs — safe to make incremental (this is what lets `mise run ci`
+# skip the sweep on a re-run with an unchanged tree).
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 [tasks.submodule]
 description = "Provision the pinned submodules (blobless+sparse: tinkerpop, calcite) + build/register the client"
 run = "bash scripts/init-submodule.sh"
@@ -124,13 +168,18 @@ run = "bash scripts/init-submodule.sh"
 # so a test run must gate on the type-check first — else a type error ships green under a bare
 # `bun test` (which is how the build once went red after a refactor passed its tests).
 [tasks.test]
-description = "Full suite: the Bun-process core, then the browser lane in its OWN process"
+description = "Full suite, fanned across cores: one `bun test` process per bracket, in parallel"
 depends = ["install", "check", "submodule"]
-# TWO processes on purpose. Step 1 is the core suite; the browser `describe`s discover but SKIP (the lane
-# flag is unset), so no Chrome and no heavy Bun.build under the full-suite FD load. Step 2 runs JUST the
-# browser lane in a fresh process with the flag set — isolated, where its bundling is reliable (and it
-# self-skips if there is no system Chrome). CI runs the same split as parallel bracket jobs instead.
-run = ["bun test", "MOGWAI_RUN_BROWSER=1 bun test test/browser/"]
+# ONE command on purpose (was a two-command array). scripts/test-all.ts fans the suite out into the SAME
+# brackets CI uses (scripts/brackets.ts), one `bun test <files>` child per bracket run CONCURRENTLY — so
+# a 24-core box actually uses its cores instead of pinning ~1 on a single `bun test`. The browser bracket
+# runs in its own child with the lane flag set (unminified locally; it self-skips without Chrome), which
+# subsumes the old "browser second, in its own process" step. Single command because mise appends
+# `-- <args>` to the LAST run command: with one command, `mise run test -- test/L3 -t foo` reaches
+# test-all.ts as argv, which then takes a targeted single-process fast path. CI still fans by RUNNER
+# (scripts/test-bracket.ts); this is the local mirror sharing the one bracket function.
+run = "bun scripts/test-all.ts"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 [tasks."test:cf-limits"]
 description = "Instrument: L3 conformance with every compiled statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]
@@ -140,6 +189,7 @@ depends = ["install", "check", "submodule"]
 # by the real DO in cloudflare.test.ts, and `mise run binds` catches the placeholder idiom statically.
 env = { MOGWAI_CF_LIMITS = "1" }
 run = "bun test test/L3-conformance"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # The BROWSER lane — Playwright drives a real (system) Chrome against the browser leaves (src/browser/*).
 # Part of the normal gate now: the tests run under a bare `bun test` / `mise run ci` and get their own CI
@@ -166,21 +216,25 @@ run = "bun test test/browser/"
 description = "L1 — corpus parse+chain (2,298 canonical traversals)"
 depends = ["install", "check"]
 run = "bun test test/L1-corpus"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 [tasks.L2]
 description = "L2 — SQL snapshots (compile-to-SQL contract)"
 depends = ["install", "check"]
 run = "bun test test/L2-sql"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 [tasks.L3]
 description = "L3 — official TinkerPop cucumber conformance over GraphBinary (ratcheted)"
 depends = ["install", "check", "submodule"]
 run = "bun test test/L3-conformance"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 [tasks.L4]
 description = "L4 — our addendum Gherkin suite (gap coverage; all must pass)"
 depends = ["install", "check", "submodule"]
 run = "bun test test/L4-addendum"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 [tasks.L5]
 description = "L5 — property-based fast-path differential (HEAD-derived seed)"
@@ -191,6 +245,9 @@ description = "L5 — property-based fast-path differential (HEAD-derived seed)"
 # the install fails instead — so the entry is documentation of the need, not the mechanism.)
 depends = ["install", "check", "submodule"]
 run = "bun test test/L5-properties"
+# Incremental at a FIXED HEAD (deterministic), but its seed is HEAD-derived — see the note on the
+# `[tasks.check]` block: a re-run after a new commit that touched no source will skip with the old seed.
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # The DEEP sweep: a random seed and a much larger sample. Findings get diagnosed into
 # test/L5-properties/known.ts (or fixed), then promoted into an L4 .feature so the floor rises.
@@ -214,6 +271,7 @@ run = "L5_SEED=$(bun -e 'console.log(Math.floor(Math.random() * 0x7fffffff))') L
 description = "Census — the refactor guard: every corpus traversal's outcome vs the committed baseline"
 depends = ["install", "check", "submodule"]
 run = "bun test test/L7-census"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # Re-record the baseline. Deliberately a command rather than the test rewriting itself: the census
 # is a two-way baseline, so an auto-record would launder the very regression it exists to catch.
@@ -266,6 +324,10 @@ description = "Bundle the Cloudflare Worker (dry-run deploy)"
 # which has no `./io` export — got installed in place of the link; that route is now closed.
 depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
+# Bundles src/cloudflare/worker.ts (+ everything it imports, all under src/ and the generated parser)
+# per wrangler.jsonc — so those files are its inputs. Incremental so the ~seconds dry-run deploy in the
+# `gates` group skips on an unchanged tree.
+sources = ["src/**", "parser/**", "wrangler.jsonc", "tsconfig.json", "package.json", "bun.lock"]
 
 # ONE BRACKET of the suite, for a CI runner of its own. `bun test` is a single process and bun does
 # not parallelise across files, so the suite is a serial CPU pole; the only thing that shortens it is
@@ -294,6 +356,7 @@ run = "bun scripts/test-bracket.ts"
 description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
 depends = ["install"]
 run = "bun scripts/sql-hygiene.ts"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 # EXPLAIN QUERY PLAN over every compiled corpus read. Instrument for the temp-b-tree count (needs
 # judgement), gate for base-table scans (zero today; the base tables are reached through covering
@@ -316,6 +379,7 @@ description = "Instrument: the full suite under reversed unordered scans (finds 
 depends = ["install", "check", "submodule"]
 env = { MOGWAI_REVERSE_UNORDERED = "1" }
 run = "bun test"
+sources = ["src/**", "test/**", "scripts/**", "parser/**", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 
 # The static half of the gate, grouped so CI can put it on a runner of its own. Every member finishes

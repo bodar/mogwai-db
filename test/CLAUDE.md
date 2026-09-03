@@ -17,13 +17,17 @@
 
 - **Run `mise run test`, NOT bare `bun test`.** The mise task carries the `depends` that set up
   the environment — `install`, `submodule`, and crucially `check` (`tsc --noEmit`). Bare `bun test`
-  skips type-checking and the submodule, so green there can hide broken types. `bun test <file>` is
-  fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L5`
-  run one level each; `mise run ci` is the full gate.
+  skips type-checking and the submodule, so green there can hide broken types. This is ENFORCED: a
+  PreToolUse hook (`.claude/hooks/reroute-bun-test.py`) rewrites a bare `bun test [args]` to
+  `mise run test [-- args]`, so the fast inner loop on one file is `mise run test -- <file>` (which
+  runs a targeted single `bun test` after the deps have set up). `mise run test` itself fans the suite
+  across cores — one `bun test` process per bracket (`scripts/test-all.ts`, sharing the CI bracket
+  function in `scripts/brackets.ts`). `mise run L1`..`L5` run one level each; `mise run ci` is the
+  full gate. Re-runs are incremental (`sources` in `mise.toml`) — an unchanged tree skips.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
   beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test` and
-  `build`, and `test` is a bare `bun test` over all 71 files, so **L1–L5 and `test/L7-census` are inside
-  it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
+  `build`, and `test` fans one `bun test` per bracket over ALL discovered files (`scripts/test-all.ts`),
+  so **L1–L5 and `test/L7-census` are inside it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
   exist for the inner loop — before `ci`, not after it.
   Only three things are genuinely outside: the two ENV-switch runs (`test:cf-limits`,

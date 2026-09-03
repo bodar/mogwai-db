@@ -93,6 +93,19 @@ log path — `mise run ci` leaves `.logs/check.log`, `.logs/test.log`, … — i
 suite because a `tail` scrolled the part you needed past. **Do not pipe a suite through `tail`/`grep`
 and then re-run when you miss something; the whole run is already in the file.**
 
+**`mise run test` fans the suite across cores and re-runs are incremental — two properties that change
+how you invoke it.** (1) `test` is no longer one serial `bun test`; `scripts/test-all.ts` runs one
+`bun test` process PER BRACKET concurrently (the same total bracket function CI uses,
+`scripts/brackets.ts` — a new `test/L6-…/` dir becomes a child here and a CI runner there with no edit),
+so the wall is the slowest bracket, not the whole suite. A filter still works: `mise run test -- <path
+or -t name>` takes a targeted single-process fast path (mise appends `-- args` to the one run command,
+which is why `test` is a single command). (2) Every deterministic, file-driven task carries `sources`
+globs, so a re-run with an unchanged tree SKIPS ("sources up-to-date, skipping") — this is why running
+`mise run test` then `mise run ci` no longer re-executes the identical work. Skip freshness is
+mtime-based (fails safe — any edit reruns); the two inputs it can't see are the `vendor/tinkerpop`
+`.feature` corpus (a pin bump) and L5's HEAD-derived seed (a new commit), both re-run fresh by CI, which
+remains the gate of record — see the `sources` comment block in `mise.toml`.
+
 **`mise run ci`'s EXIT CODE is truthful, but a PIPE hides it — this is a green-that-was-red trap that
 shipped a red commit once.** mise exits non-zero on any failed task (a failed dependency propagates its
 code and the parent `run` is skipped — measured). But `mise run ci 2>&1 | tail`/`| grep` makes the
@@ -273,9 +286,12 @@ ratchet, the census's legacy columns) are DELETED. A traversal the RelIR lowerin
 raises `UnsupportedTraversal` — a clear query failure, never a fallback. The RelIR plan records the
 remaining cross-cutting substrate.
 
-**Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
-  `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
-  `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
+**Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule, and is
+  serial instead of the cored fan-out). This is now ENFORCED, not just asked: a project PreToolUse Bash
+  hook (`.claude/hooks/reroute-bun-test.py`, wired in `.claude/settings.json`) transparently rewrites a
+  bare `bun test [args]` into `mise run test [-- args]` (and denies a `bun test` buried in a compound
+  command rather than mis-rewriting). See `test/CLAUDE.md`. Build graph:
+  `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
   `link:` dep resolving to the submodule-built client, so `bun install` FAILS (rather than falling
   back to npm's beta.2) if the submodule has not registered the link. Consequence: nothing is
   submodule-free, `check`/L1/L2 included.
