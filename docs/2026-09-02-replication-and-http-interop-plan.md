@@ -215,6 +215,19 @@ Honest cost: preserving conflicts is heavier than discarding — content becomes
 losers in the shadow store). Read≫write makes conflicts rare, so the shadow store is seldom populated; it is
 what "never lose a write" costs, and CouchDB pays it too.
 
+**A UID conflict is the same disposition on the secondary key.** A `uid` is the user's addressable
+per-graph id (`V("book-42")`), unique locally — but a partition lets peer A and peer B each validly create
+their own `book-42` (distinct gids, same uid), importing a violation neither side had. It is CouchDB's
+same-`_id` conflict, differing only because we split identity (gid) from the user key (uid): so it is a
+UNIQUE-index conflict, not a same-document one. Same rules bind (never reject, never lose), so it reconciles
+like any other — **both elements survive; the winner keeps the uid, the loser's uid is shadowed and surfaced;
+winner = not-deleted, then lower gid** (a total, clock-free order both peers agree on — and since gid is
+uuid_v7 it also means "first to claim the name", the intuitive outcome; convergence never depends on the
+clock). We do NOT auto-merge the two elements — only the user knows if they are the same thing. This is why a
+value that is merely *data* about an element (an ISBN) belongs in a PROPERTY, which never collides; a uid is
+for when you truly want it as the element id. Deferred to Phase 4 with the rest of conflict handling; until
+then replicated elements are gid-addressed (uid null), so no collision can arise.
+
 ### §6·4 Deletes / tombstones, and why up-front pruning is NOT needed
 
 `drop()` hard-deletes and there is no tombstone today, but replication must propagate deletes (a live-set diff
@@ -503,6 +516,7 @@ Each phase is independently valuable and lands green before the next.
     roles, deletes propagate. The outbound peer CLIENT (folded here) is `remotePeer`.
 - **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
   deterministic-winner-on-read; conflict surfacing; the referential rule (edge-resurrects-endpoint);
+  the uid conflict (not-deleted > lower-gid, loser's uid shadowed — §6·3) + carrying uid on the wire;
   depth-stemming at 1000. *Gate: two peers cross-replicate and converge; conflicts preserved and surfaced,
   never lost; a delete racing an incident edge resurrects-and-surfaces; deletes otherwise propagate.*
 - **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
