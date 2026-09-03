@@ -37,9 +37,10 @@ import { decodeForeignResult } from './foreign-decode.ts';
 
 const GRAPHBINARY_MIME = 'application/vnd.graphbinary-v4.0';
 
-/** A `graph` id that names a remote peer over HTTP rather than a local sibling. A relative id is a
- *  local graph the manager owns; a fully-qualified `http(s)` URI is a peer to reach as a client. */
-export const isRemoteGraphUri = (id: string): boolean => /^https?:\/\//i.test(id);
+/** A fully-qualified `http(s)` URL. Used two ways: a federate `graph` id that is one names a REMOTE
+ *  peer (not a local sibling), and an `io()` path that is one names a document to fetch over HTTP (not
+ *  a local io-store key). A relative string is local in both. */
+export const isHttpUrl = (s: string): boolean => /^https?:\/\//i.test(s);
 
 /** The production `Http`: the platform's global `fetch` (native on Bun, a Worker/DO, and the browser).
  *  THE ONE sanctioned place an outbound call touches global `fetch` — everything else takes an injected
@@ -119,4 +120,4 @@ export class HttpForeignExecutor implements Executor {
 /** Dispatch a `graph` id: a remote `http(s)` URI → an {@link HttpForeignExecutor} over the injected
  *  `http` transport; anything else → the manager's local resolver. The one line both managers share. */
 export const remoteOrLocal = <T extends RemoteExecutor>(id: string, http: Http, local: () => T): T | HttpForeignExecutor =>
-  isRemoteGraphUri(id) ? new HttpForeignExecutor(id, http) : local();
+  isHttpUrl(id) ? new HttpForeignExecutor(id, http) : local();

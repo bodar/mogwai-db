@@ -10,6 +10,9 @@ import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { R2IoStore } from './R2IoStore.ts';
+import { NO_IO_STORE } from '../iostore.ts';
+import { defaultHttp } from '../http-federation.ts';
+import { httpAwareIoStore } from '../http-io.ts';
 import { rpcTry, type RpcFailure, type RpcResult } from '../rpc.ts';
 
 export interface Env {
@@ -63,7 +66,9 @@ export class GraphDatabase extends DurableObject<Env> {
     this.ensureLive();
     // The R2 binding is read INSIDE the DO (bindings are a property of a DO's env exactly as they
     // are a Worker's), so a whole-graph read/write happens where the graph lives.
-    const io = this.env.IO ? new R2IoStore(this.env.IO) : undefined;
+    // io() URL-aware: an http(s) path fetches a document over the DO's global fetch (`defaultHttp`),
+    // any other path resolves against the R2 binding (fail-closed NO_IO_STORE when unbound).
+    const io = httpAwareIoStore(this.env.IO ? new R2IoStore(this.env.IO) : NO_IO_STORE, defaultHttp);
     return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH), undefined, io);
   }
 

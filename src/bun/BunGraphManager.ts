@@ -5,9 +5,10 @@ import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi, Http } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
-import type { IoStore } from '../iostore.ts';
+import { NO_IO_STORE, type IoStore } from '../iostore.ts';
 import type { FastPathConfig } from '../compiler/options/fast-paths.ts';
 import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
+import { httpAwareIoStore } from '../http-io.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -66,7 +67,12 @@ export class BunGraphManager implements GraphManager {
   ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
+    // Make io() URL-aware: an http(s) path fetches a document over the same Http seam federation uses,
+    // any other path uses the configured local store (fail-closed NO_IO_STORE when none was bound).
+    this.ioStore = httpAwareIoStore(this.io ?? NO_IO_STORE, this.http);
   }
+
+  private readonly ioStore: IoStore;
 
   private fileFor(id: string): string {
     return join(this.dir!, `${encodeURIComponent(id)}.sqlite`);
@@ -90,7 +96,7 @@ export class BunGraphManager implements GraphManager {
    *  instead of a local graph (§8), so `federate` reaches an external graph through the same seam. */
   executor(id: string): ExecutorApi {
     return remoteOrLocal(id, this.http, () =>
-      new Executor(this.resolve(id).store, this.registry, this, this.fastPaths, this.io));
+      new Executor(this.resolve(id).store, this.registry, this, this.fastPaths, this.ioStore));
   }
 
   /**
