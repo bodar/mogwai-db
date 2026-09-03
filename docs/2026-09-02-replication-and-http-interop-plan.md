@@ -483,8 +483,14 @@ Each phase is independently valuable and lands green before the next.
     one CHAINS (a local re-import). Gate met (fresh apply, idempotent re-apply, in-place update preserving the
     incoming rev, delete+tombstone, cross-batch endpoint resolution). uid replication deferred (needs a
     cross-peer collision policy).
-  - ⏳ **3b — the peer client + `_bulk_get`/`_bulk_docs` endpoints**: an outbound `Http` caller over the §9
-    endpoints; `_bulk_get` returns element bodies (the ReplVertex/ReplEdge form), `_bulk_docs` applies them.
+  - ✅ **3b — the `_bulk_get`/`_bulk_docs` transfer endpoints.** `bulkGet(store, refs)` returns element
+    bodies (labels + typed properties + endpoint gids) keyed by gid; properties ride the GraphSON
+    typed-value form (wire-safe, full-fidelity via the one exported codec). `applyWire` parses them back to
+    `BulkProperty` and calls `applyChanges` (the apply substrate stays codec-free). Both plumbed through
+    every runtime like `changes`; the router adds the two POST branches. Gate met: a full graph transfers
+    faithfully in memory (gids/revs preserved, edges reconnected by gid, typed long+list survive),
+    idempotent, deletes propagate. (The outbound peer CLIENT — the `Http` caller — is folded into 3c, where
+    the loop drives it.)
   - ⏳ **3c — the pull/push loop + checkpoint + `_replicate`**: `_changes` → `_revs_diff` → `_bulk_get` →
     `applyChanges` → checkpoint (`replication_checkpoint`, §9·2); `POST /gremlin/{g}/_replicate {source, target}`.
 - **Phase 4 — conflict preservation + tombstones (§6·3, §6·4).** Rev-tree + shadow store;
