@@ -156,7 +156,8 @@ rowid is structurally unusable as identity.
 - **`rowid` — the local, sequential, fast join key; unchanged.** `INTEGER PRIMARY KEY`; owns B-tree insert
   locality and is the covering-index join key (`e_out`/`e_in`). Never leaves the store as identity. The only
   place "sequential is load-bearing" lives.
-- **`gid` — global identity: a `uuid_v7` (RFC 9562), CouchDB's own default id.** 128 bits = 48-bit ms
+- **`gid` — global identity: a `uuid_v7` (RFC 9562), one of CouchDB's own id algorithms
+  (`couch_uuids.erl` `v7_bin`; its *configured default* is `sequential`, `uuid_v7` opt-in).** 128 bits = 48-bit ms
   timestamp + **74 random bits**; those random bits make it globally unique with **no instance prefix, no
   coordination, no collision fragility** (two independent deployments collide only on the same ms *and* the
   same 74-bit draw — never). uuid_v7's timestamp buys only secondary-index locality, never uniqueness, so it
@@ -480,16 +481,16 @@ superseded once identity split from the rowid.)
 
 ---
 
-## §14. Vendor CouchDB as reference
+## §14. Vendor CouchDB as reference — ✅ LANDED (`vendor/couchdb`, CouchDB 3.5.2 `5b4d921`)
 
 CouchDB is the design authority here, so it earns a vendored, reference-only submodule beside
 `vendor/tinkerpop`/`calcite`/`gds` — same discipline (blobless + sparse, gitlink-only, never built/imported,
-provisioned by `scripts/init-submodule.sh`, `shallow`, cited at the pin). This doc's CouchDB citations move to
-`vendor/couchdb/...` once it lands. Sparse-checkout the replication reference surface:
+provisioned by `scripts/init-submodule.sh`, `shallow`, cited at the pin). LANDED at CouchDB 3.5.2 (`5b4d921`),
+so this doc's CouchDB citations now resolve at `vendor/couchdb/...` for everyone and for CI. The
+sparse-checkout is exactly the replication reference surface (cone-mode, whole dirs), 3.3M on disk:
 
 - `src/docs/src/replication/` (`protocol.rst`, `conflicts.rst`, `intro.rst`, `replicator.rst`) and
   `src/docs/src/api/database/{changes,misc,bulk-api}.rst` + `api/local.rst`.
 - `src/couch/src/` — `couch_key_tree.erl` (rev-tree `merge`/`find_missing`/`stem`), `couch_doc.erl`
-  (`new_revid`, `to_doc_info_path`), `couch_db.erl` (`get_missing_revs`), `couch_uuids.erl`.
-
-Best done alongside Phase 0.
+  (`to_doc_info_path`), `couch_db.erl` (`new_revid`, `get_missing_revs`), `couch_uuids.erl` (`v7_bin`/`v7_hex`;
+  note the configured *default* algorithm is `sequential`, with `uuid_v7` an available option — §6·1 corrected).
