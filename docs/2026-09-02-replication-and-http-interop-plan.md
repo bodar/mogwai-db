@@ -152,14 +152,15 @@ value, and deletion has referential consequences. The five primitives port; the 
 **Governing principle (LAW): CouchDB is the gold standard; we deviate ONLY when we can empirically do
 better, or when graph semantics force it.** "Simpler for us" is not a licence — it is the reasoning that
 produced a wrong first cut here (a discard-LWW conflict model, since corrected). Measured against this
-principle the whole design has exactly a handful of justified deviations, each recorded at its section: the
-**64-bit integer id** (§6·1 — *empirically better*: integer joins keep the covering indexes index-only,
-which we measured; and even it borrows CouchDB's `sequential` prefix+counter shape); the **transfer
-ordering** vertices-before-edges (§6·2 — *graph-forced*); and the **referential conflict** rule for an edge
-to a deleted endpoint (§6·3 — *graph-forced*, no document-store analog). Everything else — the rev,
-conflict preservation, the by-sequence feed, keeping tombstones — follows CouchDB, because CouchDB is right
-and we have no empirical reason to differ. The two graph-forced deviations share one root: **an edge is the
-JOIN that CouchDB documents do not have.**
+principle the whole design has exactly **two** graph-forced deviations, each recorded at its section: the
+**transfer ordering** vertices-before-edges (§6·2) and the **referential conflict** rule for an edge to a
+deleted endpoint (§6·3), neither of which has a document-store analog. Everything else follows CouchDB — the
+identity (a `uuid_v7` `gid`, CouchDB's own default), the rev (generation + content hash), conflict
+preservation, the by-sequence feed, keeping tombstones — because CouchDB is right and we have no empirical
+reason to differ. (One thing is *orthogonal* to CouchDB rather than a deviation: a local integer rowid as the
+fast join key, separate from the `gid` — §6·1 — an internal optimization SQLite hands us that a document
+store has no need for.) The two graph-forced deviations share one root: **an edge is the JOIN that CouchDB
+documents do not have.**
 
 ---
 
@@ -186,53 +187,29 @@ tree) — turns out NOT to be needed: CouchDB does not have one, and its absence
 CouchDB answers job 1 with the rev (a bounded rev-tree per doc) and job 2 with a by-sequence index; we land
 on both of CouchDB's answers, and stop there.
 
-### §5·2 Job 1 — identity: the rev is a hidden property (the faithful port)
+### §5·2 Job 1 — the rev: generation + content hash, a dedicated column
 
-**Decision (recommended, low-regret): the rev is a hidden element property `~rev`, not a new schema
-column.** This is the faithful CouchDB port — in CouchDB `_rev` *is* a reserved field of the document, so
-"a property of the element" is the exact analog, not a shortcut. The payoff is that it rides substrate we
-already have instead of touching the schema:
+**DECIDED: `rev` = generation + content hash, stored as a dedicated column on `nodes`/`edges`** (alongside
+`gid`, §6·1 — both columns, not hidden properties, for the storage/perf reasons there). This IS CouchDB's
+model — `_rev` is a `generation-hash` pair. Generation is a *logical* clock (it increments from the parent
+rev), deliberately NOT wall-clock time: a time-based rev would make the conflict winner depend on whose clock
+was right across peers. The content hash is the entropy. Together they give idempotent replay (identical
+writes converge to the same rev, so re-sync dedups) AND the deterministic conflict winner §6·3 needs (higher
+generation, then higher hash).
 
-- **Zero schema migration.** A rev is one more row in `vertex_properties` / `edge_properties` — already
-  normalized, typed (`vtype`), indexed (`src/storage.ts`).
-- **It round-trips through everything for free.** `io()` (`src/services/catalog/io.ts`), the bulk loader
-  (`src/bulk.ts`), GraphSON export/import (`src/formats/graphson.ts`), and set-writes
-  (`src/setwrite.ts`) all already carry properties. So *the replication payload is the existing element
-  payload* — no bespoke wire format, no "also send the revs" side path. A rev-carrying graph already backs
-  up and restores with its revs intact.
-- **`_revs_diff` becomes a query, not a mechanism.** "Which of your `(id, rev)` do I lack?" is a predicate
-  over the rev property — it compiles to SQL like any traversal. That is dead-on for "compile to SQL,
-  never interpret."
-- **Hidden-key hygiene already exists in the model.** TinkerPop hidden keys (the `~` prefix,
-  `Graph.Hidden`) are excluded from `values()`/`valueMap()`/`properties()` by convention — the project
-  already uses this shape (`~tinkerpop.io.reader` in `io.ts`). `~rev` is naturally invisible to user
-  queries and is excluded from its own content hash exactly as CouchDB excludes `_rev` from the body hash.
-
-Two honest costs, both real, neither fatal:
-
-- **Storage is free; maintenance is not.** Every mutation must recompute and rewrite the element's `~rev`,
-  and to content-hash it the write path must gather the element's current content (O(element size) per
-  write). That "touch the rev on write" hook is the actual work — and it is *model-independent*: any rev
-  scheme needs something to bump the version on write. Rev-as-property makes only the *storage* free.
-- **What the rev IS remains open** (a genuine sub-decision, not settled by "where it lives"):
-  - **content hash** — `hash(labels/endpoints + properties)`, à la CouchDB's `new_revid`
-    (`MD5(deleted, prev-gen, prev-hash, body, atts)`). Idempotent: identical writes converge to the same
-    rev, so replay and re-sync dedup naturally. Costs a content read per write.
-  - **opaque per-write token (uuid)** — O(1) write, no content read, but loses content-dedup (two peers
-    that independently made the *same* edit still look divergent).
-  - **generation + hash** (`N-hash`, full CouchDB rev) — carries a generation counter, which is what makes
-    CouchDB's deterministic conflict winner (higher generation wins) work. Cheap add-on to the hash form.
-  - **DECIDED: generation + content hash** — the CouchDB-faithful choice: idempotent replay AND a
-    deterministic winner for §6 conflicts, and the generation is one integer. Generation is a *logical*
-    clock (it increments from the parent rev), deliberately NOT wall-clock time — a time-based rev would
-    make the conflict winner depend on whose clock was right across peers. The content hash is the entropy.
-
-**Because we preserve conflicts (§6·3), the `~rev` holds a bounded rev-TREE, not a scalar** — the current
-leaf revision(s) plus a stemmed ancestry (CouchDB's `_revs_limit`, a small depth cap), enough to select a
-deterministic winner and to graft an incoming rev at the right place for revs-diff. It still rides the
-property substrate: we already store typed JSON trees in a property value, so `~rev` is one such tree. The
-winner's content stays in the normal live rows (the query hot path is untouched); losing leaves are held
-aside in a shadow/conflict store, read only by a conflict-aware query.
+- **`_revs_diff` is a query, not a mechanism.** "Which of your `(gid, rev)` do I lack?" is a predicate over
+  the `gid`/`rev` columns — it compiles to SQL like any traversal, dead-on for "compile to SQL, never
+  interpret."
+- **The maintenance is the real work; the storage is cheap.** Every mutation recomputes and rewrites the
+  element's `rev`, and to content-hash it the write path gathers the element's current content (O(element
+  size) per write). That "touch the rev on write" hook is model-independent — any rev scheme needs something
+  to bump the version on write — and the dedicated column makes it an in-place update on the row already being
+  written (§6·1), the cheapest place to put a thing that fires on every write.
+- **Conflict preservation (§6·3) makes `rev` a bounded rev-TREE, not a scalar** — the current leaf(s) plus a
+  stemmed ancestry (`_revs_limit`-style depth cap), enough to select a deterministic winner and graft an
+  incoming rev for revs-diff. Stored as a JSONB blob in the column (winner cheap off the front); the winner's
+  content stays in the normal live rows (query hot path untouched), losing leaves in a shadow/conflict store
+  read only by a conflict-aware query.
 
 ### §5·3 Job 2 — the `since` cursor: a by-sequence index, exactly like CouchDB
 
@@ -302,8 +279,9 @@ frequently reconcile without checkpoints, or a hard integrity-audit requirement.
 Following the governing principle (§4), the change model is CouchDB's, with the two graph-forced deviations
 isolated to §6:
 
-- **Job 1 — identity/conflict** — a `~rev` hidden property holding a bounded rev-tree, generation + content
-  hash; conflicts PRESERVED (CouchDB, §6·3), winner-on-read.
+- **Job 1 — identity + version** — a `gid` column (uuid_v7, global identity) + a `rev` column (generation +
+  content hash, a bounded rev-tree); conflicts PRESERVED (CouchDB, §6·3), winner-on-read. Both dedicated
+  columns on `nodes`/`edges`, not hidden properties (§6·1).
 - **Job 2 — the cursor** — a per-element `seq` (by-sequence index, current-state-sized), driving
   `_changes?since=N` and a revs-diff query. `since=0` is a full sync; there is ONE mechanism, not a
   snapshot/incremental split (§7).
@@ -322,93 +300,76 @@ no Merkle tree.
 These are the consequences of §4's inversion. None is optional for a *faithful* replica; each is where "a
 trained monkey could design it" stops being true for a graph.
 
-### §6·1 Cross-peer identity — the native id becomes a 64-bit global integer
+### §6·1 Cross-peer identity — a uuid_v7 `gid`, separate from the local rowid
 
-**Our element ids are per-DO integer rowids** (`nodes.id` / `edges.id`), faced externally as
-`COALESCE(uid, id)` (`src/storage.ts`). Two independently-created graphs mint rowids **independently** —
-vertex 5 on peer A is unrelated to vertex 5 on peer B. Replication is meaningless without a stable
-cross-peer identity, and a bare `addV()` today has only a local rowid.
+**Our element ids are per-DO integer rowids** (`nodes.id` / `edges.id`, faced externally as
+`COALESCE(uid, id)`, `src/storage.ts`), and a rowid can NEVER be the cross-peer identity — not only across
+*different* graphs, but between two **replicas of the same graph, both writing**: prod and a laptop in sync
+(counters at 1000), prod creates a vertex → rowid 1001, the laptop creates a *different* vertex → also rowid
+1001, they replicate, and `1001` names two distinct vertices. A per-store sequential rowid is structurally
+unusable as identity.
 
-**DECIDED: change the NATIVE id to a 64-bit globally-unique integer — do not co-opt `uid`.** TinkerPop
-does not require integer ids (element ids are arbitrary `Object`s; Neptune uses strings, JanusGraph
-custom); we chose integer rowids for *performance* — the covering indexes `e_out(src,label,tgt)` /
-`e_in(tgt,label,src)` do integer src/tgt joins for index-only traversal (`src/storage.ts`). So we are free
-to change the id's *value scheme* while keeping it an integer, which keeps that performance intact — a
-128-bit UUID stored as TEXT would widen every join key and lose it. `uid` is then freed entirely for
-users, rather than us co-opting it. (Identity needs *uniqueness*, not content: two structurally-identical
-elements are still two elements, so the id's entropy is the prefix+counter — content addressing is the
-rev's job, §5·2. This is exactly why CouchDB's `_id` is a random/time token and its content hash lives in
-`_rev`.)
+**DECIDED: split the two jobs — the rowid stays a purely-local fast join key; a separate `gid` carries global
+identity.**
 
-**Structure: a per-instance prefix + a monotonic counter** — CouchDB's own `sequential` algorithm
-(`couch_uuids.erl`: a random prefix plus an incrementing counter) is the proven prior art for
-"collision-safe id that keeps insert locality." The counter gives B-tree insert locality; the prefix
-namespaces the peer so two peers minting locally-originated ids never collide. Counter-only (no wall-clock)
-is DECIDED — it removes any clock-skew / time-going-backward dependency and still orders a peer's own
-inserts; a Snowflake time+peer+seq layout is rejected (its only gain, global time-ordering, we cannot honor
-across peers without a shared clock anyway).
+- **`rowid` — local, sequential, fast; a pure internal optimization, unchanged.** It is the
+  `INTEGER PRIMARY KEY`; it owns B-tree insert locality (sequential → inserts append, no mid-tree splits —
+  the SQLite version of the append-only-B-tree concern CouchDB documents for its own ids) and it is the
+  covering-index join key (`e_out`/`e_in`). It never leaves the store as identity. This is the *only* place
+  the "sequential is load-bearing" property lives.
+- **`gid` — global identity: a `uuid_v7` (RFC 9562), following CouchDB exactly** (uuid_v7 is CouchDB's own
+  default id since 3.6, `couch_uuids.erl`). 128 bits = a 48-bit ms timestamp + **74 random bits**, and it is
+  those 74 random bits that make it **globally unique with NO instance prefix, NO coordination, NO collision
+  fragility**: two independent deployments collide only on the same millisecond *and* the same 74-bit draw —
+  never. This **dissolves the entire prefix / instance-id / composite / bit-split analysis** an earlier draft
+  agonized over — that fragility was purely an artifact of trying to pack global uniqueness into the 64-bit
+  rowid; a separate 128-bit `gid` simply has enough bits. Immutable, assigned at element creation. (uuid_v7's
+  timestamp buys only secondary-index locality on bulk `gid`-index inserts — never uniqueness — so it does
+  NOT reintroduce a clock-skew *correctness* dependency: a backwards clock perturbs gid ordering slightly,
+  never uniqueness. That is why time is harmless here yet was rightly rejected for the rev winner.)
+- **`rev` — version (§5·2), separate from `gid`.** `gid` is *which* element (immutable); `rev` is *which
+  version* (changes per write) — CouchDB's `_id` vs `_rev` distinction.
 
-**Bit layout — and why the KSUID-vs-ULID sortability debate is moot for us.** As a 64-bit INTEGER the id has
-exactly one order — numeric — and SQLite's `INTEGER PRIMARY KEY` B-tree *is* that order. Byte- vs
-lexical-sortability is a property of how a large value is ENCODED into a string or byte array (base32/base62
-text, or a 16/20-byte binary); an integer isn't encoded, so the distinction that separates KSUID from ULID
-does not apply. (For the record both are binary- *and* string-sortable — ULID's 128-bit form is
-network-byte-order, timestamp-first, so byte-sortable too; the real ULID/KSUID differences are size,
-entropy, and base32-vs-base62 text, not a sortability gap.) The only layout choice is which field takes the
-high bits, and it is forced: **prefix in the high bits, per-peer counter in the low bits**, so a peer's own
-inserts are numerically contiguous and ascending (per-peer B-tree locality); cross-peer order is meaningless
-by design. This is **Snowflake's structure minus the timestamp** (`prefix`≈machine, `counter`≈sequence) and
-CouchDB `sequential`'s structure as an integer. Use the 63 positive bits (reserve the sign bit — a 63-bit id
-already needs the >2^53 int64 read path, `src/gremlin/types.ts`; staying unsigned keeps JSON/JS transport
-clean): a recommended **~23-bit prefix** (8M instances, birthday-safe for realistic fleets, reassignable on
-the replication handshake) **+ ~40-bit counter** (a 10 GB DO holds ~2²⁷ elements — ample headroom). The
-exact split stays a tunable (§11); the shape is settled.
+**Both `gid` and `rev` are DEDICATED COLUMNS on `nodes`/`edges`, not hidden properties.** A property row
+stores its key string (`~gid`/`~rev`) inline on *every* element (keys aren't interned) plus a second index —
+at ~10⁸ elements that runs to double-digit GB of metadata against the 10 GB DO ceiling. Dedicated columns are
+far cheaper (no repeated key, one index) and faster on the two hot paths: the **write path** touches `rev`
+in-place on the element row it is already writing (vs inserting a property row + two index entries, on every
+mutation), and **replication-apply** resolves `gid`→element with one index seek (vs a property seek + join).
+It is also *more* CouchDB-faithful — Couch stores `_id`/`_rev` as cheap inline fields, not separate indexed
+rows. `gid` is a 16-byte value with its own index (gid→rowid lookup); `rev` is a JSONB blob holding the
+bounded rev-tree (§5·2), winner cheap off the front. The cost is a schema change plus explicit `gid`/`rev`
+plumbing in the format adapters (`src/formats/`) so they round-trip through io/export/import — a small,
+bounded addition (columns aren't carried automatically the way a property would be).
 
-**Keep KSUID's one genuinely transferable property: inspectability.** A structured id should decode to its
-parts — `peer = id >> COUNTER_BITS`, `seq = id & COUNTER_MASK` — so document the field layout and ship a
-small decode helper (the analog of KSUID's `inspect`). If a humane EXTERNAL string form is ever wanted (a
-compact copy-paste id for URLs/logs), base62/Crockford-encoding the integer gives one that stays
-order-preserving; but the NATIVE, stored, join-key id remains the integer.
+**The local↔global mapping is the one real cost, and it rides existing machinery.** A replicated element
+gets a *fresh local rowid* on the target (its origin rowid is meaningless here); its immutable `gid` travels
+with it. An edge's `rev` references its endpoints *by `gid`* (so the same edge hashes identically on every
+peer), and edges cross the wire referencing endpoints by `gid`; on apply we translate `gid`→local rowid to
+store `src`/`tgt` as fast local integers — exactly the endpoint resolution the `BatchingLoader` already does
+(`src/bulk.ts`), now keyed on the indexed `gid` column. Within ordinary single-graph traversal nothing but
+rowids is touched; `gid` surfaces only at replication and federation-merge boundaries. `uid` stays free for
+users — we never co-opt it; interned label ids stay *local* (replication carries label/property-key NAMES,
+which `io()`/GraphSON already do — only identity needs to be global). This is the quiet gating item for
+Phase 1.
 
-**The prefix identifies the physical INSTANCE, never the graph name — a correctness point, not a
-preference.** The canonical replication case is *the same logical graph on two peers* (pull prod `social`
-onto a laptop, also `social`). A `hash(graph name)` prefix would give both instances the same namespace,
-so their independently-created elements would collide — exactly what the prefix exists to prevent. (Graph
-names are not globally unique across deployments anyway.) So the prefix is a random per-instance id
-assigned at graph creation and stored in graph metadata — analogous to CouchDB's per-server UUID. It
-doubles as **origin provenance**: a replicated element keeps its origin's id (prefix and all), and a peer
-mints ids only for elements *created locally* — so after a pull, prod-origin elements carry prod's prefix
-and your local debugging edits carry the laptop's, and you can tell which is which. (Relatedly, TinkerPop
-has no rename-graph primitive and neither do we — a graph is a DO addressed by `idFromName`, management is
-create/info/destroy on `/gremlin/{g}`, `.claude/rules/management-api.md` — so "rename" is itself a
-copy/replication, and name-derived identity would be doubly wrong.)
-
-The rev (§5·2) is keyed by this global id, and an edge's rev references its endpoints *by global id*, so
-the same edge hashes identically on every peer. Costs, all bounded: a 64-bit id exceeds 2^53, so it needs
-the lossless-int64 handling the codebase **already has** (bigint binds + CAST-AS-TEXT reads, the DO
-precision work — `src/gremlin/types.ts`, `src/storage.ts`); the write path mints the id (prefix + counter
-from a metadata/singleton row) instead of leaning on SQLite's auto-rowid. Interned label ids stay *local*
-(peer A's label 3 ≠ peer B's), so replication carries label/property-key NAMES, which `io()`/GraphSON
-already do — only the element id needs to be global. This is the quiet gating item for Phase 1.
-
-**A compounding payoff: the global id deletes ~375 LOC of federation machinery and closes the last open
-federate item.** Multigraph federation today keeps sibling ids from colliding *only* when several landed
-graphs are UNIONed into one stream, via a first-class `graph` provenance channel + a composite `(graph, id)`
-rejoin (`unifiedBoundGraph`, the `graph` `ChannelRole` and its four policy-table entries, `graphTag` /
-`LOCAL_GRAPH`, and `postMergeTail`'s fail-closed allow-list — `src/compiler/rel/{boundgraph,segment,lower/
-slice}.ts`, `src/channels.ts`, `src/compiler/ir/step.ts`, ~375 LOC). All of it exists ONLY because two
-graphs can each mint id 5. Global ids remove the premise: the discriminator is baked into the id's prefix, so
-a merged federated stream rejoins by bare (global) `id` through the ORDINARY `BoundGraph`, and the whole
-`graph`-channel apparatus is deletable. This closes the deferred gaps it only partly covered —
+**A compounding payoff: `gid` deletes ~375 LOC of federation machinery and closes the last open federate
+item.** Multigraph federation today keeps sibling ids from colliding *only* when several landed graphs are
+UNIONed into one stream, via a first-class `graph` provenance channel + a composite `(graph, id)` rejoin
+(`unifiedBoundGraph`, the `graph` `ChannelRole` and its four policy-table entries, `graphTag` / `LOCAL_GRAPH`,
+and `postMergeTail`'s fail-closed allow-list — `src/compiler/rel/{boundgraph,segment,lower/slice}.ts`,
+`src/channels.ts`, `src/compiler/ir/step.ts`, ~375 LOC). All of it exists ONLY because two graphs can each
+mint rowid 5. A globally-unique `gid` removes the premise: a merged federated stream's identity is a **single
+globally-unique column**, so it dedups/groups/rejoins by bare `gid` through the ORDINARY `BoundGraph`, and the
+whole `graph`-channel apparatus is deletable. This closes the deferred gaps it only partly covered —
 `hasLabel` / `has` / movement / `group` / `groupCount` over a merged multi-graph stream (today `'unsafe'`,
 fail-closed in `segment.ts`; the last "multi-graph mixing / cross-graph identity" item in
 `docs/outstanding-work.md`) all just compose. (The separate ~640 LOC of id-carry+rejoin for a *detached*
 foreign element — `foreign.ts`, single-sibling `boundgraph.ts` — is a physical-distribution concern,
-unaffected in kind, though "which graph" could then be derived from the prefix instead of a carried token.)
-So the global id is not only a replication prerequisite; it pays for itself in federation simplification —
-exactly the substrate win to bank. It also generalizes the base+federate mixed-merge case
-(`segment.ts` `nestedBarrierIn`, today fail-closed) once EVERY graph — local included — mints from the same
-prefixed-global scheme, which this decision already implies.
+unaffected in kind.) So `gid` is not only a replication prerequisite; it pays for itself in federation
+simplification — exactly the substrate win to bank. It also generalizes the base+federate mixed-merge case
+(`segment.ts` `nestedBarrierIn`, today fail-closed): every element already carries a `gid`, local ones
+included, so a base+federate merge is just another `gid`-keyed merge.
 
 ### §6·2 Referential integrity and ordering — we already solved the read half
 
@@ -457,8 +418,8 @@ machinery CouchDB doesn't have — so under §4 it is rejected, not an option. T
 documents lack.
 
 The cost (honest): preserving conflicts is heavier substrate than discarding — an element's content becomes
-rev-versioned (winner live in the normal rows; losing leaves in a shadow/conflict store) and `~rev` holds a
-bounded rev-tree (§5·2). The read≫write reality softens it: conflicts are rare, so the shadow store is
+rev-versioned (winner live in the normal rows; losing leaves in a shadow/conflict store) and the `rev` column
+holds a bounded rev-tree (§5·2). The read≫write reality softens it: conflicts are rare, so the shadow store is
 seldom populated. Under the governing principle this is the right price — it is what "never silently lose a
 write" costs, and CouchDB pays it.
 
@@ -628,12 +589,13 @@ the smallest proof come first, and the genuinely hard graph semantics come after
   graph; bulk-slurp another graph by URL) and proves the outbound client + worker-residency that replication
   reuses. No schema change, no rev, no seq. *Gate: a mogwai graph federates a sub-traversal to an external
   Gremlin server; `g.io(url).read()` imports another graph over HTTP.*
-- **Phase 1 — the global id + the rev property (§6·1, §5·2).** Change the native element id to a 64-bit
-  globally-unique integer (per-instance prefix + monotonic counter, minted on write; `uid` freed for
-  users); add the `~rev` hidden property and the touch-on-write hook (generation + content hash, edge rev
-  referencing endpoints by global id). Pure local substrate — no networking yet — and independently
-  testable. *Gate: every element has a global id and a rev; identical content converges to the same rev;
-  ids and revs survive an `io()` round-trip; two graphs mint non-colliding ids.*
+- **Phase 1 — the `gid` + `rev` columns (§6·1, §5·2).** Add `gid` (uuid_v7, immutable, assigned at creation,
+  indexed) and `rev` (generation + content hash, bounded rev-tree JSONB) as dedicated columns on
+  `nodes`/`edges`; wire the touch-rev-on-write hook (edge rev references endpoints by `gid`); keep the local
+  rowid unchanged as the join key; `uid` freed for users. Thread `gid`/`rev` through the format adapters so
+  they round-trip. Pure local substrate — no networking yet — independently testable. *Gate: every element
+  has a stable `gid` and a `rev`; identical content converges to the same rev; `gid`/`rev` survive an `io()`
+  round-trip; two independently-built graphs never collide on `gid`.*
 - **Phase 2 — the by-seq feed + the read side (§5·3, §6·4).** Add the per-element `seq` (indexed) bumped on
   write, and tombstone entries for deletes. Expose the `_changes?since=N` scan and the revs-diff query. Still
   server-only — no replication engine, but a peer can now be *asked* what changed and what it's missing.
@@ -668,7 +630,8 @@ the smallest proof come first, and the genuinely hard graph semantics come after
 
 Governing principle (§4): **follow CouchDB; deviate only when empirically better or graph-forced.** Resolved
 in review (recorded so they are not reopened): **rev = generation + content hash, held as a bounded rev-tree
-in `~rev`** (§5·2); **native id = 64-bit global integer, per-instance prefix + counter, `uid` freed** (§6·1);
+in the `rev` column** (§5·2); **identity = a uuid_v7 `gid` column (globally unique, no prefix/coordination)
+separate from the local rowid join key; `gid` + `rev` are dedicated columns; `uid` freed** (§6·1);
 **conflicts = CouchDB preservation (keep leaves, winner-on-read, surface, resolve) + one graph-forced
 referential exception** (§6·3); **cursor = a per-element by-sequence index, current-state-sized** (§5·3);
 **tombstones kept (no up-front pruning); rev-ancestry depth-stemmed; ONE `since=N` mechanism** (§6·4, §7).
@@ -679,12 +642,9 @@ with an OpenAPI-generated UI** (§9, and the **standard-GLV-only** law); **Couch
 it is not graph-forced** (§5·4); **the referential conflict never rejects and never loses — a referencing
 edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
 
-1. **Id bit split** (§6·1): only the exact prefix/counter widths (recommended ~23/40 in 63 positive bits) —
-   a tunable. Resolved in review: layout is prefix-high / counter-low (Snowflake-minus-time), counter-only
-   (no wall-clock), sortability is moot for an integer, and the id is inspectable via documented fields.
-2. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
-3. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
-4. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
+1. **Peer protocol naming** (§9): adopt CouchDB endpoint names (familiarity/interop) vs mogwai-native.
+2. **Rev-tree depth cap** (§6·4): the `_revs_limit` analog — how deep to keep rev ancestry before stemming.
+3. **Filtered replication** (CouchDB selectors/doc_ids): a graph-scoped filter (a sub-traversal defining
    the replicated subgraph) is the natural analog and composes with our engine — in scope for the design,
    later for the build. Interacts with referential integrity (a filtered subgraph can produce dangling
    edges by construction).
@@ -696,11 +656,12 @@ edge resurrects a deleted endpoint, the delete surfaced** (§6·3). Still open:
 - **The session extension will lie to you** (§2). It is present in `bun:sqlite` and absent on DO, so a
   changeset-based prototype passes every dev test and cannot ship. Any change-tracking must be plain SQL on
   both runtimes.
-- **The native id must be global, and its peer-prefix must NOT be the graph name** (§6·1). Keying on a
-  per-DO rowid is incoherent across peers. The native id is a 64-bit global integer (per-instance prefix +
-  counter); the prefix identifies the physical INSTANCE, not the logical name — the canonical case is the
-  same-named graph on two peers, which a name-hash prefix would collide. A replicated element keeps its
-  ORIGIN id; only locally-originated elements are minted here (so the prefix doubles as provenance).
+- **rowid is never cross-peer identity; the `gid` is** (§6·1). A per-store sequential rowid collides across
+  instances — including two replicas of one graph both writing (both mint rowid 1001). Identity is a separate
+  `uuid_v7` `gid` column, globally unique by its 74 random bits — no prefix, no coordination. Don't try to
+  pack global uniqueness into the 64-bit rowid: that forced a fragile small random prefix (explored,
+  superseded). The rowid stays a purely-local join key; a replicated element gets a fresh local rowid and its
+  `gid` travels with it.
 - **Don't add a Merkle tree** (§5·4). It's a CouchDB deviation with no justification — its O(diff) is only
   *comparison* (construction is O(size)), CouchDB reconciles without one, `since=0` covers first-contact, and
   bit-rot detection isn't graph-forced. Revisit only on a measured need.
@@ -772,10 +733,12 @@ facts (rev hash `new_revid`, deterministic winner `to_doc_info_path`, `couch_key
 [Cassandra repair / node density](https://rustyrazorblade.com/post/2025/repair-and-node-density/) ·
 [AT Protocol repository (MST)](https://atproto.com/specs/repository) · [AT Proto: sync history removal](https://github.com/bluesky-social/atproto/discussions/1410).
 
-**ID schemes** (structure + inspectability, §6·1; sortability moot for an integer):
-[KSUID](https://github.com/segmentio/ksuid) · [ULID spec](https://github.com/ulid/spec) ·
-Snowflake (timestamp+machine+sequence) · CouchDB `sequential` (`couch_uuids.erl`). Local reference:
-`/home/dan/Downloads/ULID.ts` (Coder base32/base62 + inspectable parse).
+**ID schemes** (§6·1 — the global `gid` is `uuid_v7`, following CouchDB; the local rowid stays the join key):
+[RFC 9562 (UUIDv7)](https://www.rfc-editor.org/rfc/rfc9562) · CouchDB `uuid_v7`/`sequential`
+(`couch_uuids.erl`, `config/misc.rst` — the B-tree-locality rationale) · [KSUID](https://github.com/segmentio/ksuid) ·
+[ULID spec](https://github.com/ulid/spec) · Snowflake. Surveyed; the packed-64-bit prefix+counter and the
+KSUID/ULID-sortability lines were explored and superseded once identity (`gid`) split from the local join
+key (rowid). Local reference: `/home/dan/Downloads/ULID.ts`.
 
 **mogwai code cited** (the authority): `src/iostore.ts`, `src/services/catalog/io.ts`,
 `src/cloudflare/R2IoStore.ts`, `src/formats/{graphson,drain,csv}.ts`, `src/bulk.ts`, `src/setwrite.ts`,
