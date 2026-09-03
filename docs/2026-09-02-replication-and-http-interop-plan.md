@@ -533,8 +533,11 @@ Each phase is independently valuable and lands green before the next.
   - ✅ **4c — conflict surfacing endpoint.** `GET /gremlin/{g}/_conflicts` (the `?conflicts=true` analog):
     per conflicted element, the live winner rev + shadowed loser versions (rev + wire doc). `conflictsFeed`
     joins the shadow to the live winner; plumbed through every runtime. Ordinary reads never see it.
-  - ⏳ **4d — the referential rule** (§6·3): a delete racing an incident edge resurrects the endpoint and
-    surfaces the delete (also the delete-vs-live-edit conflict: not-deleted wins, resurrect).
+  - ✅ **4d — the referential rule + resurrect-on-upsert** (§6·3). `applyDeletes` refuses a vertex delete
+    a LIVE edge references — the vertex resurrects (kept live, no tombstone), the delete surfaced; the edge
+    never dangles. A live upsert over a local tombstone drops it (not-deleted beats deleted) and surfaces
+    the delete. Gate: delete-racing-an-edge resurrects-and-surfaces; a normal delete propagates; content
+    survives resurrect. (Same-element delete-vs-CONCURRENT-edit needs delete ancestry on the wire → 4b-2.)
   - ⏳ **4e — the uid conflict + carrying uid on the wire** (§6·3): not-deleted > lower-gid, loser's uid
     shadowed + surfaced.
 - **Phase 5 — persistent replication: config CRUD + scheduler + OpenAPI UI (§9).** Persistent configs, a
