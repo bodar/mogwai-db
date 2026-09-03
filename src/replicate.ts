@@ -35,6 +35,7 @@ import type {
 export interface ReplVertex {
   readonly gid: string;
   readonly rev: string;
+  readonly uid?: string | null;
   readonly labels: readonly string[];
   readonly properties: readonly BulkProperty[];
 }
@@ -43,6 +44,7 @@ export interface ReplVertex {
 export interface ReplEdge {
   readonly gid: string;
   readonly rev: string;
+  readonly uid?: string | null;
   readonly label: string;
   readonly srcGid: string;
   readonly tgtGid: string;
@@ -120,7 +122,45 @@ export function applyChanges(store: GraphStore, cs: ChangeSet): void {
     // RESURRECT (§6·3, not-deleted beats deleted): a live version supersedes a local tombstone for the
     // same gid, so drop the tombstone and SURFACE the superseded delete as a conflict (never lost).
     resurrect(store, [...bulkV.map((v) => v.gid!), ...bulkE.map((e) => e.gid!)]);
+    // uid is a post-pass (§6·1): loadBulk landed every element with uid NULL; assign each carried uid,
+    // reconciling a cross-peer collision (two gids claiming one uid) rather than hitting UNIQUE(uid).
+    applyUids(store, 'nodes', vertices);
+    applyUids(store, 'edges', edges);
   } else if (deletes.length) refreshElements(store); // no upsert flush to piggyback on — assign the tombstones' seqs
+}
+
+/**
+ * Assign each element's carried `uid` after `loadBulk` landed it uid-null, reconciling a cross-peer
+ * collision (§6·1). A uid is unique PER GRAPH, but a partition lets two independent creates (distinct
+ * gids) claim the same uid — importing a UNIQUE(uid) violation neither peer had. It reconciles like any
+ * conflict (never reject, never lose): the WINNER keeps the uid, the loser's is shadowed and surfaced.
+ * Winner = not-deleted (both live here) > LOWER gid — a total, clock-free order both peers agree on, so
+ * they converge (and since gid is uuid_v7 it also means "first to claim the name"). NOT auto-merged: the
+ * two elements stay distinct, only the user knows if they are the same thing.
+ */
+function applyUids(store: GraphStore, table: 'nodes' | 'edges', items: readonly { gid: string; uid?: string | null }[]): void {
+  const kind = table === 'nodes' ? 'vertex' : 'edge';
+  for (const it of items) {
+    if (it.uid == null) continue;
+    const gid = upper(it.gid);
+    const holder = store.query<{ gid: string }>(`SELECT hex(gid) AS gid FROM ${table} WHERE uid = ?`, [it.uid])[0];
+    if (holder && upper(holder.gid) !== gid) {
+      if (gid < upper(holder.gid)) { // incoming wins the uid (lower gid)
+        store.query(`UPDATE ${table} SET uid = NULL WHERE hex(gid) = ?`, [upper(holder.gid)]); // strip loser FIRST (UNIQUE)
+        store.query(`UPDATE ${table} SET uid = ? WHERE hex(gid) = ?`, [it.uid, gid]);
+        shadowUid(store, holder.gid, it.uid, kind); // surface the existing loser's uid-loss
+      } else shadowUid(store, gid, it.uid, kind); // incoming loses — it keeps uid NULL, surface
+    } else if (!holder) {
+      store.query(`UPDATE ${table} SET uid = ? WHERE hex(gid) = ?`, [it.uid, gid]); // no collision
+    }
+    // holder is this same gid → uid already assigned, nothing to do (idempotent re-apply)
+  }
+}
+
+/** Surface a losing UID claim in the shadow store (§6·1) — the element still exists (its gid, content),
+ *  it just lost the contested uid. Marker doc, keyed by the uid so several coexist. */
+function shadowUid(store: GraphStore, gid: string, uid: string, kind: 'vertex' | 'edge'): void {
+  shadowLeaf(store, gid, `uid:${uid}`, kind, { uidConflict: uid, kind });
 }
 
 /** A live upsert supersedes a local tombstone for the same gid (not-deleted beats deleted, §6·3): drop
@@ -206,25 +246,25 @@ export function bulkGet(store: GraphStore, refs: readonly BulkGetRef[]): WireCha
   const vGids = refs.filter((r) => r.kind === 'vertex').map((r) => upper(r.gid));
   const eGids = refs.filter((r) => r.kind === 'edge').map((r) => upper(r.gid));
 
-  const vRows = vGids.length ? store.query<{ id: number; gid: string; rev: string }>(
-    'SELECT id, hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))',
+  const vRows = vGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null }>(
+    'SELECT id, hex(gid) AS gid, json(rev) AS rev, uid FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))',
     [JSON.stringify(vGids)]) : [];
   const vIds = vRows.map((r) => r.id);
   const labels = labelsForOwners(store, vIds);
   const vprops = vertexPropsForOwners(store, vIds, true); // collection values as json() text
   const vertices: WireVertex[] = vRows.map((r) => ({
-    gid: r.gid, rev: r.rev,
+    gid: r.gid, rev: r.rev, uid: r.uid,
     labels: (labels.get(r.id) ?? []).map((l) => l.name),
     properties: vertexPropsJson(vprops.get(r.id) ?? []),
   }));
 
-  const eRows = eGids.length ? store.query<{ id: number; gid: string; rev: string; label: string; src: string; tgt: string }>(
-    `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
+  const eRows = eGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null; label: string; src: string; tgt: string }>(
+    `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, e.uid AS uid, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
      FROM edges e JOIN labels l ON l.id = e.label JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
      WHERE e.gid IS NOT NULL AND hex(e.gid) IN (SELECT value FROM json_each(?))`, [JSON.stringify(eGids)]) : [];
   const eprops = edgePropsForOwners(store, eRows.map((r) => r.id), true);
   const edges: WireEdge[] = eRows.map((r) => ({
-    gid: r.gid, rev: r.rev, label: r.label, srcGid: r.src, tgtGid: r.tgt,
+    gid: r.gid, rev: r.rev, uid: r.uid, label: r.label, srcGid: r.src, tgtGid: r.tgt,
     properties: edgePropsJson(eprops.get(r.id) ?? []),
   }));
 
@@ -293,11 +333,16 @@ function classifyWire<W extends { gid: string; rev: string }, R>(
  * Two peers cross-replicating CONVERGE: `revWins` is deterministic, so each keeps the same winner live
  * and shadows the same loser.
  */
+/** Drop each property's source VertexProperty `id` so the target MINTS a fresh one — a property rowid is
+ *  LOCAL (like the element rowid, §6·1), so preserving it across peers collides on `vertex_properties.id`.
+ *  Property identity is not gid-tracked; re-minting is the correct cross-peer behaviour. */
+const reminted = (props: readonly BulkProperty[]): BulkProperty[] => props.map(({ id: _id, ...p }) => p);
+
 export function applyWire(store: GraphStore, ws: WireChangeSet): void {
   const vertices = classifyWire(store, 'nodes', 'vertex', ws.vertices ?? [],
-    (v) => ({ gid: v.gid, rev: v.rev, labels: v.labels, properties: vertexProperties(v.properties) }));
+    (v) => ({ gid: v.gid, rev: v.rev, uid: v.uid, labels: v.labels, properties: reminted(vertexProperties(v.properties)) }));
   const edges = classifyWire(store, 'edges', 'edge', ws.edges ?? [],
-    (e) => ({ gid: e.gid, rev: e.rev, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: edgeProperties(e.properties) }));
+    (e) => ({ gid: e.gid, rev: e.rev, uid: e.uid, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: reminted(edgeProperties(e.properties)) }));
   applyChanges(store, { vertices, edges, deletes: ws.deletes ?? [] });
 }
 

@@ -273,10 +273,13 @@ export type RevsDiffResponse = Readonly<Record<string, { readonly missing: reado
 /** A reference `_bulk_get` fetches the body of. */
 export interface BulkGetRef { readonly gid: string; readonly kind: 'vertex' | 'edge'; }
 
-/** A vertex on the wire — GraphSON `{key: [{id, value, properties?}, …]}` properties, keyed by gid. */
+/** A vertex on the wire — GraphSON `{key: [{id, value, properties?}, …]}` properties, keyed by gid.
+ *  `uid` is the user-supplied per-graph id (§6·1), carried so it replicates; a cross-peer collision
+ *  (two gids claiming one uid) reconciles by not-deleted > lower-gid, the loser's uid shadowed. */
 export interface WireVertex {
   readonly gid: string;
   readonly rev: string;
+  readonly uid?: string | null;
   readonly labels: readonly string[];
   readonly properties: Record<string, unknown[]>;
 }
@@ -285,6 +288,7 @@ export interface WireVertex {
 export interface WireEdge {
   readonly gid: string;
   readonly rev: string;
+  readonly uid?: string | null;
   readonly label: string;
   readonly srcGid: string;
   readonly tgtGid: string;
