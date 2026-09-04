@@ -250,6 +250,49 @@ describe('F2b-2 — the remote placement endpoints (_match_set + _placement over
   });
 });
 
+describe('F2c-2 — a weak placement edge cascades on a deleted endpoint, never resurrects it (§5)', () => {
+  const FILTER = 'g.V().hasLabel("task")';
+  const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';
+
+  const setup = async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry);
+    await mgr.executor('src').framedAsync('g.addV("task").property("name","t1")', {}); // one matched vertex
+    await mgr.executor('tgt').framedAsync('g.addV("inbox")', {});
+    const replId = replicationId('pull', 'src', 'tgt');
+    const cp: Checkpoint = { read: () => mgr.checkpoint('tgt', replId), write: async (seq) => { await mgr.checkpoint('tgt', replId, seq); } };
+    const pull = () => runReplication(localPeer(mgr, 'src'), localPeer(mgr, 'tgt'), cp, {}, FILTER, PLACEMENT);
+    const count = (label: string) => mgr.storeOf('tgt').query<{ c: number }>('SELECT count(*) AS c FROM edges e JOIN labels l ON l.id = e.label WHERE l.name = ?', [label])[0].c;
+    const tasks = () => mgr.storeOf('tgt').query<{ c: number }>("SELECT count(*) AS c FROM nodes n JOIN vertex_labels vl ON vl.node=n.id JOIN labels l ON l.id=vl.label WHERE l.name='task'")[0].c;
+    return { mgr, pull, count, tasks };
+  };
+
+  test('a source delete of the endpoint cascades the weak mount instead of resurrecting the vertex', async () => {
+    const s = await setup();
+    await s.pull();
+    expect(s.tasks()).toBe(1); // t1 landed
+    expect(s.count('inbox_holds')).toBe(1); // and got its weak mount edge
+    // The source deletes t1 (the matched vertex the weak edge points at).
+    await s.mgr.executor('src').framedAsync('g.V().hasLabel("task").drop()', {});
+    await s.pull();
+    // The weak edge did NOT pin t1: t1 is deleted and its weak mount cascaded with it — not resurrected.
+    expect(s.tasks()).toBe(0);
+    expect(s.count('inbox_holds')).toBe(0);
+    // The inbox itself is untouched.
+    expect(s.mgr.storeOf('tgt').query<{ c: number }>("SELECT count(*) AS c FROM nodes n JOIN vertex_labels vl ON vl.node=n.id JOIN labels l ON l.id=vl.label WHERE l.name='inbox'")[0].c).toBe(1);
+  });
+
+  test('the cascaded weak edge is tombstoned, so it propagates downstream', async () => {
+    const s = await setup();
+    await s.pull();
+    await s.mgr.executor('src').framedAsync('g.V().hasLabel("task").drop()', {});
+    await s.pull();
+    // A tombstone exists for an edge kind (the cascaded weak inbox_holds) beyond t1's own vertex tombstone.
+    const toms = s.mgr.storeOf('tgt').query<{ kind: string }>('SELECT kind FROM tombstones');
+    expect(toms.some((t) => t.kind === 'edge')).toBe(true);
+    expect(toms.some((t) => t.kind === 'vertex')).toBe(true);
+  });
+});
+
 describe('F2c-1 — placement edges are WEAK references, replicated/user edges are STRONG', () => {
   const FILTER = 'g.V().hasLabel("task")';
   const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';

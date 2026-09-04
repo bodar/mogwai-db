@@ -196,11 +196,13 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   const vLocal = localRevs(store, 'nodes', [...vRow.keys()]); // gid → local LIVE rev, for the concurrency check
   const eLocal = localRevs(store, 'edges', [...eRow.keys()]);
 
-  // Which of the to-be-deleted vertices are still endpoints of a LIVE edge → resurrect them (referential).
+  // Which of the to-be-deleted vertices are still endpoints of a live STRONG edge → resurrect them
+  // (referential). Only a STRONG edge is an existence-claim (§5): a WEAK placement edge is a decoration
+  // that does NOT pin its endpoint — it cascades instead (below), so it is excluded here.
   const vIds = [...vRow.values()];
   const referenced = new Set(vIds.length ? store.query<{ id: number }>(
-    `SELECT src AS id FROM edges WHERE src IN (SELECT value FROM json_each(?))
-     UNION SELECT tgt AS id FROM edges WHERE tgt IN (SELECT value FROM json_each(?))`,
+    `SELECT src AS id FROM edges WHERE weak = 0 AND src IN (SELECT value FROM json_each(?))
+     UNION SELECT tgt AS id FROM edges WHERE weak = 0 AND tgt IN (SELECT value FROM json_each(?))`,
     [JSON.stringify(vIds), JSON.stringify(vIds)]).map((r) => r.id) : []);
 
   // A delete is REFUSED (surfaced, not applied) when it conflicts with the LIVE element (§6·3): a vertex
@@ -228,6 +230,18 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     }
   }
 
+  // WEAK-EDGE CASCADE (§5): a vertex actually being removed (a STRONG edge would have resurrected it above,
+  // so it is not here) drags its incident WEAK edges with it — they are decorations, not existence-claims.
+  // Each is removed AND tombstoned at its OWN gid/rev, so a downstream replica of THIS graph learns the
+  // edge is gone; with edges-before-vertices ordering the vertex delete then never resurrects there, and B
+  // never needs to know the edge was weak (the marker is LOCAL and need not travel). These edges are never
+  // in `deletes` — the source that dropped the vertex knows nothing of a placement edge only THIS graph made.
+  const weakCascade = removeV.length ? store.query<{ id: number; gid: string | null; rev: string | null }>(
+    `SELECT id, hex(gid) AS gid, json(rev) AS rev FROM edges
+     WHERE weak = 1 AND (src IN (SELECT value FROM json_each(?)) OR tgt IN (SELECT value FROM json_each(?)))`,
+    [JSON.stringify(removeV), JSON.stringify(removeV)]) : [];
+  for (const w of weakCascade) removeE.push(w.id);
+
   if (removeV.length) {
     deleteMembers(store, 'vertex_properties', 'node', removeV);
     deleteMembers(store, 'vertex_labels', 'node', removeV);
@@ -241,16 +255,21 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     deleteMembers(store, 'edges', 'id', removeE);
   }
 
-  // A tombstone per APPLIED delete (a refused one is surfaced, not tombstoned), skipping a gid already
-  // tombstoned. gid crosses as hex→unhex, rev as jsonb text, seq NULL (the refresh assigns it).
+  // A tombstone per APPLIED delete (a refused one is surfaced, not tombstoned) PLUS each locally-cascaded
+  // weak edge (at its own gid/rev), skipping a gid already tombstoned. gid crosses as hex→unhex, rev as
+  // jsonb text, seq NULL (the refresh assigns it).
   const applied = deletes.filter((d) => !refused.has(upper(d.gid)));
+  const toTombstone: { gid: string; rev: string | null; kind: string }[] = [
+    ...applied.map((d) => ({ gid: upper(d.gid), rev: d.rev, kind: d.kind })),
+    ...weakCascade.filter((w) => w.gid).map((w) => ({ gid: upper(w.gid!), rev: w.rev, kind: 'edge' })),
+  ];
   const already = new Set(store.query<{ gid: string }>(
     'SELECT hex(gid) AS gid FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))',
-    [JSON.stringify(applied.map((d) => upper(d.gid)))]).map((r) => r.gid));
-  const record = applied.filter((d) => !already.has(upper(d.gid)));
+    [JSON.stringify(toTombstone.map((t) => t.gid))]).map((r) => r.gid));
+  const record = toTombstone.filter((t) => !already.has(t.gid));
   if (record.length) insertSet(store, 'tombstones',
     [{ name: 'gid', type: 'blob', blob: true }, { name: 'rev', type: 'blob', jsonb: true }, { name: 'kind', type: 'any' }],
-    record.map((d) => [upper(d.gid), d.rev, d.kind]));
+    record.map((t) => [t.gid, t.rev, t.kind]));
 }
 
 /**
