@@ -390,6 +390,33 @@ function countExpr(input: Rel): Expr {
     : { kind: 'agg', fn: 'count', args: [] };
 }
 
+/**
+ * A GLOBAL `sum`/`mean` reducer, guarded so it emits over ANY non-empty input and NOTHING over an
+ * empty one. `SumGlobalStep`/`MeanGlobalStep` override `processAllStarts` with `if (starts.hasNext())`
+ * and their `generateSeedFromStarts` reduces an all-null stream to null
+ * (`vendor/tinkerpop/gremlin-core/.../step/map/SumGlobalStep.java` — *"an all null stream will result
+ * in null"*), so a non-empty all-null input yields ONE null traverser and only a truly EMPTY input
+ * yields nothing. SQL aggregation collapses to one row regardless — a NULL for BOTH cases — so a
+ * `count(*)` HAVING guard is what tells them apart: keep the aggregate row iff the stream had a start
+ * (`red_n > 0`), and the framing's `productiveNull` carries the surviving null to the wire. `count(*)`
+ * (rows, not bulk) is the `starts.hasNext()` test — a bulk-N traverser is still one start.
+ *
+ * min/max need no guard: their argmax window (above) already yields zero rows for an empty input by
+ * construction and one for a non-empty one.
+ */
+function nonEmptyReducer(input: Rel, aggs: readonly (readonly [string, Expr])[], fresh: Minter): Rel {
+  const N = 'red_n';
+  const aggregated = make.aggregate({
+    id: fresh('red'), input, channels: [],
+    type: typeOf(meta('v', 'any', true), meta('vt', 'text', true), meta(N, 'int')),
+    groupBy: [], aggs: [...aggs, [N, { kind: 'agg', fn: 'count', args: [] }]],
+  });
+  return make.filter({
+    id: fresh('rn'), input: aggregated, channels: [], type: aggregated.type,
+    pred: { kind: 'binary', op: '>', left: col(aggregated.id, N), right: compilerInt(0) },
+  });
+}
+
 /** `count()` as a RETYPE, shared by every host that has one — the element tail's terminal and the path tail's
  *  own arm, so the two cannot disagree about whether the answer is `SUM(bulk)` or `COUNT(*)` (that question is
  *  `countExpr`'s, and it reads the CHANNEL). A reducing aggregate is a BARRIER: no channel survives it (§3.5),
@@ -1600,22 +1627,17 @@ function scalarTail(
         const casted = storedCompareOn(compilerText(staticSumVt))(col(rel.id, 'v'));
         const weighted = bulk ? { kind: 'binary', op: '*', left: casted, right: col(rel.id, bulk.col) } as Expr : casted;
         const tower = sumTower({ kind: 'agg', fn: 'sum', args: [weighted] }, staticSumVt);
-        rel = make.aggregate({
-          id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          groupBy: [], aggs: [['v', tower.value], ['vt', tower.type]],
-        });
-        out = numeric;
+        rel = nonEmptyReducer(rel, [['v', tower.value], ['vt', tower.type]], fresh);
+        out = { ...numeric, productiveNull: true };
         continue;
       }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
-      rel = make.aggregate({
-        id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-        groupBy: [], aggs: [['v', reduced.value], ['vt', reduced.type]],
-      });
+      rel = nonEmptyReducer(rel, [['v', reduced.value], ['vt', reduced.type]], fresh);
       // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
       // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
-      // give and `UNKNOWN` would throw the second column away.
-      out = numeric;
+      // give and `UNKNOWN` would throw the second column away. `productiveNull` because a non-empty
+      // all-null sum/mean reduces to null and MUST emit it (the empty case is dropped by the guard).
+      out = { ...numeric, productiveNull: true };
       continue;
     }
 

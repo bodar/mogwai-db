@@ -79,7 +79,7 @@
   },
   "cap": {
     "binds": 0,
-    "bytes": 3384,
+    "bytes": 3462,
     "compiler": 87,
     "bound": 0
   },
@@ -523,7 +523,7 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 3093,
+    "bytes": 3131,
     "compiler": 44,
     "bound": 0
   },
