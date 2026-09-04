@@ -88,6 +88,7 @@ function parseConfig(id: string, body: any): ReplicationConfig {
     continuous: body.continuous === true,
     createTarget: body.create_target === true || body.createTarget === true,
     filter: typeof body.filter === 'string' ? body.filter : null,
+    placement: typeof body.placement === 'string' ? body.placement : null,
     checkpointInterval: Number.isFinite(body.checkpoint_interval) ? body.checkpoint_interval
       : Number.isFinite(body.checkpointInterval) ? body.checkpointInterval : null,
     useCheckpoints: !(body.use_checkpoints === false || body.useCheckpoints === false),

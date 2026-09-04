@@ -326,6 +326,9 @@ export interface ReplicateOptions {
   /** A captured vertex-selector traversal (filtered-replication-plan F1), evaluated on the SOURCE: only
    *  the matched subgraph (+ its 1-hop edge-closure) is pulled/pushed. Absent → the whole graph. */
   readonly filter?: string;
+  /** An optional target-side placement traversal (filtered-replication-plan §3/F2), run over the current
+   *  match set after the subgraph lands, to graft it into pre-existing target structure. Absent → unattached. */
+  readonly placement?: string;
 }
 
 /** What one replication pass moved: entries read from the source feed, element bodies written, deletes

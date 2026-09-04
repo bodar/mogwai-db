@@ -50,6 +50,26 @@ describe('replicator config CRUD (Phase 5b)', () => {
     expect(one).toMatchObject({ id: 'nightly', continuous: true, checkpointInterval: 60000 });
   });
 
+  test('a filter + placement round-trip through the config store (F1/F2)', async () => {
+    const s = setup();
+    const cfg = { id: 'graft', source: 'http://peer/gremlin/prod', target: 'local',
+      filter: 'g.V().hasLabel("task")', placement: "g.V(matchedIds).mergeE([label:'inbox_holds', from: V('inbox')])" };
+    expect((await s.router(jsonReq('http://h/_replicator', 'POST', cfg))).status).toBe(201);
+    const one = (await (await s.router(new Request('http://h/_replicator/graft'))).json()) as ReplicationConfig;
+    expect(one).toMatchObject({ filter: cfg.filter, placement: cfg.placement });
+  });
+
+  test('placement column self-heals on a pre-existing registry (idempotent ALTER migration)', () => {
+    const sql = new BunSqlite(':memory:');
+    // A registry that predates the `placement` column: create the old-shape table, then open a store over it.
+    sql.exec(`CREATE TABLE replication_config(
+      id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, continuous INTEGER NOT NULL DEFAULT 0,
+      create_target INTEGER NOT NULL DEFAULT 0, filter TEXT, checkpoint_interval INTEGER, use_checkpoints INTEGER NOT NULL DEFAULT 1)`);
+    const store = new ReplicatorStore(sql); // ctor's ensureColumn adds `placement`
+    store.putConfig({ id: 'j', source: 'a', target: 'b', placement: 'g.V(matchedIds).addE("x").from(V(1))' });
+    expect(store.getConfig('j')?.placement).toBe('g.V(matchedIds).addE("x").from(V(1))');
+  });
+
   test('DELETE is idempotent; GET of an absent job is 404', async () => {
     const s = setup();
     await s.router(jsonReq('http://h/_replicator', 'POST', { id: 'gone', source: 'a', target: 'b' }));
@@ -80,7 +100,7 @@ describe('replicator config CRUD (Phase 5b)', () => {
 
   test('the store round-trips a full config', () => {
     const store = new ReplicatorStore(new BunSqlite(':memory:'));
-    const cfg: ReplicationConfig = { id: 'x', source: 's', target: 't', continuous: true, createTarget: true, filter: 'g.V().hasLabel("keep")', checkpointInterval: 5000, useCheckpoints: false };
+    const cfg: ReplicationConfig = { id: 'x', source: 's', target: 't', continuous: true, createTarget: true, filter: 'g.V().hasLabel("keep")', placement: 'g.V(matchedIds).addE("held").from(V("root"))', checkpointInterval: 5000, useCheckpoints: false };
     store.putConfig(cfg);
     expect(store.getConfig('x')).toEqual(cfg);
     expect(store.getConfig('missing')).toBeNull();

@@ -27,6 +27,11 @@ export interface ReplicationConfig {
   continuous?: boolean;
   createTarget?: boolean;
   filter?: string | null;
+  /** The optional target-side placement traversal (filtered-replication-plan §3/F2): a full Gremlin
+   *  traversal grafting the current match set into pre-existing target structure, referencing the matched
+   *  vertices by a `matchedIds` bind, e.g. `g.V(matchedIds).mergeE([label:'inbox_holds', from: V('inbox')])`.
+   *  Run each pass over the current match set, idempotently. Absent → the subgraph just lands, unattached. */
+  placement?: string | null;
   checkpointInterval?: number | null;
   useCheckpoints?: boolean;
 }
@@ -71,7 +76,7 @@ const REGISTRY_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS replication_config(
      id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
      continuous INTEGER NOT NULL DEFAULT 0, create_target INTEGER NOT NULL DEFAULT 0,
-     filter TEXT, checkpoint_interval INTEGER, use_checkpoints INTEGER NOT NULL DEFAULT 1)`,
+     filter TEXT, placement TEXT, checkpoint_interval INTEGER, use_checkpoints INTEGER NOT NULL DEFAULT 1)`,
   // Scheduler state, one row per config (CouchDB `_scheduler/docs`+`jobs`, §9·2). `state` uses CouchDB's
   // vocabulary. `next_run` is when the worker-residency scheduler should next run this job (ms); `lease_until`
   // is the CLAIM lease (ms) — a runner claims a due job by setting it, and another overlapping runner skips a
@@ -89,16 +94,16 @@ const REGISTRY_SCHEMA = [
 
 interface ConfigRow {
   id: string; source: string; target: string; continuous: number; create_target: number;
-  filter: string | null; checkpoint_interval: number | null; use_checkpoints: number;
+  filter: string | null; placement: string | null; checkpoint_interval: number | null; use_checkpoints: number;
 }
 
 const rowToConfig = (r: ConfigRow): ReplicationConfig => ({
   id: r.id, source: r.source, target: r.target,
   continuous: !!r.continuous, createTarget: !!r.create_target,
-  filter: r.filter, checkpointInterval: r.checkpoint_interval, useCheckpoints: !!r.use_checkpoints,
+  filter: r.filter, placement: r.placement, checkpointInterval: r.checkpoint_interval, useCheckpoints: !!r.use_checkpoints,
 });
 
-const COLS = 'id, source, target, continuous, create_target, filter, checkpoint_interval, use_checkpoints';
+const COLS = 'id, source, target, continuous, create_target, filter, placement, checkpoint_interval, use_checkpoints';
 
 /** The synchronous store-tier for the registry — the same logic the CF DO runs internally and Bun runs
  *  in-process. Owns its own schema over the `Sql` transport (a dedicated control-plane sqlite, never a
@@ -112,6 +117,7 @@ export class ReplicatorStore {
     // release is applied idempotently here: an add is skipped when the column is already present. Append new
     // columns to this list, never edit the CREATE above for them.
     this.ensureColumn('replication_job', 'history', 'history TEXT');
+    this.ensureColumn('replication_config', 'placement', 'placement TEXT'); // filtered-replication-plan §8/F2
   }
 
   /** Add `column` (`decl` = its full DDL, e.g. `"history TEXT"`) to `table` if it is not already present —
@@ -124,12 +130,13 @@ export class ReplicatorStore {
   /** Upsert a job by id (create or replace) — idempotent, so a PUT of the same doc is a no-op change. */
   putConfig(c: ReplicationConfig): void {
     this.sql.query(
-      `INSERT INTO replication_config(${COLS}) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replication_config(${COLS}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET source = excluded.source, target = excluded.target,
          continuous = excluded.continuous, create_target = excluded.create_target, filter = excluded.filter,
+         placement = excluded.placement,
          checkpoint_interval = excluded.checkpoint_interval, use_checkpoints = excluded.use_checkpoints`,
       [c.id, c.source, c.target, c.continuous ? 1 : 0, c.createTarget ? 1 : 0,
-        c.filter ?? null, c.checkpointInterval ?? null, c.useCheckpoints === false ? 0 : 1]);
+        c.filter ?? null, c.placement ?? null, c.checkpointInterval ?? null, c.useCheckpoints === false ? 0 : 1]);
   }
 
   getConfig(id: string): ReplicationConfig | null {
