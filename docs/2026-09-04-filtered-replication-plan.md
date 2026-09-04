@@ -233,8 +233,12 @@ Each phase independently valuable, lands green before the next (the parent plan'
     `matchedIds` bind, not a `call()` service.** The idempotent idiom is a `where(not(<edge>))`-guarded
     `addE` — `mergeE` over an incoming vertex stream is NOT lowered yet (a real gap; `write.ts` declines
     per-traverser endpoint resolution). Verified end to end (local + remote pull/push).
-  - **F2c — weak references.** *(next)* the placement's synthesized edges get a hidden `~` marker; the
-    delete path's referenced-check (`applyDeletes`) excludes weak edges (they cascade, don't resurrect, §5).
+  - ✅ **F2c — weak references.** A placement-synthesized edge is marked weak — a DEDICATED `edges.weak`
+    column, NOT a hidden `~`-property (a property would leak into ordinary reads, and the parent §6·5
+    already chose columns over hidden properties for markers; weak is LOCAL and does not travel on the
+    wire). `runPlacement` marks the edges it created; `applyDeletes`'s resurrect-check counts only STRONG
+    edges, and a removed vertex CASCADES its incident weak edges (removed + tombstoned at their own gid/rev,
+    so a downstream replica gets the edge tombstone and never needs the marker). **F2 COMPLETE.**
 - **F3 — undo.** Dedicated-target undo (destroy / delete-by-provenance) first; the shared-target
   before-image journal when shared-target replication lands.
 
@@ -276,6 +280,14 @@ Captured here so they are not lost; each is its own small piece of work against 
    by withdrawal). Recorded here so it is not re-proposed: the safe design exists, but the caveat-to-value
    ratio does not justify it.
 
+4. **`mergeE` over an incoming vertex stream (an engine gap F2 surfaced).** The "steer to `mergeE`" idiom
+   for an idempotent placement is not achievable today: `g.V(matchedIds).mergeE([…]).option(Merge.inV, …)`
+   raises `UnsupportedTraversal` — `elementMergeE` (`src/compiler/rel/write.ts`) declines per-traverser
+   endpoint resolution (an `option(Merge.outV/inV, …)` evaluated at each incoming traverser). So the working,
+   verified idempotent form F2 documents is a `where(not(<existing edge>))`-guarded `addE` instead. Closing
+   the gap — lowering `mergeE` with option-resolved endpoints over an incoming stream — is a self-contained
+   write-path feature against the existing engine, and would let placement use the more natural `mergeE`.
+
 ---
 
 ## §11. Decisions — locked
@@ -283,10 +295,15 @@ Captured here so they are not lost; each is its own small piece of work against 
 - **`filter`** = arbitrary traversal, validated by run-on-save (must yield vertices), 1-hop edge-closed,
   dynamic/never-prune on the match dimension (§2).
 - **Deletes always propagate** via tombstones; never-prune is match-only (§4).
-- **`placement`** = optional target-side idempotent write traversal (option C), run each pass over the
-  current match set (a convergence step); steer to `mergeE` (§3). A/B rejected.
+- **`placement`** = optional target-side idempotent write traversal, run each pass over the current match
+  set (a convergence step). A full Gremlin traversal with a VISIBLE `matchedIds` bind (the matched vertices'
+  target ids) — `g.V(matchedIds)…` — decided over a `call()`/side-channel service; `V($ids)` already lowers
+  to one `json_each`, so zero new engine plumbing. Idempotent idiom = a `where(not(<edge>))`-guarded `addE`
+  (`mergeE`-over-an-incoming-stream is not lowered yet — §10·4) (§3).
 - **Weak references** = synthesized placement edges don't pin their endpoint (cascade, not resurrect);
-  **local to the synthesizing graph, marker does not travel** (§5). Strong = replicated/user edges.
+  **local to the synthesizing graph, marker does not travel** (§5). Strong = replicated/user edges. Stored
+  as a DEDICATED `edges.weak` column, not a hidden `~`-property (a property leaks into reads; parent §6·5
+  chose columns for markers).
 - **Save + undo**, not static analysis; undo free for dedicated targets, a before-image journal for shared
   (§6).
 - **Schema** = add `placement TEXT` to `replication_config` (§8).
