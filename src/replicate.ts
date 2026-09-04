@@ -196,14 +196,19 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   const vLocal = localRevs(store, 'nodes', [...vRow.keys()]); // gid → local LIVE rev, for the concurrency check
   const eLocal = localRevs(store, 'edges', [...eRow.keys()]);
 
-  // Which of the to-be-deleted vertices are still endpoints of a live STRONG edge → resurrect them
-  // (referential). Only a STRONG edge is an existence-claim (§5): a WEAK placement edge is a decoration
-  // that does NOT pin its endpoint — it cascades instead (below), so it is excluded here.
+  // Which of the to-be-deleted vertices are still endpoints of a live STRONG edge that is NOT itself being
+  // deleted in THIS batch → resurrect them (referential). Two exclusions, both load-bearing:
+  //  - a WEAK placement edge is a decoration, not an existence-claim (§5) — it cascades (below), not pins;
+  //  - an edge being deleted in the SAME batch is a CASCADED edge (a vertex `drop()` tombstones the vertex
+  //    AND its incident edges, §6·5), NOT a concurrent existence-claim. Without this exclusion the edge is
+  //    still live at check time and would wrongly resurrect its own vertex. A CONCURRENT-peer-add edge, by
+  //    contrast, has NO incoming tombstone, so it is not excluded and correctly resurrects (§6·3).
   const vIds = [...vRow.values()];
+  const eDeleting = [...eRow.values()]; // the edges this batch is deleting
   const referenced = new Set(vIds.length ? store.query<{ id: number }>(
-    `SELECT src AS id FROM edges WHERE weak = 0 AND src IN (SELECT value FROM json_each(?))
-     UNION SELECT tgt AS id FROM edges WHERE weak = 0 AND tgt IN (SELECT value FROM json_each(?))`,
-    [JSON.stringify(vIds), JSON.stringify(vIds)]).map((r) => r.id) : []);
+    `SELECT src AS id FROM edges WHERE weak = 0 AND id NOT IN (SELECT value FROM json_each(?)) AND src IN (SELECT value FROM json_each(?))
+     UNION SELECT tgt AS id FROM edges WHERE weak = 0 AND id NOT IN (SELECT value FROM json_each(?)) AND tgt IN (SELECT value FROM json_each(?))`,
+    [JSON.stringify(eDeleting), JSON.stringify(vIds), JSON.stringify(eDeleting), JSON.stringify(vIds)]).map((r) => r.id) : []);
 
   // A delete is REFUSED (surfaced, not applied) when it conflicts with the LIVE element (§6·3): a vertex
   // a live edge references (existence-claim), OR a delete that does not DESCEND the local live rev — a

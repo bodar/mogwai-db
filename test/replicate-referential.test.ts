@@ -72,6 +72,26 @@ describe('replication — the referential rule + resurrect (§6·3)', () => {
       expect(n(m.storeOf(g), "SELECT count(*) AS n FROM vertex_properties p JOIN nodes nn ON nn.id=p.node WHERE hex(nn.gid)=? AND p.key='age'", gid)).toBe(1);
   });
 
+  test('a vertex drop that CASCADED its edges replicates cleanly — no self-resurrect', async () => {
+    // The bug this guards: a vertex `drop()` tombstones the vertex AND its incident edges (§6·5), so both
+    // arrive in one apply batch. The edge is still live when the referential check runs, and without
+    // excluding same-batch-deleted edges it would resurrect its OWN vertex. A CASCADED edge (its own
+    // tombstone present) must not pin; only a CONCURRENT edge (no tombstone) does.
+    let router: import('../src/api.ts').Http;
+    const m = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    router = (await import('../src/router.ts')).makeRouter(m);
+    const url = (g: string) => `http://peer/gremlin/${g}`;
+    await m.executor('seed').framedAsync(
+      'g.addV("p").property("name","v").as("a").addV("p").property("name","w").as("b").addE("knows").from("a").to("b")', {});
+    await m.replicate('target', { source: url('seed') });
+    expect(await m.info('target')).toEqual({ vertexCount: 2, edgeCount: 1 });
+    await m.executor('seed').framedAsync('g.V().has("name","v").drop()', {}); // drops v AND cascades the knows edge
+    await m.replicate('target', { source: url('seed') });
+    // v is GONE (not resurrected by its own cascaded edge), the edge is gone, w remains.
+    expect(await m.info('target')).toEqual({ vertexCount: 1, edgeCount: 0 });
+    expect(n(m.storeOf('target'), "SELECT count(*) AS n FROM nodes nn JOIN vertex_properties p ON p.node=nn.id WHERE p.key='name' AND p.value='w'")).toBe(1);
+  });
+
   test('resurrect-on-upsert: a live version supersedes a local tombstone, surfacing the delete', async () => {
     const m = mgr();
     await m.executor('g').framedAsync('g.addV("person").property("name","v").property("age",29)', {});
