@@ -91,6 +91,20 @@ const heldInt = (value: number): Expr => compilerInt(value);
  *
  * NULL propagates through every one of them (SQLite's own semantics), which is exactly Gremlin's
  * null-in/null-out, so none needs a guard. `concat` is the one exception and says why inline.
+ *
+ * LITERAL-ONLY TODAY — every argument in this family is a LITERAL, never a user `$param`, so args
+ * inline as typed SQL literals and none spends a bind. This is literal-only in TinkerPop *end to end*
+ * at our pin: the grammar uses the `*Literal` productions (`stringNullableLiteral`/`integerLiteral`/
+ * `dateLiteral` — no `variable` alternative), AND `GraphTraversal` exposes no `GValue` overload for
+ * `concat`/`replace`/`split`/`substring`/`format`/`dateAdd`/`dateDiff` (only raw `String`/`int`/`Date`),
+ * so `concat($x)`/`replace($x,$y)` do not PARSE. Consequence: a "a param is being wrongly inlined here,
+ * route it through `constLit`'s name-branch" fix in this family is a PHANTOM against what the front-end
+ * can hand us today — the parameter branch is unreachable (a 2026-08-30 session nearly shipped exactly
+ * that). NOT a permanent wall: unlike `inject` — a grammar-only gap we widened to reach an existing
+ * `inject(Object...)` capability (`patches/upstream/tinkerpop-06-…`) — parameterizing this family needs
+ * NEW upstream `GValue` overloads on `GraphTraversal` + the step constructors, not just a grammar widen.
+ * It reads as incomplete GValue rollout, not a principled exclusion (an upstream enhancement candidate).
+ * If those overloads ever land, THIS is where the `$param` branch would light up.
  */
 const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step: IRStep) => Expr | null>> = {
   length: (v) => call('length', v),

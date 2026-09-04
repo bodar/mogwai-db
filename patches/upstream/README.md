@@ -123,3 +123,18 @@ until this lands rather than filtering it, because the warning is CORRECT.
 `genericLiteralVarargs` to `genericArgumentVarargs`. A bound variable is already a generic argument in
 the grammar, so this is a strict additive superset: `inject($map)` is needed by federate's standard
 map-values transport while existing literal calls are unchanged. **Pending upstream PR.**
+
+### 07 — the string/date transform family cannot take a bound variable (CANDIDATE, not yet drafted)
+
+`concat`/`replace`/`split`/`substring`/`format`/`dateAdd`/`dateDiff`/`asString` are literal-only: the
+grammar uses the `*Literal` productions (no `variable` alternative) AND `GraphTraversal` exposes no
+`GValue` overload for them (only raw `String`/`int`/`Date`). So `replace($old,$new)`/`substring($n)`/
+`dateAdd(day,$n)` cannot be expressed, even though every other argument-bearing step family (has, range,
+limit, tail, skip, addV/E, property, out/in/both, constant, option, call, …) takes a `GValue`.
+
+Unlike 06, this is **NOT a grammar-only widen** — the Java API itself lacks the capability, so it needs
+new `GValue` overloads on `GraphTraversal` + the step constructors + the GValue-resolution plumbing, and
+only THEN the grammar switch to the `*Argument` productions. It reads as incomplete GValue rollout rather
+than a principled exclusion; worth confirming upstream intent before drafting, then it is a genuine
+enhancement PR (not a fix). Mogwai-side landing point is documented at the `VALUE_TX` family head in
+`src/compiler/rel/transform.ts`. **Candidate only — no patch written; nothing owed until then.**
