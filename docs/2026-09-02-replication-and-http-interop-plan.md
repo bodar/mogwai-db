@@ -647,9 +647,15 @@ Each phase is independently valuable and lands green before the next.
   - **5c-browser — the Service-Worker driver + a persistent SW registry (remaining).** A WASM registry in the
     SW + `runTick` + a timer, closing the browser edge's 501; Playwright coverage. The WASM-leaf registry +
     scheduler are ALREADY proven by the bun-wasm contract, so this is browser plumbing over proven pieces.
-  - **5d — checkpoint session history (§9·2) + reconciliation.** Extend the checkpoint with CouchDB's
-    session-record `history` array; decide the scheduled-job checkpoint home (registry vs per-graph); surface it
-    in `_scheduler/docs`. *Gate: a job's checkpoint carries CouchDB-shaped session history, visible in the UI.*
+  - ✅ **5d — job session history + registry column migration.** Each job keeps a bounded `history` (newest
+    first, capped 20 — CouchDB's `_scheduler` `history`, §9·2): `recordResult`/`recordFailure` prepend a
+    `{time, info}` record (run stats or error), surfaced via `_scheduler/jobs`/`_scheduler/docs`. The
+    scheduled-job checkpoint home was decided in 5c-core: the registry (keyed by `replicationIdFor(configId)`),
+    not per-graph. And the registry — being a SINGLETON that persists across schema changes, unlike a
+    fresh-per-id graph DO — got an idempotent `ALTER TABLE … ADD COLUMN` migration in `ReplicatorStore`'s ctor
+    (the generic home for future columns), which self-heals an existing registry that predates a column. Gate
+    MET (`test/scheduler.test.ts`): history accumulates newest-first + bounded, failures recorded; the
+    migration makes a stale singleton registry self-heal (green over real workerd).
 - **Phase 6 — optional manual tombstone purge (§6·4).** Opt-in, CouchDB-style. (No Merkle backstop — §5·3.)
 
 ---
