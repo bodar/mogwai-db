@@ -16,6 +16,7 @@ import type { MogwaiConfig } from '../config.ts';
 export type BootstrapMessage =
   | { kind: 'mogwai-control-port'; port: MessagePort } // factory → SW: a port to the WorkerFactory RPC session
   | { kind: 'mogwai-graph-port'; graphId: string; port: MessagePort } // factory → SW: a port to a graph's Worker
+  | { kind: 'mogwai-registry-port'; port: MessagePort } // factory → SW: a port to the singleton registry Worker
   | { kind: 'mogwai-need-control' }; // SW → factory: (re)open a control session
 
 /** Boot a NEW capnweb session on an already-spawned graph Worker: make a channel, hand the Worker one end
@@ -34,6 +35,21 @@ export function bootSession(worker: Worker, graphId: string, config?: MogwaiConf
 export function spawnGraphWorker(workerUrl: string | URL, graphId: string, config?: MogwaiConfig): { worker: Worker; port: MessagePort } {
   const worker = new Worker(workerUrl, { type: 'module', name: graphId });
   return { worker, port: bootSession(worker, graphId, config) };
+}
+
+/** Boot a NEW capnweb session on the singleton REGISTRY Worker: it takes only a port (the registry store is
+ *  self-contained — no graphId, no config). Serves every session over its one host, so this is safe to call
+ *  again for a re-handshake. */
+export function bootRegistrySession(worker: Worker): MessagePort {
+  const channel = new MessageChannel();
+  worker.postMessage({ port: channel.port1 }, [channel.port1]);
+  return channel.port2;
+}
+
+/** Spawn the singleton registry Worker and boot its first session. */
+export function spawnRegistryWorker(workerUrl: string | URL): { worker: Worker; port: MessagePort } {
+  const worker = new Worker(workerUrl, { type: 'module', name: '_replicator' });
+  return { worker, port: bootRegistrySession(worker) };
 }
 
 /** Remove a graph's OPFS database directory (recursively) if present; a missing directory is a no-op.

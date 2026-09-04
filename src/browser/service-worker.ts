@@ -13,6 +13,9 @@ import { makeRouter } from '../router.ts';
 import type { GraphManager } from '../manager.ts';
 import { BrowserGraphManager } from './BrowserGraphManager.ts';
 import { FactoryStubSource } from './factory-stub-source.ts';
+import { StubReplicatorRegistry } from './StubReplicatorRegistry.ts';
+import { runDueReplications } from '../scheduler.ts';
+import { allowlistedHttp } from '../http-allowlist.ts';
 
 // `self` is the ServiceWorkerGlobalScope (the WebWorker-lib type); the ambient `self` cannot be that
 // specific under a shared lib set, so cast once here.
@@ -26,8 +29,16 @@ scope.addEventListener('activate', (event) => event.waitUntil(scope.clients.clai
 // The SW-side source owns the control sessions to the WorkerFactory pages, the per-graph direct stubs,
 // and the cross-tab failover (dispose-the-dead-stub-on-new-port). The manager engine runs makeRouter over
 // it, retrying once when a stub is swapped by failover.
-const manager: GraphManager = new BrowserGraphManager(new FactoryStubSource(scope));
-const router = makeRouter(manager);
+const source = new FactoryStubSource(scope);
+const manager: GraphManager = new BrowserGraphManager(source);
+// The control plane (§9): the singleton registry lives in its own dedicated Worker (persistent OPFS), reached
+// by a direct capnweb stub, so `/_replicator` CRUD survives a tab/SW restart. The scheduler runs at THIS
+// edge (the SW) as a client of the graph Workers — never inside one — driven by `POST /_scheduler/run` (an
+// elected tab ticks it; 5c-browser-2). `runTick`'s remote-peer http is deny-all until the config-to-SW
+// plumbing lands (5c-browser-2); local→local replication works now.
+const registry = new StubReplicatorRegistry(source);
+const runTick = () => runDueReplications({ registry, manager, http: allowlistedHttp([]) });
+const router = makeRouter(manager, undefined, undefined, registry, runTick);
 
 scope.addEventListener('fetch', (event) => {
   const { pathname } = new URL(event.request.url);
@@ -40,7 +51,10 @@ scope.addEventListener('fetch', (event) => {
 });
 
 /** The paths the graph edge owns. `/gremlin` (bare + `/gremlin/{id}`) is the Gremlin data + management
- *  plane; `/graphql/{id}` is the GraphQL edge. Everything else passes through untouched. */
+ *  plane; `/graphql/{id}` is the GraphQL edge; `/_replicator` + `/_scheduler` are the replication control
+ *  plane (§9). Everything else passes through untouched. */
 function isGraphPath(pathname: string): boolean {
-  return pathname === '/gremlin' || pathname.startsWith('/gremlin/') || pathname.startsWith('/graphql/');
+  return pathname === '/gremlin' || pathname.startsWith('/gremlin/') || pathname.startsWith('/graphql/')
+    || pathname === '/_replicator' || pathname.startsWith('/_replicator/')
+    || pathname.startsWith('/_scheduler/');
 }

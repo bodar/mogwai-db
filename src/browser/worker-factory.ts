@@ -7,7 +7,9 @@
 // control-plane capnweb session. The only native messages are the `Bootstrap` port hand-offs, which
 // capnweb cannot itself carry (worker-spawn.ts).
 import { newMessagePortRpcSession, RpcTarget } from 'capnweb';
-import { spawnGraphWorker, bootSession, removeOpfsDir, type BootstrapMessage } from './worker-spawn.ts';
+import {
+  spawnGraphWorker, bootSession, spawnRegistryWorker, bootRegistrySession, removeOpfsDir, type BootstrapMessage,
+} from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
 
 /** This tab's stake in one graph: a queued (or granted) per-graph Web Lock and, once granted, the Worker
@@ -29,11 +31,18 @@ interface Leadership {
  *  and pushes the SW a fresh port. No heartbeats, no announcement protocol. */
 export class WorkerFactory extends RpcTarget {
   private readonly graphs = new Map<string, Leadership>();
+  /** This tab's stake in the SINGLETON registry Worker — the same Web-Lock leadership as a graph, keyed
+   *  `mogwai-registry`, so exactly one tab owns the registry Worker and the rest fail over to it. */
+  private registry?: Leadership;
 
-  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`) the page serves; `config` (read from
-   *  the page's inline `<script>` JSON) rides each Worker's boot so it can build its allowlisted Http
-   *  seam for io()/federate over http. */
-  constructor(private readonly workerUrl: string | URL, private readonly config?: MogwaiConfig) {
+  /** `workerUrl` is the bundled graph-worker entry (`worker.ts`); `registryWorkerUrl` the registry-worker
+   *  entry (`registry-worker.ts`) — both served by the page. `config` (read from the page's inline
+   *  `<script>` JSON) rides each GRAPH Worker's boot for its allowlisted Http seam (the registry needs none). */
+  constructor(
+    private readonly workerUrl: string | URL,
+    private readonly registryWorkerUrl: string | URL,
+    private readonly config?: MogwaiConfig,
+  ) {
     super();
   }
 
@@ -64,6 +73,28 @@ export class WorkerFactory extends RpcTarget {
     }
   }
 
+  /** The SW wants the singleton registry Worker. Identical leadership to `openGraph` but for the ONE
+   *  registry (lock `mogwai-registry`): the tab that holds the lock spawns the registry Worker and pushes
+   *  the SW a direct port; others queue and take over on failover. Idempotent. */
+  async openRegistry(): Promise<void> {
+    if (!this.registry) {
+      const abort = new AbortController();
+      const L: Leadership = { abort, isLeader: false };
+      this.registry = L;
+      navigator.locks
+        .request('mogwai-registry', { signal: abort.signal }, () => {
+          L.isLeader = true;
+          this.deliverRegistry(L);
+          return heldUntilAborted(abort.signal);
+        })
+        .catch((e: unknown) => {
+          if (!(e instanceof DOMException && e.name === 'AbortError')) throw e;
+        });
+    } else if (this.registry.isLeader) {
+      this.deliverRegistry(this.registry);
+    }
+  }
+
   /** Tear down graph `id` (idempotent): release/cancel this tab's lock (so a queued tab does not later
    *  resurrect a destroyed graph), terminate the Worker if we own it, and remove the OPFS database. */
   async destroyGraph(id: string): Promise<void> {
@@ -85,6 +116,17 @@ export class WorkerFactory extends RpcTarget {
       return s.port;
     })();
     this.post({ kind: 'mogwai-graph-port', graphId: id, port });
+  }
+
+  /** As registry leader: spawn the registry Worker if we don't own one yet (on failover re-opens its
+   *  opfs-sahpool over the committed configs), then push the SW a fresh session port. */
+  private deliverRegistry(g: Leadership): void {
+    const port = g.worker ? bootRegistrySession(g.worker) : (() => {
+      const s = spawnRegistryWorker(this.registryWorkerUrl);
+      g.worker = s.worker;
+      return s.port;
+    })();
+    this.post({ kind: 'mogwai-registry-port', port });
   }
 
   /** Post a Bootstrap (port hand-off) to the controlling Service Worker, transferring the port. */
@@ -110,6 +152,8 @@ export interface MogwaiOptions {
   serviceWorker?: string | URL;
   /** The per-graph Worker script URL. Default: `./worker.js` beside this bundle. */
   worker?: string | URL;
+  /** The singleton registry Worker script URL. Default: `./registry-worker.js` beside this bundle. */
+  registryWorker?: string | URL;
   /** The Service Worker scope. Default: the SW's own directory (root, for a root deploy) — widen it (and
    *  serve the SW with `Service-Worker-Allowed`) only to intercept `/gremlin/*` above the SW's path. */
   scope?: string;
@@ -125,20 +169,21 @@ export interface MogwaiOptions {
 export async function installMogwai(opts: MogwaiOptions = {}): Promise<() => void> {
   const serviceWorker = opts.serviceWorker ?? new URL('./service-worker.js', import.meta.url);
   const worker = opts.worker ?? new URL('./worker.js', import.meta.url);
+  const registryWorker = opts.registryWorker ?? new URL('./registry-worker.js', import.meta.url);
   await registerServiceWorker(serviceWorker, opts.scope); // resolves once the SW controls this page
-  return installWorkerFactory(worker, opts.config);
+  return installWorkerFactory(worker, registryWorker, opts.config);
 }
 
 /** Install the page-side factory: open a control-plane capnweb session with the Service Worker (so the SW
  *  can call `openGraph`), and re-open one whenever the SW solicits (`mogwai-need-control`, after the SW or
  *  its ports were reaped). Returns a disposer that removes the listener. Call once, after the SW controls
  *  the page (see {@link registerServiceWorker}). */
-export function installWorkerFactory(workerUrl: string | URL, config?: MogwaiConfig): () => void {
+export function installWorkerFactory(workerUrl: string | URL, registryWorkerUrl: string | URL, config?: MogwaiConfig): () => void {
   // Ask the browser to make this origin's OPFS PERSISTENT — otherwise it is evictable under storage
   // pressure, which would silently drop a graph's committed data (the 10 GB DO ceiling has no such risk).
   // Fire-and-forget: it may prompt, be auto-granted, or be denied; storage still works either way.
   void navigator.storage?.persist?.().catch(() => {});
-  const factory = new WorkerFactory(workerUrl, config);
+  const factory = new WorkerFactory(workerUrl, registryWorkerUrl, config);
   const openControl = () => {
     const channel = new MessageChannel();
     newMessagePortRpcSession(channel.port1, factory); // this page exposes the factory over port1

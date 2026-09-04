@@ -13,10 +13,12 @@
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphStubSource } from './BrowserGraphManager.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
+import type { ReplicatorRegistryHost } from './ReplicatorRegistryHost.ts';
+import type { RegistryStubSource } from './StubReplicatorRegistry.ts';
 import type { WorkerFactory } from './worker-factory.ts';
 import type { BootstrapMessage } from './worker-spawn.ts';
 
-export class FactoryStubSource implements GraphStubSource {
+export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
   /** Control sessions to WorkerFactory pages (one per open factory tab). Cross-tab: openGraph goes to
    *  ALL of them; the tab that holds the lock answers. */
   private readonly factories = new Set<RpcStub<WorkerFactory>>();
@@ -28,6 +30,11 @@ export class FactoryStubSource implements GraphStubSource {
   private readonly portWaiters = new Map<string, Array<() => void>>();
   /** In-flight solicitations, so concurrent first-touchers share one `openGraph` round. */
   private readonly soliciting = new Map<string, Promise<RpcStub<GraphWorkerHost>>>();
+
+  /** The CURRENT registry stub (singleton) — replaced on failover, exactly like a graph's. */
+  private currentRegistry?: RpcStub<ReplicatorRegistryHost>;
+  private registryWaiters: Array<() => void> = [];
+  private solicitingRegistry?: Promise<RpcStub<ReplicatorRegistryHost>>;
 
   constructor(private readonly scope: ServiceWorkerGlobalScope) {
     scope.addEventListener('message', (event) => this.onMessage(event as ExtendableMessageEvent));
@@ -41,12 +48,47 @@ export class FactoryStubSource implements GraphStubSource {
       const waiters = this.factoryWaiters;
       this.factoryWaiters = [];
       for (const w of waiters) w();
-      // A late-joining tab must queue for leadership on the graphs already in flight, so it can take over
-      // on failover — re-broadcast the active graphs to it.
+      // A late-joining tab must queue for leadership on everything already in flight, so it can take over
+      // on failover — re-broadcast the active graphs AND the registry to it.
       for (const id of this.current.keys()) void factory.openGraph(id).catch(() => {});
+      if (this.currentRegistry || this.solicitingRegistry) void factory.openRegistry().catch(() => {});
     } else if (data?.kind === 'mogwai-graph-port') {
       this.acceptPort(data.graphId, data.port);
+    } else if (data?.kind === 'mogwai-registry-port') {
+      this.acceptRegistryPort(data.port);
     }
+  }
+
+  /** A leader delivered the registry port. On FAILOVER (we already held a stub) dispose the old one — that
+   *  aborts its session and rejects any hung call, which lets the wrapper retry against the new leader. */
+  private acceptRegistryPort(port: MessagePort): void {
+    const next = newMessagePortRpcSession<ReplicatorRegistryHost>(port);
+    const prev = this.currentRegistry;
+    if (prev && prev !== next) {
+      try { prev[Symbol.dispose](); } catch { /* a dead stub throws on dispose — harmless */ }
+    }
+    this.currentRegistry = next;
+    const waiters = this.registryWaiters;
+    this.registryWaiters = [];
+    for (const w of waiters) w();
+  }
+
+  /** The current registry stub, soliciting one if we have none — the singleton twin of {@link open}. */
+  openRegistry(): Promise<RpcStub<ReplicatorRegistryHost>> {
+    if (this.currentRegistry) return Promise.resolve(this.currentRegistry);
+    if (!this.solicitingRegistry) {
+      this.solicitingRegistry = this.solicitRegistry();
+      void this.solicitingRegistry.finally(() => { this.solicitingRegistry = undefined; });
+    }
+    return this.solicitingRegistry;
+  }
+
+  private async solicitRegistry(): Promise<RpcStub<ReplicatorRegistryHost>> {
+    const factories = await this.ensureFactories();
+    const arrived = new Promise<void>((resolve) => this.registryWaiters.push(resolve));
+    for (const f of factories) void f.openRegistry().catch(() => {});
+    await arrived;
+    return this.currentRegistry!;
   }
 
   /** A leader delivered a port for `id`. If we already held a stub (this is a FAILOVER — the old leader
