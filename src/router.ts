@@ -271,6 +271,23 @@ export function makeRouter(
         try { return json(await mgr.bulkGet(gid, (await req.json()) as { gid: string; kind: 'vertex' | 'edge' }[])); }
         catch (e: any) { return json({ error: e.message }, 400); }
       }
+      if (endpoint === '_match_set') {
+        // The SOURCE-side current match set as gids for placement (filtered-replication-plan §3/F2).
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        try {
+          const { filter } = (await req.json()) as { filter: string };
+          return json({ gids: await mgr.matchSet(gid, filter) });
+        } catch (e: any) { return json({ error: e.message }, 400); } // a non-vertex filter fails closed here
+      }
+      if (endpoint === '_placement') {
+        // Run the TARGET-side placement over the matched gids (§3/F2) — an idempotent graft.
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        try {
+          const { placement, matchGids } = (await req.json()) as { placement: string; matchGids: string[] };
+          await mgr.placement(gid, placement, matchGids);
+          return json({ ok: true });
+        } catch (e: any) { return json({ error: e.message }, 400); }
+      }
       if (endpoint === '_bulk_docs') {
         if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
         try { await mgr.bulkDocs(gid, await req.json()); return json({ ok: true }); }

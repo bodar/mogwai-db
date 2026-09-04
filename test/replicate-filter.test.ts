@@ -207,6 +207,49 @@ describe('F2b — placement grafts the current match set into pre-existing targe
   });
 });
 
+describe('F2b-2 — the remote placement endpoints (_match_set + _placement over HTTP)', () => {
+  const FILTER = 'g.V().hasLabel("task")';
+  const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';
+  const held = (mgr: BunGraphManager, g: string) =>
+    mgr.storeOf(g).query<{ c: number }>('SELECT count(*) AS c FROM edges e JOIN labels l ON l.id = e.label WHERE l.name = ?', ['inbox_holds'])[0].c;
+  const setup = async () => {
+    let router: Http;
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    router = makeRouter(mgr);
+    const url = (g: string) => `http://peer/gremlin/${g}`;
+    return { mgr, router: router!, url };
+  };
+
+  test('_match_set: a remote-source PULL grafts on the local target', async () => {
+    const s = await setup();
+    await s.mgr.executor('remote').framedAsync(TASK_GRAPH, {}); // the remote source
+    await s.mgr.executor('local').framedAsync('g.addV("inbox")', {}); // the local target
+    const replId = replicationId('pull', s.url('remote'), 'local');
+    const cp: Checkpoint = { read: () => s.mgr.checkpoint('local', replId), write: async (seq) => { await s.mgr.checkpoint('local', replId, seq); } };
+    await runReplication(remotePeer(s.router, s.url('remote')), localPeer(s.mgr, 'local'), cp, {}, FILTER, PLACEMENT);
+    expect(held(s.mgr, 'local')).toBe(2); // the remote's matched tasks, grafted here
+  });
+
+  test('_placement: a PUSH grafts on the remote target', async () => {
+    const s = await setup();
+    await s.mgr.executor('src').framedAsync(TASK_GRAPH, {}); // the local source
+    await s.mgr.executor('backup').framedAsync('g.addV("inbox")', {}); // the remote target
+    const replId = replicationId('push', s.url('backup'), 'src');
+    const cp: Checkpoint = { read: () => s.mgr.checkpoint('src', replId), write: async (seq) => { await s.mgr.checkpoint('src', replId, seq); } };
+    await runReplication(localPeer(s.mgr, 'src'), remotePeer(s.router, s.url('backup')), cp, {}, FILTER, PLACEMENT);
+    expect(held(s.mgr, 'backup')).toBe(2); // grafted on the remote target via the _placement endpoint
+  });
+
+  test('_match_set rejects a non-vertex filter (400)', async () => {
+    const s = await setup();
+    await s.mgr.executor('g').framedAsync(TASK_GRAPH, {});
+    const res = await s.router(new Request(`${s.url('g')}/_match_set`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filter: 'g.V().count()' }),
+    }));
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('matchSet — the source-side current match set as gids', () => {
   test('returns the matched vertices’ gids (the full current set, not a delta)', async () => {
     const mgr = new BunGraphManager(undefined, standardRegistry);
