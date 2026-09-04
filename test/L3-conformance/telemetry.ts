@@ -83,7 +83,9 @@ export class LoggingGraphManager implements GraphManager {
   }
   create(id: string): Promise<void> { return this.inner.create(id); }
   info(id: string): Promise<GraphInfo> { return this.inner.info(id); }
-  changes(id: string, since: number): Promise<ChangesFeed> { return this.inner.changes(id, since); }
+  changes(id: string, since: number, limit?: number, filter?: string): Promise<ChangesFeed> { return this.inner.changes(id, since, limit, filter); }
+  matchSet(id: string, filter: string): Promise<readonly string[]> { return this.inner.matchSet(id, filter); }
+  placement(id: string, placement: string, matchGids: readonly string[]): Promise<void> { return this.inner.placement(id, placement, matchGids); }
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> { return this.inner.revsDiff(id, request); }
   bulkGet(id: string, refs: readonly BulkGetRef[]): Promise<WireChangeSet> { return this.inner.bulkGet(id, refs); }
   bulkDocs(id: string, changes: WireChangeSet): Promise<void> { return this.inner.bulkDocs(id, changes); }

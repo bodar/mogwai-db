@@ -168,6 +168,55 @@ describe('F1b — a configured/one-shot replication pulls only the filtered subg
   });
 });
 
+describe('F2b — placement grafts the current match set into pre-existing target structure', () => {
+  // The idempotent edge-attach idiom the engine supports TODAY: guard the addE with `where(not(<existing
+  // edge>))`, so re-running each pass never duplicates (mergeE-over-an-incoming-stream is not lowered yet).
+  const FILTER = 'g.V().hasLabel("task")';
+  const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';
+
+  // F2b-1 exercises the LOCAL mechanism (both peers via the manager); the remote `_match_set`/`_placement`
+  // HTTP endpoints are F2b-2.
+  const twoGraph = async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry);
+    await mgr.executor('remote').framedAsync(TASK_GRAPH, {});
+    await mgr.executor('local').framedAsync('g.addV("inbox")', {}); // the pre-existing target structure
+    const replId = replicationId('pull', 'remote', 'local');
+    const cp: Checkpoint = { read: () => mgr.checkpoint('local', replId), write: async (seq) => { await mgr.checkpoint('local', replId, seq); } };
+    const pull = (placement?: string) => runReplication(localPeer(mgr, 'remote'), localPeer(mgr, 'local'), cp, {}, FILTER, placement);
+    const heldCount = () => mgr.storeOf('local').query<{ c: number }>('SELECT count(*) AS c FROM edges e JOIN labels l ON l.id = e.label WHERE l.name = ?', ['inbox_holds'])[0].c;
+    return { mgr, pull, heldCount };
+  };
+
+  test('placement attaches the matched vertices (only) to the inbox, idempotently', async () => {
+    const s = await twoGraph();
+    await s.pull(PLACEMENT);
+    // The two matched tasks are grafted under the inbox; the boundary person (dan) is NOT matched, eve
+    // was never pulled — so exactly 2 inbox_holds edges.
+    expect(s.heldCount()).toBe(2);
+    // A second pass re-runs the placement over the same match set and MUST NOT duplicate (the guard).
+    await s.pull(PLACEMENT);
+    expect(s.heldCount()).toBe(2);
+  });
+
+  test('a run with no placement lands the subgraph unattached', async () => {
+    const s = await twoGraph();
+    await s.pull(); // no placement
+    expect(s.heldCount()).toBe(0); // nothing grafted
+    // The subgraph itself DID land: the closure carries both incident edges (assigned + blocks).
+    expect(s.mgr.storeOf('local').query<{ c: number }>('SELECT count(*) AS c FROM edges')[0].c).toBe(2);
+  });
+});
+
+describe('matchSet — the source-side current match set as gids', () => {
+  test('returns the matched vertices’ gids (the full current set, not a delta)', async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry);
+    await mgr.executor('g').framedAsync(TASK_GRAPH, {});
+    const gids = await mgr.matchSet('g', 'g.V().hasLabel("task")');
+    expect(gids).toHaveLength(2); // t1, t3 — not the boundary people
+    expect(gids.every((g) => /^[0-9A-F]{32}$/i.test(g))).toBe(true); // hex gids, cross-peer identity
+  });
+});
+
 describe('F1c — save-time filter validation (run-on-save, not static analysis)', () => {
   const jsonReq = (url: string, body: unknown) =>
     new Request(url, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });

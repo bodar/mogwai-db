@@ -376,6 +376,12 @@ export interface GraphManager {
    *  SOURCE: the feed is restricted to the matched vertices + their 1-hop edge-closure. A non-vertex
    *  filter throws (fail-closed), surfaced to the caller. Absent → the whole graph. */
   changes(id: string, since: number, limit?: number, filter?: string): Promise<ChangesFeed>;
+  /** The SOURCE-side current match set as gids for placement (filtered-replication-plan §3/F2): the gids
+   *  of the vertices the captured `filter` matches now (throws on a non-vertex filter). Store-tier read. */
+  matchSet(id: string, filter: string): Promise<readonly string[]>;
+  /** Run the TARGET-side `placement` traversal over the matched gids (§3/F2) — resolve them to local rowids
+   *  and execute the traversal with them bound as `matchedIds`, idempotently. Store-tier write. */
+  placement(id: string, placement: string, matchGids: readonly string[]): Promise<void>;
   /** Given the revs a peer holds per gid, return which ones graph `id` is MISSING (§4 primitive 2) —
    *  the cheap "what should I send you?" diff. A pure gid/rev key lookup, store-tier. */
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse>;

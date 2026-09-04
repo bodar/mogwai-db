@@ -74,6 +74,14 @@ export class BrowserGraphManager implements GraphManager {
     return this.call(id, ((s) => s.changes(since, limit, filter)) as Awaited$<ChangesFeed>);
   }
 
+  async matchSet(id: string, filter: string): Promise<readonly string[]> {
+    return this.call(id, ((s) => s.matchSet(filter)) as Awaited$<string[]>);
+  }
+
+  async placement(id: string, placement: string, matchGids: readonly string[]): Promise<void> {
+    return this.call(id, ((s) => s.placement(placement, matchGids)) as Awaited$<void>);
+  }
+
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
     return this.call(id, ((s) => s.revsDiff(request)) as Awaited$<RevsDiffResponse>);
   }

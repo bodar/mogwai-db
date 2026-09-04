@@ -436,8 +436,39 @@ export function checkpoint(store: GraphStore, replicationId: string, seq?: numbe
   return seq;
 }
 
-/** A replication PEER — the four protocol operations, direction-agnostic. A local peer binds a manager's
- *  own methods; a remote peer is an `Http` caller over the `_` endpoints. The loop drives two of them. */
+/**
+ * The SOURCE-side match set for placement (filtered-replication-plan §3/F2): the GIDS of the vertices the
+ * captured `filter` matches RIGHT NOW — the WHOLE current set, not the delta (so placement is a convergence
+ * step that self-heals a pass that crashed after import but before placement). Gids, not the source's local
+ * ids, because placement runs on the TARGET where the same vertices are addressed by their cross-peer gid.
+ * `filterVertexIds` yields the matched vertices' external ids (throwing on a non-vertex filter); this maps
+ * them to gids via one `json_each` bind (type-safe by `COALESCE`'s NONE affinity, as `changesFeed` does).
+ */
+export function matchSetGids(store: GraphStore, executor: Executor, filter: string): string[] {
+  const ids = executor.filterVertexIds(filter);
+  if (!ids.length) return [];
+  return store.query<{ gid: string }>(
+    'SELECT hex(gid) AS gid FROM nodes WHERE gid IS NOT NULL AND COALESCE(uid, id) IN (SELECT value FROM json_each(?))',
+    [JSON.stringify(ids)]).map((r) => r.gid);
+}
+
+/**
+ * Run the TARGET-side placement traversal over the current match set (filtered-replication-plan §3/F2):
+ * resolve the matched gids to this graph's local rowids and execute the captured `placement` with them
+ * bound as `matchedIds` — a full Gremlin traversal (`g.V(matchedIds).mergeE([…, from: V('inbox')])`) that
+ * grafts the just-landed subgraph into pre-existing target structure. IDEMPOTENT by the author's use of
+ * `mergeE` (re-running each pass is a no-op / self-heal). The matched vertices are addressed by the
+ * `matchedIds` bind — a bound collection lowers to ONE `json_each` (never a placeholder list, never
+ * literals). A gid the target does not hold is skipped (not yet landed); an empty set is a no-op.
+ */
+export function runPlacement(executor: Executor, store: GraphStore, placement: string, matchGids: readonly string[]): void {
+  const rowids = [...resolveGids(store, 'nodes', matchGids).values()];
+  if (!rowids.length) return;
+  executor.framed(placement, { matchedIds: rowids }); // a write; its framed result is discarded
+}
+
+/** A replication PEER — the protocol operations, direction-agnostic. A local peer binds a manager's own
+ *  methods; a remote peer is an `Http` caller over the `_` endpoints. The loop drives two of them. */
 export interface Peer {
   /** `filter` (filtered-replication-plan F1) is a captured vertex-selector run on the SOURCE peer; the
    *  feed is restricted to the matched vertices + their 1-hop edge-closure. A source peer that cannot run
@@ -446,16 +477,22 @@ export interface Peer {
   revsDiff(request: RevsDiffRequest): Promise<RevsDiffResponse>;
   bulkGet(refs: readonly BulkGetRef[]): Promise<WireChangeSet>;
   bulkDocs(changes: WireChangeSet): Promise<void>;
+  /** The SOURCE-side current match set as gids (filtered-replication-plan §3/F2), for placement. */
+  matchSet(filter: string): Promise<readonly string[]>;
+  /** Run the TARGET-side placement over the match set (§3/F2) — idempotent graft. */
+  placement(placement: string, matchGids: readonly string[]): Promise<void>;
 }
 
 /** A local peer over a manager's own graph — no HTTP hop, just the in-process (or DO-RPC) methods. The
- *  manager evaluates a `filter` where the graph's store + executor live. */
+ *  manager evaluates a `filter`/`placement` where the graph's store + executor live. */
 export function localPeer(mgr: GraphManager, id: string): Peer {
   return {
     changes: (since, limit, filter) => mgr.changes(id, since, limit, filter),
     revsDiff: (request) => mgr.revsDiff(id, request),
     bulkGet: (refs) => mgr.bulkGet(id, refs),
     bulkDocs: (changes) => mgr.bulkDocs(id, changes),
+    matchSet: (filter) => mgr.matchSet(id, filter),
+    placement: (placement, matchGids) => mgr.placement(id, placement, matchGids),
   };
 }
 
@@ -473,6 +510,14 @@ export function storePeer(store: GraphStore, executor?: Executor): Peer {
     revsDiff: async (request) => revsDiff(store, request),
     bulkGet: async (refs) => bulkGet(store, refs),
     bulkDocs: async (changes) => applyWire(store, changes),
+    matchSet: async (filter) => {
+      if (!executor) throw new Error('a filtered replication source needs an executor to evaluate the selector');
+      return matchSetGids(store, executor, filter);
+    },
+    placement: async (placement, matchGids) => {
+      if (!executor) throw new Error('a placement needs an executor to run the target-side traversal');
+      runPlacement(executor, store, placement, matchGids);
+    },
   };
 }
 
@@ -512,6 +557,8 @@ export function remotePeer(http: Http, url: string): Peer {
     revsDiff: (request) => post('_revs_diff', request),
     bulkGet: (refs) => post('_bulk_get', refs),
     bulkDocs: async (changes) => { await post('_bulk_docs', changes); },
+    matchSet: async (filter) => (await post<{ gids: string[] }>('_match_set', { filter })).gids,
+    placement: async (placement, matchGids) => { await post('_placement', { placement, matchGids }); },
   };
 }
 
@@ -621,7 +668,7 @@ export async function runReplicationPass(
  *  and re-arms while `more`. Resumable: every page advances the checkpoint, so an interrupted drain
  *  resumes from the last committed page. */
 export async function runReplication(
-  source: Peer, target: Peer, cp: Checkpoint, opts: PaceOptions = {}, filter?: string,
+  source: Peer, target: Peer, cp: Checkpoint, opts: PaceOptions = {}, filter?: string, placement?: string,
 ): Promise<ReplicationRunStats> {
   const batchSize = opts.batchSize ?? DEFAULT_REPLICATION_BATCH;
   const pace = opts.pace ?? (() => Promise.resolve());
@@ -633,6 +680,15 @@ export async function runReplication(
     if (!p.more) break; // source drained
     if (opts.maxBatches != null && total.batches >= opts.maxBatches) { total.more = true; break; }
     await pace({ batches: total.batches, read: total.read, written: total.written, deleted: total.deleted });
+  }
+  // PLACEMENT (filtered-replication-plan §3/F2): once the subgraph has drained onto the target, graft it
+  // over the SOURCE's CURRENT match set (not the delta) — a convergence step, re-run each replication,
+  // idempotent by the author's `mergeE`, so it self-heals a pass that landed elements but crashed before
+  // placement. Only runs when the run actually drained (`!more`), so a paced multi-tick drain places once
+  // at the end rather than per wake over a partial set. A placement implies a filter (the match set is the
+  // filter's output).
+  if (placement && filter && !total.more) {
+    await target.placement(placement, await source.matchSet(filter));
   }
   return total;
 }
@@ -663,7 +719,7 @@ function replicateWith(
   return runReplication(source, target, {
     read: async () => cp(replId),
     write: async (seq) => { await cp(replId, seq); },
-  }, {}, opts.filter); // the source-side selector (filtered-replication-plan F1), applied every pass
+  }, {}, opts.filter, opts.placement); // the source-side selector + target-side placement (F1/F2)
 }
 
 /** A one-shot replication for `localId` via a manager's own methods (Bun in-process, CF over DO RPC) —

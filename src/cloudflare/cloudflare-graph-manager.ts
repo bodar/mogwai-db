@@ -109,6 +109,12 @@ export class CloudflareGraphManager implements GraphManager {
   changes(id: string, since: number, limit?: number, filter?: string): Promise<ChangesFeed> {
     return this.ns.getByName(id).changes(since, limit, filter);
   }
+  matchSet(id: string, filter: string): Promise<readonly string[]> {
+    return this.ns.getByName(id).matchSet(filter);
+  }
+  placement(id: string, placement: string, matchGids: readonly string[]): Promise<void> {
+    return this.ns.getByName(id).placement(placement, matchGids);
+  }
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
     return this.ns.getByName(id).revsDiff(request);
   }

@@ -29,8 +29,10 @@ export interface ReplicationConfig {
   filter?: string | null;
   /** The optional target-side placement traversal (filtered-replication-plan §3/F2): a full Gremlin
    *  traversal grafting the current match set into pre-existing target structure, referencing the matched
-   *  vertices by a `matchedIds` bind, e.g. `g.V(matchedIds).mergeE([label:'inbox_holds', from: V('inbox')])`.
-   *  Run each pass over the current match set, idempotently. Absent → the subgraph just lands, unattached. */
+   *  vertices by a `matchedIds` bind. Run each pass over the current match set, so it must be IDEMPOTENT —
+   *  the engine-supported idiom is a `where(not(<existing edge>))`-guarded `addE`, e.g.
+   *  `g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))`.
+   *  (`mergeE` over an incoming vertex stream is not lowered yet.) Absent → the subgraph lands unattached. */
   placement?: string | null;
   checkpointInterval?: number | null;
   useCheckpoints?: boolean;

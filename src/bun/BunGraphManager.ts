@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { GraphStore, type Sql } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint, managerReplicate, conflictsFeed } from '../replicate.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, managerReplicate, conflictsFeed, matchSetGids, runPlacement } from '../replicate.ts';
 import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi, Http } from '../api.ts';
@@ -129,6 +129,14 @@ export class BunGraphManager implements GraphManager {
     // `filterVertexIds` is present; a non-vertex filter throws, surfaced to the caller.
     const match = filter ? this.executor(id).filterVertexIds(filter) : undefined;
     return changesFeed(this.resolve(id).store, since, limit, match);
+  }
+
+  async matchSet(id: string, filter: string): Promise<readonly string[]> {
+    return matchSetGids(this.resolve(id).store, this.executor(id), filter);
+  }
+
+  async placement(id: string, placement: string, matchGids: readonly string[]): Promise<void> {
+    runPlacement(this.executor(id), this.resolve(id).store, placement, matchGids);
   }
 
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {

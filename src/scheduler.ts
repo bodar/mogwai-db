@@ -75,7 +75,7 @@ async function runJob(deps: SchedulerDeps, config: ReplicationConfig, opts: Requ
   try {
     const stats = await runReplication(peerFor(deps, config.source), peerFor(deps, config.target), cp, {
       batchSize: opts.batchSize, maxBatches: opts.maxBatchesPerWake,
-    }, config.filter ?? undefined); // the config's source-side selector (filtered-replication-plan F1)
+    }, config.filter ?? undefined, config.placement ?? undefined); // source selector + target placement (F1/F2)
     const interval = config.checkpointInterval ?? opts.defaultIntervalMs;
     // `stats.more` ⇒ the wake bound stopped a still-draining job → run again PROMPTLY (drain across ticks).
     // Otherwise: a continuous job polls again after `interval`; a one-shot is done.

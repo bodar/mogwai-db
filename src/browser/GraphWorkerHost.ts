@@ -11,7 +11,7 @@
 // opfs-sahpool VFS (test/browser/workers/graph-worker.worker.ts).
 import { GraphStore, type Sql } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff, type GraphInfo } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint, storeReplicate, conflictsFeed } from '../replicate.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, storeReplicate, conflictsFeed, matchSetGids, runPlacement } from '../replicate.ts';
 import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import { Executor, type Framed } from '../execute.ts';
 import type { ForeignResult, ForeignTerminal } from '../api.ts';
@@ -123,6 +123,16 @@ export class GraphWorkerHost extends RpcTarget {
     // the 1-hop subgraph around the matched vertices; a non-vertex filter throws (surfaced to the caller).
     const match = filter ? this.executor.filterVertexIds(filter) : undefined;
     return changesFeed(this.store, since, limit, match);
+  }
+
+  /** The current match set as gids (filtered-replication-plan §3/F2) — the source side of placement. */
+  matchSet(filter: string): string[] {
+    return matchSetGids(this.store, this.executor, filter);
+  }
+
+  /** Run the placement traversal over the match set (§3/F2) — the target side, an idempotent graft. */
+  placement(placement: string, matchGids: readonly string[]): void {
+    runPlacement(this.executor, this.store, placement, matchGids);
   }
 
   /** The `_revs_diff` lookup (§4 primitive 2) — store-tier, run inside this graph's Worker. */

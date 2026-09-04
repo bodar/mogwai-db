@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { graphInfo, changesFeed, revsDiff } from '../manager.ts';
-import { bulkGet, applyWire, checkpoint as storeCheckpoint, conflictsFeed } from '../replicate.ts';
+import { bulkGet, applyWire, checkpoint as storeCheckpoint, conflictsFeed, matchSetGids, runPlacement } from '../replicate.ts';
 import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ConflictEntry, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
 import { Executor as ExecutorImpl, frameResolved, readSegmentHead, type Framed } from '../execute.ts';
 import type { Compiled, Executable } from '../compiler/compiler.ts';
@@ -147,6 +147,16 @@ export class GraphDatabase extends DurableObject<Env> {
     // as a value via the caller's rpcTry, like any query failure).
     const match = filter ? this.executor().filterVertexIds(filter) : undefined;
     return changesFeed(this.store, since, limit, match);
+  }
+
+  matchSet(filter: string): string[] {
+    this.ensureLive();
+    return matchSetGids(this.store, this.executor(), filter);
+  }
+
+  placement(placement: string, matchGids: readonly string[]): void {
+    this.ensureLive();
+    runPlacement(this.executor(), this.store, placement, matchGids);
   }
 
   revsDiff(request: RevsDiffRequest): RevsDiffResponse {
