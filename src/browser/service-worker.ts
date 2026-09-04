@@ -16,6 +16,8 @@ import { FactoryStubSource } from './factory-stub-source.ts';
 import { StubReplicatorRegistry } from './StubReplicatorRegistry.ts';
 import { runDueReplications } from '../scheduler.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
+import type { Http } from '../api.ts';
+import type { BootstrapMessage } from './worker-spawn.ts';
 
 // `self` is the ServiceWorkerGlobalScope (the WebWorker-lib type); the ambient `self` cannot be that
 // specific under a shared lib set, so cast once here.
@@ -34,11 +36,21 @@ const manager: GraphManager = new BrowserGraphManager(source);
 // The control plane (§9): the singleton registry lives in its own dedicated Worker (persistent OPFS), reached
 // by a direct capnweb stub, so `/_replicator` CRUD survives a tab/SW restart. The scheduler runs at THIS
 // edge (the SW) as a client of the graph Workers — never inside one — driven by `POST /_scheduler/run` (an
-// elected tab ticks it; 5c-browser-2). `runTick`'s remote-peer http is deny-all until the config-to-SW
-// plumbing lands (5c-browser-2); local→local replication works now.
+// elected tab ticks it on a timer, or an admin fires it once).
 const registry = new StubReplicatorRegistry(source);
-const runTick = () => runDueReplications({ registry, manager, http: allowlistedHttp([]) });
+// The scheduler's outbound http (its remote peers) is the SW's global `fetch`, ALLOWLISTED from the config a
+// factory page sends (`mogwai-config`) — empty ⇒ deny-all (fail closed), exactly as Bun/CF. Read at call
+// time from a mutable allowlist, so a config arriving after SW start (or updated) takes effect without a
+// rebuild. A local→local job needs no http (localPeer), so it works even before any config arrives.
+let schedulerAllowlist: string[] = [];
+const schedulerHttp: Http = (req) => allowlistedHttp(schedulerAllowlist)(req);
+const runTick = () => runDueReplications({ registry, manager, http: schedulerHttp });
 const router = makeRouter(manager, undefined, undefined, registry, runTick);
+
+scope.addEventListener('message', (event) => {
+  const data = (event as ExtendableMessageEvent).data as BootstrapMessage | undefined;
+  if (data?.kind === 'mogwai-config') schedulerAllowlist = data.config.httpAllowlist ?? [];
+});
 
 scope.addEventListener('fetch', (event) => {
   const { pathname } = new URL(event.request.url);

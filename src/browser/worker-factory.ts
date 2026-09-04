@@ -189,13 +189,49 @@ export function installWorkerFactory(workerUrl: string | URL, registryWorkerUrl:
     newMessagePortRpcSession(channel.port1, factory); // this page exposes the factory over port1
     const msg: BootstrapMessage = { kind: 'mogwai-control-port', port: channel.port2 };
     navigator.serviceWorker.controller?.postMessage(msg, [channel.port2]);
+    // The scheduler's outbound-http allowlist lives at the SW edge (it runs the runner); send the config
+    // so a remote-peer replication ("pull from Cloudflare into this tab") is permitted — else deny-all.
+    if (config) navigator.serviceWorker.controller?.postMessage({ kind: 'mogwai-config', config } satisfies BootstrapMessage);
   };
   const onMessage = (event: MessageEvent) => {
     if ((event.data as BootstrapMessage | undefined)?.kind === 'mogwai-need-control') openControl();
   };
   navigator.serviceWorker.addEventListener('message', onMessage);
   openControl(); // proactively open one now so the first request is fast
-  return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  // The browser's background scheduler (§9): a Web-Lock-elected tab ticks `POST /_scheduler/run` every
+  // `schedulerIntervalMs`, waking the SW to run due jobs. ONE tab ticks (the rest queue and take over on
+  // failover — the same primitive as graph leadership); opt-in (unset ⇒ off, a `POST /_scheduler/run` still
+  // works manually), matching Bun.
+  const stopTicker = config?.schedulerIntervalMs && config.schedulerIntervalMs > 0
+    ? startSchedulerTicker(config.schedulerIntervalMs)
+    : undefined;
+  return () => {
+    navigator.serviceWorker.removeEventListener('message', onMessage);
+    stopTicker?.();
+  };
+}
+
+/** Start this tab's replication-scheduler ticker: contend for the `mogwai-scheduler` Web Lock, and WHILE
+ *  elected, `POST /_scheduler/run` every `intervalMs` (the SW runs the due jobs). Only the lock holder ticks;
+ *  the rest wait and one takes over when the holder tab dies — the browser's continuous-replication driver.
+ *  Returns a stop function (releases the lock / ends the loop). */
+function startSchedulerTicker(intervalMs: number): () => void {
+  const abort = new AbortController();
+  navigator.locks
+    .request('mogwai-scheduler', { signal: abort.signal }, async () => {
+      while (!abort.signal.aborted) {
+        try { await fetch('/_scheduler/run', { method: 'POST' }); } catch { /* SW asleep / transient — next tick */ }
+        await new Promise<void>((resolve) => {
+          if (abort.signal.aborted) return resolve();
+          const t = setTimeout(resolve, intervalMs);
+          abort.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+        });
+      }
+    })
+    .catch((e: unknown) => {
+      if (!(e instanceof DOMException && e.name === 'AbortError')) throw e;
+    });
+  return () => abort.abort();
 }
 
 /** Register the Service Worker and resolve once it CONTROLS this page — so the first intercepted fetch

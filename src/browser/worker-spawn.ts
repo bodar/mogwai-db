@@ -17,6 +17,7 @@ export type BootstrapMessage =
   | { kind: 'mogwai-control-port'; port: MessagePort } // factory → SW: a port to the WorkerFactory RPC session
   | { kind: 'mogwai-graph-port'; graphId: string; port: MessagePort } // factory → SW: a port to a graph's Worker
   | { kind: 'mogwai-registry-port'; port: MessagePort } // factory → SW: a port to the singleton registry Worker
+  | { kind: 'mogwai-config'; config: MogwaiConfig } // factory → SW: the runtime config (the scheduler's http allowlist)
   | { kind: 'mogwai-need-control' }; // SW → factory: (re)open a control session
 
 /** Boot a NEW capnweb session on an already-spawned graph Worker: make a channel, hand the Worker one end
