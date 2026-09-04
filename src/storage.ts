@@ -72,9 +72,17 @@ const SCHEMA = [
      key TEXT NOT NULL, value, vtype TEXT, meta BLOB)`,
   // `gid`/`rev` mirror `nodes` (see that comment). An edge's `rev` content hash references its
   // endpoints by `gid` (§6·5), so a replicated edge converges across peers that preserved those gids.
+  // `weak` marks a WEAK reference (filtered-replication-plan §5/F2): a placement-synthesized decoration
+  // edge that does NOT pin its endpoint — on a delete of the endpoint it CASCADES (is removed) instead of
+  // RESURRECTING the vertex, unlike a normal (strong) edge (parent §6·3). A DEDICATED column, not a hidden
+  // `~`-property: a property would LEAK into ordinary reads (valueMap/properties don't filter `~` keys) and
+  // the parent §6·5 already chose columns over hidden properties for markers (gid/rev/seq). Weak is LOCAL
+  // to the synthesizing graph and does NOT travel on the wire (bulkGet selects explicit columns, omitting
+  // it), so a replicated edge is born strong (DEFAULT 0). A normal `addE`/mergeE/bulk-load never sets it.
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1)`,
+     tgt INTEGER NOT NULL, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1,
+     weak INTEGER NOT NULL DEFAULT 0)`,
   // Edge properties are ALSO normalized rows (the typed-property-values rework retired
   // the flat JSONB blob): TinkerPop's edge Property has no id/meta/multi, so ONE row per
   // (edge,key) — the UNIQUE constraint enforces that single cardinality and doubles as

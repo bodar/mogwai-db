@@ -250,6 +250,34 @@ describe('F2b-2 — the remote placement endpoints (_match_set + _placement over
   });
 });
 
+describe('F2c-1 — placement edges are WEAK references, replicated/user edges are STRONG', () => {
+  const FILTER = 'g.V().hasLabel("task")';
+  const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';
+
+  test('the synthesized mount edges are marked weak; the replicated ones are not', async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry);
+    await mgr.executor('remote').framedAsync(TASK_GRAPH, {});
+    await mgr.executor('local').framedAsync('g.addV("inbox")', {});
+    const replId = replicationId('pull', 'remote', 'local');
+    const cp: Checkpoint = { read: () => mgr.checkpoint('local', replId), write: async (seq) => { await mgr.checkpoint('local', replId, seq); } };
+    await runReplication(localPeer(mgr, 'remote'), localPeer(mgr, 'local'), cp, {}, FILTER, PLACEMENT);
+    const byLabel = mgr.storeOf('local').query<{ name: string; weak: number }>(
+      'SELECT l.name AS name, e.weak AS weak FROM edges e JOIN labels l ON l.id = e.label ORDER BY l.name, e.id');
+    const holds = byLabel.filter((r) => r.name === 'inbox_holds');
+    expect(holds).toHaveLength(2);
+    expect(holds.every((r) => r.weak === 1)).toBe(true); // the placement edges are weak
+    // The replicated graph edges (assigned, blocks) are strong.
+    expect(byLabel.filter((r) => r.name !== 'inbox_holds').every((r) => r.weak === 0)).toBe(true);
+  });
+
+  test('a normal addE creates a STRONG edge (weak defaults to 0)', async () => {
+    const mgr = new BunGraphManager(undefined, standardRegistry);
+    await mgr.executor('g').framedAsync('g.addV("a").as("x").addV("b").addE("rel").from("x")', {});
+    expect(mgr.storeOf('g').query<{ c: number }>('SELECT count(*) AS c FROM edges WHERE weak = 0')[0].c).toBe(1);
+    expect(mgr.storeOf('g').query<{ c: number }>('SELECT count(*) AS c FROM edges WHERE weak = 1')[0].c).toBe(0);
+  });
+});
+
 describe('matchSet — the source-side current match set as gids', () => {
   test('returns the matched vertices’ gids (the full current set, not a delta)', async () => {
     const mgr = new BunGraphManager(undefined, standardRegistry);

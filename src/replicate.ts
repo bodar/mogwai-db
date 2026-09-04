@@ -464,7 +464,13 @@ export function matchSetGids(store: GraphStore, executor: Executor, filter: stri
 export function runPlacement(executor: Executor, store: GraphStore, placement: string, matchGids: readonly string[]): void {
   const rowids = [...resolveGids(store, 'nodes', matchGids).values()];
   if (!rowids.length) return;
+  const before = maxId(store, 'edges');
   executor.framed(placement, { matchedIds: rowids }); // a write; its framed result is discarded
+  // Every edge this run synthesized is a WEAK reference (§5): a decoration that does NOT pin its endpoint —
+  // on a delete of that endpoint it cascades instead of resurrecting. Mark the edges created THIS run (id
+  // above the pre-run max — edge ids are monotonic and the run is one synchronous span). Idempotent: a
+  // re-run whose guard creates nothing has no new ids to mark, and an already-weak edge stays weak.
+  store.query('UPDATE edges SET weak = 1 WHERE id > ?', [before]);
 }
 
 /** A replication PEER — the protocol operations, direction-agnostic. A local peer binds a manager's own
