@@ -209,9 +209,10 @@ Each phase independently valuable, lands green before the next (the parent plan'
     The `filter` threads through the `changes` seam on every runtime and through `Peer.changes`; `_changes`
     accepts it as a GET `?filter=` OR a POST body (a captured traversal is arbitrary-length, so `remotePeer`
     POSTs it), a non-vertex filter failing closed as a 400. `test/replicate-filter.test.ts`.
-  - **F1b — wire the config `filter` into `runReplication`.** *(next)* the paged pass reads
-    `replication_config.filter` and passes it to `source.changes`, so a configured/scheduled replication
-    pulls only the subgraph.
+  - ✅ **F1b — wire the config `filter` into `runReplication`.** `runReplicationPass`/`runReplication`
+    take a `filter`, re-evaluated every pass (dynamic/never-prune) and passed to `source.changes`;
+    `ReplicateOptions.filter` threads it through the one-shot `_replicate` and `replicateWith`; the
+    scheduler's `runJob` passes `config.filter`, so a persistent config now restricts what it replicates.
   - **F1c — save-time validation.** *(next)* `handleReplicator` trial-runs the filter (bounded) against the
     source peer and rejects a non-vertex/erroring one at save.
 - **F2 — placement + weak references.** The optional `placement` traversal, run each pass over the current
