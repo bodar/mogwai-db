@@ -1575,7 +1575,15 @@ function scalarTail(
           id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
           exprs: [['v', col(winner.id, 'v')], ['vt', minMaxWinnerVt(winner, out)]],
         });
-        out = numeric;
+        // A min/max NULL result is ALWAYS productive — unconditionally, not only when the INPUT stream
+        // already was (`ProductiveByStrategy`). `ReducingBarrierStep.processAllStarts` emits whenever it
+        // has seen ANY start (`MaxGlobalStep.java:43-46`), and the argmax window above yields exactly one
+        // row for a non-empty input and zero for an empty one — so the single row it produces is always
+        // the genuine reduced value, null (all inputs null) or not. Inheriting `out.productiveNull` caught
+        // only the `aggregate().by(foo).cap().unfold().max()` path and dropped `g.inject(null,null).max()`
+        // to an empty result. (sum/mean stay inherited below: SQL aggregation emits one NULL row even over
+        // an EMPTY input, which those must SKIP — `SumGlobalStep` yields nothing over zero starts.)
+        out = { ...numeric, productiveNull: true };
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
