@@ -213,8 +213,11 @@ Each phase independently valuable, lands green before the next (the parent plan'
     take a `filter`, re-evaluated every pass (dynamic/never-prune) and passed to `source.changes`;
     `ReplicateOptions.filter` threads it through the one-shot `_replicate` and `replicateWith`; the
     scheduler's `runJob` passes `config.filter`, so a persistent config now restricts what it replicates.
-  - **F1c — save-time validation.** *(next)* `handleReplicator` trial-runs the filter (bounded) against the
-    source peer and rejects a non-vertex/erroring one at save.
+  - ✅ **F1c — save-time validation.** `validateReplicationFilter` trial-runs the filter (bounded `.limit`)
+    against the source peer (local via the manager, remote via allowlisted http, resolved by the shared
+    `peerForRef`); a non-vertex/erroring filter is REJECTED (400) and not stored. The validator is injected
+    into `makeRouter` (like `runTick`), built at each composition root from its manager + http, so the
+    outbound http stays out of the router. **F1 COMPLETE.**
 - **F2 — placement + weak references.** The optional `placement` traversal, run each pass over the current
   match set (idempotent); synthesized edges marked weak (`~`); the delete path consults weak/strong
   (cascade vs resurrect). *Gate: a placement grafts the subgraph idempotently (no duplicates on re-run,
