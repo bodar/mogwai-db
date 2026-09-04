@@ -3,7 +3,18 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { changesFeed } from '../src/manager.ts';
 import { makeRouter } from '../src/router.ts';
-import type { ChangesFeed } from '../src/api.ts';
+import { runReplication, remotePeer, localPeer, replicationId, type Checkpoint } from '../src/replicate.ts';
+import type { ChangesFeed, Http } from '../src/api.ts';
+
+// The task/person subgraph the F1 tests select over: 2 tasks, 2 people (eve unconnected),
+// dan-assigned->t1, t1-blocks->t3. `hasLabel("task")` closes to {t1, t3, dan} + both edges; eve is dropped.
+const TASK_GRAPH =
+  `g.addV("task").property("name","t1").as("t1")
+    .addV("person").property("name","dan").as("dan")
+    .addV("task").property("name","t3").as("t3")
+    .addV("person").property("name","eve").as("eve")
+    .addE("assigned").from("dan").to("t1")
+    .addE("blocks").from("t1").to("t3")`;
 
 // Filtered replication F1a — the SOURCE-side selector (docs/2026-09-04-filtered-replication-plan.md §2/§9).
 // A captured vertex-selector traversal (`Executor.filterVertexIds`) yields the matched vertices; `changesFeed`
@@ -13,14 +24,7 @@ import type { ChangesFeed } from '../src/api.ts';
 const setup = async () => {
   const mgr = new BunGraphManager(undefined, standardRegistry);
   const exec = mgr.executor('g');
-  // v1 task, v2 person(dan), v3 task, v4 person(eve, unconnected); e1 dan-assigned->task1, e2 task1-blocks->task3.
-  await exec.framedAsync(
-    `g.addV("task").property("name","t1").as("t1")
-      .addV("person").property("name","dan").as("dan")
-      .addV("task").property("name","t3").as("t3")
-      .addV("person").property("name","eve").as("eve")
-      .addE("assigned").from("dan").to("t1")
-      .addE("blocks").from("t1").to("t3")`, {});
+  await exec.framedAsync(TASK_GRAPH, {});
   return { mgr, exec, store: mgr.storeOf('g') };
 };
 
@@ -118,5 +122,46 @@ describe('the _changes endpoint carries the filter — GET query + POST body', (
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filter: bad }),
     }));
     expect(p.status).toBe(400);
+  });
+});
+
+describe('F1b — a configured/one-shot replication pulls only the filtered subgraph', () => {
+  // Two graphs behind one in-memory router (the manager's http loops back), so a remote peer runs the
+  // whole hop in memory — the same discipline the paging tests use.
+  const twoGraph = async () => {
+    let router: Http;
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    router = makeRouter(mgr);
+    await mgr.executor('remote').framedAsync(TASK_GRAPH, {});
+    return { mgr, router: router!, url: (g: string) => `http://peer/gremlin/${g}` };
+  };
+  const FILTER = 'g.V().hasLabel("task")';
+
+  test('runReplication with a filter lands only the 1-hop edge-closed subgraph on the target', async () => {
+    const s = await twoGraph();
+    const replId = replicationId('pull', s.url('remote'), 'local');
+    const cp: Checkpoint = { read: () => s.mgr.checkpoint('local', replId), write: async (seq) => { await s.mgr.checkpoint('local', replId, seq); } };
+    const stats = await runReplication(remotePeer(s.router, s.url('remote')), localPeer(s.mgr, 'local'), cp, {}, FILTER);
+    expect(stats.written).toBe(5); // 3 vertices (t1, t3, dan) + 2 edges — eve is NOT pulled
+    const info = await s.mgr.info('local');
+    expect(info).toEqual({ vertexCount: 3, edgeCount: 2 });
+  });
+
+  test('the one-shot _replicate endpoint carries the filter in its body (ReplicateOptions.filter)', async () => {
+    const s = await twoGraph();
+    const res = await s.router(new Request(`${s.url('local')}/_replicate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: s.url('remote'), filter: FILTER }),
+    }));
+    expect(res.status).toBe(200);
+    expect(await s.mgr.info('local')).toEqual({ vertexCount: 3, edgeCount: 2 });
+  });
+
+  test('an unfiltered replication still pulls the whole graph (no regression)', async () => {
+    const s = await twoGraph();
+    const replId = replicationId('pull', s.url('remote'), 'local');
+    const cp: Checkpoint = { read: () => s.mgr.checkpoint('local', replId), write: async (seq) => { await s.mgr.checkpoint('local', replId, seq); } };
+    await runReplication(remotePeer(s.router, s.url('remote')), localPeer(s.mgr, 'local'), cp, {});
+    expect(await s.mgr.info('local')).toEqual({ vertexCount: 4, edgeCount: 2 }); // eve included
   });
 });

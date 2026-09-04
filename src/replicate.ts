@@ -547,11 +547,14 @@ export interface ReplicationRunStats extends ReplicationStats { readonly batches
  *  the page filled (there is likely another page). This is the pacing primitive — one span, bounded by
  *  `batchSize` — that both the one-shot drain and the scheduler's per-wake work are built from. */
 export async function runReplicationPass(
-  source: Peer, target: Peer, cp: Checkpoint, batchSize = DEFAULT_REPLICATION_BATCH,
+  source: Peer, target: Peer, cp: Checkpoint, batchSize = DEFAULT_REPLICATION_BATCH, filter?: string,
 ): Promise<ReplicationRunStats> {
   const since = await cp.read();
   const limit = batchSize > 0 ? batchSize : undefined;
-  const feed = await source.changes(since, limit);
+  // A `filter` (filtered-replication-plan F1) restricts the SOURCE feed to the matched subgraph + its
+  // 1-hop closure; re-evaluated every pass (dynamic/never-prune, §2). It rides the same `changes` call
+  // the pass already makes, so pacing/paging are unchanged.
+  const feed = await source.changes(since, limit, filter);
   const live = feed.results.filter((r) => !r.deleted && r.rev);
   const deletes: WireDelete[] = feed.results.filter((r) => r.deleted)
     .map((r) => ({ gid: r.id, rev: r.rev ? JSON.stringify(r.rev) : null, kind: r.kind }));
@@ -591,13 +594,13 @@ export async function runReplicationPass(
  *  and re-arms while `more`. Resumable: every page advances the checkpoint, so an interrupted drain
  *  resumes from the last committed page. */
 export async function runReplication(
-  source: Peer, target: Peer, cp: Checkpoint, opts: PaceOptions = {},
+  source: Peer, target: Peer, cp: Checkpoint, opts: PaceOptions = {}, filter?: string,
 ): Promise<ReplicationRunStats> {
   const batchSize = opts.batchSize ?? DEFAULT_REPLICATION_BATCH;
   const pace = opts.pace ?? (() => Promise.resolve());
   const total = { read: 0, written: 0, deleted: 0, last_seq: await cp.read(), batches: 0, more: false };
   for (;;) {
-    const p = await runReplicationPass(source, target, cp, batchSize);
+    const p = await runReplicationPass(source, target, cp, batchSize, filter);
     total.read += p.read; total.written += p.written; total.deleted += p.deleted;
     total.last_seq = p.last_seq; total.batches += 1;
     if (!p.more) break; // source drained
@@ -633,7 +636,7 @@ function replicateWith(
   return runReplication(source, target, {
     read: async () => cp(replId),
     write: async (seq) => { await cp(replId, seq); },
-  });
+  }, {}, opts.filter); // the source-side selector (filtered-replication-plan F1), applied every pass
 }
 
 /** A one-shot replication for `localId` via a manager's own methods (Bun in-process, CF over DO RPC) —

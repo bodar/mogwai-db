@@ -320,7 +320,13 @@ export interface WireChangeSet {
 
 /** A one-shot `_replicate` request (§9): exactly one of `source`/`target` is a remote `http(s)` graph
  *  URL, the other is (or defaults to) this graph — so `{source: url}` PULLS and `{target: url}` PUSHES. */
-export interface ReplicateOptions { readonly source?: string; readonly target?: string; }
+export interface ReplicateOptions {
+  readonly source?: string;
+  readonly target?: string;
+  /** A captured vertex-selector traversal (filtered-replication-plan F1), evaluated on the SOURCE: only
+   *  the matched subgraph (+ its 1-hop edge-closure) is pulled/pushed. Absent → the whole graph. */
+  readonly filter?: string;
+}
 
 /** What one replication pass moved: entries read from the source feed, element bodies written, deletes
  *  applied, and the source cursor reached (the new checkpoint). */
