@@ -94,17 +94,27 @@ function parseConfig(id: string, body: any): ReplicationConfig {
   };
 }
 
+/** Trial-run a captured `filter` against its source and throw on a non-vertex/erroring one — the
+ *  save-time validation (filtered-replication-plan §2). Injected (like `runTick`) so the outbound `http`
+ *  stays at the composition root, out of the router/store tier. */
+export type FilterValidator = (source: string, filter: string) => Promise<void>;
+
 /** The replicator control-plane CRUD (§9): `/_replicator` (list/create) and `/_replicator/{id}`
- *  (get/replace/delete). All JSON, all idempotent + create-on-demand like the graph-lifecycle verbs. */
-async function handleReplicator(registry: ReplicatorRegistry, id: string | null, req: Request): Promise<Response> {
+ *  (get/replace/delete). All JSON, all idempotent + create-on-demand like the graph-lifecycle verbs. A
+ *  config with a `filter` is trial-run at save (`validateFilter`) and REJECTED (400) if it does not yield
+ *  a vertex stream — fail-closed so a broken filter never becomes a silently-wrong replication (§2/§6). */
+async function handleReplicator(registry: ReplicatorRegistry, id: string | null, req: Request, validateFilter?: FilterValidator): Promise<Response> {
+  const save = async (config: ReplicationConfig): Promise<void> => {
+    if (config.filter && validateFilter) await validateFilter(config.source, config.filter);
+    await registry.putConfig(config);
+  };
   try {
     if (id === null) {
       if (req.method === 'GET') return json({ configs: await registry.listConfigs() });
       if (req.method === 'POST') {
         const body = (await req.json()) as any;
         const cid = typeof body?.id === 'string' && body.id ? body.id : newConfigId();
-        const config = parseConfig(cid, body);
-        await registry.putConfig(config);
+        await save(parseConfig(cid, body));
         return json({ id: cid, ok: true }, 201);
       }
       return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
@@ -115,7 +125,7 @@ async function handleReplicator(registry: ReplicatorRegistry, id: string | null,
         return config ? json(config) : json({ error: 'not found', id }, 404);
       }
       case 'PUT': {
-        await registry.putConfig(parseConfig(id, (await req.json()) as any));
+        await save(parseConfig(id, (await req.json()) as any));
         return json({ id, ok: true }, 201);
       }
       case 'DELETE':
@@ -150,6 +160,10 @@ export function makeRouter(
   /** Fire ONE scheduler tick (the worker-residency runner), backing `POST /_scheduler/run`. Injected so the
    *  router stays out of the scheduler's dependency graph (it just triggers it). Absent ⇒ that route 501s. */
   runTick?: () => Promise<unknown>,
+  /** Trial-run a config's `filter` against its source at save (filtered-replication-plan §2). Injected so
+   *  the outbound `http` a remote source needs lives at the composition root, not the router. Absent ⇒ a
+   *  filter is stored unvalidated (a runtime that has not wired it yet). */
+  validateFilter?: FilterValidator,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
@@ -185,7 +199,7 @@ export function makeRouter(
     const repMatch = pathname.match(replicatorPath);
     if (repMatch) {
       if (!registry) return json({ error: 'replication registry not configured' }, 501);
-      return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req);
+      return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req, validateFilter);
     }
 
     // Scheduler introspection (`jobs`/`docs`, GET) + the `run` trigger (POST) — one scheduler tick now.

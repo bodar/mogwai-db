@@ -1,7 +1,7 @@
 import { LazyMap } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
 import type { GraphManager } from './manager.ts';
-import { makeRouter, type QueryLogger } from './router.ts';
+import { makeRouter, type QueryLogger, type FilterValidator } from './router.ts';
 import type { ReplicatorRegistry } from './replicator-registry.ts';
 
 // The runtime-agnostic dependency graph. Platform entry points provide the one
@@ -22,9 +22,13 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
   registry?: ReplicatorRegistry;
   /** Fire one scheduler tick (`POST /_scheduler/run`) — the worker-residency runner. Optional. */
   runTick?: () => Promise<unknown>;
+  /** Trial-run a config's `filter` against its source at save (filtered-replication-plan §2). Built at the
+   *  entry point from its `manager` + allowlisted `http` (`validateReplicationFilter` over `peerForRef`).
+   *  Optional — absent, a filter is stored unvalidated. */
+  validateFilter?: FilterValidator;
 }
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick));
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick, deps.validateFilter));
 }

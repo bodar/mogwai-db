@@ -515,6 +515,33 @@ export function remotePeer(http: Http, url: string): Peer {
   };
 }
 
+/** Build a {@link Peer} for a graph REF — a remote `http(s)` URL → an HTTP peer over `http` (the SSRF
+ *  guard is on that seam, as for federate/io); a local id → the manager's own graph. Shared by the
+ *  scheduler (`peerFor`) and by save-time filter validation, so both resolve a ref the same way. */
+export function peerForRef(mgr: GraphManager, http: Http, ref: string): Peer {
+  return isUrl(ref) ? remotePeer(http, ref) : localPeer(mgr, ref);
+}
+
+/** How many matched vertices a save-time filter probe pulls: §2 wants a BOUNDED trial run, so the
+ *  captured selector is capped with a trailing `.limit()` — we only need to confirm the terminal is a
+ *  vertex stream, not enumerate the whole match set. */
+const FILTER_PROBE_LIMIT = 1;
+
+/** Trial-run a captured replication FILTER against its SOURCE peer, throwing if it is not a valid
+ *  vertex-selector (filtered-replication-plan §2/§6 — validate by RUN-ON-SAVE, never static analysis).
+ *  The bounded probe runs `filterVertexIds` on the source: a non-vertex/erroring filter throws (locally
+ *  the precise "must yield a vertex stream"; remotely a 400 from the source's own `_changes`), which the
+ *  router surfaces as a 400 save rejection. Fail-closed at save so a broken filter never becomes a
+ *  silently-wrong replication. An empty CURRENT match set is valid (the selector is well-formed, it just
+ *  matches nothing now — dynamic/never-prune). */
+export async function validateReplicationFilter(source: Peer, filter: string): Promise<void> {
+  try {
+    await source.changes(0, undefined, `${filter}.limit(${FILTER_PROBE_LIMIT})`);
+  } catch (e: any) {
+    throw new Error(`replication filter rejected: ${e?.message ?? String(e)}`);
+  }
+}
+
 /** The default page size for a paged pull (CouchDB's `worker_batch_size` default). Bounds how many change
  *  entries — and thus element bodies — one pass fetches and applies, so no single `applyWire` span
  *  busy-locks the single-threaded store. Follows CouchDB (§4 governing principle); tune by measurement. */

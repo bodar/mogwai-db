@@ -5,6 +5,7 @@ import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { GraphDatabase, type Env } from './graph-store-do.ts';
 import { ReplicatorRegistryDO, CloudflareReplicatorRegistry } from './replicator-registry-do.ts';
 import { runDueReplications, type SchedulerDeps } from '../scheduler.ts';
+import { peerForRef, validateReplicationFilter } from '../replicate.ts';
 
 // Both Durable Object classes must be exported from the Worker's entry module so
 // wrangler can bind them (the durable_objects class_name entries).
@@ -32,13 +33,17 @@ export default {
     // shape the Bun server builds from flags/env. `federate("http://…")` at the edge runs through the
     // allowlisted transport (SSRF guard); empty allowlist ⇒ deny all.
     const config = configFromWorkerEnv(env);
+    const http = allowlistedHttp(config.httpAllowlist);
+    const manager = new CloudflareGraphManager(env.GRAPH, http);
     const app = application({
-      manager: new CloudflareGraphManager(env.GRAPH, allowlistedHttp(config.httpAllowlist)),
+      manager,
       pathPrefix: config.pathPrefix,
       // The control-plane registry (§9·2) — the singleton DO, forwarded over RPC; serves `/_replicator`.
       registry: new CloudflareReplicatorRegistry(env.REPLICATOR),
       // `POST /_scheduler/run` fires one tick at worker residency (the Cron Trigger does it on a schedule).
       runTick: () => runDueReplications(schedulerDeps(env)),
+      // Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer.
+      validateFilter: (source, filter) => validateReplicationFilter(peerForRef(manager, http, source), filter),
     });
     return app.router(request);
   },

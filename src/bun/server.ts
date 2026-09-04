@@ -10,6 +10,7 @@ import { BunSqlite } from './BunSqlite.ts';
 import { FileIoStore } from './FileIoStore.ts';
 import { ReplicatorStore, storeRegistry } from '../replicator-registry.ts';
 import { runDueReplications, startPollingScheduler, type SchedulerDeps } from '../scheduler.ts';
+import { peerForRef, validateReplicationFilter } from '../replicate.ts';
 import { extendedRegistry } from '../services/standard.ts';
 
 /** Bun entry point: build the multi-graph manager (in-memory by default, or a
@@ -52,12 +53,15 @@ export function startServer(config: Partial<MogwaiConfig> = {}) {
   // graph DOs/stores stay pure data-plane clients — the runner orchestrates from here.
   const schedulerDeps: SchedulerDeps = { registry, manager, http };
   const runTick = () => runDueReplications(schedulerDeps);
+  // Save-time filter validation (filtered-replication-plan §2): trial-run a config's filter against its
+  // source peer (local via the manager, remote via the allowlisted http) — built here where both live.
+  const validateFilter = (source: string, filter: string) => validateReplicationFilter(peerForRef(manager, http, source), filter);
   const stopScheduler = schedulerIntervalMs && schedulerIntervalMs > 0
     ? startPollingScheduler(schedulerDeps, schedulerIntervalMs)
     : undefined;
   // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
   // is its channel). `log` (from `$MOGWAI_LOG`) turns the one-line-per-query access log back on.
-  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined, registry, runTick });
+  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined, registry, runTick, validateFilter });
   const server = Bun.serve({ port, fetch: app.router });
   // Stop the background scheduler when the server is stopped, so a test (or a graceful shutdown) leaks no
   // timer. Wrap `stop` rather than changing the return type, so existing callers are unaffected.

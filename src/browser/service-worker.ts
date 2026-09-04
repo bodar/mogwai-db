@@ -15,6 +15,7 @@ import { BrowserGraphManager } from './BrowserGraphManager.ts';
 import { FactoryStubSource } from './factory-stub-source.ts';
 import { StubReplicatorRegistry } from './StubReplicatorRegistry.ts';
 import { runDueReplications } from '../scheduler.ts';
+import { peerForRef, validateReplicationFilter } from '../replicate.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import type { Http } from '../api.ts';
 import type { BootstrapMessage } from './worker-spawn.ts';
@@ -45,7 +46,10 @@ const registry = new StubReplicatorRegistry(source);
 let schedulerAllowlist: string[] = [];
 const schedulerHttp: Http = (req) => allowlistedHttp(schedulerAllowlist)(req);
 const runTick = () => runDueReplications({ registry, manager, http: schedulerHttp });
-const router = makeRouter(manager, undefined, undefined, registry, runTick);
+// Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer — a local
+// source routes to its graph Worker (via the manager), a remote one through the SW's allowlisted http.
+const validateFilter = (source: string, filter: string) => validateReplicationFilter(peerForRef(manager, schedulerHttp, source), filter);
+const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter);
 
 scope.addEventListener('message', (event) => {
   const data = (event as ExtendableMessageEvent).data as BootstrapMessage | undefined;

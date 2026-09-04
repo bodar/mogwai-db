@@ -3,7 +3,9 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { changesFeed } from '../src/manager.ts';
 import { makeRouter } from '../src/router.ts';
-import { runReplication, remotePeer, localPeer, replicationId, type Checkpoint } from '../src/replicate.ts';
+import { runReplication, remotePeer, localPeer, replicationId, peerForRef, validateReplicationFilter, type Checkpoint } from '../src/replicate.ts';
+import { ReplicatorStore, storeRegistry } from '../src/replicator-registry.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import type { ChangesFeed, Http } from '../src/api.ts';
 
 // The task/person subgraph the F1 tests select over: 2 tasks, 2 people (eve unconnected),
@@ -163,5 +165,42 @@ describe('F1b — a configured/one-shot replication pulls only the filtered subg
     const cp: Checkpoint = { read: () => s.mgr.checkpoint('local', replId), write: async (seq) => { await s.mgr.checkpoint('local', replId, seq); } };
     await runReplication(remotePeer(s.router, s.url('remote')), localPeer(s.mgr, 'local'), cp, {});
     expect(await s.mgr.info('local')).toEqual({ vertexCount: 4, edgeCount: 2 }); // eve included
+  });
+});
+
+describe('F1c — save-time filter validation (run-on-save, not static analysis)', () => {
+  const jsonReq = (url: string, body: unknown) =>
+    new Request(url, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+
+  const withValidation = async () => {
+    let router: Http;
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    await mgr.executor('src').framedAsync(TASK_GRAPH, {}); // the source the filter is validated against
+    const registry = storeRegistry(new ReplicatorStore(new BunSqlite(':memory:')));
+    const validateFilter = (source: string, filter: string) =>
+      validateReplicationFilter(peerForRef(mgr, (req) => router(req), source), filter);
+    router = makeRouter(mgr, undefined, undefined, registry, undefined, validateFilter);
+    return { router: router!, registry };
+  };
+
+  test('a valid vertex-selector filter is accepted at save', async () => {
+    const s = await withValidation();
+    const res = await s.router(jsonReq('http://h/_replicator', { id: 'j', source: 'src', target: 'local', filter: 'g.V().hasLabel("task")' }));
+    expect(res.status).toBe(201);
+    expect(await s.registry.getConfig('j')).toMatchObject({ filter: 'g.V().hasLabel("task")' });
+  });
+
+  test('a non-vertex filter is REJECTED at save (400) and NOT stored — fail-closed', async () => {
+    const s = await withValidation();
+    const res = await s.router(jsonReq('http://h/_replicator', { id: 'bad', source: 'src', target: 'local', filter: 'g.V().count()' }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/filter rejected/);
+    expect(await s.registry.getConfig('bad')).toBeNull(); // nothing persisted
+  });
+
+  test('a config without a filter skips validation', async () => {
+    const s = await withValidation();
+    const res = await s.router(jsonReq('http://h/_replicator', { id: 'plain', source: 'src', target: 'local' }));
+    expect(res.status).toBe(201);
   });
 });

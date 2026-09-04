@@ -16,7 +16,7 @@
 // worker residency — the whole point of not being on a DO.
 
 import type { GraphManager, Http } from './api.ts';
-import { type Peer, type Checkpoint, localPeer, remotePeer, runReplication, isUrl, DEFAULT_REPLICATION_BATCH } from './replicate.ts';
+import { type Peer, type Checkpoint, peerForRef, runReplication, DEFAULT_REPLICATION_BATCH } from './replicate.ts';
 import { type ReplicatorRegistry, type ReplicationConfig, replicationIdFor } from './replicator-registry.ts';
 
 /** What the runner needs — the registry (job/config/checkpoint store), the local `GraphManager` (to reach a
@@ -62,7 +62,7 @@ export interface JobOutcome {
  *  allowlisted transport; a local id → the manager's own graph (which on CF is a DO reached over RPC — so the
  *  runner orchestrates at worker residency and the DO merely answers). */
 function peerFor(deps: SchedulerDeps, ref: string): Peer {
-  return isUrl(ref) ? remotePeer(deps.http, ref) : localPeer(deps.manager, ref);
+  return peerForRef(deps.manager, deps.http, ref);
 }
 
 /** Run ONE claimed job: a bounded, paced replication pass, then record the result + reschedule. */
