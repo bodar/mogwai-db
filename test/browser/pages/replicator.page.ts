@@ -11,6 +11,8 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
   catch (e: any) { results.push({ name, ok: false, error: String(e?.stack || e) }); }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function main() {
   await installMogwai(); // register SW + factory; ./service-worker.js, ./worker.js, ./registry-worker.js beside this page
 
@@ -18,6 +20,20 @@ async function main() {
   const ts = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const jsonReq = (path: string, method: string, body?: unknown) =>
     fetch(`${O}${path}`, { method, ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
+
+  // Warm the control plane before the real checks. A just-activated Service Worker can intercept the FIRST
+  // body-carrying request before its request body is fully readable (a Chromium/Playwright SW timing
+  // artifact — it surfaces as a spurious 400 from `req.json()`), and the registry Worker spawns lazily on
+  // first touch. So retry a throwaway PUT round-trip until it lands (bounded), then the assertions run
+  // against a warm edge. A deterministic 400 (a real bug) would never reach 201 and fail here, loudly.
+  const deadline = Date.now() + 10_000;
+  let warm = false;
+  while (Date.now() < deadline) {
+    if ((await jsonReq(`/_replicator/__warmup-${ts}`, 'PUT', { source: 'a', target: 'b' })).status === 201) { warm = true; break; }
+    await sleep(50);
+  }
+  await jsonReq(`/_replicator/__warmup-${ts}`, 'DELETE');
+  if (!warm) throw new Error('control plane never became ready (warmup PUT never returned 201)');
   const gremlin = (g: string, text: string) =>
     fetch(`${O}/gremlin/${g}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gremlin: text, batchSize: 10_000 }) });
   const vertexCount = async (g: string): Promise<number> => ((await (await fetch(`${O}/gremlin/${g}`)).json()) as any).vertexCount;
