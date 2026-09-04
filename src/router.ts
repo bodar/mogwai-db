@@ -19,6 +19,7 @@ import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs } from './docs.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
 import { type ReplicatorRegistry, type ReplicationConfig, newConfigId } from './replicator-registry.ts';
+import { isUrl } from './replicate.ts';
 
 /** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
@@ -104,7 +105,7 @@ export type FilterValidator = (source: string, filter: string) => Promise<void>;
  *  (get/replace/delete). All JSON, all idempotent + create-on-demand like the graph-lifecycle verbs. A
  *  config with a `filter` is trial-run at save (`validateFilter`) and REJECTED (400) if it does not yield
  *  a vertex stream — fail-closed so a broken filter never becomes a silently-wrong replication (§2/§6). */
-async function handleReplicator(registry: ReplicatorRegistry, id: string | null, req: Request, validateFilter?: FilterValidator): Promise<Response> {
+async function handleReplicator(mgr: GraphManager, registry: ReplicatorRegistry, id: string | null, req: Request, validateFilter?: FilterValidator): Promise<Response> {
   const save = async (config: ReplicationConfig): Promise<void> => {
     if (config.filter && validateFilter) await validateFilter(config.source, config.filter);
     await registry.putConfig(config);
@@ -129,9 +130,24 @@ async function handleReplicator(registry: ReplicatorRegistry, id: string | null,
         await save(parseConfig(id, (await req.json()) as any));
         return json({ id, ok: true }, 201);
       }
-      case 'DELETE':
+      case 'DELETE': {
+        // UNDO (filtered-replication-plan §6/F3): `?destroy_target=true` also DESTROYS the target replica,
+        // not just the config — the dedicated-target undo, where the whole replica is additive so dropping
+        // it is a clean reversal (`mgr.destroy`, the same idempotent teardown a `DELETE /gremlin/{g}` runs).
+        // Only a LOCAL target id is destroyed here; a REMOTE (`http(s)`) target is left to its own endpoint
+        // (destroying it needs an outbound DELETE — deferred with the shared-target before-image journal),
+        // and the shared-target case (a target with pre-existing data) is exactly what that journal is for.
+        const destroyTarget = new URL(req.url).searchParams.get('destroy_target') === 'true';
+        const config = destroyTarget ? await registry.getConfig(id) : null;
         await registry.deleteConfig(id); // idempotent — deleting an absent job succeeds
+        if (destroyTarget && config && !isUrl(config.target)) {
+          await mgr.destroy(config.target);
+          return json({ id, undone: true, target_destroyed: config.target });
+        }
+        if (destroyTarget && config && isUrl(config.target))
+          return json({ id, undone: true, target_destroyed: null, note: 'a remote target is not destroyed by undo; delete it at its own endpoint' });
         return new Response(null, { status: 204 });
+      }
       default:
         return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, PUT, DELETE' } });
     }
@@ -200,7 +216,7 @@ export function makeRouter(
     const repMatch = pathname.match(replicatorPath);
     if (repMatch) {
       if (!registry) return json({ error: 'replication registry not configured' }, 501);
-      return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req, validateFilter);
+      return handleReplicator(mgr, registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req, validateFilter);
     }
 
     // Scheduler introspection (`jobs`/`docs`, GET) + the `run` trigger (POST) — one scheduler tick now.

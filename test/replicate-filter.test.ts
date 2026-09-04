@@ -250,6 +250,48 @@ describe('F2b-2 — the remote placement endpoints (_match_set + _placement over
   });
 });
 
+describe('F3 — dedicated-target undo (destroy the replica + remove the config)', () => {
+  const withRegistry = async () => {
+    let router: Http;
+    const mgr = new BunGraphManager(undefined, standardRegistry, undefined, undefined, undefined, (req) => router(req));
+    const registry = storeRegistry(new ReplicatorStore(new BunSqlite(':memory:')));
+    router = makeRouter(mgr, undefined, undefined, registry);
+    return { mgr, registry, router: router! };
+  };
+  const jsonReq = (url: string, method: string, body?: unknown) =>
+    new Request(url, { method, ...(body ? { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } } : {}) });
+
+  test('undo destroys a LOCAL target replica and deletes the config', async () => {
+    const s = await withRegistry();
+    await s.mgr.executor('replica').framedAsync('g.addV("x").addV("y")', {}); // the landed replica
+    await s.registry.putConfig({ id: 'j', source: 'http://peer/gremlin/prod', target: 'replica' });
+    expect((await s.mgr.info('replica')).vertexCount).toBe(2);
+    const res = await s.router(jsonReq('http://h/_replicator/j?destroy_target=true', 'DELETE'));
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({ undone: true, target_destroyed: 'replica' });
+    expect(await s.registry.getConfig('j')).toBeNull(); // config gone
+    expect((await s.mgr.info('replica')).vertexCount).toBe(0); // replica destroyed
+  });
+
+  test('a plain DELETE (no destroy_target) removes the config but leaves the target', async () => {
+    const s = await withRegistry();
+    await s.mgr.executor('replica').framedAsync('g.addV("x")', {});
+    await s.registry.putConfig({ id: 'j', source: 'http://peer/gremlin/prod', target: 'replica' });
+    expect((await s.router(jsonReq('http://h/_replicator/j', 'DELETE'))).status).toBe(204);
+    expect(await s.registry.getConfig('j')).toBeNull();
+    expect((await s.mgr.info('replica')).vertexCount).toBe(1); // target untouched
+  });
+
+  test('undo of a REMOTE target leaves it (deferred with the shared-target journal)', async () => {
+    const s = await withRegistry();
+    await s.registry.putConfig({ id: 'push', source: 'local', target: 'http://peer/gremlin/backup' });
+    const res = await s.router(jsonReq('http://h/_replicator/push?destroy_target=true', 'DELETE'));
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toMatchObject({ undone: true, target_destroyed: null });
+    expect(await s.registry.getConfig('push')).toBeNull();
+  });
+});
+
 describe('F2c-2 — a weak placement edge cascades on a deleted endpoint, never resurrects it (§5)', () => {
   const FILTER = 'g.V().hasLabel("task")';
   const PLACEMENT = 'g.V(matchedIds).where(__.not(__.inE("inbox_holds"))).addE("inbox_holds").from(V().hasLabel("inbox"))';
