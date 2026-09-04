@@ -595,7 +595,8 @@ export async function runReplication(
 export const replicationId = (direction: 'pull' | 'push', remote: string, local: string): string =>
   `${direction}:${remote}:${local}`;
 
-const isUrl = (s: string): boolean => /^https?:\/\//i.test(s);
+/** Whether a graph ref is a remote `http(s)` URL (→ a `remotePeer`) rather than a local graph id. */
+export const isUrl = (s: string): boolean => /^https?:\/\//i.test(s);
 
 /**
  * The direction-agnostic core (§4·4): resolve `{source|target: url}` to a pull or a push around the given

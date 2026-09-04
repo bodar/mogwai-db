@@ -209,6 +209,20 @@ export function buildOpenApiSpec(pathPrefix: string) {
         responses: { '204': { description: 'Deleted (or already absent).' } },
       },
     },
+    '/_scheduler/jobs': {
+      get: {
+        summary: 'Replication scheduler jobs',
+        description: 'Per-config scheduler state (CouchDB `_scheduler/jobs`): state, error count, last run info.',
+        responses: { '200': { description: 'Scheduler jobs.', content: { 'application/json': { schema: { type: 'object', properties: { jobs: { type: 'array', items: { type: 'object' } } } } } } } },
+      },
+    },
+    '/_scheduler/docs': {
+      get: {
+        summary: 'Replication jobs with scheduler state',
+        description: 'Each replication job merged with its scheduler state (CouchDB `_scheduler/docs`).',
+        responses: { '200': { description: 'Jobs + state.', content: { 'application/json': { schema: { type: 'object', properties: { docs: { type: 'array', items: { type: 'object' } } } } } } } },
+      },
+    },
   },
  } as const;
 }

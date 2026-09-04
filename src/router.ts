@@ -129,6 +129,16 @@ async function handleReplicator(registry: ReplicatorRegistry, id: string | null,
   }
 }
 
+/** Scheduler introspection (§9): `jobs` = the per-config scheduler state (CouchDB `_scheduler/jobs`);
+ *  `docs` = each config merged with its job state (CouchDB `_scheduler/docs`). Both read-only JSON. */
+async function handleScheduler(registry: ReplicatorRegistry, which: string): Promise<Response> {
+  if (which === 'jobs') return json({ jobs: await registry.listJobs() });
+  const [configs, jobs] = await Promise.all([registry.listConfigs(), registry.listJobs()]);
+  const byId = new Map(jobs.map((j) => [j.configId, j]));
+  const docs = configs.map((c) => ({ ...c, job: byId.get(c.id) ?? null }));
+  return json({ docs });
+}
+
 export function makeRouter(
   mgr: GraphManager,
   pathPrefix = 'gremlin',
@@ -143,6 +153,8 @@ export function makeRouter(
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
   // (list/create) and `/_replicator/{id}` (get/replace/delete). CouchDB's `_replicator` DB shape.
   const replicatorPath = new RegExp('^/_replicator(?:/([^/]+))?/?$');
+  // Scheduler introspection (CouchDB `_scheduler/jobs` + `_scheduler/docs`), top-level + read-only.
+  const schedulerPath = new RegExp('^/_scheduler/(jobs|docs)/?$');
   // Peer-facing sync endpoints (§9), CouchDB-shaped under the `_` system prefix: `/{prefix}/{g}/_changes`
   // and (2d) `/{prefix}/{g}/_revs_diff`. A second, longer path so a graph id can never be read as one.
   const systemPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/(_[a-z_]+)/?$`);
@@ -170,6 +182,14 @@ export function makeRouter(
     if (repMatch) {
       if (!registry) return json({ error: 'replication registry not configured' }, 501);
       return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req);
+    }
+
+    // Scheduler introspection (read-only) — job state (`_scheduler/jobs`) and config+state (`_scheduler/docs`).
+    const schMatch = pathname.match(schedulerPath);
+    if (schMatch) {
+      if (!registry) return json({ error: 'replication registry not configured' }, 501);
+      if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+      return handleScheduler(registry, schMatch[1]!);
     }
 
     // The GraphQL edge — GraphQL-over-HTTP on `POST /graphql/{g}` (JSON body) and `GET /graphql/{g}`

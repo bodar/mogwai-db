@@ -1,6 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
-import { ReplicatorStore, type ReplicationConfig, type ReplicatorRegistry } from '../replicator-registry.ts';
+import {
+  ReplicatorStore, type ReplicationConfig, type ReplicatorRegistry, type ReplicationJob, type JobResult,
+} from '../replicator-registry.ts';
 import type { Env } from './graph-store-do.ts';
 
 // The Cloudflare backend of the ReplicatorRegistry seam (docs/2026-09-02-…-plan.md §9·2). Ongoing
@@ -29,6 +31,15 @@ export class ReplicatorRegistryDO extends DurableObject<Env> {
   getConfig(id: string): ReplicationConfig | null { return this.store.getConfig(id); }
   listConfigs(): ReplicationConfig[] { return this.store.listConfigs(); }
   deleteConfig(id: string): boolean { return this.store.deleteConfig(id); }
+  claimDue(now: number, leaseMs: number, max: number): ReplicationConfig[] { return this.store.claimDue(now, leaseMs, max); }
+  recordResult(configId: string, result: JobResult): void { this.store.recordResult(configId, result); }
+  recordFailure(configId: string, message: string, now: number, backoffBaseMs: number, maxBackoffMs: number): void {
+    this.store.recordFailure(configId, message, now, backoffBaseMs, maxBackoffMs);
+  }
+  listJobs(): ReplicationJob[] { return this.store.listJobs(); }
+  getJob(configId: string): ReplicationJob | null { return this.store.getJob(configId); }
+  getCheckpoint(replicationId: string): number { return this.store.getCheckpoint(replicationId); }
+  setCheckpoint(replicationId: string, seq: number): void { this.store.setCheckpoint(replicationId, seq); }
 }
 
 /** The manager-side seam: forwards each op to the singleton DO over RPC (async), the CF twin of Bun's
@@ -40,4 +51,13 @@ export class CloudflareReplicatorRegistry implements ReplicatorRegistry {
   getConfig(id: string): Promise<ReplicationConfig | null> { return this.stub().getConfig(id); }
   listConfigs(): Promise<readonly ReplicationConfig[]> { return this.stub().listConfigs(); }
   deleteConfig(id: string): Promise<boolean> { return this.stub().deleteConfig(id); }
+  claimDue(now: number, leaseMs: number, max: number): Promise<readonly ReplicationConfig[]> { return this.stub().claimDue(now, leaseMs, max); }
+  recordResult(configId: string, result: JobResult): Promise<void> { return this.stub().recordResult(configId, result); }
+  recordFailure(configId: string, message: string, now: number, backoffBaseMs: number, maxBackoffMs: number): Promise<void> {
+    return this.stub().recordFailure(configId, message, now, backoffBaseMs, maxBackoffMs);
+  }
+  listJobs(): Promise<readonly ReplicationJob[]> { return this.stub().listJobs(); }
+  getJob(configId: string): Promise<ReplicationJob | null> { return this.stub().getJob(configId); }
+  getCheckpoint(replicationId: string): Promise<number> { return this.stub().getCheckpoint(replicationId); }
+  setCheckpoint(replicationId: string, seq: number): Promise<void> { return this.stub().setCheckpoint(replicationId, seq); }
 }

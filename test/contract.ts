@@ -82,6 +82,15 @@ function replicatorContract(getOrigin: () => string) {
       });
       expect(res.status).toBe(400);
     });
+
+    // Scheduler introspection over the real edge — on CF this exercises the registry DO's listJobs RPC
+    // across the boundary (plain-data clone), the read half of the scheduler state.
+    test('_scheduler/jobs and _scheduler/docs return the scheduler view', async () => {
+      const jobs = (await (await fetch(`${getOrigin()}/_scheduler/jobs`)).json()) as { jobs: unknown[] };
+      expect(Array.isArray(jobs.jobs)).toBe(true);
+      const docs = (await (await fetch(`${getOrigin()}/_scheduler/docs`)).json()) as { docs: unknown[] };
+      expect(Array.isArray(docs.docs)).toBe(true);
+    });
   });
 }
 
