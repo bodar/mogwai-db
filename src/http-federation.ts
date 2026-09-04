@@ -115,6 +115,11 @@ export class HttpForeignExecutor implements Executor {
   buffers(): Buffer[] {
     throw new Error(`federate(http): a synchronous query cannot be run against a remote peer (${this.url})`);
   }
+  filterVertexIds(): (string | number)[] {
+    // A filter against a REMOTE source is evaluated on the source peer via its own `_changes?filter=`, not
+    // by pulling its executor here (there is no local store to run it against). Fail-closed if reached.
+    throw new Error(`a replication filter cannot run against a remote executor (${this.url}); it runs on the source peer via _changes`);
+  }
 }
 
 /** Dispatch a `graph` id: a remote `http(s)` URI → an {@link HttpForeignExecutor} over the injected

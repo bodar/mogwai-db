@@ -228,6 +228,11 @@ export interface RemoteExecutor {
 export interface Executor extends RemoteExecutor {
   framed(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Framed[];
   buffers(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Buffer[];
+  /** Run a captured replication FILTER (a vertex-selector traversal) and return the matched vertices'
+   *  external ids — the source-side selector for filtered replication (filtered-replication-plan §2/F1).
+   *  Throws unless the traversal is a READ yielding a VERTEX stream (fail-closed; also the save-time
+   *  validation). Sync — a filter is an ordinary local read, so only a LOCAL-store executor offers it. */
+  filterVertexIds(gremlin: string, params?: Record<string, any>): (string | number)[];
 }
 
 // ---- graph lifecycle + the executor factory ----

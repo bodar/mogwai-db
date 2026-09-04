@@ -36,21 +36,50 @@ export function graphInfo(store: GraphStore): GraphInfo {
  * it has no identity to ship. `last_seq` is the graph's `update_seq`: a client checkpoints it and
  * resumes with `since = last_seq`.
  */
-export function changesFeed(store: GraphStore, since: number, limit?: number): ChangesFeed {
+export function changesFeed(store: GraphStore, since: number, limit?: number, match?: readonly (string | number)[]): ChangesFeed {
   // A `limit` PAGES the feed (CouchDB `_changes?limit=N`): the replicator drains a large graph in bounded
   // batches so no single `applyWire` span busy-locks the single-threaded store — the pacing substrate
   // (§7 / the replication plan Phase 5a). Safe to page by `seq` because every element/tombstone carries a
   // DISTINCT, strictly-monotonic seq (assigned `base + i + 1` from `nextSeqBlock`, refresh.ts), so no two
   // rows share a boundary seq — a `LIMIT` can never split a seq-group and drop a row.
   const paged = limit != null && limit > 0;
+  // FILTERED replication (filtered-replication-plan F1): when `match` is present, the live feed is
+  // restricted to the matched vertices plus their 1-HOP EDGE-CLOSURE — the matched vertices, the edges
+  // incident to them, and the OTHER endpoint each such edge reaches. That is an edge-closed subgraph,
+  // valid by construction (a boundary edge pulls its endpoint in, parent §6·3), never transitive (§2).
+  // TOMBSTONES ship IN FULL regardless of the filter (§4): `applyDeletes` is a no-op for a gid the target
+  // does not hold, and a once-boundary element's later delete must still propagate. `match` carries the
+  // filter's matched vertices as their EXTERNAL ids (`COALESCE(uid, id)`, the id a traversal yields),
+  // resolved back to rowids in the `matched` CTE — `json_each` preserves each JSON value's type and
+  // `COALESCE(uid, id)` has NONE affinity, so an integer rowid matches an integer and a uid string a
+  // string, never crossing. ONE JSON bind for the whole set (the binds rule, §6·2), never a placeholder list.
+  const filtered = match !== undefined;
   const rows = store.query<{ seq: number; id: string; kind: string; rev: string | null; deleted: number }>(
-    `SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes WHERE seq > ? AND gid IS NOT NULL
-     UNION ALL
-     SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges WHERE seq > ? AND gid IS NOT NULL
-     UNION ALL
-     SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
-     ORDER BY seq${paged ? ' LIMIT ?' : ''}`,
-    paged ? [since, since, since, limit] : [since, since, since]);
+    filtered
+      ? `WITH matched(id) AS (
+           SELECT id FROM nodes WHERE COALESCE(uid, id) IN (SELECT value FROM json_each(?))),
+         incident(eid, other) AS (
+           SELECT id, tgt FROM edges WHERE src IN (SELECT id FROM matched)
+           UNION ALL SELECT id, src FROM edges WHERE tgt IN (SELECT id FROM matched)),
+         vclosure(id) AS (SELECT id FROM matched UNION SELECT other FROM incident),
+         eclosure(id) AS (SELECT eid FROM incident)
+         SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes
+           WHERE seq > ? AND gid IS NOT NULL AND id IN (SELECT id FROM vclosure)
+         UNION ALL
+         SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges
+           WHERE seq > ? AND gid IS NOT NULL AND id IN (SELECT id FROM eclosure)
+         UNION ALL
+         SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
+         ORDER BY seq${paged ? ' LIMIT ?' : ''}`
+      : `SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes WHERE seq > ? AND gid IS NOT NULL
+         UNION ALL
+         SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges WHERE seq > ? AND gid IS NOT NULL
+         UNION ALL
+         SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
+         ORDER BY seq${paged ? ' LIMIT ?' : ''}`,
+    filtered
+      ? (paged ? [JSON.stringify(match), since, since, since, limit] : [JSON.stringify(match), since, since, since])
+      : (paged ? [since, since, since, limit] : [since, since, since]));
   const conflicts = conflictLeaves(store, rows.filter((r) => !r.deleted).map((r) => r.id)); // gid → loser leaf revs (4b-2)
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',

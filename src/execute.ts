@@ -860,6 +860,23 @@ export class Executor implements ExecutorApi {
       f.bulk === 1n ? [f.buf] : (Array(Number(f.bulk)).fill(f.buf) as Buffer[]));
   }
 
+  /** Run a captured replication FILTER against this graph and return the matched vertices' EXTERNAL ids
+   *  (`COALESCE(uid, id)` — the id a vertex traversal yields), the source-side selector for filtered
+   *  replication (filtered-replication-plan §2/F1). `changesFeed` resolves these back to rowids and closes
+   *  the 1-hop subgraph. FAILS CLOSED: the traversal must be a READ whose terminal is a VERTEX stream —
+   *  a scalar/edge/write filter throws with a clear message. This one check is BOTH the run-time contract
+   *  AND the save-time validation (§2: "confirm its terminal is a vertex stream"). Sync, like `framed`: a
+   *  filter is an ordinary local read, and a filter that tries to federate throws via `runSync`
+   *  (fail-closed — a cross-graph selector is not in scope). */
+  filterVertexIds(gremlin: string, params: Record<string, any> = {}): (string | number)[] {
+    const plan = this.runSync(gremlin, params, {});
+    if (plan.kind !== 'read')
+      throw new Error('a replication filter must be a read that yields a vertex stream, not a write');
+    if (plan.shape.kind !== 'vertex')
+      throw new Error(`a replication filter must yield a vertex stream, not a ${plan.shape.kind} result`);
+    return (this.store.query(plan.sql, plan.binds) as { id: string | number }[]).map((r) => r.id);
+  }
+
   /** ASYNC GraphBinary buffers — the client wire path (router). Handles a federated top-level
    *  call() by driving the segment loop (the one await); a non-federated query resolves with zero
    *  async work. A top-level query is federation depth 0. */
