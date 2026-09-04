@@ -438,6 +438,15 @@ const vtypeToValueType = (vt: string | null): ValueType | undefined =>
   vt && !isCollectionType(vt) && hasSerializer(vt) ? (vt as ValueType) : undefined;
 
 function frameValue(v: any, as: ValueType | undefined): Buffer {
+  // A NULL value is null on the wire whatever its declared tag — a static numeric/boolean/date tag
+  // describes the stream, not this row, and coercing (`Number(null)` → 0, `Boolean(null)` → false,
+  // `BigInt(null)` throws) would turn a genuine null traverser into a plausible value. Every GLV
+  // decodes a typed-null and an untyped-null to the same language null (a Band-3 tag distinction,
+  // build-plan §12), so the untyped null is the observationally-correct framing — and it is already
+  // the convention every explicit `frameValue(null, undefined)` call site here relies on. This is the
+  // one place `asNumber(GType.INT)` over a null (`AsNumberStep.map` returns null) and an all-null
+  // min/max (§10: one null traverser is emitted) frame correctly instead of as 0.
+  if (v === null || v === undefined) return ioc.anySerializer.serialize(null);
   switch (as) {
     case undefined: return ioc.anySerializer.serialize(v);
     case 'boolean': return ioc.booleanSerializer.serialize(Boolean(v), true);

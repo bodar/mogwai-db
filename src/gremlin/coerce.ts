@@ -109,7 +109,11 @@ export function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: 
 /** asNumber(GType.X) over a compile-time constant: parse/convert + overflow-check,
  *  raising TinkerPop's exact messages (SQL can't raise these; inject inputs are
  *  literals). Integer targets truncate toward zero. */
-export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>): number {
+export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>): number | null {
+  // A null object returns null — no parse, no throw (`AsNumberStep.map`, line 55:
+  // `if (object == null) return null;`, before the token branch). `g.inject(null).asNumber(GType.INT)`
+  // is the empty result `null`, not the parse error a non-null unparseable value raises.
+  if (v === null || v === undefined) return null;
   let n: number;
   if (typeof v === 'number') n = v;
   else if (typeof v === 'bigint') n = Number(v);
@@ -318,6 +322,9 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
         const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
         let uniform: ValueType | undefined;
         for (let i = 0; i < vals.length; i++) {
+          // A null object stays null (`AsNumberStep.map` returns null before parsing), and contributes
+          // no subtype to the uniform decision — it frames as null whatever tag the stream settles on.
+          if (vals[i] === null || vals[i] === undefined) continue;
           const out = asNumberBare(vals[i], flatType(argTypes[i]));
           vals[i] = out.val;
           if (uniform === undefined) uniform = out.as;
