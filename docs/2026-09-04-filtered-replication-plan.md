@@ -1,5 +1,15 @@
 # Filtered replication + placement — design + plan
 
+> ✅ **F1–F3 LANDED (2026-09-04).** Filtered `_changes` + 1-hop closure + config wiring + save validation
+> (F1); placement over the current match set + weak references + the remote endpoints (F2); dedicated-target
+> undo (F3) — all on trunk across Bun / Cloudflare / browser. Along the way, a pre-existing cascade bug (a
+> vertex-drop-that-cascaded-edges resurrected its own vertex on replicate) was fixed. **Not doing:** the
+> §10·1 O(1) cascade-on-apply optimization is WITHDRAWN (it would lose the concurrent-add-vs-cascade
+> distinction the explicit edge tombstone provides — not worth the correctness risk), and the §10·3 tombstone
+> purge stays withdrawn. Two follow-ups remain, each its own separate engine work: the shared-target
+> before-image journal (F3, deferred until shared-target replication is real) and lowering `mergeE` over an
+> incoming vertex stream (§10·4, which would let placement use `mergeE` instead of the guarded `addE`).
+
 _Settled design (not a changelog) for **filtered replication** — replicating a **subgraph** of a source
 into a target, and choosing **where it attaches** in the target. Companion to
 `docs/archive/2026-09-02-replication-and-http-interop-plan.md` (the replication substrate; §-refs below point into
@@ -255,16 +265,22 @@ Each phase independently valuable, lands green before the next (the parent plan'
 
 Captured here so they are not lost; each is its own small piece of work against the *existing* engine.
 
-1. **Cascade-on-apply tombstones (a revision to parent Phase 2b).** Today a vertex drop tombstones the
-   vertex **and every incident edge** (degree N → N+1 tombstones). Because deleting a vertex
-   *deterministically* implies its incident edges are gone, a replica can **cascade locally** from a single
-   vertex tombstone — deleting the vertex and its incident edges, with **weak** ones cascading and a
-   **strong concurrent-peer-add** edge still resurrecting (§5). This is **O(1) tombstones per vertex-drop**
-   regardless of degree, and it is the *same* local-cascade the weak-edge story already requires — so the two
-   unify. Edge-only drops still ship an edge tombstone (no vertex to cascade from). A genuine multi-element
-   subgraph delete still costs one tombstone *per vertex deleted* (per-element identity is unavoidable), but
-   not per edge. Filtered replication (with weak placement edges) is the forcing function that makes
-   cascade-on-apply necessary anyway.
+1. **Cascade-on-apply tombstones (the O(1) optimization) — WITHDRAWN, not doing it.** The idea was: a
+   vertex drop ships ONE tombstone (the vertex) and the replica cascades its incident edges locally, so a
+   drop costs O(1) tombstones instead of O(degree). It does not survive contact with the referential rule.
+   The whole thing that lets a replica tell a **cascaded** incident edge (delete it) from a
+   **concurrent-peer-add** edge (resurrect the vertex, §6·3) is the explicit **edge tombstone** — a cascaded
+   edge arrives with its own tombstone, a concurrent-add edge does not. An O(1) vertex-only tombstone throws
+   that signal away: the replica sees every incident strong edge as a live existence-claim and would either
+   resurrect the vertex whenever it has any edge (never deleting it) or cascade a concurrent-add edge (a LOST
+   WRITE — unacceptable). Recovering the distinction needs machinery the design deliberately removed (the
+   provenance channel, §3) or never had (a per-element causality/version-vector, or an O(degree) known-edge
+   set in the tombstone — defeating the point). The value is modest anyway (tombstones are ~40 bytes, deletes
+   are infrequent — the §10·3 reasoning), so it is **not worth the correctness risk**. What DID matter —
+   correctness — is already fixed: the O(degree) model wrongly resurrected a vertex from its OWN cascaded
+   edge, and `applyDeletes` now excludes same-batch-deleted edges from the resurrect check (a cascaded edge
+   never pins; a concurrent-add one, with no incoming tombstone, still does). Recorded so it is not
+   re-proposed: the O(1) optimization is withdrawn; the O(degree) model is correct and kept.
 
 2. **Export vs native snapshot (an io()-subsystem distinction).** Interop formats (CSV, vanilla GraphSON)
    are **live-only and lossy by design** — they carry graph *data* for other tools and cannot/should not
@@ -281,11 +297,11 @@ Captured here so they are not lost; each is its own small piece of work against 
    silently keeps a deleted doc). It *could* be made safe (record a `purged_up_to` horizon; refuse an
    incremental feed below it → force a too-far-behind puller into a full rebuild; a fresh `since=0` replica is
    always safe) — but that is a pile of caveats around a dangerous operation (an operator must choose the
-   horizon; a straggler pays a full rebuild), for little gain: **cascade-on-apply (item 1) makes a vertex drop
-   O(1) tombstones, tombstones are tiny (~40 bytes), and deletes are infrequent** (read≫write, parent §6·4).
-   So tombstones are **kept forever** and purge is **not implemented** (this closes the parent plan's Phase 6
-   by withdrawal). Recorded here so it is not re-proposed: the safe design exists, but the caveat-to-value
-   ratio does not justify it.
+   horizon; a straggler pays a full rebuild), for little gain: **tombstones are tiny (~40 bytes) and deletes
+   are infrequent** (read≫write, parent §6·4) — even at O(degree) per vertex-drop (item 1's O(1) optimization
+   is withdrawn), the accumulation is small relative to the graph. So tombstones are **kept forever** and
+   purge is **not implemented** (this closes the parent plan's Phase 6 by withdrawal). Recorded here so it is
+   not re-proposed: the safe design exists, but the caveat-to-value ratio does not justify it.
 
 4. **`mergeE` over an incoming vertex stream (an engine gap F2 surfaced).** The "steer to `mergeE`" idiom
    for an idempotent placement is not achievable today: `g.V(matchedIds).mergeE([…]).option(Merge.inV, …)`
@@ -314,5 +330,7 @@ Captured here so they are not lost; each is its own small piece of work against 
 - **Save + undo**, not static analysis; undo free for dedicated targets, a before-image journal for shared
   (§6).
 - **Schema** = add `placement TEXT` to `replication_config` (§8).
-- **Related (separate work):** cascade-on-apply tombstones, export-vs-native-snapshot (§10). Tombstone purge
-  is WITHDRAWN — not supported (§10·3).
+- **Related (separate work):** export-vs-native-snapshot (§10·2); the `mergeE`-over-an-incoming-stream engine
+  gap (§10·4). Cascade-on-apply tombstones (the O(1) optimization) is WITHDRAWN (§10·1) — the O(degree) model
+  is correct (its self-resurrect bug is fixed) and the concurrent-add distinction an O(1) cascade would lose
+  is not worth the correctness risk. Tombstone purge is WITHDRAWN — not supported (§10·3).
