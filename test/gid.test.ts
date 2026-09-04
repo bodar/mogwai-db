@@ -8,7 +8,7 @@ import { writeGraphson, loadGraphson } from '../src/formats/graphson.ts';
 import { writeCsv, loadCsv } from '../src/formats/csv.ts';
 import { mintGid } from '../src/uuid.ts';
 
-// Phase 1a (docs/2026-09-02-replication-and-http-interop-plan.md §6·1): every element carries a
+// Phase 1a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·1): every element carries a
 // globally-unique `gid` (uuid_v7). Here on the BULK/FORMAT path — a fresh gid is minted on load, it is
 // unique per graph, two independent graphs never collide, GraphSON PRESERVES it across a round trip,
 // and CSV (interop-only) RE-MINTS it. gid is not user-visible yet, so we read it straight off the

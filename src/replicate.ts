@@ -1,6 +1,6 @@
 // ---------- replication apply — landing a peer's changes by GID (§4 primitive 5, §6·1/§6·2) ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md. The write half of the peer protocol: given the
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md. The write half of the peer protocol: given the
 // element documents a source sent (its `_bulk_get` reply) and the deletes from its `_changes` feed, land
 // them on THIS graph — idempotently, at their stated rev, keyed by GID.
 //

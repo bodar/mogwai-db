@@ -101,7 +101,7 @@ function deleteOwnedBy(spec: keyof typeof OWNED_BY, owners: Rel, fresh: Minter):
 
 /**
  * `UPDATE <nodes|edges> SET dirty = 2 WHERE id IN <owner ids>` — the touch-rev-on-write marker
- * (docs/2026-09-02-replication-and-http-interop-plan.md §5·1). A content mutation over EXISTING
+ * (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·1). A content mutation over EXISTING
  * elements changes their `rev`, but the recompute is a JS content-hash the set-based SQL cannot do
  * inline, so the mutation only FLAGS the elements and the post-write refresh (`src/refresh.ts`)
  * recomputes gid/rev over `WHERE dirty` after the program commits. `owners` is a bare `(id)` relation

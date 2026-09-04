@@ -4,7 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { bulkGet, applyWire, conflictsFor } from '../src/replicate.ts';
 import type { GraphStore } from '../src/storage.ts';
 
-// Phase 4 step 4e (docs/2026-09-02-replication-and-http-interop-plan.md §6·1/§6·3): uid replicates, and a
+// Phase 4 step 4e (docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·1/§6·3): uid replicates, and a
 // cross-peer uid COLLISION (two gids claiming one user-supplied id, from a partition) reconciles like any
 // conflict — winner (not-deleted > LOWER gid) keeps the uid, the loser's is shadowed + surfaced, both
 // elements survive, deterministic ⇒ order-independent. A uid is unique per graph, never global.

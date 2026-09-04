@@ -2,7 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 
-// Phase 2 step 2b (docs/2026-09-02-replication-and-http-interop-plan.md §6·4/§6·5): drop() records a
+// Phase 2 step 2b (docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·4/§6·5): drop() records a
 // TOMBSTONE carrying the deleted element's gid (which element), its last rev (which version), a fresh
 // local seq (so the delete enters the feed), and kind. Only elements that HAD a committed gid are
 // recorded — a create-and-drop in one program leaves nothing, since no peer ever saw it.

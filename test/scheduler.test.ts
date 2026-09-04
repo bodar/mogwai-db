@@ -7,7 +7,7 @@ import { ReplicatorStore, storeRegistry, type ReplicationConfig } from '../src/r
 import { runDueReplications, startPollingScheduler, type SchedulerDeps } from '../src/scheduler.ts';
 import type { ChangesFeed, Http } from '../src/api.ts';
 
-// Phase 5c-core (docs/2026-09-02-replication-and-http-interop-plan.md §9): the worker-residency scheduler.
+// Phase 5c-core (docs/archive/2026-09-02-replication-and-http-interop-plan.md §9): the worker-residency scheduler.
 // `runDueReplications` claims due jobs from the registry (leased, so overlapping ticks never double-run one),
 // runs each as a bounded PACED pull at worker residency (the graph is a pure data-plane client), records the
 // result + reschedules. Driven here by manual ticks (the deterministic test of the shared runner the CF

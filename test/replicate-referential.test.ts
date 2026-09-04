@@ -4,7 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { applyChanges, applyWire, bulkGet, conflictsFor } from '../src/replicate.ts';
 import type { GraphStore } from '../src/storage.ts';
 
-// Phase 4 step 4d (docs/2026-09-02-replication-and-http-interop-plan.md §6·3): the referential rule (no
+// Phase 4 step 4d (docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·3): the referential rule (no
 // CouchDB analog) + resurrect-on-upsert. A vertex delete a live edge still references is REFUSED — the
 // edge is an existence-claim, so the vertex is resurrected (kept live, no tombstone) and the delete is
 // surfaced. A live version likewise supersedes a local tombstone (not-deleted beats deleted). Neither

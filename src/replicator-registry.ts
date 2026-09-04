@@ -1,6 +1,6 @@
 // ---------- the replicator registry — the control-plane store for ongoing replication ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §9/§9·2. Ongoing replication is a persistent,
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §9/§9·2. Ongoing replication is a persistent,
 // standalone job — `{source, target, continuous, …}`, both endpoints graph refs (a local id or a remote
 // http(s) URL), neither "the current graph" — run by a WORKER-residency scheduler (§9, Phase 5c), NOT by a
 // DO alarm. The scheduler enumerates due jobs from HERE, so the registry is a SINGLETON control-plane store,

@@ -1,6 +1,6 @@
 // ---------- io() over HTTP — a document fetched from a URL ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §7/§9. `g.io("https://…/modern.json").read()`
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §7/§9. `g.io("https://…/modern.json").read()`
 // imports another graph over HTTP. This is a SEPARATE concern from federate-over-HTTP: io moves a
 // whole DOCUMENT (GraphSON / CSV — the only formats io supports), never a live traversal, so a URL is
 // just another document LOCATION. The io service is untouched — it already resolves the format from the

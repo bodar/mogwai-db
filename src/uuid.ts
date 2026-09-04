@@ -1,6 +1,6 @@
 // ---------- uuid_v7 — global element identity (`gid`) ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §6·1. A `gid` is a graph element's CROSS-PEER
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·1. A `gid` is a graph element's CROSS-PEER
 // identity, minted once at creation and immutable — separate from the local sequential rowid (which
 // stays the fast join key and never leaves the store). It is a uuid_v7 (RFC 9562), CouchDB's own
 // `couch_uuids.erl` `v7_bin` layout: a 48-bit millisecond timestamp then version 7, 12 random bits,

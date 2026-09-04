@@ -4,7 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import type { ChangesFeed } from '../src/api.ts';
 
-// Phase 2 step 2c (docs/2026-09-02-replication-and-http-interop-plan.md §5·2, §9): the peer-facing
+// Phase 2 step 2c (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·2, §9): the peer-facing
 // `GET /gremlin/{g}/_changes?since=N` feed. A UNION of live nodes/edges and tombstones WHERE seq > N,
 // ordered by seq — one entry per element at its latest state, keyed by gid. since=0 is the full current
 // state; the feed is current-state-sized (moved, not appended); a delete rides as deleted:true.

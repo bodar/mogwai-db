@@ -1,5 +1,16 @@
 # Replication, and mogwai as an HTTP client of another graph — design + plan
 
+> ✅ **LANDED AND ARCHIVED (2026-09-04).** Phases 0–5 are all on trunk (the outbound HTTP client + one-shot
+> Gremlin surfaces, `gid`/`rev`, the by-seq feed + tombstones, the pull/push engine + peer protocol, conflict
+> preservation, and persistent replication: config CRUD + a worker-residency scheduler + OpenAPI UI, across
+> Bun / Cloudflare / browser). **Phase 6 (tombstone purge) is WITHDRAWN — not supported** (a dangerous
+> operation whose safe design carried too many caveats for too little gain now that cascade-on-apply makes a
+> vertex drop O(1) tombstones; tombstones are kept forever). The one remaining designed feature,
+> **filtered replication + placement**, moved to its own live doc:
+> `docs/2026-09-04-filtered-replication-plan.md` (which also carries two related engine follow-ups this work
+> surfaced — cascade-on-apply tombstones, and the export-vs-native-snapshot distinction). So nothing here is
+> open; this doc is kept as the design authority the replication subsystem's code cites for its WHY.
+
 _Settled design + phased build plan (not a changelog). It records what a CouchDB-grade replication
 experience takes on top of what we have, the decisions (all made — §11), and the build order (§10). The
 authority is the code; CouchDB / prior-art claims cite the canonical source. Governing rule throughout (§4):
@@ -676,7 +687,12 @@ Each phase is independently valuable and lands green before the next.
     (the generic home for future columns), which self-heals an existing registry that predates a column. Gate
     MET (`test/scheduler.test.ts`): history accumulates newest-first + bounded, failures recorded; the
     migration makes a stale singleton registry self-heal (green over real workerd).
-- **Phase 6 — optional manual tombstone purge (§6·4).** Opt-in, CouchDB-style. (No Merkle backstop — §5·3.)
+- **Phase 6 — tombstone purge: WITHDRAWN, NOT SUPPORTED.** Purge is a dangerous operation (CouchDB's own
+  `_purge` can silently diverge a behind replica); a safe design exists (a `purged_up_to` horizon + a forced
+  full rebuild for a too-far-behind puller) but carries too many caveats for too little gain — cascade-on-apply
+  makes a vertex drop O(1) tombstones, tombstones are tiny, deletes are infrequent, so **tombstones are kept
+  forever**. Recorded (with the safe design) in `docs/2026-09-04-filtered-replication-plan.md` §10·3 so it is
+  not re-proposed. (No Merkle backstop — §5·3.)
 
 ---
 
@@ -707,10 +723,16 @@ All under the governing principle (§4). Locked:
   with `_replicator`/`_scheduler` now TOP-LEVEL (not per-graph), matching CouchDB.
 - **Non-goals**: CouchDB wire interop (§9·1); a Merkle tree (§5·3). **Vendor** CouchDB for reference (§14).
 
-One feature is designed but deferred to the build: **filtered replication** is a *captured traversal* (the
-vertex selector — CouchDB's selector/`doc_ids` analog, stored in `replication_config.filter`) plus the
-never-dangle resolution we already have (§6·3): an edge to a boundary endpoint pulls that endpoint in, so a
-filtered pull yields a valid edge-closed subgraph. No new machinery.
+One feature is designed and now has its OWN doc — **filtered replication + placement** →
+`docs/2026-09-04-filtered-replication-plan.md`. In brief: a source-side `filter` (a captured vertex-selector
+traversal, validated by run-on-save, 1-hop edge-closed, dynamic/never-prune on the match dimension) selects a
+subgraph; an optional target-side `placement` traversal (idempotent, over the current match set) attaches it,
+its synthesized edges being **weak references** (they cascade on a delete instead of resurrecting — local to
+the synthesizing graph, marker does not travel). That doc also captures three related engine items this design
+surfaced: **cascade-on-apply tombstones** (a revision to Phase 2b — a vertex drop ships ONE tombstone and the
+replica cascades incident edges, O(1) not O(degree)); and the **export-vs-native-snapshot** distinction (interop
+formats are live-only; a faithful backup is a native whole-DB snapshot). (Tombstone purge — the old Phase 6 —
+is WITHDRAWN; see that doc §10·3.)
 
 ---
 

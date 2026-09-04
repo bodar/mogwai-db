@@ -4,7 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import type { ChangesFeed, RevsDiffRequest, RevsDiffResponse } from '../src/api.ts';
 
-// Phase 2 step 2d (docs/2026-09-02-replication-and-http-interop-plan.md §4 primitive 2, §9): the
+// Phase 2 step 2d (docs/archive/2026-09-02-replication-and-http-interop-plan.md §4 primitive 2, §9): the
 // `POST /gremlin/{g}/_revs_diff` lookup. A peer offers {gid: [rev,...]}; the target returns which it is
 // MISSING, so the source ships only those. A pure gid/rev key lookup, never a body.
 

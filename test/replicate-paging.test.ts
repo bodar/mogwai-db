@@ -8,7 +8,7 @@ import {
 } from '../src/replicate.ts';
 import type { ChangesFeed, Http } from '../src/api.ts';
 
-// Phase 5a (docs/2026-09-02-replication-and-http-interop-plan.md §7 + Phase 5): the paced/paged
+// Phase 5a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §7 + Phase 5): the paced/paged
 // replication substrate. `runReplication` drains the source in bounded PAGES (a `_changes?limit=N` per
 // page), applying at most `batchSize` changes per span and awaiting `pace()` between pages — so a large
 // pull never busy-locks the single-threaded store. Each page advances the checkpoint, so a bounded

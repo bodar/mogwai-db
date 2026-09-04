@@ -4,7 +4,7 @@ import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import type { ChangesFeed, WireChangeSet, BulkGetRef } from '../src/api.ts';
 
-// Phase 3 step 3b (docs/2026-09-02-replication-and-http-interop-plan.md §4·5, §9): the transfer payload
+// Phase 3 step 3b (docs/archive/2026-09-02-replication-and-http-interop-plan.md §4·5, §9): the transfer payload
 // endpoints. `_bulk_get` returns element BODIES (labels + typed properties + endpoint gids) for the gids
 // a peer is missing; `_bulk_docs` applies them. Here the whole hop runs in memory over the router — the
 // half the replicator (3c) drives — proving a graph transfers faithfully: structure, typed values, and

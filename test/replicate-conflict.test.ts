@@ -5,7 +5,7 @@ import { makeRouter } from '../src/router.ts';
 import { bulkGet, applyWire, conflictsFor } from '../src/replicate.ts';
 import type { ChangesFeed, Http, WireChangeSet } from '../src/api.ts';
 
-// Phase 4 step 4b (docs/2026-09-02-replication-and-http-interop-plan.md §6·3): conflict preservation.
+// Phase 4 step 4b (docs/archive/2026-09-02-replication-and-http-interop-plan.md §6·3): conflict preservation.
 // Two DIVERGENT edits of one element (same gid, sibling gen-2 leaves off a shared gen-1) reconcile to a
 // deterministic winner (live) + loser (shadow store) — never lost, order-independent at the apply layer.
 // (Order-independent convergence through the FEED — losers propagating so both peers surface the same

@@ -1,6 +1,6 @@
 // ---------- a synchronous, pure-JS content hash (SHA-256) ----------
 //
-// The rev content hash (docs/2026-09-02-replication-and-http-interop-plan.md §5·1) is computed in the
+// The rev content hash (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·1) is computed in the
 // SYNCHRONOUS write path, so it cannot use `crypto.subtle.digest` (async), and it must run on Bun, a
 // Durable Object, AND the browser leaf — where `node:crypto` is absent. So it is a small, dependency-
 // free, pure-JS SHA-256 (a portable analog of CouchDB's md5-based `new_revid`; we are not wire-

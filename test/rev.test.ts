@@ -32,7 +32,7 @@ describe('rev — the rev-tree (Phase 4a)', () => {
   });
 });
 
-// Phase 2b (docs/2026-09-02-replication-and-http-interop-plan.md §5·1): every created element carries a
+// Phase 2b (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·1): every created element carries a
 // rev {gen, hash} computed by the post-write refresh on the unified dirty sweep. Here on the compiled
 // write path — rev is present on create, identical content converges to the same rev (idempotent
 // replay), different content diverges, and an edge's rev references its endpoint gids. rev is not

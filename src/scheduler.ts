@@ -1,6 +1,6 @@
 // ---------- the replication scheduler — worker-residency, runtime-agnostic ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §9 (revised 2026-09-04). Ongoing replication is run
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §9 (revised 2026-09-04). Ongoing replication is run
 // by a scheduler that lives at WORKER residency — NOT a DO alarm: an alarm runs inside a graph DO and would
 // busy-lock its single-threaded SQL instance, and CouchDB's replicator is a separate CLIENT of both source
 // and target, never the DB itself. So this is ONE shared runner, `runDueReplications`, driven by three thin

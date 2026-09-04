@@ -5,7 +5,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { loadBulk } from '../src/bulk.ts';
 
-// Phase 2 step 2a (docs/2026-09-02-replication-and-http-interop-plan.md §5·2): a per-element `seq`, a
+// Phase 2 step 2a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·2): a per-element `seq`, a
 // LOCAL per-graph monotonic last-modified cursor assigned by the post-write refresh from `update_seq`.
 // `_changes?since=N` will be `WHERE seq > N ORDER BY seq`; here we assert the cursor itself — every write
 // bumps it, a mutation MOVES the element's entry forward, an untouched sibling keeps its seq, and it stays

@@ -7,7 +7,7 @@ import { ReplicatorStore, storeRegistry, type ReplicationConfig } from '../src/r
 import { buildOpenApiSpec } from '../src/docs.ts';
 import type { Http } from '../src/api.ts';
 
-// Phase 5b (docs/2026-09-02-replication-and-http-interop-plan.md §9/§9·2): the ReplicatorRegistry seam +
+// Phase 5b (docs/archive/2026-09-02-replication-and-http-interop-plan.md §9/§9·2): the ReplicatorRegistry seam +
 // top-level `_replicator` CRUD. Ongoing replication is a standalone `{source, target}` job persisted in a
 // singleton control-plane store (a DO on CF, native sqlite here), CouchDB's node-global `_replicator`. The
 // scheduler (5c) enumerates due jobs from it; 5b is just the CRUD + its OpenAPI surface.

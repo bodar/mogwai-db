@@ -1,6 +1,6 @@
 // ---------- typed GraphBinary RESPONSE decoder — the inverse of execute.ts's framing ----------
 //
-// The outbound side of federation-over-HTTP (docs/2026-09-02-replication-and-http-interop-plan.md §8).
+// The outbound side of federation-over-HTTP (docs/archive/2026-09-02-replication-and-http-interop-plan.md §8).
 // Given a full GraphBinary v4 response frame from a PEER graph server — `HEADER | value* | trailer`,
 // exactly what `src/http.ts` frames and `src/execute.ts` fills — reconstruct the SAME typed
 // `ForeignResult` the in-process / DO-RPC `runForeign` produces (`src/execute.ts`), so a federated hop

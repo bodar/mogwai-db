@@ -1,6 +1,6 @@
 // ---------- federation over HTTP — mogwai as an outbound client of another graph ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §8. `federate()` depends only on a
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §8. `federate()` depends only on a
 // `FederationSource` — `executor(id).runForeign(gremlin, params, depth, …)` — and the CF/Bun managers
 // ARE that source (a sibling is just another graph they resolve by id, `src/api.ts`). When the `graph`
 // id is a fully-qualified `http(s)` URI, the manager resolves it to THIS executor instead of a local

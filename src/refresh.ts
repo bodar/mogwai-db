@@ -1,6 +1,6 @@
 // ---------- the post-write element refresh — gid mint / rev recompute ----------
 //
-// docs/2026-09-02-replication-and-http-interop-plan.md §5·1/§6·1. A compiled write lowers to set-based
+// docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·1/§6·1. A compiled write lowers to set-based
 // SQL with NO per-element JS seam — but a gid is a JS mint and a rev is a JS content-hash (SQLite has
 // no hash UDF; the design is runtime-uniform). Concrete tracing showed a write cannot be woven into
 // the read barrier's trampoline (it frames its OWN output, entangled with the effects' RETURNING

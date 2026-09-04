@@ -3,7 +3,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { applyChanges, type ReplVertex, type ReplEdge } from '../src/replicate.ts';
 
-// Phase 3 step 3a (docs/2026-09-02-replication-and-http-interop-plan.md §4·5, §6·1/§6·2): applyChanges
+// Phase 3 step 3a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §4·5, §6·1/§6·2): applyChanges
 // lands a peer's changes by GID, idempotently, at their stated rev. A fresh gid → a fresh local rowid; a
 // known gid → its rowid, content overwritten; edge endpoints resolved gid→rowid; a delete removes the
 // element and tombstones it. This is the write half the peer protocol (3b) and the replicator (3c) drive.

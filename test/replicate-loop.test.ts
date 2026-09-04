@@ -5,7 +5,7 @@ import { makeRouter } from '../src/router.ts';
 import { allowlistedHttp } from '../src/http-allowlist.ts';
 import type { ChangesFeed, Http, ReplicationStats } from '../src/api.ts';
 
-// Phase 3 step 3c (docs/2026-09-02-replication-and-http-interop-plan.md §9, §5): the pull/push loop +
+// Phase 3 step 3c (docs/archive/2026-09-02-replication-and-http-interop-plan.md §9, §5): the pull/push loop +
 // checkpoint + `_replicate`. A peer is reached over the SAME Http seam federation/io() use, so the whole
 // hop runs in memory against the manager's own router (late-bound). Gate: pull a remote graph to a fresh
 // local one; re-pull is a resumable no-op; push is the same with roles swapped.

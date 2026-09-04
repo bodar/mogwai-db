@@ -20,7 +20,7 @@ const SCHEMA = [
   // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
   // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
   // `gid` (global identity, §6·1) and `rev` (generation + content hash, §5·1) are the replication
-  // deltas (docs/2026-09-02-replication-and-http-interop-plan.md). `gid` is a 16-byte uuid_v7 BLOB,
+  // deltas (docs/archive/2026-09-02-replication-and-http-interop-plan.md). `gid` is a 16-byte uuid_v7 BLOB,
   // minted once at creation and IMMUTABLE — cross-peer identity, separate from the local rowid, which
   // stays the fast join key. `rev` is a JSONB `{gen, hash}` recomputed on every mutation (the
   // touch-rev-on-write barrier). Both are dedicated columns, not properties: a property row would
