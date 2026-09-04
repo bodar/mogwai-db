@@ -72,9 +72,15 @@ describe('_changes — the by-sequence feed endpoint', () => {
     expect(f.results[0]!.rev!.gen).toBe(6); // create + 5 mutations
   });
 
-  test('a non-GET is 405; an unknown system endpoint is 404', async () => {
-    const { http } = setup();
-    expect((await http(new Request('http://x/gremlin/g/_changes', { method: 'POST' }))).status).toBe(405);
+  test('GET and POST are allowed (POST carries a filter); another verb is 405; an unknown endpoint is 404', async () => {
+    const { http, run } = setup();
+    await run('g.addV("person")');
+    // POST with a body is the filtered form (F1) — a bodiless-but-valid `{}` is an unfiltered feed.
+    const post = await http(new Request('http://x/gremlin/g/_changes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ since: 0 }),
+    }));
+    expect(post.status).toBe(200);
+    expect((await http(new Request('http://x/gremlin/g/_changes', { method: 'PUT' }))).status).toBe(405);
     expect((await http(new Request('http://x/gremlin/g/_bogus'))).status).toBe(404);
   });
 });

@@ -27,7 +27,7 @@ import { changesFeed, revsDiff } from './manager.ts';
 import { parseRev, descendsFrom, revWins, type Rev } from './rev.ts';
 import type {
   BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete, WireRev, ChangesFeed, RevsDiffRequest,
-  RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats, ConflictEntry,
+  RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats, ConflictEntry, Executor,
 } from './api.ts';
 
 /** A replicated vertex document (what `_bulk_get` returns / `_bulk_docs` applies): identity + version +
@@ -439,16 +439,20 @@ export function checkpoint(store: GraphStore, replicationId: string, seq?: numbe
 /** A replication PEER — the four protocol operations, direction-agnostic. A local peer binds a manager's
  *  own methods; a remote peer is an `Http` caller over the `_` endpoints. The loop drives two of them. */
 export interface Peer {
-  changes(since: number, limit?: number): Promise<ChangesFeed>;
+  /** `filter` (filtered-replication-plan F1) is a captured vertex-selector run on the SOURCE peer; the
+   *  feed is restricted to the matched vertices + their 1-hop edge-closure. A source peer that cannot run
+   *  a filter (a raw store with no executor) throws when one is requested — fail-closed. */
+  changes(since: number, limit?: number, filter?: string): Promise<ChangesFeed>;
   revsDiff(request: RevsDiffRequest): Promise<RevsDiffResponse>;
   bulkGet(refs: readonly BulkGetRef[]): Promise<WireChangeSet>;
   bulkDocs(changes: WireChangeSet): Promise<void>;
 }
 
-/** A local peer over a manager's own graph — no HTTP hop, just the in-process (or DO-RPC) methods. */
+/** A local peer over a manager's own graph — no HTTP hop, just the in-process (or DO-RPC) methods. The
+ *  manager evaluates a `filter` where the graph's store + executor live. */
 export function localPeer(mgr: GraphManager, id: string): Peer {
   return {
-    changes: (since, limit) => mgr.changes(id, since, limit),
+    changes: (since, limit, filter) => mgr.changes(id, since, limit, filter),
     revsDiff: (request) => mgr.revsDiff(id, request),
     bulkGet: (refs) => mgr.bulkGet(id, refs),
     bulkDocs: (changes) => mgr.bulkDocs(id, changes),
@@ -456,10 +460,16 @@ export function localPeer(mgr: GraphManager, id: string): Peer {
 }
 
 /** A local peer over a raw store — the same four operations run in-process (the browser Worker, which
- *  holds a store + http but is not a manager). Reuses the shared store-tier functions. */
-export function storePeer(store: GraphStore): Peer {
+ *  holds a store + http but is not a manager). Reuses the shared store-tier functions. An optional
+ *  `executor` lets this peer serve as a filtered SOURCE (evaluate the selector against the store); absent,
+ *  a filtered `changes` fails closed (a raw store has no compiler to run the selector). */
+export function storePeer(store: GraphStore, executor?: Executor): Peer {
   return {
-    changes: async (since, limit) => changesFeed(store, since, limit),
+    changes: async (since, limit, filter) => {
+      if (!filter) return changesFeed(store, since, limit);
+      if (!executor) throw new Error('a filtered replication source needs an executor to evaluate the selector');
+      return changesFeed(store, since, limit, executor.filterVertexIds(filter));
+    },
     revsDiff: async (request) => revsDiff(store, request),
     bulkGet: async (refs) => bulkGet(store, refs),
     bulkDocs: async (changes) => applyWire(store, changes),
@@ -486,9 +496,16 @@ export function remotePeer(http: Http, url: string): Peer {
     return res.json() as Promise<T>;
   };
   return {
-    changes: async (since, limit) => {
-      const q = limit != null && limit > 0 ? `?since=${since}&limit=${limit}` : `?since=${since}`;
-      const res = await http(new Request(`${base}/_changes${q}`));
+    changes: async (since, limit, filter) => {
+      // A FILTER (filtered-replication-plan F1) runs on the source, so it must travel with the request.
+      // A captured traversal is arbitrary-length, so we POST it in the body (the source accepts both GET
+      // `?filter=` and this POST form); the unfiltered feed stays a plain GET.
+      const res = filter
+        ? await http(new Request(`${base}/_changes`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ since, limit, filter }),
+          }))
+        : await http(new Request(`${base}/_changes${limit != null && limit > 0 ? `?since=${since}&limit=${limit}` : `?since=${since}`}`));
       if (!res.ok) throw new Error(`replication: _changes on ${base} returned ${res.status}`);
       return res.json() as Promise<ChangesFeed>;
     },
@@ -627,6 +644,6 @@ export function managerReplicate(mgr: GraphManager, http: Http, localId: string,
 
 /** A one-shot replication run entirely over a raw store + http (the browser Worker) — the local peer,
  *  checkpoint and store all in-process, only the remote peer crossing the wire. */
-export function storeReplicate(store: GraphStore, localRef: string, http: Http, opts: ReplicateOptions): Promise<ReplicationStats> {
-  return replicateWith(storePeer(store), localRef, http, opts, (replId, seq) => checkpoint(store, replId, seq));
+export function storeReplicate(store: GraphStore, localRef: string, http: Http, opts: ReplicateOptions, executor?: Executor): Promise<ReplicationStats> {
+  return replicateWith(storePeer(store, executor), localRef, http, opts, (replId, seq) => checkpoint(store, replId, seq));
 }

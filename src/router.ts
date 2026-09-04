@@ -222,14 +222,28 @@ export function makeRouter(
       const gid = decodeURIComponent(sysMatch[1]!);
       const endpoint = sysMatch[2]!;
       if (endpoint === '_changes') {
-        if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-        const params = new URL(req.url).searchParams;
-        const since = Math.max(0, Number(params.get('since') ?? 0) || 0);
-        // `?limit=N` pages the feed (CouchDB `_changes?limit=N`) so a replicator drains a large graph in
-        // bounded batches; absent/≤0 ⇒ the whole feed (unpaged).
-        const rawLimit = Number(params.get('limit'));
-        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : undefined;
-        return json(await mgr.changes(gid, since, limit));
+        // The feed is a GET (`?since=&limit=&filter=`) OR a POST (`{since, limit, filter}` JSON body). A
+        // captured `filter` (filtered-replication-plan F1) is an arbitrary-length traversal, so a
+        // replicator POSTs it (URL-length-safe); a plain caught-up-cursor read stays a GET. Both accepted —
+        // the caller decides. `?limit=N` pages the feed (CouchDB `_changes?limit=N`); absent/≤0 ⇒ unpaged.
+        if (req.method !== 'GET' && req.method !== 'POST')
+          return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
+        try {
+          const posLimit = (n: unknown): number | undefined => (Number.isFinite(Number(n)) && Number(n) > 0 ? Math.floor(Number(n)) : undefined);
+          let since = 0, limit: number | undefined, filter: string | undefined;
+          if (req.method === 'POST') {
+            const body = (await req.json()) as { since?: number; limit?: number; filter?: string };
+            since = Math.max(0, Number(body?.since ?? 0) || 0);
+            limit = posLimit(body?.limit);
+            filter = typeof body?.filter === 'string' && body.filter ? body.filter : undefined;
+          } else {
+            const params = new URL(req.url).searchParams;
+            since = Math.max(0, Number(params.get('since') ?? 0) || 0);
+            limit = posLimit(params.get('limit'));
+            filter = params.get('filter') || undefined;
+          }
+          return json(await mgr.changes(gid, since, limit, filter));
+        } catch (e: any) { return json({ error: e.message }, 400); } // a non-vertex filter fails closed here
       }
       if (endpoint === '_revs_diff') {
         if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });

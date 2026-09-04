@@ -140,9 +140,13 @@ export class GraphDatabase extends DurableObject<Env> {
     return graphInfo(this.store);
   }
 
-  changes(since: number, limit?: number): ChangesFeed {
+  changes(since: number, limit?: number, filter?: string): ChangesFeed {
     this.ensureLive();
-    return changesFeed(this.store, since, limit);
+    // A `filter` (filtered-replication-plan F1) runs against THIS DO's own store + executor, closing the
+    // 1-hop subgraph around the matched vertices. A non-vertex filter throws (crossing the RPC boundary
+    // as a value via the caller's rpcTry, like any query failure).
+    const match = filter ? this.executor().filterVertexIds(filter) : undefined;
+    return changesFeed(this.store, since, limit, match);
   }
 
   revsDiff(request: RevsDiffRequest): RevsDiffResponse {

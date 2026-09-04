@@ -2,6 +2,8 @@ import { test, expect, describe } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { changesFeed } from '../src/manager.ts';
+import { makeRouter } from '../src/router.ts';
+import type { ChangesFeed } from '../src/api.ts';
 
 // Filtered replication F1a — the SOURCE-side selector (docs/2026-09-04-filtered-replication-plan.md §2/§9).
 // A captured vertex-selector traversal (`Executor.filterVertexIds`) yields the matched vertices; `changesFeed`
@@ -75,5 +77,46 @@ describe('changesFeed with a match set — the 1-hop edge-closed feed', () => {
     const deletes = filtered.results.filter((r) => r.deleted);
     expect(deletes).toHaveLength(1); // eve's tombstone ships even though she is out of scope
     expect(deletes[0]!.kind).toBe('vertex');
+  });
+});
+
+describe('the _changes endpoint carries the filter — GET query + POST body', () => {
+  const FILTER = 'g.V().hasLabel("task")';
+  const withRouter = async () => {
+    const { mgr } = await setup();
+    return makeRouter(mgr);
+  };
+
+  test('GET ?filter= returns the 1-hop edge-closed subgraph', async () => {
+    const http = await withRouter();
+    const res = await http(new Request(`http://x/gremlin/g/_changes?since=0&filter=${encodeURIComponent(FILTER)}`));
+    expect(res.status).toBe(200);
+    const feed = (await res.json()) as ChangesFeed;
+    expect(feed.results.filter((r) => r.kind === 'vertex')).toHaveLength(3); // 2 tasks + boundary person
+    expect(feed.results.filter((r) => r.kind === 'edge')).toHaveLength(2);
+  });
+
+  test('POST {filter} returns the same subgraph (the arbitrary-length carrier)', async () => {
+    const http = await withRouter();
+    const res = await http(new Request('http://x/gremlin/g/_changes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ since: 0, filter: FILTER }),
+    }));
+    expect(res.status).toBe(200);
+    const feed = (await res.json()) as ChangesFeed;
+    expect(feed.results.filter((r) => r.kind === 'vertex')).toHaveLength(3);
+    expect(feed.results.filter((r) => r.kind === 'edge')).toHaveLength(2);
+  });
+
+  test('a non-vertex filter fails closed with a 400 (both verbs)', async () => {
+    const http = await withRouter();
+    const bad = 'g.V().count()';
+    const g = await http(new Request(`http://x/gremlin/g/_changes?filter=${encodeURIComponent(bad)}`));
+    expect(g.status).toBe(400);
+    expect(((await g.json()) as { error: string }).error).toMatch(/vertex stream/);
+    const p = await http(new Request('http://x/gremlin/g/_changes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filter: bad }),
+    }));
+    expect(p.status).toBe(400);
   });
 });

@@ -363,7 +363,10 @@ export interface GraphManager {
    *  PAGES the feed (CouchDB `_changes?limit=N`): the replicator drains a large graph in bounded batches
    *  so no single apply span busy-locks the store (the pacing substrate). When a page is truncated,
    *  `last_seq` is the resume cursor; otherwise it is the graph's `update_seq` (fully caught up). */
-  changes(id: string, since: number, limit?: number): Promise<ChangesFeed>;
+  /** `filter` (filtered-replication-plan F1) is a captured vertex-selector traversal evaluated on the
+   *  SOURCE: the feed is restricted to the matched vertices + their 1-hop edge-closure. A non-vertex
+   *  filter throws (fail-closed), surfaced to the caller. Absent → the whole graph. */
+  changes(id: string, since: number, limit?: number, filter?: string): Promise<ChangesFeed>;
   /** Given the revs a peer holds per gid, return which ones graph `id` is MISSING (§4 primitive 2) —
    *  the cheap "what should I send you?" diff. A pure gid/rev key lookup, store-tier. */
   revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse>;

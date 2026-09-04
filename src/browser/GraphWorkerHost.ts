@@ -118,8 +118,11 @@ export class GraphWorkerHost extends RpcTarget {
 
   /** The by-sequence change feed (§5·2) — store-tier read, run inside this graph's Worker. `limit` pages
    *  the feed so a large-graph pull drains in bounded batches (the pacing substrate). */
-  changes(since: number, limit?: number): ChangesFeed {
-    return changesFeed(this.store, since, limit);
+  changes(since: number, limit?: number, filter?: string): ChangesFeed {
+    // A `filter` (filtered-replication-plan F1) runs against this graph's own store + executor, closing
+    // the 1-hop subgraph around the matched vertices; a non-vertex filter throws (surfaced to the caller).
+    const match = filter ? this.executor.filterVertexIds(filter) : undefined;
+    return changesFeed(this.store, since, limit, match);
   }
 
   /** The `_revs_diff` lookup (§4 primitive 2) — store-tier, run inside this graph's Worker. */
@@ -145,7 +148,7 @@ export class GraphWorkerHost extends RpcTarget {
   /** Run one replication pass against the peer in `opts` — the loop runs HERE (this Worker holds the
    *  store AND the outbound http), the browser twin of the CF Worker driving a DO (§7). */
   replicate(opts: ReplicateOptions): Promise<ReplicationStats> {
-    return storeReplicate(this.store, this.graphId, this.http, opts);
+    return storeReplicate(this.store, this.graphId, this.http, opts, this.executor);
   }
 
   /** Surfaced conflicts (§6·3), store-tier inside this Worker. */

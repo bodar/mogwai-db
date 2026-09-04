@@ -122,8 +122,13 @@ export class BunGraphManager implements GraphManager {
     return graphInfo(this.resolve(id).store);
   }
 
-  async changes(id: string, since: number, limit?: number): Promise<ChangesFeed> {
-    return changesFeed(this.resolve(id).store, since, limit);
+  async changes(id: string, since: number, limit?: number, filter?: string): Promise<ChangesFeed> {
+    // A `filter` (filtered-replication-plan F1) is evaluated HERE, where the graph's store + executor
+    // live: the captured selector yields the matched vertices' ids, `changesFeed` closes the 1-hop
+    // subgraph around them. The executor for a local graph id is always a local Executor, so
+    // `filterVertexIds` is present; a non-vertex filter throws, surfaced to the caller.
+    const match = filter ? this.executor(id).filterVertexIds(filter) : undefined;
+    return changesFeed(this.resolve(id).store, since, limit, match);
   }
 
   async revsDiff(id: string, request: RevsDiffRequest): Promise<RevsDiffResponse> {
