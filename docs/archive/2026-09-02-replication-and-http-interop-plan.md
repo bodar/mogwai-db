@@ -7,7 +7,7 @@
 > operation whose safe design carried too many caveats for too little gain now that cascade-on-apply makes a
 > vertex drop O(1) tombstones; tombstones are kept forever). The one remaining designed feature,
 > **filtered replication + placement**, moved to its own live doc:
-> `docs/2026-09-04-filtered-replication-plan.md` (which also carries two related engine follow-ups this work
+> `docs/archive/2026-09-04-filtered-replication-plan.md` (which also carries two related engine follow-ups this work
 > surfaced — cascade-on-apply tombstones, and the export-vs-native-snapshot distinction). So nothing here is
 > open; this doc is kept as the design authority the replication subsystem's code cites for its WHY.
 
@@ -691,7 +691,7 @@ Each phase is independently valuable and lands green before the next.
   `_purge` can silently diverge a behind replica); a safe design exists (a `purged_up_to` horizon + a forced
   full rebuild for a too-far-behind puller) but carries too many caveats for too little gain — cascade-on-apply
   makes a vertex drop O(1) tombstones, tombstones are tiny, deletes are infrequent, so **tombstones are kept
-  forever**. Recorded (with the safe design) in `docs/2026-09-04-filtered-replication-plan.md` §10·3 so it is
+  forever**. Recorded (with the safe design) in `docs/archive/2026-09-04-filtered-replication-plan.md` §10·3 so it is
   not re-proposed. (No Merkle backstop — §5·3.)
 
 ---
@@ -724,7 +724,7 @@ All under the governing principle (§4). Locked:
 - **Non-goals**: CouchDB wire interop (§9·1); a Merkle tree (§5·3). **Vendor** CouchDB for reference (§14).
 
 One feature is designed and now has its OWN doc — **filtered replication + placement** →
-`docs/2026-09-04-filtered-replication-plan.md`. In brief: a source-side `filter` (a captured vertex-selector
+`docs/archive/2026-09-04-filtered-replication-plan.md`. In brief: a source-side `filter` (a captured vertex-selector
 traversal, validated by run-on-save, 1-hop edge-closed, dynamic/never-prune on the match dimension) selects a
 subgraph; an optional target-side `placement` traversal (idempotent, over the current match set) attaches it,
 its synthesized edges being **weak references** (they cascade on a delete instead of resurrecting — local to

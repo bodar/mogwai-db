@@ -18,7 +18,7 @@ const TASK_GRAPH =
     .addE("assigned").from("dan").to("t1")
     .addE("blocks").from("t1").to("t3")`;
 
-// Filtered replication F1a — the SOURCE-side selector (docs/2026-09-04-filtered-replication-plan.md §2/§9).
+// Filtered replication F1a — the SOURCE-side selector (docs/archive/2026-09-04-filtered-replication-plan.md §2/§9).
 // A captured vertex-selector traversal (`Executor.filterVertexIds`) yields the matched vertices; `changesFeed`
 // restricts the live feed to those matches PLUS their 1-hop edge-closure (the boundary endpoints their edges
 // reach, and those edges), still shipping ALL tombstones. Never transitive, valid by construction.
