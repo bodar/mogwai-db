@@ -31,9 +31,16 @@ export interface ReplicationConfig {
   useCheckpoints?: boolean;
 }
 
+/** One past replication session (CouchDB's `history` entry, §9·2): when it ran and its stats or error. */
+export interface SessionRecord {
+  time: number;
+  info: unknown;
+}
+
 /** Scheduler state for a job (CouchDB `_scheduler/docs`+`jobs`, §9·2). `state` is CouchDB's vocabulary
  *  (`initializing`/`running`/`pending`/`crashing`/`completed`/`failed`); `nextRun` is when it is next due
- *  (ms); `info` the last run's stats or error. The claim lease is internal (not surfaced here). */
+ *  (ms); `info` the last run's stats or error; `history` the recent sessions (newest first, bounded). The
+ *  claim lease is internal (not surfaced here). */
 export interface ReplicationJob {
   configId: string;
   replicationId: string | null;
@@ -43,7 +50,11 @@ export interface ReplicationJob {
   lastUpdated: number | null;
   startTime: number | null;
   nextRun: number | null;
+  history: SessionRecord[];
 }
+
+/** How many past sessions a job keeps (CouchDB bounds its `history` too). */
+const HISTORY_CAP = 20;
 
 /** How a run finished, written back by the scheduler (releasing the lease). `nextRun` null ⇒ terminal
  *  (a completed one-shot); a number ⇒ when to run again (continuous poll, or promptly to drain more). */
@@ -69,7 +80,7 @@ const REGISTRY_SCHEMA = [
   // or error. The registry is a DATA STORE — it never runs a job; the worker does.
   `CREATE TABLE IF NOT EXISTS replication_job(
      config_id TEXT PRIMARY KEY, replication_id TEXT, state TEXT NOT NULL, error_count INTEGER NOT NULL DEFAULT 0,
-     info TEXT, last_updated INTEGER, start_time INTEGER, next_run INTEGER, lease_until INTEGER)`,
+     info TEXT, last_updated INTEGER, start_time INTEGER, next_run INTEGER, lease_until INTEGER, history TEXT)`,
   // A scheduled job's resume cursor (§9·2) — kept HERE (the scheduler's durable state), keyed by the job's
   // replication id, distinct from the per-graph `replication_checkpoint` the one-shot `_replicate` uses.
   `CREATE TABLE IF NOT EXISTS replication_checkpoint(
@@ -95,6 +106,19 @@ const COLS = 'id, source, target, continuous, create_target, filter, checkpoint_
 export class ReplicatorStore {
   constructor(private sql: Sql) {
     for (const statement of REGISTRY_SCHEMA) this.sql.exec(statement);
+    // Column migrations for an EXISTING registry. Unlike a graph DO (a fresh id per graph, so its schema is
+    // always current), the registry is a SINGLETON that persists across schema changes — and `CREATE TABLE
+    // IF NOT EXISTS` never adds a column to a table that already exists. So each column added after the first
+    // release is applied idempotently here: an add is skipped when the column is already present. Append new
+    // columns to this list, never edit the CREATE above for them.
+    this.ensureColumn('replication_job', 'history', 'history TEXT');
+  }
+
+  /** Add `column` (`decl` = its full DDL, e.g. `"history TEXT"`) to `table` if it is not already present —
+   *  an idempotent `ALTER TABLE … ADD COLUMN` (SQLite has no `IF NOT EXISTS` for it). */
+  private ensureColumn(table: string, column: string, decl: string): void {
+    const cols = this.sql.query<{ name: string }>(`PRAGMA table_info(${table})`);
+    if (!cols.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${decl}`);
   }
 
   /** Upsert a job by id (create or replace) — idempotent, so a PUT of the same doc is a no-op change. */
@@ -155,35 +179,50 @@ export class ReplicatorStore {
     return claimed;
   }
 
-  /** Record a finished run and RELEASE the lease (§9). `nextRun` null ⇒ terminal (a completed one-shot). */
-  recordResult(configId: string, r: JobResult): void {
-    this.sql.query(
-      `UPDATE replication_job SET state = ?, next_run = ?, info = ?, last_updated = ?, lease_until = NULL, error_count = 0
-       WHERE config_id = ?`,
-      [r.state, r.nextRun, JSON.stringify(r.info ?? null), r.lastUpdated, configId]);
+  /** Read a job's session history (newest first), or []. */
+  private historyOf(configId: string): SessionRecord[] {
+    const r = this.sql.query<{ history: string | null }>('SELECT history FROM replication_job WHERE config_id = ?', [configId])[0];
+    return r?.history ? (JSON.parse(r.history) as SessionRecord[]) : [];
   }
 
-  /** Record a failed run: bump `error_count`, set `crashing`, release the lease, and schedule an EXPONENTIAL
-   *  backoff retry (CouchDB's penalise-repeated-failures), capped at `maxBackoffMs`. */
+  /** Prepend a session record, capped at {@link HISTORY_CAP} (CouchDB bounds `history` too). */
+  private withSession(configId: string, record: SessionRecord): string {
+    return JSON.stringify([record, ...this.historyOf(configId)].slice(0, HISTORY_CAP));
+  }
+
+  /** Record a finished run and RELEASE the lease (§9). `nextRun` null ⇒ terminal (a completed one-shot).
+   *  Appends the run to the session history (CouchDB's `history`, §9·2). */
+  recordResult(configId: string, r: JobResult): void {
+    const history = this.withSession(configId, { time: r.lastUpdated, info: r.info ?? null });
+    this.sql.query(
+      `UPDATE replication_job SET state = ?, next_run = ?, info = ?, last_updated = ?, lease_until = NULL, error_count = 0, history = ?
+       WHERE config_id = ?`,
+      [r.state, r.nextRun, JSON.stringify(r.info ?? null), r.lastUpdated, history, configId]);
+  }
+
+  /** Record a failed run: bump `error_count`, set `crashing`, release the lease, schedule an EXPONENTIAL
+   *  backoff retry (CouchDB's penalise-repeated-failures) capped at `maxBackoffMs`, and log the session. */
   recordFailure(configId: string, message: string, now: number, backoffBaseMs: number, maxBackoffMs: number): void {
     const cur = this.sql.query<{ error_count: number }>('SELECT error_count FROM replication_job WHERE config_id = ?', [configId])[0];
     const errorCount = (cur?.error_count ?? 0) + 1;
     const delay = Math.min(maxBackoffMs, backoffBaseMs * 2 ** (errorCount - 1));
+    const info = { error: message };
+    const history = this.withSession(configId, { time: now, info });
     this.sql.query(
-      `UPDATE replication_job SET state = 'crashing', error_count = ?, info = ?, last_updated = ?, lease_until = NULL, next_run = ?
+      `UPDATE replication_job SET state = 'crashing', error_count = ?, info = ?, last_updated = ?, lease_until = NULL, next_run = ?, history = ?
        WHERE config_id = ?`,
-      [errorCount, JSON.stringify({ error: message }), now, now + delay, configId]);
+      [errorCount, JSON.stringify(info), now, now + delay, history, configId]);
   }
 
   listJobs(): ReplicationJob[] {
     return this.sql.query<JobRow>(
-      `SELECT config_id, replication_id, state, error_count, info, last_updated, start_time, next_run
+      `SELECT config_id, replication_id, state, error_count, info, last_updated, start_time, next_run, history
        FROM replication_job ORDER BY config_id`).map(rowToJob);
   }
 
   getJob(configId: string): ReplicationJob | null {
     const r = this.sql.query<JobRow>(
-      `SELECT config_id, replication_id, state, error_count, info, last_updated, start_time, next_run
+      `SELECT config_id, replication_id, state, error_count, info, last_updated, start_time, next_run, history
        FROM replication_job WHERE config_id = ?`, [configId])[0];
     return r ? rowToJob(r) : null;
   }
@@ -204,10 +243,12 @@ export const replicationIdFor = (configId: string): string => `config:${configId
 interface JobRow {
   config_id: string; replication_id: string | null; state: string; error_count: number;
   info: string | null; last_updated: number | null; start_time: number | null; next_run: number | null;
+  history: string | null;
 }
 const rowToJob = (r: JobRow): ReplicationJob => ({
   configId: r.config_id, replicationId: r.replication_id, state: r.state, errorCount: r.error_count,
   info: r.info ? JSON.parse(r.info) : null, lastUpdated: r.last_updated, startTime: r.start_time, nextRun: r.next_run,
+  history: r.history ? (JSON.parse(r.history) as SessionRecord[]) : [],
 });
 
 /** The async seam the router + scheduler call. The CF backend forwards to the singleton registry DO (async

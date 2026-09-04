@@ -148,6 +148,29 @@ describe('replication scheduler (Phase 5c-core)', () => {
     expect((await s.mgr.info('local')).vertexCount).toBe(3);
   });
 
+  test('the job accumulates a bounded session history, newest first (Phase 5d)', async () => {
+    const s = setup();
+    await seedN(s, 'remote', 1);
+    await s.registry.putConfig({ id: 'hist', source: s.url('remote'), target: 'local', continuous: true, checkpointInterval: 1 });
+    // Three due ticks (each after the prior nextRun).
+    await runDueReplications(s.deps, { now: 10 });
+    await runDueReplications(s.deps, { now: 20 });
+    await runDueReplications(s.deps, { now: 30 });
+    const job = await s.registry.getJob('hist');
+    expect(job!.history.length).toBe(3);
+    expect(job!.history.map((h) => h.time)).toEqual([30, 20, 10]); // newest first
+    // Each record carries that run's stats.
+    expect(job!.history[0]!.info).toMatchObject({ read: expect.any(Number), written: expect.any(Number) });
+  });
+
+  test('a failed run is recorded in the history too', async () => {
+    const s = setup(() => Promise.reject(new Error('boom')));
+    await s.registry.putConfig({ id: 'failhist', source: 'http://peer/gremlin/x', target: 'local', continuous: true });
+    await runDueReplications(s.deps, { now: 0, backoffBaseMs: 100, backoffMaxMs: 1000 });
+    const job = await s.registry.getJob('failhist');
+    expect(job!.history[0]!.info).toMatchObject({ error: 'boom' });
+  });
+
   test('deleting a config drops its scheduler job too', async () => {
     const s = setup();
     await s.registry.putConfig({ id: 'temp', source: s.url('remote'), target: 'local', continuous: true });
