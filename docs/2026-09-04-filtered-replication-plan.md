@@ -241,6 +241,13 @@ Each phase independently valuable, lands green before the next (the parent plan'
     so a downstream replica gets the edge tombstone and never needs the marker). **F2 COMPLETE.**
 - **F3 — undo.** Dedicated-target undo (destroy / delete-by-provenance) first; the shared-target
   before-image journal when shared-target replication lands.
+  - ✅ **F3-dedicated — destroy the replica.** `DELETE /_replicator/{id}?destroy_target=true` deletes the
+    config AND destroys a LOCAL target replica (`mgr.destroy`, the idempotent teardown — for a dedicated
+    fresh replica everything replication did is additive, so a destroy is a clean reversal). A plain DELETE
+    removes only the config. A REMOTE target is left to its own endpoint (deferred with the journal).
+  - **F3-shared — the before-image journal.** *(deferred, as the plan states)* lands when shared-target
+    replication (placement/import mutating pre-existing elements) is real; the write journal
+    (`{replication_id, gid, op, prev_body?}`) is the shadow-store pattern pointed at replication provenance.
 
 ---
 
