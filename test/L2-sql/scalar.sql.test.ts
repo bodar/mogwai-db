@@ -119,8 +119,11 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject([1,2],[3,4])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // unfold() explodes the list back to a scalar stream.
     expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value', type: UNKNOWN });
-    // Scope.local reducers act per-list (mean over the numeric elements → Double).
-    expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar', productiveNull: false });
+    // Scope.local reducers act per-list (mean over the numeric elements → Double). `productiveNull`
+    // is now unconditional: an EMPTY list is filtered out by the reducer's `json_array_length > 0`
+    // guard, so any surviving row is a genuine value (`SumLocalStep`: a non-empty all-null list
+    // reduces to null and is emitted, an empty one emits nothing).
+    expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar', productiveNull: true });
     // none(P) on a LIST keeps the list iff no element matches (collection filter).
     expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').sql).toContain('NOT EXISTS');
     // none(pred) is NOT the iterate discard-marker (only a bare none() is stripped).

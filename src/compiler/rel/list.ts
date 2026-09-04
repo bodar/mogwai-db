@@ -671,7 +671,22 @@ export function listRetype(
   // is no multiplicity inside a list: a member is one value, so the bulk-weighted form never applies.
   if (isReducer(step.name) && isLocalScope(step)) {
     if (args.some((arg) => typeof arg === 'number')) return null;
-    const members = membersOf(list, fresh);
+    // `Sum`/`Mean`/`Min`/`MaxLocalStep`: a NON-EMPTY list emits its reduced value — null when every
+    // member is null/ineligible, because the step forwards to the first non-null seed and SPLITS on
+    // it even if that is null (`vendor/tinkerpop/gremlin-core/.../step/map/SumLocalStep.java` —
+    // `if (iterator.hasNext()) … return traverser.split(result)`; `MaxLocalStep.java:45-56`). An EMPTY
+    // list emits NOTHING (the `while` skips to the next start). SQL's json_each aggregate collapses
+    // BOTH to a NULL row, so guard the OUTER row on the list's length and let `productiveNull` carry
+    // the genuine null out. This SUBSUMES the old `of.productiveNull` flag: a `ProductiveByStrategy`
+    // all-null list is non-empty, so it still emits — the flag was only ever a proxy for
+    // non-emptiness, and it missed a genuine non-empty all-null list no strategy touched
+    // (`inject([null,null]).sum(Scope.local)` answered [] instead of [null]). `count`/`conjoin` above
+    // are deliberately NOT guarded — an empty list counts 0 and conjoins to `''`, both real results.
+    const host = make.filter({
+      id: fresh('mne'), input: rel, channels: rel.channels, type: rel.type,
+      pred: { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [list] }, right: compilerInt(0) },
+    });
+    const members = membersOf(col(host.id, LIST_COL), fresh);
     const payload = memberPayload(of, members);
     const memberType = memberTypeOf(of);
     /** One correlated subquery over the members, projecting one named column. */
@@ -682,12 +697,11 @@ export function listRetype(
         groupBy: [], aggs: [[name, value]],
       }),
     }];
-    // A NULL reduction is a REAL result exactly when the LIST says nothing was dropped on the way in
-    // (`ProductiveByStrategy`), which is the fact `foldScalars` recorded beside the member type. It
-    // rides out with every reducer arm below, so no shape can be built that forgets it.
-    const productive = of.kind === 'scalar' && of.productiveNull ? { productiveNull: true } : {};
+    // The surviving null is ALWAYS a real value now (the empty-list case is filtered above), so
+    // `productiveNull` is unconditional rather than read off the member shape's flag.
+    const productive = { productiveNull: true } as const;
     const asNumber = (value: readonly [string, Expr], vt: readonly [string, Expr]) => ({
-      rel: withPayload(rel, [value, vt], [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+      rel: withPayload(host, [value, vt], [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
       type: UNKNOWN, result: 'number' as const, ...productive,
     });
 
@@ -740,7 +754,7 @@ export function listRetype(
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
       // fenced, for the same plan).
-      const held = fenced(withPayload(rel, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
+      const held = fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
       return {
         rel: withPayload(held,
           [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
@@ -768,7 +782,7 @@ export function listRetype(
     // that subject is a decode CASE, so writing the whole thing twice is what made this family's
     // statement grow when projected collections became typed. Same rule as the argmax above.
     const reduced = reducerAggregate(payload, step.name);
-    const held = fenced(withPayload(rel, [['v', scalar(reduced.value, 'v', 'any')[1]]], [meta('v', 'any', true)], fresh), fresh);
+    const held = fenced(withPayload(host, [['v', scalar(reduced.value, 'v', 'any')[1]]], [meta('v', 'any', true)], fresh), fresh);
     return {
       rel: withPayload(held,
         [['v', col(held.id, 'v')], ['vt', step.name === 'mean' ? compilerText('real') : { kind: 'call', fn: 'typeof', args: [col(held.id, 'v')] }]],
