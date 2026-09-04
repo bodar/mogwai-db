@@ -1,5 +1,5 @@
 {
-  "passing": 1807,
+  "passing": 1808,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1425,6 +1425,7 @@
     "g_injectXnullX_anyXeqXnullXX",
     "g_injectXnullX_asBool",
     "g_injectXnullX_asDate",
+    "g_injectXnullX_asNumberXGType_INTX",
     "g_injectXnullX_concat_XinjectX",
     "g_injectXnullX_isXeqXV9999_valuesXnameXXX",
     "g_injectXnullX_noneXeqXnullXX",
@@ -2192,7 +2193,6 @@
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_create",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_match",
     "g_injectXlistX_isXtypeOfXGType_LISTXX_groupCount",
-    "g_injectXnullX_asNumberXGType_INTX",
     "g_injectXnullX_combineXinjectX1XX",
     "g_injectXnullX_conjoinX1X",
     "g_injectXnullX_differenceXinjectX1XX",
