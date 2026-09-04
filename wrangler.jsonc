@@ -28,6 +28,13 @@
     { "tag": "v2", "new_sqlite_classes": ["ReplicatorRegistryDO"] }
   ],
 
+  // The replication scheduler's periodic wake (§9): a Worker Cron Trigger fires `scheduled()`, which runs
+  // the due replication jobs at WORKER residency (a client of the graph DOs) — deliberately NOT a DO alarm,
+  // which would occupy a graph DO's single-threaded slot. Every minute (the finest cron granularity); a job's
+  // own `checkpoint_interval` paces how often it actually re-pulls. A one-shot `POST /_replicate` and the
+  // admin `POST /_scheduler/run` are unaffected.
+  "triggers": { "crons": ["* * * * *"] },
+
   // Outbound-HTTP host allowlist for io()/federate over HTTP (src/config.ts, src/http-allowlist.ts).
   // The URL in `g.io("https://…")` / `federate("https://…")` comes from a client's query, so it is
   // confined to these hosts — an SSRF guard. UNSET (as here) ⇒ outbound HTTP is DISABLED (deny all,

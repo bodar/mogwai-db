@@ -145,16 +145,20 @@ export function makeRouter(
   log: QueryLogger = silentLogger,
   /** The control-plane store for ongoing replication (§9). TOP-LEVEL (`/_replicator[/{id}]`), CouchDB's
    *  node-global `_replicator` — NOT per-graph, since a job is a standalone `{source, target}` run by the
-   *  worker-residency scheduler. Optional: a runtime without one (the browser edge until Phase 5c) returns
-   *  501 on those routes rather than pretending. */
+   *  worker-residency scheduler. Optional: a runtime without one returns 501 on those routes. */
   registry?: ReplicatorRegistry,
+  /** Fire ONE scheduler tick (the worker-residency runner), backing `POST /_scheduler/run`. Injected so the
+   *  router stays out of the scheduler's dependency graph (it just triggers it). Absent ⇒ that route 501s. */
+  runTick?: () => Promise<unknown>,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
   // (list/create) and `/_replicator/{id}` (get/replace/delete). CouchDB's `_replicator` DB shape.
   const replicatorPath = new RegExp('^/_replicator(?:/([^/]+))?/?$');
-  // Scheduler introspection (CouchDB `_scheduler/jobs` + `_scheduler/docs`), top-level + read-only.
-  const schedulerPath = new RegExp('^/_scheduler/(jobs|docs)/?$');
+  // Scheduler introspection (CouchDB `_scheduler/jobs` + `_scheduler/docs`, read-only) plus a `run` admin
+  // trigger (`POST /_scheduler/run`) that fires one scheduler tick NOW — the uniform, over-HTTP way to drive
+  // the worker-residency runner (the cron/interval do it on a schedule in production; this is "run now").
+  const schedulerPath = new RegExp('^/_scheduler/(jobs|docs|run)/?$');
   // Peer-facing sync endpoints (§9), CouchDB-shaped under the `_` system prefix: `/{prefix}/{g}/_changes`
   // and (2d) `/{prefix}/{g}/_revs_diff`. A second, longer path so a graph id can never be read as one.
   const systemPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/(_[a-z_]+)/?$`);
@@ -184,12 +188,18 @@ export function makeRouter(
       return handleReplicator(registry, repMatch[1] ? decodeURIComponent(repMatch[1]) : null, req);
     }
 
-    // Scheduler introspection (read-only) — job state (`_scheduler/jobs`) and config+state (`_scheduler/docs`).
+    // Scheduler introspection (`jobs`/`docs`, GET) + the `run` trigger (POST) — one scheduler tick now.
     const schMatch = pathname.match(schedulerPath);
     if (schMatch) {
       if (!registry) return json({ error: 'replication registry not configured' }, 501);
+      const which = schMatch[1]!;
+      if (which === 'run') {
+        if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+        if (!runTick) return json({ error: 'replication scheduler not configured' }, 501);
+        try { return json(await runTick()); } catch (e: any) { return json({ error: e.message }, 500); }
+      }
       if (req.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-      return handleScheduler(registry, schMatch[1]!);
+      return handleScheduler(registry, which);
     }
 
     // The GraphQL edge — GraphQL-over-HTTP on `POST /graphql/{g}` (JSON body) and `GET /graphql/{g}`

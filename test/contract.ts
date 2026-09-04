@@ -91,6 +91,30 @@ function replicatorContract(getOrigin: () => string) {
       const docs = (await (await fetch(`${getOrigin()}/_scheduler/docs`)).json()) as { docs: unknown[] };
       expect(Array.isArray(docs.docs)).toBe(true);
     });
+
+    // The scheduler END TO END over the real edge (`POST /_scheduler/run`): a local→local job, driven by
+    // the worker-residency runner. On CF this exercises claimDue/recordResult/checkpoint over the registry DO
+    // boundary AND the local-peer path (a graph DO reached over RPC) — the whole scheduler on real workerd.
+    test('POST /_scheduler/run replicates a local→local job at worker residency', async () => {
+      const src = `sched-src-${Date.now()}`;
+      const dst = `sched-dst-${Date.now()}`;
+      // Seed the source graph.
+      await fetch(`${getOrigin()}/gremlin/${src}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gremlin: "g.addV('person').property('name','marko')" }),
+      });
+      // A one-shot job src → dst; both local graph ids (no external URL, so no allowlist needed).
+      await fetch(`${getOrigin()}/_replicator/sched-${src}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: src, target: dst, continuous: false }),
+      });
+      const tick = (await (await fetch(`${getOrigin()}/_scheduler/run`, { method: 'POST' })).json()) as { ran: number };
+      expect(tick.ran).toBeGreaterThanOrEqual(1);
+      // The target now holds the replicated vertex.
+      const info = (await (await fetch(`${getOrigin()}/gremlin/${dst}`)).json()) as { vertexCount: number };
+      expect(info.vertexCount).toBe(1);
+      await fetch(`${getOrigin()}/_replicator/sched-${src}`, { method: 'DELETE' });
+    });
   });
 }
 

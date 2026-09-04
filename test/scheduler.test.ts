@@ -4,7 +4,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import { ReplicatorStore, storeRegistry, type ReplicationConfig } from '../src/replicator-registry.ts';
-import { runDueReplications, type SchedulerDeps } from '../src/scheduler.ts';
+import { runDueReplications, startPollingScheduler, type SchedulerDeps } from '../src/scheduler.ts';
 import type { ChangesFeed, Http } from '../src/api.ts';
 
 // Phase 5c-core (docs/2026-09-02-replication-and-http-interop-plan.md §9): the worker-residency scheduler.
@@ -125,6 +125,27 @@ describe('replication scheduler (Phase 5c-core)', () => {
     const doc = docs.docs.find((d: ReplicationConfig & { job: any }) => d.id === 'introspect');
     expect(doc).toMatchObject({ id: 'introspect', continuous: true });
     expect(doc.job).toMatchObject({ state: 'pending' });
+  });
+
+  test('startPollingScheduler drives ticks on a REAL timer until stopped', async () => {
+    const s = setup();
+    await seedN(s, 'remote', 2);
+    await s.registry.putConfig({ id: 'poll', source: s.url('remote'), target: 'local', continuous: true, checkpointInterval: 5 });
+    const stop = startPollingScheduler(s.deps, 5); // tick every 5ms
+    try {
+      const deadline = Date.now() + 2000;
+      while ((await s.mgr.info('local')).vertexCount < 2 && Date.now() < deadline) await Bun.sleep(10);
+      expect((await s.mgr.info('local')).vertexCount).toBe(2); // the timer drove a sync
+      // A later remote delta is picked up by a subsequent tick.
+      await s.run('remote', 'g.addV("person")');
+      const d2 = Date.now() + 2000;
+      while ((await s.mgr.info('local')).vertexCount < 3 && Date.now() < d2) await Bun.sleep(10);
+      expect((await s.mgr.info('local')).vertexCount).toBe(3);
+    } finally { stop(); }
+    // After stop, no further ticks: a new remote vertex is NOT pulled.
+    await s.run('remote', 'g.addV("person")');
+    await Bun.sleep(50);
+    expect((await s.mgr.info('local')).vertexCount).toBe(3);
   });
 
   test('deleting a config drops its scheduler job too', async () => {

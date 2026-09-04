@@ -20,6 +20,9 @@ export interface MogwaiConfig {
   pathPrefix?: string;
   /** One-line-per-query access log. Both runtimes (a Worker reads it from env). */
   log?: boolean;
+  /** Continuous-replication poll interval (ms). >0 starts the Bun/browser background scheduler; absent/0
+   *  leaves it off (a `POST /_scheduler/run` still triggers a tick, and on CF the Cron Trigger drives it). */
+  schedulerIntervalMs?: number;
   // ── Bun-only runtime settings (a Worker gets storage from its DO and io from the R2 binding) ──
   port?: number;
   dataDir?: string;
@@ -43,6 +46,7 @@ export function configFromBun(
     httpAllowlist: flags.allowHost?.length ? toAllowlist(flags.allowHost) : toAllowlist(env.MOGWAI_HTTP_ALLOWLIST),
     pathPrefix: flags.pathPrefix ?? env.MOGWAI_PATH_PREFIX,
     log: env.MOGWAI_LOG ? true : undefined,
+    schedulerIntervalMs: env.MOGWAI_SCHEDULER_INTERVAL_MS ? Number(env.MOGWAI_SCHEDULER_INTERVAL_MS) : undefined,
     port: port ? Number(port) : undefined,
     dataDir: flags.dataDir ?? env.MOGWAI_DB_DIR,
     ioDir: flags.ioDir ?? env.MOGWAI_IO_DIR,
@@ -66,6 +70,7 @@ export function configFromWorkerEnv(env: WorkerConfigEnv): MogwaiConfig {
     httpAllowlist: toAllowlist(c?.httpAllowlist ?? env.HTTP_ALLOWLIST),
     pathPrefix: c?.pathPrefix ?? env.PATH_PREFIX,
     log: c?.log ?? (env.MOGWAI_LOG ? true : undefined),
+    schedulerIntervalMs: c?.schedulerIntervalMs,
   };
 }
 
@@ -79,5 +84,6 @@ export function configFromBrowser(raw: unknown): MogwaiConfig {
     httpAllowlist: toAllowlist(o.httpAllowlist as string | readonly string[] | undefined),
     pathPrefix: typeof o.pathPrefix === 'string' ? o.pathPrefix : undefined,
     log: o.log === true || undefined,
+    schedulerIntervalMs: typeof o.schedulerIntervalMs === 'number' ? o.schedulerIntervalMs : undefined,
   };
 }

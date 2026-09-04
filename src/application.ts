@@ -20,9 +20,11 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
   /** The control-plane store for ongoing replication (§9), serving the top-level `/_replicator` CRUD.
    *  Optional — absent, those routes return 501 (a runtime without a scheduler yet). */
   registry?: ReplicatorRegistry;
+  /** Fire one scheduler tick (`POST /_scheduler/run`) — the worker-residency runner. Optional. */
+  runTick?: () => Promise<unknown>;
 }
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry));
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick));
 }

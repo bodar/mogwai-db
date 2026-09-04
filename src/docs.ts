@@ -223,6 +223,19 @@ export function buildOpenApiSpec(pathPrefix: string) {
         responses: { '200': { description: 'Jobs + state.', content: { 'application/json': { schema: { type: 'object', properties: { docs: { type: 'array', items: { type: 'object' } } } } } } } },
       },
     },
+    '/_scheduler/run': {
+      post: {
+        summary: 'Run due replications now',
+        description:
+          'Fire ONE scheduler tick immediately (at worker residency): claim due jobs and run them. The ' +
+          'admin "run now" trigger — the Cron Trigger (CF) or the background interval (Bun/browser) does ' +
+          'this on a schedule. Returns how many jobs ran plus per-job outcomes.',
+        responses: {
+          '200': { description: 'Tick result.', content: { 'application/json': { schema: { type: 'object', properties: { ran: { type: 'integer' }, outcomes: { type: 'array', items: { type: 'object' } } } } } } },
+          '501': { description: 'This runtime has no scheduler configured.' },
+        },
+      },
+    },
   },
  } as const;
 }
