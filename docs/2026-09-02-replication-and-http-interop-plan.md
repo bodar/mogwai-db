@@ -621,13 +621,24 @@ Each phase is independently valuable and lands green before the next.
     (the only place the singleton-DO boundary is exercised). Gate MET — full CI green incl. the cloudflare
     bracket over real `wrangler dev`. (Browser SW backend still returns 501 until 5c wires it with the
     scheduler.)
-  - **5c — the `Scheduler` seam + the shared `runDueReplications` + `replication_job` + introspection.** CF cron
-    `scheduled()` / Bun `setInterval` / browser SW timer, all calling ONE shared runner that reads due jobs
-    (with the job-claim/lease guard), runs each as a bounded paced pull at worker residency, records
-    `replication_job` state (CouchDB's `initializing/running/pending/crashing/completed/failed` + error_count
-    backoff), and re-arms. `_scheduler/jobs`/`_scheduler/docs` introspection. *Gate: a continuous job keeps a
-    graph synced on a schedule (Bun test drives the tick manually + a real-timer test), no SQL instance
-    busy-locked; overlapping ticks never double-run a job.*
+  - ✅ **5c-core — the runtime-agnostic scheduler runner + `replication_job` + introspection.** `replication_job`
+    (+ a registry-side checkpoint) in `ReplicatorStore` with the claim/lease + backoff methods (`claimDue`
+    oldest-first up to `max_jobs`; the lease is what stops overlapping ticks double-running a job;
+    `recordResult`/`recordFailure` release it, failure → `crashing` + exponential backoff), extended through the
+    seam + `storeRegistry` + the CF registry DO/forwarder (plain-data RPC). `src/scheduler.ts`
+    `runDueReplications(deps)`: claim due jobs and run each CONCURRENTLY as a bounded PACED pull
+    (`runReplication` with `maxBatches` per wake, §5a), reschedule (continuous → poll after interval; large →
+    drain across ticks while `more`; one-shot → completed), release the lease. Peers built per ref (URL →
+    `remotePeer` over the allowlisted http; local id → `localPeer` over the manager, a DO over RPC on CF — so
+    the DO only answers). `_scheduler/jobs`/`_scheduler/docs` routes + OpenAPI. Gate MET
+    (`test/scheduler.test.ts`, manual-tick): continuous sync + delta; paced 3-tick drain; one-shot completes;
+    the lease makes two racing ticks run a job exactly once; failing → crashing/backoff; introspection; the
+    shared `replicatorContract` hits `_scheduler/*` over real workerd too.
+  - **5c-drivers — the three per-runtime tickers.** The Bun `startPollingScheduler` `setInterval` in
+    `startServer`; the CF Worker Cron Trigger (`[triggers] crons` + a `scheduled()` handler calling
+    `runDueReplications`); the browser Service-Worker timer + the SW's own registry backend (closing the last
+    501). *Gate: a real-timer end-to-end continuous sync on Bun; the CF `scheduled()` path exercised over
+    workerd (`--test-scheduled`); the browser edge no longer 501s.*
   - **5d — checkpoint session history (§9·2) + reconciliation.** Extend the checkpoint with CouchDB's
     session-record `history` array; decide the scheduled-job checkpoint home (registry vs per-graph); surface it
     in `_scheduler/docs`. *Gate: a job's checkpoint carries CouchDB-shaped session history, visible in the UI.*
