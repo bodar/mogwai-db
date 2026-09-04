@@ -222,6 +222,19 @@ Each phase independently valuable, lands green before the next (the parent plan'
   match set (idempotent); synthesized edges marked weak (`~`); the delete path consults weak/strong
   (cascade vs resurrect). *Gate: a placement grafts the subgraph idempotently (no duplicates on re-run,
   self-heals a skipped pass); a deleted endpoint cascades its weak mount instead of resurrecting.*
+  - ✅ **F2a — the `placement` config column + threading.** `replication_config.placement TEXT` (idempotent
+    `ensureColumn` migration); threaded through `ReplicationConfig`/`parseConfig`/`ReplicateOptions`.
+  - ✅ **F2b — placement execution over the match set.** The source hands the replicator its CURRENT match
+    set as gids (`matchSetGids` — the whole set, not the delta, so a crashed pass self-heals); the target
+    resolves them to local rowids and runs the captured `placement` with them bound as `matchedIds`
+    (`runPlacement`; `V($ids)` → one json_each). `Peer`/`GraphManager.matchSet`/`placement` across all
+    runtimes; `runReplication` runs it once after the drain; `_match_set`/`_placement` HTTP endpoints for
+    the remote pull/push hop. **The contract (settled with Dan): a full Gremlin traversal with a VISIBLE
+    `matchedIds` bind, not a `call()` service.** The idempotent idiom is a `where(not(<edge>))`-guarded
+    `addE` — `mergeE` over an incoming vertex stream is NOT lowered yet (a real gap; `write.ts` declines
+    per-traverser endpoint resolution). Verified end to end (local + remote pull/push).
+  - **F2c — weak references.** *(next)* the placement's synthesized edges get a hidden `~` marker; the
+    delete path's referenced-check (`applyDeletes`) excludes weak edges (they cascade, don't resurrect, §5).
 - **F3 — undo.** Dedicated-target undo (destroy / delete-by-provenance) first; the shared-target
   before-image journal when shared-target replication lands.
 
