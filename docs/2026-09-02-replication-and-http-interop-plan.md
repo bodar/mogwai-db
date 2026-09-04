@@ -654,11 +654,19 @@ Each phase is independently valuable and lands green before the next.
     MET in a REAL browser (`test/browser/replicator.test.ts`): registry CRUD to the persistent Worker,
     `POST /_scheduler/run` on a local→local job, `_scheduler/docs`. (`runTick` remote-peer http is deny-all
     until 5c-browser-2.)
-  - **5c-browser-2 — config-to-SW + the auto-ticker (remaining).** Send the `MogwaiConfig` (host allowlist)
-    to the SW so `runTick`'s remote peers use an allowlisted http (the "pull from Cloudflare into a local tab"
-    case); and a Web-Lock-elected tab `setInterval` that periodically `POST /_scheduler/run` (the browser's
-    background scheduler — one elected tab ticks, waking the SW). *Gate: an elected tab keeps a local graph
-    synced from a remote peer on a timer.*
+  - ✅ **5c-browser-2 — config-to-SW + the auto-ticker.** `installWorkerFactory` sends a `mogwai-config`
+    bootstrap to the SW; the SW reads its `httpAllowlist` into a mutable list its scheduler-http closure reads
+    at call time (empty ⇒ deny-all) — so `runTick`'s remote peers use an allowlisted `fetch` (the "pull from
+    Cloudflare into this tab" case). A Web-Lock-elected tab (`mogwai-scheduler`) `POST`s `/_scheduler/run`
+    every `schedulerIntervalMs` (opt-in, matching Bun), waking the SW; one tab ticks, the rest fail over. Gate
+    MET in a REAL browser (`test/browser/scheduler-ticker.test.ts`): an elected tab auto-syncs a local→local
+    job on the timer; a remote job to a non-allowlisted host is refused with the "not allowlisted" message
+    naming the configured host (proving the config reached the SW).
+
+  **Phase 5 is COMPLETE across all three runtimes** (Bun, Cloudflare, browser): config CRUD + a
+  worker-residency scheduler (CF cron / Bun interval / browser Web-Lock-elected tab ticker over ONE shared
+  `runDueReplications`) + the OpenAPI-generated UI, with pacing (paged `_changes` + bounded per-wake work) so
+  no single-threaded SQL instance is ever busy-locked.
   - ✅ **5d — job session history + registry column migration.** Each job keeps a bounded `history` (newest
     first, capped 20 — CouchDB's `_scheduler` `history`, §9·2): `recordResult`/`recordFailure` prepend a
     `{time, info}` record (run stats or error), surfaced via `_scheduler/jobs`/`_scheduler/docs`. The
