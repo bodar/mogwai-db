@@ -591,6 +591,15 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
 - **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the non-null side;
   over an all-null input they reduce to null and ONE null traverser is emitted. Nulls sort LAST, with an
   explicit `IS NULL` term (SQLite orders NULLs first ascending).
+- **EVERY global reducer emits its reduced value over a NON-EMPTY input and NOTHING over an EMPTY one, and
+  a non-empty all-null input reduces to null.** `Sum`/`Mean`/`Min`/`MaxGlobalStep` all override
+  `processAllStarts` with `if (starts.hasNext())` and their `generateSeedFromStarts` reduces an all-null
+  stream to null. min/max realise this with their argmax window (zero rows for empty input by
+  construction); sum/mean use SQL aggregation, which collapses to ONE row for BOTH empty and non-empty
+  all-null, so a `count(*)` HAVING guard (`nonEmptyReducer`) distinguishes them and `productiveNull`
+  carries the surviving null out. `count(*)` (rows, not bulk) IS the `starts.hasNext()` test.
+- **A scalar-shape NULL row frames as null under EVERY tag, never coerced (`frameValue` short-circuit,
+  §12).** Distinct from the reducer rule above: this is the wire framer, that is the row's *presence*.
 - **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`); `containsKey` is presence (an
   `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY RESULT, not a decline
   (`Select.feature:578-596`).
