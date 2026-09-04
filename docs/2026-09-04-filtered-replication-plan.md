@@ -200,6 +200,20 @@ Each phase independently valuable, lands green before the next (the parent plan'
   (§4); `runReplication` passes the filter through; save trial-runs the filter (must yield vertices).
   *Gate: a filtered pull yields a valid edge-closed subgraph; deletes still propagate; a non-vertex filter
   is rejected at save.*
+  - ✅ **F1a — the source-side filtered feed.** `Executor.filterVertexIds(gremlin)` runs the captured
+    selector and returns the matched vertices' external ids, failing closed unless it is a READ yielding a
+    VERTEX stream (the one check that is both the run-time contract and the save-time validation, §2).
+    `changesFeed(store, since, limit, match?)` closes the 1-hop subgraph (matched vertices + incident edges
+    + boundary endpoints) via a `matched`/`incident`/`closure` CTE seeded by one `json_each` bind (external
+    ids resolved to rowids, type-safe by `COALESCE`'s NONE affinity), while ALL tombstones still ship (§4).
+    The `filter` threads through the `changes` seam on every runtime and through `Peer.changes`; `_changes`
+    accepts it as a GET `?filter=` OR a POST body (a captured traversal is arbitrary-length, so `remotePeer`
+    POSTs it), a non-vertex filter failing closed as a 400. `test/replicate-filter.test.ts`.
+  - **F1b — wire the config `filter` into `runReplication`.** *(next)* the paged pass reads
+    `replication_config.filter` and passes it to `source.changes`, so a configured/scheduled replication
+    pulls only the subgraph.
+  - **F1c — save-time validation.** *(next)* `handleReplicator` trial-runs the filter (bounded) against the
+    source peer and rejects a non-vertex/erroring one at save.
 - **F2 — placement + weak references.** The optional `placement` traversal, run each pass over the current
   match set (idempotent); synthesized edges marked weak (`~`); the delete path consults weak/strong
   (cascade vs resurrect). *Gate: a placement grafts the subgraph idempotently (no duplicates on re-run,
