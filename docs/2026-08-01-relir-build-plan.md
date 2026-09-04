@@ -644,6 +644,14 @@ RECONSTRUCT what nothing can observe.
   is legal only where the carried channels survive a merge (`CHANNEL_GROUP_POLICY`) AND the suffix
   reads the multiplicity (`ir/bulk.ts`); a BODY's end is not the wire, and `bulked` goes STALE at a
   barrier that drops the channel.
+- **A NULL frames as null under EVERY static tag — the tag describes the STREAM, not the row.**
+  `frameValue` short-circuits a null value to the untyped-null serialization before its tag switch;
+  coercing it (`Number(null)` → 0, `Boolean(null)` → false, `BigInt(null)` throws) turns a genuine
+  null traverser into a plausible value with the right arity — the class no ladder level sees. Two
+  witnesses: `asNumber(GType.INT)` over a null (`AsNumberStep.map` returns null before the token
+  branch) and an all-null `min`/`max` (one null traverser is emitted). A typed-null and an untyped-null
+  decode to the same language null in every GLV (a Band-3 tag distinction), so the untyped null is the
+  observationally-correct framing and needs no per-tag null encoding.
 
 **Order and determinism.** Deterministic, not merely ordered — `ROW_NUMBER() OVER (ORDER BY encounter,
 id)` needs the tie-break, and the tie-break is the caller's argument. Mint the emission order ONCE over
