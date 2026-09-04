@@ -644,9 +644,21 @@ Each phase is independently valuable and lands green before the next.
     real-timer test (a `setInterval` drives a continuous sync + delta, stops cleanly); the cross-runtime
     `schedulerContract` (`POST /_scheduler/run` on a local→local job) over Bun / WASM leaf / real workerd —
     the last exercising claimDue/recordResult/checkpoint + the local-peer DO path across the boundary.
-  - **5c-browser — the Service-Worker driver + a persistent SW registry (remaining).** A WASM registry in the
-    SW + `runTick` + a timer, closing the browser edge's 501; Playwright coverage. The WASM-leaf registry +
-    scheduler are ALREADY proven by the bun-wasm contract, so this is browser plumbing over proven pieces.
+  - ✅ **5c-browser-1 — the persistent browser registry Worker + SW scheduler.** The SW can't hold OPFS or
+    spawn a Worker, so the singleton registry lives in its OWN dedicated Worker over a persistent opfs-sahpool
+    DB (`.mogwai/_replicator`) — the control-plane twin of a graph Worker: `ReplicatorRegistryHost` +
+    `registry-worker.ts`; WorkerFactory `openRegistry()` with a `mogwai-registry` Web Lock (leadership +
+    failover); `FactoryStubSource.openRegistry()` + `StubReplicatorRegistry` (the seam over the stub,
+    retry-once-on-failover). The SW wires the registry + `runTick` into makeRouter and intercepts
+    `/_replicator` + `/_scheduler`; the scheduler runs at the SW edge as a client of the graph Workers. Gate
+    MET in a REAL browser (`test/browser/replicator.test.ts`): registry CRUD to the persistent Worker,
+    `POST /_scheduler/run` on a local→local job, `_scheduler/docs`. (`runTick` remote-peer http is deny-all
+    until 5c-browser-2.)
+  - **5c-browser-2 — config-to-SW + the auto-ticker (remaining).** Send the `MogwaiConfig` (host allowlist)
+    to the SW so `runTick`'s remote peers use an allowlisted http (the "pull from Cloudflare into a local tab"
+    case); and a Web-Lock-elected tab `setInterval` that periodically `POST /_scheduler/run` (the browser's
+    background scheduler — one elected tab ticks, waking the SW). *Gate: an elected tab keeps a local graph
+    synced from a remote peer on a timer.*
   - ✅ **5d — job session history + registry column migration.** Each job keeps a bounded `history` (newest
     first, capped 20 — CouchDB's `_scheduler` `history`, §9·2): `recordResult`/`recordFailure` prepend a
     `{time, info}` record (run stats or error), surfaced via `_scheduler/jobs`/`_scheduler/docs`. The
