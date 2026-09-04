@@ -634,11 +634,19 @@ Each phase is independently valuable and lands green before the next.
     (`test/scheduler.test.ts`, manual-tick): continuous sync + delta; paced 3-tick drain; one-shot completes;
     the lease makes two racing ticks run a job exactly once; failing → crashing/backoff; introspection; the
     shared `replicatorContract` hits `_scheduler/*` over real workerd too.
-  - **5c-drivers — the three per-runtime tickers.** The Bun `startPollingScheduler` `setInterval` in
-    `startServer`; the CF Worker Cron Trigger (`[triggers] crons` + a `scheduled()` handler calling
-    `runDueReplications`); the browser Service-Worker timer + the SW's own registry backend (closing the last
-    501). *Gate: a real-timer end-to-end continuous sync on Bun; the CF `scheduled()` path exercised over
-    workerd (`--test-scheduled`); the browser edge no longer 501s.*
+  - ✅ **5c-drivers — the Bun + CF tickers + a uniform `POST /_scheduler/run` trigger.** An injected `runTick`
+    (application `runTick?` dep) backs `POST /_scheduler/run` — one tick now, the uniform over-HTTP way to
+    drive the worker-residency runner (and what lets the shared contract exercise the whole scheduler on Bun,
+    the WASM leaf, AND real workerd through the existing boots, no extra wrangler boot). Bun: `startServer`
+    starts a background `startPollingScheduler` when `schedulerIntervalMs > 0` (new config field), `server.stop`
+    wrapped to clear the timer. CF: a `scheduled()` Cron Trigger handler (`[triggers] crons` = every minute)
+    runs due jobs at worker residency — a Worker cron, NOT a DO alarm. Gate MET: `test/scheduler.test.ts`
+    real-timer test (a `setInterval` drives a continuous sync + delta, stops cleanly); the cross-runtime
+    `schedulerContract` (`POST /_scheduler/run` on a local→local job) over Bun / WASM leaf / real workerd —
+    the last exercising claimDue/recordResult/checkpoint + the local-peer DO path across the boundary.
+  - **5c-browser — the Service-Worker driver + a persistent SW registry (remaining).** A WASM registry in the
+    SW + `runTick` + a timer, closing the browser edge's 501; Playwright coverage. The WASM-leaf registry +
+    scheduler are ALREADY proven by the bun-wasm contract, so this is browser plumbing over proven pieces.
   - **5d — checkpoint session history (§9·2) + reconciliation.** Extend the checkpoint with CouchDB's
     session-record `history` array; decide the scheduled-job checkpoint home (registry vs per-graph); surface it
     in `_scheduler/docs`. *Gate: a job's checkpoint carries CouchDB-shaped session history, visible in the UI.*
