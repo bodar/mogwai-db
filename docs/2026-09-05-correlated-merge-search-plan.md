@@ -15,11 +15,15 @@ stored property, compared by `typedValueEq` (`predicate.ts` — `Compare.eq`, nu
 same-tag). A miss creates one vertex per DISTINCT computed map (`Map.equals`, keyed by a JSON tuple),
 written from the carrier columns; `crossed(correlate=true)` carries the found/created id back per driver.
 An unproductive by-body DROPS its key (`ProjectStep.ifProductive`), never a raise — a bare `project`
-always emits a map, so increment-1 has no 0-result guard. **Deferred (clean declines, correct until
-built):** an `option()` arm or `property()` tail OVER a computed search; the map LITERAL `[k: __.trav]`
-(candidate-rooted `P.eq`, stays declined by design); a non-`project` map-producing traversal (needs the
-general map-valued-driver substrate). Tests: `test/L4-addendum/merge-search-computed.feature`,
-`test/merge-search-computed.test.ts`. Two premise-corrections the build confirmed against the reference:
+always emits a map, so increment-1 has no 0-result guard. **Composing steps now land too** (combinatorial
+completeness): a `property()` TAIL over a computed search (an ordinary AddPropertyStep over the merge
+output), CONSTANT `option(onMatch)` / `option(onCreate)` arms (props + labels, over the matched /
+created vertices), multi-key projects, and the `by('key')` string shorthand. **Deferred (clean declines,
+correct until built):** a RUNTIME `option()` arm value (resolves at the DRIVER — over a multi-driver
+computed search where drivers match different vertices, needs a per-driver ord-correlated write, the next
+increment); the map LITERAL `[k: __.trav]` (candidate-rooted `P.eq`, stays declined by design); a
+non-`project` map-producing traversal (needs the general map-valued-driver substrate). Tests:
+`test/L4-addendum/merge-search-computed.feature`, `test/merge-search-computed.test.ts`. Two premise-corrections the build confirmed against the reference:
 `key` on `hasPropertyPredicate` is a compile-time string not an `Expr` (so **computed keys, increment 3,
 are a real signature gap** — not the free slot §design step 2 implied); and a bare `make.join`'s declared
 `type` maps POSITIONALLY onto `left.cols ++ right.cols`, not by name.

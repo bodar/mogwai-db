@@ -111,3 +111,31 @@ Feature: mogwai addendum — a CORRELATED mergeV search (a computed criterion pe
       | h |
     And the graph should return 10 for count of "g.V()"
     And the graph should return 4 for count of "g.V().has(\"handle\").has(\"kind\",\"h\")"
+
+  # A CONSTANT option(onMatch) writes onto the matched vertex; option(onCreate) onto the created one
+  # (with its label). A RUNTIME arm value over a computed search declines (a separate increment).
+  @gap:merge-search-computed
+  Scenario: g_V_hasXname_markoX_mergeVXproject_name_by_valuesXnameXX_optionXonMatch_seen_yesX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").mergeV(__.project("name").by(__.values("name"))).option(Merge.onMatch, ["seen":"yes"]).values("seen")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | yes |
+    And the graph should return 6 for count of "g.V()"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"seen\",\"yes\")"
+
+  @gap:merge-search-computed
+  Scenario: g_V_hasXname_markoX_mergeVXproject_handle_by_constantXnewhXX_optionXonCreate_label_statusX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").mergeV(__.project("handle").by(__.constant("newh"))).option(Merge.onCreate, [(T.label):"account","status":"fresh"]).values("handle")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | newh |
+    And the graph should return 7 for count of "g.V()"
+    And the graph should return 1 for count of "g.V().hasLabel(\"account\").has(\"handle\",\"newh\").has(\"status\",\"fresh\")"

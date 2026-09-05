@@ -2202,15 +2202,30 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * The first increment covers the SEARCH map with no `option()` arms and no `property()` tail — those
  * over a computed search decline (a clean deferral, never a wrong answer), handled in the constant path.
  */
-function mergeVComputed(input: Rel, match: MergeSpec, propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
+function mergeVComputed(
+  input: Rel, match: MergeSpec, onCreate: MergeSpec | null, onMatch: MergeSpec | null,
+  propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter,
+): Effects | null {
   const cKeys = Object.keys(match.computed);
   const searchId = idOrNull(match.id);
   if (searchId === false) return null;
-  const labels = (match.label as string[] | null) ?? [];
   // The `property()` TAIL is an ordinary AddPropertyStep over the merge OUTPUT (matched and created
   // alike), exactly as it is on a constant merge — same parse, run below over `emitted`.
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!tailWrites) return null;
+  // The `option()` arms — CONSTANT only. An `onMatch` writes over the MATCHED vertices, an `onCreate`
+  // over the CREATED ones (its label/props join the creation). A RUNTIME arm value resolves at the
+  // DRIVER (`materializeMap(traverser)`) and declines here: over a multi-driver computed search the
+  // matched vertices differ per driver, so it needs an ord-correlated write, a separate increment.
+  const appended = [...new Set(((onMatch?.label as string[] | null) ?? []))];
+  try { for (const name of appended) validateLabel(name); } catch { return null; }
+  const matchWrites = mergeWrites(onMatch, 'vertex', child);
+  const createExtra = onCreate ? mergeWrites(onCreate, 'vertex', child) : [];
+  if (!matchWrites || !createExtra) return null;
+  if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
+  // The created vertex's LABEL is `onCreate`'s where it gives one, else the merge argument's (a `project`
+  // gives none). A runtime label declines.
+  const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
@@ -2288,6 +2303,10 @@ function mergeVComputed(input: Rel, match: MergeSpec, propertySteps: readonly IR
     id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
   }), true);
+  // `onMatch` over the MATCHED vertices — the append-only labels first (its table), then the constant
+  // property writes. Empty on the create path, so it writes nothing there.
+  if (appended.length) bindLabels(idsOf(matched, fresh), appended, bind, fresh);
+  for (const write of matchWrites) if (!propertyStatements('vertex', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
   // the carrier when `matched` is empty).
@@ -2339,6 +2358,9 @@ function mergeVComputed(input: Rel, match: MergeSpec, propertySteps: readonly IR
     });
     bind(insert({ target, cols: ['node', 'key', 'value', 'vtype'], source: rows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
   }
+  // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the
+  // creation above). Additional to the merge argument's computed values, which are already written.
+  for (const write of createExtra) if (!propertyStatements('vertex', created, write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's tuple KEY to the created tuple's, so the
   // one vertex made for a repeated map is carried by every driver that asked for it (`crossed`'s equi-join).
@@ -2356,6 +2378,10 @@ function mergeVComputed(input: Rel, match: MergeSpec, propertySteps: readonly IR
   // union, snapshotted where there is a tail (a write needs a stable owner set), like the constant path.
   const emitted = tailWrites.length ? bind(merged, true) : merged;
   for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // Touch the rev of the MATCHED (existing) vertices whenever onMatch, its labels or the tail mutated
+  // them (§5·1) — created vertices are born dirty, so only the matched side needs it, and an empty
+  // `matched` is a no-op. Placed after the writes it certifies.
+  if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', idsOf(matched, fresh), fresh));
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
 }
 
@@ -2385,12 +2411,12 @@ export function elementMergeV(
   // does the SEARCH map alone: an `option()` arm or a `property()` tail over a computed search declines
   // here (a clean deferral, never a wrong answer) rather than being half-applied.
   if (Object.keys(match.computed).length) {
-    // The SEARCH map correlated per driver. A `property()` TAIL composes (it is an ordinary
-    // AddPropertyStep rooted at the merge OUTPUT, no driver dependence). An `option()` arm still declines
-    // — an onMatch/onCreate RUNTIME value over a MULTI-driver computed search needs the per-driver
-    // (ord-correlated) write `mergeArmValueWrite`'s rooted scalar cannot give, a separate increment.
-    if (options.length || onCreate || onMatch) return null;
-    return mergeVComputed(input, match, propertySteps, ordered, child, fresh);
+    // The SEARCH map correlated per driver. A `property()` TAIL and CONSTANT `option(onMatch/onCreate)`
+    // arms compose (all rooted at the merge OUTPUT, no driver dependence). A RUNTIME arm value declines
+    // inside `mergeVComputed` — it resolves at the DRIVER and, over a MULTI-driver computed search where
+    // drivers match DIFFERENT vertices, needs the per-driver (ord-correlated) write a rooted scalar
+    // cannot give — a separate increment.
+    return mergeVComputed(input, match, onCreate, onMatch, propertySteps, ordered, child, fresh);
   }
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's

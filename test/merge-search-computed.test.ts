@@ -121,4 +121,32 @@ describe('mergeV(__.project(k).by(body)) — correlated search', () => {
     expect(out).toEqual(['marko']);
     expect(await run(s, 'g.V().count()')).toEqual([6]);
   });
+
+  test('option(onMatch, [const]) — writes onto the MATCHED vertex', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).option(Merge.onMatch, ['seen':'yes']).values('seen')");
+    expect(out).toEqual(['yes']);
+    expect(await run(s, "g.V().has('name','marko').has('seen','yes').count()")).toEqual([1]);
+    expect(await run(s, 'g.V().count()')).toEqual([6]);
+  });
+
+  test('option(onCreate, [const + T.label]) — writes onto the CREATED vertex with its label', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('handle').by(__.constant('newh'))).option(Merge.onCreate, [(T.label):'account','status':'fresh']).values('handle')");
+    expect(out).toEqual(['newh']);
+    expect(await run(s, "g.V().hasLabel('account').has('handle','newh').has('status','fresh').count()")).toEqual([1]);
+    expect(await run(s, 'g.V().count()')).toEqual([7]);
+  });
+
+  test('a RUNTIME arm value over a computed search declines (fail closed, no wrong answer)', async () => {
+    const s = store(modern);
+    await expect(run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).option(Merge.onMatch, ['x': __.values('name')])")).rejects.toThrow();
+  });
+
+  test('a tail on a MATCHED vertex is FTS-indexed (the matched side is marked dirty)', async () => {
+    const s = store(modern);
+    await run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).property('note','findable words')");
+    const fts = s.query("SELECT owner FROM property_fts WHERE pk='note'", []) as { owner: number }[];
+    expect(fts.length).toBe(1);
+  });
 });
