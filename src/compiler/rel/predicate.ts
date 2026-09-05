@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, type Minter } from './build.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -34,6 +34,9 @@ const isPred = (value: unknown): value is Pred =>
   value !== null && typeof value === 'object' && 'op' in value && Array.isArray((value as Pred).operands);
 
 const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+/** A SQL expression that is always FALSE but does not constant-fold, so a CASE `else` (or a
+ *  comparability mismatch) stays a real per-row branch a later pass will not drop. */
+const compilerFalse: Expr = binary('!=', { kind: 'call', fn: 'json_object', args: [] }, { kind: 'call', fn: 'json_object', args: [] });
 /** Gremlin predicates are two-valued: negating SQL NULL is TRUE, not NULL. */
 const negated = (inner: Expr): Expr => binary('is not', inner, compilerInt(1));
 /** SQLite has no boolean literal; a degenerate set folds to a constant comparison rather than to a
@@ -191,9 +194,6 @@ const ordered = (
       : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
-  const compilerFalse = binary('!=',
-    { kind: 'call', fn: 'json_object', args: [] },
-    { kind: 'call', fn: 'json_object', args: [] });
   if (type.kind === 'perRow') {
     return numericBound
       ? { kind: 'case', whens: [
@@ -248,6 +248,50 @@ export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
  *  subquery where the vtype is an arbitrary expression, and two spellings of the same cast policy is
  *  how one of them silently stops matching the other. */
 export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(col(rel, vtype));
+
+/**
+ * COMPARABILITY over two PER-ROW stored scalars — the faithful lowering of an ordering theta
+ * `where('a', P.gt('b'))` (and lt/gte/lte) between two VALUE aliases.
+ *
+ * `Compare.gt/gte/lt/lte` route through `GremlinValueComparator.COMPARABILITY`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java:63-116`
+ * → `.../util/GremlinValueComparator.java:97-153`), NOT the cross-type total order ORDERABILITY that
+ * `order(Scope.local)` uses: an ordering op is defined ONLY within one `Type` bucket (`comparable()` =
+ * `ft == st`, `GremlinValueComparator.java:314-363`) and is simply FALSE across buckets (the guard
+ * returns false before `compare` would throw). So this is a same-bucket-else-false CASE, not a sort
+ * key — the shape `ordered()` already builds for the one-static-side case, one axis over (both per-row).
+ *
+ * The reachable scalar buckets for a value alias are Number / Date(datetime) / Duration / String /
+ * Boolean / UUID; the tag→bucket mapping and the uuid-as-lexical compare mirror `orderability.ts`'s
+ * `kindOf`/`cmpNatural` so the ordering and orderability comparators agree on every bucket. Within
+ * Number (one bucket across int/real, `GremlinValueComparator.Type.Number`) each side is cast by its OWN
+ * storage class (`storedCompareOn`) and SQLite's exact int/real comparison decides — NumberHelper's
+ * numeric equivalence. Callers guarantee a runtime `t` tag on both sides (an `unknown`-typed alias
+ * declines upstream), so the `else` fires only for a genuine cross-bucket pair.
+ */
+export const comparableTheta = (
+  op: Extract<Expr, { kind: 'binary' }>['op'], valA: Expr, typeA: Expr, valB: Expr, typeB: Expr,
+): Expr => {
+  const inList = (t: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: t, values: names.map(compilerText) });
+  const bothIn = (names: readonly string[]): Expr => and(inList(typeA, names), inList(typeB, names));
+  const bothEq = (name: string): Expr => and(binary('=', typeA, compilerText(name)), binary('=', typeB, compilerText(name)));
+  const asInt = (v: Expr): Expr => ({ kind: 'cast', arg: v, to: 'int' });
+  return {
+    kind: 'case',
+    whens: [
+      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare.
+      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
+      // Date (epoch) and Duration (total nanos) each ride as an integer → chronological order.
+      [bothEq('datetime'), binary(op, asInt(valA), asInt(valB))],
+      [bothEq('duration'), binary(op, asInt(valA), asInt(valB))],
+      // String/char (lexical), Boolean (0/1) and UUID (lexical, per `orderability.ts`) compare the value.
+      [bothIn(['string', 'char']), binary(op, valA, valB)],
+      [bothEq('boolean'), binary(op, valA, valB)],
+      [bothEq('uuid'), binary(op, valA, valB)],
+    ],
+    else: compilerFalse,
+  };
+};
 
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a

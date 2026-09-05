@@ -26,7 +26,7 @@ import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
-import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { comparableTheta, CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
@@ -35,7 +35,7 @@ import {
     typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
-import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
+import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
@@ -4593,14 +4593,27 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(and(prodA, prodB), cmp) });
       }
       // A SCALAR-alias theta (`where('b', P.eq('c'))` over two VALUE aliases, no `by()`) — compare the
-      // STORED values directly. `eq`/`neq` only (identity): TinkerPop's `P.eq` is value+type equality,
-      // which SQLite's `=` over two stored scalars matches (an int 29 and a text "marko" are unequal, as
-      // are two different types that print alike). Ordering over two arbitrary stored scalars — where the
-      // type space is not known to be one — stays a later phase.
+      // STORED values. `eq`/`neq` is value+type equality (`COMPARABILITY.equals`): SQLite's `=` over two
+      // stored scalars matches it (an int 29 and a text "marko" are unequal, as are two types that print
+      // alike). An ORDERING op (gt/lt/gte/lte) is `COMPARABILITY.compare` — comparable ONLY within one
+      // `Type` bucket, else the predicate is FALSE (never the cross-type total order ORDERABILITY, which
+      // `order(Scope.local)` uses); `comparableTheta` builds that per-row (Compare.java:63-116 →
+      // GremlinValueComparator.comparable).
       if (projA && projB && projA.read.kind === 'value' && projB.read.kind === 'value' && !step.modulators?.length) {
-        if (pred.op !== 'eq' && pred.op !== 'neq') return 'decline';
-        const same = eq(aliasValueAt(col(rel.id, projA.entry.col), 'last'), aliasValueAt(col(rel.id, projB.entry.col), 'last'));
-        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
+        const [valA, valB] = [aliasValueAt(col(rel.id, projA.entry.col), 'last'), aliasValueAt(col(rel.id, projB.entry.col), 'last')];
+        if (pred.op === 'eq' || pred.op === 'neq') {
+          const same = eq(valA, valB);
+          return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
+        }
+        const cmpOp = ALIAS_CMP[pred.op];
+        if (!cmpOp) return 'decline';
+        // `comparableTheta` reads each side's runtime `t` tag to pick the bucket; an UNKNOWN-typed alias
+        // writes NO tag (`history.ts` `objectEntry`), so its bucket cannot be told from a genuine
+        // cross-bucket mismatch — DECLINE that tail (fail-closed) rather than answer a real comparison
+        // false via the CASE `else`. A `static`/`perRow` alias always carries the tag.
+        if (projA.read.type.kind === 'unknown' || projB.read.type.kind === 'unknown') return 'decline';
+        const [typeA, typeB] = [aliasTypeAt(col(rel.id, projA.entry.col), 'last'), aliasTypeAt(col(rel.id, projB.entry.col), 'last')];
+        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: comparableTheta(cmpOp, valA, typeA, valB, typeB) });
       }
     }
   }
