@@ -79,3 +79,35 @@ Feature: mogwai addendum — a CORRELATED mergeV search (a computed criterion pe
       | same |
     And the graph should return 7 for count of "g.V()"
     And the graph should return 1 for count of "g.V().has(\"tag\",\"same\")"
+
+  # A MULTI-KEY project narrows by every criterion; a miss creates a vertex carrying them all.
+  @gap:merge-search-computed
+  Scenario: g_V_hasXname_markoX_mergeVXproject_a_b_by_constantsX_multi_key
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").mergeV(__.project("a","b").by(__.constant("x")).by(__.constant("y"))).values("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | x |
+    And the graph should return 7 for count of "g.V()"
+    And the graph should return 1 for count of "g.V().has(\"a\",\"x\").has(\"b\",\"y\")"
+
+  # A property() TAIL after a computed merge is an ordinary AddPropertyStep over the merge OUTPUT —
+  # matched and created alike — and composes with the correlated search.
+  @gap:merge-search-computed
+  Scenario: g_V_hasLabelXpersonX_mergeVXproject_handle_by_valuesXnameXX_propertyXkind_hX_tail
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").mergeV(__.project("handle").by(__.values("name"))).property("kind","h").values("kind")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | h |
+      | h |
+      | h |
+      | h |
+    And the graph should return 10 for count of "g.V()"
+    And the graph should return 4 for count of "g.V().has(\"handle\").has(\"kind\",\"h\")"

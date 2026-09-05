@@ -2202,16 +2202,20 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * The first increment covers the SEARCH map with no `option()` arms and no `property()` tail — those
  * over a computed search decline (a clean deferral, never a wrong answer), handled in the constant path.
  */
-function mergeVComputed(input: Rel, match: MergeSpec, ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
+function mergeVComputed(input: Rel, match: MergeSpec, propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
   const cKeys = Object.keys(match.computed);
   const searchId = idOrNull(match.id);
   if (searchId === false) return null;
   const labels = (match.label as string[] | null) ?? [];
+  // The `property()` TAIL is an ordinary AddPropertyStep over the merge OUTPUT (matched and created
+  // alike), exactly as it is on a constant merge — same parse, run below over `emitted`.
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
+  if (!tailWrites) return null;
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
-  const { bindings, bind } = effectScope(fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carriedCh) : input;
   const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
 
@@ -2347,7 +2351,11 @@ function mergeVComputed(input: Rel, match: MergeSpec, ordered: boolean, child: C
   const createdFor = make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] });
 
-  const emitted = make.union({ id: fresh('u'), inputs: [matched, createdFor], all: true, channels: [], type: matched.type });
+  const merged = make.union({ id: fresh('u'), inputs: [matched, createdFor], all: true, channels: [], type: matched.type });
+  // The tail acts on whatever the merge EMITTED — matched and created alike — so it runs ONCE over the
+  // union, snapshotted where there is a tail (a write needs a stable owner set), like the constant path.
+  const emitted = tailWrites.length ? bind(merged, true) : merged;
+  for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
 }
 
@@ -2377,8 +2385,12 @@ export function elementMergeV(
   // does the SEARCH map alone: an `option()` arm or a `property()` tail over a computed search declines
   // here (a clean deferral, never a wrong answer) rather than being half-applied.
   if (Object.keys(match.computed).length) {
-    if (options.length || propertySteps.length || onCreate || onMatch) return null;
-    return mergeVComputed(input, match, ordered, child, fresh);
+    // The SEARCH map correlated per driver. A `property()` TAIL composes (it is an ordinary
+    // AddPropertyStep rooted at the merge OUTPUT, no driver dependence). An `option()` arm still declines
+    // — an onMatch/onCreate RUNTIME value over a MULTI-driver computed search needs the per-driver
+    // (ord-correlated) write `mergeArmValueWrite`'s rooted scalar cannot give, a separate increment.
+    if (options.length || onCreate || onMatch) return null;
+    return mergeVComputed(input, match, propertySteps, ordered, child, fresh);
   }
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's

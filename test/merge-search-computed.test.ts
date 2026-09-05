@@ -77,11 +77,48 @@ describe('mergeV(__.project(k).by(body)) — correlated search', () => {
     expect(await run(s, 'g.V().count()')).toEqual(before);
   });
 
+  test('TAIL over a MATCH — property() after the merge writes onto the found vertex', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).property('seen','yes').values('seen')");
+    expect(out).toEqual(['yes']);
+    expect(await run(s, "g.V().has('name','marko').has('seen','yes').count()")).toEqual([1]);
+    expect(await run(s, "g.V().has('seen','yes').count()")).toEqual([1]);
+  });
+
+  test('TAIL over a CREATE — property() after the merge writes onto each created vertex', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().hasLabel('person').mergeV(__.project('handle').by(__.values('name'))).property('kind','h').values('kind')");
+    expect(out).toEqual(['h', 'h', 'h', 'h']);
+    expect(await run(s, "g.V().has('handle').has('kind','h').count()")).toEqual([4]);
+  });
+
   test('DISTINCT create — two drivers with the SAME computed value share one created vertex', async () => {
     const s = store(modern);
     // Both persons compute handle='same' → one create, two traversers carry it.
     const out = await run(s, "g.V().hasLabel('person').limit(2).mergeV(__.project('handle').by(__.constant('same'))).values('handle')");
     expect(out).toEqual(['same', 'same']);
     expect(await run(s, "g.V().has('handle','same').count()")).toEqual([1]);
+  });
+
+  test('by("key") shorthand — a string by() is values("key")', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('name').by('name')).values('name')");
+    expect(out).toEqual(['marko']);
+    expect(await run(s, 'g.V().count()')).toEqual([6]);
+  });
+
+  test('MULTI-KEY — every computed criterion must hold (miss creates a vertex carrying all)', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('a','b').by(__.constant('x')).by(__.constant('y'))).values('a')");
+    expect(out).toEqual(['x']);
+    expect(await run(s, "g.V().has('a','x').has('b','y').count()")).toEqual([1]);
+    expect(await run(s, 'g.V().count()')).toEqual([7]);
+  });
+
+  test('MULTI-KEY match — an existing vertex satisfying all criteria is found, not duplicated', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().has('name','marko').mergeV(__.project('name','age').by('name').by('age')).values('name')");
+    expect(out).toEqual(['marko']);
+    expect(await run(s, 'g.V().count()')).toEqual([6]);
   });
 });
