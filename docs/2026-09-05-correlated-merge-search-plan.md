@@ -17,12 +17,15 @@ written from the carrier columns; `crossed(correlate=true)` carries the found/cr
 An unproductive by-body DROPS its key (`ProjectStep.ifProductive`), never a raise — a bare `project`
 always emits a map, so increment-1 has no 0-result guard. **Composing steps now land too** (combinatorial
 completeness): a `property()` TAIL over a computed search (an ordinary AddPropertyStep over the merge
-output), CONSTANT `option(onMatch)` / `option(onCreate)` arms (props + labels, over the matched /
-created vertices), multi-key projects, and the `by('key')` string shorthand. **Deferred (clean declines,
-correct until built):** a RUNTIME `option()` arm value (resolves at the DRIVER — over a multi-driver
-computed search where drivers match different vertices, needs a per-driver ord-correlated write, the next
-increment); the map LITERAL `[k: __.trav]` (candidate-rooted `P.eq`, stays declined by design); a
-non-`project` map-producing traversal (needs the general map-valued-driver substrate). Tests:
+output), `option(onMatch)` / `option(onCreate)` arms — CONSTANT (props + labels) and RUNTIME (a `[k:
+__.trav]` value), multi-key projects, and the `by('key')` string shorthand. The RUNTIME arm is the
+`armValueWriteCorrelated` primitive: the value resolves at the DRIVER (`child.scalar` over the incoming
+stream) and JOINS to the merged element by `ord`, so over a multi-driver search each element gets ITS OWN
+driver's value (verified: three persons each get their own age). It covers single/default (a `replace`);
+an explicit list/set arm cardinality declines (fail closed). This is the reusable per-driver correlated
+write mergeE-computed will share. **Deferred (clean declines, correct until built):** an explicit list/set
+runtime arm cardinality; the map LITERAL `[k: __.trav]` (candidate-rooted `P.eq`, stays declined by
+design); a non-`project` map-producing traversal (needs the general map-valued-driver substrate). Tests:
 `test/L4-addendum/merge-search-computed.feature`, `test/merge-search-computed.test.ts`. Two premise-corrections the build confirmed against the reference:
 `key` on `hasPropertyPredicate` is a compile-time string not an `Expr` (so **computed keys, increment 3,
 are a real signature gap** — not the free slot §design step 2 implied); and a bare `make.join`'s declared
@@ -120,15 +123,21 @@ endpoints):
 
 1. ✅ **LANDED — Computed VALUES via the map-producing traversal** — `mergeV(__.project(k).by(__.trav))`
    where values vary per driver (`mergeVComputed`). Keys/labels compile-time. The correlated-search core
-   is built (carrier + decorrelated has-join + create-per-distinct-map + `crossed(correlate=true)`). NOT
-   in this increment: `mergeV(__.select(dynMap))` — a runtime side-effect map needs the map-valued-driver
-   substrate `resolveMergeArg` flags as unbuilt (a `withSideEffect` CONSTANT map already worked); and
-   `option()`/`property()` over a computed search (decline). No 0-result guard was needed — a bare
-   `project` always emits a map (the whole-map raise is the general-traversal case, increment 4).
+   is built (carrier + decorrelated has-join + create-per-distinct-map + `crossed(correlate=true)`), and
+   ALL its composing steps landed too: the `property()` tail, the `option(onMatch/onCreate)` arms
+   (constant + RUNTIME via `armValueWriteCorrelated`), multi-key, `by('key')`. NOT in this increment:
+   `mergeV(__.select(dynMap))` — a runtime side-effect map needs the map-valued-driver substrate
+   `resolveMergeArg` flags as unbuilt (a `withSideEffect` CONSTANT map already worked); and an explicit
+   list/set RUNTIME arm cardinality (declines). No 0-result guard was needed — a bare `project` always
+   emits a map (the whole-map raise is the general-traversal case, increment 4).
 2. **`mergeE` computed values** — the same, over `edgeCriteria`/`pairedWith` (which already correlate).
-   The compounding move is to lift `mergeVComputed`'s carrier + `typedValueEq` join into a shared
-   correlated-search engine both hosts use; now that a third instance (mergeV-computed) is green beside
-   mergeV-constant and mergeE, that unification is the safe next step.
+   The compounding move is to lift `mergeVComputed`'s carrier + `typedValueEq` join AND
+   `armValueWriteCorrelated` into a shared correlated-search engine both hosts use. `armValueWriteCorrelated`
+   is already the shared per-driver arm-write; the remaining shared skeleton is match → onMatch → unmatched
+   → createFor → union → tail → crossed (currently duplicated in shape between `mergeVComputed` and
+   `elementMergeE`), with the create as a host hook (vertex/position vs edge/value). ⚠️ `elementMergeE`'s
+   edge-create + dual id-collision guards are subtle and corpus-critical — fold it in carefully, one green
+   step, guarded by its tests.
 3. **Computed KEYS / LABELS** — a correlated `key`/label `Expr`. ⚠️ Increment 1 confirmed this is a REAL
    signature gap: `hasPropertyPredicate`'s `key` is a compile-time `string` (`compilerText`), not an
    `Expr`. Needs a new seam (a correlated key/label into the property/label scan), not a free slot.

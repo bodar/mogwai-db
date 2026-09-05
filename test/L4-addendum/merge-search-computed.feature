@@ -139,3 +139,22 @@ Feature: mogwai addendum — a CORRELATED mergeV search (a computed criterion pe
       | newh |
     And the graph should return 7 for count of "g.V()"
     And the graph should return 1 for count of "g.V().hasLabel(\"account\").has(\"handle\",\"newh\").has(\"status\",\"fresh\")"
+
+  # A RUNTIME arm value resolves at the DRIVER and lands PER DRIVER on the vertex it matched — each
+  # person's matched vertex gets ITS OWN age under "echo", not one shared value.
+  @gap:merge-search-computed
+  Scenario: g_V_hasLabelXpersonX_mergeVXproject_name_by_valuesXnameXX_optionXonMatch_echo_valuesXageXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").mergeV(__.project("name").by(__.values("name"))).option(Merge.onMatch, ["echo": __.values("age")]).values("echo")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | d[29].i |
+      | d[27].i |
+      | d[32].i |
+      | d[35].i |
+    And the graph should return 6 for count of "g.V()"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"echo\",29)"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"peter\").has(\"echo\",35)"

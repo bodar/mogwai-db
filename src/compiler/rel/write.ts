@@ -874,6 +874,61 @@ function mergeArmValueWrite(
   return true;
 }
 
+/**
+ * A RUNTIME `onMatch`/`onCreate` value over a CORRELATED merge search — resolved at the DRIVER, written
+ * onto the PER-DRIVER merged element (`target` = `(ord, id)`).
+ *
+ * The difference from `mergeArmValueWrite` is the correlation: a correlated search's drivers match (or
+ * create) DIFFERENT elements, so the arm value cannot be one rooted scalar shared across them — it is
+ * resolved per driver (`child.scalar` over the incoming stream) and JOINED to the target by `ord`, so
+ * each merged element gets ITS OWN driver's value. A merge arm value is SINGLE per driver
+ * (`materializeMap` = `TraversalUtil.apply`.next()), so this covers single/default (a `replace`); an
+ * explicit `list`/`set` arm cardinality declines (fail closed — no corpus, and the set-dedup would need
+ * the per-owner form `runtimePropertyStatements` builds).
+ */
+function armValueWriteCorrelated(
+  target: Rel, incoming: Rel, hasOrd: boolean, write: PropertyRuntimeSet,
+  bind: Binder, fresh: Minter, child: ChildSeam, aliases: AliasMap,
+): boolean {
+  if (write.cardinality === 'list' || write.cardinality === 'set') return false;
+  const spec = PROPERTY_TABLE.vertex;
+  const key = propertyKeyExpr(write.key, write.keyName);
+  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: 'vertex', row: { rel: incoming, aliases } };
+  const produced = child.scalar(write.body, host);
+  if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return false;
+  // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
+  // unproductive driver is filtered out (the reference's 0-result skip), the same shape the carrier uses.
+  const valsAll = make.project({
+    id: fresh('av'), input: incoming, channels: [],
+    type: typeOf(...(hasOrd ? [meta('vord', 'int')] : []), meta('v', 'any', true), meta('vtype', 'text', true), meta('present', 'int', true)),
+    exprs: [...(hasOrd ? [['vord', col(incoming.id, ORD)] as const] : []), ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')], ['present', produced.present]],
+  });
+  const vals = make.filter({ id: fresh('af'), input: valsAll, channels: [], type: valsAll.type, pred: col(valsAll.id, 'present') });
+  const joined = make.join({
+    id: fresh('j'), left: target, right: vals, channels: [],
+    ...(hasOrd ? { join: 'inner' as const, on: eq(col(target.id, ORD), col(vals.id, 'vord')) } : { join: 'cross' as const }),
+    type: typeOf(...target.type.cols, ...vals.type.cols),
+  });
+  const paired = bind(make.project({
+    id: fresh('p'), input: joined, channels: [], type: typeOf(meta('id', 'int'), meta('v', 'any', true), meta('vtype', 'text', true)),
+    exprs: [['id', col(joined.id, 'id')], ['v', col(joined.id, 'v')], ['vtype', col(joined.id, 'vtype')]],
+  }), true);
+  const ids = idsOf(paired, fresh);
+  // REPLACE the key on the merged elements (single, declared or the element default) before the insert.
+  const g = write.cardinality === 'single' ? undefined : (owner: Expr): Expr => eq(cardinalityOf(owner, key, null, fresh), text('single'));
+  const stale = existingRows('vertex', ids, key, g, fresh);
+  bind(dropStaleIndex('vertex', stale.ids, fresh));
+  const t0 = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  bind(remove({ target: t0, channels: [], type: typeOf(), where: stale.pred(t0), returning: [] }));
+  const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const source = make.project({
+    id: fresh('p'), input: paired, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [[spec.owner, col(paired.id, 'id')], ['key', key], ['value', col(paired.id, 'v')], ['vtype', col(paired.id, 'vtype')]],
+  });
+  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
+  return true;
+}
+
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
  *  read the rows of the statement before it without the caller threading names. */
 type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels) => Rel;
@@ -2222,7 +2277,6 @@ function mergeVComputed(
   const matchWrites = mergeWrites(onMatch, 'vertex', child);
   const createExtra = onCreate ? mergeWrites(onCreate, 'vertex', child) : [];
   if (!matchWrites || !createExtra) return null;
-  if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
   // The created vertex's LABEL is `onCreate`'s where it gives one, else the merge argument's (a `project`
   // gives none). A runtime label declines.
   const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
@@ -2303,10 +2357,17 @@ function mergeVComputed(
     id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
   }), true);
-  // `onMatch` over the MATCHED vertices — the append-only labels first (its table), then the constant
-  // property writes. Empty on the create path, so it writes nothing there.
+  // `onMatch` over the MATCHED vertices — the append-only labels first (its table), then the property
+  // writes. Empty on the create path, so it writes nothing there. A RUNTIME value resolves at the DRIVER
+  // and lands per-driver (`armValueWriteCorrelated`, correlated by `ord`); a constant one is the ordinary
+  // element-agnostic write.
   if (appended.length) bindLabels(idsOf(matched, fresh), appended, bind, fresh);
-  for (const write of matchWrites) if (!propertyStatements('vertex', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  for (const write of matchWrites) {
+    const ok = write.kind === 'runtime'
+      ? armValueWriteCorrelated(matched, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES)
+      : propertyStatements('vertex', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard);
+    if (!ok) return null;
+  }
 
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
   // the carrier when `matched` is empty).
@@ -2359,8 +2420,9 @@ function mergeVComputed(
     bind(insert({ target, cols: ['node', 'key', 'value', 'vtype'], source: rows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
   }
   // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the
-  // creation above). Additional to the merge argument's computed values, which are already written.
-  for (const write of createExtra) if (!propertyStatements('vertex', created, write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // creation above). Additional to the merge argument's computed values, which are already written. A
+  // RUNTIME onCreate value is deferred to below — it needs `createdFor`, the per-driver correlation.
+  for (const write of createExtra) if (write.kind !== 'runtime' && !propertyStatements('vertex', created, write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's tuple KEY to the created tuple's, so the
   // one vertex made for a repeated map is carried by every driver that asked for it (`crossed`'s equi-join).
@@ -2370,8 +2432,11 @@ function mergeVComputed(
     exprs: [['cid', col(createdTuples.id, 'id')], ['tk', tupleKey(createdTuples.id)]] });
   const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner', on: eq(col(umMin.id, 'tk'), col(ctMin.id, 'tk')), channels: [],
     type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('tk', 'text'), meta('cid', 'int'), meta('ct_tk', 'text')) });
-  const createdFor = make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
-    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] });
+  const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
+  // A RUNTIME `onCreate` value resolves at the DRIVER and lands per-driver on the vertex that driver
+  // created (`createdFor` carries the `ord` that asked) — the same correlated write `onMatch` uses.
+  for (const write of createExtra) if (write.kind === 'runtime' && !armValueWriteCorrelated(createdFor, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES)) return null;
 
   const merged = make.union({ id: fresh('u'), inputs: [matched, createdFor], all: true, channels: [], type: matched.type });
   // The tail acts on whatever the merge EMITTED — matched and created alike — so it runs ONCE over the
@@ -2407,17 +2472,12 @@ export function elementMergeV(
   }
   if (Object.values(match.props).some(isNested)) return null;
   // A COMPUTED merge argument (`mergeV(__.project('k').by(__.body))`) — the search varies per driver, so
-  // it takes the correlated path rather than the input-independent cross join below. The first increment
-  // does the SEARCH map alone: an `option()` arm or a `property()` tail over a computed search declines
-  // here (a clean deferral, never a wrong answer) rather than being half-applied.
-  if (Object.keys(match.computed).length) {
-    // The SEARCH map correlated per driver. A `property()` TAIL and CONSTANT `option(onMatch/onCreate)`
-    // arms compose (all rooted at the merge OUTPUT, no driver dependence). A RUNTIME arm value declines
-    // inside `mergeVComputed` — it resolves at the DRIVER and, over a MULTI-driver computed search where
-    // drivers match DIFFERENT vertices, needs the per-driver (ord-correlated) write a rooted scalar
-    // cannot give — a separate increment.
-    return mergeVComputed(input, match, onCreate, onMatch, propertySteps, ordered, child, fresh);
-  }
+  // it takes the correlated path rather than the input-independent cross join below. A `property()` tail
+  // and `option(onMatch/onCreate)` arms all compose: a constant write is element-agnostic, and a RUNTIME
+  // arm value resolves at the DRIVER and lands per-driver on the vertex that driver matched/created
+  // (`armValueWriteCorrelated`, correlated by `ord`). An explicit list/set arm cardinality on a runtime
+  // value declines inside (fail closed).
+  if (Object.keys(match.computed).length) return mergeVComputed(input, match, onCreate, onMatch, propertySteps, ordered, child, fresh);
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's
   // (`onCreateMap` is their union) — and `validateNoOverrides` has already proved the two agree. A

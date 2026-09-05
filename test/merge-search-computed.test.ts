@@ -138,9 +138,26 @@ describe('mergeV(__.project(k).by(body)) — correlated search', () => {
     expect(await run(s, 'g.V().count()')).toEqual([7]);
   });
 
-  test('a RUNTIME arm value over a computed search declines (fail closed, no wrong answer)', async () => {
+  test('option(onMatch, [k: __.trav]) RUNTIME — each matched vertex gets ITS OWN driver value', async () => {
     const s = store(modern);
-    await expect(run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).option(Merge.onMatch, ['x': __.values('name')])")).rejects.toThrow();
+    // Each person matches itself and sets echo = its own age — the per-driver ord-correlation.
+    const out = await run(s, "g.V().hasLabel('person').mergeV(__.project('name').by(__.values('name'))).option(Merge.onMatch, ['echo': __.values('age')]).values('echo')");
+    expect(out.sort((a: number, b: number) => a - b)).toEqual([27, 29, 32, 35]);
+    expect(await run(s, "g.V().has('name','marko').values('echo')")).toEqual([29]);
+    expect(await run(s, "g.V().has('name','peter').values('echo')")).toEqual([35]);
+  });
+
+  test('option(onCreate, [k: __.trav]) RUNTIME — each created vertex gets ITS driver value', async () => {
+    const s = store(modern);
+    const out = await run(s, "g.V().hasLabel('person').mergeV(__.project('handle').by(__.values('name'))).option(Merge.onCreate, ['fromAge': __.values('age')]).values('handle')");
+    expect(out.sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+    expect(await run(s, "g.V().has('handle','marko').values('fromAge')")).toEqual([29]);
+    expect(await run(s, "g.V().has('handle','peter').values('fromAge')")).toEqual([35]);
+  });
+
+  test('an explicit list/set cardinality on a RUNTIME arm value declines (fail closed)', async () => {
+    const s = store(modern);
+    await expect(run(s, "g.V().has('name','marko').mergeV(__.project('name').by(__.values('name'))).option(Merge.onMatch, ['x': __.values('age')], Cardinality.list)")).rejects.toThrow();
   });
 
   test('a tail on a MATCHED vertex is FTS-indexed (the matched side is marked dirty)', async () => {
