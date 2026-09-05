@@ -163,15 +163,19 @@ names (list-alias dedup key, the local/flatMap split).
   family" — B3 was subsumed. Only repeat-body `otherV()` still declines, and that belongs to the repeat
   substrate (not this plan). New oracle `test/L4-addendum/otherv-scope-crossing.feature` pins the
   coalesce+otherV+path and local(bothE.limit).otherV compositions against regression.
-- ◑ **B4 (LOCATED by B2 — a latent correctness bug, own increment).** `ordered()`
-  (`src/compiler/rel/predicate.ts`) — the one-static-side range/`is` compare — buckets only 2-way
-  (numeric vs string): its `agrees` fold answers `CONSTANT.false` for a non-numeric non-string, so
-  `is(P.gt(<bool>))` / `<`/`>` over two BOOLEAN values always answers false, where TinkerPop's Boolean
-  bucket is comparable (`false < true`, `GremlinValueComparator.Type.Boolean` + `naturalOrder`). Same
-  gap for the `perRow`/`unknown` arms. The compounding fix is to extract the scalar-bucket table B2's
-  `comparableTheta` uses (Number/Date/Duration/String/Boolean/UUID) and have `ordered()` consume it too
-  — one bucket authority for both the one-side and two-side comparators, retiring the ad-hoc
-  `NUMERIC_VTYPES`/`CAST_TO_INT` 2-way split. Needs a witness graph with a stored boolean property.
+- ✅ **B4 (LANDED 643a7530 — a latent wrong answer, fixed).** `ordered()`
+  (`src/compiler/rel/predicate.ts`) split subject types only 2-way (numeric vs string), so a BOOLEAN
+  subject fell to the `else` and every ordering op folded to false: `values(boolProp).is(P.gt(false))`
+  was EMPTY where TinkerPop's Boolean bucket keeps the `true`s (`false < true`,
+  `GremlinValueComparator.Type.Boolean` + `naturalOrder`; `Compare.java:63-116` routes gt/lt/gte/lte
+  through COMPARABILITY). Added the Boolean bucket to all three arms: a `static`/`perRow` boolean subject
+  compares raw (0/1 = the natural order), an `unknown`-typed subject stays false (a stored 0/1 boolean is
+  indistinguishable from an int without a tag). Consistent with `comparableTheta` and `orderability.ts`.
+  Witnessed on the zoo `captiveBorn` property (gt(false)=5, gte(false)=10, lt(true)=5, gt(true)=0 — all 0
+  before). Oracle `test/L4-addendum/boolean-ordering-theta.feature`; census 0 answer changes (the corpus
+  never exercised it). The fuller "one shared bucket table for `ordered()` + `comparableTheta`" cleanup
+  (retiring the `NUMERIC_VTYPES`/`CAST_TO_INT` ad-hoc split, adding a UUID ordering arm) remains optional
+  de-duplication, not a correctness gap.
 
 ### Phase C — the hard structural half
 
