@@ -55,21 +55,12 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
   `addV`/`mergeV` **tails** (element-rooted `AddPropertyStep`), and `mergeV` **onMatch/onCreate values**
   (`mergeArmValueWrite`, DRIVER-rooted per `materializeMap(traverser)`, `MergeVertexStep.java:103`/`:153`).
   Validated by `property-traversal-multivalue.feature`/`property-map-form.feature`/`merge-property-tail.feature`
-  + `test/property-traversal-value.test.ts`; drove L3 +5. **What remains, with the references now pinned:**
-  - the merge **SEARCH** correlated per driver — `matching`/`edgeCriteria` are still input-independent.
-    TinkerPop resolves the WHOLE map-producing traversal per driver (`mergeV(__.project/select/…)`,
-    `MergeElementStep.materializeMap`), then searches `has(k, concreteValue)`; 0→throw, >1→first. Design
-    (both refs confirmed): a `pairs` relation of correlated `child.scalar` values (the `mergeE` endpoint
-    pattern), joined to candidates through `hasPropertyPredicate`'s `valuePred` (Calcite's
-    decorrelate-to-equi-join, `RelDecorrelator:1894-2004` — no LATERAL, which SQLite lacks). Route the
-    correlated value THROUGH `has()` so it inherits the vtype-aware compare + FTS.
-  - a map-LITERAL entry whose value is a traversal (`mergeV([k: __.trav])`) is NOT the search-by-equality
-    it looks like — TinkerPop makes it `has(k, P.eq(traversal))`, a `P.eq` resolved at the CANDIDATE
-    (`P.java:381`), i.e. a self-comparison. Degenerate, no corpus; we DECLINE it (correct — a
-    driver-rooted reading would be a considered divergence, not a bug fix).
-  - `mergeV(__.select(sideEffectMap))` whole-arg / no-arg `mergeV/mergeE` (traverser-as-map) — the SAME
-    map-producing-traversal feature as the search above; a runtime EDGE property value (take-first, no
-    cardinality — `AddPropertyStep.java:172-199`); runtime property META. Ties to the supplied-`T.id` merge.
+  + `test/property-traversal-value.test.ts`; drove L3 +5. **What remains — the merge SEARCH correlated per
+  driver — is DESIGNED and reference-pinned in its own plan:**
+  [correlated merge search](./2026-09-05-correlated-merge-search-plan.md) (the `pairs` + decorrelate-to-equi-join
+  design, the whole-map `materializeMap` resolution, why the map-literal `[k:__.trav]` stays declined, and
+  the build order incl. whole-arg/no-arg merge, edge runtime value, and meta). `matching`/`edgeCriteria`
+  are still input-independent — that plan is what makes them correlated. Ties to the supplied-`T.id` merge.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP
