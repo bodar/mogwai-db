@@ -177,10 +177,16 @@ names (list-alias dedup key, the local/flatMap split).
   fail-closed today, and both mechanisms carry correctness risk (miscount / intricate join) better spent
   on C3/D1 first. Restrict the eventual build to an element-output linear body; non-element / non-linear
   stays deferred.
-- ◑ **C3 (SCOPED — a multi-part subtle substrate, not one edit).** Per-origin barrier-in-body ("slice 2").
-  Probed the actual declines: `local(out.fold())`, `local(out.count())`, `flatMap(out.fold())`,
+- ✅ **C3 (LANDED — all three families, 1783c614 / d0b82487 / 77af9ac6).** Per-origin barrier-in-body
+  ("slice 2"). The keystone turned out to be ONE seeded-barrier substrate (families 2/3 share it):
+  `ChainCtx.originDomain` (set by `childRows`, one row per entering traverser) lets a per-origin
+  `GROUP BY origin` LEFT JOIN it and `COALESCE` the empty origins to the barrier's SEED (`[]` for `fold`,
+  `{}` for `group`) — the crux a naive `GROUP BY` silently drops. `origin` is a CONSULTED key (plain
+  column, re-declared as the channel on the output), never a grouped-Aggregate passenger. It compounded
+  beyond `local`: union-arm/flatMap-arm folds landed too (3 `@Unsupported` scenarios dropped). Probed the
+  actual declines: `local(out.fold())`, `local(out.count())`, `flatMap(out.fold())`,
   `local(out.fold()).unfold()`'s terminal forms ALREADY lower (the reduction arm / `scalarChild`). What
-  declines is three distinct families, each its own mechanism:
+  declined was three families, each its own mechanism:
   - ✅ **a non-seeded numeric reducer in `local` (LANDED 1783c614).** `local(outE.values('weight').sum())`,
     `mean` — declined because a reducer over an empty child emits NOTHING (unlike `count`→0, `fold`→[]),
     so `perTraverserChild` failed on `present` ABSENT (`reduction.ts:261`). **Measured correction to the
@@ -194,10 +200,14 @@ names (list-alias dedup key, the local/flatMap split).
     Compounds to sum/mean in `map`/`flatMap`/`where`/`choose` and reducer-valued `property(k, __.…sum())`
     writes; +16 census deferral→run (1 mine, 15 pre-existing drift), 0 answer changes. Oracle
     `test/L4-addendum/local-reducer-empty-drop.feature`; `rel-spine.test.ts` two DECLINED→COVERED.
-  - **a full GROUP in `local`** (`local(out.group().by('lang'))`, `groupCount()`) — a grouping barrier
-    scoped per-entering-traverser = `GROUP BY [origin, key]` with `origin` CONSULTED as part of the group
-    key (like `graph`, `channels.ts` note), NOT a passenger. Extends `PER_ORIGIN_SAFE_BARRIER` for the
-    grouped case.
+  - ✅ **a full GROUP in `local` (LANDED 77af9ac6).** `local(out.group().by('lang'))`, `groupCount()` — a
+    grouping barrier scoped per-entering-traverser, `GROUP BY [origin, key]` at stage 1 and `GROUP BY
+    [origin]` at the fold-to-map, `origin` CONSULTED as a plain-column key (like `graph`), NOT a passenger.
+    Reused the family-3 seeded substrate whole: `groupMap`'s per-origin path (`map.ts`) + the origin
+    DOMAIN LEFT JOIN that SEEDS the empty `{}` a `group()` owes an edgeless vertex (the crux family 3
+    already solved for `[]`). Keyed `group("a")` in a per-origin scope stays fail-closed. Verified
+    per-origin + seeded (marko `groupCount.by(name)` `{josh:1,lop:1,vadas:1}`, edgeless vadas `{}`); 0
+    census answer changes; ordinary/keyed group unchanged. Oracle `test/L4-addendum/local-group.feature`.
   - ✅ **a barrier that CONTINUES mid-body (LANDED d0b82487).** `local(out.fold().unfold())` — the fold's
     result re-enters the body and continues. Built the SHARED per-origin-barrier substrate families 2/3
     both need: a new `ChainCtx.originDomain` (set by `childRows`, one row per entering traverser) so
