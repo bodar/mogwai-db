@@ -63,7 +63,7 @@ import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
-import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail } from './lower/branch.ts';
+import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -235,8 +235,9 @@ const withFanoutOrder = (merged: FramedRel, fresh: Minter): FramedRel => {
  * COLLECT/write demand → mint a deterministic fan-out order. A SLICE demand → decline (see
  * `withFanoutOrder`'s ⚠️). A failed merge stays `null`.
  */
-export const branchResult = (merged: FramedRel | null, ctx: ChainCtx, fresh: Minter): FramedRel | null =>
-  !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh);
+export function branchResult<T extends FramedRel>(merged: T | null, ctx: ChainCtx, fresh: Minter): T | null {
+  return !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh) as T;
+}
 
 /**
  * THE FAN-OUT SORT KEY, carried past the merge as two `origin` channels (the role the channel core
@@ -323,7 +324,7 @@ export const tagArm = (rel: Rel, k: number, fresh: Minter): Rel => {
  * rather than reach here. (Calcite: a plain `Union` carries no collation — `RelMdCollation` — so the
  * order is IMPOSED as a window, `SqlStdOperatorTable.ROW_NUMBER`.)
  */
-export const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap, graph: GraphSource, fresh: Minter): FramedRel | null => {
+export const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap, graph: GraphSource, fresh: Minter): BranchRel | null => {
   const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
   const base = withChannel(withoutEncounter(source.channels), BORD_ARM);
   const merged = mergeArms(tagged, base, labels, graph, fresh);
@@ -1342,7 +1343,7 @@ function scalarTail(
     if (BRANCH_HOSTS.has(step.name)) {
       const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases);
     }
 
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
@@ -3942,7 +3943,7 @@ function elementTail(
       // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
       // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
       // heavier slice form — it trips `framed`'s backstop and declines the traversal.
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases);
     }
     if (step.name === 'repeat') {
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
@@ -4317,7 +4318,7 @@ function propertyTail(
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels);
-    return merged && continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, labels);
+    return merged && continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases);
   }
 
   // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with

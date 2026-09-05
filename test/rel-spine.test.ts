@@ -443,6 +443,11 @@ const COVERED = [
   'g.V().hasLabel("person").union(__.out("knows"), __.out("created")).dedup()',
   // …composing with the alias channel, with nothing written between the two features.
   'g.V().as("a").union(__.out(), __.in()).select("a")',
+  // …and where an ARM binds a label the continuation reads: each arm is reprojected onto one canonical
+  // alias column and an arm that did not bind it NULL-pads (`CHANNEL_MERGE_POLICY.alias='union'`), so
+  // `select('b')` drops the non-binding arm's rows rather than borrowing a sibling's binding
+  // (`remapArmAliases`, the branch-arm twin of `flatMapRejoin`'s outbound frame).
+  "g.V().union(__.as('b').out(), __.in())",
   // …and over a VALUE parent, where the arms are scalar bodies rather than movements.
   'g.V().values("name").union(__.identity(), __.identity())',
   // …over an ORDERED input, and with an ORDER inside an arm: a `union` is a fresh UNORDERED stream
@@ -572,7 +577,6 @@ const DECLINED = [
   // takes every traverser), so it is no longer refused; a single REDUCTION arm still declines (it owes the
   // batched empty-input gate), which is what `union(__.count())` below pins.
   "g.V().union(__.count())",           // a SINGLE reduction arm: still owes the arm-major `Exists(input)` gate
-  "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
   // disagree only on their TYPE TAG. That is no longer refused: §6·7's lattice meets them at a
   // per-row `vtype` column (`meetScalarArms`), so the payload agrees and the Union is positional

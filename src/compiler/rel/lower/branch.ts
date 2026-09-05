@@ -1,5 +1,5 @@
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, meta, notProduced, payloadCols, renumber, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -14,7 +14,8 @@ import { ALWAYS_PRODUCTIVE } from '../child.ts';
 import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
-import type { AliasMap } from '../../alias.ts';
+import type { AliasEntry, AliasMap } from '../../alias.ts';
+import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
@@ -35,12 +36,15 @@ import { augmentParent, BORD_ARM, BORD_PARENT, branchResult, continueAs, countTa
  *  element one, with `coalesce` in neither. */
 export const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce', 'optional']);
 
+/** A branch boundary returns the physical relation AND the label names its arms carried out. */
+export type BranchRel = FramedRel & { readonly aliases: AliasMap };
+
 /** Which arm-merging builder a step wants. Total over `BRANCH_HOSTS`, so a member added there without a
  *  builder is a compile error rather than a silent decline. */
 export function branchArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels)
       : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
@@ -61,7 +65,7 @@ export function branchArms(
  * `[]`). They must agree; a disagreement (e.g. one arm kept `bulk`, i.e. it did NOT actually collapse)
  * declines.
  */
-export const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, graph: GraphSource, fresh: Minter): FramedRel | null => {
+export const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, graph: GraphSource, fresh: Minter): BranchRel | null => {
   if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
   const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
   const merged = mergeArms(tagged, withChannel(base, BORD_ARM), labels, graph, fresh);
@@ -88,7 +92,7 @@ export const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: Alia
  */
 export function batchedBranch(
   arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   const merged = mintArmMajor(arms, arms[0]!.rel.channels, labels, graph, fresh);
   if (!merged) return null;
   const gated = make.filter({
@@ -158,7 +162,7 @@ export function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
  * path/property arm, or an arm carrying an alias the collapsed arm cannot (`union(min.as('x'),
  * …).select('x')`, the `mintArmMajor` channel check), declines.
  */
-export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap): FramedRel | null {
+export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap): BranchRel | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
     const fr = arm.framing;
@@ -180,7 +184,7 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
 export function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   // A `union` is a fresh UNORDERED stream (`BranchStep` drains arm-by-arm and every scenario of
   // `Union.feature` asserts unordered), so a position the input carried OR an arm minted inside itself
@@ -203,8 +207,8 @@ export function unionArms(
   if (args.length === 1) {
     if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
     const only = continueAs(input, framing, bodies[0]!, 0, bulked, inArmBody(ctx), fresh, labels);
-    if (!only || only.aliases.size !== labels.size) return null;
-    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing }, ctx, fresh);
+    if (!only) return null;
+    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases }, ctx, fresh);
   }
 
   const slice = sliceableBranch(ctx, input);
@@ -376,15 +380,14 @@ export function sourceUnion(
  */
 export function variantMerge(
   arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
-): FramedRel | null {
+): BranchRel | null {
   const shapes: VariantArm[] = [];
   for (const arm of arms) {
     const shape = variantArmOf(arm.framing);
     if (!shape) return null;
     shapes.push(shape);
   }
-  if (arms.some((arm) => arm.aliases.size !== labels.size)) return null;
-  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
+  if (arms.some((arm) => !sameChannels(arms[0]!.rel.channels, arm.rel.channels))) return null;
   const hasList = variantHasList(shapes);
   const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, hasList, fresh));
   const channels = mergeChannels(base, tagged.map((rel) => rel.channels), { rigid: 'peer' });
@@ -393,6 +396,7 @@ export function variantMerge(
     // The DECLARED vocabulary is de-duplicated by shape, never by position: two arms of the same
     // shape share one tag, so the framer's arm list stays a description of what a row can BE.
     framing: { kind: 'variant', arms: dedupeArms(shapes) },
+    aliases: labels,
   };
 }
 
@@ -410,7 +414,7 @@ export const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] =
 
 export function mergeArms(
   arms: readonly Tail[], base: Channels, labels: AliasMap, source: GraphSource, fresh: Minter,
-): FramedRel | null {
+): BranchRel | null {
   let [first, ...rest] = arms as [Tail, ...Tail[]];
   // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
   // disagreement — see `meetScalarArms`. The re-projection is what makes the arms comparable at all,
@@ -435,15 +439,16 @@ export function mergeArms(
   // trivially. See `mapDemotedArms`.
   const demoted = mapDemotedArms(arms, source, fresh);
   if (demoted) [first, ...rest] = (arms = demoted) as unknown as [Tail, ...Tail[]];
+  const remapped = remapArmAliases(arms, labels, fresh);
+  if (!remapped) return null;
+  [first, ...rest] = (arms = remapped.arms) as [Tail, ...Tail[]];
   // ARMS THAT DISAGREE ON SHAPE MERGE TO A VARIANT — a per-row tagged union, and the same move the
   // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
   // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
   if (rest.some((arm) => !sameFraming(first.framing, arm.framing)))
-    return variantMerge(arms, base, labels, fresh);
+    return variantMerge(arms, base, remapped.aliases, fresh);
   // …and on their declared COLUMNS, name for name, because a Union is positional.
   if (rest.some((arm) => !sameColumns(first.rel.type.cols, arm.rel.type.cols))) return null;
-  // An arm that bound a label would have to be remapped onto a canonical column (see above).
-  if (arms.some((arm) => arm.aliases.size !== labels.size)) return null;
   // ARMS THAT DISAGREE ON RIGID STATE DECLINE, and this is the check the channel core would otherwise
   // make by THROWING — which is right inside the core and wrong here, where the contract is `null`.
   // The comparison is arm-TO-ARM, not arm-to-`base`: a channel EVERY arm mints uniformly (the `fromV`
@@ -467,6 +472,84 @@ export function mergeArms(
       channels, type: first.rel.type,
     }),
     framing: first.framing,
+    aliases: remapped.aliases,
+  };
+}
+
+/**
+ * REHOME arm-local label columns onto one branch schema. `BranchStep.standardAlgorithm()` feeds each
+ * arm `start.split()` and returns that arm's end traverser, so labels bound in an arm escape with the
+ * full traverser rather than being local implementation state
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153`).
+ *
+ * A positional `UNION ALL` needs every arm to name the same columns. Alias channels have the core's
+ * `union` merge policy: a label absent from an arm is NULL there, so `aliasPresent` makes a later
+ * `select()` drop precisely that arm's rows. The framing layer owns the name-to-column map, hence this
+ * projection rather than teaching `mergeChannels` about labels.
+ */
+function remapArmAliases(
+  arms: readonly Tail[], incoming: AliasMap, fresh: Minter,
+): { readonly arms: readonly Tail[]; readonly aliases: AliasMap } | null {
+  const body = new Map<string, AliasEntry>();
+  for (const arm of arms) {
+    for (const [label, entry] of liveAliases(arm.aliases, arm.rel)) {
+      if (!incoming.has(label)) body.set(label, mergeAliasEntry(body.get(label), entry));
+    }
+  }
+  if (!body.size) return { arms, aliases: incoming };
+
+  const aliases = new Map(incoming);
+  for (const [label, entry] of body) {
+    // An arm is a dynamic choice, so its path-length summary is not linear. The first arm supplies
+    // the homogeneous shape descriptor; a disagreeing shape remains fail-closed at alias re-entry.
+    aliases.set(label, { ...entry, col: `a${aliases.size}`, binds: undefined, pathPos: undefined });
+  }
+  const canonical = [...body.keys()].map((label) => [label, aliases.get(label)!] as const);
+  const canonicalByCol = new Map(canonical.map(([label, entry]) => [entry.col, label]));
+  const reprojected: Tail[] = [];
+  for (const arm of arms) {
+    const local = liveAliases(arm.aliases, arm.rel);
+    const localCols = new Set(canonical.flatMap(([label]) => {
+      const entry = local.get(label);
+      return entry ? [entry.col] : [];
+    }));
+    let channels: Channels = arm.rel.channels.filter((channel) => !(channel.role === 'alias' && localCols.has(channel.col)));
+    for (const [, entry] of canonical) channels = withChannel(channels, { col: entry.col, role: 'alias' });
+    const payload = payloadCols(arm.rel);
+    reprojected.push({
+      ...arm,
+      aliases,
+      rel: make.project({
+        id: fresh('ba'), input: arm.rel, channels, type: typeOf(...payload, ...carriedCols(channels)),
+        exprs: [
+          ...payload.map((column) => [column.name, col(arm.rel.id, column.name)] as const),
+          ...channels.map((channel) => {
+            const label = canonicalByCol.get(channel.col);
+            const localEntry = label && local.get(label);
+            return [channel.col, label ? (localEntry ? col(arm.rel.id, localEntry.col) : compilerNull()) : col(arm.rel.id, channel.col)] as const;
+          }),
+        ],
+      }),
+    });
+  }
+  return { arms: reprojected, aliases };
+}
+
+/** Merge only the compile-time description of a branch-local binding. A heterogeneous binding is
+ * deliberately less specific: `select()` then declines through its ordinary alias-shape machinery. */
+function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): AliasEntry {
+  if (!left) return right;
+  const same = <T>(a: T | undefined, b: T | undefined): T | undefined =>
+    JSON.stringify(a) === JSON.stringify(b) ? a : undefined;
+  return {
+    ...left,
+    shapes: new Set([...left.shapes, ...right.shapes]),
+    scalarType: same(left.scalarType, right.scalarType),
+    listOf: same(left.listOf, right.listOf),
+    mapOf: same(left.mapOf, right.mapOf),
+    propertyElem: same(left.propertyElem, right.propertyElem),
+    binds: undefined,
+    pathPos: undefined,
   };
 }
 
@@ -509,7 +592,7 @@ export function mergeArms(
 export function chooseOptions(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length) return null;
   const subject = branchSubject(input, framing);
   if (!subject) return null;
@@ -682,7 +765,7 @@ export function chooseOptions(
 export function coalesceArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
@@ -701,7 +784,7 @@ export function coalesceArms(
 export function optionalArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const nested = step.args[0]?.value, extra = step.args[1]?.value;
   if (extra !== undefined || !isNested(nested)) return null;
@@ -722,7 +805,7 @@ export function optionalArms(
 export function coalesceMerge(
   bodies: readonly (readonly IRStep[])[], input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   const slice = sliceableBranch(ctx, input);
   const source = slice ? augmentParent(input, fresh) : input;
   const subject = branchSubject(source, framing);
@@ -769,7 +852,7 @@ export function coalesceMerge(
 export function chooseArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
   // A `choose` is a `BranchStep` like `union` — barrier-free it is TRAVERSER-major, a batched-barrier
