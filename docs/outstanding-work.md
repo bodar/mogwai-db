@@ -68,9 +68,6 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 
 - **Cheap mechanical wins — highest value / lowest cost.** Each routes through machinery already
   present nearby:
-  - **Supplied `T.id` on `mergeV`/`mergeE`** — create arms decline on `spec.id != null` though the
-    `elementIdGuard` + id-column machinery is used by `addV`/`addE`; only create-insert routing is
-    missing (`src/compiler/rel/write.ts`). Unblocks upsert-by-id + CSV/GraphSON id round-trips.
   - **OLAP decorated-property reads** — `has(key,value)` over an OLAP score and mixed decorated+stored
     `values()` decline, but `existsOf(rowById())`+`cval` and the base-UNION-decorate pattern are in the
     same file (`src/compiler/rel/decorate.ts`). Unblocks post-`pageRank`/`connectedComponent` reads.
@@ -85,7 +82,8 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
     → [match plan](./2026-08-13-match-relir-lowering-plan.md).
   - **Strategies** (`src/compiler/ir/strategies.ts`) — the largest L3 clusters:
     `SubgraphStrategy(edges:/vertexProperties:)` criteria, `PartitionStrategy` with `mergeV`/`mergeE`
-    (partition-aware upsert — ties to the correlated write-arg + `T.id` items), and small config gaps
+    (partition-aware upsert — ties to the correlated write-arg item; supplied `T.id` on merge now lands),
+    and small config gaps
     (`includeMetaProperties`, `ProductiveByStrategy` on a non-standard host). No injection rule yet
     wraps a criterion around a mutation.
   - **`subgraph('sg')`** side-effect collection into a named graph (matrix ❌, a sizeable L3 cluster)

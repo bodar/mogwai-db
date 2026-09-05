@@ -1756,14 +1756,27 @@ function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minte
  * question about a traversal nobody wrote.
  */
 function matching(
+  id: string | number | null,
   labels: readonly string[], props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
+  // A SUPPLIED `T.id` is `searchVerticesTraversal`'s `g.V(id)` narrowing, spelled as the `hasId(id)`
+  // step it is equivalent to — the same read-fold path `g.V().has(T.id, …)` takes, reading the
+  // external id (`COALESCE(uid, id)`). So the merge search inherits id matching from `hasId` rather
+  // than re-expressing it, exactly as it inherits label/property matching from those steps.
   return rootedVertices([
     { name: 'V', args: [] },
+    ...(id === null ? [] : [{ name: 'hasId', args: [arg(id)] }]),
     ...labels.map((label) => ({ name: 'hasLabel', args: [arg(label)] })),
     ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
   ] as IRStep[], child, fresh);
 }
+
+/** A merge map's `T.id` slot as the scalar an element id may be — `null` for "the map named none"
+ *  (an absent slot), and `false` for "named, but not a placeable id". A nested id is filtered out by
+ *  the caller before this, so the only remaining non-scalar is a shape this route declines rather than
+ *  coercing (`addV`/`addE`'s `T.id` decline the same non-string/number values). */
+const idOrNull = (id: unknown): string | number | null | false =>
+  id === null || id === undefined ? null : typeof id === 'string' || typeof id === 'number' ? id : false;
 
 /** Rewrite a `Col` written against `from` so it names `to` instead — what a CROSS JOIN's projection
  *  needs, because a join's outputs are spelled in ITS scope and not its sides'. */
@@ -1865,12 +1878,16 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * - a NESTED label/key/value anywhere in a map — resolved per incoming traverser against the graph, which is
  *   `resolveMergeSpec`'s row-at-a-time surface and not an expression. A `__.select(k)` whole-arg map
  *   is the same decline for a smaller reason: it needs the `withSideEffect` constants, which this seam
- *   is not handed.
- * - `T.id` — a numeric id is written as the ROWID after asking whether it is still free
- *   (`assertAvailableElementId`), a runtime refusal an `Insert` cannot state. The MATCH half is
- *   perfectly expressible; declining the pair is what stops a create silently colliding.
+ *   is not handed. A nested `T.id` value declines for the same reason (a per-row id).
  * - `option(onMatch, [(T.label): …])` — label MUTATION, whose refusal depends on the graph's `mutable`
  *   flag and whose write is not a property write at all.
+ *
+ * ## `T.id` IS SUPPORTED, and it is the SEARCH's id, the CREATE's id, and a CONDITIONAL guard
+ *
+ * The search narrows by the merge argument's id (`hasId`, above), the create writes `onCreate`'s id or
+ * the merge argument's, and the "already exists" refusal is a guard that fires ONLY on the create branch
+ * — `addV`'s unconditional guard would wrongly raise on a match, because a search-by-id match already
+ * owns that id. A non-scalar id (a shape no vertex id can be) declines, as it does on `addV`.
  */
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
@@ -1885,9 +1902,16 @@ export function elementMergeV(
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
-    if (spec.id != null || isNested(spec.label)) return null;
+    if (isNested(spec.id) || isNested(spec.label)) return null;
     if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
   }
+  // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
+  // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's
+  // (`onCreateMap` is their union) — and `validateNoOverrides` has already proved the two agree. A
+  // non-scalar id is not a vertex id this route can place, so it declines rather than mis-executing.
+  const searchId = idOrNull(match.id);
+  const createId = idOrNull(onCreate?.id ?? match.id);
+  if (searchId === false || createId === false) return null;
   // **A LABEL ON `onMatch` IS APPEND-ONLY `addLabel`, not a replacement** — the reference handles it
   // apart from every other entry and says so:
   // *"Handle T.label separately: append-only addLabel semantics for multi-label support"*
@@ -1917,13 +1941,13 @@ export function elementMergeV(
   const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], child, fresh);
   if (!createLabels) return null;
 
-  const searched = matching((match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
+  const searched = matching(searchId, (match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
   if (!searched) return null;
 
   const carried = writeInputChannels(input);
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
-  const { bindings, bind } = effectScope(fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carried) : input;
 
   // SNAPSHOTTED for two reasons at once, and either alone would be enough: the create is guarded by
@@ -1931,6 +1955,19 @@ export function elementMergeV(
   // inserts into (the `addV` trap, one level up); and every `onMatch` statement after the first has
   // already changed a property the search asked about.
   const matched = bind(idsOf(searched, fresh), true);
+  // IS THE CREATE ID STILL FREE — but only WHEN a create happens, which is `mergeV`'s whole difference
+  // from `addV`'s unconditional guard. The search is by id (`hasId` above), so a MATCH already owns that
+  // id and no collision is possible; a create runs only where the search came back empty, and collides
+  // exactly when a NON-matching element already holds the id (a vertex with id 1 but the wrong label).
+  // So the guard is `elementIdGuard`'s relation NARROWED by `NOT EXISTS <the match>`: it is non-empty
+  // precisely on the create-and-collide case, and `raiseWhen: 'rows'` speaks the reference's sentence there.
+  if (createId !== null) {
+    const idTaken = elementIdGuard(createId, 'vertex', fresh);
+    guard(make.filter({
+      id: fresh('f'), input: idTaken.node, channels: [], type: idTaken.node.type,
+      pred: { kind: 'exists', plan: matched, negated: true },
+    }), idTaken.guard);
+  }
   // The reference applies the labels before the property entries and so does this; they are different
   // tables, so the order is the reference's rather than a constraint.
   if (appended.length) bindLabels(matched, appended, bind, fresh);
@@ -1957,8 +1994,10 @@ export function elementMergeV(
     id: fresh('f'), input: absent, channels: [], type: absent.type,
     pred: { kind: 'exists', plan: matched, negated: true },
   });
-  // A merge map's `T.id` still DECLINES above, so the creation supplies none.
-  const created = addVertex(creating, createLabels.names, null, createWrites, false, bind, fresh);
+  // The creation supplies the merge's id (`onCreate`'s, else the merge argument's — `createId`), routed
+  // to the rowid or `uid` column by `addVertex` exactly as `addV` does. The guard above has already made
+  // a colliding id a clear raise, so the insert here only ever runs against a free one.
+  const created = addVertex(creating, createLabels.names, createId, createWrites, false, bind, fresh);
 
   // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
   // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the
@@ -2017,8 +2056,10 @@ export function elementMergeV(
  *
  * - **no label anywhere** and **more than one** — declined; the reference raises
  *   `mergeE cannot create an edge without a label` / `an edge takes exactly one label`.
- * - **`T.id`** — an edge with a supplied public id; the guard mechanism now exists for it, the
- *   `Insert` column plumbing does not.
+ * - **`T.id` IS SUPPORTED** — the search narrows by it (`hasId` in `edgeCriteria`), the create routes it
+ *   to the rowid/`uid` column (`elementAddE`'s plumbing), and TWO guards raise the reference's "already
+ *   exists" on collision (id taken on the create branch; two distinct pairs claiming one id). A nested or
+ *   non-scalar id declines, as on `addE`.
  * - **an incoming endpoint over a non-VERTEX stream, or at the source** — there is no traverser to
  *   be an endpoint. `MergeEdgeStep` raises `Out Vertex not specified in onCreate`, so declining
  *   defers to that message rather than inventing a second.
@@ -2038,12 +2079,19 @@ export function elementMergeE(
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
-    if (spec.id != null || isNested(spec.label)) return null;
+    if (isNested(spec.id) || isNested(spec.label)) return null;
     if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
   }
   // An edge carries exactly ONE label and it is fixed at creation, so a label on `onMatch` is not a
   // mutation this route may make — it is one the reference refuses outright.
   if (onMatch?.label) return null;
+  // A SUPPLIED `T.id`, the same three roles it has on `mergeV`: the SEARCH narrows by the merge
+  // argument's id (`searchEdges` reads `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or the
+  // merge argument's, and a non-scalar id declines. The create's collision refusal is TWO guards below,
+  // because an edge id can collide two ways a vertex id cannot (below).
+  const searchId = idOrNull(match.id);
+  const createId = idOrNull(onCreate?.id ?? match.id);
+  if (searchId === false || createId === false) return null;
 
   // **THE SEARCH READS THE MERGE MAP AND ONLY THE MERGE MAP.** `searchEdges` is handed the resolved
   // MATCH map alone, and `onCreateMap` is built afterwards and only once the search came back empty
@@ -2117,7 +2165,7 @@ export function elementMergeE(
     exprs: [[ORD, position], ...(src ? [['src', src] as const] : []), ...(tgt ? [['tgt', tgt] as const] : [])],
   }), true);
 
-  const criteria = edgeCriteria(searchLabels[0] ?? null, Object.entries(match.props), child, fresh);
+  const criteria = edgeCriteria(searchId, searchLabels[0] ?? null, Object.entries(match.props), child, fresh);
   if (!criteria) return null;
   // SNAPSHOTTED for `mergeV`'s two reasons at once: the create is guarded by this relation's
   // emptiness and would otherwise read the very table its own statement inserts into, and an
@@ -2163,28 +2211,64 @@ export function elementMergeE(
     for (const write of tailWrites) propertyStatements('edge', idsOf(found, fresh), write, bind, fresh);
     return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, found, carried, ordered, fresh, true) };
   }
-  const wanted = make.distinct({
+  const wantedRel = make.distinct({
     id: fresh('d'), channels: [], type: typeOf(meta('src', 'int'), meta('tgt', 'int')),
     input: make.project({
       id: fresh('p'), input: unmatched, channels: [], type: typeOf(meta('src', 'int'), meta('tgt', 'int')),
       exprs: [['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')]],
     }),
   });
+  // A SUPPLIED EDGE `T.id` reads `wanted` from THREE places — the create insert and both collision
+  // guards — so it is a SNAPSHOT (retained, read once), not a plain CTE `checkSnapshots` would refuse
+  // three readers of. Absent an id it stays a plain relation feeding the one insert, so the no-id path
+  // is byte-identical.
+  const wanted = createId === null ? wantedRel : bind(wantedRel, true);
+  // AN EDGE ID COLLIDES TWO WAYS, and both are arithmetic over the data an `Insert` cannot state — one
+  // more than `mergeV`'s single conditional guard, because an edge is created per DISTINCT endpoint pair:
+  //  - **the id is TAKEN while a create happens** — `wanted` non-empty means the search (which narrows by
+  //    the id, `hasId` above) came back empty for some pair, so an existing edge with that id would have
+  //    matched; creating against it collides. `elementIdGuard` NARROWED by `EXISTS <wanted>` — `mergeV`'s
+  //    conditional guard, on the edge host.
+  //  - **more than ONE distinct pair wants creating** — one supplied id cannot label two edges, so a
+  //    second `wanted` row is the collision `addE` raises on its second input row. `Limit{offset:1}` is
+  //    the "is there a second" test, column-agnostic exactly as `addE`'s is.
+  if (createId !== null) {
+    const idTaken = elementIdGuard(createId, 'edge', fresh);
+    guard(make.filter({
+      id: fresh('f'), input: idTaken.node, channels: [], type: idTaken.node.type,
+      pred: { kind: 'exists', plan: wanted, negated: false },
+    }), idTaken.guard);
+    const second = make.limit({
+      id: fresh('li'), input: wanted, channels: [], type: wanted.type, count: compilerInt(1), offset: compilerInt(1),
+    });
+    guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), idTaken.guard);
+  }
   const labelRow = internLabels(labels.map(text), bind, fresh)!;
   const paired = make.join({
     id: fresh('j'), left: wanted, right: labelRow, join: 'cross', channels: [],
     type: typeOf(meta('src', 'int'), meta('tgt', 'int'), meta('lbl', 'int')),
   });
+  // A CALLER-SUPPLIED PUBLIC ID lands in one of two columns and the choice is the value's own type,
+  // exactly as `elementAddE` spells it for `edges`: a NUMBER is the rowid, a STRING is the `uid`. Absent,
+  // the row names neither and takes whatever rowid SQLite assigns. The guards above have already made a
+  // collision a clear raise, so the insert here only ever runs against a free id.
+  const idCol = createId === null ? null : typeof createId === 'number' ? 'id' : 'uid';
+  const idMeta = idCol === 'id' ? meta('id', 'int') : meta('uid', 'text', true);
+  const idExpr: Expr | null = createId === null ? null : typeof createId === 'number' ? compilerInt(createId) : text(createId);
   const rows = make.project({
-    id: fresh('p'), input: paired, channels: [], type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-    exprs: [['src', col(paired.id, 'src')], ['label', col(paired.id, 'lbl')], ['tgt', col(paired.id, 'tgt')]],
+    id: fresh('p'), input: paired, channels: [],
+    type: typeOf(...(idCol ? [idMeta] : []), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    exprs: [
+      ...(idCol ? [[idCol, idExpr!] as const] : []),
+      ['src', col(paired.id, 'src')], ['label', col(paired.id, 'lbl')], ['tgt', col(paired.id, 'tgt')],
+    ],
   });
   const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   // THE `RETURNING` PROJECTS THE ENDPOINTS, and that is what replaces a positional correlation: an
   // edge's `(src, tgt)` IS the key its input rows are found by, so nothing depends on the order the
   // created rows come back in (P5b's hazard does not arise) or on a spare column to carry.
   const created = bind(insert({
-    target: edgesTarget, cols: ['src', 'label', 'tgt'], source: rows, channels: [],
+    target: edgesTarget, cols: [...(idCol ? [idCol] : []), 'src', 'label', 'tgt'], source: rows, channels: [],
     type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')),
     returning: [['id', col(edgesTarget.id, 'id')], ['src', col(edgesTarget.id, 'src')], ['tgt', col(edgesTarget.id, 'tgt')]],
   }));
@@ -2275,10 +2359,15 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  * expressible.
  */
 function edgeCriteria(
+  id: string | number | null,
   label: string | null, props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   const read = child.rooted([
     { name: 'E', args: [] },
+    // A supplied `T.id` is `searchEdges`' `g.E(eid)` narrowing, spelled as `hasId(eid)` — the endpoints
+    // it also narrows by (`where(outV().hasId(…))` upstream) stay in `pairedWith`, so this is only the
+    // id-and-label-and-property half of the search, read through the same fold `g.E().has(T.id,…)` uses.
+    ...(id === null ? [] : [{ name: 'hasId', args: [arg(id)] }]),
     // A map with no `T.label` searches EVERY edge — `searchEdges` adds `hasLabel` only when the label
     // is non-null, so an absent one is one fewer step rather than a different chain.
     ...(label === null ? [] : [{ name: 'hasLabel', args: [arg(label)] }]),

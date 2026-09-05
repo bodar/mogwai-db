@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,819<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,825<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -205,7 +205,7 @@ heterogeneous stream frames each value by its own tag.
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a runtime/computed label; `addE` after `addE`; `addInE` |
 | `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ❌ `property(k, <traversal>)` |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
-| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | ❌ `T.id` in the merge map; a map-valued `inject`/`union` feeding the merge; a meta-property under an undeclared cardinality |
+| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅ (upsert-by-id, both hosts); ❌ a map-valued `inject`/`union` feeding the merge; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |
 
 A write chain is a SEQUENCE of statements, O(write steps) and never O(rows).

@@ -1389,6 +1389,114 @@ describe('the RelIR spine', () => {
         .toThrow('Vertex does not exist for mergeE');
   });
 
+  test('a supplied T.id on mergeV is the search id, the create id, and a CONDITIONAL guard', () => {
+    // `searchVerticesTraversal` narrows the search by `mergeMap.get(T.id)` (a `g.V(id)`, here the
+    // `hasId` step it equals) and `addVertex(onCreateMap…)` writes the create id — so a merge map's
+    // `T.id` upserts BY id. The guard is `addV`'s "already exists" made CONDITIONAL on the create
+    // branch: a search-by-id MATCH already owns the id, so only a create against an id a NON-matching
+    // vertex holds may collide.
+    const store = () => new GraphStore(new BunSqlite(':memory:'));
+    const write = (s: GraphStore, gremlin: string) => exec(s).buffers(gremlin, {});
+    const rows = (s: GraphStore) => s.query('SELECT id, uid FROM nodes', []);
+
+    for (const gremlin of [
+      'g.mergeV([(T.id):"1",(T.label):"person"])',
+      'g.mergeV([(T.id):5])',
+      'g.mergeV([(T.label):"person","name":"mike"]).option(Merge.onCreate,[(T.id):"1"])',
+    ]) expect(compile(gremlin, {}).kind, gremlin).toBe('program');
+
+    // CREATE with a string id → the `uid` column; a numeric id → the rowid. `addVertex`'s rule.
+    {
+      const s = store();
+      write(s, 'g.mergeV([(T.id):"1",(T.label):"person","name":"mike"])');
+      expect(rows(s)).toEqual([{ id: 1, uid: '1' }]);
+      expect(s.query("SELECT value FROM vertex_properties WHERE key='name'", [])).toEqual([{ value: 'mike' }]);
+    }
+    {
+      const s = store();
+      write(s, 'g.mergeV([(T.id):5,(T.label):"person"])');
+      expect(rows(s)).toEqual([{ id: 5, uid: null }]);
+    }
+    // `onCreate` supplies the id the merge argument omitted — `onCreateMap` is their union.
+    {
+      const s = store();
+      write(s, 'g.mergeV([(T.label):"person","name":"mike"]).option(Merge.onCreate,[(T.id):"1"])');
+      expect(rows(s)).toEqual([{ id: 1, uid: '1' }]);
+    }
+
+    // MATCH by id is idempotent, and its `onMatch` applies — the search finds the existing vertex, so
+    // no second is created and the guard does NOT fire (the match already owns the id).
+    {
+      const s = store();
+      write(s, 'g.addV("person").property("name","marko").property(T.id,"1")');
+      write(s, 'g.mergeV([(T.id):"1"]).option(Merge.onMatch,["age":29])');
+      expect(rows(s)).toEqual([{ id: 1, uid: '1' }]);
+      expect(s.query("SELECT value FROM vertex_properties WHERE key='age'", [])).toEqual([{ value: 29 }]);
+    }
+
+    // COLLISION only on the CREATE branch: id "1" is a `software`, the merge asks for a `person`, so the
+    // search misses and the create hits a vertex already holding the id — the reference's verbatim raise.
+    {
+      const s = store();
+      write(s, 'g.addV("software").property(T.id,"1")');
+      expect(() => write(s, 'g.mergeV([(T.id):"1",(T.label):"person"])'))
+        .toThrow(idAlreadyExists('Vertex', '1'));
+      // …and a numeric id the same way.
+      const s2 = store();
+      write(s2, 'g.addV("software").property(T.id,9)');
+      expect(() => write(s2, 'g.mergeV([(T.id):9,(T.label):"person"])'))
+        .toThrow(idAlreadyExists('Vertex', 9));
+    }
+  });
+
+  test('a supplied T.id on mergeE routes the create insert and guards the collision', () => {
+    // `searchEdges` narrows by `mergeMap.get(T.id)` (a `g.E(eid)`, here `hasId` in `edgeCriteria`) and
+    // the create routes the id to the `edges` rowid/`uid` column — `elementAddE`'s plumbing. The guard
+    // is `mergeV`'s conditional one on the edge host: a create against a taken id raises the reference's
+    // sentence. (The SECOND collision — two distinct pairs claiming one id — is the fail-closed
+    // complement; today's mergeE endpoint forms are all constant per stream, so it is not yet reachable.)
+    const store = () => {
+      const s = new GraphStore(new BunSqlite(':memory:'));
+      for (const _ of [1, 2, 3]) exec(s).buffers('g.addV("person")', {});
+      return s;
+    };
+    const write = (s: GraphStore, gremlin: string) => exec(s).buffers(gremlin, {});
+    const edges = (s: GraphStore) => s.query('SELECT id, uid, src, tgt FROM edges', []);
+
+    for (const gremlin of [
+      'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):7])',
+      'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onCreate,[(T.id):"e7"])',
+    ]) expect(compile(gremlin, {}).kind, gremlin).toBe('program');
+
+    // CREATE: a numeric id → rowid, a string id → `uid`.
+    {
+      const s = store();
+      write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):7])');
+      expect(edges(s)).toEqual([{ id: 7, uid: null, src: 1, tgt: 2 }]);
+    }
+    {
+      const s = store();
+      write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):"e7"])');
+      expect(edges(s)).toEqual([{ id: 1, uid: 'e7', src: 1, tgt: 2 }]);
+    }
+    // MATCH by id is idempotent — the second `mergeE` finds the edge its first created.
+    {
+      const s = store();
+      const g = 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):7])';
+      write(s, g);
+      write(s, g);
+      expect(s.query('SELECT count(*) c FROM edges', [])).toEqual([{ c: 1 }]);
+    }
+    // COLLISION: id 7 is taken by a 1->2 edge; a merge for a 1->3 edge with the same id misses the
+    // search and collides on the create — the reference's verbatim raise.
+    {
+      const s = store();
+      write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):7])');
+      expect(() => write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):3,(T.id):7])'))
+        .toThrow(idAlreadyExists('Edge', 7));
+    }
+  });
+
   test('a large literal inject inlines as 0-bind literals and stays on RelIR', () => {
     // There is no >100-value conversion. A literal inject spends NO binds — each member inlines as a
     // typed SQL literal (`constLit`) — so even 101 members is 0 binds and trivially DO-legal on RelIR.
