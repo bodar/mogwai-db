@@ -255,9 +255,14 @@ table, each cheap enough to finish in the CPU budget?"**
 3. **Reuse-first vocabulary.** Native TinkerPop names verbatim (they parse; stock clients emit them;
    conformance references them). Our extensions are `mogwai.*` (per the project rule); `gds.*` may be
    offered as *aliases* for onboarding but we do not squat that namespace.
-4. **The `call()` surface is the superset, and it mirrors GDS's own shape.** GDS is itself call-based
-   (`CALL gds.pageRank.stream/.mutate/.write/.stats`). We mirror those **modes** so Neo4j users see a
-   familiar surface and we get write-back for free.
+4. **The `call()` surface is the superset — of PARAMETERS, not of modes.** GDS is itself call-based
+   (`CALL gds.pageRank.stream/.mutate/.write/.stats`), and the superset we owe is its per-algorithm
+   *parameter* surface (`dampingFactor`, `relationshipWeightProperty`, `sourceNodes`, `topK`, …). We do
+   NOT mirror its stream/mutate/write/stats **modes**: mogwai only implements `decorate` (+ `path` for
+   shortestPath), because the traversal model subsumes the rest — a `stream` shape IS the decorated
+   element stream, "stats" is ordinary aggregation over it (`values(key).mean()`), and "write"/"mutate"
+   is `property()`/`addV` in the traversal. This corrects the doc's earlier "mirror the modes" text; see
+   **GDS parameter coverage (2026-09-05)** below for the full mode/param/projection reconciliation.
 5. **Correct by design, fail closed.** A config/variant SQL cannot express throws a clear deferral;
    never mis-execute, never silently answer a different question, never drop to JS filtering.
 6. **Rides the existing seam — no new orchestrator.** Global iterative algorithms are `'barrier'`
@@ -365,14 +370,128 @@ the scores** — a host-driven loop is a barrier, and a barrier's product is a l
 rather than re-sourced from. That is the one piece of genuinely new plumbing this doc asks for (see
 open research 1).
 
-### GDS-style modes on the `call()` surface
-- `stream` — return `{node, score}` rows (the source-form `{kind:'relation'}` contribution).
-- `mutate` — write score back as a vertex property via the existing write path (`applyVertexProperty`,
-  `src/bulk.ts`); then it's a normal queryable property. The ergonomic escape hatch; moots the
-  return-shape question, and the only mode that needs nothing new.
-- `stats` — return only the summary (iterations, didConverge, distribution).
-- The native TinkerPop step ≈ a *fourth* "decorate-in-flight and continue" mode (per-traverser
-  correlated read of a retained relation, element-preserving) — same engine, different tail.
+### GDS-style modes on the `call()` surface — SUPERSEDED, see below
+
+The original plan (mirror `stream`/`mutate`/`stats`) was **not** taken, and the code proves it:
+`kernel.ts` accepts only `mode === 'decorate'`, shortest-path only `'path'`, and `spi/types.ts`
+records "A former third arm, `stream`, is DELETED." The reconciled decision is in the next section.
+
+---
+
+## GDS parameter coverage (2026-09-05)
+
+The bet (principle #2/#4): TinkerPop's four native steps are thin desugarings (`desugarGraphAlgos`,
+`src/compiler/ir/strategies.ts`) onto `call('mogwai.<algo>', {…})`, and the `call()` surface is the
+GDS-*parameter* superset. This section is the coverage matrix — GDS's per-algorithm param surface vs
+what each service accepts today — built against the now-vendored config surface
+(`vendor/gds/config-api` + `vendor/gds/procedures/facade-api/configs/{centrality,community,similarity,
+path-finding}-configs`, added to the sparse set for exactly this) plus the `vendor/gds/algo`
+implementations. **Implementation is a follow-on; this is the plan.**
+
+### Modes / projection / multi-graph — the cross-cutting reconciliation
+
+These resolve most of GDS's config surface *once*, so the per-algorithm tables below carry only real
+algorithm-tuning params.
+
+- **Modes (`stream`/`mutate`/`write`/`stats`) → N/A by design.** We do `decorate` (+ `path`). The
+  traversal model subsumes the rest: the decorated element stream IS `stream`; "stats" is ordinary
+  aggregation (`…pageRank().values(key).mean()`); "write"/"mutate" is `property()`/`addV` in the
+  traversal. So every `writeProperty`/`mutateProperty`/`writeConcurrency` param is N/A, and GDS's
+  `<algo>{Stream,Mutate,Write,Stats}Config` split collapses to one param set. `propertyName` (our
+  decorate key) is the sole survivor of the write-mode family.
+- **`relationshipTypes` → the `edges` scope.** `edgeScopeOf` (`src/services/catalog/olap/kernel.ts`)
+  already parses `__.bothE("knows")` into `{direction, labels}`, which is GDS's relationship-type
+  filter plus an orientation choice folded together. Gap: GDS allows richer multi-type selection; we do
+  a single `outE`/`inE`/`bothE(labels?)` and fail closed past that.
+- **`nodeLabels` → PARTIAL, a real gap.** `g.V().hasLabel("person").pageRank()` changes the *seed set*,
+  not the graph projection — GDS's `nodeLabels` induces a subgraph (edges to excluded nodes vanish).
+  No clean equivalent today; flag as a design item, not a param to bolt on.
+- **Named graph → federation, a composition not a param.** GDS's `graphName` selects a projected graph;
+  our analogue is `call("federate", {graph, …})` (a sibling DO). Directional analogue (different
+  mechanism: cross-DO RPC vs in-process catalog), and OLAP-over-federated-source does not compose today
+  — a separate substrate question, not a per-algorithm param.
+- **`concurrency`/`logProgress`/`jobId`/`sudo` → N/A.** We compile to one (or a few) SQL statements in
+  a single-threaded DO isolate; there is no thread pool to size or job registry to name.
+
+### Per-algorithm matrix
+
+Legend: **add** = real algorithm-tuning param to implement · **maps** = already covered via a
+cross-cutting mapping above · **model** = needs a semantics decision first (lineage conflict) ·
+**variant** = a missing algorithm shape, not a param · **N/A** = infra/mode/projection, excluded.
+
+**Ranking / centrality**
+
+| Algo | GDS param (default, cited) | today | verdict |
+|---|---|---|---|
+| pageRank | `dampingFactor` (0.85, `centrality-configs/…/pagerank/PageRankConfig.java`) | yes | — |
+| | `maxIterations` (20, `…/pagerank/RankConfig.java:46`) | yes (`~tinkerpop.pageRank.times`) | — |
+| | `tolerance` (1e-7, `RankConfig.java:40`) | hardcoded 1e-5, not settable | **add** |
+| | `relationshipWeightProperty` (null) | no | **add** (weighted messages) |
+| | `sourceNodes` (`[]`, personalized) | no (our seed = traverser count, different) | **add** |
+| | `scaler` (None; Min/Max/Mean/Log/StdScore) | no | **add** |
+| articleRank | `dampingFactor`/`maxIterations`/`tolerance` | yes/yes/yes | — |
+| | `relationshipWeightProperty`, `sourceNodes`, `scaler` | no | **add** |
+| betweenness | `samplingSize`/`samplingSeed` (full/exact default; `algo/…/betweenness/RandomDegreeSelectionStrategy.java`) | no (always exact) | **add** (accuracy/cost trade) |
+| | `relationshipWeightProperty` (null) | no (hop-count only) | **add** |
+| closeness | `useWassermanFaust` (false; `algo/…/closeness/{Default,WassermanFaust}CentralityComputer.java`) | no (Default only) | **add** (1-line reducer swap) |
+| harmonic | (none — no algorithm-specific tunable, `algo/…/harmonic/HarmonicCentralityBaseConfig.java`) | — | full parity |
+| hits | `hitsIterations`/`authProperty`/`hubProperty` | yes (as `iterations`/`authProperty`/`hubProperty`) | — |
+| degree | `orientation` (NATURAL) | yes (as `direction` out/in/both) | — |
+| | `relationshipWeightProperty` (null) | no (bare count) | **add** (weighted degree) |
+
+**Community / components**
+
+| Algo | GDS param (default, cited) | today | verdict |
+|---|---|---|---|
+| wcc | `threshold` (0; `community-configs/…/wcc/WccBaseConfig.java:32`, validation: >0 requires `relationshipWeightProperty`) | no | **add** |
+| | `relationshipWeightProperty` (null) | no | **add** (pairs with `threshold`) |
+| | `seedProperty` (null, incremental) | no | **add** |
+| | `consecutiveIds` (false) | no | **add** (cheap result renumber) |
+| peerPressure (≈GDS labelPropagation) | `maxIterations` (10; `community-configs/…/labelpropagation/LabelPropagationBaseConfig.java:40`) | hardcoded 30 | **add** (trivial — `iterateInSql` bound) |
+| | `nodeWeightProperty`, `relationshipWeightProperty` (null) | no | **add** (SUM(weight) vote tally) |
+| | `seedProperty` (null) | no | **model** — our lineage is TinkerPop `PeerPressureVertexProgram` (cluster = vertex id), which has no seed concept; adding it extends past the reference |
+| scc | (none — no algorithm-specific config) | `propertyName` | full parity |
+| kcore | (none) | `propertyName` | full parity |
+| triangleCount | `maxDegree` (`Long.MAX_VALUE`; `algo/…/triangle/IntersectingTriangleCount.java`) | no | **add** (hub cost bound — O(deg²) today) |
+| localClusteringCoefficient | `maxDegree` | no | **add** |
+| | `seedProperty` (precomputed triangleCount reuse; `algo/…/triangle/LocalClusteringCoefficient.java`) | no (always recomputes) | **add** (composition/perf) |
+
+**Similarity / paths**
+
+| Algo | GDS param (default, cited) | today | verdict |
+|---|---|---|---|
+| nodeSimilarity | `topK`/`bottomK` (10; `similarity-configs/…/nodesim/NodeSimilarityBaseConfig.java:74`) | no (emits full dense relation) | **add** (top priority — combinatorial blowup on hubs) |
+| | `topN`/`bottomN` (0=off) | no | **add** |
+| | `similarityCutoff` (1e-42, `NodeSimilarityBaseConfig.java:52`) | implicit >0 only | **add** (`HAVING sim >= ?`) |
+| | `degreeCutoff` (1) / `upperDegreeCutoff` (MAX) | no | **add** (`WHERE` on the `deg` CTE) |
+| | similarity metric (JACCARD; OVERLAP/COSINE) | Jaccard hardcoded | **add** |
+| | `relationshipWeightProperty` (null) | no (unweighted) | **add** |
+| shortestPath | `sourceNode`/`targetNode(s)` | yes — generalized (sources from the traverser stream; target is an anonymous predicate) | superset |
+| | `relationshipWeightProperty` (weight) | yes (`SP_DISTANCE`) | — |
+| | edges scope / `includeEdges` | yes | — (stale "fail closed" header comment on label scope — `shortest-path.ts` — should be fixed) |
+| | hop cap that PRUNES the walk (vs our post-hoc `maxDistance` filter) | partial (filters after full relaxation) | **add** (real early-stop) |
+| | Yen's `k` (k-shortest-paths), A* heuristic | no | **variant** (new mechanism — single-relaxation barrier retains only the best distance) |
+
+### Implementation priority (follow-on tranches)
+
+1. **`relationshipWeightProperty` — one substrate, many algorithms.** A weight-aware `adjacencyCte`
+   (generalizing `shortestPathAdjacencyCte`, which already reads an edge weight) unlocks weighted
+   pageRank, articleRank, betweenness, degree, wcc-`threshold`, and weighted LPA at once. Highest
+   leverage.
+2. **nodeSimilarity `topK`/`similarityCutoff`/`degreeCutoff`** — scalability wall today (dense output);
+   all SQL tweaks (`WHERE`/`HAVING`/a per-source `ROW_NUMBER` cap).
+3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),
+   pageRank/articleRank `tolerance`, wcc `consecutiveIds`, closeness `useWassermanFaust`, triangle/LCC
+   `maxDegree`.
+4. **`sourceNodes` (personalized pageRank/articleRank)** and **`seedProperty` (wcc)** — read a
+   node-set/property into the seed INSERT instead of the identity seed.
+5. **`scaler`** (post-hoc rescale), **betweenness sampling**, **nodeSimilarity metrics/weighted**.
+6. **Deferred / design-first:** `nodeLabels` induced subgraph, OLAP-over-federation, Yen's/A*
+   (`variant`), peerPressure `seedProperty` (`model` — reconcile lineage first).
+
+Also fold in when implementation starts: the stale `strategies.ts` comment ("a GDS-style call chooses
+`stream`/`mutate`/`stats`") and the stale `shortest-path.ts` header (label-scoped `.edges` "fails
+closed" — the code actually threads labels).
 
 ---
 
