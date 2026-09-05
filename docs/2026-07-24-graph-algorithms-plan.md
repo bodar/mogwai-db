@@ -498,12 +498,21 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
    produced-but-null, the one Gremlin-coalesce ≠ SQL-COALESCE divergence), the final arm a `constant`.
    Fixed a latent `midCall` bug on the way (a `result:'number'` streaming value's type column was named
    `vtype` while `scalarPayload` read `vt`).
-   - **Deferred, its own feature:** the broader `coalesce(values(k), constant(x))` "value-or-default"
-     idiom (non-reducer arm). It is entangled with a SEPARATE pre-existing divergence —
-     `group().by(k).by(<non-reducing scalar>)` yields a single value, not TinkerPop's implicit list
-     (`by(values(k))` shows it too; explicit `.fold()` is the workaround). Fixing group's implicit fold
-     (in `map.ts` `groupMap`, real conformance blast radius) unblocks both; the L4 scenarios
-     `g_V_groupXbyXTlabelX_byXcoalesce…X` and `g_V_out_path_byXcoalesce…X` stay `@Unsupported` until then.
+   - **Value-or-default — LANDED 2026-09-05.** The broader `coalesce(values(k), …, constant(x))` idiom now
+     lowers through the same seam: `scalarCoalesceChild` dropped its "every non-final arm a reducer, final
+     a constant" restriction for the one guard that bears on correctness (refuse `min`/`max`), leaning on
+     the machinery already there — `scalarChild` admits a scalar only for a body it reduces to one value
+     per traverser (a fan-out declines) and a non-final arm must STATE its productivity. `coalesce(values(a),
+     values(b))` composes too. Unblocks L4 `g_V_out_path_byXcoalesce…X` (path by()-position) and
+     `g_V_groupXbyXTlabelX_byXcoalesce…X` (group value by()).
+   - **The "group implicit fold" premise was REFUTED, not fixed** — do not reopen it. `group().by(k).by(<bare
+     value traversal>)` does NOT fold in TinkerPop: `GroupStep`'s reducer is `Operator.assign` (last-wins
+     scalar; `GroupStep.java:60-63`), `Grouping.convertValueTraversal` folds only the OPTIMIZED
+     `by("name")`/`by(T.label)` forms, and `ByModulatorOptimizationStrategy` leaves a bare `by(__.values(k))`
+     un-optimized. Pinned by `sideEffect/Group.feature`'s `by(__.constant(1))` → scalar `d[1].i` (not `l[1]`)
+     and `by(__.out().order())` → `v[lop]` (not `l[v[lop]]`). So `map.ts`'s `single` arm is correct as it
+     stands and was left untouched; the group L4 scenario's expected was CORRECTED from a list to the scalar
+     `m[{"person":"n/a","software":"java"}]`. A list still needs an explicit `.fold()`.
 3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),
    pageRank/articleRank `tolerance`, wcc `consecutiveIds`, closeness `useWassermanFaust`, triangle/LCC
    `maxDegree`.
