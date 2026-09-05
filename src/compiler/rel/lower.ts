@@ -2240,6 +2240,16 @@ function pathTail(
     const sliced = sliceOp(step, rel, false, fresh);
     if (sliced) { rel = sliced; continue; }
 
+    // A GLOBAL row op over the STREAM of paths — `dedup()` (and, once it has a comparator, `order()`).
+    // A Path is a payload shape exactly like a list: its `LIST_COL` json IS its identity, and two paths
+    // are equal iff their ordered positions are (`GremlinValueComparator.Type.Path` compares element-wise,
+    // `.../util/GremlinValueComparator.java:328`), so a global `dedup()` keeps the first occurrence's path
+    // — the SAME `rowOp`/`payloadRowShape` the list stream uses, and the output stays a path stream. A bare
+    // `order()` has no SQL comparator (element-wise ORDERABILITY is the JS-barrier increment) and declines
+    // out of `rowOp`, falling through to the member ops below.
+    const row = rowOp(step, rel, payloadRowShape({ kind: 'list', list: col(rel.id, LIST_COL), of }), false, ctx, fresh);
+    if (row) { rel = row; continue; }
+
     // The relation is ALREADY a list relation, so the retype is the framing arm and nothing else — but only
     // where every position is a projected SCALAR. An element position would decode through a member op into
     // the scalar stream, which has no element arm, so this fails closed on exactly that boundary.
