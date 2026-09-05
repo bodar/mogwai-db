@@ -269,7 +269,37 @@ names (list-alias dedup key, the local/flatMap split).
   members), `path().group()` and a Path in a group VALUE (needs the `{t:'path'}` tree-walker arm in
   `frameTypedNode`/`listNodeExpr`, fail-closed today), `path().fold().unfold()` (member re-entry), and the
   two `order`/`dedup(Scope.local)`-over-element-membered-nested-list items `outstanding-work.md` marks
-  "won't-do" — which the keystone's materialized-member substrate makes tractable.
+  "won't-do".
+
+- ◑ **D2 (DIAGNOSED — the RIGHT direction found, base-case build is a focused follow-up).** The
+  element-membered nested-list `order`/`dedup(Scope.local)` "won't-do" (`order-dedup-local.ts`
+  `hasElementLeaf` gate). The first framing ("reconcile the barrier's member encoding" / a detached-element
+  read substrate) was a DEAD END — deeper research (Dan's steer + code + TinkerPop/Calcite) found the
+  root cause and the clean fix:
+  - **Why it fails:** the barrier HEAD is built through `valueHead → finishLowering`, which runs the
+    FRAMING payload builder — so it materializes element members (rowid → `{id,label,props}`, external id)
+    BEFORE the JS round-trip. The internal rowid is lost, so the re-inject's `{elem}` re-source (which
+    expects rowids) crashes/nulls at frame, unfold, read and movement alike; the mixed vocabulary declines
+    element unfold too.
+  - **The principle (already the architecture everywhere else):** an element is carried as its INTERNAL
+    ROWID and materialized only at the EDGE (framing → `source.elementObject`, where `COALESCE(uid,id)`
+    lives). `map.ts:187` proves the collecting-group value fold stores members as rowids at the algebra
+    level; only framing expands them. Calcite (carry the key, join late) and TinkerPop (reference elements
+    carry id; `order` compares by `id()`) both point the same way. The barrier head is the ONE place that
+    breaks this by framing early.
+  - **The fix:** make the barrier operate on the RAW rowid list — build the head with the element leaf
+    demoted to a raw scalar (so `finishLowering` emits nested rowids, not materialized objects), sort/dedup
+    the rowids in JS (rowid order = the established flat-case element convention, `list.ts:503`), then
+    re-inject with the ORIGINAL `{elem}` descriptor so the existing rowid re-source handles unfold/read/
+    movement and materialization lands at the edge. NO new detached substrate — it REMOVES the premature
+    materialization. Needs: a raw-head builder (`lowerToRel` + demote the shape's element leaves +
+    `finishLowering`), the gate removal, and re-inject with the original `of`.
+  - **Federated wrinkle (Dan flagged):** a nested list of LANDED foreign elements carries the landed
+    relation's key, re-sourced via `BoundGraph`, not `BaseGraph` (the barrier resume's default). So the
+    base-graph case is the first increment; a federated nested-element-order must gate on the source
+    (fail-closed until the resume threads the bound source) rather than re-source landed keys against the
+    base tables. Sorting by rowid (not external id) is a pre-existing near-miss for uid graphs shared with
+    the flat case — consciously kept consistent, not introduced here.
 
   Superseded re-diagnosis (kept for the reasoning): **the deferral HOLDS, but the real blocker is UPSTREAM
   of the seed.** The named gate is the path+encounter combo decline (now
