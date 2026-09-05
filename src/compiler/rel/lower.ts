@@ -4051,9 +4051,12 @@ function elementTail(
       // tail after the run is the ordinary fold and nothing here knows it happened.
       let end = at;
       while (end < steps.length && steps[end]!.name === 'property') end++;
-      const writes = propertyWrites(steps.slice(at, end), elem, childSeam(ctx, fresh));
+      const seam = childSeam(ctx, fresh);
+      const writes = propertyWrites(steps.slice(at, end), elem, seam);
       if (!writes) return null;
-      const written = elementProperty(rel, elem, writes, fresh);
+      // The seam + the live `as()` labels flow into the write so a runtime value (`property(k, __.trav)`)
+      // resolves correlated to the owner and can read an aliased traverser.
+      const written = elementProperty(rel, elem, writes, seam, labels, fresh);
       if (!written) return null;
       const tail = elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels);
       if (!tail) return null;

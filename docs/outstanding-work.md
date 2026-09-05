@@ -45,13 +45,19 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
   retained `fromV`, `where('a',eq('b')).by('key')`, list-valued alias dedup key). One substrate clears
   a large read-side family; the barrier-in-body slice 2 and per-origin-in-arm items are its consumers.
   Plan + reference-grounded increment ladder: [fan-out rejoin authority](./2026-09-05-fan-out-rejoin-authority-plan.md).
-- **Correlated per-incoming-row write-argument resolver.** A write arg that is a nested traversal not
-  foldable to a constant declines (`src/compiler/rel/write.ts`: property value/key, merge
-  match/onCreate/onMatch entries, whole-arg / no-arg merge). The write lowering has a per-*graph* rooted
-  surface but no per-*traverser* correlated one (the `resolveMergeSpec` seam is named but unwired).
-  Building it unblocks the whole dynamic-write family: `property(k,__.trav)`, computed merge
-  labels/keys/values, `mergeV(__.select(sideEffectMap))`, no-arg `mergeV/mergeE`. Architectural; the
-  biggest write-side family (rel-blockers "writes" 10).
+- **Correlated per-incoming-row write-argument resolver — increment 1 (`property()` VALUE) LANDED;
+  merge family remains.** The write lowering now has a per-*traverser* correlated surface: a
+  `property(k, __.trav)` value resolves per owner through `ChildSeam.rows`
+  (`runtimePropertyStatements`, `src/compiler/rel/write.ts`), reference-exact per
+  `AddPropertyStep.handleTraversalValue` (0→skip, >1 under an effective single→raise, list/set→each),
+  with the FTS text derived post-write from the stored `{t,v}` tree (`refreshFts`, `src/refresh.ts`).
+  Covers `property()` steps and `addV`/`mergeV` tails; validated by `property-traversal-multivalue.feature`
+  + `test/property-traversal-value.test.ts`. **What remains** (the "resolveMergeSpec" seam is the same
+  `child.rows`/`child.scalar` wiring, now proven): computed MERGE labels/keys/values (the merge SEARCH
+  correlated per driver — `matching`/`edgeCriteria` still input-independent), `mergeV(__.select(sideEffectMap))`
+  whole-arg maps, no-arg `mergeV/mergeE` (traverser-as-map), a runtime EDGE property value (take-first, no
+  cardinality — `AddPropertyStep.java:172-199`), and runtime property META. Ties to the supplied-`T.id`
+  merge work.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP

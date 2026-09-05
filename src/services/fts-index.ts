@@ -114,3 +114,11 @@ export function propertyFtsRows(
  *  8,936, and a divergent index is silent. */
 export const propertyFtsEntries = (val: unknown, typeNode: TypeNode | null): readonly FtsRow[] =>
   ftsRowsFor(valueNodeOf(val, typeNode));
+
+/** The (kind, text) pairs a STORED value indexes as — the SAME walk as `propertyFtsEntries`, but from
+ *  a `ValueNode` already reconstructed from storage (`valueNodeFromStored`) rather than from a logical
+ *  value + typeNode. The post-write refresh (`src/refresh.ts`) indexes a `property(k, __.trav)` value
+ *  this way: a runtime value's text is not known until it is stored, so it is not indexed in the
+ *  compiled plan and the refresh derives it from the stored self-describing `{t,v}` tree. ONE walk,
+ *  which is the invariant `propertyFtsRows` guards — a re-derivation would silently diverge. */
+export const propertyFtsEntriesOfNode = (node: ValueNode): readonly FtsRow[] => ftsRowsFor(node);

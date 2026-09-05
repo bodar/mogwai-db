@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,825<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,828<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -203,7 +203,7 @@ heterogeneous stream frames each value by its own tag.
 | Step | | Notes |
 |---|:--:|---|
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a runtime/computed label; `addE` after `addE`; `addInE` |
-| `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ❌ `property(k, <traversal>)` |
+| `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ✅ `property(k, __.trav)` per-row correlated (vertex; 0→skip, >1 under single→raise, list/set→each); edge value + runtime meta decline |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
 | `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅ (upsert-by-id, both hosts); ❌ a map-valued `inject`/`union` feeding the merge; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |

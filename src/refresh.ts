@@ -26,8 +26,10 @@
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { computeRev, edgeContent, parseRev, vertexContent, type Rev } from './rev.ts';
-import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
-import { updateSet, type SetColumn } from './setwrite.ts';
+import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners, type PropRow } from './formats/drain.ts';
+import { insertSet, updateSet, type SetColumn } from './setwrite.ts';
+import { valueNodeFromStored } from './gremlin/types.ts';
+import { PROPERTY_FTS_COLUMNS, propertyFtsEntriesOfNode, type OwnerElem } from './services/fts-index.ts';
 
 const GID: SetColumn = { name: 'gid', type: 'blob', blob: true };
 const REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
@@ -90,11 +92,57 @@ function refreshTombstones(store: GraphStore): void {
   updateSet(store, 'tombstones', 'id', [SEQ], rows.map((r, i) => [r.id, base + i + 1]));
 }
 
+/** The `property_fts` columns as `insertSet` typing — the same list as `PROPERTY_FTS_COLUMNS`, in the
+ *  same order the row tuples below emit. `pid`/`owner` bind as plain integers. */
+const FTS_SET_COLS: readonly SetColumn[] = PROPERTY_FTS_COLUMNS.map((name) =>
+  ({ name, type: name === 'pid' || name === 'owner' ? 'any' : 'text' }));
+
+/** The `property_fts` rows a set of dirty owners' STILL-UNINDEXED properties should carry.
+ *
+ *  A `property(k, __.trav)` value is not indexed in the compiled plan — its text is not known until it
+ *  is stored — so the post-write refresh derives it from the STORED self-describing `{t,v}` tree
+ *  (`valueNodeFromStored`) through the ONE authoritative walk (`propertyFtsEntriesOfNode`), the same
+ *  one the constant write path and the bulk loader use, so the index cannot diverge. A property whose
+ *  pid is ALREADY in `property_fts` was indexed in-plan (a constant value) and is skipped; a
+ *  stale-on-overwrite delete stayed in the plan (`dropStaleIndex`), so this only ever INSERTS and never
+ *  pays the O(n) FTS-delete trap. The `pid IN property_fts` probe scans the FTS table once per refresh
+ *  (its columns are UNINDEXED) — a cost carried only when a write leaves dirty rows, and the seam where
+ *  a per-write gate would land if it ever bites. */
+function ftsRowsForDirty(store: GraphStore, ownerElem: OwnerElem, ids: readonly number[], props: Map<number, PropRow[]>): unknown[][] {
+  const indexed = new Set(store.query<{ pid: number }>(
+    'SELECT DISTINCT pid FROM property_fts WHERE owner_elem = ? AND owner IN (SELECT value FROM json_each(?))',
+    [ownerElem, JSON.stringify([...ids])]).map((r) => r.pid));
+  const rows: unknown[][] = [];
+  for (const [owner, ps] of props)
+    for (const p of ps) {
+      if (indexed.has(p.id)) continue;
+      for (const e of propertyFtsEntriesOfNode(valueNodeFromStored(p.value, p.vtype)))
+        rows.push([ownerElem, p.id, owner, p.key, e.kind, e.text]);
+    }
+  return rows;
+}
+
+/** Index the runtime-written properties of the elements this write touched — `property(k, __.trav)`,
+ *  whose value text is only knowable once stored. Runs BEFORE `refreshNodes`/`refreshEdges` clear the
+ *  dirty flag, so `WHERE dirty` is still this write's touched set. A no-op (two index-served reads)
+ *  when nothing is dirty. */
+function refreshFts(store: GraphStore): void {
+  const nodeIds = store.query<{ id: number }>('SELECT id FROM nodes WHERE dirty').map((r) => r.id);
+  const edgeIds = store.query<{ id: number }>('SELECT id FROM edges WHERE dirty').map((r) => r.id);
+  if (!nodeIds.length && !edgeIds.length) return;
+  const rows: unknown[][] = [];
+  if (nodeIds.length) rows.push(...ftsRowsForDirty(store, 'node', nodeIds, vertexPropsForOwners(store, nodeIds, true)));
+  if (edgeIds.length) rows.push(...ftsRowsForDirty(store, 'edge', edgeIds, edgePropsForOwners(store, edgeIds, true)));
+  insertSet(store, 'property_fts', FTS_SET_COLS, rows);
+}
+
 /** Refresh the replication metadata (gid + rev + seq) of the elements a write just touched, and assign
  *  seqs to any new tombstones — called by `frameResolved` after a write program commits
- *  (`plan.kind === 'program'`). Vertices before edges (an edge's rev sees its endpoints' minted gids),
- *  then tombstones (a delete's seq follows the same write's live seqs, §6·2). */
+ *  (`plan.kind === 'program'`). FTS first (it reads `WHERE dirty`, which the metadata refresh clears),
+ *  then vertices before edges (an edge's rev sees its endpoints' minted gids), then tombstones (a
+ *  delete's seq follows the same write's live seqs, §6·2). */
 export function refreshElements(store: GraphStore): void {
+  refreshFts(store);
   refreshNodes(store);
   refreshEdges(store);
   refreshTombstones(store);

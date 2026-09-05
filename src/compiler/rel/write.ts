@@ -81,6 +81,12 @@ const FTS_COLS: readonly ColMeta[] = [meta('owner_elem', 'text'), meta('owner', 
 
 const ID_TYPE: RelType = typeOf(meta('id', 'int'));
 
+/** An empty alias map for the creation hosts (`addVertex`, `mergeV`) that carry no `as()` scope of
+ *  their own to a runtime value body — a body reading an outer `select('a')` there resolves to the
+ *  empty result rather than a live label. Defined locally because importing `lower/`'s `NO_ALIASES`
+ *  would invert the module DAG (`write` is imported BY `lower`). */
+const NO_ALIASES: AliasMap = new Map();
+
 /** One `id` column and nothing else — a target set is an identity set, and every channel the read
  *  chain carried (bulk, encounter, an alias history) is state a DELETE has no use for. */
 const idsOf = (rel: Rel, fresh: Minter): Rel =>
@@ -328,7 +334,7 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * one of those would have been an optional field whose emptiness meant "this is really the other
  * thing", which is the vocabulary shape `ScalarType` exists as the counter-example to.
  */
-export type PropertyWrite = PropertySet | PropertyRemoval;
+export type PropertyWrite = PropertySet | PropertyRemoval | PropertyRuntimeSet;
 
 export interface PropertySet {
   readonly kind: 'set';
@@ -359,6 +365,37 @@ export interface PropertyRemoval {
   readonly kind: 'remove';
   readonly key: string;
   readonly keyName: string | null;
+}
+
+/**
+ * `property(k, __.trav)` — a value the compile-time form does NOT carry, so it is resolved PER
+ * incoming traverser at lowering time, correlated to the owner row through `ChildSeam.rows`
+ * (`runtimePropertyStatements`). This is the write side's per-*traverser* surface, the twin of the
+ * per-*graph* rooted one `runtimeLabel` already has: a label body reads the graph (one value for the
+ * whole batch), a property VALUE body reads the traverser it is being written onto — so
+ * `property('age2', __.values('age'))` names a different value for every vertex it visits.
+ *
+ * The reference is `AddPropertyStep.handleTraversalValue`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java:127-200`):
+ * the body is run per traverser and ALL its results collected — 0 → the mutation is skipped and the
+ * element passes through, >1 under an effective `single` → raise, `list`/`set` → each result is a
+ * value, else the one value. So the answer is a correlated RELATION (one row per child result), not a
+ * scalar — which is exactly `ChildRows`, joined to the owners by the `origin` it carries.
+ *
+ * The body is NORMALIZED here (`child.body(nested, 'child')`) and nothing else: whether it LOWERS, and
+ * to a scalar, is `runtimePropertyStatements`' question, because only there is the owner relation the
+ * value correlates against in scope (a scalar subquery correlated to a relation not in the write
+ * statement's own scope is silently wrong SQL, not a decline — the correlation-scope rule).
+ */
+export interface PropertyRuntimeSet {
+  readonly kind: 'runtime';
+  readonly key: string;
+  readonly keyName: string | null;
+  /** The value traversal, rooted at the current traverser (`'child'` scope). */
+  readonly body: readonly IRStep[];
+  /** The DECLARED cardinality, or `null` for the graph default — the same per-element question a
+   *  constant write carries, resolved per owner in `runtimePropertyStatements`. */
+  readonly cardinality: VertexCardinality | null;
 }
 
 /**
@@ -503,12 +540,21 @@ function existingRows(elem: Elem, owners: Rel, key: Expr, guard: ((owner: Expr) 
  * itself is guarded so a `set` write of a value already present is a no-op; and the index rows
  * follow the insert because only it knows their pid.
  */
-function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind: Binder, fresh: Minter): void {
+function propertyStatements(
+  elem: Elem, owners: Rel, write: PropertyWrite, bind: Binder, fresh: Minter,
+  child: ChildSeam, aliases: AliasMap, guard: Guarder,
+): boolean {
   const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
   // A MEMBERSHIP test is against one column, and the snapshot carries the traverser's channels too —
   // so the identity projection is taken once here rather than at each of the four predicates that
   // want it. (`IN (SELECT id, bulk, encounter …)` is what SQLite refuses, and it refused it.)
   const ids = make.project({ id: fresh('w'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] });
+
+  // A RUNTIME value is resolved correlated to `owners` — a different SOURCE (one row per child
+  // result, not per owner) and a per-owner raise the constant path never needs — so it runs its own
+  // statement builder rather than sharing this one's, and DECLINES (`false`) where the value body does
+  // not lower to a scalar. Everything before this line is shared; nothing after it is.
+  if (write.kind === 'runtime') return runtimePropertyStatements(elem, owners, ids, write, bind, fresh, child, aliases, guard);
 
   // A REMOVAL is the replace half on its own, with no insert after it and no cardinality consulted:
   // the FTS text those rows own, then the rows. It is UNGUARDED — `property(k, null)` removes under
@@ -518,7 +564,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     bind(dropStaleIndex(elem, stale.ids, fresh));
     const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
-    return;
+    return true;
   }
 
   // A DECLARED cardinality is a schema write, and it must land before anything reads it back.
@@ -601,6 +647,129 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   // which is what the CSV round-trip corpus caught.
   const written = bind(rowsWritten);
   if (write.fts.length) bind(indexWritten(written, elem, write, fresh));
+  return true;
+}
+
+/**
+ * `property(k, __.trav)` — a per-incoming-row VALUE, as the statements it runs over the SAME set of
+ * owners. `runtimePropertyStatements` is `propertyStatements`' twin and stays deliberately parallel to
+ * it — same cardinality declaration, same `single`-replace, same `set`-dedup — differing only where
+ * the value's PROVENANCE forces it:
+ *
+ *  - **The SOURCE is `ChildSeam.rows`, not the owners.** The value body is run PER owner and its rows
+ *    collected (`AddPropertyStep.handleTraversalValue`,
+ *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java:127-200`):
+ *    one INSERT row per child result, keyed to its owner by the `origin` channel `child.rows` carries.
+ *    So `list`/`set` writing EACH result and `single`/default writing one are the same relation with a
+ *    different guard — exactly as the constant path is one projection whatever the cardinality.
+ *  - **0 results → the owner is simply absent from the source**, which is the reference's "skip the
+ *    mutation, pass the element through" for free — the element still flows because the RESULT relation
+ *    is the owners snapshot re-projected (`elementProperty`), independent of whether any value was
+ *    written.
+ *  - **>1 under an effective `single` → a GUARD, not a silent first** (`:178-182`). The effective
+ *    cardinality is `cardinalityOf`'s per-owner expression — declared, or the element's own
+ *    declaration COALESCED with the graph default — so one guard covers declared-single, declared-list
+ *    (never fires) and undeclared (fires only where the element resolves single), reference-exact.
+ *  - **NO in-plan FTS.** A runtime value's index text is not known until it is stored, so the
+ *    post-write refresh (`src/refresh.ts`) indexes it from the stored self-describing `{t,v}` tree
+ *    through the ONE authoritative walk — which is also why stale-on-overwrite deletes stay here
+ *    (`dropStaleIndex`), so the refresh only ever INSERTS and never pays the O(n) FTS-delete trap.
+ *
+ * DECLINES (`false`) where the value body does not lower to a SCALAR — an element/list/map result is
+ * not a scalar property value — which the caller turns into `null`, the ordinary miss.
+ */
+function runtimePropertyStatements(
+  elem: Elem, owners: Rel, ids: Rel, write: PropertyRuntimeSet, bind: Binder, fresh: Minter,
+  child: ChildSeam, aliases: AliasMap, guard: Guarder,
+): boolean {
+  // A runtime EDGE value declines up in `writeOf`, so this is always a vertex.
+  const spec = PROPERTY_TABLE.vertex;
+  const key = propertyKeyExpr(write.key, write.keyName);
+
+  // THE VALUE, PER OWNER — the ordinary fold run over the owners snapshot, one row per child result,
+  // carrying an `origin` channel = the owner id. A non-scalar result (an element/list/map value) is
+  // not a property value, so it declines.
+  const rows = child.rows(write.body, owners, elem, aliases);
+  if (!rows || rows.framing.kind !== 'scalar') return false;
+  const valueRel = rows.rel;
+  const owner = (rel: Rel): Expr => col(rel.id, rows.origin);
+  // The stored Gremlin type rides in a `vtype` column on a `values()`-shaped scalar stream (source.ts).
+  // Read it off whichever relation the source projects OVER (`seed` below), never the grandparent
+  // `valueRel` — a `Col` names a relation in direct scope, which the RelIR checker enforces.
+  const hasVtype = valueRel.type.cols.some((column) => column.name === 'vtype');
+
+  // A DECLARED cardinality is a schema write, before anything reads it back — `propertyStatements`' rule.
+  if (write.cardinality) {
+    const target = make.scan({ id: fresh('t'), table: 'vertex_property_cardinality', alias: fresh('wt'), channels: [], type: typeOf(...CARDINALITY_COLS) });
+    const rowsC = make.project({
+      id: fresh('p'), input: owners, channels: [], type: typeOf(...CARDINALITY_COLS),
+      exprs: [['node', col(owners.id, 'id')], ['key', key], ['cardinality', text(write.cardinality)]],
+    });
+    bind(insert({
+      target, cols: CARDINALITY_COLS.map((column) => column.name), source: rowsC, channels: [], type: typeOf(),
+      onConflict: { target: ['node', 'key'], set: [['cardinality', col(EXCLUDED, 'cardinality')]] }, returning: [],
+    }));
+  }
+
+  // A `single` (declared, or the element's default) REPLACES — the displaced rows and their FTS text
+  // go before the insert, over the OWNER ids exactly as the constant path does.
+  const replaces = write.cardinality === 'single' || write.cardinality === null;
+  if (replaces) {
+    const g = write.cardinality === 'single' ? undefined
+      : (o: Expr): Expr => eq(cardinalityOf(o, key, null, fresh), text('single'));
+    const stale = existingRows('vertex', ids, key, g, fresh);
+    bind(dropStaleIndex('vertex', stale.ids, fresh));
+    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
+  }
+
+  // THE >1-UNDER-SINGLE RAISE — a guard over the value rows grouped by owner, kept only where the
+  // effective cardinality resolves `single`. `cardinalityOf(owner, key, write.cardinality)` is that
+  // per-owner answer, so declared-single fires on any owner with >1, declared-list/set never fires,
+  // and undeclared fires only where the element itself resolves single — reference-exact in one guard.
+  const counts = make.aggregate({
+    id: fresh('rc'), input: valueRel, channels: [], type: typeOf(meta('origin', 'int'), meta('n', 'int')),
+    groupBy: [owner(valueRel)], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+  });
+  const offending = make.filter({
+    id: fresh('rf'), input: counts, channels: [], type: counts.type,
+    pred: and({ kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) },
+      eq(cardinalityOf(col(counts.id, 'origin'), key, write.cardinality, fresh), text('single'))),
+  });
+  guard(make.project({ id: fresh('p'), input: offending, channels: [], type: typeOf(meta('origin', 'int')), exprs: [['origin', col(offending.id, 'origin')]] }),
+    { message: 'Single-cardinality property requires exactly one value, but the traversal produced more than one', raiseWhen: 'rows' });
+
+  // A `set` write (declared, or the element's default) does not re-insert a value already present.
+  // Expressed as a filter on the value ROWS — the same per-element `!= 'set' OR NOT EXISTS` the
+  // constant path applies to the owners, one relation over.
+  const skippable = write.cardinality !== 'single' && write.cardinality !== 'list';
+  const present = (): Expr => {
+    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const matching = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(and(eq(col(scan.id, spec.owner), owner(valueRel)), eq(col(scan.id, 'key'), key)),
+        eq(col(scan.id, 'value'), col(valueRel.id, 'v'))),
+    });
+    return { kind: 'exists', plan: matching, negated: true };
+  };
+  const seed = skippable
+    ? make.filter({
+      id: fresh('f'), input: valueRel, channels: valueRel.channels, type: valueRel.type,
+      pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(owner(valueRel), key, write.cardinality, fresh), right: text('set') }, right: present() },
+    })
+    : valueRel;
+
+  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const source = make.project({
+    id: fresh('p'), input: seed, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [[spec.owner, owner(seed)], ['key', key], ['value', col(seed.id, 'v')], ['vtype', hasVtype ? col(seed.id, 'vtype') : compilerNull('text')]],
+  });
+  // NO in-plan FTS — the post-write refresh indexes this from the stored `{t,v}` tree (see the header).
+  bind(insert({
+    target, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE,
+    returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]],
+  }));
+  return true;
 }
 
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
@@ -625,15 +794,17 @@ type Guarder = (node: Rel, guard: Guard) => void;
  * blob) DECLINES rather than arriving at the executor as something a `transportable` check would
  * have to refuse at run time.
  */
-export function elementProperty(target: Rel, elem: Elem, writes: readonly PropertyWrite[], fresh: Minter): Effects | null {
+export function elementProperty(target: Rel, elem: Elem, writes: readonly PropertyWrite[], child: ChildSeam, aliases: AliasMap, fresh: Minter): Effects | null {
   // A role this route cannot put through a snapshot is a DECLINE, not a dropped channel: a `sack` or
   // a `path` would come back missing and the next reader of it would answer a different question.
   const carried = writeInputChannels(target);
   if (carried.length !== target.channels.filter((channel) => channel.role !== 'bulk').length) return null;
   const seeded = inputRows(target, writeInputCols(target), fresh);
-  const { bindings, bind } = effectScope(fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
   const owners = bind(seeded.result, true, carried);
-  for (const write of writes) propertyStatements(elem, owners, write, bind, fresh);
+  // A runtime value body that does not lower to a scalar DECLINES the whole write (`false`), which is
+  // the ordinary miss the fold turns into `UnsupportedTraversal` — never a silent skip.
+  for (const write of writes) if (!propertyStatements(elem, owners, write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of every mutated element: a `property()` write changed their content (§5·1).
   bind(markDirty(elem, idsOf(owners, fresh), fresh));
   // Back to an ELEMENT relation. `property()` is element-PRESERVING, so this IS the snapshot — no
@@ -932,7 +1103,20 @@ function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam): PropertyWrite | 
   // constant tags each element losslessly (`valueNodeOf`) instead of being re-inferred from the JS
   // value — which cannot tell a uuid from a string or a datetime from a long (§6·7).
   const folded = isNested(spec.value) ? constFromNested(spec.value, child.sideEffects, child.params) : null;
-  if (folded && !folded.has) return null;
+  // A NESTED value that does NOT fold to a constant is a per-incoming-row value: resolved correlated
+  // to the owner in `runtimePropertyStatements`, not a decline (the whole point of this feature).
+  // What stays out of v1 is a NARROWER sub-case, declined honestly rather than mis-executed:
+  //  - an EDGE runtime value — `handleTraversalValue` takes the FIRST of several silently for a
+  //    non-vertex (`AddPropertyStep.java:172-199`, `effectiveCard` null), a take-first path distinct
+  //    from the vertex cardinality one this increment builds;
+  //  - a runtime value carrying META — a JSONB object on the row this route does not emit per-row yet.
+  if (folded && !folded.has) {
+    if (elem === 'edge' || spec.meta !== null || !isNested(spec.value)) return null;
+    const body = child.body(spec.value.nested, 'child');
+    if (!body?.length) return null;
+    try { validatePropertyKey(spec.key); } catch { return null; }
+    return { kind: 'runtime', key: spec.key, keyName: spec.keyName, body, cardinality: spec.cardinality };
+  }
   const value = folded ? folded.value : spec.value;
   const vtype = folded ? folded.vtype : spec.vtype;
   const typeNode = folded ? folded.typeNode : spec.typeNode;
@@ -1027,8 +1211,8 @@ function internLabels(labels: readonly Expr[], bind: Binder, fresh: Minter): Rel
  */
 export function addVertex(
   input: Rel, labels: readonly Expr[], uid: string | number | null, writes: readonly PropertyWrite[],
-  ordered: boolean, bind: Binder, fresh: Minter,
-): Rel {
+  ordered: boolean, bind: Binder, fresh: Minter, child: ChildSeam, aliases: AliasMap, guard: Guarder,
+): Rel | null {
   // ZERO labels is a real state and it is the whole reason this takes a LIST: under
   // `LabelCardinality.ZERO_OR_MORE` a bare `addV()` creates a vertex carrying none, and a merge map
   // with no `T.label` does the same. Nothing to intern and nothing to pair, so both statements are
@@ -1074,7 +1258,10 @@ export function addVertex(
     }));
   }
 
-  for (const write of writes) propertyStatements('vertex', created, write, bind, fresh);
+  // A runtime value over the FRESHLY CREATED rows is correlated to `created` by `child.rows` (a
+  // standalone joinable relation, not an enclosing-scope subquery), so it reads properties an earlier
+  // `property()` in this same creation just wrote. A body that does not lower to a scalar declines.
+  for (const write of writes) if (!propertyStatements('vertex', created, write, bind, fresh, child, aliases, guard)) return null;
 
   // WHAT THE NEW TRAVERSER CARRIES FORWARD. `addV` MINTS a traverser, so `bulk` is 1 and its
   // `encounter` is its own id — the created rows ARE in emission order. Every OTHER carried channel
@@ -1214,7 +1401,8 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // A RUNTIME label's validity, also before the creation — the reference validates the resolved value
   // and so must we, and a check after the insert has nothing left to refuse.
   for (const runtime of labels.runtime) labelGuards(runtime, guard, fresh);
-  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, labels.names, tokens.id, writes, ordered, bind, fresh);
+  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, labels.names, tokens.id, writes, ordered, bind, fresh, child, NO_ALIASES, guard);
+  if (!result) return null;
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
@@ -1677,7 +1865,7 @@ export function elementAddE(
     returning: [['id', col(edgesTarget.id, 'id')]],
   }));
 
-  for (const write of writes) propertyStatements('edge', created, write, bind, fresh);
+  for (const write of writes) if (!propertyStatements('edge', created, write, bind, fresh, child, aliases, guard)) return null;
 
   // THE ALIASES CARRY, by `addVertex`'s mechanism because it is the same question: an `Insert`'s
   // `RETURNING` says nothing about which input row produced a given output row, so the created rows
@@ -1971,7 +2159,7 @@ export function elementMergeV(
   // The reference applies the labels before the property entries and so does this; they are different
   // tables, so the order is the reference's rather than a constraint.
   if (appended.length) bindLabels(matched, appended, bind, fresh);
-  for (const write of matchWrites) propertyStatements('vertex', matched, write, bind, fresh);
+  for (const write of matchWrites) if (!propertyStatements('vertex', matched, write, bind, fresh, child, NO_ALIASES, guard)) return null;
   // Touch the rev of the MATCHED (existing) vertices whenever onMatch or the tail `property()` run
   // mutated them (§5·1); created vertices are already born dirty, and an empty `matched` is a no-op.
   if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', matched, fresh));
@@ -1996,8 +2184,10 @@ export function elementMergeV(
   });
   // The creation supplies the merge's id (`onCreate`'s, else the merge argument's — `createId`), routed
   // to the rowid or `uid` column by `addVertex` exactly as `addV` does. The guard above has already made
-  // a colliding id a clear raise, so the insert here only ever runs against a free one.
-  const created = addVertex(creating, createLabels.names, createId, createWrites, false, bind, fresh);
+  // a colliding id a clear raise, so the insert here only ever runs against a free one. A runtime tail
+  // value that does not lower to a scalar declines the whole creation (`null`).
+  const created = addVertex(creating, createLabels.names, createId, createWrites, false, bind, fresh, child, NO_ALIASES, guard);
+  if (!created) return null;
 
   // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
   // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the
@@ -2009,7 +2199,7 @@ export function elementMergeV(
   // upstream's own reading of it (an ordinary AddPropertyStep over the merge's output). One statement
   // set over the union, rather than one per branch.
   const emitted = tailWrites.length ? bind(merged, true) : merged;
-  for (const write of tailWrites) propertyStatements('vertex', emitted, write, bind, fresh);
+  for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carried, ordered, fresh) };
 }
@@ -2171,7 +2361,7 @@ export function elementMergeE(
   // emptiness and would otherwise read the very table its own statement inserts into, and an
   // `onMatch` write can change a property the search asked about.
   const matched = bind(pairedWith(pairs, criteria, { bySrc: matchOut !== undefined, byTgt: matchIn !== undefined }, fresh), true);
-  for (const write of matchWrites) propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh);
+  for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the MATCHED (existing) edges whenever onMatch or the tail `property()` run mutated
   // them (§5·1); created edges are born dirty, and an empty `matched` is a no-op. Placed before the
   // create/match branch, so it covers the tail writes both branches run over the matched subset.
@@ -2208,7 +2398,7 @@ export function elementMergeE(
       raiseWhen: 'rows',
     });
     const found = tailWrites.length ? bind(matched, true) : matched;
-    for (const write of tailWrites) propertyStatements('edge', idsOf(found, fresh), write, bind, fresh);
+    for (const write of tailWrites) if (!propertyStatements('edge', idsOf(found, fresh), write, bind, fresh, child, aliases, guard)) return null;
     return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, found, carried, ordered, fresh, true) };
   }
   const wantedRel = make.distinct({
@@ -2272,7 +2462,7 @@ export function elementMergeE(
     type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')),
     returning: [['id', col(edgesTarget.id, 'id')], ['src', col(edgesTarget.id, 'src')], ['tgt', col(edgesTarget.id, 'tgt')]],
   }));
-  for (const write of createWrites) propertyStatements('edge', idsOf(created, fresh), write, bind, fresh);
+  for (const write of createWrites) if (!propertyStatements('edge', idsOf(created, fresh), write, bind, fresh, child, aliases, guard)) return null;
 
   const createdFor = make.join({
     id: fresh('j'), left: pairs, right: created, join: 'inner', channels: [],
@@ -2291,7 +2481,7 @@ export function elementMergeE(
     ],
   });
   const emitted = tailWrites.length ? bind(merged, true) : merged;
-  for (const write of tailWrites) propertyStatements('edge', idsOf(emitted, fresh), write, bind, fresh);
+  for (const write of tailWrites) if (!propertyStatements('edge', idsOf(emitted, fresh), write, bind, fresh, child, aliases, guard)) return null;
 
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carried, ordered, fresh, true) };
 }

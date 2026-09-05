@@ -10,7 +10,6 @@ Feature: mogwai addendum — a traversal-valued property() yields EVERY result, 
   # fall-through are unpinned upstream, and each is a separate branch here.
 
   @gap:property-traversal-multivalue
-  @Unsupported
   Scenario: g_VX1X_propertyXlist_friends_outXknowsX_valuesXnameXX
     Given the modern graph
     And the traversal of
@@ -24,7 +23,6 @@ Feature: mogwai addendum — a traversal-valued property() yields EVERY result, 
 
   # set dedups by value, so a traversal that yields a repeat stores it once.
   @gap:property-traversal-multivalue
-  @Unsupported
   Scenario: g_VX1X_propertyXset_langs_bothXcreatedX_valuesXlangXX
     Given the modern graph
     And the traversal of
@@ -38,7 +36,6 @@ Feature: mogwai addendum — a traversal-valued property() yields EVERY result, 
   # An empty traversal writes NOTHING — distinct from `property(k, null)`, which removes, and from
   # storing a null, which this graph never does.
   @gap:property-traversal-multivalue
-  @Unsupported
   Scenario: g_VX1X_propertyXlist_nothing_outXnosuchX_valuesXnameXX
     Given the modern graph
     And the traversal of
