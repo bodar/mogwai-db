@@ -159,14 +159,43 @@ names (list-alias dedup key, the local/flatMap split).
   `mergeArms` returns the merged outbound `AliasMap` (`BranchRel`) and the scalar/element/property branch
   tails continue with `merged.aliases`. Oracle `test/L4-addendum/branch-arm-label-escape.feature`;
   `rel-spine.test.ts` union case moved DECLINED→COVERED. L3 1828→1829.
-- **C2 (Claude; novel, reference-faithful).** The `flatMap` path-hide node — collapse the N body-minted
-  path positions to one input→output position (`FlatMap.feature:56`). Lets `flatMap`-under-`path()` stop
-  declining.
-- **C3 (Claude).** Per-origin barrier-in-body ("slice 2") — a `fold`/`group`/`aggregate` inside a
-  fan-out body scoped per-entering-traverser: `GROUP BY origin` with `origin` CONSULTED as part of the
-  group key (the way `graph` is spliced into the dedup/group key, `channels.ts` note), NOT carried as a
-  passenger. Extends `PER_ORIGIN_SAFE_BARRIER`. Bounded-`repeat`/`union`-arm variants stay per their
-  arm-major/traverser-major rule; unbounded-`repeat` stays permanent decline.
+- ◑ **C2 (DESIGNED — sequenced after C3/D1; the one item deferred, with magnitude).** The `flatMap`
+  path-hide — collapse the N body-minted path positions to one input→output position
+  (`FlatMap.feature:56`: `flatMap(out().out()).path()` = `[v,end]`). **Key fact:** `movement()` appends a
+  path position whenever the path CHANNEL is present (`pathCarried`), NOT based on `ctx.tracksPath`, so
+  running the body with `tracksPath` off does not stop appends. Two mechanisms, both with real cost:
+  - **(a) static-N JSON surgery.** Count the body's path-appending steps (movements + value-maps, per
+    `path.ts`) at compile time; if statically constant (a LINEAR body — `out().out()` = 2), reproject the
+    path as `first (len − N) positions ++ last position` via a `json_each` reconstruction. N==1 is already
+    correct (no-op). Risk: an exact miscount of the append set is a wrong path; a non-linear body (branch/
+    repeat inside) has no static N and must decline.
+  - **(b) origin-rejoin.** Number the input (`mintRowOrigin`, keeping P), strip the path channel for the
+    body so it appends nothing, run the body, then self-join the element output to the numbered input by
+    `origin` to recover P, and `extendPath` the output position. Robust but must INLINE the body-run
+    (`childRows` refuses a pre-numbered input, `reduction.ts:464`), and needs the join.
+  **Deferred because:** `flatMap`-under-`path()` is niche (few/no corpus witnesses), it is correctly
+  fail-closed today, and both mechanisms carry correctness risk (miscount / intricate join) better spent
+  on C3/D1 first. Restrict the eventual build to an element-output linear body; non-element / non-linear
+  stays deferred.
+- ◑ **C3 (SCOPED — a multi-part subtle substrate, not one edit).** Per-origin barrier-in-body ("slice 2").
+  Probed the actual declines: `local(out.fold())`, `local(out.count())`, `flatMap(out.fold())`,
+  `local(out.fold()).unfold()`'s terminal forms ALREADY lower (the reduction arm / `scalarChild`). What
+  declines is three distinct families, each its own mechanism:
+  - **a non-seeded numeric reducer in `local`** (`local(outE.values('weight').sum())`,
+    `mean`/`min`/`max`) — declines because a reducer over an empty child emits NOTHING (unlike
+    `count`→0, `fold`→[]), so `perTraverserChild` fails `produced.present === ALWAYS_PRODUCTIVE`
+    (`reduction.ts:237,262`); needs a productive-null / empty-drop per-reducer (the `nonEmptyReducer`
+    seam) plus a scalar-host `origin` (a rowid-less parent — the channel must carry a VALUE, a
+    channels-core change per `childRows`' own note at `reduction.ts:447-450`).
+  - **a full GROUP in `local`** (`local(out.group().by('lang'))`, `groupCount()`) — a grouping barrier
+    scoped per-entering-traverser = `GROUP BY [origin, key]` with `origin` CONSULTED as part of the group
+    key (like `graph`, `channels.ts` note), NOT a passenger. Extends `PER_ORIGIN_SAFE_BARRIER` for the
+    grouped case.
+  - **a barrier that CONTINUES mid-body** (`local(out.fold().unfold())`) — the fold's result re-enters
+    the body and continues; the per-origin fold must keep `origin` through the collect so the tail
+    rejoins.
+  Bounded-`repeat`/`union`-arm variants stay per their arm-major/traverser-major rule; unbounded-`repeat`
+  stays permanent decline. Each family is a separate green increment.
 
 ### Phase D — the async-boundary frame authority (Codex sweep, Claude spec+review; Claude owns the path+encounter seed)
 
