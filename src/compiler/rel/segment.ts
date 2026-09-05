@@ -23,6 +23,7 @@ import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
 import { buildOrderDedupSegment, buildOrderGlobalSegment, orderDedupBarrierIn, orderGlobalBarrierIn } from './order-dedup-local.ts';
 import { asStringBarrierIn, buildAsStringSegment } from './asstring-barrier.ts';
+import { buildCastSegment, castBarrierIn } from './cast-barrier.ts';
 import type { Elem } from '../elem.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
@@ -425,6 +426,7 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const orderDedup = orderDedupBarrierIn(steps);
   const orderGlobal = orderGlobalBarrierIn(steps);
   const asStr = asStringBarrierIn(steps, request.lowering);
+  const cast = castBarrierIn(steps, request.lowering);
   // The EARLIEST boundary wins: a segment's head is the prefix BEFORE it, so a later barrier belongs to
   // that head's resumed tail, not to this segment. A value-transform boundary (a regex `has()`, a
   // `reverse()`, a `split()`) is asked here rather than discovered in the fold, for the same reason as a
@@ -438,7 +440,8 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const odAt = orderDedup ? orderDedup.at : Infinity;
   const ogAt = orderGlobal ? orderGlobal.at : Infinity;
   const asStrAt = asStr ? asStr.at : Infinity;
-  const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt, ogAt, asStrAt);
+  const castAt = cast ? cast.at : Infinity;
+  const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt, ogAt, asStrAt, castAt);
   if (earliest === Infinity) {
     // No barrier on the top-level spine — look for a federate barrier NESTED in a branch arm (the
     // multi-graph merge, `union(federate(A)…, federate(B)…)`). Only reached here, so a top-level
@@ -455,6 +458,7 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   // scalar `values().order()` stays in SQL untouched.
   if (earliest === ogAt) return buildOrderGlobalSegment(steps, orderGlobal!.at, request.lowering);
   if (earliest === asStrAt) return buildAsStringSegment(steps, asStr!.at, request.lowering);
+  if (earliest === castAt) return buildCastSegment(steps, cast!.at, request.lowering);
   if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
   // A DECORATE barrier (an OLAP algorithm) keeps the LIVE element stream — it does not land detached
   // rows — so it takes its own resume, not the source/mid foreign one.

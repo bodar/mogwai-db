@@ -3237,13 +3237,15 @@ function valueResume(
   const fresh = minter();
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
-  // No channel crossed the boundary — a tail that DEMANDS an encounter or a path cannot be seeded from a
-  // bare value list, so it declines rather than compile a plan with the column silently missing.
-  if (facts.demandsEncounter || facts.tracksPath) return null;
-  // Bind the array index (`json_each.key`) as `RESUME_ORD`: it IS each value's STREAM POSITION, which the
-  // list seed threads as an encounter channel so a later re-explode (`unfold()`) emits an earlier
-  // traverser's members before a later one's, rather than sorting by the inner member ordinal alone (a
-  // total order only within one list). The scalar seed ignores it.
+  // A tail that tracks a PATH cannot be seeded from a bare value list (no path history crossed the
+  // barrier), so it declines rather than compile a plan with the column silently missing. An
+  // ENCOUNTER demand IS satisfiable: every seed below threads the array index (stream order) as the
+  // encounter channel, so a terminal-emission-order tail is seeded rather than declined.
+  if (facts.tracksPath) return null;
+  // Bind the array index (`json_each.key`) as `RESUME_ORD`: it IS each value's STREAM POSITION, which
+  // EVERY seed threads as an encounter channel — the list/map seeds so a later re-explode (`unfold()`)
+  // emits an earlier traverser's members before a later one's, the scalar seed so a terminal-emission-order
+  // retype tail keeps input order rather than declining.
   const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh, undefined, RESUME_ORD);
   const chain = tail(seed(exploded, fresh), ctx, fresh);
   return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
@@ -3255,9 +3257,14 @@ const RESUME_ORD = 'so';
 
 export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
   return valueResume(values, steps, from, opts,
+    // Carry the array index as an ENCOUNTER channel exactly as the list/map seeds do: the re-injected
+    // values are in stream order (the array order), so a tail that demands a terminal emission order
+    // (`asNumber().asDate().asNumber()` — a length->1 retype chain, `computeDemandsEncounter`) is seeded
+    // from it rather than declined. A tail that owes no encounter simply never reads the column.
     (exploded, fresh) => make.project({
-      id: fresh('vrp'), input: exploded, channels: [], type: typeOf(meta('v', 'any', true)),
-      exprs: [['v', col(exploded.id, 'sv')]],
+      id: fresh('vrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta('v', 'any', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [['v', col(exploded.id, 'sv')], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
     }),
     (seed, ctx, fresh) => scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh));
 }

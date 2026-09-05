@@ -62,11 +62,13 @@ describe('scalar-parent / projection SQL', () => {
     // `AsNumberStep.map` returns a `Number` UNCHANGED and a `Date`/`OffsetDateTime` as its epoch-milli
     // Long (`vendor/tinkerpop/.../map/AsNumberStep.java:57-72`). Over a runtime stream already framed
     // numeric or datetime it therefore needs no cast and cannot raise — the value is the same, only the
-    // tag moves (datetime → long). A bare `asNumber()` over an UNTYPED property still declines (it could
-    // meet a non-numeric value it must RAISE on, which SQL cannot do — the runtime-guard increment).
+    // tag moves (datetime → long). A bare `asNumber()` over an UNTYPED (per-row) property is the runtime
+    // guard that lowers as a JS value-transform barrier (`cast-barrier.ts`): it compiles to a SEGMENT
+    // (not a plain read), so `read()`'s compile-only path refuses it here — its result is asserted in
+    // `test/compiler/cast-barrier.exec.test.ts`.
     expect(read('g.V().count().asNumber()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().values("birthday").asDate().asNumber()').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(() => read('g.V().values("age").asNumber()')).toThrow(UnsupportedTraversal);
+    expect(() => read('g.V().values("age").asNumber()')).toThrow(/segment plan/);
 
     // The round-trip the reference pins (AsDate.feature `g_V_valuesXbirthdayX_asDate_asNumber_asDate`):
     // a date → asDate (datetime) → asNumber (long millis) → asDate recovers the original instant.
