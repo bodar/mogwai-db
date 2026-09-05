@@ -561,15 +561,14 @@ UNEVALUABLE`.
 - 🚧 **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
   `path().by(<transform>)` writes) — inert until tags join a comparison.
 - 🚧 **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy) and `barrier(Barrier.normSack)`.
-- 🚧 **`dateAdd`/`dateDiff` over a NON-datetime input is a wrong answer, not a throw.** `DateAddStep.map`
-  throws *"dateAdd() accept only OffsetDateTime or Date (deprecated)."* and `DateDiffStep` throws on a
-  non-date LEFT operand (`vendor/tinkerpop/gremlin-core/.../step/map/DateAddStep.java`), but the const-fold
-  (`foldConstantCoercions`, `gremlin/coerce.ts`) computes `Number(v) ± delta` unconditionally, so
-  `inject(null).dateAdd(DT.day,2)` answers epoch-0+2d and `inject(1234).dateAdd(…)` treats the int as
-  millis — both should raise. Unwitnessed (every DateAdd.feature scenario feeds `datetime(…)`), and the
-  fix is fiddly: the fold must gate on datetime PROVENANCE (`as==='datetime'` OR a datetime-literal source)
-  without breaking the working `inject(datetime(…)).dateAdd(…)` path, whose datetime literal does not set
-  `as`. Neighbour of the reducer null family (2026-09-05) but its own increment.
+- ✅ **`dateAdd`/`dateDiff` over a NON-datetime input RAISES** (2026-09-05). `DateAddStep.map` throws
+  *"dateAdd() accept only OffsetDateTime or Date (deprecated)."* and `DateDiffStep` on a non-date LEFT
+  operand; the const-fold (`foldConstantCoercions`, `gremlin/coerce.ts`) used to compute `Number(v) ± delta`
+  unconditionally, so `inject(null).dateAdd(DT.day,2)` answered epoch-0+2d and `inject(1234).dateAdd(…)`
+  treated the int as millis. It now gates on datetime PROVENANCE — `as==='datetime'` (a leading `asDate`
+  or a prior `dateAdd`) OR the SOURCE being a datetime literal (`at===1` and every inject arg typed
+  `datetime`) — and raises otherwise, leaving `inject(datetime(…)).dateAdd(…)` and the chained/`asDate`
+  forms working. Unwitnessed (every DateAdd.feature scenario feeds `datetime(…)`), so it moved no L3/census.
 - 🚧 **Path value positions** — `id`/`label`/`valueMap` (channels `[]`, no carry); `path().unfold()` over a MIXED
   element+value path; the ENCOUNTER-plus-path walk.
 - 🚧 **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept

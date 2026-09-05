@@ -344,11 +344,27 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
       as = 'datetime';
       continue;
     }
+    // `dateAdd`/`dateDiff` require an OffsetDateTime/Date SUBJECT and RAISE on anything else — a null,
+    // an int, a string all throw (`DateAddStep.map`: *"dateAdd() accept only OffsetDateTime or Date
+    // (deprecated)."*; `DateDiffStep` likewise on a non-date LEFT operand). SQL cannot raise, so the fold
+    // must — computing `Number(v) ± delta` unconditionally treated a bare int as epoch millis and a null
+    // as epoch 0, a required error becoming a plausible value. The subject is a datetime iff a prior
+    // coercion produced one (`as === 'datetime'` — a leading `asDate`, or a preceding `dateAdd`) or the
+    // SOURCE is a datetime literal (the first coercion over an `inject(datetime(…))`, whose args carry
+    // `type: 'datetime'`). `dateDiff`'s result is a `long`, so a `dateAdd` chained after one correctly
+    // falls to the raise.
+    const datetimeSubject = as === 'datetime'
+      || (at === 1 && steps[0].args.length > 0 && steps[0].args.every((a) => a.type === 'datetime'));
     if (step.name === 'dateAdd') {
+      if (!datetimeSubject) throw new ValueParseError('dateAdd() accept only OffsetDateTime or Date (deprecated).');
       const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
       for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
       as = 'datetime';
       continue;
+    }
+    if (!datetimeSubject) {
+      const v = vals[0];
+      throw new ValueParseError(`DateDiff can only take OffsetDateTime or Date (deprecated) as argument, encountered ${v === null || v === undefined ? 'null' : javaTypeName(v)}`);
     }
     const other = dateDiffOtherMs(step.args[0]?.value, {});
     for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
