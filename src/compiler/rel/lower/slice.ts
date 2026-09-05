@@ -12,7 +12,7 @@ import { isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
 import { countLit, sliceBound } from '../const.ts';
 import { byExpr, modulations, productivityFilter, type Modulation } from '../modulator.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasIdAt, aliasProjection, aliasValueAt } from '../alias.ts';
+import { aliasIdAt, aliasListAt, aliasProjection, aliasValueAt } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
 import { payloadCols } from '../build.ts';
 import { exprChildren } from '../../../rel/walk.ts';
@@ -623,7 +623,13 @@ export function dedupByLabels(
       if (prod) productive.push(prod);
     } else if (proj.read.kind === 'element') keyExprs.push(aliasIdAt(column, 'last'));
     else if (proj.read.kind === 'value') keyExprs.push(aliasValueAt(column, 'last'));
-    else return null; // a list-valued alias key with no `by()` is a later phase — decline.
+    // A LIST label keys on its canonical JSON (`json(v)`): `DedupGlobalStep` compares each label's
+    // scope value with `java.util.List` content-equality (`DedupGlobalStep.java:80-88`), and SQLite's
+    // canonical `json()` text of two identical arrays compares equal under `=`/GROUP BY — the faithful
+    // lowering. A MAP label stays declined: `json()` object text is key-ORDER sensitive, but a Java
+    // `LinkedHashMap` compares by ENTRY set regardless of order, so text equality is not faithful.
+    else if (proj.read.kind === 'list') keyExprs.push(aliasListAt(column, 'last'));
+    else return null; // a MAP-valued alias key — order-sensitive JSON text vs entry-equality, a later phase.
   }
   const domain = productive.length
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: productive.reduce((a, b) => and(a, b)) })

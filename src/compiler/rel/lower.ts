@@ -1209,6 +1209,25 @@ function selectCollection(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter):
   };
 }
 
+/**
+ * A KEYED `dedup(label…)[.by()]` — it reads each label's `Pop.last` off the path and ranks the
+ * survivor's whole payload, INDEPENDENT of the current stream shape (`DedupGlobalStep<S>` is generic
+ * in S, `vendor/tinkerpop/gremlin-core/.../step/filter/DedupGlobalStep.java:75-88`). Returns the
+ * deduped rel, `null` to DECLINE, or `'skip'` when the step is not a keyed dedup so the caller falls
+ * through to its ordinary row op. This is the ONE dispatch every tail shares — element, record,
+ * scalar, list and map — so a keyed dedup composes wherever a label is bound, not only on the element
+ * stream (the list/scalar/map tails used to never reach `dedupByLabels`, so a keyed dedup over a bound
+ * LIST/scalar declined though the algebra was built).
+ */
+function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | null | 'skip' {
+  if (step.name !== 'dedup' || isLocalScope(step) || step.optionArms || !(step.args ?? []).length) return 'skip';
+  const keys = step.args.map((a) => a.value);
+  if (!keys.every((k) => typeof k === 'string')) return 'skip';
+  const bys = modulations(step, 1, childSeam(ctx, fresh));
+  if (!bys) return null;
+  return dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh);
+}
+
 function scalarTail(
   seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES,
@@ -1381,6 +1400,9 @@ function scalarTail(
     // value stream the same row-op vocabulary every other shape has (per-origin dedup, the ordered
     // first-occurrence, the deterministic tie) instead of a hand-rolled subset. A `dedup` reset the
     // multiplicity, so the fold learns `bulked = false` exactly as the element tail does.
+    const kd = keyedDedup(step, rel, labels, ctx, fresh);
+    if (kd === null) return null;
+    if (kd !== 'skip') { rel = kd; bulked = false; continue; }
     const row = rowOp(step, rel, scalarRowShape(host), bulked, ctx, fresh);
     if (row) { rel = row; if (step.name === 'dedup') bulked = false; continue; }
 
@@ -2102,6 +2124,9 @@ function listTail(
     // JSON — two lists are equal iff their ordered members are, so byte-identity IS list equality and a
     // global `dedup()` keeps the first occurrence's list. A LOCAL-scope op declines out of `rowOp` and
     // falls to `listMemberOp`.
+    const kd = keyedDedup(step, rel, labels, ctx, fresh);
+    if (kd === null) return null;
+    if (kd !== 'skip') { rel = kd; continue; }
     const listHost: ChildHost = { kind: 'list', list: col(rel.id, LIST_COL), of: items };
     const row = rowOp(step, rel, payloadRowShape(listHost), false, ctx, fresh);
     if (row) { rel = row; continue; }
@@ -2384,6 +2409,9 @@ function mapTail(
     // canonical-key-order `LinkedHashMap` compares by entries). `order()` with no comparator DECLINES —
     // a Java `Map` is not `Comparable`, so the map host's `by()` arms return null and no total order is
     // invented, exactly as the reference refuses one. A LOCAL-scope op was handled above.
+    const kd = keyedDedup(step, rel, labels, ctx, fresh);
+    if (kd === null) return null;
+    if (kd !== 'skip') { rel = kd; continue; }
     const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels } };
     const row = rowOp(step, rel, payloadRowShape(mapHost), false, ctx, fresh);
     if (!row) return null;
