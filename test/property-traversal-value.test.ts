@@ -93,18 +93,21 @@ describe('property(k, __.trav) — correlated per-row value', () => {
     expect(out.map(Number).sort((a, b) => a - b)).toEqual([0, 0, 2]);
   });
 
-  test('mergeV option(onMatch) writes a computed value at the MATCHED element', async () => {
-    // marko exists (2 out-knows), so onMatch runs and writes deg = its outE count, resolved at the
-    // matched vertex through the runtime write path.
-    const out = await values("g.mergeV(['name': 'marko']).option(Merge.onMatch, ['deg': __.outE().count()]).values('deg')", twoKnows);
-    expect(out.map(Number)).toEqual([2]);
+  test('mergeV option(onMatch) resolves the value at the DRIVER, not the matched element', async () => {
+    // Driver = marko; the merge matches josh; onMatch writes tag = __.values('name'). Per
+    // MergeVertexStep.java:103 (materializeMap at the incoming traverser), the value is the DRIVER's
+    // name ('marko'), applied onto the matched josh — NOT josh's own name. This discriminates
+    // driver-rooted (correct) from element-rooted.
+    const out = await values("g.V().has('name','marko').mergeV(['name':'josh']).option(Merge.onMatch, ['tag': __.values('name')]).values('tag')", twoKnows);
+    expect(out).toEqual(['marko']);
   });
 
-  test('mergeV option(onCreate) writes a computed value at the CREATED element', async () => {
-    // 'newbie' does not exist → create it, then onCreate writes deg = bothE().count() = 0 (the fresh
-    // vertex has no edges yet). onMatch would not run.
-    const out = await values("g.mergeV(['name': 'newbie']).option(Merge.onCreate, ['deg': __.bothE().count()]).values('deg')", twoKnows);
-    expect(out.map(Number)).toEqual([0]);
+  test('mergeV option(onCreate) resolves the value at the DRIVER, not the created element', async () => {
+    // Driver = marko (knows 2); 'newbie' does not exist → create it; onCreate writes deg =
+    // __.out('knows').count() resolved at the DRIVER marko (=2), applied onto the created vertex —
+    // NOT the fresh vertex's own count (which would be 0).
+    const out = await values("g.V().has('name','marko').mergeV(['name':'newbie']).option(Merge.onCreate, ['deg': __.out('knows').count()]).values('deg')", twoKnows);
+    expect(out.map(Number)).toEqual([2]);
   });
 
   test('the post-write FTS refresh indexes a runtime-written value', () => {

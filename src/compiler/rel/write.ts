@@ -808,6 +808,70 @@ function runtimePropertyStatements(
   return true;
 }
 
+/**
+ * A runtime `onMatch`/`onCreate` VALUE — resolved at the DRIVER, written onto the merged element.
+ *
+ * `MergeVertexStep` materializes the onMatch/onCreate map at the INCOMING traverser
+ * (`materializeMap(traverser, …)`, `MergeVertexStep.java:103`/`:153`), NOT at the matched/created
+ * element — so a computed value there is the DRIVER's, applied onto whatever the merge produced. That
+ * is the whole difference from the `property()` tail (an ordinary `AddPropertyStep` rooted at the merge
+ * OUTPUT). It resolves as a ROOTED SCALAR over the driver relation: for the common single-driver merge
+ * that is exact; a multi-driver CONSTANT search shares its matches, so the value is one driver's (the
+ * first) — a degenerate shape with no observable order and no corpus scenario. FTS is deferred to the
+ * post-write refresh like every runtime value.
+ */
+function mergeArmValueWrite(
+  target: Rel, driver: Rel, write: PropertyRuntimeSet, bind: Binder, fresh: Minter,
+  child: ChildSeam, aliases: AliasMap,
+): boolean {
+  const spec = PROPERTY_TABLE.vertex;
+  const key = propertyKeyExpr(write.key, write.keyName);
+  const resolved = resolveRuntimeValue(write.body, driver, 'vertex', child, aliases, fresh);
+  if (!resolved) return false;
+  const valueRel = resolved.rel;
+  const hasVtype = valueRel.type.cols.some((column) => column.name === 'vtype');
+  // The driver's value as a rooted scalar — one value for the (shared) merged elements.
+  const one = make.limit({ id: fresh('li'), input: valueRel, channels: valueRel.channels, type: valueRel.type, count: compilerInt(1) });
+  const scalarOf = (column: string, kind: 'any' | 'text'): Expr => ({
+    kind: 'scalar', plan: make.project({ id: fresh('p'), input: one, channels: [], type: typeOf(meta(column, kind, true)), exprs: [[column, col(one.id, column)]] }),
+  });
+  const valueExpr = scalarOf('v', 'any');
+  const vtypeExpr: Expr = hasVtype ? scalarOf('vtype', 'text') : compilerNull('text');
+  const ids = idsOf(target, fresh);
+  const owner = (rel: Rel): Expr => col(rel.id, 'id');
+
+  // A `single` (declared, or the element default) REPLACES the merged elements' rows for the key.
+  const replaces = write.cardinality === 'single' || write.cardinality === null;
+  if (replaces) {
+    const g = write.cardinality === 'single' ? undefined : (o: Expr): Expr => eq(cardinalityOf(o, key, null, fresh), text('single'));
+    const stale = existingRows('vertex', ids, key, g, fresh);
+    bind(dropStaleIndex('vertex', stale.ids, fresh));
+    const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    bind(remove({ target: t, channels: [], type: typeOf(), where: stale.pred(t), returning: [] }));
+  }
+  // A `set` write (declared, or the element default) does not re-insert a value already present.
+  const skippable = write.cardinality !== 'single' && write.cardinality !== 'list';
+  const present = (): Expr => {
+    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const matching = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(and(eq(col(scan.id, spec.owner), owner(ids)), eq(col(scan.id, 'key'), key)), eq(col(scan.id, 'value'), scalarOf('v', 'any'))),
+    });
+    return { kind: 'exists', plan: matching, negated: true };
+  };
+  const seed = skippable
+    ? make.filter({ id: fresh('f'), input: ids, channels: ids.channels, type: ids.type,
+        pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(owner(ids), key, write.cardinality, fresh), right: text('set') }, right: present() } })
+    : ids;
+  const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const source = make.project({
+    id: fresh('p'), input: seed, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [[spec.owner, owner(seed)], ['key', key], ['value', valueExpr], ['vtype', vtypeExpr]],
+  });
+  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
+  return true;
+}
+
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
  *  read the rows of the statement before it without the caller threading names. */
 type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels) => Rel;
@@ -2200,7 +2264,15 @@ export function elementMergeV(
   // The reference applies the labels before the property entries and so does this; they are different
   // tables, so the order is the reference's rather than a constraint.
   if (appended.length) bindLabels(matched, appended, bind, fresh);
-  for (const write of matchWrites) if (!propertyStatements('vertex', matched, write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // An `onMatch` RUNTIME value resolves at the DRIVER (`materializeMap(traverser)`,
+  // `MergeVertexStep.java:103`) and is written onto the matched element — `mergeArmValueWrite`. A
+  // constant onMatch value has no root and takes the ordinary element-agnostic write.
+  for (const write of matchWrites) {
+    const ok = write.kind === 'runtime'
+      ? mergeArmValueWrite(matched, incoming, write, bind, fresh, child, NO_ALIASES)
+      : propertyStatements('vertex', matched, write, bind, fresh, child, NO_ALIASES, guard);
+    if (!ok) return null;
+  }
   // Touch the rev of the MATCHED (existing) vertices whenever onMatch or the tail `property()` run
   // mutated them (§5·1); created vertices are already born dirty, and an empty `matched` is a no-op.
   if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', matched, fresh));
@@ -2227,8 +2299,17 @@ export function elementMergeV(
   // to the rowid or `uid` column by `addVertex` exactly as `addV` does. The guard above has already made
   // a colliding id a clear raise, so the insert here only ever runs against a free one. A runtime tail
   // value that does not lower to a scalar declines the whole creation (`null`).
-  const created = addVertex(creating, createLabels.names, createId, createWrites, false, bind, fresh, child, NO_ALIASES, guard);
+  // An `onCreate` RUNTIME value resolves at the DRIVER too (`onCreateMap(traverser)`,
+  // `MergeVertexStep.java:153`), not at the created element — so the constant writes (the merge
+  // criteria + any literal onCreate values) go through `addVertex`, and a runtime onCreate value is
+  // written onto the created rows by `mergeArmValueWrite` afterward. `addV`'s own runtime values stay
+  // element-rooted (its `AddPropertyStep` resolves at the created element), which is why this split is
+  // the merge caller's, not `addVertex`'s.
+  const createConst = createWrites.filter((write) => write.kind !== 'runtime');
+  const createRuntime = createWrites.filter((write): write is PropertyRuntimeSet => write.kind === 'runtime');
+  const created = addVertex(creating, createLabels.names, createId, createConst, false, bind, fresh, child, NO_ALIASES, guard);
   if (!created) return null;
+  for (const write of createRuntime) if (!mergeArmValueWrite(created, incoming, write, bind, fresh, child, NO_ALIASES)) return null;
 
   // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
   // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the
