@@ -330,10 +330,24 @@ fi
 #   algo        — the productized algorithm implementations (PageRank, Louvain, Dijkstra, Brandes…)
 #   algo-common — shared algorithm infrastructure the above build on
 #   core        — the in-memory graph-projection / CSR model (how GDS holds the graph)
+#   config-api  — the shared config MIXINS (AlgoBaseConfig, RelationshipWeightConfig, IterationsConfig,
+#                 ToleranceConfig, SeedConfig, ConcurrencyConfig, WritePropertyConfig…) — the param
+#                 vocabulary every algorithm composes; `algo` consumes flattened `*Parameters`, so the
+#                 USER-FACING param names, defaults and validation are only here + the configs below
+#   procedures/facade-api/configs/{centrality,community,similarity,path-finding}-configs
+#               — the per-algorithm `@Configuration` interfaces (PageRankConfig, WccStreamConfig,
+#                 NodeSimilarityBaseConfig, ShortestPath*Config…) carrying each param's DEFAULT and
+#                 validation. These are the surface the GDS-parameter coverage matrix
+#                 (docs/2026-07-24-graph-algorithms-plan.md) is built against; the four families are
+#                 exactly the algorithms mogwai exposes (ml/node-embeddings/miscellaneous omitted).
 GDS_SRC=src/main/java/org/neo4j/gds
+GDS_CFG=procedures/facade-api/configs
 if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
   provision vendor/gds https://github.com/neo4j/graph-data-science.git shallow \
-    "pregel/$GDS_SRC" "algo/$GDS_SRC" "algo-common/$GDS_SRC" "core/$GDS_SRC"
+    "pregel/$GDS_SRC" "algo/$GDS_SRC" "algo-common/$GDS_SRC" "core/$GDS_SRC" \
+    "config-api/$GDS_SRC" \
+    "$GDS_CFG/centrality-configs/$GDS_SRC" "$GDS_CFG/community-configs/$GDS_SRC" \
+    "$GDS_CFG/similarity-configs/$GDS_SRC" "$GDS_CFG/path-finding-configs/$GDS_SRC"
 fi
 
 # ── couchdb: READ-ONLY prior art for the replication + HTTP-interop layer ───────────────────────
