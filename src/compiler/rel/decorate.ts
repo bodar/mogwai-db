@@ -93,8 +93,14 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
     },
 
     // by('key') / order().by('key') / project().by('key') — the decorated value as a correlated scalar.
-    // The value is stored under its own storage class (a string component id for WCC), so `ordering`
-    // needs no numeric-compare wrap; a numeric-typed score (pageRank) lands this tranche's follow-up.
+    // `ordering` is deliberately a NO-OP here, and correct without a wrap: `barrier_state.cval` is
+    // UNTYPED and keeps each value's NATIVE storage class (`src/storage.ts`), so a REAL score already
+    // sorts numerically and a TEXT component id lexically. This is the one place the decorate source
+    // diverges from `BaseGraph.propertyScalar`, which DOES wrap (its stored values are decimal-TEXT, so
+    // an ordered numeric key needs `storedCompareOn`'s CAST). The wrap would reopen only for an
+    // algorithm decorating a decimal-TEXT bigdecimal (the long/bigint/bigdecimal tail — see
+    // `SQLite runtime versions`); none does today, and `has(key, P.gt(x))` over the REAL score already
+    // proves the comparison is numeric (`test/L2-sql/pagerank.exec.test.ts`).
     propertyScalar(kind, id, k, ordering, fresh) {
       if (k !== key) return base.propertyScalar(kind, id, k, ordering, fresh);
       const row = rowById(id, fresh);

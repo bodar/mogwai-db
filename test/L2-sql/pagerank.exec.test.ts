@@ -96,6 +96,14 @@ describe('pageRank() — pageRank DECORATE barrier', () => {
     for (const r of rows) expect(r[KEY]).toBeCloseTo(1 / 6, 9);
   });
 
+  test('order().by(pageRank) sorts the decorated REAL score NUMERICALLY (native cval storage class)', async () => {
+    const store = seeded(MODERN_SEED);
+    // `barrier_state.cval` keeps its REAL storage class, so ORDER BY is numeric with no compare wrap —
+    // ascending is the reverse of the reference desc ranking (ties broken by id: marko<peter, vadas<josh).
+    expect(await run(store, `g.V().pageRank().order().by("${KEY}").values("name")`))
+      .toEqual(['marko', 'peter', 'vadas', 'josh', 'ripple', 'lop']);
+  });
+
   test('has(pageRank, P) filters on the decorated REAL score — a vtype-aware NUMERIC compare', async () => {
     const store = seeded(MODERN_SEED);
     // scores: lop 0.305, ripple 0.176, {vadas,josh} 0.146, {marko,peter} 0.114 — compared as numbers,
