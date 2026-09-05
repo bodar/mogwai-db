@@ -57,6 +57,29 @@ describe('betweenness — Brandes (directed, full source set)', () => {
     near(await scores(seedD(nodes, edges)), { a: 0, b: 0, c: 0, d: 0, e: 0 });
   });
 
+  test('a label-scoped edges restricts the paths (edge scope, gained by the adjacencyCte dedup)', async () => {
+    const seed = [
+      `g.addV('n').property('name','a')`, `g.addV('n').property('name','b')`, `g.addV('n').property('name','c')`,
+      `g.V().has('name','a').addE('R').to(__.V().has('name','b'))`,
+      `g.V().has('name','b').addE('R').to(__.V().has('name','c'))`,
+      `g.V().has('name','a').addE('S').to(__.V().has('name','c'))`, // a shortcut on a DIFFERENT label
+    ];
+    const bOf = async (edges: string): Promise<number> => ((await run(seeded(seed),
+      `g.V().call("betweenness")${edges}.project("name","betweenness").by("name").by("betweenness")`)).map(unmap) as any[])
+      .find((r) => r.name === 'b').betweenness;
+    // All labels: a→c takes the direct S shortcut, so b is on no shortest path.
+    expect(await bOf('')).toBe(0);
+    // Scoped to R: a→c must go a→b→c, so b sits on the only shortest path.
+    expect(await bOf('.with("~tinkerpop.betweenness.edges", __.outE("R"))')).toBe(1);
+  });
+
+  test('an undirected (bothE) edge scope fails closed — directed only (undirected halving unimplemented)', async () => {
+    const seed = seedD(['a', 'b', 'c'], [['a', 'b'], ['b', 'c']]);
+    await expect(exec(seeded(seed)).framedAsync(
+      `g.V().call("betweenness").with("~tinkerpop.betweenness.edges", __.bothE()).has("betweenness")`, {}))
+      .rejects.toThrow('directed');
+  });
+
   test('every vertex decorated; order().by(betweenness) composes', async () => {
     const seed = seedD(['a', 'b', 'c', 'd', 'e'], [['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'e']]);
     const store = seeded(seed);

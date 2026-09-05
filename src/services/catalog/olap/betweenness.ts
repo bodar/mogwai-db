@@ -1,7 +1,7 @@
 import type { Service } from '../../spi/types.ts';
 import { BETWEENNESS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, decorateBarrier, nodeCount, stringParam } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
 
 // ---------- betweenness — Brandes betweenness centrality ----------------------------------------
 //
@@ -23,23 +23,34 @@ import { STATE_INSERT, decorateBarrier, nodeCount, stringParam } from './kernel.
 // GDS's own BetweennessCentralityTest (GPLv3 — re-expressed): directed line/cycle/diamond.
 
 const BETWEENNESS_KEY = 'betweenness';
+const BE_EDGES = '~tinkerpop.betweenness.edges';
 const SIGMA = 0;
 const DELTA = 1;
-/** Directed adjacency — betweenness follows out-edges (GDS default orientation). */
-const E = 'e(src, tgt) AS (SELECT src, tgt FROM edges)';
 
 /** betweenness() over a store: a multi-source, keep-all-rounds DECORATE barrier. */
 export function createBetweennessService(store: GraphStore | undefined): Service {
   return decorateBarrier({
     name: BETWEENNESS_SERVICE_NAME,
     store,
-    describeParams: () => ({ propertyName: `the vertex property key for the score (default ${BETWEENNESS_KEY})` }),
+    describeParams: () => ({
+      propertyName: `the vertex property key for the score (default ${BETWEENNESS_KEY})`,
+      edges: 'the message scope — a Direction or an anonymous outE/inE(labels?) edge traversal (default outE = GDS NATURAL)',
+    }),
     plan: (params) => {
       const key = stringParam(params, 'propertyName', BETWEENNESS_KEY);
+      // Directed adjacency, default out-edges (GDS's NATURAL orientation) — shared with every OLAP
+      // algorithm through `adjacencyCte` (no more inline copy), which also gives betweenness a label
+      // scope for free. `both` is refused: undirected betweenness HALVES the score (each undirected path
+      // counted from both endpoints), which this directed Brandes does not do — fail closed, not a
+      // silently-doubled score.
+      const scope = edgeScopeOf(params[BE_EDGES], 'out', BETWEENNESS_SERVICE_NAME);
+      if (scope.direction === 'both')
+        throw new Error(`${BETWEENNESS_SERVICE_NAME}: only a directed (outE/inE) edge scope is supported yet, not bothE (undirected betweenness halves the score)`);
       return {
         channels: [{ key, channel: 0, vtype: 'double' }],
         core: (store, run): number => {
           const N = nodeCount(store);
+          const { cte: E, labelBinds } = adjacencyCte(scope);
 
           // FORWARD: seed level 0 — every node is its own source with one shortest path to itself.
           store.query(`${STATE_INSERT} SELECT ?, 0, id, id, ${SIGMA}, 1 FROM nodes`, [run]);
@@ -56,7 +67,7 @@ export function createBetweennessService(store: GraphStore | undefined): Service
                   WHERE NOT EXISTS (SELECT 1 FROM barrier_state s
                           WHERE s.run = ? AND s.channel = ${SIGMA} AND s.round <= ? AND s.scope = nf.scope AND s.id = nf.id)
                RETURNING id`,
-              [run, level, run, level + 1, run, level]);
+              [...labelBinds, run, level, run, level + 1, run, level]);
             if (inserted.length === 0) break;
             maxLevel = level + 1;
           }
@@ -78,7 +89,7 @@ export function createBetweennessService(store: GraphStore | undefined): Service
                    FROM cur LEFT JOIN contrib ON contrib.scope = cur.scope AND contrib.id = cur.id`,
               // cur=level L (run,L); up=successors at level L+1 — BOTH its σ (s.round) and δ (d.round) are
               // at L+1; insert δ for level L (run,L).
-              [run, level, run, level + 1, run, level + 1, run, level]);
+              [...labelBinds, run, level, run, level + 1, run, level + 1, run, level]);
           }
 
           // Betweenness[v] = Σ over sources s≠v of δ[s][v]. Written at (scope 0, channel 0) in a fresh
