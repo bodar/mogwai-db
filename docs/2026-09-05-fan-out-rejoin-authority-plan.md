@@ -133,9 +133,17 @@ names (list-alias dedup key, the local/flatMap split).
   `keyedDedup` dispatch, wired the scalar/list/map tails, and added the `list` arm to `dedupByLabels`
   (`aliasListAt`, canonical `json()` = `java.util.List` content-equality; `map` stays declined —
   order-sensitive text ≠ `LinkedHashMap` entry-equality). Oracle `test/L4-addendum/list-alias-dedup.feature`.
-- **B2.** `where('a', P('b')).by('key')` residue — the element-alias case already works
-  (`goldens.tsv`); build the scalar-alias-with-`by()` and mixed-kind theta arms
-  (`lower.ts` `aliasWhere` family).
+- ◑ **B2 (ASSESSED — mostly already done, residual correctly deferred).** The element-alias theta
+  `where('a', op('b')).by('key')` ships today, ordering included (`aliasWhere`, `lower.ts:4558-4580`).
+  The residual — a scalar (value) alias ORDERING theta (`where('a', gt('b'))` over two stored scalars) —
+  is a legitimate comparator DEFERRAL, not a wire gap: value/type equality (`eq`/`neq`) is SQLite `=`
+  (built, `lower.ts:4587-4591`), but `<`/`>` over two stored scalars of unknown type diverges from
+  TinkerPop's `GremlinValueComparator` cross-type total order, so a naive SQLite compare is a WRONG
+  answer (the same JS-comparator boundary `order(Scope.local)` draws). The one correct narrow slice is
+  guarded on both aliases' `AliasEntry.scalarType` being in the Number family (then SQLite `<` is
+  faithful) — low-value; build it only with a witness. Mixed-kind theta (`by('key')` over a value alias)
+  is semantically ill-formed (a scalar has no property key). So B2 is not the "cheap wire" it looked
+  like; the declines are correct.
 - **B3.** `otherV()` scope-crossing — thread `ctx.needsFromV` through `local`/`coalesce`-arm bodies
   (partly present via `childRows`' `needsFromV` param); the census lists the deferred compositions.
 
