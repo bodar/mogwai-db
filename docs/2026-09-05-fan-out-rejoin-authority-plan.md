@@ -144,8 +144,13 @@ names (list-alias dedup key, the local/flatMap split).
   faithful) — low-value; build it only with a witness. Mixed-kind theta (`by('key')` over a value alias)
   is semantically ill-formed (a scalar has no property key). So B2 is not the "cheap wire" it looked
   like; the declines are correct.
-- **B3.** `otherV()` scope-crossing — thread `ctx.needsFromV` through `local`/`coalesce`-arm bodies
-  (partly present via `childRows`' `needsFromV` param); the census lists the deferred compositions.
+- ✅ **B3 (DONE BY THE SUBSTRATE — regression pins added).** Probing showed the fan-out `otherV()`
+  scope-crossing family ALREADY lowers after A/C: `local`/`coalesce`/`union`/`flatMap` bodies with a
+  following `otherV()`, including with a trailing `path().by()`, all compile (the `ctx.needsFromV` demand
+  threads through `childRows`/`inArmBody`). This is the request's "one substrate clears a large read-side
+  family" — B3 was subsumed. Only repeat-body `otherV()` still declines, and that belongs to the repeat
+  substrate (not this plan). New oracle `test/L4-addendum/otherv-scope-crossing.feature` pins the
+  coalesce+otherV+path and local(bothE.limit).otherV compositions against regression.
 
 ### Phase C — the hard structural half
 
