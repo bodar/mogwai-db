@@ -444,8 +444,8 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
 
 | Algo | GDS param (default, cited) | today | verdict |
 |---|---|---|---|
-| wcc | `threshold` (0; `community-configs/…/wcc/WccBaseConfig.java:32`, validation: >0 requires `relationshipWeightProperty`) | no | **add** |
-| | `relationshipWeightProperty` (null) | no | **add** (pairs with `threshold`) |
+| wcc | `threshold` (0; `community-configs/…/wcc/WccBaseConfig.java:32`, validation: >0 requires `relationshipWeightProperty`) | **yes** (landed 2026-09-05) | — |
+| | `relationshipWeightProperty` (null) | **yes** (landed 2026-09-05) | — (pairs with `threshold`) |
 | | `seedProperty` (null, incremental) | no | **add** |
 | | `consecutiveIds` (false) | no | **add** (cheap result renumber) |
 | peerPressure (≈GDS labelPropagation) | `maxIterations` (10; `community-configs/…/labelpropagation/LabelPropagationBaseConfig.java:40`) | hardcoded 30 | **add** (trivial — `iterateInSql` bound) |
@@ -480,9 +480,12 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
    built on the shared `directedAdjacency` scaffolding so the weight/hop/unweighted forms cannot drift),
    with weighted **pageRank** as the first consumer (weighted out-degree `SUM(w) HAVING > 0`, message
    `α·pr·w/Σw`; unweighted path byte-unchanged; proven ≡ a weighted JS oracle in `olap-differential`).
-   **articleRank** adopted it too (2026-09-05, weighted delta-accumulation ≡ oracle to 1e-9). Remaining
-   consumers: betweenness (weighted paths), degree (streaming — a different mechanism: a weighted body
-   `<dir>E().values(w).sum()`), wcc-`threshold`, weighted LPA.
+   **articleRank** (weighted delta-accumulation ≡ oracle to 1e-9) and **wcc `threshold`** (union only
+   across edges with `w > threshold`, validated `threshold > 0` requires the weight, ≡ the connected-
+   components oracle over the filtered edge set) adopted it too, all 2026-09-05. Remaining consumers:
+   betweenness (weighted paths), degree (streaming — a different mechanism: a weighted body
+   `<dir>E().values(w).sum()`, needing the isolated-vertex → 0 case, since `sum()` has no seed over
+   empty), weighted LPA.
 2. **nodeSimilarity `topK`/`similarityCutoff`/`degreeCutoff`** — scalability wall today (dense output);
    all SQL tweaks (`WHERE`/`HAVING`/a per-source `ROW_NUMBER` cap).
 3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),

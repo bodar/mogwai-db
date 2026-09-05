@@ -215,6 +215,18 @@ describe('OLAP SQL-per-round ≡ JS oracle (whole-vector differential)', () => {
     expect(new Map([...sql].map(([k, v]) => [k, String(v)]))).toEqual(oracle);
   });
 
+  test('connectedComponent weighted threshold — union only above the cutoff (≡ oracle)', async () => {
+    const s = store();
+    // threshold 0.5 keeps only the two weight-1.0 edges (marko→josh, josh→ripple), splitting the graph:
+    // {marko,josh,ripple} vs isolated vadas / lop / peter. Oracle = the same union-find over the filtered
+    // (undirected) edge set, labelled by the min external-id string.
+    const kept = weightedOutE(s).filter((e) => e.w > 0.5).flatMap((e) => [{ src: e.src, tgt: e.tgt }, { src: e.tgt, tgt: e.src }]);
+    const oracle = new Map(connectedComponents(nodesOf(s), kept).map((t) => [t.id, String(t.value)]));
+    const sql = await decorated(s, 'connectedComponent().with("relationshipWeightProperty","weight").with("threshold",0.5)', 'gremlin.connectedComponentVertexProgram.component');
+    expect(new Map([...sql].map(([k, v]) => [k, String(v)]))).toEqual(oracle);
+    expect(new Set(oracle.values()).size).toBeGreaterThan(1); // genuinely split (guards against a no-op filter)
+  });
+
   test('pageRank (scores agree to 1e-9)', async () => {
     const s = store();
     const oracle = new Map(pageRankScores(nodesOf(s).map((n) => ({ id: n.id })), outE(s), 0.85).map((t) => [t.id, t.value as number]));

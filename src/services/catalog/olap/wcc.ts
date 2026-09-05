@@ -1,7 +1,7 @@
 import type { Service } from '../../spi/types.ts';
 import { WCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
+import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, weightedAdjacencyCte, type Slot } from './kernel.ts';
 
 // ---------- wcc — connectedComponent(), a DECORATE barrier ----------
 //
@@ -31,7 +31,11 @@ export function createWccService(store: GraphStore | undefined): Service {
   return decorateBarrier({
     name: WCC_SERVICE_NAME,
     store,
-    describeParams: () => ({ propertyName: `the vertex property key to write the component id under (default ${CC_COMPONENT_KEY})` }),
+    describeParams: () => ({
+      propertyName: `the vertex property key to write the component id under (default ${CC_COMPONENT_KEY})`,
+      relationshipWeightProperty: 'union only across edges whose weight (this edge property) exceeds `threshold` (GDS weighted WCC)',
+      threshold: 'weight cutoff — union only across edges with weight > threshold (default 0); requires relationshipWeightProperty when > 0',
+    }),
     plan: (params) => {
       // connectedComponent is UNDIRECTED (default bothE); union-find is symmetric, so a `both` scope is
       // exactly right and a directional (out/in) scope is a different, directional min-propagation we do
@@ -40,10 +44,21 @@ export function createWccService(store: GraphStore | undefined): Service {
       if (scope.direction !== 'both')
         throw new Error(`${WCC_SERVICE_NAME}: only an undirected (bothE) edge scope is supported yet, not ${scope.direction}E`);
       const key = stringParam(params, CC_PROPERTY_NAME, CC_COMPONENT_KEY);
+      // relationshipWeightProperty + threshold (GDS): union only across edges with weight > threshold —
+      // a weight-filtered adjacency. `threshold` defaults 0; GDS validates threshold > 0 requires the
+      // weight property (`WccBaseConfig.validate`), which we mirror. Absent weight → unweighted, unchanged.
+      const rw = params.relationshipWeightProperty;
+      const weightKey = typeof rw === 'string' && rw.length > 0 ? rw : undefined;
+      const threshold = typeof params.threshold === 'number' ? params.threshold : 0;
+      if (threshold > 0 && !weightKey)
+        throw new Error(`${WCC_SERVICE_NAME}: a threshold > 0 requires relationshipWeightProperty`);
       return {
         channels: [{ key, channel: 0, vtype: 'string' }], // a component id is the min external-id STRING
         core: (store, run): number => {
-          const { cte, labelBinds } = adjacencyCte(scope);
+          const { cte, labelBinds } = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
+          // Weighted: only edges with w > threshold connect (an extra WHERE + a threshold bind).
+          const edgeFilter = weightKey ? ' WHERE e.w > ?' : '';
+          const filterBind = weightKey ? [threshold] : [];
           // Seed each component to the vertex's external-id STRING (stored in `cval`, in SQL). Each
           // round takes the lexicographic MIN over {self} ∪ {neighbours} (the `e` CTE carries both
           // directions for bothE), writing the next slot. Fixpoint in ≤ diameter rounds; |V|+1 is the
@@ -55,11 +70,11 @@ export function createWccService(store: GraphStore | undefined): Service {
           const step = (prev: Slot, next: Slot) => store.query(
             `WITH ${cte},
                ${VEC},
-               adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src
+               adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src${edgeFilter}
                        UNION ALL SELECT id, v FROM vec)
              ${STATE_INSERT}
                SELECT ?, ?, 0, n.id, 0, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
-            [...labelBinds, run, prev, run, next]);
+            [...labelBinds, run, prev, ...filterBind, run, next]);
           return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
         },
