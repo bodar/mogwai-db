@@ -1,10 +1,28 @@
 # Correlated merge search — build plan
 
-**Status: DESIGNED, reference-confirmed, NOT built.** The property-VALUE family and the merge WRITE
-arms (onMatch/onCreate/tail) of the correlated write-arg resolver are LANDED (see "Already landed"
-below). This doc is the remaining piece: the merge **SEARCH** correlated per driver — a computed
-criterion in the merge argument (`mergeV(__.project(...))` etc.). Written so a fresh session can execute
-it without re-deriving. All citations are at the pinned submodules.
+**Status: increment 1 (mergeV computed VALUES) LANDED on trunk (2026-09-05); increments 2–4 remain.**
+The property-VALUE family and the merge WRITE arms (onMatch/onCreate/tail) of the correlated write-arg
+resolver were LANDED earlier (see "Already landed" below). This doc is the merge **SEARCH** correlated
+per driver — a computed criterion in the merge argument (`mergeV(__.project(...))` etc.). Written so a
+fresh session can execute it without re-deriving. All citations are at the pinned submodules.
+
+**What landed (increment 1, `mergeVComputed`, `src/compiler/rel/write.ts`):** `mergeV(__.project('k')
+.by(__.body))` — the SEARCH map, correlated per driver. A leading `project` merge arg parses to
+driver-rooted keyed bodies (`MergeSpec.computed`, `write-args.ts`); the constant criteria stay
+input-independent through `matching` while the computed ones are carried (one `(present, value, vtype)`
+triple per key, via `child.scalar` at the driver) and joined by a correlated EXISTS over the candidate's
+stored property, compared by `typedValueEq` (`predicate.ts` — `Compare.eq`, numeric-cross-class else
+same-tag). A miss creates one vertex per DISTINCT computed map (`Map.equals`, keyed by a JSON tuple),
+written from the carrier columns; `crossed(correlate=true)` carries the found/created id back per driver.
+An unproductive by-body DROPS its key (`ProjectStep.ifProductive`), never a raise — a bare `project`
+always emits a map, so increment-1 has no 0-result guard. **Deferred (clean declines, correct until
+built):** an `option()` arm or `property()` tail OVER a computed search; the map LITERAL `[k: __.trav]`
+(candidate-rooted `P.eq`, stays declined by design); a non-`project` map-producing traversal (needs the
+general map-valued-driver substrate). Tests: `test/L4-addendum/merge-search-computed.feature`,
+`test/merge-search-computed.test.ts`. Two premise-corrections the build confirmed against the reference:
+`key` on `hasPropertyPredicate` is a compile-time string not an `Expr` (so **computed keys, increment 3,
+are a real signature gap** — not the free slot §design step 2 implied); and a bare `make.join`'s declared
+`type` maps POSITIONALLY onto `left.cols ++ right.cols`, not by name.
 
 ## The problem
 
@@ -96,13 +114,23 @@ endpoints):
 
 ## Build order (increments, trunk-based)
 
-1. **Computed VALUES via the map-producing traversal** — `mergeV(__.project(k).by(__.trav))` and
-   `mergeV(__.select(withSideEffectMap))` where values vary per driver. The 80% case; keys/labels stay
-   compile-time. This is the correlated-search core (pairs + decorrelated has-join + the 0-result guard).
+1. ✅ **LANDED — Computed VALUES via the map-producing traversal** — `mergeV(__.project(k).by(__.trav))`
+   where values vary per driver (`mergeVComputed`). Keys/labels compile-time. The correlated-search core
+   is built (carrier + decorrelated has-join + create-per-distinct-map + `crossed(correlate=true)`). NOT
+   in this increment: `mergeV(__.select(dynMap))` — a runtime side-effect map needs the map-valued-driver
+   substrate `resolveMergeArg` flags as unbuilt (a `withSideEffect` CONSTANT map already worked); and
+   `option()`/`property()` over a computed search (decline). No 0-result guard was needed — a bare
+   `project` always emits a map (the whole-map raise is the general-traversal case, increment 4).
 2. **`mergeE` computed values** — the same, over `edgeCriteria`/`pairedWith` (which already correlate).
-3. **Computed KEYS / LABELS** — a correlated `key`/label `Expr` into the same `hasPropertyPredicate`
-   / `hasLabelPredicate` seam.
-4. **no-arg `mergeV()`/`mergeE()`** (traverser-as-map) — same resolution, the driver IS the map value.
+   The compounding move is to lift `mergeVComputed`'s carrier + `typedValueEq` join into a shared
+   correlated-search engine both hosts use; now that a third instance (mergeV-computed) is green beside
+   mergeV-constant and mergeE, that unification is the safe next step.
+3. **Computed KEYS / LABELS** — a correlated `key`/label `Expr`. ⚠️ Increment 1 confirmed this is a REAL
+   signature gap: `hasPropertyPredicate`'s `key` is a compile-time `string` (`compilerText`), not an
+   `Expr`. Needs a new seam (a correlated key/label into the property/label scan), not a free slot.
+4. **no-arg `mergeV()`/`mergeE()`** (traverser-as-map) and the general map-producing traversal (a
+   `project` not at the head, `select(dynMap)`) — the map-valued-driver substrate + the whole-map
+   0-result raise (`TraversalUtil.apply`).
 
 Each increment lands with L4 `.feature` scenarios (there are none yet — write them) and its own tests.
 No L3 movement expected (the corpus has no computed-merge scenarios) — this is ceiling work, validated by
