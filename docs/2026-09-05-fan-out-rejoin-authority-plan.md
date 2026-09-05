@@ -180,24 +180,24 @@ names (list-alias dedup key, the local/flatMap split).
   `mergeArms` returns the merged outbound `AliasMap` (`BranchRel`) and the scalar/element/property branch
   tails continue with `merged.aliases`. Oracle `test/L4-addendum/branch-arm-label-escape.feature`;
   `rel-spine.test.ts` union case moved DECLINED→COVERED. L3 1828→1829.
-- ◑ **C2 (DESIGNED — sequenced after C3/D1; the one item deferred, with magnitude).** The `flatMap`
-  path-hide — collapse the N body-minted path positions to one input→output position
-  (`FlatMap.feature:56`: `flatMap(out().out()).path()` = `[v,end]`). **Key fact:** `movement()` appends a
-  path position whenever the path CHANNEL is present (`pathCarried`), NOT based on `ctx.tracksPath`, so
-  running the body with `tracksPath` off does not stop appends. Two mechanisms, both with real cost:
-  - **(a) static-N JSON surgery.** Count the body's path-appending steps (movements + value-maps, per
-    `path.ts`) at compile time; if statically constant (a LINEAR body — `out().out()` = 2), reproject the
-    path as `first (len − N) positions ++ last position` via a `json_each` reconstruction. N==1 is already
-    correct (no-op). Risk: an exact miscount of the append set is a wrong path; a non-linear body (branch/
-    repeat inside) has no static N and must decline.
-  - **(b) origin-rejoin.** Number the input (`mintRowOrigin`, keeping P), strip the path channel for the
-    body so it appends nothing, run the body, then self-join the element output to the numbered input by
-    `origin` to recover P, and `extendPath` the output position. Robust but must INLINE the body-run
-    (`childRows` refuses a pre-numbered input, `reduction.ts:464`), and needs the join.
-  **Deferred because:** `flatMap`-under-`path()` is niche (few/no corpus witnesses), it is correctly
-  fail-closed today, and both mechanisms carry correctness risk (miscount / intricate join) better spent
-  on C3/D1 first. Restrict the eventual build to an element-output linear body; non-element / non-linear
-  stays deferred.
+- ✅ **C2 (LANDED 5557f9c8 — mechanism (b), the risk was on (a)).** The `flatMap` path-hide:
+  `flatMap(out().out()).path()` = `[v,end]`, mid hidden (`FlatMap.feature:56`). The reference is exact —
+  `LP_O_OB_P_S_SE_SL_Traverser.split`
+  (`vendor/tinkerpop/gremlin-core/.../traverser/LP_O_OB_P_S_SE_SL_Traverser.java:65-69`) sets
+  `clone.path = head.path.clone().extend(r, labels)`: the PRE-child head's path extended by exactly ONE
+  position, the emitted value. The deferral's "correctness risk" lived entirely in **mechanism (a)**
+  (static-N JSON slice, miscount); **mechanism (b)** has no miscount because it never appends the body's
+  hops. `flatMapRejoin` under a path demand now: `mintRowOrigin` beside the entering path P, run the body
+  PATH-FREE (`dropPath` — a path-hostile body step then composes, exactly TinkerPop hiding the body's own
+  paths), recover P by an inner join on `origin` (fan-out is one-to-many), `extendPath` by the one output
+  element → P ++ [emitted]. The only substrate change: `childRows` now REUSES a pre-minted per-row origin
+  (`mintRowOrigin` is idempotent) instead of refusing it — a group reducer (`!perRow`, host-rowid origin)
+  still refuses. Element-output only (a scalar/list output under `path()` stays fail-closed — its own
+  increment). "Niche" was also wrong: it IS the corpus scenario `g_V_flatMapXout_outX_path`. Works at
+  depth — witnessed with a per-origin barrier inside the body
+  (`flatMap(out().order().by('name')).path()`). Oracle updates in
+  `test/L4-addendum/flatmap-local-escape.feature` (dropped `@Unsupported`, added barrier-in-body +
+  non-element pins); L3 1831→1832; census deferral→run (answer reference-verified).
 - ✅ **C3 (LANDED — all three families, 1783c614 / d0b82487 / 77af9ac6).** Per-origin barrier-in-body
   ("slice 2"). The keystone turned out to be ONE seeded-barrier substrate (families 2/3 share it):
   `ChainCtx.originDomain` (set by `childRows`, one row per entering traverser) lets a per-origin
