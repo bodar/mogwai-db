@@ -2126,9 +2126,14 @@ export function elementMergeV(
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
+    // A nested LABEL/id (a per-driver element identity) and a nested KEY (a per-driver property key)
+    // are the correlated-SEARCH surface, deferred. A nested VALUE is only a search criterion in the
+    // MATCH map; in `onCreate`/`onMatch` it is a WRITE over the created/matched element, which the
+    // runtime property path (`runtimePropertyStatements`, over the merge's own owner relation) resolves.
     if (isNested(spec.id) || isNested(spec.label)) return null;
-    if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
+    if (Object.values(spec.propKeys).some(isNested)) return null;
   }
+  if (Object.values(match.props).some(isNested)) return null;
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's
   // (`onCreateMap` is their union) — and `validateNoOverrides` has already proved the two agree. A

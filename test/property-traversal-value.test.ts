@@ -93,6 +93,20 @@ describe('property(k, __.trav) — correlated per-row value', () => {
     expect(out.map(Number).sort((a, b) => a - b)).toEqual([0, 0, 2]);
   });
 
+  test('mergeV option(onMatch) writes a computed value at the MATCHED element', async () => {
+    // marko exists (2 out-knows), so onMatch runs and writes deg = its outE count, resolved at the
+    // matched vertex through the runtime write path.
+    const out = await values("g.mergeV(['name': 'marko']).option(Merge.onMatch, ['deg': __.outE().count()]).values('deg')", twoKnows);
+    expect(out.map(Number)).toEqual([2]);
+  });
+
+  test('mergeV option(onCreate) writes a computed value at the CREATED element', async () => {
+    // 'newbie' does not exist → create it, then onCreate writes deg = bothE().count() = 0 (the fresh
+    // vertex has no edges yet). onMatch would not run.
+    const out = await values("g.mergeV(['name': 'newbie']).option(Merge.onCreate, ['deg': __.bothE().count()]).values('deg')", twoKnows);
+    expect(out.map(Number)).toEqual([0]);
+  });
+
   test('the post-write FTS refresh indexes a runtime-written value', () => {
     // A runtime value is not indexed in the compiled plan; the refresh derives its property_fts rows
     // from the stored tree. Asserted at the index directly (a store-level check), like fts-index.test.
