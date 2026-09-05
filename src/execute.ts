@@ -501,6 +501,10 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
   // rather than read per member. `of` is not read here for the reason `mixed`'s `arms` is not: the pairs
   // tree self-describes; the descriptor exists for unfold().
   if (of.kind === 'map') return items.map((pairs: any) => frameTypedNode({ t: 'map', v: pairs }));
+  // A list of PATHS (path().fold(), a Path in a group value): each member is a path's own positions
+  // array, so it frames as a PATH (labels + objects) rather than a bare list — the SAME `framePath` the
+  // top-level path uses, over the member's positions decoded by the position descriptor `of.of`.
+  if (of.kind === 'path') return items.map((inner: any) => framePath(listItemBuffers(JSON.stringify(inner), of.of)));
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the

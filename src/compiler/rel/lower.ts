@@ -43,7 +43,7 @@ import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldLists, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -2235,6 +2235,16 @@ function pathTail(
       if (args.length || step.modulators?.length || step.optionArms) return null;
       const counted = countTail(rel, fresh);
       return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    // `fold()` over a path stream collects every path into ONE List<Path>. A Path is a first-class
+    // collection member (`GremlinValueComparator.Type.Path`), so the outer list's member arm is `path`
+    // and each member frames as a PATH (labels + objects), NOT a bare list — the SAME `foldLists` the list
+    // stream uses, over the path's `LIST_COL`; the encounter orders the members.
+    if (step.name === 'fold' && !args.length && !isLocalScope(step)) {
+      const encounter = encounterOf(rel.channels);
+      const folded = foldPaths(rel, of, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
     const sliced = sliceOp(step, rel, false, fresh);

@@ -29,6 +29,14 @@ export type ListOf =
   // to emit nothing. Use `withMemberType` to change one without dropping the other.
   | { kind: 'scalar'; type: ScalarType; productiveNull: boolean }
   | { kind: 'list'; of: ListOf }
+  // A list whose members are PATHS — `path().fold()`, a Path in a group value. A Path is a first-class
+  // GraphBinary type (`GremlinValueComparator.Type.Path`), distinct from a plain list, so a member
+  // framed by this arm serializes as a PATH (labels + objects, `execute.ts` `framePath`) rather than a
+  // bare list. `of` is the POSITION member shape (a path's positions are self-describing `{t,v}` nodes,
+  // `TYPED_MEMBERS`), the same slot the `list` arm's `of` fills one level down. The member value stored
+  // in the outer list is a path's own positions array (its `LIST_COL`), exactly what `framePath`'s
+  // `listItemBuffers` reads.
+  | { kind: 'path'; of: ListOf }
   // A list whose members are MAPS — `project(k…).by(…).fold()`, `valueMap().fold()`,
   // `group().by().by().fold()`: every GraphQL to-many object field at depth ≥ 2. Each member is a
   // self-describing `[[key, valueNode], …]` PAIRS ARRAY — the SAME encoding `map`/`mapValue` carry in

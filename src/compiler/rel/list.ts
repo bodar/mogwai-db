@@ -1170,6 +1170,16 @@ export function foldLists(
   return foldNested(input, LIST_COL, { kind: 'list', of }, opts.order, fresh);
 }
 
+/** Fold a PATH stream into one `List<Path>` — each path (its `LIST_COL` positions) becomes a MEMBER of
+ *  the outer list, so the member arm is `path` (not `list`: a Path is its own GraphBinary type). The same
+ *  `foldNested` collection as `foldLists`, differing only in the member tag it stamps — `of` is the
+ *  path's POSITION member shape. */
+export function foldPaths(
+  input: Rel, of: ListOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } {
+  return foldNested(input, LIST_COL, { kind: 'path', of }, opts.order, fresh);
+}
+
 const foldOrder = (input: Rel, order: readonly string[] | undefined, defaultCol: string): readonly SortTerm[] =>
   order?.length
     ? order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
@@ -1646,7 +1656,11 @@ export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fre
   // A MAP-membered list needs no root expansion for the same reason `scalar`/`mixed` do not: each member
   // is already the self-describing pairs array the framer walks (`foldMaps` collected `json(MAP_COL)`),
   // so the column holds the wire tree and there are no rowids to expand.
-  if (of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map') return jsonOf(list);
+  // A PATH member's positions were already materialized into self-describing nodes at `path()` time
+  // (`pathPositions` expanded each via `source.elementNode`), so the outer list already holds the wire
+  // tree — nothing to expand at the root, exactly as scalar/mixed/map. The framer (`listItemBuffers`'
+  // `path` arm) wraps each member's positions array in `framePath`.
+  if (of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map' || of.kind === 'path') return jsonOf(list);
   if (of.kind === 'elem') {
     const rowids = membersOf(jsonOf(list), fresh);
     const expanded = make.aggregate({
@@ -1702,6 +1716,9 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
  * - a NESTED list recurses under `listNode`, so a list of lists frames as `{t:'list', v:[{t:'list',…}]}`.
  */
 export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh: Minter): Expr | null {
+  // A PATH member nested in a MAP/RECORD value (`group().by().by(path)`) needs a `{t:'path'}` wrapper the
+  // tree walker (`frameTypedNode`) would read — not built yet, so it declines below (fail closed) rather
+  // than framing a path as a bare list. `path().fold()` targets `listPayloadExpr`, not this tree walker.
   if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
   if (of.kind === 'map') {
     const members = membersOf(jsonOf(list), fresh);
