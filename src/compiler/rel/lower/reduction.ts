@@ -9,7 +9,6 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
-import { labelReads, labelsBoundBefore } from '../../ir/labels.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit } from '../const.ts';
@@ -312,17 +311,10 @@ export function flatMapRejoin(
   if (ctx.tracksPath && step.name === 'flatMap') return null;
   // A LABEL BOUND INSIDE THE BODY escapes to parent scope for `local` (the full-traverser forward above,
   // so `g.V()…as('a').local(__.out('created').as('b')).select('a','b')` sees `b`) but NOT for plain
-  // `flatMap` (`head.split` re-derives from the pre-child head, dropping `b`). `local` threads the body's
-  // outbound `AliasMap` (`rows.aliases`) below; plain `flatMap`'s shed-to-empty is a later increment, so
-  // it still fails closed when a body-bound label is read downstream, while keeping the cases where the
-  // label is consumed WITHIN the body (`flatMap(__.out().as('a').select('a'))`) or binds nothing.
-  if (step.name === 'flatMap') {
-    const bodyBound = labelsBoundBefore(body, body.length, ctx.params);
-    if (bodyBound.size) {
-      const outerReads = labelReads(steps.slice(at + 1), ctx.params);
-      if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
-    }
-  }
+  // `flatMap`: `head.split` re-derives from the pre-child head, so a body-bound label is DROPPED. `local`
+  // threads the body's outbound `AliasMap` below; `flatMap` SHEDS the body-bound alias channels and keeps
+  // the pre-body map, so a downstream `select('b')` is the correct EMPTY result (`Select.feature`), not a
+  // decline and not a wrong binding — see the rejoin below.
   // Run the WHOLE body PER TRAVERSER: `local`/`flatMap` apply their body to each traverser
   // independently (TinkerPop's `LocalStep`/`FlatMapStep`), so a slice/`dedup`/`order` inside it scopes
   // to the ENTERING traverser, not globally — the SAME per-origin substrate `match` uses (a pattern body
@@ -341,11 +333,12 @@ export function flatMapRejoin(
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
   const shed = dropOrigin(rows.rel, fresh);
   // `local` carries the body's outbound labels to parent scope (the full-traverser forward); plain
-  // `flatMap` sheds them, continuing with the pre-body map only. The body-bound alias CHANNELS still ride
-  // through `shed` physically in the flatMap case, but with no name pointing at them a downstream
-  // `select` cannot resolve one — which is the correct empty result, not a wrong binding.
+  // `flatMap` sheds the body-bound alias CHANNELS (`shedBodyAliases`) and continues with the pre-body map
+  // only — so the channel never rides into a downstream `dedup`/merge as a spurious distinguishing column,
+  // and a downstream read of a body-bound label is the correct empty result.
   const out = step.name === 'local' ? rows.aliases : labels;
-  return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, out);
+  const rejoined = step.name === 'local' ? shed : shedBodyAliases(shed, labels, fresh);
+  return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, out);
 }
 
 /**
@@ -442,6 +435,24 @@ export function dropOrigin(rel: Rel, fresh: Minter): Rel {
   const cols = rel.type.cols.filter((column) => column.name !== origin.col);
   return make.project({
     id: fresh('dx'), input: rel, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+  });
+}
+
+/** SHED the alias CHANNELS a plain `flatMap` body bound — `flatMap` re-derives from the pre-child head
+ *  (`Traverser.split`), so a label bound inside it never escapes; leaving its channel would ride into a
+ *  downstream whole-row `dedup`/merge as a spurious distinguishing column (the alias twin of `dropOrigin`).
+ *  Keeps every non-alias channel, the payload, and the pre-body alias channels named by `keep` (their
+ *  columns are lower-numbered; a body mints fresh higher-numbered ones off the incoming map's size). A
+ *  no-op when the body bound none. */
+function shedBodyAliases(rel: Rel, keep: AliasMap, fresh: Minter): Rel {
+  const keepCols = new Set([...keep.values()].map((entry) => entry.col));
+  const drop = new Set(rel.channels.filter((channel) => channel.role === 'alias' && !keepCols.has(channel.col)).map((channel) => channel.col));
+  if (!drop.size) return rel;
+  const channels = rel.channels.filter((channel) => !drop.has(channel.col));
+  const cols = rel.type.cols.filter((column) => !drop.has(column.name));
+  return make.project({
+    id: fresh('fa'), input: rel, channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
   });
 }
