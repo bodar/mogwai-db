@@ -128,6 +128,18 @@ export interface ChildRows {
   readonly rel: Rel;
   readonly framing: RelFraming;
   readonly origin: string;
+  /**
+   * The labels LIVE at the body's end — the host labels that rode IN plus any the body itself bound.
+   *
+   * A per-traverser-spliced body must thread this OUT to parent scope for the combinators whose
+   * TinkerPop step forwards the full `Traverser.Admin` — `local` (`LocalStep.processNextStart` returns
+   * `localTraversal.nextTraverser()`), and through their own merges `union`/`choose`/`repeat`. Plain
+   * `flatMap` UNWRAPS to a value and re-derives from the pre-child head (`Traverser.split`), so it sheds
+   * these and keeps only the incoming map. The physical alias CHANNELS ride through the rejoin as
+   * ordinary carried columns either way; this field is the name→column half the framing layer owns,
+   * which `childRows` used to compute and discard.
+   */
+  readonly aliases: AliasMap;
 }
 
 /**

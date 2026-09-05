@@ -299,23 +299,29 @@ export function flatMapRejoin(
   body: readonly IRStep[], steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
-  // PATH HIDING — "Objects from flatMap traversal should be hidden from path()"
-  // (`vendor/tinkerpop/gremlin-test/.../map/FlatMap.feature:56`): `flatMap(out().out()).path()` is
-  // `[v, end]`, NOT `[v, mid, end]`. The rejoin lowers the body through the ordinary fold, whose hops
-  // each MINT a path position, so under a path demand the body's intermediate objects would leak into
-  // the path. Hiding them (one input→output path step for the whole body) is a later increment; fail
-  // closed while path is tracked.
-  if (ctx.tracksPath) return null;
-  // A LABEL BOUND INSIDE THE BODY THAT THE OUTER CHAIN READS must ESCAPE to the parent scope
-  // (`g.V()…as('a').local(__.out('created').as('b')).select('a','b')` — b is bound in the body and
-  // read after) — and that propagation is the child-body-label-escape feature the rejoin does NOT
-  // wire, so the outer `select('b')` would find b unbound and answer `[]`. Fail closed: decline when a
-  // body-bound label is read downstream, while keeping the cases where the label is consumed WITHIN
-  // the body (`local(__.out().as('a').select('a'))`) or the body binds nothing at all.
-  const bodyBound = labelsBoundBefore(body, body.length, ctx.params);
-  if (bodyBound.size) {
-    const outerReads = labelReads(steps.slice(at + 1), ctx.params);
-    if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
+  // PATH: `local` and plain `flatMap` DIVERGE (`vendor/tinkerpop/gremlin-core`). `LocalStep` forwards
+  // the child's FULL `Traverser.Admin` (`.../step/branch/LocalStep.java:60-67` →
+  // `.../Traversal.java:593-595`), so `local(out().out()).path()` is `[v, mid, end]` — the body's minted
+  // positions ARE the answer, and since `inBody` does not clear `tracksPath` the ordinary fold already
+  // appends them: nothing to hide, carry through. Plain `flatMap` unwraps to a value and re-derives from
+  // the PRE-child head (`.../map/FlatMapStep.java:42-52` → `.../util/DefaultTraversal.java:220-230` →
+  // `.../Traverser.java:185-195`), so `flatMap(out().out()).path()` is `[v, end]` — its intermediate
+  // objects are HIDDEN (`.../gremlin-test/.../map/FlatMap.feature:56`). Hiding them (one input→output
+  // path step for the whole body) is a later increment, so `flatMap` under a path demand still fails
+  // closed.
+  if (ctx.tracksPath && step.name === 'flatMap') return null;
+  // A LABEL BOUND INSIDE THE BODY escapes to parent scope for `local` (the full-traverser forward above,
+  // so `g.V()…as('a').local(__.out('created').as('b')).select('a','b')` sees `b`) but NOT for plain
+  // `flatMap` (`head.split` re-derives from the pre-child head, dropping `b`). `local` threads the body's
+  // outbound `AliasMap` (`rows.aliases`) below; plain `flatMap`'s shed-to-empty is a later increment, so
+  // it still fails closed when a body-bound label is read downstream, while keeping the cases where the
+  // label is consumed WITHIN the body (`flatMap(__.out().as('a').select('a'))`) or binds nothing.
+  if (step.name === 'flatMap') {
+    const bodyBound = labelsBoundBefore(body, body.length, ctx.params);
+    if (bodyBound.size) {
+      const outerReads = labelReads(steps.slice(at + 1), ctx.params);
+      if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
+    }
   }
   // Run the WHOLE body PER TRAVERSER: `local`/`flatMap` apply their body to each traverser
   // independently (TinkerPop's `LocalStep`/`FlatMapStep`), so a slice/`dedup`/`order` inside it scopes
@@ -334,7 +340,12 @@ export function flatMapRejoin(
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
   const shed = dropOrigin(rows.rel, fresh);
-  return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  // `local` carries the body's outbound labels to parent scope (the full-traverser forward); plain
+  // `flatMap` sheds them, continuing with the pre-body map only. The body-bound alias CHANNELS still ride
+  // through `shed` physically in the flatMap case, but with no name pointing at them a downstream
+  // `select` cannot resolve one — which is the correct empty result, not a wrong binding.
+  const out = step.name === 'local' ? rows.aliases : labels;
+  return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, out);
 }
 
 /**
@@ -485,7 +496,7 @@ export function childRows(
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
   if (!tail || tail.effects?.length || !originOf(tail.rel.channels)) return null;
-  return { rel: tail.rel, framing: tail.framing, origin: ORIGIN.col };
+  return { rel: tail.rel, framing: tail.framing, origin: ORIGIN.col, aliases: tail.aliases };
 }
 
 /**
