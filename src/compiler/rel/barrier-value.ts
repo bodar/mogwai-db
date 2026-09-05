@@ -48,8 +48,9 @@ export function buildValueTransformSegment(
   transform: (value: unknown) => unknown,
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
+  headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
 ): SegmentPlan | null {
-  const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
+  const head = headOf(lowerToRel(steps.slice(0, at), lowering));
   if (!head) return null;
   return {
     kind: 'segment',

@@ -22,6 +22,7 @@ import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
 import { buildOrderDedupSegment, buildOrderGlobalSegment, orderDedupBarrierIn, orderGlobalBarrierIn } from './order-dedup-local.ts';
+import { asStringBarrierIn, buildAsStringSegment } from './asstring-barrier.ts';
 import type { Elem } from '../elem.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
@@ -423,6 +424,7 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const split = splitBarrierIn(steps);
   const orderDedup = orderDedupBarrierIn(steps);
   const orderGlobal = orderGlobalBarrierIn(steps);
+  const asStr = asStringBarrierIn(steps, request.lowering);
   // The EARLIEST boundary wins: a segment's head is the prefix BEFORE it, so a later barrier belongs to
   // that head's resumed tail, not to this segment. A value-transform boundary (a regex `has()`, a
   // `reverse()`, a `split()`) is asked here rather than discovered in the fold, for the same reason as a
@@ -435,7 +437,8 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   const splitAt = split ? split.at : Infinity;
   const odAt = orderDedup ? orderDedup.at : Infinity;
   const ogAt = orderGlobal ? orderGlobal.at : Infinity;
-  const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt, ogAt);
+  const asStrAt = asStr ? asStr.at : Infinity;
+  const earliest = Math.min(callAt, regexAt, revAt, splitAt, odAt, ogAt, asStrAt);
   if (earliest === Infinity) {
     // No barrier on the top-level spine — look for a federate barrier NESTED in a branch arm (the
     // multi-graph merge, `union(federate(A)…, federate(B)…)`). Only reached here, so a top-level
@@ -451,6 +454,7 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   // A GLOBAL bare order() over a LIST stream — declines (→ inline SQL fold) for a scalar/element head, so a
   // scalar `values().order()` stays in SQL untouched.
   if (earliest === ogAt) return buildOrderGlobalSegment(steps, orderGlobal!.at, request.lowering);
+  if (earliest === asStrAt) return buildAsStringSegment(steps, asStr!.at, request.lowering);
   if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
   // A DECORATE barrier (an OLAP algorithm) keeps the LIVE element stream — it does not land detached
   // rows — so it takes its own resume, not the source/mid foreign one.

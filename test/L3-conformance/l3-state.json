@@ -1,5 +1,5 @@
 {
-  "passing": 1811,
+  "passing": 1813,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -467,6 +467,7 @@
     "g_V_filterXhasXname_startingWithXm_or_pXX",
     "g_V_fold",
     "g_V_foldX_rangeXlocal_6_7X",
+    "g_V_fold_asStringXlocalX_orderXlocalX",
     "g_V_fold_combineXVX",
     "g_V_fold_combineXconstantXnullXX",
     "g_V_fold_countXlocalX",
@@ -1009,6 +1010,7 @@
     "g_V_valueMapXlocationX_selectXvaluesX_unfold_mergeXseattle_vancouverX",
     "g_V_valueMapXlocationX_selectXvaluesX_unfold_orderXlocalX_conjoinX1X",
     "g_V_valueMapXlocationX_selectXvaluesX_unfold_productXdulles_seattle_vancouverX_unfold",
+    "g_V_valueMapXnameX_asString",
     "g_V_valueMapXname_ageX",
     "g_V_valueMapXname_ageX_byXisXxXXbyXunfoldX",
     "g_V_valueMapXname_ageX_withXtokensX",
@@ -1975,7 +1977,6 @@
     "g_V_emit_timesX2X_repeatXoutX_path",
     "g_V_filterXisX0XX",
     "g_V_flatMapXout_outX_path",
-    "g_V_fold_asStringXlocalX_orderXlocalX",
     "g_V_fold_mergeXk_vX",
     "g_V_foo_injectX9999999999X_min",
     "g_V_groupXmX_byXnameX_byXinXknowsX_nameX_capXmX",
@@ -2097,7 +2098,6 @@
     "g_V_untilXloops_isX2XX_repeatXout_order_byXnameXX_valuesXnameX",
     "g_V_untilXout_outX_repeatXin_asXaXX_selectXaX_byXtailXlocalX_nameX",
     "g_V_untilXout_outX_repeatXin_asXaX_in_asXbXX_selectXa_bX_byXnameX",
-    "g_V_valueMapXnameX_asString",
     "g_V_valueMapXnameX_order_fold_asStringXlocalX",
     "g_V_valueMapXname_ageX_withXtokens_idsX_byXunfoldX",
     "g_V_valueMapXname_ageX_withXtokens_labelsX_byXunfoldX",

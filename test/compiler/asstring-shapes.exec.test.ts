@@ -6,8 +6,13 @@
 // semantic-equivalence deviation, not a defect. See the value-carriage worklist (RelIR §10, §6·7).
 import { test, expect, describe } from 'bun:test';
 import { run, seededStore } from '../support/harness.ts';
+import { executeFramed } from '../support/executor.ts';
+import { decodeAll } from '../support/decode.ts';
 
 const values = (rows: any[]) => rows.map((r) => r.v);
+/** A collection `asString()` lowers to a value-transform BARRIER (a segment), which the SQL-only `run`
+ *  helper cannot execute — so these go through the full `executeFramed` path and decode the wire. */
+const framed = (q: string) => decodeAll(executeFramed(seededStore(), q).map((f) => f.buf));
 
 describe('asString() over each traverser shape', () => {
   test('over a VERTEX renders v[<id>] (StringFactory.vertexString)', () => {
@@ -41,5 +46,25 @@ describe('asString() over each traverser shape', () => {
     const store = seededStore();
     const r = run(store, 'g.V().hasLabel("person").values("age").asString()');
     expect(values(r).sort()).toEqual(['27', '29', '32', '35']);
+  });
+
+  // The collection forms escape to a JS value-transform barrier (`gremlinString` / `asstring-barrier.ts`).
+  test('global over a MAP renders {k=[v]} (AbstractMap.toString)', async () => {
+    const r = await framed('g.V().valueMap("name").asString()');
+    expect(r.sort()).toEqual([
+      '{name=[josh]}', '{name=[lop]}', '{name=[marko]}', '{name=[peter]}', '{name=[ripple]}', '{name=[vadas]}',
+    ]);
+  });
+
+  test('local over a folded ELEMENT list stringifies each member, keeping the list', async () => {
+    const r = await framed('g.V().fold().asString(Scope.local)');
+    expect(r.length).toBe(1);
+    expect([...r[0]].sort()).toEqual(['v[1]', 'v[2]', 'v[3]', 'v[4]', 'v[5]', 'v[6]']);
+  });
+
+  test('a following order(local) sorts the barrier-produced string list', async () => {
+    const r = await framed('g.V().fold().asString(Scope.local).order(local)');
+    expect(r.length).toBe(1);
+    expect([...r[0]]).toEqual(['v[1]', 'v[2]', 'v[3]', 'v[4]', 'v[5]', 'v[6]']);
   });
 });
