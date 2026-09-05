@@ -93,8 +93,13 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | result |
       | d[6].l |
 
+  # A barrier-less value traversal in group() is NOT implicitly folded: GroupStep's reducer is
+  # Operator.assign (last-writer-wins, a single scalar), and Grouping.convertValueTraversal folds only
+  # the OPTIMIZED by("name")/by(T.label) forms — a bare by(__.coalesce(...)) stays un-optimized
+  # (ByModulatorOptimizationStrategy). Pinned by sideEffect/Group.feature's by(__.constant(1)) → scalar
+  # d[1].i (not l[1]). So each label's value is the LAST person's/software's coalesce result, a scalar —
+  # a list would need an explicit .fold(). (person: no lang → "n/a"; software: lang → "java".)
   @gap:nested-branch
-  @Unsupported
   Scenario: g_V_groupXbyXTlabelX_byXcoalesceXvaluesXlangX_constantXnaXXX
     Given the modern graph
     And the traversal of
@@ -104,7 +109,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"person":"l[n/a,n/a,n/a,n/a]","software":"l[java,java]"}] |
+      | m[{"person":"n/a","software":"java"}] |
 
   # Option-map choose() is scalar-valued, but it must also be recognized when nested
   # inside the generic child scope used by map()/local()/flatMap().

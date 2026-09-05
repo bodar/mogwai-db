@@ -89,7 +89,6 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[P,S] |
 
   @gap:path-position
-  @Unsupported
   Scenario: g_V_out_path_byXcoalesceXvaluesXlangX_constantXnoneXXX
     Given the modern graph
     And the traversal of

@@ -1064,35 +1064,49 @@ export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHos
   return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
 }
 
-/** `by(__.coalesce(A, …, Z))` over SCALAR arms → one SQL `COALESCE(...)` — the SCALAR twin of the
- *  relational `coalesceArms`, and the MONOID-COMPLETION seam: a semigroup reducer (`sum`/`mean`, which is
- *  NULL over an empty child) gains an identity when its coalesce fallback is a `constant`. So
+/** `by(__.coalesce(A, …, Z))` over SCALAR arms → one SQL `COALESCE(...)`. The SCALAR twin of the
+ *  relational `coalesceArms`, covering both the MONOID-COMPLETION case — a semigroup reducer (`sum`/`mean`,
+ *  NULL over an empty child) gains an identity from a `constant` fallback, so
  *  `coalesce(outE().values('w').sum(), constant(0))` is a weighted degree that reads 0 (not null) at a
- *  sink. The relational path (`BRANCH_HOSTS` self-root, below) still runs whenever an arm is an
- *  element/list/mixed shape — this only claims the all-scalar-arms case it cannot collapse.
+ *  sink — AND the broader VALUE-OR-DEFAULT idiom (`coalesce(values(k), constant(x))`: a stored value with
+ *  a fallback). The relational path (`BRANCH_HOSTS` self-root, below) still runs whenever an arm is an
+ *  element/list/mixed shape — this only claims the all-scalar-arms case it can collapse to one SQL
+ *  COALESCE.
  *
  *  Correctness — SQL `COALESCE` takes the first NON-NULL arg; Gremlin coalesce the first arm that
- *  PRODUCES. They agree exactly when, per arm, produced ⟺ non-null: true for `sum`/`mean`/`count`/`fold`/
- *  `values`/`constant` (a reducer/value over empty is NULL and unproduced; a stored value is never null —
- *  `property(k,null)` stores nothing), and NOT for `min`/`max` (an all-null non-empty candidate set is
- *  produced-but-null), which are refused so the whole clause fails closed rather than mis-execute. */
+ *  PRODUCES. They agree exactly when, per arm, produced ⟺ non-null. `scalarChild` is the gate for SHAPE
+ *  (it yields a scalar only for a body it can reduce to one value per traverser, so a fan-out arm
+ *  declines) and, via the check below, for PRODUCTIVITY (a non-final arm must STATE `present`). The ONE
+ *  scalar shape it admits where produced ≠ non-null is `min`/`max` (a non-empty ALL-NULL candidate set is
+ *  produced-but-null), refused here so the whole clause fails closed rather than mis-execute; every other
+ *  admitted arm (`sum`/`mean`/`count`/`fold`/`values`/token/`constant`/re-root) has produced ⟺ non-null
+ *  (a reducer/value over empty is NULL and unproduced; a stored value is never null — `property(k,null)`
+ *  stores nothing).
+ *
+ *  NOT a group implicit fold: `group().by(k).by(coalesce(…))` produces ONE scalar per traverser, which
+ *  the barrier-less value traversal keeps LAST via TinkerPop's `Operator.assign` (`GroupStep.java:60-63`,
+ *  a value traversal with no reducing barrier; `Grouping.convertValueTraversal` folds only the OPTIMIZED
+ *  `by("name")`/`by(T.label)` forms, and `ByModulatorOptimizationStrategy` leaves a bare `by(__.values(k))`
+ *  un-optimized — pinned by `sideEffect/Group.feature`'s `by(__.constant(1))` → scalar `d[1].i`, not
+ *  `l[1]`). The LIST needs an explicit `.fold()`, exactly as `by(values(k))` does — this is `map.ts`'s
+ *  `single` arm, and it is correct as it stands. */
 function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.some((a) => !isNested(a))) return null;
   const bodies = args.map((a) => bodyOf((a as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((b) => !b?.length)) return null;
-  // MONOID COMPLETION, and only that: complete a semigroup REDUCER with a CONSTANT identity. Every
-  // non-final arm must be a reducer (sum/mean/count/fold — NOT min/max, whose all-null-but-produced case
-  // breaks the produced⟺non-null equivalence SQL COALESCE relies on), and the final arm a `constant`
-  // (the identity). The broader `coalesce(values(k), constant(x))` "value-or-default" idiom is a separate
-  // feature — over bare value reads it entangles with group's list-fold (a `group().by(k).by(scalar)`
-  // yields a single value here, not TinkerPop's list), so it fails closed rather than mis-fold.
+  // `min`/`max` are the ONE scalar shape where produced ≠ non-null (a non-empty all-null candidate set is
+  // produced-but-null), which breaks the SQL-COALESCE ⟺ Gremlin-coalesce equivalence — refuse any arm
+  // ending in one. Every other arm's soundness is enforced below: `scalarChild` yields a scalar only for a
+  // body it can reduce to one value per traverser (a fan-out declines), and a NON-FINAL arm must STATE its
+  // productivity so we know when to fall through to the next. A `constant` final is no longer required —
+  // an all-arms-unproductive coalesce is simply unproductive, its `present` the OR the code already builds
+  // — so `coalesce(values(a), values(b))` composes on the same footing as `coalesce(values(a), constant)`.
   const bodyList = bodies as (readonly IRStep[])[];
-  const last = bodyList.length - 1;
-  for (let i = 0; i < bodyList.length; i++) {
-    const term = bodyList[i]!.at(-1)!.name;
-    if (i === last ? term !== 'constant' : (!selfCollapses(term) || term === 'min' || term === 'max')) return null;
+  for (const body of bodyList) {
+    const term = body.at(-1)!.name;
+    if (term === 'min' || term === 'max') return null;
   }
   const arms: ChildValue[] = [];
   for (const body of bodyList) {
