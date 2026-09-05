@@ -244,20 +244,33 @@ names (list-alias dedup key, the local/flatMap split).
 
 ### Phase D — the async-boundary frame authority (Codex sweep, Claude spec+review; Claude owns the path+encounter seed)
 
-- ◑ **D1 (LOCATED — a focused follow-up; hard to VERIFY, so not a tail-end rush).** The concrete named
-  gap is the path+encounter combo decline at `lower.ts:2999`: `if (facts.tracksPath && facts.demandsEncounter)
-  return null;`. The seed would have to carry BOTH the path channel (position 0 off the landed id, as
-  `seedPath` does for the base source) AND the encounter (minted from the landed array order,
-  `foreignRelation(withOrder)`). The broader unification routes the bespoke resumes
-  (`valueResume`/`lowerForeignResume`) through the full-frame `Lowering.seed`/`valueSeed`/`listSeed`/`mapSeed`
-  machinery (3308-3338, landed 49b2ed5c) rather than each hand-seeding a subset (the boundary trace's
-  subset table). **Why a focused session, not a rushed dispatch:** the channel-obligations gate
-  (`checkChannels`, `src/rel/obligations.ts`) catches a DROPPED channel at build time, but NOT a wrongly-
-  VALUED one (a path seeded in the wrong position, an encounter off the wrong order) — and a witness needs
-  a federate/subgraph traversal that tracks `path()` AND orders mid-chain, which the federate test infra
-  makes non-trivial to construct. So D1 wants the reference in hand and the federate witness built FIRST,
-  then the seed. Preferred form is the dissolving rewrite (seed → re-enter the fold), not a parallel
-  hand-seed table.
+- ⛔ **D1 (RE-DIAGNOSED 2026-09-05 — the deferral HOLDS, but the real blocker is UPSTREAM of the seed;
+  STOPPED for a human design decision).** The named gate is the path+encounter combo decline (now
+  `lower.ts:3007`, `if (facts.tracksPath && facts.demandsEncounter) return null;`, plus its twin at the
+  `detachedTail` `.V()`/`.E()` re-root). The combined seed IS a clean build — path-project THEN renumber,
+  which composes because a `Window` only EXTENDS its input (§3.5), so the path rides through the encounter
+  renumber untouched; I wrote it (a shared `combinedPathEncounterSeed`, deleting the blanket 3007 gate so
+  the existing `demandsEncounter && !seedsEncounter && !ordersMidChain` line is the sole, correct gate) and
+  it type-checked. **But it is UNWITNESSABLE end-to-end and was reverted**, because probing showed the
+  combo is UNREACHABLE by any valid traversal:
+  - `order().by(k).path()` ALREADY works (`order()` mints the encounter mid-chain, so `demandsEncounter`
+    stays false without a downstream collector — the `ordersMidChain` case never hit the gate).
+  - The only thing that makes `demandsEncounter` true alongside `tracksPath` is an ORDER-DEMANDING
+    consumer AFTER `path()` (a whole-stream `fold()`/`order()`/`group()`). **None composes:** `fold` is
+    deliberately NOT a `PATH_LIST_OP` (`ir/step.ts:461-465` — over a path, `fold`/`order`/`dedup`/`count`
+    are whole-stream ops meaning something other than the per-path list ops), and `path().fold()` DECLINES
+    on the BASE graph too (measured), not just federated. Folding a stream of ELEMENT-membered paths needs
+    the element-membered-nested-list re-entry that `outstanding-work.md` marks **"Superseded / won't-do"**.
+  So the seed guard protects a combo nothing reaches, and landing the seed would be dead code whose
+  wrongly-VALUED channels (`checkChannels` is structural-only) nothing could catch until a path-consumer
+  feature lands far away — exactly the risk this bullet already flagged. **The design fork for the human:**
+  (a) accept D1's deferral as correctly fail-closed + unreachable (the guard stays; revisit when path
+  consumers exist); or (b) invest in the PATH-CONSUMER family first — a whole-stream `fold()`/`order()`/
+  `group()` over a `path`-framed stream, including the element-membered-nested-list fold that is currently
+  a "won't-do" — which is the actual prerequisite that would make D1 reachable AND witnessable. Only then
+  is the seed (already written, easy to reconstruct) worth landing. The plan's earlier "the federate
+  witness is non-trivial to construct" was the wrong diagnosis: the witness is impossible because the
+  CONSUMER does not exist, not because the harness is hard.
 
 ## 8. Claude / Codex split & sequencing
 
