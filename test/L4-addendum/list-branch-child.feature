@@ -8,7 +8,6 @@ Feature: mogwai addendum — a list-armed branch as an all-cardinality child-bod
   # wrong count is never returned. Sizes (count(Scope.local)) keep the assertions order-independent.
 
   @gap:list-branch-child
-  @Unsupported
   Scenario: g_V_1_flatMapXunionXout_fold__in_foldXX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -21,8 +20,10 @@ Feature: mogwai addendum — a list-armed branch as an all-cardinality child-bod
       | d[3].l |
       | d[0].l |
 
+  # Each PERSON emits TWO lists (union's two arms), each counted — so 4 persons -> 8 counts. An arm whose
+  # sub-stream is EMPTY still emits a SEEDED `[]` (FoldStep's ArrayListSupplier), count 0, kept not dropped
+  # (foldPerOrigin LEFT JOINs the origin domain). marko(out3,in0) vadas(out0,in1) josh(out2,in1) peter(out1,in0).
   @gap:list-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_localXunionXout_fold__in_foldXX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -33,12 +34,12 @@ Feature: mogwai addendum — a list-armed branch as an all-cardinality child-bod
     Then the result should be unordered
       | result |
       | d[3].l |
-      | d[0].l |
       | d[2].l |
       | d[1].l |
+      | d[1].l |
+      | d[1].l |
       | d[0].l |
-      | d[1].l |
-      | d[1].l |
+      | d[0].l |
       | d[0].l |
 
   # A coalesce whose arms REDUCE per traverser now lowers through the child seam (`reductionArm`):

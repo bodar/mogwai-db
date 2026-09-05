@@ -291,6 +291,15 @@ export function perTraverserChild(
  *  the whitelist twin of `match`'s `PER_ORIGIN_UNSAFE` blacklist. */
 export const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'range', 'skip', 'tail', 'barrier']);
 
+/** The CARDINALITY-changing barriers that self-scope per origin by GROUPING rather than by a window — a
+ *  `fold()` that CONTINUES mid-body (`local(__.out().fold().unfold())`). Distinct from
+ *  `PER_ORIGIN_SAFE_BARRIER` on purpose (per its own comment that set stays a WINDOW-scoping whitelist):
+ *  these reduce N rows to one PER ORIGIN via `GROUP BY origin` (`foldPerOrigin` in `list.ts`, the key
+ *  spliced not a passenger, the seed LEFT JOINed off the origin DOMAIN so an empty sub-stream still emits
+ *  `[]`) and re-expand through `unfold()`'s `explode`, which carries the origin forward. A TERMINAL `fold()`
+ *  never reaches here — `scalarChild` answers it as a correlated list before `flatMapRejoin`. */
+export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold']);
+
 /**
  * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
  * `scalarChild`'s movement arm explicitly defers ("fan-out `flatMap(__.V()…)` needs the general child
@@ -343,7 +352,7 @@ export function flatMapRejoin(
   // `sample` (a global reservoir with no per-origin form), `fold`/`group`/`aggregate`/a reducer
   // (framing-changing, and a reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE
   // — a wrong answer if run across all origins at once.
-  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name))) return null;
+  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
   const rows = childRows(body, rel, framing.elem, labels, ctx, fresh, true, ctx.needsFromV ?? false);
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
@@ -496,6 +505,19 @@ function shedBodyAliases(rel: Rel, keep: AliasMap, fresh: Minter): Rel {
  * per-ROW number (`mintRowOrigin`), never the element id (which would collapse the three into one — the
  * exact wrong answer the element-id seed gave, the twin of `match`'s per-binding-row fix).
  */
+/** The DOMAIN of origins a per-origin body scopes over — `seeded` reduced to a single `dorigin` column,
+ *  one row per entering traverser. A SEEDED barrier (`fold`/`group`) LEFT JOINs this to emit its seed for an
+ *  origin whose sub-stream is empty. Named `dorigin` (not `origin`) so the seed join can carry it beside the
+ *  barrier's own `origin` key without a duplicate column; the payload is dropped — the seed needs only the
+ *  origin values, and a narrow relation keeps the join cheap. Carried on `ChainCtx.originDomain`. */
+export function originDomainOf(seeded: Rel, fresh: Minter): Rel {
+  const origin = originOf(seeded.channels)!;
+  return make.project({
+    id: fresh('od'), input: seeded, channels: [], type: typeOf(meta('dorigin', 'int')),
+    exprs: [['dorigin', col(seeded.id, origin.col)]],
+  });
+}
+
 export function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
   perRow = false, needsFromV = false,
@@ -519,7 +541,11 @@ export function childRows(
   // `needsFromV` rides IN only for a `flatMap`/`local` fan-out whose result an outer `otherV()` reads:
   // `inBody` cleared the demand (a body does not inherit it), so re-inject it here — the body's tail
   // edge hop then mints its entering vertex, which the rejoin carries out to the outer `otherV`.
-  const bodyCtx = needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx);
+  // THE ORIGIN DOMAIN rides in on the ctx so a SEEDED barrier in the body (`fold`→[], `group`→{}) can emit
+  // its seed for an origin whose sub-stream is EMPTY — a `GROUP BY origin` over the post-fan-out stream
+  // cannot, because a movement that fans out to zero drops that origin before the barrier sees it.
+  const baseCtx = needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx);
+  const bodyCtx = { ...baseCtx, originDomain: originDomainOf(seeded, fresh) };
   const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, bodyCtx, fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.

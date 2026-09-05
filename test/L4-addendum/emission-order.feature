@@ -113,7 +113,6 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | l[] |
 
   @gap:emission-order
-  @Unsupported
   Scenario: g_V_orderXbyXnameXX_localXoutXcreatedX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of

@@ -1,4 +1,5 @@
 import type { Channel, ChannelRole, Channels } from '../../../channels.ts';
+import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { IRStep } from '../../ir/strategies.ts';
@@ -176,6 +177,19 @@ export interface ChainCtx extends FilterCtx {
    * the one host that honours it (`flatMapRejoin`) re-injects it through `childRows`'s explicit parameter.
    */
   readonly needsFromV?: boolean;
+  /**
+   * THE DOMAIN OF ORIGINS in the current per-origin scope — a relation carrying a single `origin` column,
+   * one row per ENTERING traverser, set by `childRows`/`scopeRows` when it mints the origin channel.
+   *
+   * It exists because a SEEDED per-origin barrier (`fold`→[], `group`→{}) must emit its seed for an origin
+   * whose sub-stream is EMPTY, and a `GROUP BY origin` over the post-fan-out stream cannot: a movement that
+   * fans out to zero (a vertex with no `out()`) drops that origin before the barrier sees it. The barrier
+   * LEFT JOINs this domain and `COALESCE`s the missing groups to the seed, so `local(__.out().fold().unfold())`
+   * keeps the empty vertex and `local(__.out().count(Scope.local))` answers 0 rather than dropping it. A body
+   * with no per-origin scope has none, and a seeded barrier that finds an origin channel but no domain fails
+   * closed rather than answering a silently-truncated multiset (`fold`/`group` dispatch in `lower.ts`).
+   */
+  readonly originDomain?: Rel;
 }
 
 /**

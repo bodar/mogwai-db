@@ -1716,10 +1716,13 @@ function scalarTail(
       // is not there (`assertStreamColumns`' rule, stated at the one seam that can violate it).
       const streamType = out.kind === 'scalar' && !(perRowColumnOf(out.type) && !carries(perRowColumnOf(out.type)!))
         ? out.type : UNKNOWN;
+      // A per-origin fold is SEEDED per origin — see the element fold above; fail closed without a domain.
+      const origin = rel.channels.find((channel) => channel.role === 'origin');
+      if (origin && !ctx.originDomain) return null;
       const folded = foldScalars(rel, {
         type: streamType,
         ...(encounter ? { order: [encounter.col] } : {}),
-      }, fresh);
+      }, fresh, origin ? ctx.originDomain : undefined);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
@@ -4037,7 +4040,12 @@ function elementTail(
       // `simplePath().fold()` collects the elements that survived the filter — the path did its work.
       rel = dropPath(rel, fresh);
       const encounter = encounterOf(rel.channels);
-      const folded = foldElements(rel, elem, encounter ? { order: [encounter.col] } : {}, fresh);
+      // A per-origin fold (`origin` still live — a `local`/`flatMap` body) is SEEDED per origin and needs
+      // the origin DOMAIN to emit `[]` for an empty sub-stream; without one, fail closed rather than
+      // silently collapse every origin into one list.
+      const origin = rel.channels.find((channel) => channel.role === 'origin');
+      if (origin && !ctx.originDomain) return null;
+      const folded = foldElements(rel, elem, encounter ? { order: [encounter.col] } : {}, fresh, origin ? ctx.originDomain : undefined);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
     // `sack(Operator.x).by(v)` MUTATES the accumulator and leaves the traverser alone, so it is an

@@ -1,4 +1,5 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { withChannel, type Channel } from '../../channels.ts';
 import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -993,6 +994,7 @@ export function foldScalars(
   input: Rel,
   opts: { readonly type: ScalarType; readonly productiveNull?: boolean; readonly order?: readonly string[] },
   fresh: Minter,
+  domain?: Rel,
 ): { readonly rel: Rel; readonly of: ListOf } {
   // The type column and the position are named rather than passed as EXPRESSIONS, because the relation
   // an expression must address is the window's output and not the caller's input: every node here
@@ -1026,13 +1028,63 @@ export function foldScalars(
   // because a member has no column of its own; `static`/`unknown` cross unchanged, `text` flag and
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
   const memberType: ScalarType = vtype ? PER_ROW_ENVELOPE : opts.type;
+  const of: ListOf = { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull };
+  const origin = flagged.channels.find((channel) => channel.role === 'origin');
+  if (origin && domain) return foldPerOrigin(flagged, origin, domain, member, order, of, fresh);
   return {
     rel: make.aggregate({
       id: fresh('fd'), input: flagged, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       groupBy: [],
       aggs: [[LIST_COL, collectedArray(member, order)]],
     }),
-    of: { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull },
+    of,
+  };
+}
+
+/**
+ * A fold's collect scoped PER ORIGIN — the branch `foldElements`/`foldScalars` take when the input carries
+ * an `origin` channel AND a per-origin scope supplied its origin DOMAIN (`local(__.out().fold().unfold())`,
+ * a per-ENTERING-traverser fold that then continues).
+ *
+ * Two moves, both forced by the semantics:
+ *  1. `origin` is `CHANNEL_GROUP_POLICY` `undefined`, so it can NEVER be a grouped `Aggregate` PASSENGER
+ *     (`obligations.ts` — a grouping would take an undefined role from an arbitrary member). It is CONSULTED
+ *     as the group key instead — spliced into `groupBy`, emitted as a PLAIN column (the emitter reads the
+ *     first `groupBy.length` type cols as the keys, `src/rel/emit.ts`), then RE-DECLARED as the `origin`
+ *     channel by the following `project` (the one node kind that may declare a channel — `mintRowOrigin`'s
+ *     idiom on the output side). Every OTHER carried role is consumed: a fold IS a reducing barrier.
+ *  2. `fold()` is SEEDED — an empty sub-stream emits `[]`, not nothing (`FoldStep`'s `ArrayListSupplier`).
+ *     But `GROUP BY origin` produces NO row for an origin whose sub-stream is empty (a vertex with no
+ *     `out()`), because a movement that fans out to zero drops that origin before the fold sees it. So the
+ *     grouped fold is LEFT JOINed onto the origin DOMAIN (one row per entering traverser) and the missing
+ *     groups `COALESCE` to the seed `[]` — the reference's empty-fold, kept rather than silently dropped.
+ */
+function foldPerOrigin(
+  input: Rel, origin: Channel, domain: Rel, member: Expr, order: readonly SortTerm[], of: ListOf, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } {
+  // one list per NON-EMPTY origin — the key rides as a plain column, then the join re-declares the channel.
+  const grouped = make.aggregate({
+    id: fresh('fe'), input, channels: [],
+    type: typeOf(meta(origin.col, 'int'), meta(LIST_COL, 'json')),
+    groupBy: [col(input.id, origin.col)],
+    aggs: [[LIST_COL, collectedArray(member, order)]],
+  });
+  // LEFT JOIN the origin DOMAIN so an origin whose sub-stream was empty (no group above) still emits a row,
+  // its list `COALESCE`d to the seed `[]`. `domain`'s column is `dorigin` (not `origin`) so it rides beside
+  // the fold's own `origin` key without a duplicate column.
+  const joined = make.join({
+    id: fresh('fj'), left: domain, right: grouped, join: 'left', channels: [],
+    // The right side is NULL for a domain origin with no group (an empty sub-stream) — the whole point.
+    type: typeOf(meta('dorigin', 'int'), meta(origin.col, 'int', true), meta(LIST_COL, 'json', true)),
+    on: { kind: 'binary', op: '=', left: col(domain.id, 'dorigin'), right: col(grouped.id, origin.col) },
+  });
+  return {
+    rel: make.project({
+      id: fresh('fo'), input: joined, channels: withChannel([], origin),
+      type: typeOf(meta(LIST_COL, 'json'), meta(origin.col, 'int')),
+      exprs: [[LIST_COL, coalesce(col(joined.id, LIST_COL), EMPTY_ARRAY)], [origin.col, col(joined.id, 'dorigin')]],
+    }),
+    of,
   };
 }
 
@@ -1058,11 +1110,13 @@ export function foldScalars(
  * `FoldStep` supplies a seed, which is the per-step rule §12 cites `gremlin-core` for.
  */
 export function foldElements(
-  input: Rel, elem: Elem, opts: { readonly order?: readonly string[] }, fresh: Minter,
+  input: Rel, elem: Elem, opts: { readonly order?: readonly string[] }, fresh: Minter, domain?: Rel,
 ): { readonly rel: Rel; readonly of: ListOf } {
   // ORDER BY the encounter when there is one; else by the member ROWID — see `foldScalars`. Only the
   // no-encounter (correlated) branch is new, so an ordinary element fold's SQL is byte-unchanged.
   const order = foldOrder(input, opts.order, 'id');
+  const origin = input.channels.find((channel) => channel.role === 'origin');
+  if (origin && domain) return foldPerOrigin(input, origin, domain, col(input.id, 'id'), order, { kind: 'elem', elem }, fresh);
   return {
     rel: make.aggregate({
       id: fresh('fe'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),

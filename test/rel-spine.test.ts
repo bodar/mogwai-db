@@ -537,6 +537,14 @@ const COVERED = [
   "g.V().local(__.out().fold())", "g.V().local(__.out().values('name').fold())",
   "g.V().local(__.outE().fold())", "g.V().local(__.outE().values('weight').fold())",
   "g.V().local(__.out().fold()).unfold()", "g.V().local(__.outE().fold()).unfold()",
+  // A fold that CONTINUES mid-body — `fold().unfold()` INSIDE the local. The fold is scoped PER ORIGIN
+  // (`GROUP BY origin`, `foldPerOrigin`) and SEEDED: an empty sub-stream still emits `[]`, kept by a LEFT
+  // JOIN onto the origin DOMAIN (`ChainCtx.originDomain`), so `count(Scope.local)` is the out-degree per
+  // vertex (0 for an edgeless one), not the whole frontier, and `unfold` re-expands per origin.
+  "g.V().local(__.out().fold().unfold())", "g.V().local(__.out().values('name').fold().unfold())",
+  "g.V().local(__.out().fold().count(Scope.local))",
+  "g.V().local(__.out().order().by('name').fold().unfold().limit(1))",
+  "g.V().hasLabel('person').local(__.out().fold().unfold().values('name').fold())",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",
