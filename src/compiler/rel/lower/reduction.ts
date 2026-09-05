@@ -109,6 +109,23 @@ export function collapsedToOneRow(rel: Rel): boolean {
 }
 
 /**
+ * The relation FEEDING the single-row collapse `collapsedToOneRow` verified — the reducing barrier's own
+ * input. A NON-SEEDED reducer's productivity is "did any row reach it", i.e. `EXISTS` over exactly this,
+ * and reading it back off the ALREADY-lowered plan is what keeps that `present` from re-lowering the whole
+ * value sub-chain a second time (which doubled a `property(k, __.…sum())` plan's SQL). Follows the same
+ * passthrough chain `collapsedToOneRow` walks, so the two cannot disagree about where the collapse is.
+ */
+export function collapseInput(rel: Rel): Rel | null {
+  switch (rel.kind) {
+    case 'aggregate': return rel.groupBy.length === 0 ? rel.input : null;
+    case 'limit': return rel.count?.kind === 'lit' && rel.count.value === 1 ? rel.input : null;
+    case 'project': case 'sort': case 'window': case 'filter': case 'distinct': case 'materialize':
+      return collapseInput(rel.input);
+    default: return null;
+  }
+}
+
+/**
  * `map()` / `flatMap()` / `local()` — A CHILD BODY APPLIED PER TRAVERSER, or `null` to decline.
  *
  * TinkerPop's three per-traverser hosts differ in ONE thing, and naming that thing is what makes them
@@ -839,6 +856,21 @@ export function valueColIsSubquery(rel: Rel, name: string): boolean {
  * ONE `continueAs` dispatcher, so a scalar root reduces through exactly the same collapse arms — the
  * member re-entry is a reachability question, not a second engine.
  */
+/** "Did this correlated body produce ANY row" — an `EXISTS` over its first column, the productivity
+ *  signal a NON-SEEDED reducer needs. `sum`/`mean`/`min`/`max` emit NOTHING over zero starts
+ *  (`SumGlobalStep.processAllStarts` returns none — `vendor/tinkerpop/gremlin-core/.../step/map/SumGlobalStep.java`),
+ *  unlike `count`→0 / `fold`→[] which seed. Shared by the argmax pick and the numeric-reducer arm so the
+ *  two cannot state the same fact two ways. `null` when the relation projects no column to probe. */
+function existsAny(rel: Rel, fresh: Minter): Expr | null {
+  const probeCol = rel.type.cols[0];
+  if (!probeCol) return null;
+  const probe = make.project({
+    id: fresh('mp'), input: rel, channels: [], type: typeOf(meta('one', 'any', true)),
+    exprs: [['one', col(rel.id, probeCol.name)]],
+  });
+  return { kind: 'exists', plan: probe, negated: false };
+}
+
 export function correlatedReduce(
   root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' } | { readonly kind: 'list' } | { readonly kind: 'map' }>,
   body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
@@ -872,12 +904,11 @@ export function correlatedReduce(
       const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
       const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
       const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
-      const probe = make.project({ id: fresh('mp'), input: values.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(values.rel.id, probeCol.name)]] });
       return {
         expr: { kind: 'scalar', plan: vExpr },
         framing: { kind: 'scalar', type: UNKNOWN, result: 'number' },
         vtype: { kind: 'scalar', plan: vtExpr },
-        present: { kind: 'exists', plan: probe, negated: false },
+        present: existsAny(values.rel, fresh)!,
         yields: 'one',
       };
     }
@@ -919,9 +950,19 @@ export function correlatedReduce(
   const scalar = scalarOf('v');
   if (tail.framing.result === 'count')
     return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  // A NON-SEEDED numeric reducer (`sum`/`mean`, and a non-argmax `min`/`max`) emits NOTHING over zero
+  // starts, so its productivity is `EXISTS` over the rows that FED it — the empty-drop the argmax arm
+  // above already computes, not a `NULL`-value test (`TraversalProduct`: a productive null is a value).
+  // Without it a `local(outE.values('weight').sum())` on an edgeless vertex would keep the traverser with
+  // a null sum instead of dropping it (`SumGlobalStep` drops it), which is why `perTraverserChild`
+  // declines a reducer whose `present` the seam cannot state. The probe reads the reducer's OWN input
+  // (`collapseInput`) off the already-lowered `tail`, so it costs no second lowering of the value chain.
+  const rows = collapseInput(tail.rel);
+  const present = rows && existsAny(rows, fresh);
+  if (!present) return null;
   return {
     expr: { kind: 'scalar', plan: scalar },
-    framing: tail.framing, vtype: { kind: 'scalar', plan: scalarOf('vt') }, yields: 'one',
+    framing: tail.framing, vtype: { kind: 'scalar', plan: scalarOf('vt') }, present, yields: 'one',
   };
 }
 

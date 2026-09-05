@@ -507,6 +507,13 @@ const COVERED = [
   // result, so they may take that expression only where the body had exactly ONE to give.
   "g.V().map(__.outE().count())", "g.V().flatMap(__.outE().count())", "g.V().local(__.outE().count())",
   "g.V().map(__.out().count())", "g.V().hasLabel('person').map(__.out('created').count())",
+  // A NON-SEEDED numeric reducer (`sum`/`mean`, and `min`/`max`) DROPS the empty-child traverser —
+  // `SumGlobalStep`/Mean/Min/Max override `processAllStarts` to emit NOTHING over zero starts, so their
+  // productivity is an `EXISTS` over the rows that FED the reducer (the empty-drop the argmax `min`/`max`
+  // arm already carried, now shared by all four — `existsAny`). `count`/`fold` seed and stay always-present.
+  "g.V().local(__.outE().values('weight').sum())", "g.V().map(__.outE().values('weight').sum())",
+  "g.V().local(__.outE().values('weight').mean())", "g.V().local(__.out().values('age').sum())",
+  "g.V().where(__.out().values('age').sum())",
   // A MULTI-VALUED property read is the case the policies disagree about, so both directions are
   // listed: `map` picks the insertion-order first, `local` declines (see DECLINED).
   "g.V().map(__.values('name'))", "g.V().map(__.values('age'))",
@@ -585,9 +592,6 @@ const DECLINED = [
   // (`mixedBranch`, a list-of-elements member framed by `listPayloadExpr`) — so they are no longer here.
   // What still declines is a variant with a MAP arm, which has no variant `vk`.
   "g.V().union(__.count(), __.valueMap('name'))", // scalar + MAP: variantArmOf has no vk for a map
-  "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
-  // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
-  // reference rejects. count()/fold() are not this — both emit a traverser for an empty child.
   // NOTE: the OPTION-MAP form used to sit here and is covered now — see the option-map test below.
   // What it needed was not a new gate but a PRESENCE signal, because `Pick.none` and
   // `Pick.unproductive` are distinguishable only where the choice reports productivity BESIDE its
@@ -634,9 +638,6 @@ const DECLINED = [
   "g.V().local(__.values('name'))",
   "g.V().map(__.out())",
   "g.V().local(__.count())",
-  // A numeric reducer over an EMPTY child: the seam cannot state productivity (the aggregate is NULL
-  // both there and over an all-null input that `MaxLocalStep` genuinely emits), and `map` must drop.
-  "g.V().local(__.out().values('age').sum())",
 ];
 
 describe('the RelIR spine', () => {
