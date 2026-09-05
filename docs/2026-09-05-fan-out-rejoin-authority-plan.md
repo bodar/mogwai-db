@@ -198,9 +198,16 @@ names (list-alias dedup key, the local/flatMap split).
     scoped per-entering-traverser = `GROUP BY [origin, key]` with `origin` CONSULTED as part of the group
     key (like `graph`, `channels.ts` note), NOT a passenger. Extends `PER_ORIGIN_SAFE_BARRIER` for the
     grouped case.
-  - **a barrier that CONTINUES mid-body** (`local(out.fold().unfold())`) — the fold's result re-enters
-    the body and continues; the per-origin fold must keep `origin` through the collect so the tail
-    rejoins.
+  - ✅ **a barrier that CONTINUES mid-body (LANDED d0b82487).** `local(out.fold().unfold())` — the fold's
+    result re-enters the body and continues. Built the SHARED per-origin-barrier substrate families 2/3
+    both need: a new `ChainCtx.originDomain` (set by `childRows`, one row per entering traverser) so
+    `foldPerOrigin` (`list.ts`) can `GROUP BY origin` (the key CONSULTED not a passenger — `origin` is
+    `undefined` group policy) AND LEFT JOIN the domain to SEED the empties `fold()` owes (`[]` for a vertex
+    with no `out()`), which a bare `GROUP BY` drops. The seeded-empty was the crux: a naive per-origin fold
+    silently dropped empty origins (wrong for `count(Scope.local)`), which is why the substrate, not a
+    peephole, was the right call. Compounded to union-arm/flatMap-arm folds (3 `@Unsupported` scenarios
+    dropped, answers reference-verified). 0 census answer changes; ordinary top-level fold byte-unchanged.
+    Oracle `test/L4-addendum/local-fold-continue.feature`.
   Bounded-`repeat`/`union`-arm variants stay per their arm-major/traverser-major rule; unbounded-`repeat`
   stays permanent decline. Each family is a separate green increment.
 
