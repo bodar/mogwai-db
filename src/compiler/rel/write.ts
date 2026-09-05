@@ -2702,6 +2702,306 @@ export function mergeVFromMap(
   return { bindings: [...seeded.bindings, ...bindings], result };
 }
 
+/** The vtype tags an external vertex id carries when it is a ROWID (SQLite's integer storage class) —
+ *  so a map endpoint value with one of these resolves against `nodes.id`, and anything else against the
+ *  `uid`. The same rowid-vs-uid split `elementScan` draws from a value's JS type, drawn here from the
+ *  stored `{t,v}` node's tag because the endpoint arrives as data in the driver's map. */
+const NUMERIC_ID_VTYPES: readonly string[] = ['byte', 'short', 'int', 'long', 'bigint'];
+
+/**
+ * A map-VALUED merge driver for EDGES — `inject([T.label:…, (OUT):…, (IN):…]).mergeE()` /
+ * `mergeE(__.identity())` / `select("m").mergeE()`, where the incoming TRAVERSER is the merge map
+ * (`MergeElementStep.materializeMap` with the identity/no-arg map traversal). The map's entries are
+ * decomposed PER DRIVER at runtime via `json_each` over `MAP_COL`, so the search — label, endpoints AND
+ * property criteria — is DATA, not compile-time strings. `mergeVFromMap`'s shape on the edge host, with
+ * `mergeEComputed`'s create/`crossed` machinery.
+ *
+ * **The whole map is the search AND the create source** (`onCreateTraversal == null` ⇒ `onCreateMap`
+ * is the merge map, `MergeEdgeStep.onCreateMap:342`). So — unlike `mergeEComputed`, whose `project`
+ * search admits only string keys — the endpoints and label narrow the search here:
+ * `searchEdges` reads `T.label`→`hasLabel`, `Direction.OUT`→`outV().hasId`, `Direction.IN`→`inV().hasId`
+ * and each string key→`has(k, v)` (`MergeEdgeStep.java:168-219`); the create needs BOTH endpoints (else
+ * the reference's per-traverser raise, `:313-316`), the label (or `Edge.DEFAULT_LABEL`, `:320`) and the
+ * string properties (`:324-330`). An endpoint is a vertex EXTERNAL id resolved to its rowid, raising
+ * `Vertex does not exist for mergeE` when it names no vertex (`resolveVertex:398-409`).
+ *
+ * Deferred, fail-closed (each a `null` decline): a LIST-valued map (stored scalar vs JSON list never
+ * compares equal); a `T.id` in the map (search/create by edge id — its own machinery, guarded below);
+ * an `option(Merge.outV/inV)` or an `onCreate` endpoint over a map driver (endpoints come from the map
+ * here); a RUNTIME arm value (roots at the map driver, needs a map host).
+ */
+export function mergeEFromMap(
+  input: Rel, maps: MergeMaps, valOf: MapOf, propertySteps: readonly IRStep[],
+  ordered: boolean, child: ChildSeam, fresh: Minter,
+): Effects | null {
+  if (valOf.kind !== 'scalar') return null;
+  const { onCreate, onMatch } = maps;
+  // An edge carries exactly ONE immutable label, so a label on `onMatch` is refused.
+  if (onMatch?.label) return null;
+  // Endpoints come from the DRIVER MAP's Direction keys; an option- or onCreate-supplied endpoint over a
+  // map driver is a separate combination — decline rather than silently ignore it (fail closed).
+  if (maps.outV !== undefined || maps.inV !== undefined) return null;
+  if (onCreate?.outV !== undefined || onCreate?.inV !== undefined) return null;
+  const matchWrites = mergeWrites(onMatch, 'edge', child);
+  const createExtra = onCreate ? mergeWrites(onCreate, 'edge', child) : [];
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
+  if (!matchWrites || !createExtra || !tailWrites) return null;
+  // A RUNTIME arm value roots at the map driver (no element id) — deferred, so constant arms only here.
+  if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
+  // The create's fallback label — `onCreate`'s single constant label if it named one, else the edge
+  // default (`Edge.DEFAULT_LABEL`); the map's own `T.label` wins over it per driver (below). An edge
+  // takes exactly one label, so a multi-name `onCreate` label declines.
+  const onCreateLabels = ((onCreate?.label as string[] | null) ?? []);
+  if (onCreateLabels.length > 1) return null;
+  const fallbackLabel = onCreateLabels[0] ?? 'edge';
+  try { validateLabel(fallbackLabel); } catch { return null; }
+
+  const carriedCh = writeInputChannels(input);
+  if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  // ALWAYS snapshot — the search reads the map several times and the create needs a per-driver `ord` to
+  // correlate its output back, both of which want a retained relation.
+  const seeded = inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
+  const incoming = bind(seeded.result, true, carriedCh);
+  if (!incoming.type.cols.some((column) => column.name === MAP_COL)) return null; // not a map stream
+  const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
+
+  // The four sides of a pair (`[keyNode, valNode]`, each a `{t,v}` node), and the key CLASS probes.
+  const ext = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+  const jsonText = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+  const keyT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.t');
+  const keyV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.v');
+  const valV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.v');
+  const valT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.t');
+  const isToken = (p: Rel, name: 'label' | 'id'): Expr => and(eq(keyT(p), compilerText('T')), eq(keyV(p), compilerText(name)));
+  const isDir = (p: Rel, side: 'OUT' | 'IN'): Expr => and(eq(keyT(p), compilerText('D')), eq(keyV(p), compilerText(side)));
+
+  // The carrier — the driver's map (and its `ord`), reprojected WITHOUT the channels, so every search
+  // filter/join below is channel-free; `incoming` keeps the channels for the final `crossed`.
+  const carrier0 = bind(make.project({
+    id: fresh('cc'), input: incoming, channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta(MAP_COL, 'json')),
+    exprs: [...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []), [MAP_COL, col(incoming.id, MAP_COL)]],
+  }), true);
+  const map0 = col(carrier0.id, MAP_COL);
+
+  // FAIL CLOSED on a `T.id` in the map — search/create by edge id is its own machinery; until then a map
+  // carrying it REFUSES rather than silently ignoring the id criterion (a wrong answer).
+  const idProbe = pairsOf(map0, fresh);
+  guard(make.limit({
+    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
+      input: make.filter({ id: fresh('f'), input: carrier0, channels: [], type: carrier0.type,
+        pred: { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: idProbe, channels: [], type: idProbe.type, pred: isToken(idProbe, 'id') }) } }) }),
+  }), { message: 'mergeE with a T.id in a map-valued driver is not yet supported', raiseWhen: 'rows' });
+
+  // The map's `T.label` value as a per-row scalar (NULL when the map names none) — narrows the search and
+  // labels the created edge.
+  const mapLabelScalar = (mapCol: Expr): Expr => {
+    const p = pairsOf(mapCol, fresh);
+    const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isToken(p, 'label') });
+    return { kind: 'scalar', plan: make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta('lbl', 'any', true)), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('lbl', 'any', true)), exprs: [['lbl', valV(hits)]] }) }) };
+  };
+  // Does the map carry this Direction key at all — the `containsKey(direction)` the create raise reads.
+  const hasDir = (mapCol: Expr, side: 'OUT' | 'IN'): Expr => {
+    const p = pairsOf(mapCol, fresh);
+    return { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isDir(p, side) }) };
+  };
+  // The map's `Direction.OUT`/`Direction.IN` value RESOLVED to a vertex rowid — the external id matched
+  // against `nodes.id` for a numeric-typed id, `nodes.uid` for a string one (`elementScan`'s provenance
+  // rule, the value's stored tag standing in for its JS type). NULL when the map names no such endpoint
+  // OR the id names no vertex — the two are told apart by `hasDir` above, so the missing-endpoint raise
+  // and the missing-vertex raise stay distinct.
+  const endpointRowid = (mapCol: Expr, side: 'OUT' | 'IN'): Expr => {
+    const p = pairsOf(mapCol, fresh);
+    const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isDir(p, side) });
+    const nodeScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('rn'), channels: [], type: typeOf(...NODES_COLS) });
+    const numeric: Expr = { kind: 'in-list', expr: valT(hits), values: NUMERIC_ID_VTYPES.map((t) => compilerText(t)) };
+    const match: Expr = { kind: 'case', whens: [[numeric, eq(col(nodeScan.id, 'id'), valV(hits))]], else: eq(col(nodeScan.id, 'uid'), valV(hits)) };
+    const joined = make.join({ id: fresh('j'), left: hits, right: nodeScan, join: 'inner', on: match, channels: [],
+      type: typeOf(...hits.type.cols, ...NODES_COLS) });
+    const only = make.project({ id: fresh('p'), input: joined, channels: [], type: ID_TYPE, exprs: [['id', col(joined.id, 'id')]] });
+    return { kind: 'scalar', plan: make.limit({ id: fresh('li'), input: only, channels: [], type: ID_TYPE, count: compilerInt(1) }) };
+  };
+
+  // The carrier's resolved per-driver facts: the map (passed through), its endpoints as rowids, whether
+  // each Direction is present, and the label name. Every search/create reference below is a column, not a
+  // repeated subquery.
+  const carrier = bind(make.project({
+    id: fresh('cc'), input: carrier0, channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta(MAP_COL, 'json'),
+      meta('src', 'int', true), meta('tgt', 'int', true), meta('hasOut', 'int'), meta('hasIn', 'int'), meta('lbl', 'any', true)),
+    exprs: [
+      ...(hasOrd ? [[ORD, col(carrier0.id, ORD)] as const] : []),
+      [MAP_COL, map0],
+      ['src', endpointRowid(map0, 'OUT')], ['tgt', endpointRowid(map0, 'IN')],
+      ['hasOut', { kind: 'case', whens: [[hasDir(map0, 'OUT'), compilerInt(1)]], else: compilerInt(0) }],
+      ['hasIn', { kind: 'case', whens: [[hasDir(map0, 'IN'), compilerInt(1)]], else: compilerInt(0) }],
+      ['lbl', mapLabelScalar(map0)],
+    ],
+  }), true);
+  const driverMap = col(carrier.id, MAP_COL);
+
+  // THE MATCH — every edge the driver's whole map is satisfied by: no STRING-key pair the candidate
+  // lacks (dynamic-key EXISTS over `edge_properties`, vtype-aware), narrowed by the label (`hasLabel`),
+  // the source endpoint (`edge.src`), and the target endpoint (`edge.tgt`) where the map named them.
+  const candScan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('ec'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+  // Renamed so the search join's output names stay unique — the candidate's own endpoints/label do not
+  // collide with the carrier's resolved `src`/`tgt`.
+  const candidates = make.project({
+    id: fresh('p'), input: candScan, channels: [], type: typeOf(meta('cid', 'int'), meta('csrc', 'int'), meta('clabel', 'int'), meta('ctgt', 'int')),
+    exprs: [['cid', col(candScan.id, 'id')], ['csrc', col(candScan.id, 'src')], ['clabel', col(candScan.id, 'label')], ['ctgt', col(candScan.id, 'tgt')]],
+  });
+  const allMatch = (cand: Rel): Expr => {
+    const candId = col(cand.id, 'cid');
+    const pairs = pairsOf(driverMap, fresh);
+    const spec = PROPERTY_TABLE.edge;
+    const ep = make.scan({ id: fresh('ep'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const epMatch = make.filter({
+      id: fresh('f'), input: ep, channels: [], type: ep.type,
+      pred: and(and(eq(col(ep.id, spec.owner), candId), eq(col(ep.id, 'key'), keyV(pairs))),
+        typedValueEq(col(ep.id, 'value'), col(ep.id, 'vtype'), valV(pairs), valT(pairs))),
+    });
+    const propProbe = make.project({ id: fresh('p'), input: epMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    // A STRING-key pair the candidate FAILS. (A `T.label`/`Direction`/`T.id` pair cannot reach here — the
+    // label/endpoints narrow via columns below, and a `T.id` was refused by the guard.)
+    const unsat = make.filter({
+      id: fresh('f'), input: pairs, channels: [], type: pairs.type,
+      pred: and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
+    });
+    const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
+    // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.
+    const lblCol = col(carrier.id, 'lbl');
+    const lb = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+    const lblFilter = make.filter({ id: fresh('f'), input: lb, channels: [], type: lb.type, pred: eq(col(lb.id, 'name'), lblCol) });
+    const lblIds = make.project({ id: fresh('p'), input: lblFilter, channels: [], type: ID_TYPE, exprs: [['id', col(lblFilter.id, 'id')]] });
+    const labelOk: Expr = or({ kind: 'binary', op: 'is', left: lblCol, right: compilerNull('text') },
+      { kind: 'in-query', expr: col(cand.id, 'clabel'), plan: lblIds, negated: false });
+    // The endpoints: a side the map did not name does not narrow; one it named must equal the candidate's.
+    const outOk: Expr = or(eq(col(carrier.id, 'hasOut'), compilerInt(0)), eq(col(cand.id, 'csrc'), col(carrier.id, 'src')));
+    const inOk: Expr = or(eq(col(carrier.id, 'hasIn'), compilerInt(0)), eq(col(cand.id, 'ctgt'), col(carrier.id, 'tgt')));
+    return and(and(propsOk, labelOk), and(outOk, inOk));
+  };
+  const joined = make.join({
+    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: allMatch(candidates), channels: [],
+    type: typeOf(...carrier.type.cols, ...candidates.type.cols),
+  });
+  const matched = bind(make.project({
+    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'cid')]],
+  }), true);
+  // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
+  for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));
+
+  // ROWS THAT FOUND NOTHING — a carrier row whose `ord` has no matched row (or the single-row carrier
+  // when `matched` is empty).
+  const trueLit = eq(compilerInt(1), compilerInt(1));
+  const unmatched = make.filter({
+    id: fresh('f'), input: carrier, channels: [], type: carrier.type,
+    pred: { kind: 'exists', negated: true, plan: make.filter({
+      id: fresh('f'), input: matched, channels: [], type: matched.type,
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+  });
+  // THE CREATE RAISES, per driver whose search missed — the reference's three sentences, in its order:
+  // OUT missing, then IN missing, then an endpoint that names no vertex (`MergeEdgeStep:313-319`).
+  const raiseOn = (pred: Expr, message: string): void => {
+    guard(make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
+        input: make.filter({ id: fresh('f'), input: unmatched, channels: [], type: unmatched.type, pred }) }),
+    }), { message, raiseWhen: 'rows' });
+  };
+  const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull('int') });
+  raiseOn(eq(col(unmatched.id, 'hasOut'), compilerInt(0)), 'Out Vertex not specified in onCreate - edge cannot be created');
+  raiseOn(and(eq(col(unmatched.id, 'hasOut'), compilerInt(1)), eq(col(unmatched.id, 'hasIn'), compilerInt(0))), 'In Vertex not specified in onCreate - edge cannot be created');
+  raiseOn(and(and(eq(col(unmatched.id, 'hasOut'), compilerInt(1)), eq(col(unmatched.id, 'hasIn'), compilerInt(1))),
+    or(isNull(col(unmatched.id, 'src')), isNull(col(unmatched.id, 'tgt')))), 'Vertex does not exist for mergeE');
+
+  // ONE EDGE PER DISTINCT `(src, tgt, map)` THAT FOUND NOTHING. The guards above abort the traversal
+  // before this runs unless every unmatched row has both endpoints resolved, so `src`/`tgt` are non-null
+  // for every wanted row.
+  const wanted = bind(rowNumberWindow(make.distinct({
+    id: fresh('d'), channels: [], type: typeOf(meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json')),
+    input: make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json')),
+      exprs: [['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')], [MAP_COL, col(unmatched.id, MAP_COL)]] }),
+  }), 'word', [], { partitionBy: [], orderBy: [] }, fresh), true);
+
+  // THE CREATED EDGE'S LABEL — the map's `T.label` per wanted row, else the fallback. Intern the DISTINCT
+  // names (an upsert, data-sized over the wanted rows), then resolve each wanted row's label id by name.
+  const wantedLbl = make.project({
+    id: fresh('p'), input: wanted, channels: [], type: typeOf(meta('word', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json'), meta('name', 'text')),
+    exprs: [['word', col(wanted.id, 'word')], ['src', col(wanted.id, 'src')], ['tgt', col(wanted.id, 'tgt')], [MAP_COL, col(wanted.id, MAP_COL)],
+      ['name', { kind: 'call', fn: 'COALESCE', args: [mapLabelScalar(col(wanted.id, MAP_COL)), text(fallbackLabel)] }]],
+  });
+  const labelling = bind(wantedLbl, true);
+  const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
+    input: make.project({ id: fresh('p'), input: labelling, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelling.id, 'name')]] }) });
+  const labelsTable = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
+    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
+  const lbLookup = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+  const withLid = make.join({ id: fresh('j'), left: labelling, right: lbLookup, join: 'inner', on: eq(col(labelling.id, 'name'), col(lbLookup.id, 'name')), channels: [],
+    type: typeOf(meta('word', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json', true), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
+
+  // THE CREATE — an edge per wanted tuple, in `word` order so the assigned rowids recover their tuple.
+  const inOrder = make.sort({ id: fresh('so'), input: withLid, channels: [], type: withLid.type, terms: [{ expr: col(withLid.id, 'word'), dir: 'asc' }] });
+  const rows = make.project({
+    id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    exprs: [['src', col(inOrder.id, 'src')], ['label', col(inOrder.id, 'lid')], ['tgt', col(inOrder.id, 'tgt')]],
+  });
+  const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+  const created = bind(insert({
+    target: edgesTarget, cols: ['src', 'label', 'tgt'], source: rows, channels: [],
+    type: typeOf(meta('id', 'int')), returning: [['id', col(edgesTarget.id, 'id')]],
+  }));
+  const rankedCreated = positioned(created, fresh);
+  const createdTuples = bind(make.join({
+    id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
+    type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
+  }), true);
+  // WRITE THE MAP'S STRING PROPERTIES onto each created edge — one relational Insert over `json_each`:
+  // explode each created edge's map into entries KEEPING the edge id, keep only string-key pairs (a
+  // `T.label`/`Direction`/`T.id` token is not a property), and project `(edge, key, value, vtype)`.
+  const { exploded } = explodeMembers(fenced(createdTuples, fresh), MAP_COL, PAIR, fresh);
+  const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
+    pred: eq(ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.t'), compilerText('string')) });
+  const propRows = make.project({
+    id: fresh('p'), input: propPairs, channels: [],
+    type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [['edge', col(propPairs.id, 'id')], ['key', ext(pairSide(col(propPairs.id, PAIR.value), 'keys'), '$.v')],
+      ['value', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.t')]],
+  });
+  const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.edge.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.edge.cols) });
+  bind(insert({ target: propTarget, cols: ['edge', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'edge')]] }));
+  // `onCreate`'s own CONSTANT properties, over the created edges (a shared key upserts, so `onCreate`
+  // wins over the map's value written above).
+  for (const write of createExtra) if (!propertyStatements('edge', idsOf(created, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+
+  // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, map)` to the created tuple's,
+  // so the one edge made for a repeated tuple is carried by every driver that asked (`crossed` by `ord`).
+  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text')),
+    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')], ['mk', jsonText(col(unmatched.id, MAP_COL))]] });
+  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text')),
+    exprs: [['cid', col(createdTuples.id, 'id')], ['src', col(createdTuples.id, 'src')], ['tgt', col(createdTuples.id, 'tgt')], ['mk', jsonText(col(createdTuples.id, MAP_COL))]] });
+  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner',
+    on: and(and(eq(col(umMin.id, 'src'), col(ctMin.id, 'src')), eq(col(umMin.id, 'tgt'), col(ctMin.id, 'tgt'))), eq(col(umMin.id, 'mk'), col(ctMin.id, 'mk'))), channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text'), meta('cid', 'int'), meta('ct_src', 'int'), meta('ct_tgt', 'int'), meta('ct_mk', 'text')) });
+  const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
+
+  // THE MERGED EDGES — matched ∪ created, the tail over the union, the whole crossed back onto the input.
+  const merged = make.union({
+    id: fresh('u'), all: true, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    inputs: [matched, createdFor],
+  });
+  const emitted = tailWrites.length ? bind(merged, true) : merged;
+  for (const write of tailWrites) if (!propertyStatements('edge', idsOf(emitted, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  return { bindings: [...seeded.bindings, ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
+}
+
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
   driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,

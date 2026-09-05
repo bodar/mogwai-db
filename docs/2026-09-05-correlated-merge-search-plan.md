@@ -1,8 +1,10 @@
 # Correlated merge search — build plan
 
-**Status (2026-09-05): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES), 4a (map-valued
-`mergeV`, scalar string-key maps) and 4b (map-valued `mergeV` with a `T.label` key → +2 L3) LANDED on
-trunk; 4c (map-valued mergeE + the general map-producing traversal + the whole-map 0-result raise) remains.** A fail-closed safety fix landed
+**Status (2026-09-06): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES), 4a (map-valued
+`mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a `T.label` key → +2 L3) and 4c-mergeE
+(map-valued `mergeE` — the edge host) LANDED on trunk; the 4c map-producing traversal (`select("m")` of a
+side-effect map, `out().project(…)`/`select(dynMap)`) + the whole-map 0-result raise remain — they unlock
+the CORPUS `select("m").mergeE()` scenario.** A fail-closed safety fix landed
 first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
 replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
 turned out to be ONE substrate** — see the 3+4 entry in the build order.
@@ -200,9 +202,22 @@ endpoints):
      added to `test/merge-search-map-vertex.{feature,test.ts}`. Deferred: `T.id`; a multi-label map value;
      the compound-slice `mergeV(__.select("m").limit(Scope.local,1).unfold())` corpus form (`resolveMergeArg`
      still declines the local-slice arm).
-   - **4c — map-valued `mergeE`** (`inject(map).mergeE()`, `select("m").mergeE()`) — the edge host, endpoints
-     from the map's `Direction` keys; the general map-producing traversal (`out().project(…)`,
-     `select(dynMap)`) + the whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` → throw).
+   - ✅ **4c-mergeE — LANDED — map-valued `mergeE`** (`inject([T.label:…,(OUT):…,(IN):…]).mergeE()` /
+     `mergeE(__.identity())`) — the edge host, `mergeVFromMap`'s shape with `mergeEComputed`'s create/`crossed`
+     machinery. `mapLiteralBlob` (`map.ts`) now also encodes a `Direction` key as `{t:'D', v:'OUT'|'IN'}` (the
+     `directionKey` shape `elementMap()` already emits). `mergeEFromMap` (`write.ts`, dispatched from
+     `mergedFromMap`, `lower.ts`) decomposes the driver map per row: `T.label`→`hasLabel` + the created edge's
+     data-sized label intern (default `edge` absent one), `Direction.OUT`/`IN`→endpoint external ids resolved
+     to rowids (numeric-vtype→`nodes.id`, else `uid`; NULL→"Vertex does not exist for mergeE"), string
+     keys→dynamic-key property criteria (search) + property write (create). The three create raises fire per
+     driver whose search missed — OUT missing, IN missing, endpoint unresolved (`MergeEdgeStep:313-319`),
+     `raiseWhen:'rows'`. `option(onCreate/onMatch)` CONSTANT arms, a `property()` tail, distinct-create, and
+     the T.id refusal all compose. Tests: `test/L4-addendum/merge-search-map-edge.feature`,
+     `test/merge-search-map-edge.test.ts`. Deferred, fail-closed: an `option(Merge.outV/inV)` or `onCreate`
+     endpoint over a map driver, a `T.id`/list-valued map, a RUNTIME arm value.
+   - **4c-producer — map-producing traversal + select of a side-effect map** (`select("m").mergeE()`,
+     `out().project(…)`, `select(dynMap)`) + the whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` →
+     throw "does not map to a value"). Unlocks the CORPUS `select("m").mergeE()` scenario (raises L3).
 
 Each increment lands with L4 `.feature` scenarios (there are none yet — write them) and its own tests.
 No L3 movement expected (the corpus has no computed-merge scenarios) — this is ceiling work, validated by

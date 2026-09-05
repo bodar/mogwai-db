@@ -42,7 +42,7 @@ import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeVFromMap, propertyDrop, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
@@ -4974,11 +4974,11 @@ function mergedElements(
   return effects && { effects, at: end };
 }
 
-/** `mergeV()`/`mergeV(__.identity())` over a MAP-valued stream — the driver's map IS the merge argument
- *  (the map-VALUED driver). Mirrors `mergedElements`' cluster scan, but the search decomposes the
- *  driver's map per row at runtime (`mergeVFromMap`) rather than a compile-time spec. Only the
- *  `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
- *  as a mere multiplier and is deferred (declines). Edge map-valued merge is a later sub-increment. */
+/** `mergeV()`/`mergeE()`/`…(__.identity())` over a MAP-valued stream — the driver's map IS the merge
+ *  argument (the map-VALUED driver). Mirrors `mergedElements`' cluster scan, but the search decomposes the
+ *  driver's map per row at runtime (`mergeVFromMap`/`mergeEFromMap`) rather than a compile-time spec. Only
+ *  the `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
+ *  as a mere multiplier and is deferred (declines). */
 function mergedFromMap(
   input: Rel, valOf: MapOf, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
@@ -4995,6 +4995,8 @@ function mergedFromMap(
   try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params); }
   catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   if (!maps.matchFromDriver) return null;
-  const effects = op === 'mergeV' ? mergeVFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh) : null;
+  const effects = op === 'mergeV'
+    ? mergeVFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh)
+    : mergeEFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
 }
