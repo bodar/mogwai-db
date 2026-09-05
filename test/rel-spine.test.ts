@@ -1455,10 +1455,11 @@ describe('the RelIR spine', () => {
 
   test('a supplied T.id on mergeE routes the create insert and guards the collision', () => {
     // `searchEdges` narrows by `mergeMap.get(T.id)` (a `g.E(eid)`, here `hasId` in `edgeCriteria`) and
-    // the create routes the id to the `edges` rowid/`uid` column — `elementAddE`'s plumbing. The guard
-    // is `mergeV`'s conditional one on the edge host: a create against a taken id raises the reference's
-    // sentence. (The SECOND collision — two distinct pairs claiming one id — is the fail-closed
-    // complement; today's mergeE endpoint forms are all constant per stream, so it is not yet reachable.)
+    // the create routes the id to the `edges` rowid/`uid` column — `elementAddE`'s plumbing. TWO guards
+    // raise the reference's "already exists": (1) the id is taken on the CREATE branch (`mergeV`'s
+    // conditional guard, edge host); (2) more than one DISTINCT endpoint pair claims one id — `addE`'s
+    // second-row guard, and REACHABLE, because an `option(Merge.outV, __.select('v'))` endpoint varies
+    // per incoming row (the multi-pair case below).
     const store = () => {
       const s = new GraphStore(new BunSqlite(':memory:'));
       for (const _ of [1, 2, 3]) exec(s).buffers('g.addV("person")', {});
@@ -1491,13 +1492,29 @@ describe('the RelIR spine', () => {
       write(s, g);
       expect(s.query('SELECT count(*) c FROM edges', [])).toEqual([{ c: 1 }]);
     }
-    // COLLISION: id 7 is taken by a 1->2 edge; a merge for a 1->3 edge with the same id misses the
-    // search and collides on the create — the reference's verbatim raise.
+    // COLLISION (guard 1): id 7 is taken by a 1->2 edge; a merge for a 1->3 edge with the same id misses
+    // the search and collides on the create — the reference's verbatim raise.
     {
       const s = store();
       write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2,(T.id):7])');
       expect(() => write(s, 'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):3,(T.id):7])'))
         .toThrow(idAlreadyExists('Edge', 7));
+    }
+    // COLLISION (guard 2): the SAME supplied id over TWO distinct endpoint pairs. `select("v")` resolves
+    // per incoming vertex, so `mergeE` over two `person`s asks for two DISTINCT self-loops both labelled
+    // id 99 — upstream's loop creates the first and collides on the second, and the guard raises the same
+    // sentence. This is the reachable multi-pair case, and the guard is ATOMIC (nothing created before it
+    // raises, exactly as `addE`'s second-row guard is) — a fresh graph stays empty.
+    {
+      const s = store();
+      const T = (name: string) => ({ typeName: 'T', elementName: name });
+      const D = (name: string) => ({ typeName: 'Direction', elementName: name });
+      const M = (name: string) => ({ typeName: 'Merge', elementName: name });
+      const xx1 = new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')], [T('id'), 99]]);
+      const gremlin = 'g.V().hasLabel("person").as("v").mergeE(xx1).option(Merge.outV,__.select("v")).option(Merge.inV,__.select("v"))';
+      expect(compile(gremlin, { xx1 }).kind, gremlin).toBe('program');
+      expect(() => exec(s).buffers(gremlin, { xx1 })).toThrow(idAlreadyExists('Edge', 99));
+      expect(s.query('SELECT count(*) c FROM edges', [])).toEqual([{ c: 0 }]);
     }
   });
 
