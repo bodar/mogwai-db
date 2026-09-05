@@ -181,12 +181,19 @@ names (list-alias dedup key, the local/flatMap split).
   Probed the actual declines: `local(out.fold())`, `local(out.count())`, `flatMap(out.fold())`,
   `local(out.fold()).unfold()`'s terminal forms ALREADY lower (the reduction arm / `scalarChild`). What
   declines is three distinct families, each its own mechanism:
-  - **a non-seeded numeric reducer in `local`** (`local(outE.values('weight').sum())`,
-    `mean`/`min`/`max`) — declines because a reducer over an empty child emits NOTHING (unlike
-    `count`→0, `fold`→[]), so `perTraverserChild` fails `produced.present === ALWAYS_PRODUCTIVE`
-    (`reduction.ts:237,262`); needs a productive-null / empty-drop per-reducer (the `nonEmptyReducer`
-    seam) plus a scalar-host `origin` (a rowid-less parent — the channel must carry a VALUE, a
-    channels-core change per `childRows`' own note at `reduction.ts:447-450`).
+  - ✅ **a non-seeded numeric reducer in `local` (LANDED 1783c614).** `local(outE.values('weight').sum())`,
+    `mean` — declined because a reducer over an empty child emits NOTHING (unlike `count`→0, `fold`→[]),
+    so `perTraverserChild` failed on `present` ABSENT (`reduction.ts:261`). **Measured correction to the
+    scoping: `min`/`max` ALREADY worked** (the argmax arm computes `present: EXISTS(value rows)`); only
+    `sum`/`mean` fell into `correlatedReduce`'s numeric arm which returned WITHOUT `present`. The fix was
+    that ONE signal, not the feared channels-core change: extract the argmax EXISTS-probe as `existsAny`,
+    share it, and read the reducer's OWN input off the already-lowered tail (`collapseInput`) so it costs
+    no second lowering. **This is a CORRELATED SCALAR, never `childRows`/`origin`** — so the "scalar-host
+    origin / channel-carries-a-VALUE" clause was mis-scoped here (it bled from the group family below);
+    a scalar-HOST `local` reducer is a genuinely separate, unwitnessed sub-case, correctly still deferred.
+    Compounds to sum/mean in `map`/`flatMap`/`where`/`choose` and reducer-valued `property(k, __.…sum())`
+    writes; +16 census deferral→run (1 mine, 15 pre-existing drift), 0 answer changes. Oracle
+    `test/L4-addendum/local-reducer-empty-drop.feature`; `rel-spine.test.ts` two DECLINED→COVERED.
   - **a full GROUP in `local`** (`local(out.group().by('lang'))`, `groupCount()`) — a grouping barrier
     scoped per-entering-traverser = `GROUP BY [origin, key]` with `origin` CONSULTED as part of the group
     key (like `graph`, `channels.ts` note), NOT a passenger. Extends `PER_ORIGIN_SAFE_BARRIER` for the
