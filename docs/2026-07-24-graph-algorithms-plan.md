@@ -438,7 +438,7 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
 | harmonic | (none — no algorithm-specific tunable, `algo/…/harmonic/HarmonicCentralityBaseConfig.java`) | — | full parity |
 | hits | `hitsIterations`/`authProperty`/`hubProperty` | yes (as `iterations`/`authProperty`/`hubProperty`) | — |
 | degree | `orientation` (NATURAL) | yes (as `direction` out/in/both) | — |
-| | `relationshipWeightProperty` (null) | no (bare count) | **add** (weighted degree) |
+| | `relationshipWeightProperty` (null) | **yes** (landed 2026-09-05) | — (weighted degree, via monoid completion) |
 
 **Community / components**
 
@@ -488,6 +488,22 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
    empty), weighted LPA.
 2. **nodeSimilarity `topK`/`similarityCutoff`/`degreeCutoff`** — scalability wall today (dense output);
    all SQL tweaks (`WHERE`/`HAVING`/a per-source `ROW_NUMBER` cap).
+2b. **Monoid completion — LANDED 2026-09-05.** `by(coalesce(<reducer>, constant(k)))` lowers to a SQL
+   `COALESCE(...)` (`scalarChild`/`scalarCoalesceChild`, `src/compiler/rel/lower/reduction.ts`), giving a
+   semigroup reducer (`sum`/`mean`, NULL over empty) an opt-in identity — completing it to a monoid. This
+   is how weighted **degree** reads 0 at a sink: `coalesce(<dir>E().values(w).sum(), constant(0))`,
+   synthesized in the streaming service via the `stepChain` array-idempotency substrate — NOT a
+   service-level hack; the completion lives once, in the seam. SCOPED to its definition: every non-final
+   arm a reducer (sum/mean/count/fold; `min`/`max` refused — an all-null candidate set is
+   produced-but-null, the one Gremlin-coalesce ≠ SQL-COALESCE divergence), the final arm a `constant`.
+   Fixed a latent `midCall` bug on the way (a `result:'number'` streaming value's type column was named
+   `vtype` while `scalarPayload` read `vt`).
+   - **Deferred, its own feature:** the broader `coalesce(values(k), constant(x))` "value-or-default"
+     idiom (non-reducer arm). It is entangled with a SEPARATE pre-existing divergence —
+     `group().by(k).by(<non-reducing scalar>)` yields a single value, not TinkerPop's implicit list
+     (`by(values(k))` shows it too; explicit `.fold()` is the workaround). Fixing group's implicit fold
+     (in `map.ts` `groupMap`, real conformance blast radius) unblocks both; the L4 scenarios
+     `g_V_groupXbyXTlabelX_byXcoalesce…X` and `g_V_out_path_byXcoalesce…X` stay `@Unsupported` until then.
 3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),
    pageRank/articleRank `tolerance`, wcc `consecutiveIds`, closeness `useWassermanFaust`, triangle/LCC
    `maxDegree`.

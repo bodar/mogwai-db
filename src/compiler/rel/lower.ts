@@ -767,9 +767,14 @@ function midCall(
   const produced = serviceValue(step, elementHost(input, elem, aliases), ctx, fresh);
   if (!produced) return null;
   const { expr, framing, vtype } = produced;
+  // The type column's NAME follows the framing — the same authority `scalarPayload` reads by: a numeric
+  // reducer's dynamic type rides in `vt` (the chain-reducer convention, `nonEmptyReducer`), a per-row type
+  // in `vtype`. Projecting it always as 'vtype' worked only until a `result:'number'` streaming value
+  // existed (weighted degree = coalesce(sum(),constant(0))), which `scalarPayload` then sought under 'vt'.
+  const typeCol = framing.kind === 'scalar' && framing.result === 'number' ? 'vt' : 'vtype';
   return projectScalar(input,
-    [['v', expr], ...(vtype ? [['vtype', vtype] as const] : [])],
-    [meta('v', 'any', true), ...(vtype ? [meta('vtype', 'text', true)] : [])],
+    [['v', expr], ...(vtype ? [[typeCol, vtype] as const] : [])],
+    [meta('v', 'any', true), ...(vtype ? [meta(typeCol, 'text', true)] : [])],
     framing, fresh);
 }
 

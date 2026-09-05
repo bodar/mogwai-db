@@ -324,3 +324,31 @@ describe('scalar-parent / projection SQL', () => {
 
 
 });
+
+describe('scalar coalesce — monoid completion (a semigroup reducer + a constant identity)', () => {
+  // `coalesce` over SCALAR arms lowers to a SQL COALESCE(...) in a by()/child position — the seam that
+  // gives a semigroup reducer (`sum`/`mean`, NULL over an empty child) an opt-in identity. This is what
+  // makes weighted degree read 0 at a sink; here it is exercised directly, decoupled from any service.
+  const projMap = async (g: string): Promise<Record<string, number>> => {
+    const out: Record<string, number> = {};
+    for (const b of executeQuery(seededStore(), g, {})) {
+      const m: any = await decode(b);
+      out[m.get('name')] = Number(m.get('d'));
+    }
+    return out;
+  };
+
+  test('coalesce(sum(), constant(0)) completes the monoid — a sink reads 0, not null', async () => {
+    const got = await projMap('g.V().project("name","d").by("name").by(__.coalesce(__.outE().values("weight").sum(), __.constant(0)))');
+    expect(got.marko).toBeCloseTo(1.9, 9); // 0.5 + 1.0 + 0.4 out-edge weights
+    expect(got.josh).toBeCloseTo(1.4, 9);
+    for (const sink of ['vadas', 'lop', 'ripple']) expect(got[sink]).toBe(0); // no out-edges → identity
+  });
+
+  test('a min/max coalesce arm fails closed — produced ≠ non-null there (Gremlin coalesce ≠ SQL COALESCE)', () => {
+    // min/max emit a null RESULT over an all-null (non-empty) candidate set, so COALESCE would wrongly
+    // fall through — the one divergence, refused rather than mis-executed.
+    expect(() => read('g.V().project("name","d").by("name").by(__.coalesce(__.outE().values("weight").max(), __.constant(0)))'))
+      .toThrow(UnsupportedTraversal);
+  });
+});

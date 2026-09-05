@@ -314,6 +314,9 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
   };
   const IN = { marko: 0, vadas: 1, lop: 3, josh: 1, ripple: 1, peter: 0 };
   const OUT = { marko: 3, vadas: 0, lop: 0, josh: 2, ripple: 0, peter: 1 };
+  const near = (got: Record<string, number>, want: Record<string, number>) => {
+    for (const [k, v] of Object.entries(want)) expect(got[k]).toBeCloseTo(v, 9);
+  };
 
   // `tinker.degree.centrality` contributes `kind: 'rel'`, and a service implements `stream` XOR `rel`,
   // so it has exactly one lowering. These tests assert its answer directly.
@@ -326,6 +329,19 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
       expect(await projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
         .toEqual(OUT);
     });
+
+  test('weighted degree (relationshipWeightProperty) sums edge weights — OUT, a sink reads 0 not null', async () => {
+    // sum() is a semigroup (NULL over no edges); the service completes it to the monoid via
+    // coalesce(<dir>E().values(w).sum(), constant(0)), lowered by the scalar-coalesce seam — so a sink
+    // vertex reads 0, GDS-style, rather than being dropped/nulled.
+    near(await projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).with("relationshipWeightProperty","weight").project("vertex","degree").by(select("v")).by()'),
+      { marko: 1.9, vadas: 0, lop: 0, josh: 1.4, ripple: 0, peter: 0.2 });
+  });
+
+  test('weighted degree IN — a source reads 0', async () => {
+    near(await projMap('g.V().as("v").call("tinker.degree.centrality").with("relationshipWeightProperty","weight").project("vertex","degree").by(select("v")).by()'),
+      { marko: 0, vadas: 0.5, lop: 1.0, josh: 1.0, ripple: 1.0, peter: 0 });
+  });
 
   test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', async () => {
       expect(await projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',

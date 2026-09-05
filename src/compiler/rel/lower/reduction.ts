@@ -9,7 +9,7 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
-import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
@@ -1064,6 +1064,67 @@ export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHos
   return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
 }
 
+/** `by(__.coalesce(A, …, Z))` over SCALAR arms → one SQL `COALESCE(...)` — the SCALAR twin of the
+ *  relational `coalesceArms`, and the MONOID-COMPLETION seam: a semigroup reducer (`sum`/`mean`, which is
+ *  NULL over an empty child) gains an identity when its coalesce fallback is a `constant`. So
+ *  `coalesce(outE().values('w').sum(), constant(0))` is a weighted degree that reads 0 (not null) at a
+ *  sink. The relational path (`BRANCH_HOSTS` self-root, below) still runs whenever an arm is an
+ *  element/list/mixed shape — this only claims the all-scalar-arms case it cannot collapse.
+ *
+ *  Correctness — SQL `COALESCE` takes the first NON-NULL arg; Gremlin coalesce the first arm that
+ *  PRODUCES. They agree exactly when, per arm, produced ⟺ non-null: true for `sum`/`mean`/`count`/`fold`/
+ *  `values`/`constant` (a reducer/value over empty is NULL and unproduced; a stored value is never null —
+ *  `property(k,null)` stores nothing), and NOT for `min`/`max` (an all-null non-empty candidate set is
+ *  produced-but-null), which are refused so the whole clause fails closed rather than mis-execute. */
+function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const args = step.args.map((a) => a.value);
+  if (args.length < 2 || args.some((a) => !isNested(a))) return null;
+  const bodies = args.map((a) => bodyOf((a as { readonly nested: unknown }).nested, ctx.params));
+  if (bodies.some((b) => !b?.length)) return null;
+  // MONOID COMPLETION, and only that: complete a semigroup REDUCER with a CONSTANT identity. Every
+  // non-final arm must be a reducer (sum/mean/count/fold — NOT min/max, whose all-null-but-produced case
+  // breaks the produced⟺non-null equivalence SQL COALESCE relies on), and the final arm a `constant`
+  // (the identity). The broader `coalesce(values(k), constant(x))` "value-or-default" idiom is a separate
+  // feature — over bare value reads it entangles with group's list-fold (a `group().by(k).by(scalar)`
+  // yields a single value here, not TinkerPop's list), so it fails closed rather than mis-fold.
+  const bodyList = bodies as (readonly IRStep[])[];
+  const last = bodyList.length - 1;
+  for (let i = 0; i < bodyList.length; i++) {
+    const term = bodyList[i]!.at(-1)!.name;
+    if (i === last ? term !== 'constant' : (!selfCollapses(term) || term === 'min' || term === 'max')) return null;
+  }
+  const arms: ChildValue[] = [];
+  for (const body of bodyList) {
+    const cv = scalarChild(body, host, ctx, fresh);
+    if (!cv || cv.framing.kind !== 'scalar' || cv.framing.result === 'value') return null;
+    arms.push(cv);
+  }
+  // Every NON-FINAL arm must STATE its productivity — else we cannot know when to fall to the next arm.
+  if (arms.slice(0, -1).some((a) => a.present === undefined)) return null;
+  const value: Expr = { kind: 'call', fn: 'COALESCE', args: arms.map((a) => a.expr) };
+  // The whole coalesce produces iff ANY arm does; a `constant`/token fallback makes it ALWAYS productive.
+  const present: Expr | undefined = arms.some((a) => a.present === ALWAYS_PRODUCTIVE) ? ALWAYS_PRODUCTIVE
+    : arms.every((a) => a.present !== undefined)
+      ? arms.map((a) => a.present!).reduce((l, r) => ({ kind: 'binary', op: 'or', left: l, right: r }))
+      : undefined;
+  // A single shared STATIC type stays static (one column); otherwise a per-row tag whose column is the
+  // COALESCE of each arm's own vtype — a reducer's `vt` expr, else the arm's static-type literal (the
+  // expression-level twin of `withMergedVtype`, `build.ts`).
+  const staticTypes = arms.map((a) => a.framing.kind === 'scalar' && a.framing.result === undefined && !a.vtype ? a.framing.type : null);
+  if (staticTypes.every((t): t is ScalarType => t !== null)) {
+    const met = meetScalarTypes(staticTypes);
+    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
+  }
+  const tagOf = (a: ChildValue): Expr => {
+    if (a.vtype) return a.vtype;
+    const tag = a.framing.kind === 'scalar' ? staticTypeOf(a.framing.type) : undefined;
+    return tag ? compilerText(tag) : compilerNull('text');
+  };
+  const vtype: Expr = { kind: 'call', fn: 'COALESCE', args: arms.map(tagOf) };
+  return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
+}
+
 export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   const first = body[0]!;
@@ -1215,6 +1276,12 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // arm already builds — no branch-in-by special case, just the self-root the numeric self-reducer above
   // uses one hop later. This is what lets an emit-unrolled recurse (`union` of level-prefixes) sit inside
   // a `project().by()`, the shape a GraphQL `@recurse` field lowers to.
+  // A scalar-armed `coalesce` is a per-row `COALESCE(...)` (monoid completion), not the relational
+  // arm-major union the self-root below builds; try it first, fall through to that for element/list arms.
+  if (body.length === 1 && first.name === 'coalesce') {
+    const coalesced = scalarCoalesceChild(first, host, ctx, fresh);
+    if (coalesced) return coalesced;
+  }
   if (BRANCH_HOSTS.has(body[0]!.name)) {
     const reduced = selfRootedReduce(body, host, ctx, fresh);
     if (reduced) return reduced;

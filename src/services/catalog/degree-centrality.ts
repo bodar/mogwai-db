@@ -27,16 +27,31 @@ function directionOf(params: Record<string, unknown>): 'out' | 'in' | 'both' {
   throw new Error(`tinker.degree.centrality: unsupported direction '${raw}'`);
 }
 
-/** The body the seam lowers — a movement in `direction`, then `count()`. Written as IR rather than
- *  parsed from Gremlin text because that is what it IS: the service is not quoting a traversal, it is
- *  naming two steps. */
-const degreeBody = (direction: 'out' | 'in' | 'both'): readonly IRStep[] =>
-  [{ name: direction, args: [] }, { name: 'count', args: [] }] as unknown as readonly IRStep[];
+/** The edge-movement step for a direction, used by the WEIGHTED body (which hops to edges to read a
+ *  weight); the unweighted body hops to the adjacent VERTICES and counts them. */
+const EDGE_STEP = { out: 'outE', in: 'inE', both: 'bothE' } as const;
+
+/** The body the seam lowers. UNWEIGHTED: a movement in `direction`, then `count()` — `count` is a monoid
+ *  (0 over no edges), so an isolated vertex is 0 for free. WEIGHTED (`relationshipWeightProperty`): the
+ *  Σ of the incident edges' weights. `sum()` is a SEMIGROUP (NULL over no edges, not 0), so complete it to
+ *  a monoid the honest, general way — `coalesce(<dir>E().values(w).sum(), constant(0))`, which the scalar-
+ *  coalesce seam (`reduction.ts` `scalarCoalesceChild`) lowers to `COALESCE(Σw, 0)`. Written as IR, not
+ *  parsed: the service NAMES its steps, and a synthesized `{nested: Step[]}` arm rides idempotently
+ *  through `stepChain` exactly as a parsed nested body does (the substrate `strategies.ts` synthesis uses). */
+const degreeBody = (direction: 'out' | 'in' | 'both', weightKey: string | undefined): readonly IRStep[] => {
+  if (weightKey === undefined) return [{ name: direction, args: [] }, { name: 'count', args: [] }] as unknown as readonly IRStep[];
+  const sumArm = [{ name: EDGE_STEP[direction], args: [] }, { name: 'values', args: [{ value: weightKey, type: null, name: null }] }, { name: 'sum', args: [] }];
+  const zeroArm = [{ name: 'constant', args: [{ value: 0, type: null, name: null }] }];
+  return [{ name: 'coalesce', args: [{ value: { nested: sumArm }, type: null, name: null }, { value: { nested: zeroArm }, type: null, name: null }] }] as unknown as readonly IRStep[];
+};
 
 export const degreeCentralityService: Service = {
   name: 'tinker.degree.centrality',
   type: 'streaming',
-  describeParams: () => ({ direction: 'Direction (OUT | IN | BOTH), default IN' }),
+  describeParams: () => ({
+    direction: 'Direction (OUT | IN | BOTH), default IN',
+    relationshipWeightProperty: 'sum this edge property instead of counting edges (GDS weighted degree); default an unweighted count',
+  }),
   resolve: () => ({
     kind: 'rel',
     buildRel: (site: RelCallSite): RelContribution | null => {
@@ -47,7 +62,9 @@ export const degreeCentralityService: Service = {
         throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
       if (site.host.kind !== 'element')
         throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
-      const value = site.child.scalar(degreeBody(directionOf(site.params)), site.host);
+      const rw = site.params.relationshipWeightProperty;
+      const weightKey = typeof rw === 'string' && rw.length > 0 ? rw : undefined;
+      const value = site.child.scalar(degreeBody(directionOf(site.params), weightKey), site.host);
       return value && { kind: 'value', value };
     },
   }),
