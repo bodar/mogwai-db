@@ -6,9 +6,11 @@ Feature: mogwai addendum — order/dedup(Scope.local) over a NESTED list (JS ORD
   # express that, so it runs as the SAME sync value-transform barrier reverse()/split()/regex use: a SQL
   # head reads the nested lists, a batched JS ORDERABILITY comparator sorts/dedups them, the result re-
   # injects (orderability.ts / order-dedup-local.ts). Scope: a nested list of SCALARS (or nested scalar
-  # lists/maps). An ELEMENT-membered nested list DECLINES — the barrier ships materialized vertices to JS
-  # and the rowid is gone, so the result cannot re-enter the graph (a rare, non-corpus shape; fail-closed,
-  # never a wrong answer). @gap:nested-order.
+  # lists/maps) AND one whose members are ELEMENTS (a Map<K,List<vertex>> value ordered whole). The element
+  # case carries the members' RAW ROWIDS through the barrier (the head demotes element leaves to raw
+  # scalars, `rawListElements`) and materializes only at the edge, so the result re-enters the graph:
+  # unfold/read/movement all compose. Sorting is by rowid (= id on a rowid graph), the flat-case
+  # element convention. @gap:nested-order.
 
   @gap:nested-order
   Scenario: g_injectXnested_scalarsX_fold_orderXlocalX
@@ -64,18 +66,78 @@ Feature: mogwai addendum — order/dedup(Scope.local) over a NESTED list (JS ORD
       | l[d[2].i,d[9].i] |
       | l[d[3].i,d[1].i] |
 
-  # ELEMENT-nested DECLINES (fail-closed): a Map<K,List<vertex>> value ordered whole cannot round-trip
-  # through the barrier (the vertices lose their rowids). Kept as the reference answer for when a detached-
-  # element re-entry substrate lands; today it must REFUSE, never answer.
+  # ELEMENT-membered nested list — a Map<K,List<vertex>> value ordered whole. The barrier carries the
+  # members as RAW ROWIDS and materializes at the edge, so the sorted/deduped list RE-ENTERS the graph.
+  # The assertions are ORDER-INDEPENDENT (the name multiset after unfold/unfold/read), the reference-safe
+  # claim: order(local)'s OUTER sort compares vertex-lists element-wise by id, but each inner list's order
+  # is out()'s iteration order (unspecified in the reference), so only the multiset is conformance-stable —
+  # the exact sorted structure is regression-locked in test/compiler/nested-element-order.exec.test.ts.
+  # What these prove is the round-trip: element members survive order/dedup(Scope.local) and re-source.
   @gap:nested-order
-  @Unsupported
-  Scenario: g_V_group_selectValues_orderXlocalX_element_declines
+  Scenario: g_V_group_byName_byXoutFoldX_selectValues_orderXlocalX_unfold_unfold_name
     Given the modern graph
     And the traversal of
       """
-      g.V().hasLabel("person").group().by("name").by(__.out().fold()).select(Column.values).order(Scope.local)
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).select(Column.values).order(Scope.local).unfold().unfold().values("name")
       """
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[l[],l[v[lop]],l[v[lop],v[ripple]],l[v[vadas],v[lop],v[josh]]] |
+      | vadas |
+      | lop |
+      | josh |
+      | lop |
+      | lop |
+      | ripple |
+
+  # dedup(Scope.local) over the same element-membered nested list — the collapse path re-sources too.
+  @gap:nested-order
+  Scenario: g_V_group_byName_byXoutFoldX_selectValues_dedupXlocalX_unfold_unfold_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).select(Column.values).dedup(Scope.local).unfold().unfold().values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | josh |
+      | lop |
+      | lop |
+      | ripple |
+
+  # MOVEMENT after the round-trip: the re-sourced vertices take out() — proving they re-entered as real
+  # graph elements, not opaque objects. out() of {vadas,lop,josh,lop,lop,ripple} = josh's created edges.
+  @gap:nested-order
+  Scenario: g_V_group_byName_byXoutFoldX_selectValues_orderXlocalX_unfold_unfold_out_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).select(Column.values).order(Scope.local).unfold().unfold().out().values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+
+  # T.label key variant — group().by(T.label).by(fold()) gives Map<label,List<vertex>>; select(values).
+  # order(local) sorts the two vertex-lists, and every vertex re-sources.
+  @gap:nested-order
+  Scenario: g_V_group_byLabel_byXfoldX_selectValues_orderXlocalX_unfold_unfold_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).by(__.fold()).select(Column.values).order(Scope.local).unfold().unfold().values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | josh |
+      | peter |
+      | lop |
+      | ripple |

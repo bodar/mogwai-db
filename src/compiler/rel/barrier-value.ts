@@ -49,8 +49,12 @@ export function buildValueTransformSegment(
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
+  // The head lowers under `headOpts` (the resume always uses the plain `lowering`) so a barrier can build
+  // its HEAD with an option the RESUME must not inherit — `order`/`dedup(Scope.local)`'s `rawListElements`,
+  // which frames element members as rowids for the round-trip but must NOT reach the resume's wire read.
+  headOpts: Lowering = lowering,
 ): SegmentPlan | null {
-  const head = headOf(lowerToRel(steps.slice(0, at), lowering));
+  const head = headOf(lowerToRel(steps.slice(0, at), headOpts));
   if (!head) return null;
   return {
     kind: 'segment',

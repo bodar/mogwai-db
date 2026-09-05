@@ -1737,12 +1737,33 @@ export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh:
   return inner && rebuiltMembers(members, listNode(inner), fresh);
 }
 
+/** Demote every ELEMENT leaf of a list member tree to a raw rowid scalar, so `listPayloadExpr` takes its
+ *  scalar PASSTHROUGH arm (`jsonOf(list)`) and emits the members' STORED rowids rather than expanding each
+ *  to an `{id,label,props}` object. The one caller is a value-transform barrier HEAD
+ *  (`order`/`dedup(Scope.local)` over an element-membered nested list, `order-dedup-local.ts`): the barrier
+ *  round-trips the members through JS and must re-source them as elements afterwards, which needs the
+ *  internal rowid that framing throws away — so the head carries rowids and materialization lands at the
+ *  edge (`unfoldList`'s `elem` arm CASTs the rowid straight back to an element `id`). Recurses through
+ *  `list` nesting only, the rowid-recoverable shape; `property`/`mixed`-element leaves are not recoverable
+ *  and the barrier declines them upstream, so they never reach here (and a `scalar`/`map` leaf is returned
+ *  unchanged, making this a no-op for a scalar-membered nested list — the established path is byte-stable). */
+export function demoteElementLeaves(of: ListOf): ListOf {
+  if (of.kind === 'elem') return SCALAR_MEMBERS;
+  if (of.kind === 'list') return { kind: 'list', of: demoteElementLeaves(of.of) };
+  return of;
+}
+
 /** The list relation as WIRE ROWS: one `list` column per traverser, in emission order, plus the `Shape`
  *  that says how to frame each member. The arm ORDER is deliberate — a nested list is
- *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form. */
-export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSource, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
+ *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form.
+ *
+ *  `rawElements` builds a barrier HEAD (`order-dedup-local.ts`): the SQL frames the DEMOTED tree (element
+ *  leaves as raw rowids), while the `Shape` keeps the ORIGINAL member descriptor so the barrier's re-inject
+ *  re-sources the members as elements. Every ordinary read passes `false` and frames elements normally, so
+ *  the wire is unchanged; the mismatch is confined to a head, which is read back into JS and never framed. */
+export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSource, fresh: Minter, rawElements = false): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
-  const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, source, fresh);
+  const payload = listPayloadExpr(col(ordered.id, LIST_COL), rawElements ? demoteElementLeaves(of) : of, source, fresh);
   if (!payload) return null;
   const shape: Shape = of.kind === 'list' ? { kind: 'jsonbList', items: of }
     : set ? { kind: 'jsonbSet', items: of }

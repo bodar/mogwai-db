@@ -2692,6 +2692,16 @@ export interface Lowering {
    * `null` from it declines. Absent everywhere but a value-barrier resume's nested-tail plan.
    */
   readonly seed?: ((fresh: Minter) => FramedRel | null) | null;
+  /**
+   * A value-transform BARRIER HEAD read only: frame the element members of a (nested) list as their
+   * stored ROWIDS rather than `{id,label,props}` objects, so `order`/`dedup(Scope.local)` can round-trip
+   * an element-membered nested list through JS and re-source the elements afterwards (`order-dedup-local.ts`;
+   * the framing would otherwise throw the internal rowid away, and `map.ts` proves the algebra stores
+   * members as rowids until the edge). NEVER set on a resume or an ordinary wire read: the `Shape` still
+   * describes the members as elements, so a terminal read framed with this on would ship rowids to the
+   * wire. Off everywhere but the barrier head, where the head is read back into JS and never framed.
+   */
+  readonly rawListElements?: boolean;
 }
 
 /**
@@ -2720,6 +2730,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   // here before was not a scoping decision, it was wrong against the reference.
   collections: opts.collections ?? new Map(),
   seed: opts.seed ?? null,
+  rawListElements: opts.rawListElements ?? false,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
@@ -2800,7 +2811,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
 const carriesMultiplicity = (chain: Tail): boolean =>
   chain.bulked && chain.rel.channels.some((channel) => channel.role === 'bulk');
 
-const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
+const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElements: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
   // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
   // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
@@ -2828,7 +2839,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, fresh: Mint
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
-    case 'list': return listPayload(chain.rel, framing.of, !!framing.set, source, fresh);
+    case 'list': return listPayload(chain.rel, framing.of, !!framing.set, source, fresh, rawListElements);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.valOf, source, fresh);
     case 'mapEntry': return mapEntryPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
@@ -2924,8 +2935,8 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter): RelLowering | null => {
-  const wire = framed(chain, source, detached, fresh);
+const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter, rawListElements = false): RelLowering | null => {
+  const wire = framed(chain, source, detached, rawListElements, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
@@ -2991,7 +3002,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.rawListElements);
 }
 
 /**
@@ -3453,8 +3464,10 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
  * a NESTED list) must re-frame them by that shape or a following `unfold()` mis-reads them. A nested `list`/
  * `map` member is itself a JSON collection, so a scalar `value` re-inject would frame it as its JSON TEXT
  * (a string on the wire) — hence the shape-carrying twin. `of` is DATA the caller carries from the pre-
- * barrier stream, never re-derived. (The order/dedup barrier declines an element-membered nested list, so
- * `of` here reaches only scalar/list/map members.)
+ * barrier stream, never re-derived. When `of` reaches an ELEMENT member (an `order`/`dedup(Scope.local)`
+ * over an element-membered nested list), each re-injected member is the element's stored ROWID (the head
+ * carried rowids, not framed objects), and the resumed tail re-sources it as an element the ordinary way
+ * (`unfoldList`'s `elem` arm), materializing at the edge — the framing is NOT done here.
  */
 export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
   return valueResume(steps, from, opts, listSeed(of, lists),

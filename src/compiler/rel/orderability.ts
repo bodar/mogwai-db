@@ -10,11 +10,13 @@
 // to reuse; this IS that comparator, checked against the vendored Java it copies.
 //
 // It reads the member encodings the barrier delivers after a `jsonbList` head is `JSON.parse`d
-// (`execute.ts` readSegmentHead): a BARE scalar (`3`, `"marko"` — a fold of untyped members) and a
-// self-describing `{t,v}` NODE (a typed member). The ELEMENT-member case (an expanded vertex object) is
-// handled ONLY at framing depth for completeness — the order/dedup BARRIER declines an element-membered
-// nested list (`order-dedup-local.ts`), because a post-barrier element has lost its rowid and cannot
-// re-enter the graph; so in practice this comparator sees scalars and typed nodes.
+// (`execute.ts` readSegmentHead): a BARE scalar (`3`, `"marko"` — a fold of untyped members), a
+// self-describing `{t,v}` NODE (a typed member), and — for an element-membered nested list — the element's
+// bare ROWID (an integer), because the `order`/`dedup(Scope.local)` barrier carries element members as raw
+// rowids and materializes only at the edge (`order-dedup-local.ts`, `rawListElements`). A rowid compares as
+// a plain number, which IS the flat-case element convention (`Comparator.comparing(Element::id)`, sorting
+// by rowid). The expanded-object case (`{id,label,props}`) can still arrive from an `out().fold()` inside a
+// map VALUE and is handled for completeness.
 
 /** ORDERABILITY's type-priority ladder (`Type` enum order). A cross-type compare is decided by these
  *  alone; same-type falls to the per-type comparator below. */
