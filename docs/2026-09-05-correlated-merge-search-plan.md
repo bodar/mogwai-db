@@ -131,13 +131,19 @@ endpoints):
    list/set RUNTIME arm cardinality (declines). No 0-result guard was needed — a bare `project` always
    emits a map (the whole-map raise is the general-traversal case, increment 4).
 2. **`mergeE` computed values** — the same, over `edgeCriteria`/`pairedWith` (which already correlate).
-   The compounding move is to lift `mergeVComputed`'s carrier + `typedValueEq` join AND
-   `armValueWriteCorrelated` into a shared correlated-search engine both hosts use. `armValueWriteCorrelated`
-   is already the shared per-driver arm-write; the remaining shared skeleton is match → onMatch → unmatched
-   → createFor → union → tail → crossed (currently duplicated in shape between `mergeVComputed` and
-   `elementMergeE`), with the create as a host hook (vertex/position vs edge/value). ⚠️ `elementMergeE`'s
-   edge-create + dual id-collision guards are subtle and corpus-critical — fold it in carefully, one green
-   step, guarded by its tests.
+   ⚠️ **The three-way engine unification was investigated and DECLINED — the REFERENCE is the signal.**
+   TinkerPop's `MergeElementStep` is a shared base, but it shares only the map-resolution (`materializeMap`)
+   + validation + the search→`has`-chain scaffold; the actual search+create is `flatMap`, which is
+   **abstract, per-subclass** — `MergeVertexStep` and `MergeEdgeStep` each implement their own, and
+   `MergeEdgeStep` has its OWN search (`searchEdges`/`resolveVertices`, because endpoints). Our code already
+   mirrors this exactly: `write-args.ts` `mergeMaps` IS the shared base (map parse + validation), and
+   `elementMergeV`/`mergeVComputed`/`elementMergeE` are the per-host `flatMap`s. So forcing the search+create
+   into one engine goes against the reference's grain; the shared substrate it has, we have. What DID land
+   is the honest, reference-aligned dedup: the shared vertex-merge write/emit tail (`applyMergeOnMatch` +
+   `emitMergeVertices`) that `elementMergeV` and `mergeVComputed` had duplicated — so the two vertex paths
+   can no longer drift (the drift that once dropped a `markDirty`). `armValueWriteCorrelated` is already the
+   reusable per-driver arm-write a future `mergeE` computed value would share. `elementMergeE` is left as the
+   reference leaves it: its own `flatMap`.
 3. **Computed KEYS / LABELS** — a correlated `key`/label `Expr`. ⚠️ Increment 1 confirmed this is a REAL
    signature gap: `hasPropertyPredicate`'s `key` is a compile-time `string` (`compilerText`), not an
    `Expr`. Needs a new seam (a correlated key/label into the property/label scan), not a free slot.

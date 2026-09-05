@@ -2234,6 +2234,51 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * — `addV`'s unconditional guard would wrongly raise on a match, because a search-by-id match already
  * owns that id. A non-scalar id (a shape no vertex id can be) declines, as it does on `addV`.
  */
+
+/**
+ * `onMatch` over the MATCHED vertices — the append-only labels first (their own table), then the property
+ * writes. The RUNTIME write is dispatched by the caller, because that is the ONE thing the two vertex-merge
+ * paths do differently: a constant merge's matches are input-independent, so its runtime arm value is one
+ * rooted scalar (`mergeArmValueWrite`); a correlated merge's matches differ per driver, so its value is
+ * per-driver (`armValueWriteCorrelated`). Everything else — the labels, the constant-write dispatch — is
+ * identical, and sharing it is what stops the two paths drifting (that drift once dropped a `markDirty`).
+ * `false` declines.
+ */
+function applyMergeOnMatch(
+  matchedIds: Rel, appended: readonly string[], matchWrites: readonly PropertyWrite[],
+  runtimeWrite: (write: PropertyRuntimeSet) => boolean,
+  bind: Binder, guard: Guarder, fresh: Minter, child: ChildSeam,
+): boolean {
+  if (appended.length) bindLabels(matchedIds, appended, bind, fresh);
+  for (const write of matchWrites) {
+    const ok = write.kind === 'runtime' ? runtimeWrite(write)
+      : propertyStatements('vertex', matchedIds, write, bind, fresh, child, NO_ALIASES, guard);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/**
+ * THE MERGED VERTICES EMITTED — matched ∪ created, the `property()` tail run over the union (matched and
+ * created alike), the matched vertices' rev touched (created are born dirty; an empty matched is a no-op),
+ * and the whole crossed back onto the incoming traversers. SHARED by both vertex-merge paths: the create's
+ * SHAPE (a constant merge's single `LIMIT 1` create vs a correlated merge's create-per-distinct-map) and
+ * the `crossed` CORRELATE flag are the only host differences, and they are the two arguments. `null`
+ * declines. The `markDirty` lands at the END here rather than mid-program — its only reader is the
+ * post-write refresh, which runs once after every statement, so its position among them does not matter.
+ */
+function emitMergeVertices(
+  incoming: Rel, matched: Rel, produced: Rel, matchedIds: Rel, dirtied: boolean,
+  tailWrites: readonly PropertyWrite[], correlate: boolean, ordered: boolean, carriedCh: Channels,
+  bind: Binder, guard: Guarder, fresh: Minter, child: ChildSeam,
+): Rel | null {
+  const merged = make.union({ id: fresh('u'), inputs: [matched, produced], all: true, channels: [], type: matched.type });
+  const emitted = tailWrites.length ? bind(merged, true) : merged;
+  for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  if (dirtied || tailWrites.length) bind(markDirty('vertex', matchedIds, fresh));
+  return crossed(incoming, emitted, carriedCh, ordered, fresh, correlate);
+}
+
 /**
  * `mergeV(__.project('k').by(__.body))` — the CORRELATED merge SEARCH, whose criteria are computed
  * PER DRIVER rather than being compile-time constants.
@@ -2357,17 +2402,11 @@ function mergeVComputed(
     id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
   }), true);
-  // `onMatch` over the MATCHED vertices — the append-only labels first (its table), then the property
-  // writes. Empty on the create path, so it writes nothing there. A RUNTIME value resolves at the DRIVER
-  // and lands per-driver (`armValueWriteCorrelated`, correlated by `ord`); a constant one is the ordinary
-  // element-agnostic write.
-  if (appended.length) bindLabels(idsOf(matched, fresh), appended, bind, fresh);
-  for (const write of matchWrites) {
-    const ok = write.kind === 'runtime'
-      ? armValueWriteCorrelated(matched, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES)
-      : propertyStatements('vertex', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard);
-    if (!ok) return null;
-  }
+  // `onMatch` over the MATCHED vertices — shared with the constant path; the per-driver runtime write
+  // (`armValueWriteCorrelated`, correlated by `ord`) is the one host difference. Empty on the create path.
+  if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites,
+    (write) => armValueWriteCorrelated(matched, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES),
+    bind, guard, fresh, child)) return null;
 
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
   // the carrier when `matched` is empty).
@@ -2438,16 +2477,10 @@ function mergeVComputed(
   // created (`createdFor` carries the `ord` that asked) — the same correlated write `onMatch` uses.
   for (const write of createExtra) if (write.kind === 'runtime' && !armValueWriteCorrelated(createdFor, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES)) return null;
 
-  const merged = make.union({ id: fresh('u'), inputs: [matched, createdFor], all: true, channels: [], type: matched.type });
-  // The tail acts on whatever the merge EMITTED — matched and created alike — so it runs ONCE over the
-  // union, snapshotted where there is a tail (a write needs a stable owner set), like the constant path.
-  const emitted = tailWrites.length ? bind(merged, true) : merged;
-  for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
-  // Touch the rev of the MATCHED (existing) vertices whenever onMatch, its labels or the tail mutated
-  // them (§5·1) — created vertices are born dirty, so only the matched side needs it, and an empty
-  // `matched` is a no-op. Placed after the writes it certifies.
-  if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', idsOf(matched, fresh), fresh));
-  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
+  const result = emitMergeVertices(incoming, matched, createdFor, idsOf(matched, fresh),
+    appended.length > 0 || matchWrites.length > 0, tailWrites, true, ordered, carriedCh, bind, guard, fresh, child);
+  if (!result) return null;
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
 export function elementMergeV(
@@ -2541,21 +2574,13 @@ export function elementMergeV(
       pred: { kind: 'exists', plan: matched, negated: true },
     }), idTaken.guard);
   }
-  // The reference applies the labels before the property entries and so does this; they are different
-  // tables, so the order is the reference's rather than a constraint.
-  if (appended.length) bindLabels(matched, appended, bind, fresh);
-  // An `onMatch` RUNTIME value resolves at the DRIVER (`materializeMap(traverser)`,
-  // `MergeVertexStep.java:103`) and is written onto the matched element — `mergeArmValueWrite`. A
-  // constant onMatch value has no root and takes the ordinary element-agnostic write.
-  for (const write of matchWrites) {
-    const ok = write.kind === 'runtime'
-      ? mergeArmValueWrite(matched, incoming, write, bind, fresh, child, NO_ALIASES)
-      : propertyStatements('vertex', matched, write, bind, fresh, child, NO_ALIASES, guard);
-    if (!ok) return null;
-  }
-  // Touch the rev of the MATCHED (existing) vertices whenever onMatch or the tail `property()` run
-  // mutated them (§5·1); created vertices are already born dirty, and an empty `matched` is a no-op.
-  if (appended.length || matchWrites.length || tailWrites.length) bind(markDirty('vertex', matched, fresh));
+  // `onMatch` over the MATCHED vertices — shared with the computed path (`applyMergeOnMatch`). An
+  // `onMatch` RUNTIME value resolves at the DRIVER (`materializeMap(traverser)`, `MergeVertexStep.java:103`);
+  // a constant search's matches are input-independent, so its runtime value is one rooted scalar
+  // (`mergeArmValueWrite`) — the one host difference. (The rev touch moves to `emitMergeVertices` below.)
+  if (!applyMergeOnMatch(matched, appended, matchWrites,
+    (write) => mergeArmValueWrite(matched, incoming, write, bind, fresh, child, NO_ALIASES),
+    bind, guard, fresh, child)) return null;
 
   // ONE row off the input, because a create happens once however many traversers asked for it. The
   // incoming columns are dropped first: what the creation needs from it is its ROW COUNT, and
@@ -2591,19 +2616,14 @@ export function elementMergeV(
   if (!created) return null;
   for (const write of createRuntime) if (!mergeArmValueWrite(created, incoming, write, bind, fresh, child, NO_ALIASES)) return null;
 
-  // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
-  // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the
-  // other.
-  const merged = make.union({
-    id: fresh('u'), inputs: [matched, idsOf(created, fresh)], all: true, channels: [], type: ID_TYPE,
-  });
-  // The tail `property()` run acts on whatever the merge EMITTED — matched and created alike, which is
-  // upstream's own reading of it (an ordinary AddPropertyStep over the merge's output). One statement
-  // set over the union, rather than one per branch.
-  const emitted = tailWrites.length ? bind(merged, true) : merged;
-  for (const write of tailWrites) if (!propertyStatements('vertex', emitted, write, bind, fresh, child, NO_ALIASES, guard)) return null;
-
-  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carried, ordered, fresh) };
+  // THE MERGED ELEMENT(S) — the pre-write matches (`matched`) UNION the one creation, the tail run over
+  // the union, the matched rev touched, and the whole crossed back onto the input. Shared with the
+  // computed path (`emitMergeVertices`); the input-independent CROSS join (`correlate` false) is this
+  // host's difference — every match pairs with every driver, upstream's per-traverser loop stated once.
+  const result = emitMergeVertices(incoming, matched, idsOf(created, fresh), matched,
+    appended.length > 0 || matchWrites.length > 0, tailWrites, false, ordered, carried, bind, guard, fresh, child);
+  if (!result) return null;
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
 // ---------- mergeE() ----------
