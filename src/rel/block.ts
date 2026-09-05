@@ -45,6 +45,28 @@ export const grouped = (b: Slots): boolean => b.groupBy !== undefined;
 /** A side of a join may be spliced into the join's own FROM only when it fills nothing else. */
 export const spliceable = (b: Slots): boolean => !grouped(b) && b.having === undefined && !tailUsed(b) && !b.windowed;
 
+/**
+ * No alias this side would lift collides with one the other side already took. Splicing lifts a
+ * side's own FROM items into the join's own FROM, so two sides reading the SAME shared relation lift
+ * the same alias twice — measured: `FROM r0 x INNER JOIN r0 x` → `ambiguous column name`. A collision
+ * is not an error (the sides are genuinely different relations); it just means the side keeps its own
+ * SELECT, where its aliases are private again.
+ */
+export const free = (aliases: readonly string[], taken: ReadonlySet<string>): boolean =>
+  !aliases.some((alias) => taken.has(alias));
+
+/**
+ * THE JOIN-SPLICE DECISION, stated once for both readers (§5).
+ *
+ * The emitter holds a rendered `Block` (itself a `Slots`) and this analysis a `BlockShape`; both ask
+ * the identical question of a join side — may it fuse into the join's own FROM? — so it lives here
+ * rather than inlined in each. A side splices only when the join permits it (`mayFuse`: not a LEFT
+ * join's right side), it fills nothing but FROM/WHERE (`spliceable`), and its aliases are `free` of
+ * the other side's. A copy that drifts is the P1 hazard `check` guards against — see the header.
+ */
+export const maySplice = (mayFuse: boolean, slots: Slots, aliases: readonly string[], taken: ReadonlySet<string>): boolean =>
+  mayFuse && spliceable(slots) && free(aliases, taken);
+
 /** A kind that fuses no input of its own: the leaves, and the two whose children are not blocks it
  *  fills (a `Join` asks `spliceable` of each side, a `Recursive` renders its own statement). */
 const fusesNothing = (): boolean => false;
@@ -103,10 +125,24 @@ export interface BlockShape {
 export type Shape = BlockShape | 'closed';
 
 const EMPTY: Slots = { distinct: false, windowed: false };
+
+/**
+ * WHICH RELATION KINDS STAND IN A `FROM` WITHOUT A WRAPPING SELECT — the classification the emitter's
+ * `directSource` CONSTRUCTS and this analysis PREDICTS, single-sourced so the two cannot drift over
+ * which kinds are table sources. TOTAL over `RelKind` (like `NEEDS_SUBQUERY`), so a new kind must
+ * declare whether it is one rather than silently inheriting `false` here and a missing switch arm
+ * there — the divergence that makes `check` admit a P1 plan the emitter then wraps.
+ */
+export const DIRECT_SOURCE: { readonly [K in RelKind]: boolean } = {
+  scan: true, values: true, 'self-ref': true, ref: true,
+  join: false, recursive: false, project: false, filter: false,
+  aggregate: false, sort: false, limit: false, distinct: false,
+  window: false, explode: false, materialize: false, union: false,
+};
 /** A relation that can stand in a FROM clause without a wrapping SELECT. */
-const direct = (r: Rel): boolean => r.kind === 'scan' || r.kind === 'values' || r.kind === 'self-ref' || r.kind === 'ref';
+export const isDirectSource = (r: Rel): boolean => DIRECT_SOURCE[r.kind];
 /** How the emitter aliases a FROM item: a `Scan` carries its own, everything else uses its `RelId`. */
-const aliasOf = (r: Rel): string => (r.kind === 'scan' ? r.alias : r.id);
+export const aliasOf = (r: Rel): string => (r.kind === 'scan' ? r.alias : r.id);
 /** A relation the block reaches only through a derived table: a fresh SELECT, one alias, no sources
  *  — and nothing of what is inside it belongs to this SELECT. */
 const derived = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [r.id], sources: [], fused: [] });
@@ -142,10 +178,9 @@ const inputShape = (input: Rel, kind: RelKind): BlockShape => {
  * nothing else and its aliases do not collide with what the other side already took.
  */
 const sideShape = (r: Rel, mayFuse: boolean, taken: ReadonlySet<string>): BlockShape => {
-  const free = (aliases: readonly string[]): boolean => !aliases.some((alias) => taken.has(alias));
   const shape = shapeOf(r);
-  if (shape !== 'closed' && mayFuse && spliceable(shape.slots) && free(shape.aliases)) return shape;
-  return direct(r) && free([aliasOf(r)]) ? leaf(r) : derived(r);
+  if (shape !== 'closed' && maySplice(mayFuse, shape.slots, shape.aliases, taken)) return shape;
+  return isDirectSource(r) && free([aliasOf(r)], taken) ? leaf(r) : derived(r);
 };
 
 function compute(r: Rel): Shape {

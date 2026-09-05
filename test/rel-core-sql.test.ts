@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
-import { fromTree } from '../src/rel/block.ts';
+import { aliasOf, fromTree, shapeOf } from '../src/rel/block.ts';
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { col, compilerInt, compilerNull, compilerText, lit } from '../src/rel/expr.ts';
@@ -138,6 +138,35 @@ describe('RelIR relational-core SQL', () => {
       return out;
     };
 
+    /** EVERY FROM-item alias standing at the TOP LEVEL of this statement — a table source, a
+     *  `(VALUES …)`, a `json_each(…)` and a derived `(SELECT …)` alike each contribute their own
+     *  alias (a source inside a derived table is a different SELECT and contributes none). This is
+     *  the set `free`/`maySplice` test a splice against, so pinning it is what keeps `aliasOf` and the
+     *  alias bookkeeping honest across the two modules. */
+    const emittedAliases = (sql: string): readonly string[] => {
+      const tokens = sql.match(/\(|\)|[A-Za-z_][A-Za-z0-9_]*|\S/g) ?? [];
+      const closes = (from: number): number => {
+        let depth = 0;
+        for (let j = from; j < tokens.length; j++) {
+          if (tokens[j] === '(') depth++;
+          else if (tokens[j] === ')' && --depth === 0) return j;
+        }
+        throw new Error(`unbalanced parentheses in ${sql}`);
+      };
+      const out: string[] = [];
+      let depth = 0;
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i]!;
+        if (token === '(') { depth++; continue; }
+        if (token === ')') { depth--; continue; }
+        if (depth !== 0 || !/^(FROM|JOIN)$/i.test(token)) continue;
+        if (tokens[i + 1] === '(') { const end = closes(i + 1); out.push(tokens[end + 1]!); i = end + 1; }        // (SELECT…)/(VALUES…) alias
+        else if (tokens[i + 2] === '(') { const end = closes(i + 2); out.push(tokens[end + 1]!); i = end + 1; }   // json_each(…) alias
+        else { out.push(tokens[i + 2]!); i += 2; }                                                                // <table> alias
+      }
+      return out;
+    };
+
     const n = scan('n');
     const m = scan('m');
     const shadow = scanRel({ id: relId('shadow'), table: 'nodes', alias: 'n', channels, type: { cols } });
@@ -183,9 +212,15 @@ describe('RelIR relational-core SQL', () => {
     ];
 
     for (const shape of shapes) {
-      const predicted = fromTree(shape).map((source) => (source.kind === 'scan' ? source.alias : source.id));
+      const predicted = fromTree(shape).map((source) => aliasOf(source));
       const sql = emitQuery(planOf(shape)).sql;
       expect({ shape: shape.id, sources: predicted }).toEqual({ shape: shape.id, sources: [...emittedSources(sql)] });
+      // …and the FULL alias set the analysis says this block occupies — not only the unwrapped
+      // sources, but the derived tables and `json_each` items too — is exactly what the SQL puts in
+      // FROM. This is the set the splice/`free` collision test reads, so it must agree byte-for-byte.
+      const analysed = shapeOf(shape);
+      const predictedAliases = analysed === 'closed' ? [] : analysed.aliases;
+      expect({ shape: shape.id, aliases: predictedAliases }).toEqual({ shape: shape.id, aliases: [...emittedAliases(sql)] });
     }
   });
 

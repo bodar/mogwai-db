@@ -1,5 +1,5 @@
 import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
-import { NEEDS_SUBQUERY, grouped, spliceable, type Slots } from './block.ts';
+import { NEEDS_SUBQUERY, aliasOf, free, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
@@ -216,20 +216,26 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   /** A relation that can stand in a FROM clause without a wrapping SELECT. A named CTE reference is
    * one of these, which is what makes `... FROM edges e INNER JOIN c2 p ON …` reachable at all. */
   const directSource = (r: Rel, outer: Scope): { item: FromItem; cols: Cols } | undefined => {
-    if (r.kind === 'ref') return refSource(r);
-    if (r.kind === 'scan') return { item: { text: ident(r.table), alias: r.alias }, cols: colsOf(r.alias, r) };
-    // A recursive reference is a table source, never a derived relation: SQLite requires it exactly
-    // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
-    if (r.kind === 'self-ref') return { item: { text: ident(r.name), alias: r.id }, cols: colsOf(r.id, r) };
-    if (r.kind === 'values') {
-      const rows = list(r.rows.map((row) => q`(${list(row.map((e) => expr(e, outer)))})`));
-      // SQLite names anonymous VALUES columns column1, column2, … . Bind the declared names to those
-      // positions here rather than re-projecting, so the row source stays one FROM item.
-      return {
-        item: { text: q`(VALUES ${rows})`, alias: r.id },
-        cols: new Map(r.type.cols.map((column, i) => [column.name, qualified(r.id, `column${i + 1}`)])),
-      };
+    switch (r.kind) {
+      case 'ref': return refSource(r);
+      case 'scan': return { item: { text: ident(r.table), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
+      // A recursive reference is a table source, never a derived relation: SQLite requires it exactly
+      // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
+      case 'self-ref': return { item: { text: ident(r.name), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
+      case 'values': {
+        const rows = list(r.rows.map((row) => q`(${list(row.map((e) => expr(e, outer)))})`));
+        // SQLite names anonymous VALUES columns column1, column2, … . Bind the declared names to those
+        // positions here rather than re-projecting, so the row source stays one FROM item.
+        return {
+          item: { text: q`(VALUES ${rows})`, alias: aliasOf(r) },
+          cols: new Map(r.type.cols.map((column, i) => [column.name, qualified(aliasOf(r), `column${i + 1}`)])),
+        };
+      }
     }
+    // `isDirectSource` is the shared classification (`block.ts`); every kind it marks a table source
+    // has an arm above, so this fires only if the two ever fall out of step — the P1 drift, made a
+    // loud construction error here rather than a `circular reference` from SQLite downstream.
+    if (isDirectSource(r)) throw new Error(`RelIR emitter: '${r.kind}' is a direct source with no FROM construction`);
     return undefined;
   };
 
@@ -273,11 +279,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    */
   const side = (r: Rel, outer: Scope, mayFuse: boolean, taken: ReadonlySet<string>): Side => {
     const built = build(r, outer);
-    const free = (aliases: readonly string[]): boolean => !aliases.some((alias) => taken.has(alias));
-    if (built.kind === 'block' && mayFuse && spliceable(built) && free([built.from.alias, ...built.joins.map((join) => join.item.alias)]))
+    if (built.kind === 'block' && maySplice(mayFuse, built, [built.from.alias, ...built.joins.map((join) => join.item.alias)], taken))
       return { from: built.from, joins: built.joins, where: built.where, cols: built.select.map(([, e]) => e), scope: built.scope };
     const direct = directSource(r, outer);
-    const { item, cols } = direct && free([direct.item.alias])
+    const { item, cols } = direct && free([direct.item.alias], taken)
       ? direct
       : { item: { text: q`(${renderBuilt(built)})`, alias: r.id }, cols: colsOf(r.id, r) };
     return { from: item, joins: [], cols: r.type.cols.map((column) => cols.get(column.name)!), scope: withRel(outer, r.id, cols) };
@@ -296,11 +301,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const refSource = (r: Extract<Rel, { readonly kind: 'ref' }>): { item: FromItem; cols: Cols } => {
     const bound = bindings.get(r.name);
     if (!bound) throw new Error(`RelIR emitter: Ref '${r.name}' has no Plan binding`);
-    if (!retained(bound)) return { item: { text: ident(r.name), alias: r.id }, cols: colsOf(r.id, r) };
+    const alias = aliasOf(r);
+    if (!retained(bound)) return { item: { text: ident(r.name), alias }, cols: colsOf(alias, r) };
     const rows: RowsBind = { rowsOf: r.name };
     return {
-      item: { text: q`json_each(${value(rows)})`, alias: r.id },
-      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(r.id, 'value')}, ${value(`$[${i}]`)})`])),
+      item: { text: q`json_each(${value(rows)})`, alias },
+      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${value(`$[${i}]`)})`])),
     };
   };
 
