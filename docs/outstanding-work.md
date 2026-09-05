@@ -44,6 +44,7 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
   barrier-resume transplant in `segment.ts`) and at new-position consumers (`otherV()` outside a
   retained `fromV`, `where('a',eq('b')).by('key')`, list-valued alias dedup key). One substrate clears
   a large read-side family; the barrier-in-body slice 2 and per-origin-in-arm items are its consumers.
+  Plan + reference-grounded increment ladder: [fan-out rejoin authority](./2026-09-05-fan-out-rejoin-authority-plan.md).
 - **Correlated per-incoming-row write-argument resolver.** A write arg that is a nested traversal not
   foldable to a constant declines (`src/compiler/rel/write.ts`: property value/key, merge
   match/onCreate/onMatch entries, whole-arg / no-arg merge). The write lowering has a per-*graph* rooted
