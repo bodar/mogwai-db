@@ -172,6 +172,21 @@ const ordered = (
   // TEXT. A plain number needs no cast (it already binds/inlines numeric).
   const tailCast = exactTailCast(value);
   const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
+  // BOOLEAN bucket (`GremlinValueComparator.Type.Boolean`): false < true via natural order, and a stored
+  // boolean rides as 0/1 so SQLite's own compare IS that order. COMPARABILITY compares ONLY a
+  // boolean-bucket subject, else the ordering op is false (`Compare.java:63-116`). The 2-way
+  // numeric/string split below has NO boolean arm, so `is(P.gt(false))` over a boolean wrongly folded to
+  // false — a silent wrong answer. `eq`/`neq` are value equality and never reach `ordered()`.
+  if (typeof value === 'boolean') {
+    if (type.kind === 'static')
+      return normalizeTypeName(type.type) === 'boolean' ? binary(op, subject, bound) : CONSTANT.false;
+    if (type.kind === 'perRow')
+      return { kind: 'case', whens: [[binary('=', type.vtype, compilerText('boolean')), binary(op, subject, bound)]], else: compilerFalse };
+    // A stored boolean is 0/1 (INTEGER storage), indistinguishable from an int subject without a type tag,
+    // so an untyped subject cannot be placed in the boolean bucket — decline to false rather than admit an
+    // int as if it were comparable.
+    return compilerFalse;
+  }
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
     // A TEXT-stored exact-tail subject (`inject(9.99m)`, a bound big long/Duration — `type.text`) rides as
