@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, EDGE_MOVES, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -4938,8 +4938,13 @@ function mergedElements(
   const arms = steps.slice(at + 1, options);
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
+  // The INCOMING stream's element kind, for a computed criterion / runtime arm body rooted at the
+  // driver (`materializeMap(traverser)`): `by('key')`/`by(__.values(k))` read the driver's OWN
+  // property, which is `vertex_properties` or `edge_properties` per this. `undefined` = cannot say
+  // (after a branch/select), which a driver-rooted body declines rather than guessing (fail closed).
+  const driverElem = elementKindAt(steps, at);
   const effects = steps[at]!.name === 'mergeE'
-    ? elementMergeE(input, steps[at]!, arms, tail, aliases, ctx.ordered, child, fresh)
-    : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, child, fresh);
+    ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh)
+    : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
 }

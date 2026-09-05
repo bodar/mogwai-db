@@ -823,12 +823,14 @@ function runtimePropertyStatements(
  * post-write refresh like every runtime value.
  */
 function mergeArmValueWrite(
-  target: Rel, driver: Rel, write: PropertyRuntimeSet, bind: Binder, fresh: Minter,
+  target: Rel, driver: Rel, write: PropertyRuntimeSet, driverElem: Elem | undefined, bind: Binder, fresh: Minter,
   child: ChildSeam, aliases: AliasMap,
 ): boolean {
   const spec = PROPERTY_TABLE.vertex;
   const key = propertyKeyExpr(write.key, write.keyName);
-  const resolved = resolveRuntimeValue(write.body, driver, 'vertex', child, aliases, fresh);
+  // The value body is rooted at the DRIVER, so it reads the driver's element kind; `?? 'vertex'`
+  // preserves the prior hardcode for a cannot-say driver. The WRITE target is `vertex` (mergeV only).
+  const resolved = resolveRuntimeValue(write.body, driver, driverElem ?? 'vertex', child, aliases, fresh);
   if (!resolved) return false;
   const valueRel = resolved.rel;
   const hasVtype = valueRel.type.cols.some((column) => column.name === 'vtype');
@@ -887,13 +889,17 @@ function mergeArmValueWrite(
  * the per-owner form `runtimePropertyStatements` builds).
  */
 function armValueWriteCorrelated(
-  target: Rel, incoming: Rel, hasOrd: boolean, write: PropertyRuntimeSet,
+  target: Rel, incoming: Rel, hasOrd: boolean, write: PropertyRuntimeSet, driverElem: Elem | undefined,
   bind: Binder, fresh: Minter, child: ChildSeam, aliases: AliasMap,
 ): boolean {
   if (write.cardinality === 'list' || write.cardinality === 'set') return false;
+  // The WRITE lands on the merged VERTEX (a runtime EDGE property value is declined upstream in
+  // `writeOf`, so this is only ever reached for a vertex merge). The VALUE body is rooted at the DRIVER
+  // (`driverElem` — the incoming stream's kind), `?? 'vertex'` preserving the prior hardcode for a
+  // cannot-say driver.
   const spec = PROPERTY_TABLE.vertex;
   const key = propertyKeyExpr(write.key, write.keyName);
-  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: 'vertex', row: { rel: incoming, aliases } };
+  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
   const produced = child.scalar(write.body, host);
   if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return false;
   // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
@@ -914,7 +920,7 @@ function armValueWriteCorrelated(
     exprs: [['id', col(joined.id, 'id')], ['v', col(joined.id, 'v')], ['vtype', col(joined.id, 'vtype')]],
   }), true);
   const ids = idsOf(paired, fresh);
-  // REPLACE the key on the merged elements (single, declared or the element default) before the insert.
+  // REPLACE the key on the merged vertices (single, declared or the element default) before the insert.
   const g = write.cardinality === 'single' ? undefined : (owner: Expr): Expr => eq(cardinalityOf(owner, key, null, fresh), text('single'));
   const stale = existingRows('vertex', ids, key, g, fresh);
   bind(dropStaleIndex('vertex', stale.ids, fresh));
@@ -2304,7 +2310,7 @@ function emitMergeVertices(
  */
 function mergeVComputed(
   input: Rel, match: MergeSpec, onCreate: MergeSpec | null, onMatch: MergeSpec | null,
-  propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter,
+  propertySteps: readonly IRStep[], driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   const cKeys = Object.keys(match.computed);
   const searchId = idOrNull(match.id);
@@ -2336,7 +2342,10 @@ function mergeVComputed(
   // THE CARRIER — one `(present, value, vtype)` triple per computed key, resolved at the DRIVER. A body
   // that does not lower to a scalar, or cannot state its productivity (`present` ABSENT ≠ "always
   // productive", `child.ts`), declines the whole search rather than mis-executing.
-  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: 'vertex', row: { rel: incoming, aliases: NO_ALIASES } };
+  // The driver-rooted body reads the DRIVER's own property (`by('key')`/`by(__.values(k))`), so the
+  // host is the driver's element kind. `?? 'vertex'` preserves the prior hardcode for a cannot-say
+  // driver (after a branch/select) — a simplification the map-valued-driver substrate revisits.
+  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases: NO_ALIASES } };
   // The value's Gremlin TYPE at the driver — a `has(k, concreteValue)` compare needs it, and it comes
   // from one of three places: a per-row read carries it as a `vtype` column (`__.values(k)`); a static
   // scalar states it in its framing (`count()`→`long`); a bare literal states it in its storage class
@@ -2405,7 +2414,7 @@ function mergeVComputed(
   // `onMatch` over the MATCHED vertices — shared with the constant path; the per-driver runtime write
   // (`armValueWriteCorrelated`, correlated by `ord`) is the one host difference. Empty on the create path.
   if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites,
-    (write) => armValueWriteCorrelated(matched, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES),
+    (write) => armValueWriteCorrelated(matched, incoming, hasOrd, write, driverElem, bind, fresh, child, NO_ALIASES),
     bind, guard, fresh, child)) return null;
 
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
@@ -2475,7 +2484,7 @@ function mergeVComputed(
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
   // A RUNTIME `onCreate` value resolves at the DRIVER and lands per-driver on the vertex that driver
   // created (`createdFor` carries the `ord` that asked) — the same correlated write `onMatch` uses.
-  for (const write of createExtra) if (write.kind === 'runtime' && !armValueWriteCorrelated(createdFor, incoming, hasOrd, write, bind, fresh, child, NO_ALIASES)) return null;
+  for (const write of createExtra) if (write.kind === 'runtime' && !armValueWriteCorrelated(createdFor, incoming, hasOrd, write, driverElem, bind, fresh, child, NO_ALIASES)) return null;
 
   const result = emitMergeVertices(incoming, matched, createdFor, idsOf(matched, fresh),
     appended.length > 0 || matchWrites.length > 0, tailWrites, true, ordered, carriedCh, bind, guard, fresh, child);
@@ -2485,7 +2494,7 @@ function mergeVComputed(
 
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  ordered: boolean, child: ChildSeam, fresh: Minter,
+  driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -2510,7 +2519,7 @@ export function elementMergeV(
   // arm value resolves at the DRIVER and lands per-driver on the vertex that driver matched/created
   // (`armValueWriteCorrelated`, correlated by `ord`). An explicit list/set arm cardinality on a runtime
   // value declines inside (fail closed).
-  if (Object.keys(match.computed).length) return mergeVComputed(input, match, onCreate, onMatch, propertySteps, ordered, child, fresh);
+  if (Object.keys(match.computed).length) return mergeVComputed(input, match, onCreate, onMatch, propertySteps, driverElem, ordered, child, fresh);
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's
   // (`onCreateMap` is their union) — and `validateNoOverrides` has already proved the two agree. A
@@ -2579,7 +2588,7 @@ export function elementMergeV(
   // a constant search's matches are input-independent, so its runtime value is one rooted scalar
   // (`mergeArmValueWrite`) — the one host difference. (The rev touch moves to `emitMergeVertices` below.)
   if (!applyMergeOnMatch(matched, appended, matchWrites,
-    (write) => mergeArmValueWrite(matched, incoming, write, bind, fresh, child, NO_ALIASES),
+    (write) => mergeArmValueWrite(matched, incoming, write, driverElem, bind, fresh, child, NO_ALIASES),
     bind, guard, fresh, child)) return null;
 
   // ONE row off the input, because a create happens once however many traversers asked for it. The
@@ -2614,7 +2623,7 @@ export function elementMergeV(
   const createRuntime = createWrites.filter((write): write is PropertyRuntimeSet => write.kind === 'runtime');
   const created = addVertex(creating, createLabels.names, createId, createConst, false, bind, fresh, child, NO_ALIASES, guard);
   if (!created) return null;
-  for (const write of createRuntime) if (!mergeArmValueWrite(created, incoming, write, bind, fresh, child, NO_ALIASES)) return null;
+  for (const write of createRuntime) if (!mergeArmValueWrite(created, incoming, write, driverElem, bind, fresh, child, NO_ALIASES)) return null;
 
   // THE MERGED ELEMENT(S) — the pre-write matches (`matched`) UNION the one creation, the tail run over
   // the union, the matched rev touched, and the whole crossed back onto the input. Shared with the
@@ -2627,6 +2636,259 @@ export function elementMergeV(
 }
 
 // ---------- mergeE() ----------
+
+/**
+ * `mergeE(__.project('k').by(__.body))` — the CORRELATED edge merge SEARCH, criteria computed PER
+ * DRIVER. `mergeVComputed`'s shape on the edge host: `MergeElementStep.materializeMap` runs the whole
+ * map-producing traversal at the driver (`TraversalUtil.apply`,
+ * `vendor/tinkerpop/gremlin-core/.../util/TraversalUtil.java:41-53`), so the search values are CONCRETE
+ * per driver and the search is a literal `has(k, concreteValue)` chain over edges
+ * (`.../step/map/MergeEdgeStep.java:218`). A per-driver CARRIER, a decorrelated equi-join (Calcite's
+ * `RelDecorrelator` form — a projected column joined, never a LATERAL), one create per DISTINCT
+ * `(endpoints, computed map)` that found nothing, and `crossed(…, correlate=true)`.
+ *
+ * **A `project` search map admits only STRING property keys** — no `Direction`/`T.label` token key — so
+ * a computed edge search narrows by properties alone (every edge, then the computed criterion), never by
+ * endpoints or label; those come from `option(onCreate, …)` for the CREATE, exactly where `elementMergeE`
+ * reads them. A computed TOKEN key (endpoints/label per driver) is the general map-producing-traversal
+ * case, deferred. An unproductive by-body OMITS its key for that driver (`ProjectStep.ifProductive`),
+ * read as "does not narrow" — a bare `project` always emits a map, so there is no 0-result raise here.
+ */
+function mergeEComputed(
+  input: Rel, maps: MergeMaps, match: MergeSpec, onCreate: MergeSpec | null, onMatch: MergeSpec | null,
+  propertySteps: readonly IRStep[], aliases: AliasMap, driverElem: Elem | undefined,
+  ordered: boolean, child: ChildSeam, fresh: Minter,
+): Effects | null {
+  const cKeys = Object.keys(match.computed);
+  // An edge carries exactly ONE immutable label, so a label on `onMatch` is refused (as the constant
+  // path refuses it) rather than a mutation this route may make.
+  if (onMatch?.label) return null;
+  // The search map is a `project`, so it names no `T.id`/`Direction`/`T.label`; the CREATE takes its id,
+  // endpoints and label from `onCreate` — the same resolution `elementMergeE` does (with `match.*` here
+  // always absent). A non-scalar id declines.
+  const createId = idOrNull(onCreate?.id ?? match.id);
+  if (createId === false) return null;
+  const createOut = endpointSlot(onCreate?.outV, maps.outV, child, fresh);
+  const createIn = endpointSlot(onCreate?.inV, maps.inV, child, fresh);
+  if (createOut === null || createIn === null) return null;
+  const creating = createOut !== undefined && createIn !== undefined;
+  const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
+  if (creating && labels.length !== 1) return null;
+
+  // Edge properties are single-valued (no cardinality, no meta), which `mergeWrites`/`propertyWrites`
+  // over `'edge'` already enforce.
+  const matchWrites = mergeWrites(onMatch, 'edge', child);
+  const createExtra = onCreate ? mergeWrites(onCreate, 'edge', child) : [];
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
+  if (!matchWrites || !createExtra || !tailWrites) return null;
+
+  const carriedCh = writeInputChannels(input);
+  if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
+  const incoming = seeded ? bind(seeded.result, true, carriedCh) : input;
+  const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
+
+  // THE CREATE ENDPOINTS, resolved per driver over `incoming` (endpoints first, so a missing vertex
+  // refuses before anything is written) — `elementMergeE`'s `Endpoint` vocabulary verbatim.
+  const src = createOut === undefined ? undefined : endpointExpr(createOut, incoming, aliases, fresh, guard);
+  const tgt = createIn === undefined ? undefined : endpointExpr(createIn, incoming, aliases, fresh, guard);
+  if ((createOut !== undefined && !src) || (createIn !== undefined && !tgt)) return null;
+
+  // THE CARRIER — `mergeVComputed`'s per-key `(present, value, vtype)` triples PLUS this driver's create
+  // endpoints, so one relation carries both the search criterion and what a miss would create. The value
+  // body is rooted at the DRIVER (`driverElem`); a body that cannot state its productivity declines.
+  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
+  const litVtype = (e: Expr): string | null =>
+    e.kind === 'lit' ? (e.type === 'text' ? 'string' : e.type === 'int' ? 'int' : e.type === 'real' ? 'double' : null) : null;
+  const values: ChildValue[] = [];
+  const pts: Expr[] = [];
+  for (const key of cKeys) {
+    const produced = child.scalar(match.computed[key]!, host);
+    if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return null;
+    const pt = produced.vtype
+      ?? (produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static' ? compilerText(String(produced.framing.type.type)) : null)
+      ?? (litVtype(produced.expr) ? compilerText(litVtype(produced.expr)!) : null);
+    if (!pt) return null;
+    values.push(produced);
+    pts.push(pt);
+  }
+  const ppCol = (i: number) => `pp${i}`, cvCol = (i: number) => `cv${i}`, ptCol = (i: number) => `pt${i}`;
+  const gate = (present: Expr, e: Expr): Expr => ({ kind: 'case', whens: [[present, e]], else: compilerNull('text') });
+  const tupleCols = cKeys.flatMap((_, i) => [meta(ppCol(i), 'int'), meta(cvCol(i), 'any', true), meta(ptCol(i), 'text', true)]);
+  const endpointCols: readonly ColMeta[] = [...(src ? [meta('src', 'int')] : []), ...(tgt ? [meta('tgt', 'int')] : [])];
+  const carrier = bind(make.project({
+    id: fresh('cc'), input: incoming, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), ...endpointCols, ...tupleCols),
+    exprs: [
+      ...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []),
+      ...(src ? [['src', src] as const] : []),
+      ...(tgt ? [['tgt', tgt] as const] : []),
+      ...cKeys.flatMap((_, i) => [
+        [ppCol(i), { kind: 'case', whens: [[values[i]!.present!, compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(values[i]!.present!, values[i]!.expr)] as const,
+        [ptCol(i), gate(values[i]!.present!, pts[i]!)] as const,
+      ]),
+    ],
+  }), true);
+  // A per-driver identity over the computed MAP — two drivers create ONE edge iff their endpoints AND
+  // maps are equal (the endpoints join the tuple key below).
+  const tupleKey = (rel: RelId): Expr => ({ kind: 'call', fn: 'json_array', args: cKeys.flatMap((_, i) => [col(rel, ppCol(i)), col(rel, ptCol(i)), col(rel, cvCol(i))]) });
+
+  // THE MATCH — every edge (the search map has no constant id/label/props), narrowed by every computed
+  // criterion as a correlated EXISTS over the candidate edge's stored property, vtype-aware
+  // (`typedValueEq` = `Compare.eq`). Endpoints do NOT narrow the search (`MergeEdgeStep` searches by the
+  // MATCH map alone; `onCreate`'s endpoints are for the create). An unproductive key does not narrow.
+  const candidates = edgeCriteria(null, null, [], child, fresh);
+  if (!candidates) return null;
+  const criterion = (candId: Expr, i: number): Expr => {
+    const spec = PROPERTY_TABLE.edge;
+    const scan = make.scan({ id: fresh('ep'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const matchedRows = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(and(eq(col(scan.id, spec.owner), candId), eq(col(scan.id, 'key'), compilerText(cKeys[i]!))),
+        typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(carrier.id, cvCol(i)), col(carrier.id, ptCol(i)))),
+    });
+    const probe = make.project({ id: fresh('p'), input: matchedRows, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return or(eq(col(carrier.id, ppCol(i)), compilerInt(0)), { kind: 'exists', plan: probe, negated: false });
+  };
+  const conj = cKeys.map((_, i) => criterion(col(candidates.id, 'id'), i)).reduce((a, b) => and(a, b));
+  const joined = make.join({
+    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: conj, channels: [],
+    type: typeOf(...carrier.type.cols, meta('id', 'int')),
+  });
+  const matched = bind(make.project({
+    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
+  }), true);
+  // `onMatch` over the MATCHED edges. A runtime EDGE arm value is declined upstream (`writeOf`, the
+  // take-first edge path), so `matchWrites` is constant-only here — a computed mergeE whose onMatch holds
+  // a `__.trav` value declines the whole merge (fail closed), the same deferral the inline edge path has.
+  // Empty on the create path.
+  for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
+  // Touch the rev of the matched edges whenever onMatch or the tail mutated them (created edges are born
+  // dirty); an empty matched is a no-op. Before the create branch, so it covers the tail over `matched`.
+  if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));
+
+  // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or the single-row carrier when
+  // `matched` is empty).
+  const trueLit = eq(compilerInt(1), compilerInt(1));
+  const unmatched = make.filter({
+    id: fresh('f'), input: carrier, channels: [], type: carrier.type,
+    pred: { kind: 'exists', negated: true, plan: make.filter({
+      id: fresh('f'), input: matched, channels: [], type: matched.type,
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+  });
+
+  // A SEARCH THAT MISSED WITH NO ENDPOINTS TO CREATE IS A RAISE, not a decline (`MergeEdgeStep` reaches
+  // its endpoint check only after an empty search) — `raiseWhen: 'rows'` fires precisely on the rows that
+  // found nothing, the reference's per-traverser sentence.
+  if (!creating) {
+    guard(make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]] }),
+    }), {
+      message: `${createOut === undefined ? 'Out' : 'In'} Vertex not specified in onCreate - edge cannot be created`,
+      raiseWhen: 'rows',
+    });
+    const found = tailWrites.length ? bind(matched, true) : matched;
+    for (const write of tailWrites) if (!propertyStatements('edge', idsOf(found, fresh), write, bind, fresh, child, aliases, guard)) return null;
+    return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, found, carriedCh, ordered, fresh, true) };
+  }
+
+  // ONE EDGE PER DISTINCT `(src, tgt, computed map)` THAT FOUND NOTHING. Two drivers naming the same
+  // endpoints AND the same map create one edge; a different map (or different endpoints) is a different
+  // edge. `Distinct`'s NULL columns compare EQUAL, which the JSON key below handles for the equi-join.
+  const wantedCols: readonly ColMeta[] = [meta('src', 'int'), meta('tgt', 'int'), ...tupleCols];
+  const wanted = bind(rowNumberWindow(make.distinct({
+    id: fresh('d'), channels: [], type: typeOf(...wantedCols),
+    input: make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...wantedCols),
+      exprs: [['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')],
+        ...cKeys.flatMap((_, i) => [[ppCol(i), col(unmatched.id, ppCol(i))] as const, [cvCol(i), col(unmatched.id, cvCol(i))] as const, [ptCol(i), col(unmatched.id, ptCol(i))] as const])] }),
+  }), 'word', [], { partitionBy: [], orderBy: [] }, fresh), true);
+  // A SUPPLIED EDGE `T.id` collides two ways (as `elementMergeE`): taken while a create happens, and more
+  // than one distinct edge wanting the one id.
+  if (createId !== null) {
+    const idTaken = elementIdGuard(createId, 'edge', fresh);
+    guard(make.filter({
+      id: fresh('f'), input: idTaken.node, channels: [], type: idTaken.node.type,
+      pred: { kind: 'exists', plan: wanted, negated: false },
+    }), idTaken.guard);
+    const second = make.limit({ id: fresh('li'), input: wanted, channels: [], type: wanted.type, count: compilerInt(1), offset: compilerInt(1) });
+    guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), idTaken.guard);
+  }
+
+  // THE CREATE — an edge per wanted tuple, in `word` order so the assigned rowids recover their tuple.
+  const labelRow = internLabels(labels.map(text), bind, fresh)!;
+  const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
+  const paired = make.join({
+    id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
+  });
+  const idCol = createId === null ? null : typeof createId === 'number' ? 'id' : 'uid';
+  const idMeta = idCol === 'id' ? meta('id', 'int') : meta('uid', 'text', true);
+  const idExpr: Expr | null = createId === null ? null : typeof createId === 'number' ? compilerInt(createId) : text(createId);
+  const rows = make.project({
+    id: fresh('p'), input: paired, channels: [],
+    type: typeOf(...(idCol ? [idMeta] : []), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    exprs: [
+      ...(idCol ? [[idCol, idExpr!] as const] : []),
+      ['src', col(paired.id, 'src')], ['label', col(paired.id, 'lbl')], ['tgt', col(paired.id, 'tgt')],
+    ],
+  });
+  const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+  const created = bind(insert({
+    target: edgesTarget, cols: [...(idCol ? [idCol] : []), 'src', 'label', 'tgt'], source: rows, channels: [],
+    type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')),
+    returning: [['id', col(edgesTarget.id, 'id')], ['src', col(edgesTarget.id, 'src')], ['tgt', col(edgesTarget.id, 'tgt')]],
+  }));
+  // The created rows correlated back to their tuple by POSITION (rowid order = insertion order = `word`).
+  // The created relation is projected to `id` alone first, so the positional join to `wanted` carries no
+  // duplicate `src`/`tgt` column (a bare join names its type positionally).
+  const createdIds = make.project({ id: fresh('p'), input: created, channels: [], type: ID_TYPE, exprs: [['id', col(created.id, 'id')]] });
+  const rankedCreated = positioned(createdIds, fresh);
+  const createdTuples = bind(make.join({
+    id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
+    type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
+  }), true);
+  // Write each PRESENT computed value onto its created edge (single-valued; FTS is the post-write
+  // refresh's, a created edge is born dirty).
+  for (let i = 0; i < cKeys.length; i++) {
+    const spec = PROPERTY_TABLE.edge;
+    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
+    const rowsP = make.project({
+      id: fresh('p'), input: present, channels: [], type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      exprs: [['edge', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ['value', col(present.id, cvCol(i))], ['vtype', col(present.id, ptCol(i))]],
+    });
+    bind(insert({ target, cols: ['edge', 'key', 'value', 'vtype'], source: rowsP, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
+  }
+  // `onCreate`'s own CONSTANT properties, over the created edges (its label already joined the creation;
+  // a runtime onCreate edge value declines upstream, as onMatch's does). A shared key upserts, so
+  // `onCreate` wins over the computed value written above.
+  for (const write of createExtra) if (!propertyStatements('edge', idsOf(created, fresh), write, bind, fresh, child, aliases, guard)) return null;
+
+  // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, tupleKey)` to the created
+  // tuple's, so the one edge made for a repeated `(endpoints, map)` is carried by every driver that asked
+  // (`crossed`'s equi-join by `ord`).
+  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text')),
+    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')], ['tk', tupleKey(unmatched.id)]] });
+  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text')),
+    exprs: [['cid', col(createdTuples.id, 'id')], ['src', col(createdTuples.id, 'src')], ['tgt', col(createdTuples.id, 'tgt')], ['tk', tupleKey(createdTuples.id)]] });
+  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner',
+    on: and(and(eq(col(umMin.id, 'src'), col(ctMin.id, 'src')), eq(col(umMin.id, 'tgt'), col(ctMin.id, 'tgt'))), eq(col(umMin.id, 'tk'), col(ctMin.id, 'tk'))), channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text'), meta('cid', 'int'), meta('ct_src', 'int'), meta('ct_tgt', 'int'), meta('ct_tk', 'text')) });
+  const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
+
+  // THE MERGED EDGES — matched ∪ created, the tail over the union, the whole crossed back onto the input.
+  const merged = make.union({
+    id: fresh('u'), all: true, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    inputs: [matched, createdFor],
+  });
+  const emitted = tailWrites.length ? bind(merged, true) : merged;
+  for (const write of tailWrites) if (!propertyStatements('edge', idsOf(emitted, fresh), write, bind, fresh, child, aliases, guard)) return null;
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
+}
 
 /**
  * `mergeE(map)` with its `option()` arms and the `property()` run after them — the edge upsert.
@@ -2680,7 +2942,7 @@ export function elementMergeV(
  */
 export function elementMergeE(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  aliases: AliasMap, ordered: boolean, child: ChildSeam, fresh: Minter,
+  aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -2695,10 +2957,11 @@ export function elementMergeE(
     if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
   }
   // A COMPUTED merge argument (`mergeE(__.project('k').by(__.body))`) — the search criterion varies per
-  // driver. `edgeCriteria` below reads only the CONSTANT `match.props`, so leaving this to fall through
-  // would DROP the computed criterion and search unfiltered by it — a wrong answer, not a coverage gap.
-  // Decline (fail closed) until the correlated edge search is built (increment 2 replaces this).
-  if (Object.keys(match.computed).length) return null;
+  // driver, so it takes the correlated path rather than `edgeCriteria`'s input-independent constant read
+  // below (which reads only `match.props` and would DROP the computed criterion — a wrong answer). The
+  // create's endpoints/label come from `option(onCreate, …)`, since a `project` search map admits no
+  // Direction/T.label token key. `property()` tails and `option(onMatch/onCreate)` arms all compose.
+  if (Object.keys(match.computed).length) return mergeEComputed(input, maps, match, onCreate, onMatch, propertySteps, aliases, driverElem, ordered, child, fresh);
   // An edge carries exactly ONE label and it is fixed at creation, so a label on `onMatch` is not a
   // mutation this route may make — it is one the reference refuses outright.
   if (onMatch?.label) return null;

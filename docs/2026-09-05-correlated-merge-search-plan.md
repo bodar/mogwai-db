@@ -1,6 +1,9 @@
 # Correlated merge search — build plan
 
-**Status: increment 1 (mergeV computed VALUES) LANDED on trunk (2026-09-05); increments 2–4 remain.**
+**Status: increments 1 (mergeV computed VALUES) and 2 (mergeE computed VALUES) LANDED on trunk
+(2026-09-05); increments 3–4 remain.** A fail-closed safety fix landed first (`elementMergeE` declined a
+computed criterion it was silently dropping — a wrong-answer bug), then increment 2 replaced that decline
+with `mergeEComputed`.
 The property-VALUE family and the merge WRITE arms (onMatch/onCreate/tail) of the correlated write-arg
 resolver were LANDED earlier (see "Already landed" below). This doc is the merge **SEARCH** correlated
 per driver — a computed criterion in the merge argument (`mergeV(__.project(...))` etc.). Written so a
@@ -130,7 +133,26 @@ endpoints):
    `resolveMergeArg` flags as unbuilt (a `withSideEffect` CONSTANT map already worked); and an explicit
    list/set RUNTIME arm cardinality (declines). No 0-result guard was needed — a bare `project` always
    emits a map (the whole-map raise is the general-traversal case, increment 4).
-2. **`mergeE` computed values** — the same, over `edgeCriteria`/`pairedWith` (which already correlate).
+2. ✅ **LANDED — `mergeE` computed values** (`mergeEComputed`, `src/compiler/rel/write.ts`). Mirrors
+   `mergeVComputed` on the edge host: a per-driver carrier of `(present, value, vtype)` triples PLUS the
+   driver's create endpoints, a correlated EXISTS over the candidate edge's stored property
+   (`typedValueEq`), create-per-DISTINCT-`(src, tgt, computed map)`, and `crossed(correlate=true)`.
+   **KEY FINDING — a `project` search map admits only STRING property keys** (no `Direction`/`T.label`
+   token key), so a computed edge search narrows by PROPERTIES alone (every edge, then the criterion);
+   endpoints and label for the CREATE come from `option(onCreate, …)`, exactly where `elementMergeE`
+   already reads them. Composing steps all land: multi-key, `by('key')` shorthand, a driver-property
+   criterion body (`by(__.values(k))` — see the driver-elem thread below), `option(onMatch/onCreate)`
+   CONSTANT arms, a `property()` tail, distinct-create (same `(endpoints, map)` → one edge; per-driver
+   endpoints via `option(Merge.outV/inV, __.select('d'))` → distinct edges), and a supplied edge `T.id`
+   with its two collision guards. **The DRIVER-ELEM thread** (`elementKindAt(steps, at)` from
+   `mergedElements`, `lower.ts`) now feeds every merge-write driver host — the computed criterion body,
+   and `mergeVComputed`/`mergeArmValueWrite`/`armValueWriteCorrelated` (which had all hardcoded
+   `'vertex'`): a `by(__.values(k))` reads the driver's OWN element kind. `?? 'vertex'` preserves the
+   prior hardcode for a cannot-say driver (deferred to increment 4's map-valued-driver substrate).
+   **Deferred, fail-closed (declined upstream in `writeOf`, edge take-first):** a RUNTIME edge arm value
+   (`option(onMatch, [k: __.trav])`) — a separate "edge runtime property value" feature; a computed
+   mergeE holding one declines the whole merge. Tests: `test/L4-addendum/merge-search-computed-edge.feature`,
+   `test/merge-search-computed-edge.test.ts`.
    ⚠️ **The three-way engine unification was investigated and DECLINED — the REFERENCE is the signal.**
    TinkerPop's `MergeElementStep` is a shared base, but it shares only the map-resolution (`materializeMap`)
    + validation + the search→`has`-chain scaffold; the actual search+create is `flatMap`, which is
