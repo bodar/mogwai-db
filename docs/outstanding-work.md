@@ -45,19 +45,31 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
   retained `fromV`, `where('a',eq('b')).by('key')`, list-valued alias dedup key). One substrate clears
   a large read-side family; the barrier-in-body slice 2 and per-origin-in-arm items are its consumers.
   Plan + reference-grounded increment ladder: [fan-out rejoin authority](./2026-09-05-fan-out-rejoin-authority-plan.md).
-- **Correlated per-incoming-row write-argument resolver — increment 1 (`property()` VALUE) LANDED;
-  merge family remains.** The write lowering now has a per-*traverser* correlated surface: a
-  `property(k, __.trav)` value resolves per owner through `ChildSeam.rows`
-  (`runtimePropertyStatements`, `src/compiler/rel/write.ts`), reference-exact per
-  `AddPropertyStep.handleTraversalValue` (0→skip, >1 under an effective single→raise, list/set→each),
-  with the FTS text derived post-write from the stored `{t,v}` tree (`refreshFts`, `src/refresh.ts`).
-  Covers `property()` steps and `addV`/`mergeV` tails; validated by `property-traversal-multivalue.feature`
-  + `test/property-traversal-value.test.ts`. **What remains** (the "resolveMergeSpec" seam is the same
-  `child.rows`/`child.scalar` wiring, now proven): computed MERGE labels/keys/values (the merge SEARCH
-  correlated per driver — `matching`/`edgeCriteria` still input-independent), `mergeV(__.select(sideEffectMap))`
-  whole-arg maps, no-arg `mergeV/mergeE` (traverser-as-map), a runtime EDGE property value (take-first, no
-  cardinality — `AddPropertyStep.java:172-199`), and runtime property META. Ties to the supplied-`T.id`
-  merge work.
+- **Correlated per-incoming-row write-argument resolver — the property-VALUE family + merge WRITE arms
+  LANDED; the merge SEARCH remains.** The write lowering has a per-*traverser* correlated surface: a
+  `property(k, __.trav)` value resolves per owner through `ChildSeam.rows`/`.scalar`
+  (`resolveRuntimeValue`/`runtimePropertyStatements`, `src/compiler/rel/write.ts`), reference-exact per
+  `AddPropertyStep.handleTraversalValue` (0→skip, >1 under an effective single→raise, list/set→each; a
+  reducing body like `count()` falls back to the scalar arm), with FTS derived post-write from the
+  stored `{t,v}` tree (`refreshFts`, `src/refresh.ts`). Covers `property()` steps, the property MAP form,
+  `addV`/`mergeV` **tails** (element-rooted `AddPropertyStep`), and `mergeV` **onMatch/onCreate values**
+  (`mergeArmValueWrite`, DRIVER-rooted per `materializeMap(traverser)`, `MergeVertexStep.java:103`/`:153`).
+  Validated by `property-traversal-multivalue.feature`/`property-map-form.feature`/`merge-property-tail.feature`
+  + `test/property-traversal-value.test.ts`; drove L3 +5. **What remains, with the references now pinned:**
+  - the merge **SEARCH** correlated per driver — `matching`/`edgeCriteria` are still input-independent.
+    TinkerPop resolves the WHOLE map-producing traversal per driver (`mergeV(__.project/select/…)`,
+    `MergeElementStep.materializeMap`), then searches `has(k, concreteValue)`; 0→throw, >1→first. Design
+    (both refs confirmed): a `pairs` relation of correlated `child.scalar` values (the `mergeE` endpoint
+    pattern), joined to candidates through `hasPropertyPredicate`'s `valuePred` (Calcite's
+    decorrelate-to-equi-join, `RelDecorrelator:1894-2004` — no LATERAL, which SQLite lacks). Route the
+    correlated value THROUGH `has()` so it inherits the vtype-aware compare + FTS.
+  - a map-LITERAL entry whose value is a traversal (`mergeV([k: __.trav])`) is NOT the search-by-equality
+    it looks like — TinkerPop makes it `has(k, P.eq(traversal))`, a `P.eq` resolved at the CANDIDATE
+    (`P.java:381`), i.e. a self-comparison. Degenerate, no corpus; we DECLINE it (correct — a
+    driver-rooted reading would be a considered divergence, not a bug fix).
+  - `mergeV(__.select(sideEffectMap))` whole-arg / no-arg `mergeV/mergeE` (traverser-as-map) — the SAME
+    map-producing-traversal feature as the search above; a runtime EDGE property value (take-first, no
+    cardinality — `AddPropertyStep.java:172-199`); runtime property META. Ties to the supplied-`T.id` merge.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP
