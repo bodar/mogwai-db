@@ -16,7 +16,8 @@ import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
-import { propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
+import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
+import { edgeEndpoint } from './element.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy } from '../../gremlin/frontend.ts';
@@ -645,20 +646,32 @@ function terminal(
       { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, fresh);
   }
 
-  // `asString()` over a VERTEX — the traverser's String rendering, `AsStringGlobalStep`'s `String.valueOf`
-  // over a non-scalar object. A vertex renders `v[<id>]`, TinkerPop's `Element.toString()`
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/StringFactory.java`
-  // `vertexString`). The id is the OUTWARD id (`COALESCE(uid, id)`, `byExpr`'s token arm — the same one
-  // `id()`/`by(T.id)` read), so it composes over a bound graph and agrees with the write path. `asString`
-  // over a runtime object is where JS/Java renderings may legitimately differ; a vertex's is exact.
-  // SCALAR asString is `VALUE_TX`'s (`scalarTail`); the EDGE, PROPERTY, MAP and LIST renderings are their
-  // own arms. Bare `asString()` only — a `Scope` token over a single element is a no-op but declines here
-  // until the scoped forms are built, rather than answering an unverified shape.
-  if (step.name === 'asString' && elem === 'vertex' && !args.length) {
-    const id = byExpr({ key: { kind: 'token', token: 'id' } }, elementHost(input, elem, aliases), ctx.source, fresh);
+  // `asString()` over an ELEMENT — the traverser's String rendering, `AsStringGlobalStep`'s
+  // `String.valueOf` over a non-scalar object. A vertex renders `v[<id>]` and an edge
+  // `e[<id>][<src>-<label>-><tgt>]`, TinkerPop's `StringFactory.vertexString`/`edgeString`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/StringFactory.java`).
+  // Every id is the OUTWARD id (`COALESCE(uid, id)`, `byExpr`'s token arm and `source.externalId` — the
+  // same reads `id()`/`by(T.id)`/`outV()` use), so it composes over a bound graph and agrees with the
+  // write path. `asString` over a runtime object is where JS/Java renderings may legitimately differ;
+  // these are exact. SCALAR asString is `VALUE_TX`'s (`scalarTail`); PROPERTY is `propertyAsString`, and
+  // the MAP and LIST renderings are their own arms. Bare `asString()` only — a `Scope` token over a
+  // single element is a no-op but declines here until the scoped forms are built.
+  if (step.name === 'asString' && (elem === 'vertex' || elem === 'edge') && !args.length) {
+    const host = elementHost(input, elem, aliases);
+    const id = byExpr({ key: { kind: 'token', token: 'id' } }, host, ctx.source, fresh);
     if (!id) return null;
-    const rendered: Expr = { kind: 'binary', op: '||',
-      left: { kind: 'binary', op: '||', left: compilerText('v['), right: id }, right: compilerText(']') };
+    const cat = (...parts: Expr[]): Expr => parts.reduce((l, r) => ({ kind: 'binary', op: '||', left: l, right: r }));
+    let rendered: Expr;
+    if (elem === 'vertex') {
+      rendered = cat(compilerText('v['), id, compilerText(']'));
+    } else {
+      const label = byExpr({ key: { kind: 'token', token: 'label' } }, host, ctx.source, fresh);
+      if (!label) return null;
+      const endpoint = (end: 'src' | 'tgt'): Expr =>
+        ctx.source.externalId('vertex', edgeEndpoint(col(input.id, 'id'), end, fresh), fresh);
+      rendered = cat(compilerText('e['), id, compilerText(']['), endpoint('src'),
+        compilerText('-'), label, compilerText('->'), endpoint('tgt'), compilerText(']'));
+    }
     return projectScalar(input, [['v', rendered]], [meta('v', 'text')], { kind: 'scalar', type: STATIC('string') }, fresh);
   }
 
@@ -4283,6 +4296,7 @@ function propertyTail(
     : step.name === 'label' && elem === 'vertex' ? propertyKey(rel, fresh)
       : step.name === 'id' && elem === 'vertex' ? propertyId(rel, fresh)
         : step.name === 'value' ? propertyValue(rel, fresh)
+          : step.name === 'asString' ? propertyAsString(rel, elem, fresh)
           : step.name === 'element' ? propertyElement(rel, elem, fresh)
         // `count()` is shape-agnostic and needs no property-specific arm: `countExpr` reads the BULK
         // CHANNEL, and `properties()` carries the parent's channels through its join — so a

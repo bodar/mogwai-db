@@ -318,6 +318,31 @@ export function propertyValue(input: Rel, fresh: Minter): { rel: Rel; framing: R
   };
 }
 
+/** `asString()` over a PROPERTY — TinkerPop's `Property`/`VertexProperty` `toString()`:
+ *  `vp[<key>-><value>]` for a VertexProperty (a vertex owner) and `p[<key>-><value>]` for an edge
+ *  `Property` (`StringFactory.propertyString`/`.vertexPropertyString`). The value renders by its STORED
+ *  form (`storedValueOn`, the identical read `value()` uses), so a datetime / exact-tail value shows what
+ *  the wire would; JS/Java number formatting may differ, an allowed semantic-equivalence deviation, while
+ *  the key and prefix are exact. A property value is never null, so the `||` chain never poisons. */
+export function propertyAsString(input: Rel, ownerElem: Elem, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  const cat = (...parts: Expr[]): Expr => parts.reduce((l, r) => ({ kind: 'binary', op: '||', left: l, right: r }));
+  const rendered = cat(
+    compilerText(ownerElem === 'vertex' ? 'vp[' : 'p['),
+    col(input.id, PROP('key')),
+    compilerText('->'),
+    storedValueOn(col(input.id, PROP('value')), col(input.id, PROP('vtype'))),
+    compilerText(']'),
+  );
+  return {
+    rel: make.project({
+      id: fresh('pas'), input, channels: input.channels,
+      type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
+      exprs: [['v', rendered], ...carryThrough(input)],
+    }),
+    framing: { kind: 'scalar', type: STATIC('string') },
+  };
+}
+
 /** `element()` — the OWNING element, back to an ordinary element stream, so movement and filters
  *  compose after it exactly as they would have before the `properties()`.
  *

@@ -17,6 +17,26 @@ describe('asString() over each traverser shape', () => {
     expect(values(r).sort()).toEqual(['v[1]', 'v[2]', 'v[3]', 'v[4]', 'v[5]', 'v[6]']);
   });
 
+  test('over an EDGE renders e[<id>][<src>-<label>-><tgt>] (StringFactory.edgeString)', () => {
+    const store = seededStore();
+    const r = run(store, 'g.E().asString()');
+    expect(values(r).sort()).toEqual([
+      'e[10][4-created->5]', 'e[11][4-created->3]', 'e[12][6-created->3]',
+      'e[7][1-knows->2]', 'e[8][1-knows->4]', 'e[9][1-created->3]',
+    ]);
+  });
+
+  test('over a VERTEX PROPERTY renders vp[<key>-><value>] (StringFactory.vertexPropertyString)', () => {
+    const store = seededStore();
+    const r = run(store, 'g.V().properties().asString()');
+    expect(values(r).sort()).toEqual([
+      'vp[age->27]', 'vp[age->29]', 'vp[age->32]', 'vp[age->35]',
+      'vp[lang->java]', 'vp[lang->java]',
+      'vp[name->josh]', 'vp[name->lop]', 'vp[name->marko]', 'vp[name->peter]',
+      'vp[name->ripple]', 'vp[name->vadas]',
+    ]);
+  });
+
   test('over a SCALAR value stays the value string (unchanged by the element arms)', () => {
     const store = seededStore();
     const r = run(store, 'g.V().hasLabel("person").values("age").asString()');
