@@ -293,6 +293,37 @@ export const comparableTheta = (
   };
 };
 
+/**
+ * Gremlin `P.eq` equality between two TYPED stored-style values — each a `(value, vtype)` pair — as the
+ * merge SEARCH compares a candidate's stored property against a driver's computed criterion
+ * (`t.has(k, concreteValue)` → `Compare.eq` → `GremlinValueComparator.equals`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:123-139`).
+ *
+ * The reference rule, exactly: two NUMBERS compare numerically ACROSS int/real classes
+ * (`NumberHelper.compare == 0`, so `30` (int) equals `30.0` (double)); any other pair is equal only when
+ * the SAME Gremlin type holds equal values; a cross-type pair is never equal (`comparable(f,s)` is
+ * false). So — both vtypes numeric → each cast to its numeric class (which bridges int↔real, and pulls
+ * a decimal/bigint TEXT tail to a numeric) and compared; else the same vtype → a raw value compare
+ * (string/boolean/uuid, and `datetime`/`duration` whose epoch/nanos form IS the value); else false.
+ * It is `comparableTheta`'s `eq` sibling — the same same-bucket-else-false shape, collapsed to the two
+ * arms an EQUALITY needs (numbers as one bucket; every other tag compared only within itself).
+ *
+ * The numeric guard is `NUMERIC_VTYPES`, NOT `CAST_TO_INT`: `datetime`/`duration` are numeric to SQLite
+ * but are NOT `Number`s to Gremlin, so a `datetime` must not compare-equal to an `int` that happens to
+ * share its epoch — they take the same-vtype arm and only compare within their own tag.
+ */
+export const typedValueEq = (aValue: Expr, aVtype: Expr, bValue: Expr, bVtype: Expr): Expr => {
+  const numeric = (vtype: Expr): Expr => ({ kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) });
+  return {
+    kind: 'case',
+    whens: [
+      [and(numeric(aVtype), numeric(bVtype)), binary('=', storedCompareOn(aVtype)(aValue), storedCompareOn(bVtype)(bValue))],
+      [binary('=', aVtype, bVtype), binary('=', aValue, bValue)],
+    ],
+    else: compilerFalse,
+  };
+};
+
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
  * compiler constant. */

@@ -15,10 +15,12 @@ import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } f
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, meta, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
+import { typedValueEq } from './predicate.ts';
+import type { ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
@@ -2177,6 +2179,178 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * — `addV`'s unconditional guard would wrongly raise on a match, because a search-by-id match already
  * owns that id. A non-scalar id (a shape no vertex id can be) declines, as it does on `addV`.
  */
+/**
+ * `mergeV(__.project('k').by(__.body))` — the CORRELATED merge SEARCH, whose criteria are computed
+ * PER DRIVER rather than being compile-time constants.
+ *
+ * `MergeElementStep.materializeMap` runs the whole map-producing traversal at the incoming traverser
+ * (`TraversalUtil.apply`, `vendor/tinkerpop/gremlin-core/.../util/TraversalUtil.java:41-53`), so the
+ * search values are CONCRETE per driver and the search is a literal `has(k, concreteValue)` chain
+ * (`.../step/map/MergeElementStep.java:397-404`). Two searches for two drivers, so `mergeV`'s
+ * input-INDEPENDENT cross join (one search for all drivers) is the wrong correlation — this is
+ * `mergeE`'s endpoint machinery on the vertex host: a per-driver CARRIER, a decorrelated equi-join
+ * (Calcite's `RelDecorrelator` form — a projected column joined, never a LATERAL), one create per
+ * DISTINCT computed map that found nothing, and `crossed(…, correlate=true)`.
+ *
+ * The constant criteria (label / constant props / `T.id`) stay input-independent through `matching`
+ * (the read fold), so they keep inheriting whatever `has()`/`hasLabel()` learn; only the COMPUTED
+ * criteria are carried and joined here. An unproductive by-body OMITS its key for that driver
+ * (`ProjectStep.ifProductive`, `.../step/map/ProjectStep.java:62-70`), read as "this criterion does not
+ * narrow" — not a raise (a bare `project` always emits a map, so there is no 0-result raise here; that
+ * is the general map-producing-traversal case, deferred).
+ *
+ * The first increment covers the SEARCH map with no `option()` arms and no `property()` tail — those
+ * over a computed search decline (a clean deferral, never a wrong answer), handled in the constant path.
+ */
+function mergeVComputed(input: Rel, match: MergeSpec, ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
+  const cKeys = Object.keys(match.computed);
+  const searchId = idOrNull(match.id);
+  if (searchId === false) return null;
+  const labels = (match.label as string[] | null) ?? [];
+
+  const carriedCh = writeInputChannels(input);
+  if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind } = effectScope(fresh);
+  const incoming = seeded ? bind(seeded.result, true, carriedCh) : input;
+  const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
+
+  // THE CARRIER — one `(present, value, vtype)` triple per computed key, resolved at the DRIVER. A body
+  // that does not lower to a scalar, or cannot state its productivity (`present` ABSENT ≠ "always
+  // productive", `child.ts`), declines the whole search rather than mis-executing.
+  const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: 'vertex', row: { rel: incoming, aliases: NO_ALIASES } };
+  // The value's Gremlin TYPE at the driver — a `has(k, concreteValue)` compare needs it, and it comes
+  // from one of three places: a per-row read carries it as a `vtype` column (`__.values(k)`); a static
+  // scalar states it in its framing (`count()`→`long`); a bare literal states it in its storage class
+  // (`__.constant('x')` frames as `unknown`, so read the lit). A value we cannot type DECLINES the whole
+  // search rather than comparing against a NULL vtype, which silently matches nothing (a duplicate
+  // create — a wrong answer, not a coverage gap).
+  const litVtype = (e: Expr): string | null =>
+    e.kind === 'lit' ? (e.type === 'text' ? 'string' : e.type === 'int' ? 'int' : e.type === 'real' ? 'double' : null) : null;
+  const values: ChildValue[] = [];
+  const pts: Expr[] = [];
+  for (const key of cKeys) {
+    const produced = child.scalar(match.computed[key]!, host);
+    if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return null;
+    const pt = produced.vtype
+      ?? (produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static' ? compilerText(String(produced.framing.type.type)) : null)
+      ?? (litVtype(produced.expr) ? compilerText(litVtype(produced.expr)!) : null);
+    if (!pt) return null;
+    values.push(produced);
+    pts.push(pt);
+  }
+  const ppCol = (i: number) => `pp${i}`, cvCol = (i: number) => `cv${i}`, ptCol = (i: number) => `pt${i}`;
+  // Every dropped key normalises to `(0, NULL, NULL)`, so two drivers that drop the same key agree — the
+  // value the unproductive body happened to leave never leaks into the identity or the compare.
+  const gate = (present: Expr, e: Expr): Expr => ({ kind: 'case', whens: [[present, e]], else: compilerNull('text') });
+  const tupleCols = cKeys.flatMap((_, i) => [meta(ppCol(i), 'int'), meta(cvCol(i), 'any', true), meta(ptCol(i), 'text', true)]);
+  const carrier = bind(make.project({
+    id: fresh('cc'), input: incoming, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), ...tupleCols),
+    exprs: [
+      ...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []),
+      ...cKeys.flatMap((_, i) => [
+        [ppCol(i), { kind: 'case', whens: [[values[i]!.present!, compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(values[i]!.present!, values[i]!.expr)] as const,
+        [ptCol(i), gate(values[i]!.present!, pts[i]!)] as const,
+      ]),
+    ],
+  }), true);
+  // A per-driver identity over the computed MAP — two drivers create ONE vertex iff their maps are equal
+  // (`Map.equals`, `record.ts`), stated as a JSON tuple of the normalised `(present, vtype, value)`s.
+  const tupleKey = (rel: RelId): Expr => ({ kind: 'call', fn: 'json_array', args: cKeys.flatMap((_, i) => [col(rel, ppCol(i)), col(rel, ptCol(i)), col(rel, cvCol(i))]) });
+
+  // THE MATCH — candidates (constant criteria, input-independent) narrowed by every computed criterion.
+  const candidates = matching(searchId, labels, Object.entries(match.props), child, fresh);
+  if (!candidates) return null;
+  // `has(k, concreteValue)` per key as a correlated EXISTS over the candidate's stored property, compared
+  // vtype-aware (`typedValueEq` = `Compare.eq`); an unproductive key (`present=0`) does not narrow.
+  const criterion = (candId: Expr, i: number): Expr => {
+    const spec = PROPERTY_TABLE.vertex;
+    const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const matched = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(and(eq(col(scan.id, spec.owner), candId), eq(col(scan.id, 'key'), compilerText(cKeys[i]!))),
+        typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(carrier.id, cvCol(i)), col(carrier.id, ptCol(i)))),
+    });
+    const probe = make.project({ id: fresh('p'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return or(eq(col(carrier.id, ppCol(i)), compilerInt(0)), { kind: 'exists', plan: probe, negated: false });
+  };
+  const conj = cKeys.map((_, i) => criterion(col(candidates.id, 'id'), i)).reduce((a, b) => and(a, b));
+  const joined = make.join({
+    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: conj, channels: [],
+    type: typeOf(...carrier.type.cols, meta('id', 'int')),
+  });
+  const matched = bind(make.project({
+    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
+  }), true);
+
+  // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
+  // the carrier when `matched` is empty).
+  const trueLit = eq(compilerInt(1), compilerInt(1));
+  const unmatched = make.filter({
+    id: fresh('f'), input: carrier, channels: [], type: carrier.type,
+    pred: { kind: 'exists', negated: true, plan: make.filter({
+      id: fresh('f'), input: matched, channels: [], type: matched.type,
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+  });
+  // ONE CREATE PER DISTINCT COMPUTED MAP — `Distinct` collapses the tuple (its NULL columns compare EQUAL,
+  // which a join's `=` would not — the JSON key handles that side).
+  const wanted = bind(rowNumberWindow(make.distinct({
+    id: fresh('d'), channels: [], type: typeOf(...tupleCols),
+    input: make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...tupleCols),
+      exprs: cKeys.flatMap((_, i) => [[ppCol(i), col(unmatched.id, ppCol(i))] as const, [cvCol(i), col(unmatched.id, cvCol(i))] as const, [ptCol(i), col(unmatched.id, ptCol(i))] as const]) }),
+  }), 'word', [], { partitionBy: [], orderBy: [] }, fresh), true);
+
+  // THE CREATE — a vertex per wanted tuple, in `word` order so the assigned rowids recover their tuple.
+  const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
+  const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
+  const rowPer = make.project({ id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)), exprs: [['uid', compilerNull('text')]] });
+  const created = bind(insert({ target: nodesTarget, cols: ['uid'], source: rowPer, channels: [], type: ID_TYPE, returning: [['id', col(nodesTarget.id, 'id')]] }));
+  const createLabels = creationLabels(labels, child, fresh);
+  if (!createLabels || createLabels.runtime?.length) return null;
+  const labelRow = internLabels(createLabels.names, bind, fresh);
+  if (labelRow) {
+    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const pairs = make.join({ id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [] }));
+  }
+  // The created rows correlated back to their tuple by POSITION (rowid order = insertion order = `word`).
+  const rankedCreated = positioned(created, fresh);
+  // A bare join's declared `type` maps POSITIONALLY onto `left.cols ++ right.cols`, so it must list the
+  // sides in that order — `rankedCreated` (id, ord) then `wanted` (pp/cv/pt…, word).
+  const createdTuples = bind(make.join({
+    id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
+    type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
+  }), true);
+  // Write each PRESENT computed value onto its created vertex — FTS is the post-write refresh's (a created
+  // vertex is born dirty), the same route every runtime value takes.
+  for (let i = 0; i < cKeys.length; i++) {
+    const spec = PROPERTY_TABLE.vertex;
+    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
+    const rows = make.project({
+      id: fresh('p'), input: present, channels: [], type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      exprs: [['node', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ['value', col(present.id, cvCol(i))], ['vtype', col(present.id, ptCol(i))]],
+    });
+    bind(insert({ target, cols: ['node', 'key', 'value', 'vtype'], source: rows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
+  }
+
+  // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's tuple KEY to the created tuple's, so the
+  // one vertex made for a repeated map is carried by every driver that asked for it (`crossed`'s equi-join).
+  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('tk', 'text')),
+    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['tk', tupleKey(unmatched.id)]] });
+  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('tk', 'text')),
+    exprs: [['cid', col(createdTuples.id, 'id')], ['tk', tupleKey(createdTuples.id)]] });
+  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner', on: eq(col(umMin.id, 'tk'), col(ctMin.id, 'tk')), channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('tk', 'text'), meta('cid', 'int'), meta('ct_tk', 'text')) });
+  const createdFor = make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] });
+
+  const emitted = make.union({ id: fresh('u'), inputs: [matched, createdFor], all: true, channels: [], type: matched.type });
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carriedCh, ordered, fresh, true) };
+}
+
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
   ordered: boolean, child: ChildSeam, fresh: Minter,
@@ -2198,6 +2372,14 @@ export function elementMergeV(
     if (Object.values(spec.propKeys).some(isNested)) return null;
   }
   if (Object.values(match.props).some(isNested)) return null;
+  // A COMPUTED merge argument (`mergeV(__.project('k').by(__.body))`) — the search varies per driver, so
+  // it takes the correlated path rather than the input-independent cross join below. The first increment
+  // does the SEARCH map alone: an `option()` arm or a `property()` tail over a computed search declines
+  // here (a clean deferral, never a wrong answer) rather than being half-applied.
+  if (Object.keys(match.computed).length) {
+    if (options.length || propertySteps.length || onCreate || onMatch) return null;
+    return mergeVComputed(input, match, ordered, child, fresh);
+  }
   // A SUPPLIED `T.id` — the SEARCH narrows by the merge argument's id (`searchVerticesTraversal` reads
   // `mergeMap.get(T.id)`), the CREATE writes `onCreate`'s id or, absent one, the merge argument's
   // (`onCreateMap` is their union) — and `validateNoOverrides` has already proved the two agree. A

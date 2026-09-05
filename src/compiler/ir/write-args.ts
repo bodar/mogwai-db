@@ -256,6 +256,13 @@ export interface MergeSpec {
   /** The per-key property cardinality. A map's CardinalityValueTraversal wins over
    * its enclosing option(..., Cardinality.x) default, matching TinkerPop. */
   propCardinalities: Record<string, Cardinality>;
+  /** CORRELATED search criteria whose value is a DRIVER-rooted body, not a compile-time constant —
+   * a whole-arg map-producing traversal (`mergeV(__.project('k').by(__.body))`). Each is one search
+   * criterion (`has(k, concreteValue)`) whose value the write lowering resolves per driver and carries
+   * as a correlated column, distinct from `props` (constant, input-independent through the read fold).
+   * Empty for a map literal / constant merge argument. Only the SEARCH (`merge`) map carries these;
+   * `resolveMergeSpec`'s per-driver map-literal nested values stay in `props`. */
+  computed: Record<string, readonly Step[]>;
 }
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
@@ -301,6 +308,64 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
   if (inner[0].name === 'identity' || inner.some((s) => s.name === 'select'))
     throw new Deferral(`merge whole-arg traversal __.${names} not yet supported (needs a map-valued driver / local-map / nested-write substrate; a map literal [k: __.trav] IS supported)`);
   throw new Deferral(`merge whole-arg traversal __.${names} not yet supported`);
+}
+
+/**
+ * A WHOLE-ARG map-producing traversal whose map is computed PER DRIVER — the merge-SEARCH correlated
+ * case, decomposed into one driver-rooted body per key.
+ *
+ * `mergeV(__.project('k').by(__.body))`: `MergeElementStep.materializeMap` runs the whole traversal at
+ * the driver (`TraversalUtil.apply` = `.next()`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:41-53`),
+ * so the map's VALUES are concrete per driver and the search is a literal `has(k, concreteValue)` chain
+ * (`MergeElementStep.searchVerticesPropertyConstraints`,
+ * `.../step/map/MergeElementStep.java:397-404`). A map LITERAL `[k: __.trav]` is a DIFFERENT thing —
+ * wrapped in `ConstantTraversal` (`.../step/map/MergeElementStep.java:80`), its value stays a raw
+ * traversal that `has(k, traversal)` reads as `P.eq(<traversal at the CANDIDATE>)`, a degenerate
+ * self-comparison — so that stays in `props` (a nested value the write lowering declines), and only a
+ * genuine map-PRODUCING traversal comes here.
+ *
+ * The `project` keys are compile-time strings; each key's value is its `by()` body. The by-ring CYCLES
+ * exactly as `ProjectStep.map` does (`TraversalRing.next()`, `.../step/map/ProjectStep.java:62-70`):
+ * fewer bodies than keys reuse them in order. `null` falls through (a map literal, a `select`, or a
+ * project not at the head — a map rooted at a different element, which needs the general
+ * map-producing-traversal substrate this increment does not yet build).
+ */
+function parseComputedMergeArg(raw: any, params: Record<string, any>): Record<string, readonly Step[]> | null {
+  if (!isNested(raw)) return null;
+  const chain = stepChain(raw.nested, params);
+  // A LEADING `project` and only its `by()`s. A step before it (`__.out().project(…)`) roots the map at
+  // a different element than the driver; a step after it transforms the map — both are the general
+  // map-valued-traversal case, deferred rather than mis-decomposed.
+  if (chain.length === 0 || chain[0].name !== 'project') return null;
+  const [project, ...bys] = chain;
+  if (!bys.every((s) => s.name === 'by')) return null;
+  const keys = project.args.map((a) => a.value);
+  if (!keys.length || keys.some((k) => typeof k !== 'string')) return null;
+  // `ProjectStep`'s own constructor raises `keys must be unique in ProjectStep`.
+  if (new Set(keys as string[]).size !== keys.length) return null;
+  // A key's value body: `by(__.trav)` is the nested traversal, `by('key')` is `values('key')`. A bare
+  // `by()` / no `by()` at all is the traverser ITSELF (`TraversalRing` empty → identity) — a vertex is
+  // not a scalar search value, so that key declines the whole decomposition (fall through to the
+  // deferral) rather than searching for a property equal to an element.
+  const bodyFor = (index: number): readonly Step[] | null => {
+    if (!bys.length) return null;
+    const by = bys[index % bys.length]!;
+    const a = by.args[0];
+    if (a === undefined) return null;
+    if (isNested(a.value)) return stepChain(a.value.nested, params);
+    // `by('key')` is `values('key')` — a synthesized step (no parse ctx; ctx is diagnostics only, and
+    // `child.scalar` reads it as an `IRStep` where ctx is optional).
+    if (typeof a.value === 'string') return [{ name: 'values', args: [a] } as Step];
+    return null;
+  };
+  const computed: Record<string, readonly Step[]> = {};
+  for (const [index, key] of (keys as string[]).entries()) {
+    const body = bodyFor(index);
+    if (!body) return null;
+    computed[key] = body;
+  }
+  return computed;
 }
 
 /**
@@ -379,8 +444,23 @@ export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void
 }
 
 function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
+  const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} };
+  // A WHOLE-ARG map-producing traversal as the SEARCH map — `mergeV(__.project('k').by(__.body))` —
+  // resolves to concrete values PER DRIVER (`MergeElementStep.materializeMap`), so its criteria are
+  // DRIVER-rooted and carried apart from the constant `props`. Only the merge (search) map: an
+  // onCreate/onMatch whole-arg traversal is a different arm-as-traversal question, still deferred by
+  // `resolveMergeArg` below.
+  if (role.kind === 'merge') {
+    const computed = parseComputedMergeArg(raw, params);
+    if (computed) {
+      // The keys are search criteria that become property writes on the CREATE branch, so they are
+      // validated as property keys here — the same `validateResolvedMergeSpec` runs for constant props.
+      for (const key of Object.keys(computed)) validatePropertyKey(key);
+      spec.computed = computed;
+      return spec;
+    }
+  }
   raw = resolveMergeArg(raw, sideEffects, params);
-  const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
