@@ -248,8 +248,31 @@ names (list-alias dedup key, the local/flatMap split).
 
 ### Phase D — the async-boundary frame authority (Codex sweep, Claude spec+review; Claude owns the path+encounter seed)
 
-- ⛔ **D1 (RE-DIAGNOSED 2026-09-05 — the deferral HOLDS, but the real blocker is UPSTREAM of the seed;
-  STOPPED for a human design decision).** The named gate is the path+encounter combo decline (now
+- ✅ **D1 (LANDED f8674944 — via the PATH-CONSUMER ARC, not deferred).** The re-diagnosis below was
+  right that the blocker was upstream of the seed (no order-demanding consumer composed after `path()`);
+  the resolution was to BUILD that consumer family rather than accept the deferral. Three green increments
+  made a Path a first-class collection value (per TinkerPop — a Path is `Type.Path`, just a value, and
+  there is no `pathTail`): **(1) `path().dedup()`** (893914dd) routes pathTail's global row ops through
+  the shared `rowOp`/`payloadRowShape` (a path's `LIST_COL` json is its identity); **(2) `path().fold()`
+  → `List<Path>`** (b33f7fa6), the keystone — a new `path` MEMBER arm in the collection vocabulary
+  (`ListOf`, `listItemBuffers`/`framePath`, `listPayloadExpr`, `foldPaths`) so each member serializes as a
+  PATH not a bare list; **(3) the combined seed** (f8674944) — `combinedPathEncounterSeed` seeds the path
+  at position 0 THEN renumbers the encounter from the landed order (`FOREIGN_ORD`), composing because a
+  `Window` only EXTENDS its input, at BOTH the resume seed and the `detachedTail` `.V()` re-root; the
+  blanket `tracksPath && demandsEncounter` gate is deleted (the `!seedsEncounter && !ordersMidChain` line
+  is the sole correct gate). Reachable + witnessed at last: `sg('.V().out("develops").path().fold()')`
+  oracled BOTH self-consistently (fold == individual collected → seed order + path carriage) and against
+  the sibling run directly (content), the runtime witness `checkChannels` (structural-only) cannot give.
+  `test/federation.test.ts`, `test/L4-addendum/{path-stream-rowops,path-fold}.feature`; census 0 drift.
+  **Remaining path-consumer family (each its own increment, now unblocked by the keystone):**
+  `path().order()` (whole-stream ORDERABILITY — a JS barrier, `orderStreamValue` already handles element
+  members), `path().group()` and a Path in a group VALUE (needs the `{t:'path'}` tree-walker arm in
+  `frameTypedNode`/`listNodeExpr`, fail-closed today), `path().fold().unfold()` (member re-entry), and the
+  two `order`/`dedup(Scope.local)`-over-element-membered-nested-list items `outstanding-work.md` marks
+  "won't-do" — which the keystone's materialized-member substrate makes tractable.
+
+  Superseded re-diagnosis (kept for the reasoning): **the deferral HOLDS, but the real blocker is UPSTREAM
+  of the seed.** The named gate is the path+encounter combo decline (now
   `lower.ts:3007`, `if (facts.tracksPath && facts.demandsEncounter) return null;`, plus its twin at the
   `detachedTail` `.V()`/`.E()` re-root). The combined seed IS a clean build — path-project THEN renumber,
   which composes because a `Window` only EXTENDS its input (§3.5), so the path rides through the encounter
