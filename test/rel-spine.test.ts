@@ -551,6 +551,16 @@ const COVERED = [
   // fold above uses, one shape over.
   "g.V().local(__.out().group().by('lang'))", "g.V().local(__.out().groupCount())",
   "g.V().local(__.out().groupCount().by('name'))", "g.V().hasLabel('person').local(__.out().group().by('name'))",
+  // The seeded per-origin barrier COMPOSES — `flatMap` reaches the same rejoin, a per-origin barrier
+  // CONTINUES (`select`/`unfold` after a group), a value `by()` collects per origin, TWO barriers stack in
+  // one body (`fold().unfold()` then `groupCount()`), and any fan-out movement (`both()`) hosts it.
+  "g.V().flatMap(__.out().group().by('lang'))", "g.V().flatMap(__.out().groupCount())",
+  "g.V().flatMap(__.out().fold().unfold())",
+  "g.V().local(__.out().groupCount().by('lang')).select(Column.keys)",
+  "g.V().local(__.out().groupCount().by('name')).unfold()",
+  "g.V().local(__.out().group().by('lang').by('name'))",
+  "g.V().local(__.out().fold().unfold().groupCount().by('lang'))",
+  "g.V().local(__.both().groupCount().by('lang'))",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",
