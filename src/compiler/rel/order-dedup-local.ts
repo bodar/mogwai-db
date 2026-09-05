@@ -126,13 +126,14 @@ export function buildOrderDedupSegment(
 // traverser, one batched JS sort reorders the array, and `lowerListResumeOf` re-injects the lists in the
 // sorted order (the array position IS the emission order).
 //
-// It fires for a LIST stream (a `jsonbList` head, no element leaf) and a MAP stream (a `mapValue` head — a
-// map orders by its sorted entry-set, `orderMapStreamValue`). It DECLINES (→ the inline SQL fold, which
-// already covers these):
+// It fires for a LIST stream (a `jsonbList` head) — including an ELEMENT-membered one, carried as rowids
+// exactly as the `Scope.local` barrier above does (`rawListElements`, re-source at the edge) — and a MAP
+// stream (a `mapValue` head — a map orders by its sorted entry-set, `orderMapStreamValue`). It DECLINES (→
+// the inline SQL fold, which already covers these, or fail-closed):
 //  - a SCALAR stream (`values('age').order()`) — a plain `value` head SQLite orders by storage class;
-//  - an element-membered list — the barrier ships MATERIALIZED elements to JS (the rowid is gone once they
-//    round-trip through JSON), so the result cannot re-enter the graph. A rare, non-corpus shape, so it
-//    stays a clean fail-closed decline (never a wrong answer).
+//  - a non-recoverable element leaf (`property`/`mixed`-element) or a FEDERATED/merged source — same
+//    fail-closed reasons as the `Scope.local` barrier (no recoverable rowid / BoundGraph re-source not
+//    threaded).
 // Global `dedup()` is NOT this barrier's: the inline list RowShape already collapses a stream of lists.
 
 /** A bare GLOBAL `order()` step (no `Scope.local`, no `by()`, no option arms), and its position — the
@@ -155,7 +156,12 @@ export function buildOrderGlobalSegment(
   // The head decides list-vs-map-vs-scalar. A `jsonbList` head carries one list per traverser (LIST
   // stream); a `mapValue` head one map (MAP stream). A scalar `value` head is the SQL path's (SQLite
   // orders scalars by storage class), so both `valueHead` and `mapHead` decline it here.
-  const lowered = lowerToRel(steps.slice(0, at), lowering);
+  //
+  // Built RAW (`rawListElements`) like the `Scope.local` head: element members frame as rowids so an
+  // element-membered list stream round-trips; byte-identical for a scalar stream, and inert for the MAP
+  // branch (the flag only touches list framing).
+  const headOpts: Lowering = { ...lowering, rawListElements: true };
+  const lowered = lowerToRel(steps.slice(0, at), headOpts);
   const tail = steps.slice(at + 1);
   // `nest` re-plans the tail rooted at the re-injected (sorted) values, so a barrier the tail holds — a
   // `fold().asString(local)` after a map order — is reached (the fold path having declined it). Only where
@@ -163,20 +169,26 @@ export function buildOrderGlobalSegment(
   const listHead = valueHead(lowered);
   if (listHead && listHead.shape.kind === 'jsonbList') {
     const of = listHead.shape.items;
-    // An element leaf cannot round-trip (see the decline note above).
-    if (hasElementLeaf(of)) return null;
-    // Re-inject each list under the pre-barrier member shape, unchanged — a global `order()` only reorders
-    // the stream, not any list's contents. A following list op reads the members correctly.
+    // ELEMENT members round-trip ONLY as recoverable base-graph rowids — same fail-closed gate as the
+    // `Scope.local` barrier: a `property`/`mixed`-element leaf has no rowid, and a federated/merged source
+    // re-sources via `BoundGraph` (not the resume's BaseGraph default) which is not threaded yet.
+    if (hasElementLeaf(of)) {
+      if (lowering.source || lowering.mergedGraphs?.length) return null;
+      if (!recoverableElements(of)) return null;
+    }
+    // Re-inject each list under the pre-barrier member shape (element leaves intact — the head demoted them
+    // only for its SQL), unchanged — a global `order()` only reorders the stream, not any list's contents.
+    // A following list op reads the members correctly (element members re-source from their rowids).
     return buildValueStreamTransformSegment(steps, at, lowering, orderStreamValue,
       (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order', valueHead,
-      planTail && ((sorted) => planTail(tail, listSeed(of, sorted))));
+      planTail && ((sorted) => planTail(tail, listSeed(of, sorted))), headOpts);
   }
   // A MAP stream: sort by the sorted-entry-set order (`orderMapStreamValue`) and re-inject each map's pairs
   // array under the self-describing map framing (`inject($map)`'s shape).
   if (mapHead(lowered)) {
     return buildValueStreamTransformSegment(steps, at, lowering, orderMapStreamValue,
       (maps, s, from, opts) => lowerMapResumeOf(maps, s, from, opts), 'order', mapHead,
-      planTail && ((sorted) => planTail(tail, mapSeed(sorted))));
+      planTail && ((sorted) => planTail(tail, mapSeed(sorted))), headOpts);
   }
   return null;
 }

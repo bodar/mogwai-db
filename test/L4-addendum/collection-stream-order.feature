@@ -89,3 +89,26 @@ Feature: mogwai addendum — order() (GLOBAL) over a STREAM OF LISTS (JS ORDERAB
       | m[{"name":"l[marko]","age":"l[d[29].i]"}] |
       | m[{"name":"l[josh]","age":"l[d[32].i]"}] |
       | m[{"name":"l[peter]","age":"l[d[35].i]"}] |
+
+  # An ELEMENT-membered list STREAM — unfold a Map<K,List<vertex>>'s values into a stream of vertex-lists,
+  # then order() the whole stream. Like the Scope.local barrier, element members are carried as rowids and
+  # re-source at the edge, so the sorted stream re-enters the graph. The assertion is the order-independent
+  # name multiset after unfold/read (reference-safe: order()'s stream sort compares vertex-lists element-
+  # wise by id, but each inner list's order is out()'s, unspecified in the reference); the exact sorted
+  # structure is regression-locked in test/compiler/nested-element-order.exec.test.ts.
+  @gap:stream-order
+  Scenario: g_V_group_byName_byXoutFoldX_selectValues_unfold_order_unfold_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("name").by(__.out().fold()).select(Column.values).unfold().order().unfold().values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | josh |
+      | lop |
+      | lop |
+      | ripple |

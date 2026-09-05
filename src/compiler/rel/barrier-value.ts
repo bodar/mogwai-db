@@ -84,8 +84,12 @@ export function buildValueStreamTransformSegment(
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
   nest?: (transformed: readonly unknown[]) => Plan | null,
+  // The head lowers under `headOpts`, the resume always under the plain `lowering` — a global `order()`
+  // over an element-membered list stream builds its HEAD with `rawListElements` (element members framed as
+  // rowids for the round-trip) which the RESUME's wire read must not inherit. See the per-row shell.
+  headOpts: Lowering = lowering,
 ): SegmentPlan | null {
-  const head = headOf(lowerToRel(steps.slice(0, at), lowering));
+  const head = headOf(lowerToRel(steps.slice(0, at), headOpts));
   if (!head) return null;
   return {
     kind: 'segment',

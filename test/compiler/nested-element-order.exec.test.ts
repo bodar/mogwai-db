@@ -49,4 +49,17 @@ describe('order/dedup(Scope.local) over an element-membered nested list', () => 
     // Two vertex-lists: person [1,2,4,6] and software [3,5]; sorted [1,…] < [3,…].
     expect(ids(r)).toEqual([[[1, 2, 4, 6], [3, 5]]]);
   });
+
+  // GLOBAL order() over an element-membered list STREAM — the neighbouring combination (unfold the values
+  // to a stream of vertex-lists, then order the whole stream). Same rowid carriage as Scope.local.
+  test('global order() sorts a STREAM of element-lists by ORDERABILITY, members re-source', async () => {
+    const r = await framed(`${P}.unfold().order()`);
+    // Four traversers (one per value-list), sorted as a stream: [] < [2,3,4] < [3] < [3,5].
+    expect(ids(r)).toEqual([[], [2, 3, 4], [3], [3, 5]]);
+  });
+
+  test('global order() over an element-list stream then unfold/read: the re-sourced name multiset', async () => {
+    const r = await framed(`${P}.unfold().order().unfold().values("name")`);
+    expect([...r].sort()).toEqual(['josh', 'lop', 'lop', 'lop', 'ripple', 'vadas']);
+  });
 });
