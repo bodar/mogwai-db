@@ -132,7 +132,6 @@ Feature: mogwai addendum — property(Map) is sugar for one property() per entry
   # A map VALUE may be a nested traversal — `mapEntry : mapKey COLON genericLiteral` admits
   # `nestedTraversal` — and it resolves per driver element exactly as `property(k, __.trav)` does.
   @gap:property-map-form
-  @Unsupported
   Scenario: g_V_propertyXmap_with_traversal_valueX
     Given the modern graph
     And the traversal of

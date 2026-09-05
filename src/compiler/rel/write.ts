@@ -10,7 +10,7 @@ import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/type
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { arg, isNested } from '../../gremlin/frontend.ts';
-import type { ChildSeam } from './child.ts';
+import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
@@ -678,6 +678,38 @@ function propertyStatements(
  * DECLINES (`false`) where the value body does not lower to a SCALAR — an element/list/map result is
  * not a scalar property value — which the caller turns into `null`, the ordinary miss.
  */
+/**
+ * A runtime value body → the (owner, value) rows to write, resolved per owner through whichever child
+ * arm fits its cardinality — plus whether the body can yield MANY per owner (which decides the >1 raise).
+ *
+ *  - **`child.rows`** where the body may yield many (`__.values('k')`, `__.out().values('k')`): one row
+ *    per result, keyed by the `origin` channel = the owner id. `mayBeMulti` true.
+ *  - **`child.scalar`** where the body reduces to ONE (`__.out().count()`, `__.sum()`, an endpoint) —
+ *    `child.rows` declines a reducing barrier (it sheds the origin), but the value is exactly one, so the
+ *    correlated scalar is the right shape. Its result rides on a fresh `(origin, v, vtype)` relation
+ *    projected OVER `owners` (so the correlation stays in scope), and an unproductive owner is filtered
+ *    out — the reference's 0-result skip, as an absent row. `mayBeMulti` false.
+ *
+ * `null` declines: a non-scalar result (an element/list/map value is not a property value), or a
+ * reducer whose productivity the arm cannot state (a 0-result would be indistinguishable from a value).
+ */
+function resolveRuntimeValue(
+  body: readonly IRStep[], owners: Rel, elem: Elem, child: ChildSeam, aliases: AliasMap, fresh: Minter,
+): { readonly rel: Rel; readonly origin: string; readonly mayBeMulti: boolean } | null {
+  const rows = child.rows(body, owners, elem, aliases);
+  if (rows && rows.framing.kind === 'scalar') return { rel: rows.rel, origin: rows.origin, mayBeMulti: true };
+  const host: ChildHost = { kind: 'element', id: col(owners.id, 'id'), elem, row: { rel: owners, aliases } };
+  const produced = child.scalar(body, host);
+  if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !produced.present) return null;
+  const valued = make.project({
+    id: fresh('rv'), input: owners, channels: [],
+    type: typeOf(meta('origin', 'int'), meta('v', 'any', true), meta('vtype', 'text', true), meta('present', 'int', true)),
+    exprs: [['origin', col(owners.id, 'id')], ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')], ['present', produced.present]],
+  });
+  const seed = make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: col(valued.id, 'present') });
+  return { rel: seed, origin: 'origin', mayBeMulti: false };
+}
+
 function runtimePropertyStatements(
   elem: Elem, owners: Rel, ids: Rel, write: PropertyRuntimeSet, bind: Binder, fresh: Minter,
   child: ChildSeam, aliases: AliasMap, guard: Guarder,
@@ -686,13 +718,14 @@ function runtimePropertyStatements(
   const spec = PROPERTY_TABLE.vertex;
   const key = propertyKeyExpr(write.key, write.keyName);
 
-  // THE VALUE, PER OWNER — the ordinary fold run over the owners snapshot, one row per child result,
-  // carrying an `origin` channel = the owner id. A non-scalar result (an element/list/map value) is
-  // not a property value, so it declines.
-  const rows = child.rows(write.body, owners, elem, aliases);
-  if (!rows || rows.framing.kind !== 'scalar') return false;
-  const valueRel = rows.rel;
-  const owner = (rel: Rel): Expr => col(rel.id, rows.origin);
+  // THE VALUE, PER OWNER — resolved through whichever child arm fits the body's cardinality
+  // (`resolveRuntimeValue`): `child.rows` for a many-per-owner body, `child.scalar` for a
+  // reducing/single one. `null` declines (a non-scalar result, or a reducer whose productivity is
+  // unknowable).
+  const resolved = resolveRuntimeValue(write.body, owners, elem, child, aliases, fresh);
+  if (!resolved) return false;
+  const { rel: valueRel, origin, mayBeMulti } = resolved;
+  const owner = (rel: Rel): Expr => col(rel.id, origin);
   // The stored Gremlin type rides in a `vtype` column on a `values()`-shaped scalar stream (source.ts).
   // Read it off whichever relation the source projects OVER (`seed` below), never the grandparent
   // `valueRel` — a `Col` names a relation in direct scope, which the RelIR checker enforces.
@@ -727,17 +760,20 @@ function runtimePropertyStatements(
   // effective cardinality resolves `single`. `cardinalityOf(owner, key, write.cardinality)` is that
   // per-owner answer, so declared-single fires on any owner with >1, declared-list/set never fires,
   // and undeclared fires only where the element itself resolves single — reference-exact in one guard.
-  const counts = make.aggregate({
-    id: fresh('rc'), input: valueRel, channels: [], type: typeOf(meta('origin', 'int'), meta('n', 'int')),
-    groupBy: [owner(valueRel)], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
-  });
-  const offending = make.filter({
-    id: fresh('rf'), input: counts, channels: [], type: counts.type,
-    pred: and({ kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) },
-      eq(cardinalityOf(col(counts.id, 'origin'), key, write.cardinality, fresh), text('single'))),
-  });
-  guard(make.project({ id: fresh('p'), input: offending, channels: [], type: typeOf(meta('origin', 'int')), exprs: [['origin', col(offending.id, 'origin')]] }),
-    { message: 'Single-cardinality property requires exactly one value, but the traversal produced more than one', raiseWhen: 'rows' });
+  // Only a MANY-per-owner body can overstep; a reducing/scalar one is one value by construction.
+  if (mayBeMulti) {
+    const counts = make.aggregate({
+      id: fresh('rc'), input: valueRel, channels: [], type: typeOf(meta('origin', 'int'), meta('n', 'int')),
+      groupBy: [owner(valueRel)], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+    });
+    const offending = make.filter({
+      id: fresh('rf'), input: counts, channels: [], type: counts.type,
+      pred: and({ kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) },
+        eq(cardinalityOf(col(counts.id, 'origin'), key, write.cardinality, fresh), text('single'))),
+    });
+    guard(make.project({ id: fresh('p'), input: offending, channels: [], type: typeOf(meta('origin', 'int')), exprs: [['origin', col(offending.id, 'origin')]] }),
+      { message: 'Single-cardinality property requires exactly one value, but the traversal produced more than one', raiseWhen: 'rows' });
+  }
 
   // A `set` write (declared, or the element's default) does not re-insert a value already present.
   // Expressed as a filter on the value ROWS — the same per-element `!= 'set' OR NOT EXISTS` the

@@ -44,7 +44,6 @@ Feature: mogwai addendum — a property() tail after mergeV/mergeE
 
   # The tail's value resolves at the MERGED element, not at the incoming driver.
   @gap:merge-property-tail
-  @Unsupported
   Scenario: g_V_mergeVXlabel_person_name_markoX_propertyXdeg_bothE_countX
     Given the modern graph
     And the traversal of

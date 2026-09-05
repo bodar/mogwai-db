@@ -85,6 +85,14 @@ describe('property(k, __.trav) — correlated per-row value', () => {
     expect(out.sort()).toEqual(['josh', 'vadas']);
   });
 
+  test('a REDUCER value (count) resolves per owner via the child.scalar fallback', async () => {
+    // __.out('knows').count() is a reducing barrier — child.rows declines it (loses origin), so it
+    // resolves through child.scalar: one value per owner, correlated. marko→2, vadas/josh→0 (count is
+    // always productive, so every vertex gets a deg).
+    const out = await values("g.V().property('deg', __.out('knows').count()).values('deg')", twoKnows);
+    expect(out.map(Number).sort((a, b) => a - b)).toEqual([0, 0, 2]);
+  });
+
   test('the post-write FTS refresh indexes a runtime-written value', () => {
     // A runtime value is not indexed in the compiled plan; the refresh derives its property_fts rows
     // from the stored tree. Asserted at the index directly (a store-level check), like fts-index.test.
