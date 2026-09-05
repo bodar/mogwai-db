@@ -384,9 +384,9 @@
     "bound": 0
   },
   "mergeV": {
-    "binds": 6,
-    "bytes": 1413,
-    "compiler": 45,
+    "binds": 11,
+    "bytes": 1891,
+    "compiler": 112,
     "bound": 0
   },
   "min": {

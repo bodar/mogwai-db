@@ -1,8 +1,8 @@
 # Correlated merge search — build plan
 
-**Status (2026-09-05): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES) and 4a (map-valued
-`mergeV`, scalar string-key maps) LANDED on trunk; the rest of the map-valued-driver substrate (4b token
-keys → corpus, 4c mergeE + general traversal + whole-map raise) remains.** A fail-closed safety fix landed
+**Status (2026-09-05): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES), 4a (map-valued
+`mergeV`, scalar string-key maps) and 4b (map-valued `mergeV` with a `T.label` key → +2 L3) LANDED on
+trunk; 4c (map-valued mergeE + the general map-producing traversal + the whole-map 0-result raise) remains.** A fail-closed safety fix landed
 first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
 replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
 turned out to be ONE substrate** — see the 3+4 entry in the build order.
@@ -187,12 +187,19 @@ endpoints):
      `test/L4-addendum/merge-search-map-vertex.feature`, `test/merge-search-map-vertex.test.ts`. Deferred:
      token keys (below), a LIST-valued map (`valueMap()` — stored-scalar-vs-list never compares equal), a
      RUNTIME arm value (roots at the map driver, needs a map host).
-   - **4b — TOKEN keys (`T.label`/`T.id`) in the map** → the CORPUS scenarios (`inject([T.label:…, name:…])
-     .mergeV()`). ⚠️ Prerequisite in the SHARED map producer: `mapLiteralBlob` (`map.ts:1056`) DECLINES a
-     token key today (the deferral the module doc names), so `inject([T.label:…])` does not even produce a
-     stream — extend the producer to encode `tokenKey` entries, with care for the map TAIL's blast radius
-     (`keyMatches` would read a `T.label` token as a property key `'label'`). Then `mergeVFromMap` narrows
-     by the map's label (dynamic `hasLabel` over `vertex_labels`) and takes the create label from it.
+   - ✅ **4b — LANDED — TOKEN keys (`T.label`) in the map** → the CORPUS scenarios. `mapLiteralBlob`
+     (`map.ts`) now encodes a `T` token key as `{t:'T', v:name}` — the SAME shape `valueMap(true)` already
+     emits (so the map tail's existing token handling covers it, no new blast radius; verified: token-key
+     `inject` maps flow through `select`/`unfold`/`count(local)` exactly as `valueMap(true)` maps do).
+     `mergeVFromMap` narrows the search by the map's label (a per-pair `hasLabel` EXISTS over
+     `vertex_labels`, alongside the string-property match) and labels the created vertex from it (a
+     data-sized dynamic label intern — `internLabels`' upsert idiom over the created maps, then a
+     link-by-name). Token pairs are excluded from the property match and the property create. A `T.id` in
+     the map is REFUSED (a fail-closed guard — search/create by id is separate). **L3 1832 → 1834** (both
+     `inject([T.label:…, name:…]…).mergeV()` / `.mergeV(__.identity())` corpus scenarios now pass). Tests
+     added to `test/merge-search-map-vertex.{feature,test.ts}`. Deferred: `T.id`; a multi-label map value;
+     the compound-slice `mergeV(__.select("m").limit(Scope.local,1).unfold())` corpus form (`resolveMergeArg`
+     still declines the local-slice arm).
    - **4c — map-valued `mergeE`** (`inject(map).mergeE()`, `select("m").mergeE()`) — the edge host, endpoints
      from the map's `Direction` keys; the general map-producing traversal (`out().project(…)`,
      `select(dynMap)`) + the whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` → throw).

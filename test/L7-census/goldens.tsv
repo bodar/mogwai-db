@@ -1317,6 +1317,8 @@ ran	6	6	7158dac8e5900271	6af356878e5039b2	g.inject([3i,"three"]).product(["five"
 ran	1	1	57f54a886fb3835b	9193319c63afd0f7	g.inject([5,8,10],[10,7]).all(P.gte(7))
 ran	1	1	57f54a886fb3835b	9193319c63afd0f7	g.inject([5,8,10],[10,7]).any(P.eq(7))
 ran	1	1	57f54a886fb3835b	9193319c63afd0f7	g.inject([5,8,10],[10,7]).none(P.lt(7))
+ran	2	2	950db9f094663505	882386c58f05dadb	g.inject([T.label:"person", name:"marko"], [T.label:"person", name:"stephen"]).mergeV()
+ran	2	2	950db9f094663505	882386c58f05dadb	g.inject([T.label:"person", name:"marko"], [T.label:"person", name:"stephen"]).mergeV(__.identity())
 ran	1	1	9c9050625c362211	9755fe03e32a39b1	g.inject([name:"marko",age:null]).select("name","age")
 ran	1	1	f206fba015ac1dc1	be594e07228dc7fd	g.inject([null,"a",null,"b"]).conjoin("+")
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.inject([null,"abc"]).all(TextP.startingWith("a"))

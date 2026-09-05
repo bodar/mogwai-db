@@ -2546,6 +2546,32 @@ export function mergeVFromMap(
   const driverMap = col(carrier.id, MAP_COL);
   const ext = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
   const jsonText = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+  // The four sides of a pair (`[keyNode, valNode]`, each a `{t,v}` node): the key's type/value and the
+  // value's value/type. A STRING key is a property criterion; a `{t:'T', v:'label'}` key is the label.
+  const keyT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.t');
+  const keyV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.v');
+  const valV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.v');
+  const valT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.t');
+  const isToken = (p: Rel, name: 'label' | 'id'): Expr => and(eq(keyT(p), compilerText('T')), eq(keyV(p), compilerText(name)));
+  // The map's `T.label` value as a per-row scalar (NULL when the map names none) — narrows the search and
+  // labels the created vertex.
+  const mapLabelScalar = (mapCol: Expr): Expr => {
+    const p = pairsOf(mapCol, fresh);
+    const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isToken(p, 'label') });
+    return { kind: 'scalar', plan: make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta('lbl', 'any', true)), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('lbl', 'any', true)), exprs: [['lbl', valV(hits)]] }) }) };
+  };
+  // FAIL CLOSED on a `T.id` in the map — search-by-id / create-with-id is its own machinery (a per-driver
+  // id and its collision guards); until then a map carrying it REFUSES rather than silently ignoring the
+  // id criterion (a wrong answer). The guard fires per driver whose map holds a T.id.
+  const idProbe = pairsOf(driverMap, fresh);
+  guard(make.limit({
+    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
+      input: make.filter({ id: fresh('f'), input: carrier, channels: [], type: carrier.type,
+        pred: { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: idProbe, channels: [], type: idProbe.type, pred: isToken(idProbe, 'id') }) } }) }),
+  }), { message: 'mergeV with a T.id in a map-valued driver is not yet supported', raiseWhen: 'rows' });
 
   // THE MATCH — every vertex the driver's whole map is satisfied by. `allMatch` is NOT EXISTS a map entry
   // the candidate does NOT have (`has(k, v)` for every entry) — the dynamic-key form of `mergeVComputed`'s
@@ -2553,16 +2579,27 @@ export function mergeVFromMap(
   // every vertex, exactly as `V()` does (`searchVerticesTraversal` returns `g.V()` for an empty map).
   const allMatch = (candId: Expr): Expr => {
     const pairs = pairsOf(driverMap, fresh);
-    const keyNode = pairSide(col(pairs.id, PAIR.value), 'keys');
-    const valNode = pairSide(col(pairs.id, PAIR.value), 'values');
+    // A STRING property key satisfied by a stored property (vtype-aware compare).
     const vp = make.scan({ id: fresh('vp'), table: PROPERTY_TABLE.vertex.table, alias: fresh('rp'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
     const vpMatch = make.filter({
       id: fresh('f'), input: vp, channels: [], type: vp.type,
-      pred: and(and(eq(col(vp.id, 'node'), candId), eq(col(vp.id, 'key'), ext(keyNode, '$.v'))),
-        typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), ext(valNode, '$.v'), ext(valNode, '$.t'))),
+      pred: and(and(eq(col(vp.id, 'node'), candId), eq(col(vp.id, 'key'), keyV(pairs))),
+        typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), valV(pairs), valT(pairs))),
     });
-    const vpProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    const unsat = make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: { kind: 'exists', plan: vpProbe, negated: true } });
+    const propProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    // A `T.label` key satisfied by the candidate carrying that label (hasLabel over vertex_labels).
+    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const lb = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+    const vlJoin = make.join({ id: fresh('j'), left: vl, right: lb, join: 'inner', on: eq(col(vl.id, 'label'), col(lb.id, 'id')), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('id', 'int'), meta('name', 'text')) });
+    const vlMatch = make.filter({ id: fresh('f'), input: vlJoin, channels: [], type: vlJoin.type, pred: and(eq(col(vlJoin.id, 'node'), candId), eq(col(vlJoin.id, 'name'), valV(pairs))) });
+    const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    // A pair the candidate FAILS: a string property it lacks, or the T.label it does not carry. (A T.id
+    // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = no such pair.
+    const unsat = make.filter({
+      id: fresh('f'), input: pairs, channels: [], type: pairs.type,
+      pred: or(and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
+        and(isToken(pairs, 'label'), { kind: 'exists', negated: true, plan: labelProbe })),
+    });
     return { kind: 'exists', plan: unsat, negated: true };
   };
   const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
@@ -2613,14 +2650,38 @@ export function mergeVFromMap(
   // sanctioned data-sized write form): explode each created vertex's map into entries, KEEPING the
   // vertex id (`explodeMembers` carries the input row's columns), and project `(node, key, value, vtype)`.
   const { exploded } = explodeMembers(fenced(createdMaps, fresh), MAP_COL, PAIR, fresh);
+  // Only STRING-key pairs become properties — a `T.label`/`T.id` token pair is not a property (the label
+  // is written below; a `T.id` was refused by the guard). `exploded` carries the created vertex id.
+  const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
+    pred: eq(ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.t'), compilerText('string')) });
   const propRows = make.project({
-    id: fresh('p'), input: exploded, channels: [],
+    id: fresh('p'), input: propPairs, channels: [],
     type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [['node', col(exploded.id, 'id')], ['key', ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.v')],
-      ['value', ext(pairSide(col(exploded.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(exploded.id, PAIR.value), 'values'), '$.t')]],
+    exprs: [['node', col(propPairs.id, 'id')], ['key', ext(pairSide(col(propPairs.id, PAIR.value), 'keys'), '$.v')],
+      ['value', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.t')]],
   });
   const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.vertex.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
   bind(insert({ target: propTarget, cols: ['node', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'node')]] }));
+  // THE CREATED VERTEX'S LABEL, from the map's `T.label` (per created map). Intern the distinct label
+  // names — an upsert, `internLabels`' idiom, but data-sized over the created maps rather than a
+  // compile-time list — then link each created vertex to its label id by name. A map with no `T.label`
+  // yields NULL and contributes no row (the labelless default, as g.addV()). The `onCreate` CONSTANT
+  // label (below, `internLabels(createLabels.names)` ran above) is the fallback when the map names none.
+  const namedCreated = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('id', 'int'), meta('name', 'any', true)),
+    exprs: [['id', col(createdMaps.id, 'id')], ['name', mapLabelScalar(col(createdMaps.id, MAP_COL))]] });
+  const labelled = bind(make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
+    pred: { kind: 'binary', op: 'is not', left: col(namedCreated.id, 'name'), right: compilerNull('text') } }), true);
+  const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
+    input: make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelled.id, 'name')]] }) });
+  const labelsTable = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
+    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
+  const lbLookup = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+  const vlJoined = make.join({ id: fresh('j'), left: labelled, right: lbLookup, join: 'inner', on: eq(col(labelled.id, 'name'), col(lbLookup.id, 'name')), channels: [],
+    type: typeOf(meta('id', 'int'), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
+  const vlTarget = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  bind(insert({ target: vlTarget, cols: ['node', 'label'], channels: [], type: typeOf(), returning: [],
+    source: make.project({ id: fresh('p'), input: vlJoined, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(vlJoined.id, 'id')], ['label', col(vlJoined.id, 'lid')]] }) }));
   // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the creation).
   for (const write of createExtra) if (!propertyStatements('vertex', idsOf(created, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 

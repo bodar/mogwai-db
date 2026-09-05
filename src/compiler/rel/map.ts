@@ -7,6 +7,7 @@ import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
+import { isTokenArg } from '../../gremlin/frontend.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { withChannel } from '../../channels.ts';
 import { inferredVtype, LIST_COL, listNodeExpr } from './list.ts';
@@ -1047,13 +1048,23 @@ export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost
  *  keys and exact tails arrive with the write substrate that owns `mergeV`/`mergeE`. */
 export function mapLiteralBlob(value: unknown, type: TypeNode | null, paramName: string | null = null): Expr | null {
   if (!(value instanceof Map)) return null;
-  const node = valueNodeOf(value, type);
-  if (node.t !== 'map') return null;
-  // Every key must be a plain `{t:'string', v:<string>}` node: that is the only key the map tail's own
-  // reads (`mapKey` matches `$[0].v` against a string, `mapSide` collects the key nodes) can resolve
-  // today, and a `T` token or a typed key would frame from a malformed node.
-  const pairs = (node as { readonly v: readonly (readonly [ValueNode, ValueNode])[] }).v;
-  if (!pairs.every(([key]) => key.t === 'string' && typeof key.v === 'string')) return null;
+  const entries = type != null && typeof type === 'object' && 'entries' in type ? (type as { entries: Record<string, { key?: TypeNode | null; value?: TypeNode | null }> }).entries : {};
+  // Each key is a `{t,v}` node. A plain STRING property key is `{t:'string', v:name}`; a `T` token key
+  // (`T.id`/`T.label`) is `{t:'T', v:name}` — the SAME encoding `valueMap(true)` emits (`tokenKey`), so a
+  // token-keyed literal reads through the map tail exactly as a `valueMap(true)` map does, and the
+  // map-VALUED merge driver (`write.ts`) can pull the label/id out. `valueNodeOf` cannot spell a token
+  // key, so it is encoded here from the ORIGINAL Map key. Every other key (a Direction token — the mergeE
+  // map driver's, a nested/typed key) is deferred, declining the whole blob rather than seeding a corrupt one.
+  const pairs: (readonly [{ t: string; v: unknown }, ValueNode])[] = [];
+  for (const [k, vv] of value) {
+    let keyNode: { t: string; v: unknown };
+    if (isTokenArg(k) && (k.token === 'id' || k.token === 'label')) keyNode = { t: 'T', v: k.token };
+    else if (typeof k === 'string') keyNode = { t: 'string', v: k };
+    else return null;
+    let valNode: ValueNode;
+    try { valNode = valueNodeOf(vv, entries[String(k)]?.value ?? null); } catch { return null; }
+    pairs.push([keyNode, valNode]);
+  }
   let json: string;
   try { json = JSON.stringify(pairs); } catch { return null; }
   // `MAP_COL` is JSONB, exactly what `mapPayload` reads back through `json()`. A bound map uses the

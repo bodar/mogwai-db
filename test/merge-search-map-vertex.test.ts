@@ -109,3 +109,44 @@ describe('map-valued mergeV — inject([k:v]).mergeV() / mergeV(__.identity())',
     await expect(run(s, "g.V().mergeV()")).rejects.toThrow();
   });
 });
+
+// TOKEN keys in the map (T.label) — the corpus map-valued scenarios (inject([T.label:…, name:…]).mergeV()).
+// The map producer (mapLiteralBlob) now encodes a T token key as {t:'T', v:name}, the same shape
+// valueMap(true) emits; the search narrows by the label (hasLabel over vertex_labels) and the create
+// labels the vertex from it. A T.id in the map is refused (fail closed) — search/create by id is separate.
+describe('map-valued mergeV with a T.label key', () => {
+  const person = ["g.addV('person').property('name','marko').property('age',29)"];
+
+  test('MATCH by [T.label, name] finds the labelled vertex, creates nothing', async () => {
+    const s = store(person);
+    expect(await run(s, "g.inject([T.label:'person',name:'marko']).mergeV().values('name')")).toEqual(['marko']);
+    expect(await run(s, 'g.V().count()')).toEqual([1]);
+  });
+
+  test('CREATE labels the new vertex from the map T.label', async () => {
+    const s = store(person);
+    expect(await run(s, "g.inject([T.label:'person',name:'stephen']).mergeV().values('name')")).toEqual(['stephen']);
+    expect(await run(s, "g.V().has('person','name','stephen').count()")).toEqual([1]);
+    expect(await run(s, "g.V().has('name','stephen').label()")).toEqual(['person']);
+    expect(await run(s, 'g.V().count()')).toEqual([2]);
+  });
+
+  test('the LABEL narrows the search — [software, marko] does not match the person marko, so it creates', async () => {
+    const s = store(person);
+    expect(await run(s, "g.inject([T.label:'software',name:'marko']).mergeV().count()")).toEqual([1]);
+    expect(await run(s, "g.V().has('software','name','marko').count()")).toEqual([1]);
+    expect(await run(s, "g.V().has('name','marko').count()")).toEqual([2]); // person marko + software marko
+  });
+
+  test('the corpus form — two maps, mergeV(__.identity()): one matches, one creates', async () => {
+    const s = store(person);
+    expect((await run(s, "g.inject([T.label:'person',name:'marko'],[T.label:'person',name:'stephen']).mergeV(__.identity()).values('name')")).sort())
+      .toEqual(['marko', 'stephen']);
+    expect(await run(s, 'g.V().count()')).toEqual([2]);
+  });
+
+  test('a T.id in the map is refused (fail closed — search/create by id is a separate feature)', async () => {
+    const s = store(person);
+    await expect(run(s, "g.inject([T.id:5,name:'x']).mergeV()")).rejects.toThrow(/T.id/);
+  });
+});

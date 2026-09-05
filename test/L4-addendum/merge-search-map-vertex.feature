@@ -87,3 +87,56 @@ Feature: mogwai addendum — a map-VALUED mergeV driver (the traverser IS the me
     When iterated to list
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().has(\"person\",\"name\",\"kuzu\").has(\"lang\",\"gremlin\")"
+
+  # A T.label key in the map: the search narrows by label, and a miss creates a vertex carrying it.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_person_name_markoX_mergeV_matches
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:"person",name:"marko"]).mergeV().values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+    And the graph should return 6 for count of "g.V()"
+
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_person_name_kuzuX_mergeV_creates_with_label
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:"person",name:"kuzu"]).mergeV().label()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | person |
+    And the graph should return 1 for count of "g.V().has(\"person\",\"name\",\"kuzu\")"
+
+  # The LABEL narrows the search — a software marko does not match the person marko, so it creates.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_software_name_markoX_mergeV_label_narrows
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:"software",name:"marko"]).mergeV().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"software\",\"name\",\"marko\")"
+
+  # A T.id in a map-valued driver is refused (fail closed) — search/create by id is a separate feature.
+  @gap:merge-search-map-vertex
+  @Unsupported
+  Scenario: g_injectXid_99_name_xX_mergeV_is_refused
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.id:99,name:"x"]).mergeV()
+      """
+    When iterated to list
+    Then the result should be empty
