@@ -83,6 +83,47 @@ function pageRankScores(
   return ids.map((id) => ({ id, value: pr.get(id)! }));
 }
 
+/** Weighted PageRank (GDS `relationshipWeightProperty`) — the oracle for the weighted SQL. Each edge
+ *  u→v carries a weight; u sends α·pr[u]·w(u,v) / Σ_x w(u,x). A vertex whose total out-weight is 0 (no
+ *  out-edges, or all-zero weights) is dangling (its α·rank teleports) — matching the SQL's
+ *  `HAVING SUM(w) > 0`. */
+function weightedPageRankScores(
+  nodes: readonly { readonly id: number }[],
+  edges: readonly { readonly src: number; readonly tgt: number; readonly w: number }[],
+  alpha: number,
+): readonly IdValue[] {
+  const ids = nodes.map((n) => n.id);
+  const N = ids.length;
+  if (N === 0) return [];
+  const out = new Map<number, { tgt: number; w: number }[]>(ids.map((id) => [id, []]));
+  for (const e of edges) out.get(e.src)?.push({ tgt: e.tgt, w: e.w });
+  const wod = new Map<number, number>(ids.map((id) => [id, out.get(id)!.reduce((s, e) => s + e.w, 0)]));
+  const pr = new Map<number, number>(ids.map((id) => [id, 0]));
+  let messages = new Map<number, number>(ids.map((id) => [id, 0]));
+  let teleport = 1.0;
+  const EPSILON = 0.00001;
+  for (let k = 1; k <= 20; k++) {
+    const localTerminal = teleport > 0 ? teleport / N : 0;
+    const nextMessages = new Map<number, number>(ids.map((id) => [id, 0]));
+    let nextTeleport = 0;
+    let convergence = 0;
+    for (const id of ids) {
+      const rank = (k === 1 ? 0 : messages.get(id)!) + localTerminal;
+      convergence += Math.abs(rank - pr.get(id)!);
+      pr.set(id, rank);
+      nextTeleport += (1 - alpha) * rank;
+      const send = alpha * rank;
+      const total = wod.get(id)!;
+      if (total > 0) for (const e of out.get(id)!) nextMessages.set(e.tgt, nextMessages.get(e.tgt)! + send * e.w / total);
+      else nextTeleport += send;
+    }
+    teleport = nextTeleport;
+    messages = nextMessages;
+    if (convergence < EPSILON) break;
+  }
+  return ids.map((id) => ({ id, value: pr.get(id)! }));
+}
+
 /** Peer-pressure clustering: each vertex adopts the max-vote cluster among {itself} ∪ {voters}, ties to
  *  the smallest id string, to a fixpoint — the oracle for peerPressure. */
 function peerPressureClusters(
@@ -121,6 +162,8 @@ function peerPressureClusters(
 const store = () => seeded(MODERN_SEED);
 const nodesOf = (s: ReturnType<typeof store>) => s.query<{ id: number; ext: string | number }>('SELECT id, COALESCE(uid, id) AS ext FROM nodes');
 const outE = (s: ReturnType<typeof store>) => s.query<{ src: number; tgt: number }>('SELECT src, tgt FROM edges');
+const weightedOutE = (s: ReturnType<typeof store>) => s.query<{ src: number; tgt: number; w: number }>(
+  "SELECT src, tgt, COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = 'weight'), 0) AS w FROM edges");
 const bothE = (s: ReturnType<typeof store>) => outE(s).flatMap((e) => [{ src: e.src, tgt: e.tgt }, { src: e.tgt, tgt: e.src }]);
 
 /** id → decorated value, via the SQL execution path (project id + the algorithm's key). */
@@ -141,6 +184,14 @@ describe('OLAP SQL-per-round ≡ JS oracle (whole-vector differential)', () => {
     const s = store();
     const oracle = new Map(pageRankScores(nodesOf(s).map((n) => ({ id: n.id })), outE(s), 0.85).map((t) => [t.id, t.value as number]));
     const sql = await decorated(s, 'pageRank()', 'gremlin.pageRankVertexProgram.pageRank');
+    for (const [id, v] of sql) expect(Math.abs((v as number) - oracle.get(id)!)).toBeLessThan(1e-9);
+    expect(sql.size).toBe(oracle.size);
+  });
+
+  test('pageRank weighted (relationshipWeightProperty) — scores agree to 1e-9', async () => {
+    const s = store();
+    const oracle = new Map(weightedPageRankScores(nodesOf(s).map((n) => ({ id: n.id })), weightedOutE(s), 0.85).map((t) => [t.id, t.value as number]));
+    const sql = await decorated(s, 'pageRank().with("relationshipWeightProperty","weight")', 'gremlin.pageRankVertexProgram.pageRank');
     for (const [id, v] of sql) expect(Math.abs((v as number) - oracle.get(id)!)).toBeLessThan(1e-9);
     expect(sql.size).toBe(oracle.size);
   });

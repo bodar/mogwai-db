@@ -426,7 +426,7 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
 | pageRank | `dampingFactor` (0.85, `centrality-configs/…/pagerank/PageRankConfig.java`) | yes | — |
 | | `maxIterations` (20, `…/pagerank/RankConfig.java:46`) | yes (`~tinkerpop.pageRank.times`) | — |
 | | `tolerance` (1e-7, `RankConfig.java:40`) | hardcoded 1e-5, not settable | **add** |
-| | `relationshipWeightProperty` (null) | no | **add** (weighted messages) |
+| | `relationshipWeightProperty` (null) | **yes** (landed 2026-09-05) | — (weighted messages) |
 | | `sourceNodes` (`[]`, personalized) | no (our seed = traverser count, different) | **add** |
 | | `scaler` (None; Min/Max/Mean/Log/StdScore) | no | **add** |
 | articleRank | `dampingFactor`/`maxIterations`/`tolerance` | yes/yes/yes | — |
@@ -474,10 +474,12 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
 
 ### Implementation priority (follow-on tranches)
 
-1. **`relationshipWeightProperty` — one substrate, many algorithms.** A weight-aware `adjacencyCte`
-   (generalizing `shortestPathAdjacencyCte`, which already reads an edge weight) unlocks weighted
-   pageRank, articleRank, betweenness, degree, wcc-`threshold`, and weighted LPA at once. Highest
-   leverage.
+1. **`relationshipWeightProperty` — one substrate, many algorithms.** ✅ Substrate LANDED 2026-09-05:
+   `weightedAdjacencyCte(scope, weightKey)` (the generalized+renamed `shortestPathAdjacencyCte`, both now
+   built on the shared `directedAdjacency` scaffolding so the weight/hop/unweighted forms cannot drift),
+   with weighted **pageRank** as the first consumer (weighted out-degree `SUM(w) HAVING > 0`, message
+   `α·pr·w/Σw`; unweighted path byte-unchanged; proven ≡ a weighted JS oracle in `olap-differential`).
+   Remaining consumers to adopt it: articleRank, betweenness, degree, wcc-`threshold`, weighted LPA.
 2. **nodeSimilarity `topK`/`similarityCutoff`/`degreeCutoff`** — scalability wall today (dense output);
    all SQL tweaks (`WHERE`/`HAVING`/a per-source `ROW_NUMBER` cap).
 3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),

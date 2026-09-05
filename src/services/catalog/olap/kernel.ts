@@ -70,21 +70,41 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
 // reference implementations that once lived here are TEST-ONLY differential oracles and now live with
 // the test that uses them (`test/L2-sql/olap-differential.test.ts`), so `src/` holds only the SQL path.
 
-/** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". `out` reads
- *  edges as-is, `in` swaps, `both` unions both directions. The label filter (if any) is ONE json_each
- *  bind; the returned `labelBinds` are prepended to a statement's binds (before the run/round binds).
- *  A statement embedding `${cte}` once takes one copy of `labelBinds`. */
-export function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
+/** The ONE directed-`e(…)` builder every OLAP adjacency shares — the scope's direction (out reads
+ *  edges as-is, in swaps src/tgt, both unions) and the label filter, over a caller-chosen projection.
+ *  `colDecl` is the CTE's column list (`'src, tgt'`, `'src, tgt, w'`); `extra` is the SELECT suffix
+ *  after `src, tgt` (`''`, `', <w> AS w'`) applied identically to the forward and reversed selects. The
+ *  label filter is ONE json_each bind, prepended to a statement's binds before its run/round binds; a
+ *  `both` form repeats the filter so its bind repeats too (positional `?`). Extracted so the weight and
+ *  hop variants below cannot drift from the unweighted one. */
+function directedAdjacency(scope: EdgeScope, colDecl: string, extra: string): { cte: string; labelBinds: string[] } {
   const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
   const filter = scope.labels.length
     ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
-  const base = `SELECT src, tgt FROM edges${filter}`;
-  const body = scope.direction === 'out' ? base
-    : scope.direction === 'in' ? `SELECT tgt AS src, src AS tgt FROM edges${filter}`
-    : `${base} UNION ALL SELECT tgt AS src, src AS tgt FROM edges${filter}`;
-  // `both`/directional forms repeat the filter, so its bind repeats too (positional `?`).
+  const fwd = `SELECT src, tgt${extra} FROM edges${filter}`;
+  const rev = `SELECT tgt AS src, src AS tgt${extra} FROM edges${filter}`;
+  const body = scope.direction === 'out' ? fwd : scope.direction === 'in' ? rev : `${fwd} UNION ALL ${rev}`;
   const binds = scope.direction === 'both' ? [...labelBinds, ...labelBinds] : labelBinds;
-  return { cte: `e(src, tgt) AS (${body})`, labelBinds: binds };
+  return { cte: `e(${colDecl}) AS (${body})`, labelBinds: binds };
+}
+
+/** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". The
+ *  UNWEIGHTED form; a weighted algorithm uses {@link weightedAdjacencyCte}. */
+export function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
+  return directedAdjacency(scope, 'src, tgt', '');
+}
+
+/** A directed-adjacency CTE `e(src, tgt, w)` carrying each edge's WEIGHT — the shared substrate for
+ *  every `relationshipWeightProperty` OLAP algorithm (weighted pageRank/articleRank/degree/wcc/LPA) AND
+ *  for weighted shortest path. `weightKey` names an edge property read as the weight (COALESCE 0 for a
+ *  missing/absent value); `undefined` → the constant `1` (hop distance — the unweighted shortest-path
+ *  case, which still wants a `w` column). The key is a parsed literal (the user's Gremlin / a config
+ *  param naming a property), so it INLINES as a SQL literal — no bind (the bind rule, root CLAUDE.md);
+ *  the only bind is the optional label filter, as in {@link adjacencyCte}. */
+export function weightedAdjacencyCte(scope: EdgeScope, weightKey: string | undefined): { cte: string; labelBinds: string[] } {
+  const w = weightKey === undefined ? '1'
+    : `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${weightKey.replace(/'/g, "''")}'), 0)`;
+  return directedAdjacency(scope, 'src, tgt, w', `, ${w} AS w`);
 }
 
 // The barrier scratch is the general `barrier_state(run, round, scope, id, channel, cval)` — one row per
@@ -262,34 +282,17 @@ export const changedCount = (store: GraphStore, run: number, prev: Slot, next: S
 // channel needed. Negative/custom weights are legal (the reference's `distanceEqualsNumberOfHops` split;
 // GDS `BellmanFord`), so the bound is |V|-1 rounds with no Dijkstra prune.
 
-/** A shortest-path adjacency CTE `e(src, tgt, w)` — like `adjacencyCte` but carrying each edge's WEIGHT:
- *  the `distanceKey` property (COALESCE 0) when weighted, else the constant `1` (hop distance). A
- *  `distanceKey` is a parsed literal (the user's Gremlin), so it inlines as a SQL literal — no bind (the
- *  bind rule, root CLAUDE.md). The label filter stays a `json_each` bind, prepended like `adjacencyCte`'s. */
-export function shortestPathAdjacencyCte(scope: EdgeScope, distanceKey: string | undefined): { cte: string; labelBinds: string[] } {
-  const w = distanceKey === undefined ? '1'
-    : `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${distanceKey.replace(/'/g, "''")}'), 0)`;
-  const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
-  const filter = scope.labels.length
-    ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
-  const fwd = `SELECT src, tgt, ${w} AS w FROM edges${filter}`;
-  const rev = `SELECT tgt AS src, src AS tgt, ${w} AS w FROM edges${filter}`;
-  const body = scope.direction === 'out' ? fwd : scope.direction === 'in' ? rev : `${fwd} UNION ALL ${rev}`;
-  const binds = scope.direction === 'both' ? [...labelBinds, ...labelBinds] : labelBinds;
-  return { cte: `e(src, tgt, w) AS (${body})`, labelBinds: binds };
-}
-
 /** Relax shortest DISTANCE from a set of source vertices into `barrier_state` (scope = source, channel 0
  *  = dist), Bellman-Ford, entirely in SQL — reusing the two-slot `iterateInSql` driver and the sparse
  *  `changedOrNew` fixpoint. Weighted (a `distanceKey`) sums edge weights (REAL); unweighted (no key) sums
- *  hops (w=1). Seeds dist 0 at each source; each round writes the next slot with dist[s][v] = MIN(current,
- *  MIN over u→v of dist[s][u] + w(u,v)). Only REACHABLE (source, node) pairs get rows (an absent row is
- *  +∞). Returns the final slot; the dist relation stays SQL-resident for the path-reconstruction resume.
- *  Backstop |V| rounds (Bellman-Ford). */
+ *  hops (w=1) — both through the shared `weightedAdjacencyCte`. Seeds dist 0 at each source; each round
+ *  writes the next slot with dist[s][v] = MIN(current, MIN over u→v of dist[s][u] + w(u,v)). Only
+ *  REACHABLE (source, node) pairs get rows (an absent row is +∞). Returns the final slot; the dist
+ *  relation stays SQL-resident for the path-reconstruction resume. Backstop |V| rounds (Bellman-Ford). */
 export function relaxShortestPath(
   store: GraphStore, run: number, sourceIds: readonly number[], scope: EdgeScope, distanceKey: string | undefined,
 ): Slot {
-  const { cte, labelBinds } = shortestPathAdjacencyCte(scope, distanceKey);
+  const { cte, labelBinds } = weightedAdjacencyCte(scope, distanceKey);
   const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
   const seed = () => store.query(
     `${STATE_INSERT} SELECT ?, 0, s.value, s.value, 0, 0.0 FROM json_each(?) s`,

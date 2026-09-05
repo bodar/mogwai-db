@@ -128,6 +128,24 @@ describe('pageRank() — pageRank DECORATE barrier', () => {
     expect(scores.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 5); // pageRank scores sum to 1
   });
 
+  test('relationshipWeightProperty (GDS weighted PageRank) rescales the flow along edge weights', async () => {
+    const store = seeded(MODERN_SEED);
+    const proj = (rows: unknown[]): Record<string, number> => Object.fromEntries(rows
+      .map((m: any) => (m instanceof Map ? Object.fromEntries(m) : m))
+      .map((r: any) => [r.name as string, Number(r[KEY])]));
+    const q = (rw: string) => `g.V().pageRank()${rw}.project("name","${KEY}").by("name").by("${KEY}")`;
+    const unweighted = proj(await run(store, q('')));
+    const weighted = proj(await run(store, q('.with("relationshipWeightProperty","weight")')));
+    // Still a probability distribution (sums to 1), and it genuinely differs from unweighted.
+    expect(Object.values(weighted).reduce((a, b) => a + b, 0)).toBeCloseTo(1, 5);
+    // josh sends ripple 1.0 of its 1.4 out-weight (vs 1/2 unweighted), so weighting lifts ripple and
+    // pulls flow off lop (created ×0.4 from marko/josh, only peter's ×0.2 arrives full) — directional,
+    // fixture-robust checks rather than magic constants (the exact scores are pinned by olap-differential).
+    expect(weighted.ripple).toBeGreaterThan(unweighted.ripple);
+    expect(weighted.lop).toBeLessThan(unweighted.lop);
+    expect(weighted.lop).toBeGreaterThan(weighted.ripple); // lop still the sink every creator feeds
+  });
+
   test('bare values() (every key) includes the decorated score — the compute key persists', async () => {
     const store = seeded(MODERN_SEED);
     // The pageRank key is non-transient (VertexComputeKey.of(property, false)), so it is a real property
