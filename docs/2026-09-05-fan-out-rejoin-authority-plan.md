@@ -199,11 +199,20 @@ names (list-alias dedup key, the local/flatMap split).
 
 ### Phase D — the async-boundary frame authority (Codex sweep, Claude spec+review; Claude owns the path+encounter seed)
 
-- **D1.** Route `lowerForeignResume` and the value/list/map resumes to seed the FULL frame through
-  `Lowering.seed` (§4) rather than each hand-seeding a subset; build the composite
-  `tracksPath && demandsEncounter` seed that currently declines. Wide blast radius across `lower.ts`
-  resume functions, `segment.ts`, `foreign.ts`. Preferred form is the dissolving rewrite (re-enter the
-  fold), not a parallel hand-seed table.
+- ◑ **D1 (LOCATED — a focused follow-up; hard to VERIFY, so not a tail-end rush).** The concrete named
+  gap is the path+encounter combo decline at `lower.ts:2999`: `if (facts.tracksPath && facts.demandsEncounter)
+  return null;`. The seed would have to carry BOTH the path channel (position 0 off the landed id, as
+  `seedPath` does for the base source) AND the encounter (minted from the landed array order,
+  `foreignRelation(withOrder)`). The broader unification routes the bespoke resumes
+  (`valueResume`/`lowerForeignResume`) through the full-frame `Lowering.seed`/`valueSeed`/`listSeed`/`mapSeed`
+  machinery (3308-3338, landed 49b2ed5c) rather than each hand-seeding a subset (the boundary trace's
+  subset table). **Why a focused session, not a rushed dispatch:** the channel-obligations gate
+  (`checkChannels`, `src/rel/obligations.ts`) catches a DROPPED channel at build time, but NOT a wrongly-
+  VALUED one (a path seeded in the wrong position, an encounter off the wrong order) — and a witness needs
+  a federate/subgraph traversal that tracks `path()` AND orders mid-chain, which the federate test infra
+  makes non-trivial to construct. So D1 wants the reference in hand and the federate witness built FIRST,
+  then the seed. Preferred form is the dissolving rewrite (seed → re-enter the fold), not a parallel
+  hand-seed table.
 
 ## 8. Claude / Codex split & sequencing
 
