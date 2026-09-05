@@ -2978,6 +2978,35 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
 }
 
 /**
+ * A bound-source seed that carries BOTH a path AND an emission-order encounter — the composite the two
+ * disjoint branches (path-only / encounter-only) could not, and the `tracksPath && demandsEncounter`
+ * combination declined for. `input` carries `id` and the landed `FOREIGN_ORD` (a subgraph source form).
+ *
+ * PATH-PROJECT THEN RENUMBER, and it composes for one structural reason: the encounter mint is a
+ * `renumber`, whose `Window` may only EXTEND its input (§3.5), so the path column seeded in the first
+ * project rides through the renumber untouched. The path is seeded at position 0 off the landed id
+ * (exactly as the path-only seed), the encounter is `ROW_NUMBER() OVER (ORDER BY FOREIGN_ORD)` — the
+ * order the sibling EMITTED the rows (`SubgraphStep` populates its graph in the parent's encounter order,
+ * `vendor/tinkerpop/gremlin-core/.../step/sideEffect/SubgraphStep.java`). Channel order is
+ * `bulk < encounter < path` (`ROLE_ORDER`); `bulk` (=1) is inert (a path-tracking traverser never
+ * collapses) and carried only to match the shape the shared movement/leaf builders assume.
+ */
+function combinedPathEncounterSeed(input: Rel, elem: Elem, demandsPathLabels: boolean, fresh: Minter): Rel {
+  const withPath = withChannel(BULK, PATH_CHANNEL);
+  const seededPath = make.project({
+    id: fresh('bcp'), input, channels: withPath,
+    type: typeOf(meta('id', 'any', true), meta(FOREIGN_ORD, 'int'), ...carriedCols(withPath)),
+    exprs: [['id', col(input.id, 'id')], [FOREIGN_ORD, col(input.id, FOREIGN_ORD)],
+      ...withPath.map((channel) => [channel.col,
+        channel.role === 'bulk' ? compilerInt(1)
+          : seedPath({ kind: 'element', elem, id: col(input.id, 'id') }, demandsPathLabels)] as const)],
+  });
+  const channels = withChannel(withPath, ENCOUNTER);
+  return renumber(seededPath, [{ expr: col(seededPath.id, FOREIGN_ORD), dir: 'asc' }],
+    [meta('id', 'any', true), ...carriedCols(channels)], channels, fresh);
+}
+
+/**
  * THE RESUMED CHAIN — everything after a barrier `call()`, lowered over the rows it awaited.
  *
  * A barrier service answers on a Promise, so the executor drives the plan in segments: run the head,
@@ -3020,11 +3049,12 @@ export function lowerForeignResume(
   const ordersMidChain = steps.slice(from).some((s) => s.name === 'order');
   // `tracksPath` DOES have a source seed over a bound graph: the PATH channel is seeded at position 0
   // off the landed id (`seedPath` below, exactly as the base source seeds it), each hop EXTENDS it
-  // through the shared `movement`, and `path()` rejoins each position through `source.elementNode`. What
-  // is NOT built yet is a path chain that ALSO demands an encounter (the seed would have to carry both
-  // the path append and the order renumber), so that combination declines rather than seed a path
-  // without its order.
-  if (facts.tracksPath && facts.demandsEncounter) return null;
+  // through the shared `movement`, and `path()` rejoins each position through `source.elementNode`. A path
+  // chain that ALSO demands an encounter seeds BOTH — the path append AND the order renumber, path-project
+  // THEN renumber, which composes because a `Window` only EXTENDS its input (§3.5) so the path rides
+  // through untouched (`combinedPathEncounterSeed`). The one gate below is enough: a `demandsEncounter`
+  // with NO order source (neither a subgraph `FOREIGN_ORD` nor a mid-chain `order()`) declines whether or
+  // not a path is tracked — a rejoin/homogeneous list has no order to seed from.
   if (facts.demandsEncounter && !seedsEncounter && !ordersMidChain) return null;
   const boundSource = boundGraph(vertexBinding, edgeBinding);
   const boundCtx: ChainCtx = { ...ctx, source: boundSource };
@@ -3054,7 +3084,12 @@ export function lowerForeignResume(
   // one, because a collapse and an emission order are mutually exclusive (the base source seeds channels
   // by the same rule). A rejoin's per-parent pool / a homogeneous list stays id-only.
   const seed = facts.tracksPath
-    ? (() => {
+    ? (facts.demandsEncounter && seedsEncounter && !ordersMidChain
+      // BOTH a path AND an emission order: seed the path at position 0 and mint the encounter from the
+      // landed order (`FOREIGN_ORD`) — a mid-chain `order()` would mint it instead, so this is only the
+      // no-mid-order subgraph source form (the only one that carries `FOREIGN_ORD`).
+      ? combinedPathEncounterSeed(rejoined, streamElem, facts.demandsPathLabels, fresh)
+      : (() => {
       // The PATH channel seeded at position 0 (the source element), beside an inert `bulk` (=1) — a
       // path-tracking traverser never collapses (`pathCarried` blocks every collapse), so bulk is
       // carried only to match the shape the shared movement/leaf builders assume. Each hop appends to
@@ -3068,7 +3103,7 @@ export function lowerForeignResume(
             channel.role === 'bulk' ? compilerInt(1)
               : seedPath({ kind: 'element', elem: streamElem, id: col(rejoined.id, 'id') }, facts.demandsPathLabels)] as const)],
       });
-    })()
+    })())
     : seedsEncounter
     ? (() => {
       const withBulk = make.project({
@@ -3720,9 +3755,12 @@ function detachedTail(
       });
       // A re-root starts a FRESH path (`sg.traversal().V()` — TinkerPop's re-source discards the prior
       // stream), so when the chain tracks a path the re-rooted element is position 0, seeded exactly as
-      // the bound source seed does. `tracksPath && demandsEncounter` declined at the resume, so an ordered
-      // encounter and a path never coexist on this stream — the branches stay disjoint.
-      const rel = ctx.tracksPath
+      // the bound source seed does. When it ALSO demands an emission order (a downstream `fold()`), the
+      // re-root carries BOTH — path at position 0 AND the encounter minted from the landed order — the same
+      // combined seed the resume builds (`combinedPathEncounterSeed`).
+      const rel = ctx.tracksPath && ctx.ordered
+        ? combinedPathEncounterSeed(filtered, kind, ctx.demandsPathLabels, fresh)
+        : ctx.tracksPath
         ? (() => {
           const channels = withChannel(BULK, PATH_CHANNEL);
           return make.project({

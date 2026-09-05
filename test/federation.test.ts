@@ -758,6 +758,39 @@ describe('federate — SUBGRAPH aggregation (group/order/project via the main fo
   });
 });
 
+// path() AND an emission order on ONE bound stream — the combined path+encounter seed. path().fold()
+// demands both: the path channel (seeded at position 0 off the landed id) AND the encounter (minted from
+// the landed order, FOREIGN_ORD). These declined together (the two seed branches were disjoint); the
+// combined seed is a path-project THEN renumber (a Window only extends, so the path rides through). This
+// is the runtime witness the channel-obligations gate cannot give — a wrongly-VALUED path/encounter
+// (wrong position / wrong order) passes every structural check, so correctness is proven against the
+// sibling run directly.
+describe('federate — SUBGRAPH path() + fold() (the combined path+encounter seed)', () => {
+  const sg = (tail: string) =>
+    `g.call("federate").with("graph", "crew").with("subgraph", true).with("traversal", __.V().hasLabel("person").outE("develops"))${tail}`;
+  const nameOf = (o: any) => o?.properties?.find((p: any) => p.label === 'name')?.value ?? o;
+  const pathNames = (p: any) => (p?.objects ?? []).map(nameOf);
+  const list = async (g: string, on: 'home' | 'crew' = 'home') =>
+    Promise.all((await mgr.executor(on).framedAsync(g, {})).map(dec));
+  const sortd = (a: any[]) => [...a].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+
+  test('path().fold() preserves the seed order AND each path — self-consistent', async () => {
+    // fold() collects the paths in the SEED (landed) order; each path is intact. So the folded list
+    // equals the individual path stream collected — the encounter and the path channel both correct.
+    const folded = ((await list(sg('.V().out("develops").path().fold()')))[0] as any[]).map(pathNames);
+    const individual = (await list(sg('.V().out("develops").path()'))).map(pathNames);
+    expect(folded).toEqual(individual);
+    expect(folded.length).toBeGreaterThan(0);
+    expect(folded.every((p: any[]) => p.length === 2)).toBe(true); // [developer, software] per path
+  });
+
+  test('path().fold() content matches the sibling run directly (order-independent)', async () => {
+    const folded = ((await list(sg('.V().out("develops").path().fold()')))[0] as any[]).map(pathNames);
+    const crew = (await list('g.V().out("develops").path()', 'crew')).map(pathNames);
+    expect(sortd(folded)).toEqual(sortd(crew));
+  });
+});
+
 // A whole bound ELEMENT embedded as a MEMBER — a list member (fold), a group VALUE (by(fold())), or a
 // project() record field (by(identity())). Each rejoins the landed relation through `source.elementNode`
 // (Mechanism B's per-member twin); before it was source-routed these hit the LOCAL base tables against a
