@@ -545,6 +545,12 @@ const COVERED = [
   "g.V().local(__.out().fold().count(Scope.local))",
   "g.V().local(__.out().order().by('name').fold().unfold().limit(1))",
   "g.V().hasLabel('person').local(__.out().fold().unfold().values('name').fold())",
+  // A GROUP/groupCount barrier scoped PER ORIGIN — one map per entering vertex (`groupMap`'s per-origin
+  // path, `GROUP BY [origin, key]` then `GROUP BY [origin]`), with an edgeless vertex SEEDED the empty
+  // `{}` a group() owes for zero traversers (the domain LEFT JOIN). The same seeded-barrier substrate the
+  // fold above uses, one shape over.
+  "g.V().local(__.out().group().by('lang'))", "g.V().local(__.out().groupCount())",
+  "g.V().local(__.out().groupCount().by('name'))", "g.V().hasLabel('person').local(__.out().group().by('name'))",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",

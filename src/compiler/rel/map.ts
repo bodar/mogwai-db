@@ -7,7 +7,8 @@ import type { Elem } from '../elem.ts';
 import { sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { withChannel } from '../../channels.ts';
 import { inferredVtype, LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -203,6 +204,10 @@ export interface GroupRecipe {
   readonly memberDrop: boolean;
   /** The bulk channel's column where the count must weigh by multiplicity, else `undefined`. */
   readonly bulkCol: string | undefined;
+  /** A PER-ORIGIN group's `origin` column — CONSULTED as an extra `GROUP BY` key at both stages so a
+   *  `local`/`flatMap` body's group is scoped to the entering traverser, then re-declared as the origin
+   *  channel and its empty origins SEEDED `{}` off the domain. Absent for an ordinary/keyed group. */
+  readonly origin?: string;
   /** The step whose `productivityFilter` policy the drop reads — carried so the recipe stays data the
    *  aggregation can act on without re-deriving `ProductiveByStrategy`. Two sites of one label are two
    *  positions of one traversal, so they cannot disagree about the strategy. */
@@ -425,6 +430,10 @@ export function groupRows(
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
+  // A PER-ORIGIN group (`local(__.out().group().by(k))`) carries `origin` as a plain column that `groupMap`
+  // CONSULTS as an extra GROUP BY key — `origin` is `undefined` group policy, so it can never be a grouped
+  // Aggregate passenger; it rides as data (like `KEY_COL`) and is re-declared as the channel on the output.
+  const origin = input.channels.find((channel) => channel.role === 'origin');
   // A COLLECTING group states its member order, and only an ELEMENT relation has the `id` column the
   // rowid fallback below reads — a value relation has none, and a PROPERTY relation's `id` is the
   // OWNER's rather than the property's. `analyzeChain` demands an encounter for every `group()`, so
@@ -434,6 +443,7 @@ export function groupRows(
     ...(collecting ? [meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int')] : []),
     ...(bulk ? [meta(bulk.col, 'int')] : []),
     ...(encounter ? [meta(encounter.col, 'int')] : []),
+    ...(origin ? [meta(origin.col, 'int')] : []),
   ];
 
   // THE KEY IS PROJECTED TO A COLUMN FIRST, and that is a plan-quality requirement rather than a
@@ -459,6 +469,7 @@ export function groupRows(
       ...(collecting ? [[MEMBER_COL, member ?? traverserMember(host, source, fresh)] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
       ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
       ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
+      ...(origin ? [[origin.col, col(input.id, origin.col)] as const] : []),
     ],
   });
   // FENCED, or the projection is fused straight back in and the naming buys nothing: the emitter merges
@@ -528,6 +539,7 @@ export function groupRows(
       // — the entry's own value — is always present (an empty-list value is a valid member, not a drop).
       memberDrop: !!member && !memberOf,
       bulkCol: bulked && bulk ? bulk.col : undefined,
+      ...(origin ? { origin: origin.col } : {}),
       step,
     },
   };
@@ -550,8 +562,13 @@ const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
  * field because it is a property of the RELATION being aggregated, not of the grouping: two sites must
  * agree about their recipe and cannot agree about a column only their union has.
  */
-export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fresh: Minter, order: readonly string[] = [ORD_COL]): GroupedMap {
+export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fresh: Minter, order: readonly string[] = [ORD_COL], domain?: Rel): GroupedMap {
   const { counting, keyElem, bulkCol } = recipe;
+  // A PER-ORIGIN group CONSULTS `origin` as an extra key at BOTH stages (stage 1 `GROUP BY [origin, key]`,
+  // the fold-to-map `GROUP BY [origin]`), then SEEDS an empty `{}` for an origin whose sub-stream was empty
+  // off the domain — `local(__.out().group().by(k))` gives one map per entering vertex, `{}` for an edgeless
+  // one. `origin` rides as data (never a grouped-Aggregate passenger); only present with a domain to seed by.
+  const originCol = domain ? recipe.origin : undefined;
   // THE VALUE. `groupCount()` reduces the group to a traverser COUNT — `SUM(bulk)` where the stream
   // carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct after a
   // fan-out. A wrapped value `by()` (property/token/identity) and the default `group()` COLLECT members.
@@ -574,8 +591,10 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
     : collectedValue(rows, recipe, source, fresh, order);
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
-    channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
-    groupBy: [col(rows.id, KEY_COL)],
+    // `origin` is CONSULTED as the first GROUP BY key (emitted as a plain column, first — the emitter reads
+    // the leading `groupBy.length` cols as keys), so each origin's keys pool separately.
+    channels: [], type: typeOf(...(originCol ? [meta(originCol, 'int')] : []), meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
+    groupBy: [...(originCol ? [col(rows.id, originCol)] : []), col(rows.id, KEY_COL)],
     aggs: [[VAL_COL, value]],
   });
 
@@ -620,10 +639,39 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
     // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
     // dictate, so it is ours to state — and stating it is what makes the order deterministic rather
     // than whatever the grouping happened to produce.
-    rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
+    rel: originCol
+      ? mapOfGroupsPerOrigin(productive, entry, col(productive.id, KEY_COL), originCol, domain!, fresh)
+      : mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
     keyOf: entry.keyOf,
     valOf: entry.valOf,
   };
+}
+
+/**
+ * The per-origin twin of `mapOfGroups` — folds the grouped `(origin, key, val)` rows into ONE map PER
+ * ORIGIN (`GROUP BY origin`), then LEFT JOINs the origin DOMAIN so an origin whose sub-stream was empty
+ * still emits a map, `COALESCE`d to the empty `{}` (an empty pairs array) a `group()` owes for zero
+ * traversers — the seed a bare `GROUP BY` drops. The origin is re-declared as the channel on the output
+ * (the one node that may), so the rejoin carries it and `flatMapRejoin` sheds it once the body is done.
+ */
+function mapOfGroupsPerOrigin(grouped: Rel, entry: Entry, order: Expr, originCol: string, domain: Rel, fresh: Minter): Rel {
+  const perOrigin = make.aggregate({
+    id: fresh('mg'), input: grouped, channels: [],
+    type: typeOf(meta(originCol, 'int'), meta(MAP_COL, 'json')),
+    groupBy: [col(grouped.id, originCol)],
+    aggs: [[MAP_COL, collectedArray(pairOf(entry.key, entry.val), [{ expr: order, dir: 'asc' }])]],
+  });
+  const joined = make.join({
+    id: fresh('mj'), left: domain, right: perOrigin, join: 'left', channels: [],
+    // The right side is NULL for a domain origin with no group — an empty group, seeded `{}` below.
+    type: typeOf(meta('dorigin', 'int'), meta(originCol, 'int', true), meta(MAP_COL, 'json', true)),
+    on: eq(col(domain.id, 'dorigin'), col(perOrigin.id, originCol)),
+  });
+  return make.project({
+    id: fresh('mo'), input: joined, channels: withChannel([], { col: originCol, role: 'origin' }),
+    type: typeOf(meta(MAP_COL, 'json'), meta(originCol, 'int')),
+    exprs: [[MAP_COL, coalesce(col(joined.id, MAP_COL), EMPTY_ARRAY)], [originCol, col(joined.id, 'dorigin')]],
+  });
 }
 
 /**

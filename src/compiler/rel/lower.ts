@@ -1084,6 +1084,11 @@ function collectionArm(
     // over the UNION of them.
     const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
     if (!rows) return { tail: null };
+    // A PER-ORIGIN group (a `local`/`flatMap` body still carrying `origin`) needs the origin DOMAIN to SEED
+    // an empty `{}` for an origin whose sub-stream was empty; the KEYED side-effect form in a per-origin
+    // scope is a separate feature. Fail closed for both rather than mis-scope.
+    const origin = rel.channels.find((channel) => channel.role === 'origin');
+    if (origin && (!ctx.originDomain || step.args.length)) return { tail: null };
     // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
     // CONTINUES and only the unkeyed form becomes the traverser. One rule, two hosts (§6·6).
     if (step.args.length) {
@@ -1096,7 +1101,7 @@ function collectionArm(
       if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
       return 'continue';
     }
-    const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh);
+    const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh, undefined, origin ? ctx.originDomain : undefined);
     return { tail: continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
   }
 

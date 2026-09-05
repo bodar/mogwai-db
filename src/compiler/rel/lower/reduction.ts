@@ -292,13 +292,14 @@ export function perTraverserChild(
 export const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'range', 'skip', 'tail', 'barrier']);
 
 /** The CARDINALITY-changing barriers that self-scope per origin by GROUPING rather than by a window — a
- *  `fold()` that CONTINUES mid-body (`local(__.out().fold().unfold())`). Distinct from
- *  `PER_ORIGIN_SAFE_BARRIER` on purpose (per its own comment that set stays a WINDOW-scoping whitelist):
- *  these reduce N rows to one PER ORIGIN via `GROUP BY origin` (`foldPerOrigin` in `list.ts`, the key
+ *  `fold()` that CONTINUES mid-body (`local(__.out().fold().unfold())`) and a `group()`/`groupCount()`
+ *  (`local(__.out().group().by(k))`). Distinct from `PER_ORIGIN_SAFE_BARRIER` on purpose (per its own
+ *  comment that set stays a WINDOW-scoping whitelist): these reduce N rows to one PER ORIGIN via
+ *  `GROUP BY origin` (`foldPerOrigin` in `list.ts`, `groupMap`'s per-origin path in `map.ts` — the key
  *  spliced not a passenger, the seed LEFT JOINed off the origin DOMAIN so an empty sub-stream still emits
- *  `[]`) and re-expand through `unfold()`'s `explode`, which carries the origin forward. A TERMINAL `fold()`
- *  never reaches here — `scalarChild` answers it as a correlated list before `flatMapRejoin`. */
-export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold']);
+ *  `[]`/`{}`). A TERMINAL `fold()` never reaches here — `scalarChild` answers it as a correlated list
+ *  before `flatMapRejoin`. */
+export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold', 'group', 'groupCount']);
 
 /**
  * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
