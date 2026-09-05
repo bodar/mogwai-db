@@ -2694,6 +2694,11 @@ export function elementMergeE(
     if (isNested(spec.id) || isNested(spec.label)) return null;
     if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
   }
+  // A COMPUTED merge argument (`mergeE(__.project('k').by(__.body))`) — the search criterion varies per
+  // driver. `edgeCriteria` below reads only the CONSTANT `match.props`, so leaving this to fall through
+  // would DROP the computed criterion and search unfiltered by it — a wrong answer, not a coverage gap.
+  // Decline (fail closed) until the correlated edge search is built (increment 2 replaces this).
+  if (Object.keys(match.computed).length) return null;
   // An edge carries exactly ONE label and it is fixed at creation, so a label on `onMatch` is not a
   // mutation this route may make — it is one the reference refuses outright.
   if (onMatch?.label) return null;
