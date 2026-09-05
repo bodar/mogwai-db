@@ -124,6 +124,41 @@ function weightedPageRankScores(
   return ids.map((id) => ({ id, value: pr.get(id)! }));
 }
 
+/** Weighted ArticleRank (GDS delta-accumulation) — the oracle for the weighted SQL. init rank = delta =
+ *  α (=1−damping); each round delta[v] = damping·Σ_{u→v, prevDelta[u]>tol, Σw[u]>0} prevDelta[u]·w(u,v) /
+ *  (Σw[u] + avgWeightedDegree), rank[v] += delta[v]; avgWeightedDegree = Σw_all/N. Fixed maxIterations−1
+ *  rounds (`ArticleRankComputation.java` + weighted `DegreeFunctions`/`applyRelationshipWeight`). */
+function weightedArticleRankScores(
+  nodes: readonly { readonly id: number }[],
+  edges: readonly { readonly src: number; readonly tgt: number; readonly w: number }[],
+  damping: number,
+): readonly IdValue[] {
+  const ids = nodes.map((n) => n.id);
+  const N = ids.length;
+  if (N === 0) return [];
+  const alpha = 1 - damping;
+  const TOL = 1e-7;
+  const MAX_ITER = 20;
+  const out = new Map<number, { tgt: number; w: number }[]>(ids.map((id) => [id, []]));
+  for (const e of edges) out.get(e.src)?.push({ tgt: e.tgt, w: e.w });
+  const wdeg = new Map<number, number>(ids.map((id) => [id, out.get(id)!.reduce((s, e) => s + e.w, 0)]));
+  const avgDeg = edges.reduce((s, e) => s + e.w, 0) / N;
+  const rank = new Map<number, number>(ids.map((id) => [id, alpha]));
+  let delta = new Map<number, number>(ids.map((id) => [id, alpha]));
+  for (let r = 1; r < MAX_ITER; r++) {
+    const acc = new Map<number, number>(ids.map((id) => [id, 0]));
+    for (const id of ids) {
+      const d = delta.get(id)!;
+      const deg = wdeg.get(id)!;
+      if (d > TOL && deg > 0) for (const e of out.get(id)!) acc.set(e.tgt, acc.get(e.tgt)! + d * e.w / (deg + avgDeg));
+    }
+    const next = new Map<number, number>();
+    for (const id of ids) { const nd = damping * acc.get(id)!; next.set(id, nd); rank.set(id, rank.get(id)! + nd); }
+    delta = next;
+  }
+  return ids.map((id) => ({ id, value: rank.get(id)! }));
+}
+
 /** Peer-pressure clustering: each vertex adopts the max-vote cluster among {itself} ∪ {voters}, ties to
  *  the smallest id string, to a fixpoint — the oracle for peerPressure. */
 function peerPressureClusters(
@@ -192,6 +227,14 @@ describe('OLAP SQL-per-round ≡ JS oracle (whole-vector differential)', () => {
     const s = store();
     const oracle = new Map(weightedPageRankScores(nodesOf(s).map((n) => ({ id: n.id })), weightedOutE(s), 0.85).map((t) => [t.id, t.value as number]));
     const sql = await decorated(s, 'pageRank().with("relationshipWeightProperty","weight")', 'gremlin.pageRankVertexProgram.pageRank');
+    for (const [id, v] of sql) expect(Math.abs((v as number) - oracle.get(id)!)).toBeLessThan(1e-9);
+    expect(sql.size).toBe(oracle.size);
+  });
+
+  test('articleRank weighted (relationshipWeightProperty) — scores agree to 1e-9', async () => {
+    const s = store();
+    const oracle = new Map(weightedArticleRankScores(nodesOf(s).map((n) => ({ id: n.id })), weightedOutE(s), 0.85).map((t) => [t.id, t.value as number]));
+    const sql = await decorated(s, 'call("articleRank").with("relationshipWeightProperty","weight")', 'articleRank');
     for (const [id, v] of sql) expect(Math.abs((v as number) - oracle.get(id)!)).toBeLessThan(1e-9);
     expect(sql.size).toBe(oracle.size);
   });

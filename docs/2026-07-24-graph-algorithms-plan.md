@@ -430,7 +430,8 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
 | | `sourceNodes` (`[]`, personalized) | no (our seed = traverser count, different) | **add** |
 | | `scaler` (None; Min/Max/Mean/Log/StdScore) | no | **add** |
 | articleRank | `dampingFactor`/`maxIterations`/`tolerance` | yes/yes/yes | — |
-| | `relationshipWeightProperty`, `sourceNodes`, `scaler` | no | **add** |
+| | `relationshipWeightProperty` (null) | **yes** (landed 2026-09-05) | — |
+| | `sourceNodes`, `scaler` | no | **add** |
 | betweenness | `samplingSize`/`samplingSeed` (full/exact default; `algo/…/betweenness/RandomDegreeSelectionStrategy.java`) | no (always exact) | **add** (accuracy/cost trade) |
 | | `relationshipWeightProperty` (null) | no (hop-count only) | **add** |
 | closeness | `useWassermanFaust` (false; `algo/…/closeness/{Default,WassermanFaust}CentralityComputer.java`) | no (Default only) | **add** (1-line reducer swap) |
@@ -479,7 +480,9 @@ cross-cutting mapping above · **model** = needs a semantics decision first (lin
    built on the shared `directedAdjacency` scaffolding so the weight/hop/unweighted forms cannot drift),
    with weighted **pageRank** as the first consumer (weighted out-degree `SUM(w) HAVING > 0`, message
    `α·pr·w/Σw`; unweighted path byte-unchanged; proven ≡ a weighted JS oracle in `olap-differential`).
-   Remaining consumers to adopt it: articleRank, betweenness, degree, wcc-`threshold`, weighted LPA.
+   **articleRank** adopted it too (2026-09-05, weighted delta-accumulation ≡ oracle to 1e-9). Remaining
+   consumers: betweenness (weighted paths), degree (streaming — a different mechanism: a weighted body
+   `<dir>E().values(w).sum()`), wcc-`threshold`, weighted LPA.
 2. **nodeSimilarity `topK`/`similarityCutoff`/`degreeCutoff`** — scalability wall today (dense output);
    all SQL tweaks (`WHERE`/`HAVING`/a per-source `ROW_NUMBER` cap).
 3. **Cheap wins, no substrate:** peerPressure `maxIterations` (already a plain `iterateInSql` bound),

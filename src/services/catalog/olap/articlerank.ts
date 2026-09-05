@@ -1,7 +1,7 @@
 import type { Service } from '../../spi/types.ts';
 import { ARTICLE_RANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam, weightedAdjacencyCte } from './kernel.ts';
 
 // ---------- articleRank — ArticleRank, a MULTI-CHANNEL BSP decorate barrier ----------
 //
@@ -47,10 +47,18 @@ export function createArticleRankService(store: GraphStore | undefined): Service
       maxIterations: `iteration cap (default ${AR_MAX_ITERATIONS})`,
       dampingFactor: `damping factor (default ${AR_DAMPING_DEFAULT})`,
       tolerance: `per-node halt tolerance on the delta (default ${AR_TOLERANCE_DEFAULT})`,
+      relationshipWeightProperty: 'weight messages by this edge property (GDS weighted ArticleRank); default unweighted',
     }),
     plan: (params) => {
       const scope = edgeScopeOf(params[AR_EDGES], 'out', ARTICLE_RANK_SERVICE_NAME);
       const damping = typeof params.dampingFactor === 'number' ? params.dampingFactor : AR_DAMPING_DEFAULT;
+      // relationshipWeightProperty (GDS): the sender's degree becomes its WEIGHTED out-degree (Σw), the
+      // avgDegree becomes the weighted mean (Σw_all/N), and each message is scaled by the edge weight —
+      // `pageRankDegreeFunction(…, hasRelationshipWeightProperty)` + `applyRelationshipWeight` in
+      // `vendor/gds/algo/.../pagerank/{DegreeFunctions,ArticleRankComputation}.java`. A Σw=0 sender does
+      // not send (`if (degree > 0)`), which `HAVING SUM(w) > 0` reproduces. Absent → unweighted, unchanged.
+      const rw = params.relationshipWeightProperty;
+      const weightKey = typeof rw === 'string' && rw.length > 0 ? rw : undefined;
       const tolerance = typeof params.tolerance === 'number' ? params.tolerance : AR_TOLERANCE_DEFAULT;
       const maxIterParam = params.maxIterations;
       const maxIterations = typeof maxIterParam === 'number' && Number.isInteger(maxIterParam) && maxIterParam >= 1
@@ -61,10 +69,17 @@ export function createArticleRankService(store: GraphStore | undefined): Service
         core: (store, run): number => {
           const N = nodeCount(store);
           const alpha = 1 - damping;
-          const { cte, labelBinds } = adjacencyCte(scope);
-          // avgDegree = mean out-degree over the scope = |E| / |N| (one scalar; the edge count in the
-          // scope's adjacency, matching GDS's DegreeFunctions.averageDegree over Orientation.NATURAL).
-          const E = store.query<{ c: number }>(`WITH ${cte} SELECT COUNT(*) AS c FROM e`, labelBinds)[0].c;
+          const { cte, labelBinds } = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
+          // per-sender out-degree denominator: weighted (Σw, absent when 0 → does not send) or a count.
+          const odCte = weightKey
+            ? 'od AS (SELECT src AS id, SUM(w) AS c FROM e GROUP BY src HAVING SUM(w) > 0)'
+            : 'od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src)';
+          // per-edge message numerator: the delta, scaled by the edge weight when weighted.
+          const msgNum = weightKey ? 'pd.d * e.w' : 'pd.d';
+          // avgDegree = mean (weighted) out-degree over the scope = (Σw or |E|) / |N| — one scalar,
+          // matching GDS's DegreeFunctions over Orientation.NATURAL (weighted when a weight is set).
+          const E = store.query<{ c: number }>(
+            `WITH ${cte} SELECT ${weightKey ? 'COALESCE(SUM(w), 0)' : 'COUNT(*)'} AS c FROM e`, labelBinds)[0].c;
           const avgDeg = E / N;
           // SEED round 0: rank = delta = alpha for every vertex (GDS init + the initial superstep's send).
           store.query(`${STATE_INSERT} SELECT ?, 0, 0, id, ?, ? FROM nodes`, [run, AR_RANK_CHANNEL, alpha]);
@@ -75,9 +90,9 @@ export function createArticleRankService(store: GraphStore | undefined): Service
             // delta[r][v] = damping · Σ over senders u→v with prevDelta[u] > tolerance of
             //   prevDelta[u] / (outdeg[u] + avgDeg). od = per-sender out-degree in the scope.
             store.query(
-              `WITH ${cte}, od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src),
+              `WITH ${cte}, ${odCte},
                  pd AS (SELECT id, cval AS d FROM barrier_state WHERE run = ? AND round = ? AND channel = ?),
-                 msg AS (SELECT e.tgt AS id, SUM(pd.d / (od.c + ?)) AS m
+                 msg AS (SELECT e.tgt AS id, SUM(${msgNum} / (od.c + ?)) AS m
                            FROM e JOIN pd ON pd.id = e.src JOIN od ON od.id = e.src
                           WHERE pd.d > ? GROUP BY e.tgt)
                ${STATE_INSERT}
