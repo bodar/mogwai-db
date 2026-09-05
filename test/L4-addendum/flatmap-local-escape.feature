@@ -58,11 +58,11 @@ Feature: mogwai addendum — local() carries its body frame out, plain flatMap()
     When iterated to list
     Then the result should be empty
 
-  # ---- plain flatMap() HIDES intermediate path positions — DEFERRED (the hide-N-positions node,
-  #      plan Phase C2). Fail-closed today; drops this tag when it lands. Expected pins the target
-  #      ([v, end], mid hidden). ----
+  # ---- plain flatMap() HIDES intermediate path positions ([v, end], mid hidden) — LANDED (plan Phase
+  #      C2). The body runs PATH-FREE and its output element is appended as ONE position onto the entering
+  #      path, recovered by a per-row origin (the reference `head.path.extend(r)`,
+  #      LP_O_OB_P_S_SE_SL_Traverser.java:65-69; FlatMap.feature:56). ----
 
-  @Unsupported
   Scenario: g_V_hasXname_markoX_flatMapXout_outX_path_byXnameX
     Given the modern graph
     And the traversal of
@@ -74,3 +74,33 @@ Feature: mogwai addendum — local() carries its body frame out, plain flatMap()
       | result |
       | p[marko,ripple] |
       | p[marko,lop] |
+
+  # ---- the hide composes with a PER-ORIGIN barrier inside the body (order().by scopes to the entering
+  #      traverser, its minted positions still hidden): one appended position per emitted element ----
+
+  Scenario: g_V_hasXname_markoX_flatMapXout_orderXbyXnameXX_path_byXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").flatMap(__.out().order().by("name")).path().by("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[marko,josh] |
+      | p[marko,lop] |
+      | p[marko,vadas] |
+
+  # ---- non-element output under path() stays fail-closed (a scalar has no id to append as a position) ----
+
+  @Unsupported
+  Scenario: g_V_flatMapXout_valuesXnameXX_path
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name")).path()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[x] |

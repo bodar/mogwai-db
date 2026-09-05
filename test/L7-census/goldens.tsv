@@ -193,6 +193,7 @@ ran	3	3	0ef89e9d841291cb	3d17e608422ba0bd	g.V().emit(__.has("name", "marko").or(
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().filter(__.constant(0))
 ran	2	2	d37477f9ec2fc605	a21e1e31dbe42070	g.V().filter(__.has("lang","java"))
 ran	2	2	bf740234bb77f1ed	dff54e23a16841e8	g.V().filter(__.has("name", TextP.startingWith("m").or(TextP.startingWith("p"))))
+ran	2	2	70d8c1074c68e8b8	493c9be0e77ff1e6	g.V().flatMap(out().out()).path()
 ran	1	1	8d4bc5fbcfccb84e	492462d755f24ef8	g.V().fold()
 ran	1	1	9b74e960c97f8bd8	0936fc42fc2e8ad5	g.V().fold().asString(Scope.local).order(local)
 ran	1	1	9fe914df746aacef	710dd45af8e7ce35	g.V().fold().count(Scope.local)

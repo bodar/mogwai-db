@@ -83,7 +83,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().emit(__.h
 deferred	this traversal is not supported yet: no lowering covers g.V().fail("msg")	g.V().fail("msg")
 deferred	this traversal is not supported yet: no lowering covers g.V().fail()	g.V().fail()
 deferred	this traversal is not supported yet: no lowering covers g.V().filter(__.is(0))	g.V().filter(__.is(0))
-deferred	this traversal is not supported yet: no lowering covers g.V().flatMap(out().out()).path()	g.V().flatMap(out().out()).path()
 deferred	Provided traversal argument for combine step must yield an iterable type, encountered vertex	g.V().fold().combine(__.V())
 deferred	Provided traversal argument for combine step must yield an iterable type, not null	g.V().fold().combine(__.constant(null))
 deferred	Provided traversal argument for difference step must yield an iterable type, encountered vertex	g.V().fold().difference(__.V())

@@ -1,5 +1,5 @@
 {
-  "passing": 1831,
+  "passing": 1832,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -470,6 +470,7 @@
     "g_V_filterXconstantX0XX",
     "g_V_filterXhasXlang_javaXX",
     "g_V_filterXhasXname_startingWithXm_or_pXX",
+    "g_V_flatMapXout_outX_path",
     "g_V_fold",
     "g_V_foldX_rangeXlocal_6_7X",
     "g_V_fold_asStringXlocalX_orderXlocalX",
@@ -1989,7 +1990,6 @@
     "g_V_emit_repeatXout_order_byXnameXX_timesX2X_valuesXnameX",
     "g_V_emit_timesX2X_repeatXoutX_path",
     "g_V_filterXisX0XX",
-    "g_V_flatMapXout_outX_path",
     "g_V_fold_mergeXk_vX",
     "g_V_foo_injectX9999999999X_min",
     "g_V_groupXmX_byXnameX_byXinXknowsX_nameX_capXmX",

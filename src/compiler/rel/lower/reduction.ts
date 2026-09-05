@@ -1,5 +1,5 @@
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, eq, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, elementCols, firstRootedValue, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -26,12 +26,12 @@ import { LIST_COL, correlatedListMembers } from '../list.ts';
 import { elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
-import { PATH_CHANNEL, subPathMembers } from '../path.ts';
+import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
-import { continueAs, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -332,10 +332,41 @@ export function flatMapRejoin(
   // appends them: nothing to hide, carry through. Plain `flatMap` unwraps to a value and re-derives from
   // the PRE-child head (`.../map/FlatMapStep.java:42-52` → `.../util/DefaultTraversal.java:220-230` →
   // `.../Traverser.java:185-195`), so `flatMap(out().out()).path()` is `[v, end]` — its intermediate
-  // objects are HIDDEN (`.../gremlin-test/.../map/FlatMap.feature:56`). Hiding them (one input→output
-  // path step for the whole body) is a later increment, so `flatMap` under a path demand still fails
-  // closed.
-  if (ctx.tracksPath && step.name === 'flatMap') return null;
+  // objects are HIDDEN (`.../gremlin-test/.../map/FlatMap.feature:56`). The reference is precise:
+  // `LP_O_OB_P_S_SE_SL_Traverser.split` (`.../traverser/LP_O_OB_P_S_SE_SL_Traverser.java:65-69`) sets
+  // `clone.path = head.path.clone().extend(r, labels)` — the PRE-child head's path extended by exactly ONE
+  // position, the emitted value. So the body runs PATH-FREE (a path-hostile body step then composes, as it
+  // does in TinkerPop where the body's own paths are invisible), the entering path P is recovered by a
+  // per-row origin, and the one output element is appended: P ++ [emitted]. Only an ELEMENT-output body has
+  // an id to append; a scalar/list output under `path()` stays its own increment.
+  if (ctx.tracksPath && step.name === 'flatMap') {
+    if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
+    const numbered = mintRowOrigin(rel, fresh); // a per-row origin BESIDE the entering path P
+    const origin = originOf(numbered.channels)!;
+    // origin -> P, one row per entering traverser (a fan-out is one-to-many, so recovering P is a real JOIN).
+    const pathDomain = make.project({
+      id: fresh('pd'), input: numbered, channels: [], type: typeOf(meta('porigin', 'int'), meta(PATH_COL, 'json', true)),
+      exprs: [['porigin', col(numbered.id, origin.col)], [PATH_COL, col(numbered.id, PATH_COL)]],
+    });
+    // Run the body over the numbered input with PATH DROPPED — it appends nothing (`pathCarried` false).
+    const rows = childRows(body, dropPath(numbered, fresh), framing.elem, labels, ctx, fresh, true, ctx.needsFromV ?? false);
+    if (!rows || rows.framing.kind !== 'elements') return null;
+    const bodyChannels = rows.rel.channels; // element id + origin, no path
+    const joined = make.join({
+      id: fresh('fpj'), left: rows.rel, right: pathDomain, join: 'inner', ordered: true, channels: bodyChannels,
+      type: typeOf(...elementCols(bodyChannels), meta('porigin', 'int'), meta(PATH_COL, 'json', true)),
+      on: eq(col(pathDomain.id, 'porigin'), col(rows.rel.id, origin.col)),
+    });
+    // Re-attach the entering path P as the path channel, then extend it by the one emitted element.
+    const outChannels = withChannel(bodyChannels, PATH_CHANNEL);
+    const withEnteringPath = make.project({
+      id: fresh('fp'), input: joined, channels: outChannels, type: typeOf(...elementCols(outChannels)),
+      exprs: elementCols(outChannels).map((column) => [column.name, col(joined.id, column.name)] as const),
+    });
+    const extended = extendPath(withEnteringPath, { kind: 'element', elem: rows.framing.elem, id: col(withEnteringPath.id, 'id') }, fresh, ctx.demandsPathLabels);
+    const rejoined = shedBodyAliases(dropOrigin(extended, fresh), labels, fresh);
+    return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  }
   // A LABEL BOUND INSIDE THE BODY escapes to parent scope for `local` (the full-traverser forward above,
   // so `g.V()…as('a').local(__.out('created').as('b')).select('a','b')` sees `b`) but NOT for plain
   // `flatMap`: `head.split` re-derives from the pre-child head, so a body-bound label is DROPPED. `local`
@@ -523,17 +554,23 @@ export function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
   perRow = false, needsFromV = false,
 ): ChildRows | null {
-  if (!body.length || originOf(input.channels)) return null;
-  const channels = withChannel(input.channels, ORIGIN);
-  const seeded = perRow ? mintRowOrigin(input, fresh) : make.project({
-    id: fresh('og'), input, channels, type: typeOf(...elementCols(channels)),
-    // Driven off the MINTED channel list, not the input's plus one: `withChannel` inserts in
-    // `ROLE_ORDER` (origin sits before encounter), and an appended expression would declare the columns
-    // in a different order from `elementCols` — which the factory catches, and which would otherwise be
-    // a schema desync no test names.
-    exprs: [['id', col(input.id, 'id')],
-      ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, 'id') : col(input.id, channel.col)] as const)],
-  });
+  // A per-ROW body REUSES an origin already on the input (`mintRowOrigin` is idempotent), so a caller
+  // that pre-numbered to capture a channel keyed by origin — `flatMapRejoin`'s path-hide numbers the
+  // input to recover the entering path — is served rather than refused. A GROUP reducer (`!perRow`) seeds
+  // origin from the HOST rowid, a different identity, so a pre-existing origin there is still a decline.
+  if (!body.length || (!perRow && originOf(input.channels))) return null;
+  const seeded = perRow ? mintRowOrigin(input, fresh) : (() => {
+    const channels = withChannel(input.channels, ORIGIN);
+    return make.project({
+      id: fresh('og'), input, channels, type: typeOf(...elementCols(channels)),
+      // Driven off the MINTED channel list, not the input's plus one: `withChannel` inserts in
+      // `ROLE_ORDER` (origin sits before encounter), and an appended expression would declare the columns
+      // in a different order from `elementCols` — which the factory catches, and which would otherwise be
+      // a schema desync no test names.
+      exprs: [['id', col(input.id, 'id')],
+        ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, 'id') : col(input.id, channel.col)] as const)],
+    });
+  })();
   // THE HOST'S LABELS RIDE IN, and handing over `NO_ALIASES` was a WRONG ANSWER rather than a
   // narrowing: a body reading one (`by(__.select('p').values('age').sum())`) would find no live label,
   // and since an unresolvable `select()` is now the EMPTY RESULT it would pool ZERO rows and answer an
