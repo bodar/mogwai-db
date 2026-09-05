@@ -4,13 +4,19 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { SHAPE_K } from '../alias.ts';
+import { SHAPE_K, type AliasMap } from '../alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { ChildSeam } from './child.ts';
+
+/** No outer labels in a path by()-position — a path element is not the enclosing chain's alias scope, so
+ *  a `by(__.select('a'))` reads none. The host still carries a ROW (the member relation) so a
+ *  predicate-bearing child (`by(__.choose(<cond>, …))`) can build a correlated condition over the
+ *  element the position holds. */
+const PATH_BY_ALIASES: AliasMap = new Map();
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -271,8 +277,9 @@ export function pathPositions(
   };
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, source, fresh, child);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh, child);
+    const row = { row: { rel: members, aliases: PATH_BY_ALIASES } };
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge', ...row }, source, fresh, child);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex', ...row }, source, fresh, child);
     if (!edge || !vertex) return null;
     return {
       kind: 'case',
@@ -410,8 +417,9 @@ export function pathSimpleByPredicate(
     // An identity `by()` compares the raw OBJECT, stripped of the gated `L` label array (see
     // `pathSimplePredicate`) so a label never makes two visits to one object look distinct.
     if (modulation.key.kind === 'identity') return { kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.L')] };
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, source, fresh, child);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, source, fresh, child);
+    const row = { row: { rel: members, aliases: PATH_BY_ALIASES } };
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge', ...row }, source, fresh, child);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex', ...row }, source, fresh, child);
     if (!edge || !vertex) return null;
     return { kind: 'case', whens: [[isEdge, edge]], else: vertex };
   };

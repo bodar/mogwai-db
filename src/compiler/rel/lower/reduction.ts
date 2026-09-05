@@ -10,12 +10,12 @@ import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
-import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -1064,6 +1064,88 @@ export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHos
   return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
 }
 
+/** A ChildHost as a filter/branch `Subject` — the inverse of `childHostOf` (`filter.ts`), so a
+ *  predicate-bearing child (a `choose`'s condition, a `where` body) can run over the SAME traverser a
+ *  value body reads. Needs the host's ROW to name the relation the id/value lives on; a host built
+ *  without one declines rather than inventing a scope. */
+export function hostSubject(host: ChildHost): Subject | null {
+  const rel = host.row?.rel;
+  if (!rel) return null;
+  if (host.kind === 'element') return { kind: 'element', id: host.id, elem: host.elem, rel };
+  if (host.kind === 'property') return { kind: 'property', id: host.id, ownerElem: host.ownerElem, rel };
+  if (host.kind === 'scalar')
+    return { kind: 'scalar', value: host.value, ...(host.vtype ? { vtype: host.vtype } : {}), rel,
+      type: host.vtype ? { kind: 'perRow', vtype: host.vtype } : SUBJECT_UNKNOWN };
+  return null;
+}
+
+/**
+ * `by(__.choose(<cond>, <then>[, <else>]))` over SCALAR arms → one per-row SQL `CASE` — the SCALAR twin
+ * of the relational `chooseArms`.
+ *
+ * A boolean `choose` routes on the condition's PRODUCTIVITY: `ChooseStep` takes the THEN arm iff the
+ * condition traversal PRODUCED for this traverser, the ELSE arm otherwise
+ * (`vendor/tinkerpop/gremlin-core/.../branch/ChooseStep.java`). `CASE WHEN <cond> THEN … ELSE …` is that
+ * exactly — SQL sends a false OR NULL `WHEN` to the ELSE, which is the productivity split
+ * `chooseArms` spells with `notProduced` (an unproductive condition is a NULL predicate). Both arms must
+ * reduce to one scalar per traverser (`scalarChild`); a MISSING else is identity, a scalar only over a
+ * scalar host (an element identity is not one value), so it declines otherwise.
+ *
+ * The OPTION-MAP form (`choose(<key>).option(…)`) is a different question — an N-way lookup on a
+ * projected choice — and declines here (`step.optionArms`), exactly as `chooseArms`/`chooseOptions` split.
+ */
+function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const [choice, ...rest] = step.args ?? [];
+  if (!choice || rest.length < 1 || rest.length > 2 || rest.some((arg) => !isNested(arg.value))) return null;
+  // The condition may be a bare predicate (`choose(P.eq(29), …)` — `ChooseStep(new IsStep(P))`) or a
+  // body; spell a bare `P` as a one-step `is` so `bodyPredicate` handles both, exactly as `chooseArms`.
+  const condition = isNested(choice.value) ? bodyOf(choice.value.nested, ctx.params)
+    : isPred(choice.value) ? [{ name: 'is', args: [choice] } as IRStep] : null;
+  const thenBody = bodyOf((rest[0]!.value as { readonly nested: unknown }).nested, ctx.params);
+  const elseBody = rest[1] ? bodyOf((rest[1].value as { readonly nested: unknown }).nested, ctx.params) : null;
+  if (!condition?.length || !thenBody?.length) return null;
+
+  const subject = hostSubject(host);
+  if (!subject) return null;
+  const pred = bodyPredicate(condition, subject, fresh, ctx, host.row?.aliases ?? NO_ALIASES);
+  if (!pred) return null;
+
+  const thenCV = scalarChild(thenBody, host, ctx, fresh);
+  // An absent ELSE is identity — a scalar only over a scalar host; an element identity is not one value.
+  const elseCV: ChildValue | null = elseBody ? scalarChild(elseBody, host, ctx, fresh)
+    : host.kind === 'scalar'
+      ? { expr: host.value, framing: { kind: 'scalar', type: host.vtype ? PER_ROW('vtype') : UNKNOWN },
+        ...(host.vtype ? { vtype: host.vtype } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one' }
+      : null;
+  if (!thenCV || thenCV.framing.kind !== 'scalar' || thenCV.framing.result === 'value') return null;
+  if (!elseCV || elseCV.framing.kind !== 'scalar' || elseCV.framing.result === 'value') return null;
+
+  const value: Expr = { kind: 'case', whens: [[pred, thenCV.expr]], else: elseCV.expr };
+  // The chosen arm's productivity is the whole's: the THEN arm's where the condition produced, the ELSE
+  // arm's otherwise. Both always-productive ⟹ always; a stated pair ⟹ the CASE of the two; else silence.
+  const present: Expr | undefined = thenCV.present === ALWAYS_PRODUCTIVE && elseCV.present === ALWAYS_PRODUCTIVE
+    ? ALWAYS_PRODUCTIVE
+    : thenCV.present && elseCV.present ? { kind: 'case', whens: [[pred, thenCV.present]], else: elseCV.present } : undefined;
+
+  // TYPE — a shared STATIC type stays static (one column); otherwise a per-row `vtype` whose value
+  // follows the SAME branch as the value (a `CASE`, because the type must track WHICH arm the value came
+  // from). Mirrors `scalarCoalesceChild`'s tail, with `CASE` in place of `COALESCE`.
+  const arms = [thenCV, elseCV];
+  const staticTypes = arms.map((a) => a.framing.kind === 'scalar' && a.framing.result === undefined && !a.vtype ? a.framing.type : null);
+  if (staticTypes.every((t): t is ScalarType => t !== null)) {
+    const met = meetScalarTypes(staticTypes);
+    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
+  }
+  const tagOf = (a: ChildValue): Expr => {
+    if (a.vtype) return a.vtype;
+    const tag = a.framing.kind === 'scalar' ? staticTypeOf(a.framing.type) : undefined;
+    return tag ? compilerText(tag) : compilerNull('text');
+  };
+  const vtype: Expr = { kind: 'case', whens: [[pred, tagOf(thenCV)]], else: tagOf(elseCV) };
+  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
+}
+
 /** `by(__.coalesce(A, …, Z))` over SCALAR arms → one SQL `COALESCE(...)`. The SCALAR twin of the
  *  relational `coalesceArms`, covering both the MONOID-COMPLETION case — a semigroup reducer (`sum`/`mean`,
  *  NULL over an empty child) gains an identity from a `constant` fallback, so
@@ -1295,6 +1377,12 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   if (body.length === 1 && first.name === 'coalesce') {
     const coalesced = scalarCoalesceChild(first, host, ctx, fresh);
     if (coalesced) return coalesced;
+  }
+  // A boolean `choose(<cond>, <then>[, <else>])` whose arms are scalars is a per-row `CASE`, not the
+  // relational arm-major union the self-root below builds; try it first, fall through for element/list arms.
+  if (body.length === 1 && first.name === 'choose') {
+    const chosen = scalarChooseChild(first, host, ctx, fresh);
+    if (chosen) return chosen;
   }
   if (BRANCH_HOSTS.has(body[0]!.name)) {
     const reduced = selfRootedReduce(body, host, ctx, fresh);

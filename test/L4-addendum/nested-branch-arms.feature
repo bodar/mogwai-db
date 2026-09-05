@@ -25,7 +25,6 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | z |
 
   @gap:nested-branch
-  @Unsupported
   Scenario: g_V_out_coalesceXchooseXhasLabelXpersonX_valuesXnameX_constantXSWXX_constantXnoneXX
     Given the modern graph
     And the traversal of
