@@ -116,20 +116,23 @@ names (list-alias dedup key, the local/flatMap split).
 
 ### Phase A — the keystone (Claude; first, everything depends on its shape)
 
-- **A1.** Add `aliases: AliasMap` to `ChildRows`; `childRows` returns `tail.aliases`; `flatMapRejoin`
-  threads it (carry regime) into its trailing `continueAs`. Reconcile via `liveAliases` against the shed
-  rel. Unlocks `local` label-escape AND `local`-under-`path()` (both pure coverage) in one move.
-  Keep declining when a body-bound label is consumed by a downstream grouping key.
-- **A2.** The local/flatMap SPLIT: `flatMap` sheds body-bound aliases → downstream empty (correct per
-  §2), stops declining on label-escape; `local` stops declining under `path()`; `flatMap`-under-`path()`
-  still declines pending C2. This is a decline→answer behavior change for `flatMap` — check the L4
-  `@Unsupported` set and re-record.
+- ✅ **A1 (LANDED f3ffb79b).** Added `aliases: AliasMap` to `ChildRows`; `childRows` returns
+  `tail.aliases`; `flatMapRejoin` threads it (carry regime) for `local`. Unlocked `local` label-escape
+  AND `local`-under-`path()` (both pure coverage — `inBody` never cleared `tracksPath`, so the body
+  already minted the right positions). L3 1816→1819.
+- ✅ **A2 (LANDED 27b65b42).** The local/flatMap SPLIT: `flatMap` sheds body-bound aliases
+  (`shedBodyAliases`) → downstream empty (correct per §2), no longer declines on label-escape;
+  `flatMap`-under-`path()` still declines pending C2. New oracle
+  `test/L4-addendum/flatmap-local-escape.feature` pins the asymmetry.
 
-### Phase B — cheap read-side consumers (Claude; small, each on A)
+### Phase B — read-side consumers (Claude; each on A)
 
-- **B1.** List-valued alias `dedup('a')` key — wire `aliasListAt` into `dedupByLabels`
-  (`src/compiler/rel/lower/slice.ts:~624`), both the bare and `by()` arms; SQLite JSON text equality per
-  §2. Add an L4 oracle (no corpus scenario names it).
+- ✅ **B1 (LANDED a1fb1bff).** Started as the list-valued alias `dedup('a')` key, but probing showed the
+  real gap: keyed `dedup(label)` was dispatched ONLY from the element/record tails, so a keyed dedup over
+  a bound LIST or scalar declined though `dedupByLabels` was built (the reach-the-arm trap). Extracted one
+  `keyedDedup` dispatch, wired the scalar/list/map tails, and added the `list` arm to `dedupByLabels`
+  (`aliasListAt`, canonical `json()` = `java.util.List` content-equality; `map` stays declined —
+  order-sensitive text ≠ `LinkedHashMap` entry-equality). Oracle `test/L4-addendum/list-alias-dedup.feature`.
 - **B2.** `where('a', P('b')).by('key')` residue — the element-alias case already works
   (`goldens.tsv`); build the scalar-alias-with-`by()` and mixed-kind theta arms
   (`lower.ts` `aliasWhere` family).
@@ -138,11 +141,11 @@ names (list-alias dedup key, the local/flatMap split).
 
 ### Phase C — the hard structural half
 
-- **C1 (Codex sweep, Claude spec+review).** Branch-arm label remap in `mergeArms`
-  (`src/compiler/rel/lower/branch.ts:~445`): replace the blunt `arm.aliases.size !== labels.size`
-  decline with canonical-column remap + NULL-pad per `CHANNEL_MERGE_POLICY.alias='union'`. Positional
-  `UNION ALL`, so each arm's physical alias column is remapped onto one canonical column and arms that
-  never bound it NULL-pad. union/choose/coalesce/optional.
+- ✅ **C1 (LANDED d835c490 — Codex sweep, Claude reviewed+committed).** Branch-arm label remap in
+  `mergeArms` (`remapArmAliases`): canonical-column remap + NULL-pad per `CHANNEL_MERGE_POLICY.alias='union'`;
+  `mergeArms` returns the merged outbound `AliasMap` (`BranchRel`) and the scalar/element/property branch
+  tails continue with `merged.aliases`. Oracle `test/L4-addendum/branch-arm-label-escape.feature`;
+  `rel-spine.test.ts` union case moved DECLINED→COVERED. L3 1828→1829.
 - **C2 (Claude; novel, reference-faithful).** The `flatMap` path-hide node — collapse the N body-minted
   path positions to one input→output position (`FlatMap.feature:56`). Lets `flatMap`-under-`path()` stop
   declining.
