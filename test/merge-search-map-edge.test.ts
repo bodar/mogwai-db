@@ -143,4 +143,16 @@ describe('map-valued mergeE — inject([T.label:…,(OUT):…,(IN):…]).mergeE(
     // marko(1) -likes-> josh(3)
     expect(await run(s, "g.V().has('name','marko').outE('likes').inV().values('name')")).toEqual(['josh']);
   });
+
+  test('select("m") of a withSideEffect constant map feeds the driver (the corpus shape) — MATCH', async () => {
+    const s = store(seed);
+    expect(await run(s, "g.withSideEffect('m',[(T.label):'knows',(OUT):1,(IN):2]).inject(1).select('m').mergeE().values('weight')")).toEqual([0.5]);
+    expect(await run(s, 'g.E().count()')).toEqual([1]);
+  });
+
+  test('select("m") of a withSideEffect constant map feeds the driver — CREATE', async () => {
+    const s = store(seed);
+    expect(await run(s, "g.withSideEffect('m',[(T.label):'likes',(OUT):1,(IN):2]).inject(1).select('m').mergeE().label()")).toEqual(['likes']);
+    expect(await run(s, 'g.E().count()')).toEqual([2]);
+  });
 });

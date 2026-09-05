@@ -1,10 +1,11 @@
 # Correlated merge search — build plan
 
 **Status (2026-09-06): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES), 4a (map-valued
-`mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a `T.label` key → +2 L3) and 4c-mergeE
-(map-valued `mergeE` — the edge host) LANDED on trunk; the 4c map-producing traversal (`select("m")` of a
-side-effect map, `out().project(…)`/`select(dynMap)`) + the whole-map 0-result raise remain — they unlock
-the CORPUS `select("m").mergeE()` scenario.** A fail-closed safety fix landed
+`mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a `T.label` key → +2 L3), 4c-mergeE
+(map-valued `mergeE` — the edge host) and 4c-select (`select("m")` of a `withSideEffect` constant map → a
+map stream, unlocking the CORPUS `select("m").mergeE()` → L3 1834 → 1835) LANDED on trunk. Remaining: the
+GENERAL map-producing traversal as a merge argument (`mergeV(__.out().project(…))`/`mergeV(__.select(dynMap))`)
++ the whole-map 0-result raise — a clean fail-closed decline today.** A fail-closed safety fix landed
 first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
 replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
 turned out to be ONE substrate** — see the 3+4 entry in the build order.
@@ -215,9 +216,17 @@ endpoints):
      the T.id refusal all compose. Tests: `test/L4-addendum/merge-search-map-edge.feature`,
      `test/merge-search-map-edge.test.ts`. Deferred, fail-closed: an `option(Merge.outV/inV)` or `onCreate`
      endpoint over a map driver, a `T.id`/list-valued map, a RUNTIME arm value.
-   - **4c-producer — map-producing traversal + select of a side-effect map** (`select("m").mergeE()`,
-     `out().project(…)`, `select(dynMap)`) + the whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` →
-     throw "does not map to a value"). Unlocks the CORPUS `select("m").mergeE()` scenario (raises L3).
+   - ✅ **4c-select — LANDED — `select("m")` of a `withSideEffect` CONSTANT map → a map stream**
+     (`selectSideEffectConstant`, `lower.ts`; `getScopeValue` consults the side effects before the path
+     labels, `Scoping.java:126-127`). The map-VALUED twin of `constantRetype`'s `constant([k:v])`, dispatched
+     in the `select` handler before `selectKeys` (which sees only the alias map). This feeds the map-valued
+     merge driver for BOTH hosts, so **the CORPUS `g.inject(1).select("m").mergeE()` scenario passes — L3
+     1834 → 1835.** Fail-closed: a non-map / unencodable side-effect constant falls through or declines.
+     Tests added to `test/merge-search-map-{edge,vertex}.{feature,test.ts}`.
+   - **4c-traversal — the GENERAL map-producing traversal as merge argument** (`mergeV(__.out().project(…))`,
+     `mergeV(__.select(dynMap))` — a per-driver map that is not a leading `project` computed spec) + the
+     whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` → throw "does not map to a value"). Still
+     declines (fail closed) — a clean deferral, not a wrong answer.
 
 Each increment lands with L4 `.feature` scenarios (there are none yet — write them) and its own tests.
 No L3 movement expected (the corpus has no computed-merge scenarios) — this is ceiling work, validated by

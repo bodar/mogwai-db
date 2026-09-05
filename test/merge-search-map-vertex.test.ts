@@ -149,4 +149,10 @@ describe('map-valued mergeV with a T.label key', () => {
     const s = store(person);
     await expect(run(s, "g.inject([T.id:5,name:'x']).mergeV()")).rejects.toThrow(/T.id/);
   });
+
+  test('select("m") of a withSideEffect constant map feeds the mergeV driver too', async () => {
+    const s = store(person);
+    expect(await run(s, "g.withSideEffect('m',[name:'marko']).inject(1).select('m').mergeV().values('name')")).toEqual(['marko']);
+    expect(await run(s, 'g.V().count()')).toEqual([1]);
+  });
 });

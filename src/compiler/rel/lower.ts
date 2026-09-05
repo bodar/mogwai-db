@@ -1072,6 +1072,12 @@ function collectionArm(
     const collectSelect = selectCollection(step, rel, ctx, fresh);
     if (collectSelect !== 'pass')
       return { tail: collectSelect && continueAs(collectSelect.rel, collectSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
+    // A `withSideEffect` CONSTANT MAP resolves through the side effects before the path labels, so it is
+    // consulted before `selectKeys` (which sees only the alias map) — the map-producing scope read that
+    // feeds the map-valued merge driver.
+    const constSelect = selectSideEffectConstant(step, rel, ctx, fresh);
+    if (constSelect !== 'pass')
+      return { tail: constSelect && continueAs(constSelect.rel, constSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
     const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing, named: namedElsewhere(ctx) });
     if (!selected) return { tail: null };
     return { tail: continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels) };
@@ -1218,6 +1224,42 @@ function selectCollection(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter):
     }),
     framing: value.framing,
   };
+}
+
+/**
+ * `select(name)` where `name` is a `withSideEffect` CONSTANT MAP — the map-producing form of a scope
+ * read. `getScopeValue` consults the traverser's side effects before the path labels
+ * (`Scoping.java:126-127`), so a `withSideEffect("m", [k:v,…])` resolves here to that constant per
+ * surviving traverser — the map-VALUED twin of `constantRetype`'s `constant([k:v])`. It is what lets
+ * `g.inject(1).select("m").mergeE()` (`MergeEdge.feature`) feed the map-valued merge driver
+ * (`mergeEFromMap`/`mergeVFromMap`), so the map's `Direction`/`T.label`/string entries reach the search.
+ *
+ * `'pass'` for anything but a single-key `select` of a constant MAP side effect — a scalar/list constant
+ * or an unresolvable name falls through to `selectKeys`, and a value/key the blob cannot encode DECLINES
+ * (fail closed, `mapLiteralBlob` `null`). A map with non-string keys carries no STATIC key set (its
+ * `Direction`/`T.label` keys are not property names), so the framing omits `keys` and the map tail reads
+ * `MAP_COL` dynamically.
+ */
+function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter): FramedRel | null | 'pass' {
+  if (step.modulators?.length || step.optionArms) return 'pass';
+  const spec = selectSpec(step);
+  if (!spec || spec.labels.length !== 1) return 'pass';
+  const name = spec.labels[0]!;
+  if (!ctx.sideEffects.has(name)) return 'pass';
+  const value = ctx.sideEffects.get(name);
+  if (!(value instanceof Map)) return 'pass';
+  const blob = mapLiteralBlob(value, null, null);
+  if (!blob) return null;
+  const keys = [...(value as Map<unknown, unknown>).keys()];
+  const stringKeys = keys.filter((k): k is string => typeof k === 'string');
+  // The constant REPLACES each traverser's value with the same map — one row per surviving traverser,
+  // channels intact (a barrier below still sorts by the emission order), exactly `constantRetype`'s shape.
+  const out = make.project({
+    id: fresh('sec'), input: rel, channels: rel.channels,
+    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(rel.channels)),
+    exprs: [[MAP_COL, blob], ...rel.channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const)],
+  });
+  return { rel: out, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...(stringKeys.length === keys.length ? { keys: stringKeys } : {}) } };
 }
 
 /**

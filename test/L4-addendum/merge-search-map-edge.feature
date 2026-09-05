@@ -167,3 +167,31 @@ Feature: mogwai addendum — a map-VALUED mergeE driver (the traverser IS the me
     Then the result should be unordered
       | result |
       | y |
+
+  # A withSideEffect CONSTANT map read by select("m") feeds the map-valued merge driver — the corpus's
+  # own select("m").mergeE() shape (g_withSideEffectXlabel_knows_out_marko_in_vadasX_injectX1X_selectXmX_mergeE).
+  @gap:merge-search-map-edge
+  Scenario: g_withSideEffectXmX_injectX1X_selectXmX_mergeE_matches
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("m",[(T.label):"knows",(OUT):1,(IN):2]).inject(1).select("m").mergeE().values("weight")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0.5].d |
+    And the graph should return 6 for count of "g.E()"
+
+  @gap:merge-search-map-edge
+  Scenario: g_withSideEffectXmX_injectX1X_selectXmX_mergeE_creates
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("m",[(T.label):"likes",(OUT):1,(IN):2]).inject(1).select("m").mergeE().label()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | likes |
+    And the graph should return 7 for count of "g.E()"
