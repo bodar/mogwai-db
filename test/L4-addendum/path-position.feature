@@ -105,6 +105,26 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[none,java] |
       | p[none,java] |
 
+  # A value-or-VALUE coalesce (no constant fallback): the widened scalarCoalesceChild admits any
+  # all-scalar-arms coalesce, so `lang` else `name` composes per path element. A person has no lang and
+  # falls to its name; software has lang "java". Locks in dropping the constant-final restriction.
+  @gap:path-position
+  Scenario: g_V_out_path_byXcoalesceXvaluesXlangX_valuesXnameXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.coalesce(__.values("lang"), __.values("name")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[marko,java] |
+      | p[marko,josh] |
+      | p[marko,vadas] |
+      | p[josh,java] |
+      | p[josh,java] |
+      | p[peter,java] |
+
   @gap:path-position
   @Unsupported
   Scenario: g_V_out_path_byXchooseXout_constantXhasOutX_constantXleafXXX
