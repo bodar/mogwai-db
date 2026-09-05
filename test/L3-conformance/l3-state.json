@@ -1,5 +1,5 @@
 {
-  "passing": 1808,
+  "passing": 1809,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -332,6 +332,7 @@
     "g_V_andXhasXage_gt_27X__outE_count_gte_2X_name",
     "g_V_andXhasXname_typeOfXGType_STRINGXX__hasXage_typeOfXGType_INTXXX_valuesXnameX",
     "g_V_andXoutE__hasXlabel_personX_and_hasXage_gte_32XX_name",
+    "g_V_asString",
     "g_V_asXaX_andXselectXaX_selectXaXX",
     "g_V_asXaX_both_asXbX_dedupXa_bX_byXlabelX_selectXa_bX",
     "g_V_asXaX_flatMapXselectXaXX",
@@ -1926,7 +1927,6 @@
     "g_V_age_injectX1000nX_fold_sumXlocalX",
     "g_V_age_injectX1000nX_sum",
     "g_V_aggregateXxX_byXout_order_byXnameXX_capXxX",
-    "g_V_asString",
     "g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX",
     "g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX_byXmathX_plus_XX",
     "g_V_asXaX_hasXname_markoX_outXcreatedX_asXbX_addVXselectXaX_labelX_propertyXtest_selectXbX_labelX_valueMap_withXtokensX",

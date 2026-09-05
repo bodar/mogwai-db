@@ -645,6 +645,23 @@ function terminal(
       { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, fresh);
   }
 
+  // `asString()` over a VERTEX — the traverser's String rendering, `AsStringGlobalStep`'s `String.valueOf`
+  // over a non-scalar object. A vertex renders `v[<id>]`, TinkerPop's `Element.toString()`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/StringFactory.java`
+  // `vertexString`). The id is the OUTWARD id (`COALESCE(uid, id)`, `byExpr`'s token arm — the same one
+  // `id()`/`by(T.id)` read), so it composes over a bound graph and agrees with the write path. `asString`
+  // over a runtime object is where JS/Java renderings may legitimately differ; a vertex's is exact.
+  // SCALAR asString is `VALUE_TX`'s (`scalarTail`); the EDGE, PROPERTY, MAP and LIST renderings are their
+  // own arms. Bare `asString()` only — a `Scope` token over a single element is a no-op but declines here
+  // until the scoped forms are built, rather than answering an unverified shape.
+  if (step.name === 'asString' && elem === 'vertex' && !args.length) {
+    const id = byExpr({ key: { kind: 'token', token: 'id' } }, elementHost(input, elem, aliases), ctx.source, fresh);
+    if (!id) return null;
+    const rendered: Expr = { kind: 'binary', op: '||',
+      left: { kind: 'binary', op: '||', left: compilerText('v['), right: id }, right: compilerText(']') };
+    return projectScalar(input, [['v', rendered]], [meta('v', 'text')], { kind: 'scalar', type: STATIC('string') }, fresh);
+  }
+
   // `labels()` — `label()`'s FLAT-MAP twin, and the only reader that may join `vertex_labels`.
   //
   // `LabelsStep` is a `FlatMapStep` over `element.labels()` and its javadoc states both arms:
