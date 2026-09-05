@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,815<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,816<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -183,7 +183,7 @@ heterogeneous stream frames each value by its own tag.
 | `math(formula)` | ✅ | full exp4j surface, one SQL scalar (always Double — see 🔴 below) |
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | |
-| `asString` | 🟡 | scalar/vertex/edge/property/map/list all ✅ (a collection renders through a JS barrier); ❌ only when chained after a global `order().fold()` (an order-barrier resume gap) |
+| `asString` | 🟡 | works over every shape (a collection renders through a JS barrier) and through a global `order().fold()` (a nested barrier); the one gap is a NULL member in a `Scope.local` SCALAR list, which renders `null` rather than raising (a `list.ts` edge) |
 | `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
 | `reverse` | ✅ | ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
 | `split` | 🟡 | ❌ `split(Scope.local, sep)` over a folded list, and a LIST-shaped head — both fail-closed deferrals |

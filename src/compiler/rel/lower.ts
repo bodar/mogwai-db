@@ -2604,6 +2604,20 @@ export interface Lowering {
    *  composite `(graph, id)` for a POST-MERGE element read; carried here so a later segment can extend
    *  it. Absent for every non-merge compile. */
   readonly mergedGraphs?: readonly MergedGraph[];
+  /**
+   * A SOURCE RELATION to start the fold from, in place of a source STEP — the resumed stream of a
+   * value-transform barrier expressed as a first-class relation (Calcite's `Values`), so its tail
+   * composes through the ORDINARY machinery, `segmentPlan` INCLUDED. This is what lets a value barrier's
+   * resume host a NESTED barrier (`valueMap(k).order().fold().asString(Scope.local)` — the asString
+   * barrier sits in the order barrier's resume tail): the resume re-injects its computed values as this
+   * seed and re-plans the tail through `planOf`, exactly as a chained `call()` barrier re-plans its tail,
+   * differing only in that the source is re-injected data rather than a re-source.
+   *
+   * A BUILDER `(fresh) => FramedRel` rather than a built relation, because it must mint its `json_each`
+   * source in the SAME id space the tail folds in (a pre-built relation from another minter would collide).
+   * `null` from it declines. Absent everywhere but a value-barrier resume's nested-tail plan.
+   */
+  readonly seed?: ((fresh: Minter) => FramedRel | null) | null;
 }
 
 /**
@@ -2631,6 +2645,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   // shares the outer chain's collections rather than getting an empty map — the isolation that was
   // here before was not a scoping decision, it was wrong against the reference.
   collections: opts.collections ?? new Map(),
+  seed: opts.seed ?? null,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
@@ -3230,43 +3245,82 @@ const VALUE_RESUME_PARAM = '_mogwai_value_resume';
  * threaded into `tail(seed, ctx, fresh)`, so each producer names its own column and re-entry vocabulary.
  */
 function valueResume(
-  data: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering,
-  seed: (exploded: Rel, fresh: Minter) => Rel,
-  tail: (seed: Rel, ctx: ChainCtx, fresh: Minter) => Tail | null,
+  steps: readonly IRStep[], from: number, opts: Lowering,
+  seedOf: (fresh: Minter) => FramedRel,
+  tail: (rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter) => Tail | null,
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
   const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
   // A tail that tracks a PATH cannot be seeded from a bare value list (no path history crossed the
   // barrier), so it declines rather than compile a plan with the column silently missing. An
-  // ENCOUNTER demand IS satisfiable: every seed below threads the array index (stream order) as the
-  // encounter channel, so a terminal-emission-order tail is seeded rather than declined.
+  // ENCOUNTER demand IS satisfiable: every seed threads the array index (stream order) as the encounter
+  // channel, so a terminal-emission-order tail is seeded rather than declined.
   if (facts.tracksPath) return null;
-  // Bind the array index (`json_each.key`) as `RESUME_ORD`: it IS each value's STREAM POSITION, which
-  // EVERY seed threads as an encounter channel — the list/map seeds so a later re-explode (`unfold()`)
-  // emits an earlier traverser's members before a later one's, the scalar seed so a terminal-emission-order
-  // retype tail keeps input order rather than declining.
-  const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh, undefined, RESUME_ORD);
-  const chain = tail(seed(exploded, fresh), ctx, fresh);
+  const seeded = seedOf(fresh);
+  const chain = tail(seeded.rel, seeded.framing, ctx, fresh);
   return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
-/** The column `valueResume` binds each value's array index (stream position) to — the list seed carries
- *  it as an encounter channel so re-injected stream order survives a later re-explode. */
+/** The column a re-inject binds each value's array index (stream position) to — threaded as an encounter
+ *  channel so re-injected stream order survives a later re-explode / a terminal-emission-order retype. */
 const RESUME_ORD = 'so';
 
-export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
-  return valueResume(values, steps, from, opts,
-    // Carry the array index as an ENCOUNTER channel exactly as the list/map seeds do: the re-injected
-    // values are in stream order (the array order), so a tail that demands a terminal emission order
-    // (`asNumber().asDate().asNumber()` — a length->1 retype chain, `computeDemandsEncounter`) is seeded
-    // from it rather than declined. A tail that owes no encounter simply never reads the column.
-    (exploded, fresh) => make.project({
+// ---------- the re-injected SOURCES, ONE authority each ----------
+//
+// A value-transform barrier's computed values re-enter as a `json_each` source (§ substrate A). Each shape
+// is ONE builder, used BOTH by its `lower<X>Resume` (the fold path) and as a `Lowering.seed` (the nesting
+// path, where a barrier's resume tail holds ANOTHER barrier — `order().fold().asString(local)`). One
+// authority so the two paths cannot frame the re-inject two ways. The array index rides as ENCOUNTER: the
+// list/map seeds so a later `unfold()` keeps stream order, the scalar seed so a terminal-emission-order
+// retype (`asNumber().asDate().asNumber()`) keeps input order rather than declining.
+
+/** The scalar re-injected source — each datum a bare `v`. */
+export const valueSeed = (values: readonly unknown[]) => (fresh: Minter): FramedRel => {
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, values, fresh, undefined, RESUME_ORD);
+  return {
+    rel: make.project({
       id: fresh('vrp'), input: exploded, channels: [ENCOUNTER],
       type: typeOf(meta('v', 'any', true), meta(ENCOUNTER.col, 'int')),
       exprs: [['v', col(exploded.id, 'sv')], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
     }),
-    (seed, ctx, fresh) => scalarTail(seed, { kind: 'scalar', type: UNKNOWN }, steps, from, false, ctx, fresh));
+    framing: { kind: 'scalar', type: UNKNOWN },
+  };
+};
+
+/** The list re-injected source — each datum a `LIST_COL`, `json()`-wrapped for a nested member (a `list`/
+ *  `map` member is itself a JSON collection json_each hands back as TEXT; a flat scalar member needs none). */
+export const listSeed = (of: ListOf, lists: readonly unknown[]) => (fresh: Minter): FramedRel => {
+  const nested = of.kind === 'list' || of.kind === 'map';
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, lists, fresh, undefined, RESUME_ORD);
+  return {
+    rel: make.project({
+      id: fresh('lrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta(LIST_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [[LIST_COL, nested ? jsonOf(col(exploded.id, 'sv')) : col(exploded.id, 'sv')],
+        [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
+    }),
+    framing: { kind: 'list', of },
+  };
+};
+
+/** The map re-injected source — each datum a `MAP_COL` pairs blob (`json()` turns json_each's TEXT back
+ *  into the JSONB the map framer reads). */
+export const mapSeed = (maps: readonly unknown[]) => (fresh: Minter): FramedRel => {
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, maps, fresh, undefined, RESUME_ORD);
+  return {
+    rel: make.project({
+      id: fresh('mrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta(MAP_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [[MAP_COL, jsonOf(col(exploded.id, 'sv'))], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
+    }),
+    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } },
+  };
+};
+
+export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  return valueResume(steps, from, opts, valueSeed(values),
+    (rel, framing, ctx, fresh) => scalarTail(rel, framing, steps, from, false, ctx, fresh));
 }
 
 /**
@@ -3294,22 +3348,8 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
  * `of` here reaches only scalar/list/map members.)
  */
 export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
-  // A NESTED member (a `list`/`map`) is itself a JSON collection, so the seed value carries `json(sv)` —
-  // `json_each` hands back a nested element as its TEXT, and without the `json()` the framer would read a
-  // string where an array belongs (`items.map is not a function`). A flat member (`BARE_LIST`, split's
-  // case) needs no wrap: `sv` is already the scalar. `of` IS the member descriptor.
-  const nested = of.kind === 'list' || of.kind === 'map';
-  return valueResume(lists, steps, from, opts,
-    // Carry the array index as an ENCOUNTER channel: each row is one traverser's list, and its stream
-    // position is the emission order a later `unfold()` must lead its member sort with (`unfoldList`'s
-    // `carried` reason). `renumber` in the framing/reduction path reads it identically.
-    (exploded, fresh) => make.project({
-      id: fresh('lrp'), input: exploded, channels: [ENCOUNTER],
-      type: typeOf(meta(LIST_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
-      exprs: [[LIST_COL, nested ? jsonOf(col(exploded.id, 'sv')) : col(exploded.id, 'sv')],
-        [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
-    }),
-    (seed, ctx, fresh) => continueAs(seed, { kind: 'list', of }, steps, from, false, ctx, fresh, NO_ALIASES));
+  return valueResume(steps, from, opts, listSeed(of, lists),
+    (rel, framing, ctx, fresh) => continueAs(rel, framing, steps, from, false, ctx, fresh, NO_ALIASES));
 }
 
 /**
@@ -3322,13 +3362,8 @@ export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: 
  * back as TEXT). The array index rides as an ENCOUNTER channel for the `unfold()` stream-order reason.
  */
 export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
-  return valueResume(maps, steps, from, opts,
-    (exploded, fresh) => make.project({
-      id: fresh('mrp'), input: exploded, channels: [ENCOUNTER],
-      type: typeOf(meta(MAP_COL, 'json', true), meta(ENCOUNTER.col, 'int')),
-      exprs: [[MAP_COL, jsonOf(col(exploded.id, 'sv'))], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
-    }),
-    (seed, ctx, fresh) => continueAs(seed, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, steps, from, false, ctx, fresh, NO_ALIASES));
+  return valueResume(steps, from, opts, mapSeed(maps),
+    (rel, framing, ctx, fresh) => continueAs(rel, framing, steps, from, false, ctx, fresh, NO_ALIASES));
 }
 
 /**
@@ -3380,6 +3415,14 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   const tracksPath = facts.tracksPath;
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const pathChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
+  // A SEEDED chain has no source STEP — its source is the re-injected relation a value-transform
+  // barrier's resume supplies (`opts.seed`, § Lowering.seed). Built here so its `json_each` mints in the
+  // fold's own id space, then the tail (`fold().asString(local)`, …) continues over it through the
+  // ordinary machinery — which is the whole point: a barrier the tail contains is now reachable.
+  if (opts.seed) {
+    const seeded = opts.seed(fresh);
+    return seeded && continueAs(seeded.rel, seeded.framing, steps, 0, false, ctx, fresh, NO_ALIASES);
+  }
   const first = steps[0];
   if (!first) return null;
   // A `graphTag` on the source step (a multi-graph merge arm, nested-branch federate) seeds a `graph`

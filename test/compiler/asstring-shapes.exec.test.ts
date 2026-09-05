@@ -67,4 +67,15 @@ describe('asString() over each traverser shape', () => {
     expect(r.length).toBe(1);
     expect([...r[0]]).toEqual(['v[1]', 'v[2]', 'v[3]', 'v[4]', 'v[5]', 'v[6]']);
   });
+
+  // A NESTED barrier: the asString barrier sits in the ORDER barrier's resume tail, reached because the
+  // value-transform resume re-plans its tail through segmentPlan rooted at the re-injected sorted maps
+  // (§ Lowering.seed). AsString.feature g_V_valueMapXnameX_order_fold_asStringXlocalX.
+  test('asString(local) after a global order().fold() over a map stream (a nested barrier)', async () => {
+    const r = await framed('g.V().valueMap("name").order().fold().asString(Scope.local)');
+    expect(r.length).toBe(1);
+    expect([...r[0]]).toEqual([
+      '{name=[josh]}', '{name=[lop]}', '{name=[marko]}', '{name=[peter]}', '{name=[ripple]}', '{name=[vadas]}',
+    ]);
+  });
 });

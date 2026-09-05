@@ -75,9 +75,15 @@ export function buildAsStringSegment(steps: readonly IRStep[], at: number, lower
   }
   const head = valueHead(lowered);
   if (head?.shape.kind !== 'jsonbList' || (isBareList(head.shape.items) && local)) return null;
+  // A MAP member arrives as its BARE pairs array (`[[keyNode,valNode],…]`, ambiguous with a plain list),
+  // so wrap it back into the `{t:'map'}` node the renderer frames as `{k=v}`; an element (`{id,label}`),
+  // scalar, or nested-list member is already self-describing and renders as-is.
+  const nodeOf = head.shape.items.kind === 'map'
+    ? (member: unknown): unknown => ({ t: 'map', v: member })
+    : (member: unknown): unknown => member;
   return local
     ? buildValueTransformSegment(steps, at, lowering,
-      (list) => (list as unknown[]).map(asStringMember), lowerListResume, 'asString')
+      (list) => (list as unknown[]).map((m) => asStringMember(nodeOf(m))), lowerListResume, 'asString')
     : buildValueTransformSegment(steps, at, lowering,
-      (list) => gremlinString(list), lowerValueResume, 'asString');
+      (list) => gremlinString((list as unknown[]).map(nodeOf)), lowerValueResume, 'asString');
 }

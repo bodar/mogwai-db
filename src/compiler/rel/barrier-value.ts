@@ -79,6 +79,7 @@ export function buildValueStreamTransformSegment(
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
+  nest?: (transformed: readonly unknown[]) => Plan | null,
 ): SegmentPlan | null {
   const head = headOf(lowerToRel(steps.slice(0, at), lowering));
   if (!head) return null;
@@ -88,9 +89,14 @@ export function buildValueStreamTransformSegment(
     head,
     resume: (headRows: readonly BarrierInput[]): Plan => {
       const transformed = streamTransform(headRows.map((row) => row.injectedValue));
+      // The fold path first (the common case — a plain SQL tail). It declines (null) only when the tail
+      // holds ANOTHER barrier, which the ordinary fold cannot lower; `nest` then re-plans the tail as a
+      // NESTED segment rooted at the re-injected values (§ Lowering.seed) — `order().fold().asString(local)`.
       const resumed = resume(transformed, steps, at + 1, lowering);
-      if (!resumed) throw new Error(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
-      return { kind: 'sql', compiled: finishLowering(resumed) };
+      if (resumed) return { kind: 'sql', compiled: finishLowering(resumed) };
+      const nested = nest?.(transformed);
+      if (nested) return nested;
+      throw new Error(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
     },
   };
 }

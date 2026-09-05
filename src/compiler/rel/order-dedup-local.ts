@@ -2,9 +2,16 @@ import { isScopeArg } from '../../gremlin/frontend.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
-import type { SegmentPlan } from '../segment.ts';
-import { lowerListResumeOf, lowerMapResumeOf, lowerToRel, type Lowering } from './lower.ts';
+import type { Plan, SegmentPlan } from '../segment.ts';
+import type { FramedRel } from './framing.ts';
+import type { Minter } from './build.ts';
+import { listSeed, lowerListResumeOf, lowerMapResumeOf, lowerToRel, mapSeed, type Lowering } from './lower.ts';
 import { buildValueStreamTransformSegment, buildValueTransformSegment, mapHead, valueHead } from './barrier-value.ts';
+
+/** Re-plan a value-transform barrier's resume TAIL as a nested segment rooted at the re-injected values
+ *  (`Lowering.seed`) — supplied by `segmentPlan`, which holds the `SegmentRequest` `planOf` needs. `null`
+ *  where the tail holds no further barrier or none covers it; the caller then raises its resume error. */
+export type PlanTail = (tail: readonly IRStep[], seed: (fresh: Minter) => FramedRel) => Plan | null;
 import { dedupLocalValue, orderLocalValue, orderMapStreamValue, orderStreamValue } from './orderability.ts';
 
 // ---------- order/dedup(Scope.local) over a NESTED list, as a value-transform BARRIER ----------
@@ -106,12 +113,16 @@ export function orderGlobalBarrierIn(steps: readonly IRStep[]): { at: number } |
 }
 
 export function buildOrderGlobalSegment(
-  steps: readonly IRStep[], at: number, lowering: Lowering,
+  steps: readonly IRStep[], at: number, lowering: Lowering, planTail?: PlanTail,
 ): SegmentPlan | null {
   // The head decides list-vs-map-vs-scalar. A `jsonbList` head carries one list per traverser (LIST
   // stream); a `mapValue` head one map (MAP stream). A scalar `value` head is the SQL path's (SQLite
   // orders scalars by storage class), so both `valueHead` and `mapHead` decline it here.
   const lowered = lowerToRel(steps.slice(0, at), lowering);
+  const tail = steps.slice(at + 1);
+  // `nest` re-plans the tail rooted at the re-injected (sorted) values, so a barrier the tail holds — a
+  // `fold().asString(local)` after a map order — is reached (the fold path having declined it). Only where
+  // `segmentPlan` supplied a `planTail`; the re-inject shape is the same seed the resume uses.
   const listHead = valueHead(lowered);
   if (listHead && listHead.shape.kind === 'jsonbList') {
     const of = listHead.shape.items;
@@ -120,13 +131,15 @@ export function buildOrderGlobalSegment(
     // Re-inject each list under the pre-barrier member shape, unchanged — a global `order()` only reorders
     // the stream, not any list's contents. A following list op reads the members correctly.
     return buildValueStreamTransformSegment(steps, at, lowering, orderStreamValue,
-      (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order');
+      (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), 'order', valueHead,
+      planTail && ((sorted) => planTail(tail, listSeed(of, sorted))));
   }
   // A MAP stream: sort by the sorted-entry-set order (`orderMapStreamValue`) and re-inject each map's pairs
   // array under the self-describing map framing (`inject($map)`'s shape).
   if (mapHead(lowered)) {
     return buildValueStreamTransformSegment(steps, at, lowering, orderMapStreamValue,
-      (maps, s, from, opts) => lowerMapResumeOf(maps, s, from, opts), 'order', mapHead);
+      (maps, s, from, opts) => lowerMapResumeOf(maps, s, from, opts), 'order', mapHead,
+      planTail && ((sorted) => planTail(tail, mapSeed(sorted))));
   }
   return null;
 }

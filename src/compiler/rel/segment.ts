@@ -456,7 +456,11 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   if (earliest === odAt) return buildOrderDedupSegment(steps, orderDedup!.at, orderDedup!.op, request.lowering);
   // A GLOBAL bare order() over a LIST stream — declines (→ inline SQL fold) for a scalar/element head, so a
   // scalar `values().order()` stays in SQL untouched.
-  if (earliest === ogAt) return buildOrderGlobalSegment(steps, orderGlobal!.at, request.lowering);
+  if (earliest === ogAt) return buildOrderGlobalSegment(steps, orderGlobal!.at, request.lowering,
+    // Re-plan the resume tail rooted at the re-injected (sorted) values: a barrier the tail holds (a
+    // `fold().asString(local)`) is reached by `planOf` re-entering `segmentPlan` with the seed as the
+    // source, the same way a chained `call()` barrier re-plans its tail — only the source differs.
+    (tail, seed) => planOf(tail, { ...request, lowering: { ...request.lowering, seed } }));
   if (earliest === asStrAt) return buildAsStringSegment(steps, asStr!.at, request.lowering);
   if (earliest === castAt) return buildCastSegment(steps, cast!.at, request.lowering);
   if (earliest === regexAt) return buildRegexSegment(steps, regex!, request.lowering, (tail) => planOf(tail, request));
