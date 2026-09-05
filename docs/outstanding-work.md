@@ -186,8 +186,11 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 
 ## Superseded / won't-do (do not re-open)
 
-- **`order`/`dedup(Scope.local)` over an ELEMENT-membered nested list** — declines fail-closed; needs
-  federate-grade detached-element re-entry, rare and non-corpus. (The scalar-list case landed.)
+- **FEDERATED `order`/`dedup(Scope.local)`/global-`order()` over an ELEMENT-membered list** — the
+  BASE-graph case LANDED (D2, `order-dedup-local.ts`: carry rowids through the barrier, re-source at the
+  edge). A LANDED-FOREIGN element re-sources its key via `BoundGraph`, not the resume's `BaseGraph`
+  default, so the federated case still declines fail-closed until the resume threads the bound source —
+  rare and non-corpus. (The scalar-list case landed earlier.)
 - **Recursion barrier-in-term** (an aggregate/window inside a recursive `repeat` term) — a SQLite
   algebraic law; the refusal is the only correct answer, not a gap.
 - **Global `tail`/`sample` with no `encounter`** — a question about emission order a channel-less

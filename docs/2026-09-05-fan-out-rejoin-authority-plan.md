@@ -271,11 +271,22 @@ names (list-alias dedup key, the local/flatMap split).
   two `order`/`dedup(Scope.local)`-over-element-membered-nested-list items `outstanding-work.md` marks
   "won't-do".
 
-- ◑ **D2 (DIAGNOSED — the RIGHT direction found, base-case build is a focused follow-up).** The
-  element-membered nested-list `order`/`dedup(Scope.local)` "won't-do" (`order-dedup-local.ts`
-  `hasElementLeaf` gate). The first framing ("reconcile the barrier's member encoding" / a detached-element
-  read substrate) was a DEAD END — deeper research (Dan's steer + code + TinkerPop/Calcite) found the
-  root cause and the clean fix:
+- ✅ **D2 (LANDED — base graph, both scopes; federated stays fail-closed by design).** The
+  element-membered nested-list `order`/`dedup(Scope.local)` "won't-do" — and, for combinatorial
+  completeness, GLOBAL `order()` over an element-membered list stream — now round-trip on the base graph.
+  Two increments on trunk (`82f4a702` Scope.local, `7ce83f97` global stream): the fix landed exactly as
+  diagnosed below. Mechanism as built: a `rawListElements` `Lowering` flag threads settle→lowered→framed→
+  `listPayload`, which frames element leaves as raw rowids for a BARRIER HEAD only (byte-identical for the
+  scalar-nested path since `demoteElementLeaves` is a no-op there) while the head's `Shape` keeps the
+  ORIGINAL `{elem}` descriptor; the barrier builders pass it as `headOpts` (head raw, resume plain, so the
+  terminal wire read frames elements normally); the `hasElementLeaf` decline became two fail-closed gates
+  (federated/merged source, and a non-recoverable `property`/`mixed`-element leaf). Witnessed on modern
+  (order/dedup then unfold/unfold/read and a movement-after; L4 `nested-list-order-dedup.feature` +
+  `collection-stream-order.feature` reference-safe name multisets; exact sorted structure regression-locked
+  in `test/compiler/nested-element-order.exec.test.ts`). Census 0 drift; scalar/map plans byte-unchanged
+  (rel-sweep 0 diffs); perturbation neutral. The FEDERATED nested-element-order stays declined (its keys
+  re-source via `BoundGraph`, not the resume's `BaseGraph` default) — a separate increment. Original
+  diagnosis kept below for the reasoning:
   - **Why it fails:** the barrier HEAD is built through `valueHead → finishLowering`, which runs the
     FRAMING payload builder — so it materializes element members (rowid → `{id,label,props}`, external id)
     BEFORE the JS round-trip. The internal rowid is lost, so the re-inject's `{elem}` re-source (which

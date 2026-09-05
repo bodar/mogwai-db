@@ -88,7 +88,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | |
 | `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`). ❌ `Column`-keyed order forms; an element-membered list (cannot round-trip — the rowid is gone once it JSONs through the barrier) |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`), a base-graph ELEMENT-membered list by carrying member rowids through the barrier and re-sourcing at the edge. ❌ `Column`-keyed order forms; a FEDERATED element-membered list (its keys re-source via `BoundGraph`, not the resume's base default) |
 
 ## 5. Branching
 
@@ -159,7 +159,7 @@ Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-
 
 | Step | | Notes |
 |---|:--:|---|
-| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | ❌ `dedup(local)` with a label tuple or a `by()` projection; PROPERTY-member and NESTED-list member lists |
+| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | a NESTED-list-member `order`/`dedup(Scope.local)` sorts/dedups by ORDERABILITY through the value-transform barrier — SCALAR members and base-graph ELEMENT members (carried as rowids, re-sourced at the edge). ❌ `dedup(local)` with a label tuple or a `by()` projection; a PROPERTY-member list; a FEDERATED element-membered list |
 | `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over a non-iterable SCALAR self |
 | `index()` | ❌ | |
 
