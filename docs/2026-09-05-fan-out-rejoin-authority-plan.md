@@ -133,17 +133,29 @@ names (list-alias dedup key, the local/flatMap split).
   `keyedDedup` dispatch, wired the scalar/list/map tails, and added the `list` arm to `dedupByLabels`
   (`aliasListAt`, canonical `json()` = `java.util.List` content-equality; `map` stays declined —
   order-sensitive text ≠ `LinkedHashMap` entry-equality). Oracle `test/L4-addendum/list-alias-dedup.feature`.
-- ◑ **B2 (ASSESSED — mostly already done, residual correctly deferred).** The element-alias theta
-  `where('a', op('b')).by('key')` ships today, ordering included (`aliasWhere`, `lower.ts:4558-4580`).
-  The residual — a scalar (value) alias ORDERING theta (`where('a', gt('b'))` over two stored scalars) —
-  is a legitimate comparator DEFERRAL, not a wire gap: value/type equality (`eq`/`neq`) is SQLite `=`
-  (built, `lower.ts:4587-4591`), but `<`/`>` over two stored scalars of unknown type diverges from
-  TinkerPop's `GremlinValueComparator` cross-type total order, so a naive SQLite compare is a WRONG
-  answer (the same JS-comparator boundary `order(Scope.local)` draws). The one correct narrow slice is
-  guarded on both aliases' `AliasEntry.scalarType` being in the Number family (then SQLite `<` is
-  faithful) — low-value; build it only with a witness. Mixed-kind theta (`by('key')` over a value alias)
-  is semantically ill-formed (a scalar has no property key). So B2 is not the "cheap wire" it looked
-  like; the declines are correct.
+- ✅ **B2 (LANDED 4d3183b0 — the deferral premise was WRONG).** The residual — a scalar (value) alias
+  ORDERING theta (`where('a', gt('b'))` over two stored scalars) — was deferred on the belief that it
+  needed TinkerPop's cross-type TOTAL order and SQLite's `<`/`>` would diverge (a WRONG answer, "the same
+  JS-comparator boundary `order(Scope.local)` draws"). **That conflated two reference comparators.**
+  `Compare.gt/gte/lt/lte` route through `GremlinValueComparator.COMPARABILITY`
+  (`vendor/tinkerpop/gremlin-core/.../process/traversal/Compare.java:63-116` →
+  `.../util/GremlinValueComparator.java:97-153`), NOT the ORDERABILITY total order `order(Scope.local)`
+  uses. COMPARABILITY is comparable ONLY within one `Type` bucket (`ft == st`,
+  `GremlinValueComparator.java:314-363`) and is simply FALSE across buckets (guard returns false before
+  `compare` throws). So there is no cross-type total order to render and no wrong-answer risk: the
+  faithful lowering is a same-bucket-else-false CASE — the shape `ordered()` already builds for the
+  one-static-side case, one axis over. New `comparableTheta` (`src/compiler/rel/predicate.ts`) renders
+  it per-row off each alias's stored `t` tag, over ALL reachable scalar buckets (not the proposed
+  "Number-only narrow slice"): Number (one bucket across int/real, cast per side by storage class),
+  Date/Duration (int), String/char + Boolean + UUID (stored value; uuid lexical, matching
+  `orderability.ts` so the two comparators agree). An UNKNOWN-typed alias (no `t` tag) declines
+  fail-closed rather than answer a real comparison false. Works at depth — witnessed inside `match()`
+  (int/int, int/real, string/string, and the cross-bucket int-vs-string → empty). Also hoisted a shared
+  `compilerFalse` (`ordered()` had its own copy). Oracle
+  `test/L4-addendum/scalar-alias-ordering-theta.feature`; not corpus-witnessed (census 0 drift).
+  **Residual, NOW a separate compounding item:** `ordered()`'s own bucket split is only 2-way
+  (numeric/string), so `is(P.gt(<bool>))` between two booleans still mis-answers — a latent correctness
+  bug a shared bucket table would fix; see §7 B4.
 - ✅ **B3 (DONE BY THE SUBSTRATE — regression pins added).** Probing showed the fan-out `otherV()`
   scope-crossing family ALREADY lowers after A/C: `local`/`coalesce`/`union`/`flatMap` bodies with a
   following `otherV()`, including with a trailing `path().by()`, all compile (the `ctx.needsFromV` demand
@@ -151,6 +163,15 @@ names (list-alias dedup key, the local/flatMap split).
   family" — B3 was subsumed. Only repeat-body `otherV()` still declines, and that belongs to the repeat
   substrate (not this plan). New oracle `test/L4-addendum/otherv-scope-crossing.feature` pins the
   coalesce+otherV+path and local(bothE.limit).otherV compositions against regression.
+- ◑ **B4 (LOCATED by B2 — a latent correctness bug, own increment).** `ordered()`
+  (`src/compiler/rel/predicate.ts`) — the one-static-side range/`is` compare — buckets only 2-way
+  (numeric vs string): its `agrees` fold answers `CONSTANT.false` for a non-numeric non-string, so
+  `is(P.gt(<bool>))` / `<`/`>` over two BOOLEAN values always answers false, where TinkerPop's Boolean
+  bucket is comparable (`false < true`, `GremlinValueComparator.Type.Boolean` + `naturalOrder`). Same
+  gap for the `perRow`/`unknown` arms. The compounding fix is to extract the scalar-bucket table B2's
+  `comparableTheta` uses (Number/Date/Duration/String/Boolean/UUID) and have `ordered()` consume it too
+  — one bucket authority for both the one-side and two-side comparators, retiring the ad-hoc
+  `NUMERIC_VTYPES`/`CAST_TO_INT` 2-way split. Needs a witness graph with a stored boolean property.
 
 ### Phase C — the hard structural half
 
