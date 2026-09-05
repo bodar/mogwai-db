@@ -56,4 +56,30 @@ describe('connectedComponent() — wcc DECORATE barrier', () => {
     await expect(exec(store).framedAsync(`g.V().connectedComponent().with("~tinkerpop.connectedComponent.edges", __.outE("knows")).has("${KEY}")`, {}))
       .rejects.toThrow('undirected');
   });
+
+  test('has(component, value) filters on the decorated TEXT component id', async () => {
+    const store = seeded(MODERN_SEED);
+    // Every vertex is component "1" in the undirected modern graph.
+    expect(await run(store, `g.V().connectedComponent().has("${KEY}", "1").count()`)).toEqual([6]);
+    expect(await run(store, `g.V().connectedComponent().has("${KEY}", "9").count()`)).toEqual([0]);
+    // knows-only scope isolates peter into its own component "6" — filter to exactly it.
+    const rows = await run(store, `g.V().hasLabel("person").connectedComponent().with("~tinkerpop.connectedComponent.edges", __.bothE("knows")).with("~tinkerpop.connectedComponent.propertyName", "cluster").has("cluster", "6").values("name")`);
+    expect(rows).toEqual(['peter']);
+  });
+
+  test('values() mixing the decorated component key with a stored key — the UNION multiset', async () => {
+    const store = seeded(MODERN_SEED);
+    const vals = await run(store, `g.V().connectedComponent().values("name", "${KEY}")`);
+    expect(vals.length).toBe(12); // 6 stored names + 6 decorated component ids
+    expect(vals.filter((v) => v === '1').length).toBe(6); // every component id is "1"
+    expect(new Set(vals.filter((v) => v !== '1'))).toEqual(new Set(['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']));
+  });
+
+  test('bare values() (every key) includes the decorated component id', async () => {
+    const store = seeded(MODERN_SEED);
+    const bare = await run(store, `g.V().connectedComponent().values()`);
+    const plain = await run(store, `g.V().values()`);
+    expect(bare.length).toBe(plain.length + 6); // + one component id per vertex
+    expect(bare.filter((v) => v === '1').length).toBe(6); // every vertex's component id is "1"
+  });
 });

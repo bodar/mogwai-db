@@ -72,11 +72,6 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 
 ## Product capabilities
 
-- **Cheap mechanical wins — highest value / lowest cost.** Each routes through machinery already
-  present nearby:
-  - **OLAP decorated-property reads** — `has(key,value)` over an OLAP score and mixed decorated+stored
-    `values()` decline, but `existsOf(rowById())`+`cval` and the base-UNION-decorate pattern are in the
-    same file (`src/compiler/rel/decorate.ts`). Unblocks post-`pageRank`/`connectedComponent` reads.
 - **Graph capabilities:** `tree`, graph algorithms, and the remaining strategy/options forms.
   - **`match()` — mostly landed, residual gaps** (was indexed as unbuilt). Binding/filter patterns,
     `and`/`or` filter regime, nested match, modulated bodies, keyed `dedup`, and top-level

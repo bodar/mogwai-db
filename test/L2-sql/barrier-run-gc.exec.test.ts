@@ -11,7 +11,6 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 // `apply` already wrote its rows — never reaches the framer, so the drive drops the runs it allocated
 // in its own catch (`src/drive.ts` `dropRuns`). Substrate: reshape plan §8.
 
-const PR = 'gremlin.pageRankVertexProgram.pageRank';
 const rows = (store: ReturnType<typeof seeded>) =>
   store.query<{ c: number }>('SELECT count(*) AS c FROM barrier_state')[0].c;
 
@@ -25,24 +24,26 @@ describe('barrier_state run-token GC — no leak on the happy path or on a throw
 
   test('a single barrier whose tail DECLINES at resume leaks nothing (drop-on-throw)', async () => {
     const store = seeded(MODERN_SEED);
-    // has(decoratedKey, <value>) is not supported over a decorated property — it throws during the
-    // resume's lowering, AFTER pageRank's apply wrote its run's rows. Those must be dropped, not leaked.
-    await expect(exec(store).framedAsync(`g.V().pageRank().has("${PR}", 0.15)`, {})).rejects.toThrow();
+    // The tail after the barrier must DECLINE at the resume's lowering, AFTER pageRank's apply wrote its
+    // run's rows — those must be dropped, not leaked. `tree()` is an unsupported tail here, so the resume
+    // raises "no lowering covers the traversal after the barrier"; any resume-tail decline exercises the
+    // same drive-catch path (the specific declining step is incidental — swap it if `tree()` ever lands).
+    await expect(exec(store).framedAsync(`g.V().pageRank().tree()`, {})).rejects.toThrow();
     expect(rows(store)).toBe(0);
   });
 
   test('a CHAINED barrier that declines at the final resume drops BOTH runs', async () => {
     const store = seeded(MODERN_SEED);
-    // pageRank apply writes run A; connectedComponent apply writes run B; then has(PR, value) declines.
+    // pageRank apply writes run A; connectedComponent apply writes run B; then the tree() tail declines.
     // Neither run reaches the framer's cleanup — the drive's catch must drop both.
-    await expect(exec(store).framedAsync(`g.V().pageRank().connectedComponent().has("${PR}", 0.15)`, {})).rejects.toThrow();
+    await expect(exec(store).framedAsync(`g.V().pageRank().connectedComponent().tree()`, {})).rejects.toThrow();
     expect(rows(store)).toBe(0);
   });
 
   test('the sync framed() path drops on throw too', () => {
     const store = seeded(MODERN_SEED);
     // pageRank has a synchronous core, so framed() drives it; the same decline must not leak.
-    expect(() => exec(store).framed(`g.V().pageRank().has("${PR}", 0.15)`, {})).toThrow();
+    expect(() => exec(store).framed(`g.V().pageRank().tree()`, {})).toThrow();
     expect(rows(store)).toBe(0);
   });
 });

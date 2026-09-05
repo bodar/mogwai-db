@@ -281,3 +281,10 @@ The four with a native step lead the table; the algorithm name links a canonical
 | [Local clustering coefficient](https://en.wikipedia.org/wiki/Clustering_coefficient#Local_clustering_coefficient) | `localClusteringCoefficient` | |
 | [k-core](https://en.wikipedia.org/wiki/Degeneracy_(graph_theory)#k-Cores) | `kcore` | decorates the core value |
 | [Node similarity](https://en.wikipedia.org/wiki/Jaccard_index) | `nodeSimilarity` | yields `{node1, node2, similarity}` pairs |
+
+**Reads over a decorated key compose fully.** An element-decorating algorithm (`pageRank`,
+`connectedComponent`, `peerPressure`, `hits`, `kcore`) passes its element stream through with the score
+under a synthetic key, and every property read works on it: `has(key)` (presence), `has(key, value)` /
+`has(key, P.gt(x))` (a vtype-aware compare — numeric for a REAL score, text for a component id),
+`order().by(key)`, `project().by(key)`, `values(key)`, `values(key, storedKey)` (a UNION of the
+decorated value with stored ones), and `valueMap()`. All live in `src/compiler/rel/decorate.ts`.

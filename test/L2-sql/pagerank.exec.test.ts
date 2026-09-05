@@ -95,4 +95,38 @@ describe('pageRank() — pageRank DECORATE barrier', () => {
     expect(rows.length).toBe(6);
     for (const r of rows) expect(r[KEY]).toBeCloseTo(1 / 6, 9);
   });
+
+  test('has(pageRank, P) filters on the decorated REAL score — a vtype-aware NUMERIC compare', async () => {
+    const store = seeded(MODERN_SEED);
+    // scores: lop 0.305, ripple 0.176, {vadas,josh} 0.146, {marko,peter} 0.114 — compared as numbers,
+    // not text (a text compare would order "0.305" before "0.114" lexically and give the wrong set).
+    expect(await run(store, `g.V().pageRank().has("${KEY}", P.gt(0)).count()`)).toEqual([6]);
+    expect(await run(store, `g.V().pageRank().has("${KEY}", P.gt(0.15)).order().by("name").values("name")`))
+      .toEqual(['lop', 'ripple']);
+    expect(await run(store, `g.V().pageRank().has("${KEY}", P.gt(0.2)).values("name")`)).toEqual(['lop']);
+    expect(await run(store, `g.V().pageRank().has("${KEY}", P.lt(0.12)).order().by("name").values("name")`))
+      .toEqual(['marko', 'peter']);
+  });
+
+  test('values() mixing the decorated key with a stored key — the UNION multiset', async () => {
+    const store = seeded(MODERN_SEED);
+    // A terminal values() demands an encounter, so this exercises the tagged-union re-mint path.
+    const vals = await run(store, `g.V().pageRank().values("name", "${KEY}")`);
+    expect(vals.length).toBe(12); // 6 stored names + 6 decorated scores
+    const names = vals.filter((v) => typeof v === 'string');
+    const scores = vals.filter((v): v is number => typeof v === 'number');
+    expect(new Set(names)).toEqual(new Set(['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']));
+    expect(scores.length).toBe(6);
+    expect(scores.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 5); // pageRank scores sum to 1
+  });
+
+  test('bare values() (every key) includes the decorated score — the compute key persists', async () => {
+    const store = seeded(MODERN_SEED);
+    // The pageRank key is non-transient (VertexComputeKey.of(property, false)), so it is a real property
+    // in the continuation — a keyless values() reads it alongside the stored ones.
+    const bare = await run(store, `g.V().pageRank().values()`);
+    const plain = await run(store, `g.V().values()`);
+    expect(bare.length).toBe(plain.length + 6); // + one score per vertex
+    expect(bare.filter((v): v is number => typeof v === 'number' && !Number.isInteger(v)).length).toBe(6);
+  });
 });

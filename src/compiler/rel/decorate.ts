@@ -2,7 +2,7 @@ import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
-import { and, carriedCols, elementCols, eq, jsonOf, meta, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, elementCols, eq, jsonOf, meta, renumber, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { type GraphSource } from './source.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
@@ -102,21 +102,38 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
     },
 
     // has('key') — EVERY element the algorithm ran over is decorated, so presence is an EXISTS over the
-    // landed relation. has('key', value) over a decorated property is not supported yet (fail closed).
+    // landed relation. has('key', value) filters that EXISTS by the value comparison, exactly as
+    // `BaseGraph` does over a stored property's row: the value is single-cardinality (`cval`), so
+    // `EXISTS(cval matches pred)` is the whole test.
     hasPropertyPredicate(kind, id, k, valuePred, fresh) {
       if (k !== key) return base.hasPropertyPredicate(kind, id, k, valuePred, fresh);
-      if (valuePred) throw new Error(`has("${key}", <value>) over a decorated OLAP property is not supported yet — filter on it after materializing, or use order()/project() by("${key}")`);
-      return existsOf(rowById(id, fresh), fresh);
+      const row = rowById(id, fresh);
+      if (!valuePred) return existsOf(row, fresh);
+      // `vtype` is the decorated value's canonical Gremlin type — a compile-time CONSTANT, because a
+      // decorate layer holds one type for its key (there is no per-row `vtype` column as the stored
+      // property tables have). Handing it to the caller's callback gives the same vtype-aware compare a
+      // stored property's per-row `vtype` gives — so `has(pageRankKey, P.gt(0.15))` compares the REAL
+      // score numerically and `has(componentKey, "lop")` the TEXT id as text. A predicate the caller
+      // cannot build DECLINES the whole clause (`null`), never a silent presence-only fallback —
+      // the `GraphSource` contract (`source.ts`), and fail-closed per the root CLAUDE.md.
+      const matches = valuePred(col(row.id, 'cval'), compilerText(vtype));
+      if (!matches) return null;
+      return existsOf(make.filter({ id: fresh('dhf'), input: row, channels: [], type: row.type, pred: matches }), fresh);
     },
 
     // values(key) — one traverser per matching value; the decorated property is single-cardinality, so
-    // it is a 1:1 JOIN of the stream to the landed relation on id, projected to the base `(v, vtype,
-    // pord, channels)` shape so the value tail frames it like any property. `values(name, key)` mixing
-    // the decorated key with stored keys is a UNION shape that is not built yet (no scenario needs it).
+    // it is a 1:1 JOIN of the stream to the landed relation on id, projected to the base source's
+    // `(v, vtype, …channels)` shape so the value tail frames it like any property AND it can UNION with
+    // the base's stored-key values for a mixed `values(key, storedKey)`.
     propertyValues(input, kind, keys, fresh) {
-      if (!keys?.includes(key)) return base.propertyValues(input, kind, keys, fresh);
-      if (keys.length !== 1)
-        throw new Error(`values() mixing the decorated key "${key}" with stored keys is not supported yet`);
+      // `keys === null` is EVERY key, which INCLUDES this decorated one (the score persists into the
+      // continuation — `VertexComputeKey.of(property, /*transient*/ false)`, `PageRankVertexProgram`), so
+      // only a non-null list that omits our key delegates wholesale — the `valueMapPairs` guard exactly.
+      if (keys !== null && !keys.includes(key)) return base.propertyValues(input, kind, keys, fresh);
+
+      // This layer's one decorated value per element, in the base source's value shape (no `pord`: a
+      // single-cardinality value has no fan-out to order, and matching the base shape is what lets the
+      // two UNION positionally).
       const r = ref(fresh);
       const rp = make.project({ id: fresh('dvr'), input: r, channels: [], type: typeOf(meta('rid', 'int'), meta('rv', 'any', true)),
         exprs: [['rid', col(r.id, 'id')], ['rv', col(r.id, 'cval')]] });
@@ -125,13 +142,45 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
         type: typeOf(...elementCols(input.channels), meta('rid', 'int'), meta('rv', 'any', true)),
         on: eq(col(rp.id, 'rid'), col(input.id, 'id')),
       });
-      return make.project({
+      const dec = make.project({
         id: fresh('dvp'), input: joined, channels: input.channels,
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('pord', 'int'), ...carriedCols(input.channels)),
-        // A single value per element — `pord` (the multi-value fan-out order) is a constant.
-        exprs: [['v', col(joined.id, 'rv')], ['vtype', compilerText(vtype)], ['pord', compilerInt(0)],
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
+        exprs: [['v', col(joined.id, 'rv')], ['vtype', compilerText(vtype)],
           ...input.channels.map((ch) => [ch.col, col(joined.id, ch.col)] as const)],
       });
+
+      // `null` stored keys → EVERY stored key (bare `values()`); else the asked keys minus ours.
+      const baseKeys = keys === null ? null : keys.filter((k) => k !== key);
+      if (baseKeys !== null && baseKeys.length === 0) return dec; // values(key) alone — the decorated key only.
+
+      // MIXED with stored keys: the answer is the base's stored-key values UNIONed with this one
+      // decorated value. `values(k1,k2)` is ORDER-FREE across keys — TinkerPop `Element.values` maps over
+      // the provider's own `properties()` iteration and `PropertiesStep` hashes key-order-insensitively
+      // (`vendor/tinkerpop/gremlin-core/.../map/{PropertiesStep,Element}.java`), and the cucumber harness
+      // compares bags — so the correct answer is the MULTISET and any DETERMINISTIC emission is valid.
+      const baseVals = base.propertyValues(input, kind, baseKeys, fresh);
+      const arriving = input.channels.find((ch) => ch.role === 'encounter');
+      if (!arriving) return make.union({ id: fresh('dvu'), inputs: [baseVals, dec], all: true, channels: input.channels, type: baseVals.type });
+
+      // A terminal `values()` DEMANDS an encounter (`computeDemandsEncounter`), and the base fan-out was
+      // renumbered into a fresh dense encounter while this 1:1 arm carries the parent's — so their
+      // encounters OVERLAP and a bare UNION is order-unstable (`test:perturbed`). Tag each side and
+      // re-mint ONE total order: stored values first in their refined order (`dord` 0), the single
+      // decorated value last (`dord` 1) — the `valueMapPairs` slot convention, one deterministic pick
+      // among the order-free options. `(dord, encounter)` is unique per row, so the rank is total.
+      const withDord = typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('dord', 'int'), ...carriedCols(input.channels));
+      const tagged = (rel: Rel, dord: number): Rel => make.project({
+        id: fresh('dvt'), input: rel, channels: input.channels, type: withDord,
+        exprs: [['v', col(rel.id, 'v')], ['vtype', col(rel.id, 'vtype')], ['dord', compilerInt(dord)],
+          ...input.channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const)],
+      });
+      const unioned = make.union({ id: fresh('dvu'), inputs: [tagged(baseVals, 0), tagged(dec, 1)], all: true, channels: input.channels, type: withDord });
+      return renumber(
+        unioned,
+        [{ expr: col(unioned.id, 'dord'), dir: 'asc' }, { expr: col(unioned.id, arriving.col), dir: 'asc' }],
+        [meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)],
+        input.channels, fresh,
+      );
     },
     // valueMap(…keys…) — one (key, values[], ord) row per key. The decorated key contributes ONE row:
     // its value as a single-element typed list `[{t: vtype, v: cval}]` (so a REAL score frames as a
