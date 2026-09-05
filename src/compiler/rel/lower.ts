@@ -42,7 +42,8 @@ import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeVFromMap, propertyDrop, propertyWrites, type Effects } from './write.ts';
+import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
@@ -2317,6 +2318,17 @@ function mapTail(
     }
 
     if (step.modulators?.length || step.optionArms) return null;
+
+    // THE MAP-VALUED MERGE DRIVER — `mergeV()`/`mergeV(__.identity())` where the traverser (this map) IS
+    // the merge argument. Handled here rather than in `mergedElements` because the map value is in scope
+    // (`valOf` decides whether it decomposes), and the driver is a map, not an element.
+    if (step.name === 'mergeV' || step.name === 'mergeE') {
+      const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
+      if (!merged) return null;
+      const tail = elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels);
+      if (!tail) return null;
+      return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
+    }
 
     if (step.name === 'is') {
       if (assertsGType(step, 'MAP')) continue;
@@ -4946,5 +4958,30 @@ function mergedElements(
   const effects = steps[at]!.name === 'mergeE'
     ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh)
     : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh);
+  return effects && { effects, at: end };
+}
+
+/** `mergeV()`/`mergeV(__.identity())` over a MAP-valued stream — the driver's map IS the merge argument
+ *  (the map-VALUED driver). Mirrors `mergedElements`' cluster scan, but the search decomposes the
+ *  driver's map per row at runtime (`mergeVFromMap`) rather than a compile-time spec. Only the
+ *  `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
+ *  as a mere multiplier and is deferred (declines). Edge map-valued merge is a later sub-increment. */
+function mergedFromMap(
+  input: Rel, valOf: MapOf, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+): { readonly effects: Effects; readonly at: number } | null {
+  const op = steps[at]!.name;
+  if (op !== 'mergeV' && op !== 'mergeE') return null;
+  let options = at + 1;
+  while (options < steps.length && steps[options]!.name === 'option') options++;
+  let end = options;
+  while (end < steps.length && steps[end]!.name === 'property') end++;
+  const arms = steps.slice(at + 1, options);
+  const tail = steps.slice(options, end);
+  const child = childSeam(ctx, fresh);
+  let maps: MergeMaps;
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params); }
+  catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
+  if (!maps.matchFromDriver) return null;
+  const effects = op === 'mergeV' ? mergeVFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh) : null;
   return effects && { effects, at: end };
 }

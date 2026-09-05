@@ -1306,8 +1306,9 @@ export const entryHost = (rel: Rel, keyOf: MapOf, valOf: MapOf, aliases?: AliasM
     ...(aliases ? { row: { rel, aliases } } : {}) });
 
 /** One PAIR as `json_each` hands it back: the two-element `[keyNode, valNode]` array, and its position
- *  in the map (`json_each.key`, which for a JSON array IS the index). */
-const PAIR = { value: 'ev', ord: 'eo' } as const;
+ *  in the map (`json_each.key`, which for a JSON array IS the index). Exported for the map-VALUED merge
+ *  driver (`write.ts`), which decomposes a driver's map the same way the map tail reads it. */
+export const PAIR = { value: 'ev', ord: 'eo' } as const;
 
 /**
  * Does this pair's KEY equal `key` — tolerant of BOTH key encodings the map vocabulary carries.
@@ -1328,15 +1329,17 @@ const keyMatches = (pair: Expr, key: string): Expr => eq(
   compilerText(key));
 
 /** The map's pairs as a relation — `FROM json_each(<map>)`. No `input`, which is what makes it a
- *  correlated subquery over ONE traverser's map (`rel.ts`); the row-multiplying form is `unfoldMap`. */
-const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
+ *  correlated subquery over ONE traverser's map (`rel.ts`); the row-multiplying form is `unfoldMap`.
+ *  Exported for the map-VALUED merge driver (`write.ts`). */
+export const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
   id: fresh('px'), expr: map, channels: [], as: PAIR,
   type: typeOf(meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
 });
 
 /** One SIDE of a pair — `json_extract(<pair>, '$[0]')` for the key, `'$[1]'` for the value. A `{t,v}`
- *  envelope comes back as JSON TEXT, which is exactly what `mapSideBuffer` and `frameTypedNode` read. */
-const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
+ *  envelope comes back as JSON TEXT, which is exactly what `mapSideBuffer` and `frameTypedNode` read.
+ *  Exported for the map-VALUED merge driver (`write.ts`). */
+export const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
   ({ kind: 'call', fn: 'json_extract', args: [pair, compilerText(side === 'keys' ? '$[0]' : '$[1]')] });
 
 /**

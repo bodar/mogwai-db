@@ -14,8 +14,10 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
+import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
@@ -1845,7 +1847,9 @@ function writeInputCols(input: Rel): readonly ColMeta[] {
  * does not have.
  */
 const traverserCol = (input: Rel): ColMeta =>
-  (input.type.cols.some((column) => column.name === 'id') ? meta('id', 'int') : meta('v', 'any', true));
+  input.type.cols.some((column) => column.name === 'id') ? meta('id', 'int')
+  : input.type.cols.some((column) => column.name === MAP_COL) ? meta(MAP_COL, 'json')
+  : meta('v', 'any', true);
 
 // ---------- addE() ----------
 
@@ -2492,6 +2496,151 @@ function mergeVComputed(
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
+/**
+ * A map-VALUED merge driver for vertices — `inject([k:v,…]).mergeV()` / `mergeV(__.identity())`, where
+ * the incoming TRAVERSER is the merge map (`MergeElementStep.materializeMap` with the identity/no-arg map
+ * traversal, `vendor/tinkerpop/gremlin-core/.../step/map/MergeElementStep.java:339-353`). The map's
+ * (key,value) entries are decomposed PER DRIVER at runtime via `json_each` over `MAP_COL`, so the search
+ * KEY SET is DATA, not compile-time strings (which is what separates this from `mergeV(__.project(…))`).
+ *
+ * FIRST SUB-INCREMENT — a SCALAR-valued map with STRING property keys (`inject`/`select` of a scalar map).
+ * Deferred, fail-closed, each a later sub-increment: a LIST-valued map (`valueMap()`, `valOf` list — its
+ * value would compare a stored scalar against a JSON list, never equal); TOKEN keys (`T.label`/`T.id`,
+ * declined by the map producer `mapLiteralBlob` upstream so they cannot arrive here) — so the search
+ * narrows by properties alone and the create's label is `onCreate`'s or the default `vertex`; and a RUNTIME
+ * arm value, which roots at the (map) driver and needs a map host.
+ */
+export function mergeVFromMap(
+  input: Rel, maps: MergeMaps, valOf: MapOf, propertySteps: readonly IRStep[],
+  ordered: boolean, child: ChildSeam, fresh: Minter,
+): Effects | null {
+  if (valOf.kind !== 'scalar') return null;
+  const { onCreate, onMatch } = maps;
+  const appended = [...new Set(((onMatch?.label as string[] | null) ?? []))];
+  try { for (const name of appended) validateLabel(name); } catch { return null; }
+  const matchWrites = mergeWrites(onMatch, 'vertex', child);
+  const createExtra = onCreate ? mergeWrites(onCreate, 'vertex', child) : [];
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
+  if (!matchWrites || !createExtra || !tailWrites) return null;
+  // A RUNTIME arm value roots at the map driver (no element id) — deferred, so constant arms only here.
+  if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
+  const createLabels = creationLabels(((onCreate?.label as string[] | null) ?? []), child, fresh);
+  if (!createLabels || createLabels.runtime?.length) return null;
+
+  const carriedCh = writeInputChannels(input);
+  if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  // ALWAYS snapshot (even a `values` inject source) — the search reads the map three times and the
+  // create needs a per-driver `ord` to correlate its output back, both of which want a retained relation.
+  const seeded = inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
+  const incoming = bind(seeded.result, true, carriedCh);
+  if (!incoming.type.cols.some((column) => column.name === MAP_COL)) return null; // not a map stream
+  const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
+  // The CARRIER — the driver's map (and its `ord`), reprojected WITHOUT the channels, so every search
+  // filter/join below is channel-free; `incoming` keeps the channels for the final `crossed`.
+  const carrier = bind(make.project({
+    id: fresh('cc'), input: incoming, channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta(MAP_COL, 'json')),
+    exprs: [...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []), [MAP_COL, col(incoming.id, MAP_COL)]],
+  }), true);
+  const driverMap = col(carrier.id, MAP_COL);
+  const ext = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+  const jsonText = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+
+  // THE MATCH — every vertex the driver's whole map is satisfied by. `allMatch` is NOT EXISTS a map entry
+  // the candidate does NOT have (`has(k, v)` for every entry) — the dynamic-key form of `mergeVComputed`'s
+  // per-key EXISTS, the key read off the pair instead of a compile-time string. An empty map matches
+  // every vertex, exactly as `V()` does (`searchVerticesTraversal` returns `g.V()` for an empty map).
+  const allMatch = (candId: Expr): Expr => {
+    const pairs = pairsOf(driverMap, fresh);
+    const keyNode = pairSide(col(pairs.id, PAIR.value), 'keys');
+    const valNode = pairSide(col(pairs.id, PAIR.value), 'values');
+    const vp = make.scan({ id: fresh('vp'), table: PROPERTY_TABLE.vertex.table, alias: fresh('rp'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
+    const vpMatch = make.filter({
+      id: fresh('f'), input: vp, channels: [], type: vp.type,
+      pred: and(and(eq(col(vp.id, 'node'), candId), eq(col(vp.id, 'key'), ext(keyNode, '$.v'))),
+        typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), ext(valNode, '$.v'), ext(valNode, '$.t'))),
+    });
+    const vpProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    const unsat = make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: { kind: 'exists', plan: vpProbe, negated: true } });
+    return { kind: 'exists', plan: unsat, negated: true };
+  };
+  const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
+  const candidates = make.project({ id: fresh('p'), input: candScan, channels: [], type: ID_TYPE, exprs: [['id', col(candScan.id, 'id')]] });
+  const joined = make.join({
+    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: allMatch(col(candidates.id, 'id')), channels: [],
+    type: typeOf(...carrier.type.cols, meta('id', 'int')),
+  });
+  const matched = bind(make.project({
+    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
+  }), true);
+  // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
+  // reached). Shared with the other vertex-merge paths.
+  if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites, () => false, bind, guard, fresh, child)) return null;
+
+  // ROWS THAT FOUND NOTHING → one create per DISTINCT map (two drivers with the same map create one vertex).
+  const trueLit = eq(compilerInt(1), compilerInt(1));
+  const unmatched = make.filter({
+    id: fresh('f'), input: carrier, channels: [], type: carrier.type,
+    pred: { kind: 'exists', negated: true, plan: make.filter({
+      id: fresh('f'), input: matched, channels: [], type: matched.type,
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+  });
+  const wanted = bind(rowNumberWindow(make.distinct({
+    id: fresh('d'), channels: [], type: typeOf(meta(MAP_COL, 'json')),
+    input: make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(meta(MAP_COL, 'json')), exprs: [[MAP_COL, col(unmatched.id, MAP_COL)]] }),
+  }), 'word', [], { partitionBy: [], orderBy: [] }, fresh), true);
+
+  // THE CREATE — a vertex per wanted map, in `word` order so the assigned rowids recover their map.
+  const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
+  const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
+  const rowPer = make.project({ id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)), exprs: [['uid', compilerNull('text')]] });
+  const created = bind(insert({ target: nodesTarget, cols: ['uid'], source: rowPer, channels: [], type: ID_TYPE, returning: [['id', col(nodesTarget.id, 'id')]] }));
+  const labelRow = internLabels(createLabels.names, bind, fresh);
+  if (labelRow) {
+    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const labelPairs = make.join({ id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: labelPairs, channels: [], type: typeOf(), returning: [] }));
+  }
+  // The created rows correlated back to their map by POSITION (rowid order = insertion order = `word`).
+  const rankedCreated = positioned(created, fresh);
+  const createdMaps = bind(make.join({
+    id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
+    type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
+  }), true);
+  // WRITE THE MAP'S PROPERTIES onto each created vertex — one relational Insert over `json_each` (the
+  // sanctioned data-sized write form): explode each created vertex's map into entries, KEEPING the
+  // vertex id (`explodeMembers` carries the input row's columns), and project `(node, key, value, vtype)`.
+  const { exploded } = explodeMembers(fenced(createdMaps, fresh), MAP_COL, PAIR, fresh);
+  const propRows = make.project({
+    id: fresh('p'), input: exploded, channels: [],
+    type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [['node', col(exploded.id, 'id')], ['key', ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.v')],
+      ['value', ext(pairSide(col(exploded.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(exploded.id, PAIR.value), 'values'), '$.t')]],
+  });
+  const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.vertex.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
+  bind(insert({ target: propTarget, cols: ['node', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'node')]] }));
+  // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the creation).
+  for (const write of createExtra) if (!propertyStatements('vertex', idsOf(created, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+
+  // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's map to the created map (as canonical JSON
+  // text), so the one vertex made for a repeated map is carried by every driver that asked (`crossed`).
+  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('mk', 'text')),
+    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['mk', jsonText(col(unmatched.id, MAP_COL))]] });
+  const ctMin = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('cid', 'int'), meta('mk', 'text')),
+    exprs: [['cid', col(createdMaps.id, 'id')], ['mk', jsonText(col(createdMaps.id, MAP_COL))]] });
+  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner', on: eq(col(umMin.id, 'mk'), col(ctMin.id, 'mk')), channels: [],
+    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('mk', 'text'), meta('cid', 'int'), meta('ct_mk', 'text')) });
+  const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
+    exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
+
+  const result = emitMergeVertices(incoming, matched, createdFor, idsOf(matched, fresh),
+    appended.length > 0 || matchWrites.length > 0, tailWrites, true, ordered, carriedCh, bind, guard, fresh, child);
+  if (!result) return null;
+  return { bindings: [...seeded.bindings, ...bindings], result };
+}
+
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
   driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
@@ -2503,6 +2652,10 @@ export function elementMergeV(
   try { maps = mergeMaps(step, options, 'mergeV', child.sideEffects, child.params); }
   catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   const { match, onCreate, onMatch } = maps;
+  // THE MAP-VALUED DRIVER (`mergeV()`/`mergeV(__.identity())`) is handled where the map value is in
+  // scope — `mapTail` — because the driver IS a map, not an element. An element or scalar stream
+  // reaching here with that form has no map to decompose (a vertex is not a Map), so it declines.
+  if (maps.matchFromDriver) return null;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
     // A nested LABEL/id (a per-driver element identity) and a nested KEY (a per-driver property key)
@@ -2951,6 +3104,9 @@ export function elementMergeE(
   try { maps = mergeMaps(step, options, 'mergeE', child.sideEffects, child.params); }
   catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   const { match, onCreate, onMatch } = maps;
+  // The map-VALUED driver is `mapTail`'s (the map is not an element); an element/scalar driver has no
+  // map here. (Edge map-valued merge is a later sub-increment; for now it declines everywhere.)
+  if (maps.matchFromDriver) return null;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
     if (isNested(spec.id) || isNested(spec.label)) return null;

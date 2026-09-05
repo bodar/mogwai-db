@@ -1,9 +1,11 @@
 # Correlated merge search — build plan
 
-**Status: increments 1 (mergeV computed VALUES) and 2 (mergeE computed VALUES) LANDED on trunk
-(2026-09-05); increments 3–4 remain.** A fail-closed safety fix landed first (`elementMergeE` declined a
-computed criterion it was silently dropping — a wrong-answer bug), then increment 2 replaced that decline
-with `mergeEComputed`.
+**Status (2026-09-05): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES) and 4a (map-valued
+`mergeV`, scalar string-key maps) LANDED on trunk; the rest of the map-valued-driver substrate (4b token
+keys → corpus, 4c mergeE + general traversal + whole-map raise) remains.** A fail-closed safety fix landed
+first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
+replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
+turned out to be ONE substrate** — see the 3+4 entry in the build order.
 The property-VALUE family and the merge WRITE arms (onMatch/onCreate/tail) of the correlated write-arg
 resolver were LANDED earlier (see "Already landed" below). This doc is the merge **SEARCH** correlated
 per driver — a computed criterion in the merge argument (`mergeV(__.project(...))` etc.). Written so a
@@ -166,12 +168,34 @@ endpoints):
    can no longer drift (the drift that once dropped a `markDirty`). `armValueWriteCorrelated` is already the
    reusable per-driver arm-write a future `mergeE` computed value would share. `elementMergeE` is left as the
    reference leaves it: its own `flatMap`.
-3. **Computed KEYS / LABELS** — a correlated `key`/label `Expr`. ⚠️ Increment 1 confirmed this is a REAL
-   signature gap: `hasPropertyPredicate`'s `key` is a compile-time `string` (`compilerText`), not an
-   `Expr`. Needs a new seam (a correlated key/label into the property/label scan), not a free slot.
-4. **no-arg `mergeV()`/`mergeE()`** (traverser-as-map) and the general map-producing traversal (a
-   `project` not at the head, `select(dynMap)`) — the map-valued-driver substrate + the whole-map
-   0-result raise (`TraversalUtil.apply`).
+3+4. **THE MAP-VALUED MERGE DRIVER — increments 3 and 4 are ONE substrate, not two** (found 2026-09-05,
+   verified empirically). A `project` search map admits only STRING property keys, so increment 3's
+   "computed KEY/LABEL" seam has NO driver-rooted consumer except through increment 4's map source: a
+   computed-key-via-literal does not even parse, and a computed-label-via-literal is TinkerPop's
+   candidate-rooted `P.eq` (declined by design). The only forms with data-dependent keys/label/id are the
+   map-VALUED driver — no-arg `mergeV()`/`mergeE()` (the traverser IS the map), `mergeV(__.identity())`,
+   `select(dynMap)`, a general map-producing traversal — a driver whose value is a runtime JSON MAP rather
+   than an element rowid. Built as SUB-INCREMENTS, each green on trunk:
+   - ✅ **4a — LANDED — map-valued `mergeV` for a SCALAR-valued, STRING-key map** (`mergeVFromMap`,
+     `write.ts`; dispatched in `mapTail` where `valOf` is in scope, `lower.ts`). `inject([k:v,…]).mergeV()`
+     / `mergeV(__.identity())`. The core dynamic-key seam: the search is an ALL-entries-match correlated
+     join — `NOT EXISTS` a map entry (`json_each` over `MAP_COL`, `pairsOf`/`pairSide`) the candidate
+     lacks, compared vtype-aware (`typedValueEq`); the create explodes the map (`explodeMembers`) into ONE
+     relational `Insert` with data-dependent keys; distinct-per-map, `crossed(correlate=true)`. Parse:
+     `mergeMaps` marks no-arg/identity `matchFromDriver`; `elementMergeV`/`elementMergeE` decline it (an
+     element/scalar driver is not a map). `traverserCol` gained a `MAP_COL` branch. Tests:
+     `test/L4-addendum/merge-search-map-vertex.feature`, `test/merge-search-map-vertex.test.ts`. Deferred:
+     token keys (below), a LIST-valued map (`valueMap()` — stored-scalar-vs-list never compares equal), a
+     RUNTIME arm value (roots at the map driver, needs a map host).
+   - **4b — TOKEN keys (`T.label`/`T.id`) in the map** → the CORPUS scenarios (`inject([T.label:…, name:…])
+     .mergeV()`). ⚠️ Prerequisite in the SHARED map producer: `mapLiteralBlob` (`map.ts:1056`) DECLINES a
+     token key today (the deferral the module doc names), so `inject([T.label:…])` does not even produce a
+     stream — extend the producer to encode `tokenKey` entries, with care for the map TAIL's blast radius
+     (`keyMatches` would read a `T.label` token as a property key `'label'`). Then `mergeVFromMap` narrows
+     by the map's label (dynamic `hasLabel` over `vertex_labels`) and takes the create label from it.
+   - **4c — map-valued `mergeE`** (`inject(map).mergeE()`, `select("m").mergeE()`) — the edge host, endpoints
+     from the map's `Direction` keys; the general map-producing traversal (`out().project(…)`,
+     `select(dynMap)`) + the whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` → throw).
 
 Each increment lands with L4 `.feature` scenarios (there are none yet — write them) and its own tests.
 No L3 movement expected (the corpus has no computed-merge scenarios) — this is ceiling work, validated by

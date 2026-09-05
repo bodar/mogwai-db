@@ -549,15 +549,35 @@ export interface MergeMaps {
    */
   readonly outV?: unknown;
   readonly inV?: unknown;
+  /**
+   * The SEARCH map comes from the DRIVER — the incoming traverser IS the merge map, decomposed per
+   * driver at runtime (`MergeElementStep.materializeMap` with the identity/no-arg traversal). `match` is
+   * an empty spec in this mode; the lowering reads the map value off the input stream. Set for no-arg
+   * `mergeV()`/`mergeE()` and `mergeV(__.identity())` — the map-VALUED driver, distinct from a
+   * `mergeV(__.project(…))` computed search (whose criteria are still per-KEY compile-time strings).
+   */
+  readonly matchFromDriver?: boolean;
+}
+
+/** A whole-arg `__.identity()` — the merge argument is the traverser itself. Distinct from a `null`
+ *  argument (`mergeV(null)` matches anything) and from a map-producing traversal. */
+function isTraverserIdentity(raw: any, params: Record<string, any>): boolean {
+  if (!isNested(raw)) return false;
+  const inner = stepChain(raw.nested, params);
+  return inner.length === 1 && inner[0].name === 'identity';
 }
 
 export function mergeMaps(
   step: IRStep, mods: readonly Step[], op: MergeRole['op'],
   sideEffects: Map<string, any> | undefined, params: Record<string, any>,
 ): MergeMaps {
-  if (step.args.length === 0)
-    throw new Deferral(`${op}() with no argument (uses the incoming traverser as the map) not yet supported`);
-  const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
+  // THE INCOMING TRAVERSER AS THE MAP — no-arg `mergeV()`/`mergeE()` and `mergeV(__.identity())` both
+  // mean "the driver's value IS the merge map" (`materializeMap` with an identity map traversal). The
+  // match spec is empty; the lowering decomposes the driver's map value per driver.
+  const matchFromDriver = step.args.length === 0 || isTraverserIdentity(step.args[0].value, params);
+  const match = matchFromDriver
+    ? { role: { op, kind: 'merge' as const }, label: null, id: undefined, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} } satisfies MergeSpec
+    : normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   let outV: unknown, inV: unknown;
@@ -594,7 +614,7 @@ export function mergeMaps(
   // raises it per traverser; raising it once, before the lowering, is the same answer.
   requireEndpointOption(match, onCreate, outV, 'outV');
   requireEndpointOption(match, onCreate, inV, 'inV');
-  return { match, onCreate, onMatch, tail, ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
+  return { match, onCreate, onMatch, tail, ...(matchFromDriver ? { matchFromDriver } : {}), ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
 }
 
 /** `Merge.outV` in a `Direction` slot is a REFERENCE to `option(Merge.outV, …)`, so the option has to
