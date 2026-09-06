@@ -109,8 +109,8 @@
   },
   "conjoin": {
     "binds": 0,
-    "bytes": 2321,
-    "compiler": 47,
+    "bytes": 2270,
+    "compiler": 46,
     "bound": 0
   },
   "constant": {
@@ -122,7 +122,7 @@
   "count": {
     "binds": 4,
     "bytes": 3205,
-    "compiler": 40,
+    "compiler": 26,
     "bound": 0
   },
   "dateAdd": {
@@ -295,8 +295,8 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 3276,
-    "compiler": 46,
+    "bytes": 2107,
+    "compiler": 28,
     "bound": 0
   },
   "key": {
@@ -439,8 +439,8 @@
   },
   "path": {
     "binds": 0,
-    "bytes": 7656,
-    "compiler": 110,
+    "bytes": 6469,
+    "compiler": 67,
     "bound": 0
   },
   "product": {
@@ -481,7 +481,7 @@
   },
   "reverse": {
     "binds": 0,
-    "bytes": 2224,
+    "bytes": 1906,
     "compiler": 43,
     "bound": 0
   },
@@ -588,7 +588,7 @@
     "bound": 0
   },
   "values": {
-    "binds": 4,
+    "binds": 9,
     "bytes": 4255,
     "compiler": 95,
     "bound": 0

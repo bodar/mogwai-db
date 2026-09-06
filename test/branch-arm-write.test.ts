@@ -69,7 +69,32 @@ describe('a write inside a SINGLE-arm branch (works)', () => {
   });
 });
 
-describe('a write inside a MULTI-arm branch declines cleanly (fail closed)', () => {
+describe('a write inside a SOURCE union (g.union(…)) — unconditionally correct', () => {
+  // A source union has ONE start traverser, so arm-major order coincides with per-traverser order —
+  // there is no sibling traverser whose writes an arm could observe out of order. So even MULTIPLE write
+  // arms are correct here (unlike a chain-position multi-arm branch).
+  test('single-arm source union of addE creates the edge', async () => {
+    const s = store(seed.slice(0, 2)); // marko, vadas (no edge)
+    expect(await run(s, "g.union(__.addE('knows').from(__.V().has('name','marko')).to(__.V().has('name','vadas'))).count()")).toEqual([1]);
+    expect(await run(s, 'g.E().count()')).toEqual([1]);
+  });
+
+  test('multi-arm source union of three addV creates all three', async () => {
+    const s = new GraphStore(new BunSqlite(':memory:'));
+    expect((await run(s, "g.union(__.addV('person').property('name','alice'),__.addV('person').property('name','bob'),__.addV('person').property('name','chris')).values('name')")).sort())
+      .toEqual(['alice', 'bob', 'chris']);
+    expect(await run(s, 'g.V().count()')).toEqual([3]);
+  });
+
+  test('two source-union addV arms', async () => {
+    const s = new GraphStore(new BunSqlite(':memory:'));
+    expect(await run(s, "g.union(__.addV('a'),__.addV('b')).count()")).toEqual([2]);
+    expect(await run(s, "g.V().hasLabel('a').count()")).toEqual([1]);
+    expect(await run(s, "g.V().hasLabel('b').count()")).toEqual([1]);
+  });
+});
+
+describe('a write inside a MULTI-arm CHAIN branch declines cleanly (fail closed)', () => {
   test('two write arms decline (would answer a post-write state)', async () => {
     const s = store(seed);
     await expect(run(s, "g.V().hasLabel('person').union(__.addV('a'),__.addV('b')).count()")).rejects.toThrow(/not supported/);

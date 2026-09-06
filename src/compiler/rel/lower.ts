@@ -3616,7 +3616,9 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   if (first.name === 'union') {
     const merged = sourceUnion(first, ctx, fresh);
     if (!merged) return null;
-    return continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES);
+    // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — a
+    // source union's single start makes arm-major order correct, so this composes like any other write.
+    return withBranchEffects(continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES), merged);
   }
 
   if (first.name === 'inject') {

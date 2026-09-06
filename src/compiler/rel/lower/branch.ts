@@ -355,23 +355,34 @@ export function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
  */
 export function sourceUnion(
   step: IRStep, ctx: ChainCtx, fresh: Minter,
-): FramedRel | null {
+): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const arms: Tail[] = [];
+  // A WRITE in a SOURCE-union arm (`g.union(__.addV(…), __.addV(…))`) is UNCONDITIONALLY correct, unlike a
+  // chain-position branch: a source union has ONE start traverser, so arm-major and per-traverser order
+  // coincide — there is no sibling traverser whose writes an arm could observe out of order. So the arms'
+  // effects are COLLECTED (in arm order) and threaded out rather than declined; the arm RESULT relations
+  // reference those write bindings, which the caller folds into the program before the merge is read.
+  const effects: Binding[] = [];
   for (const arg of args) {
     const body = rootedSteps((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects);
     if (!body?.length) return null;
     const read = rootedRead(body, ctx, fresh);
-    if (!read || read.effects?.length) return null;
+    if (!read) return null;
+    if (read.effects?.length) effects.push(...read.effects);
     arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES, bulked: ctx.collapse });
   }
+  const withEffects = (br: BranchRel | null): BranchRel | null =>
+    br && (effects.length ? { ...br, effects: [...effects, ...(br.effects ?? [])] } : br);
   // `g.union(t)` IS `g.t` — the one branch is rooted and its rows are the whole answer, no merge (and a
   // `Union` needs two inputs anyway). Unlike a chain-position single arm there is no empty-input gate to
   // owe: a source union's arms each root their own read, which carries its own reducer semantics.
-  if (arms.length === 1) return { rel: arms[0]!.rel, framing: arms[0]!.framing };
-  return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, ctx.source, fresh);
+  if (arms.length === 1) return withEffects({ rel: arms[0]!.rel, framing: arms[0]!.framing, aliases: NO_ALIASES });
+  // The arms carry no `effects` field here (collected above), so `mergeArms`' write-arm decline does not
+  // fire — its union of the arm results is exactly what a source union owes.
+  return withEffects(mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, ctx.source, fresh));
 }
 
 /**
