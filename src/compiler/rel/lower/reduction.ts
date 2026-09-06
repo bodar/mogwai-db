@@ -31,6 +31,7 @@ import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
@@ -1094,8 +1095,87 @@ export function hostSubject(host: ChildHost): Subject | null {
  * The OPTION-MAP form (`choose(<key>).option(…)`) is a different question — an N-way lookup on a
  * projected choice — and declines here (`step.optionArms`), exactly as `chooseArms`/`chooseOptions` split.
  */
+/** The traverser ITSELF as a scalar `ChildValue` — a scalar host's identity value, `choose`'s implicit
+ *  pass-through and its absent-else arm. Shared so the two choose forms spell "the traverser" one way. */
+const scalarHostIdentity = (host: Extract<ChildHost, { kind: 'scalar' }>): ChildValue =>
+  ({ expr: host.value, framing: { kind: 'scalar', type: host.vtype ? PER_ROW('vtype') : UNKNOWN },
+    ...(host.vtype ? { vtype: host.vtype } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one' });
+
+/**
+ * `by(__.choose(<key>).option(k, s)…)` over SCALAR arms → one per-row SQL `CASE` — the OPTION-MAP twin of
+ * `scalarChooseChild`, exactly as `chooseOptions` is `chooseArms`' twin in the relational world.
+ *
+ * The choice value is projected once (`scalarChild`); each keyed option gates on its key MATCHING the
+ * choice (`predicateExpr`, the same compare `chooseOptions` and `is(P.…)` spend), first match winning
+ * because a `CASE` takes its first true `WHEN` (`ChooseStep` overrides `pickBranches` to the first —
+ * `.../branch/ChooseStep.java`). A PRODUCTIVE choice matching no key is `Pick.none`, or the traverser
+ * itself where none is unwritten (the implicit pass-through — a scalar only over a scalar host); an
+ * UNPRODUCTIVE choice takes `Pick.unproductive` where written, else falls to that same else (a NULL
+ * choice fails every key predicate on its own, so the guard is needed only to reach a DISTINCT arm).
+ *
+ * A `__.discard()` option DROPS its rows — a productivity effect a per-row `CASE` cannot carry — so a map
+ * containing one declines rather than silently keeping them; a `T`-token choice stays `chooseOptions`'.
+ */
+function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const arms = optionArms(step, (nested) => bodyOf(nested, ctx.params));
+  if (!arms || arms.some((arm) => arm.discard)) return null;
+  const choiceArg = step.args?.[0]?.value;
+  if (!isNested(choiceArg)) return null;
+  const choiceBody = bodyOf(choiceArg.nested, ctx.params);
+  const choice = choiceBody?.length ? scalarChild(choiceBody, host, ctx, fresh) : null;
+  if (!choice || choice.framing.kind !== 'scalar' || choice.framing.result === 'value' || !choice.present) return null;
+  const choiceType: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
+    : choice.framing.type.kind === 'static' ? { kind: 'static', type: choice.framing.type.type, text: choice.framing.type.text }
+    : SUBJECT_UNKNOWN;
+
+  const armValue = (arm: OptionArm): ChildValue | null => {
+    const body = bodyOf(arm.nested, ctx.params);
+    const cv = body?.length ? scalarChild(body, host, ctx, fresh) : null;
+    return cv && cv.framing.kind === 'scalar' && cv.framing.result !== 'value' ? cv : null;
+  };
+  const keyed: { readonly when: Expr; readonly cv: ChildValue }[] = [];
+  for (const arm of arms.filter((a) => a.pick === 'key')) {
+    const when = predicateExpr(choice.expr, arm.key, choiceType, null, null, fresh);
+    const cv = armValue(arm);
+    if (!when || !cv) return null;
+    keyed.push({ when, cv });
+  }
+  const noneArm = arms.find((a) => a.pick === 'none');
+  const unproductiveArm = arms.find((a) => a.pick === 'unproductive');
+  const noneCV = noneArm ? armValue(noneArm) : null;
+  const unproductiveCV = unproductiveArm ? armValue(unproductiveArm) : null;
+  if ((noneArm && !noneCV) || (unproductiveArm && !unproductiveCV)) return null;
+  const elseCV: ChildValue | null = noneCV ?? (host.kind === 'scalar' ? scalarHostIdentity(host) : null);
+  if (!elseCV) return null;
+
+  const guard: { readonly when: Expr; readonly cv: ChildValue } | null =
+    unproductiveCV && choice.present !== ALWAYS_PRODUCTIVE
+      ? { when: { kind: 'unary', op: 'not', arg: choice.present }, cv: unproductiveCV } : null;
+  const branches = [...(guard ? [guard] : []), ...keyed];
+
+  const value: Expr = { kind: 'case', whens: branches.map((b) => [b.when, b.cv.expr] as const), else: elseCV.expr };
+  const all = [...branches.map((b) => b.cv), elseCV];
+  const present: Expr | undefined = all.every((cv) => cv.present === ALWAYS_PRODUCTIVE) ? ALWAYS_PRODUCTIVE
+    : all.some((cv) => cv.present === undefined) ? undefined
+    : { kind: 'case', whens: branches.map((b) => [b.when, b.cv.present!] as const), else: elseCV.present! };
+
+  const staticTypes = all.map((cv) => cv.framing.kind === 'scalar' && cv.framing.result === undefined && !cv.vtype ? cv.framing.type : null);
+  if (staticTypes.every((t): t is ScalarType => t !== null)) {
+    const met = meetScalarTypes(staticTypes);
+    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
+  }
+  const tagOf = (cv: ChildValue): Expr => {
+    if (cv.vtype) return cv.vtype;
+    const tag = cv.framing.kind === 'scalar' ? staticTypeOf(cv.framing.type) : undefined;
+    return tag ? compilerText(tag) : compilerNull('text');
+  };
+  const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, tagOf(b.cv)] as const), else: tagOf(elseCV) };
+  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
+}
+
 function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  if (step.modulators?.length || step.optionArms) return null;
+  if (step.modulators?.length) return null;
+  if (step.optionArms) return scalarChooseOptions(step, host, ctx, fresh);
   const [choice, ...rest] = step.args ?? [];
   if (!choice || rest.length < 1 || rest.length > 2 || rest.some((arg) => !isNested(arg.value))) return null;
   // The condition may be a bare predicate (`choose(P.eq(29), …)` — `ChooseStep(new IsStep(P))`) or a
@@ -1114,10 +1194,7 @@ function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: 
   const thenCV = scalarChild(thenBody, host, ctx, fresh);
   // An absent ELSE is identity — a scalar only over a scalar host; an element identity is not one value.
   const elseCV: ChildValue | null = elseBody ? scalarChild(elseBody, host, ctx, fresh)
-    : host.kind === 'scalar'
-      ? { expr: host.value, framing: { kind: 'scalar', type: host.vtype ? PER_ROW('vtype') : UNKNOWN },
-        ...(host.vtype ? { vtype: host.vtype } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one' }
-      : null;
+    : host.kind === 'scalar' ? scalarHostIdentity(host) : null;
   if (!thenCV || thenCV.framing.kind !== 'scalar' || thenCV.framing.result === 'value') return null;
   if (!elseCV || elseCV.framing.kind !== 'scalar' || elseCV.framing.result === 'value') return null;
 

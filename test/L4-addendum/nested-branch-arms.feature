@@ -114,7 +114,6 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # inside the generic child scope used by map()/local()/flatMap().
 
   @gap:nested-branch
-  @Unsupported
   Scenario: g_V_mapXchooseXvaluesXageX_optionXbetweenX26_30X_valuesXnameXX_optionXnone_constantXunknownXX
     Given the modern graph
     And the traversal of
