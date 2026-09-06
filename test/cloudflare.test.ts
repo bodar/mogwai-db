@@ -8,7 +8,7 @@ const PORT = 8976;
 let proc: ReturnType<typeof Bun.spawn> | undefined;
 
 // Readiness must exercise the DURABLE OBJECT path, not just the Worker script. A probe of `/` (or any
-// non-/gremlin path) is served by a plain `Response.redirect`/404 that never instantiates a DO, so it
+// non-/gremlin path) is served by a plain static docs/404 response that never instantiates a DO, so it
 // goes green the instant the isolate loads — while the DO namespace is still warming. The first
 // DO-touching request then races that warmup and workerd answers 503, which is the management PUT
 // flake. So probe a real `GET /gremlin/{id}` (auto-creates + touches its DO) and treat a 503 — or any

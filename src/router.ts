@@ -181,12 +181,12 @@ export function makeRouter(
    *  the outbound `http` a remote source needs lives at the composition root, not the router. Absent ⇒ a
    *  filter is stored unvalidated (a runtime that has not wired it yet). */
   validateFilter?: FilterValidator,
-  /** Where the `/docs` Scalar UI loads its module from. Defaults to the pinned CDN (Bun/CF); the browser
-   *  build passes `./scalar.js` so the docs are self-contained (the SW-served page, a shipped static asset). */
+  /** Where the docs Scalar UI loads its module from. Defaults to the pinned CDN (Bun/CF); the browser
+   *  build passes `./scalar.js` so the docs are self-contained (a shipped static asset). */
   scalarUrl?: string,
-  /** A script the `/docs` page loads first. The browser build passes `./mogwai-db.js` so the docs page also
-   *  hosts the per-tab WorkerFactory (the landing page redirects here, so this is where the data plane must
-   *  live). Bun/CF pass nothing. */
+  /** A script the docs shell loads first. The browser build passes `./mogwai-db.js` so the shell — served
+   *  at both `/` (the site root) and `/docs` — also hosts the per-tab WorkerFactory (the browser serves
+   *  this shell as its index.html, so this IS the tab the data plane must live in). Bun/CF pass nothing. */
   bootScript?: string,
   /** The version stamped into the OpenAPI `info.version` (`src/version.ts`). Defaults to `'dev'` for
    *  callers that don't stamp one (tests, the conformance host). */
@@ -218,10 +218,11 @@ export function makeRouter(
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);
 
-    // Docs surface (GET-only). Separate paths from /{prefix}/{g}, so GLV traffic is untouched.
+    // Docs surface (GET-only). The API reference is the SITE ROOT: `/` serves the Scalar shell DIRECTLY (no
+    // redirect), and `/docs` is a kept ALIAS to the same HTML so existing links — and the browser SW's
+    // `/docs` route — keep working. Separate paths from /{prefix}/{g}, so GLV traffic is untouched.
     if (req.method === 'GET') {
-      if (pathname === '/') return Response.redirect(new URL('/docs', req.url).toString(), 302);
-      if (pathname === '/docs')
+      if (pathname === '/' || pathname === '/docs')
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       if (pathname === '/openapi.json') {
         // Request-derived so `servers[0].url` is the ABSOLUTE base this request arrived on and the spec's

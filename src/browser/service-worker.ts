@@ -20,6 +20,7 @@ import { peerForRef, validateReplicationFilter } from '../replicate.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import type { Http } from '../api.ts';
 import type { BootstrapMessage } from './worker-spawn.ts';
+import { BROWSER_SCALAR_URL, BROWSER_BOOT_SCRIPT } from './docs-page.ts';
 
 // `self` is the ServiceWorkerGlobalScope (the WebWorker-lib type); the ambient `self` cannot be that
 // specific under a shared lib set, so cast once here.
@@ -50,16 +51,18 @@ const runTick = () => runDueReplications({ registry, manager, http: schedulerHtt
 // Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer — a local
 // source routes to its graph Worker (via the manager), a remote one through the SW's allowlisted http.
 const validateFilter = (source: string, filter: string) => validateReplicationFilter(peerForRef(manager, schedulerHttp, source), filter);
-// Two browser-only docs args, both relative to the SW-served /docs page and both plain static assets the SW
-// does NOT intercept (so neither bloats this worker bundle):
-//   - `./scalar.js`   — the vendored Scalar UI, so /docs is self-contained (no CDN).
-//   - `./mogwai-db.js` — boots THIS page's WorkerFactory: the landing page redirects to /docs, so the docs
-//     page is the tab the user is left on and must host the graph data plane (else queries have no Worker).
+// Two browser-only docs args (from docs-page.ts, the ONE place they live so this SW-served `/docs` and the
+// static index.html cannot drift), both relative to the served page and both plain static assets the SW does
+// NOT intercept (so neither bloats this worker bundle):
+//   - `BROWSER_SCALAR_URL` (`./scalar.js`)   — the vendored Scalar UI, so the docs are self-contained (no CDN).
+//   - `BROWSER_BOOT_SCRIPT` (`./mogwai-db.js`) — boots THIS page's WorkerFactory: the browser build serves the
+//     docs shell as BOTH `/` and `/docs`, so it is the tab the user is on and must host the graph data plane
+//     (else queries have no Worker).
 //   - `VERSION` — the build-stamped version for the OpenAPI `info.version` (scripts/package.ts defines it).
 //   - `docsBaseUrl` — the LAZY thunk below: the OpenAPI `servers[0].url` must be the sub-path base
 //     (`/mogwai-db/`), which the SW STRIPS before routing, so the request can't reveal it. Passed as a
 //     thunk because the SW cannot read its registration scope at construction (before it installs).
-const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter, './scalar.js', './mogwai-db.js', VERSION, docsBaseUrl);
+const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter, BROWSER_SCALAR_URL, BROWSER_BOOT_SCRIPT, VERSION, docsBaseUrl);
 
 scope.addEventListener('message', (event) => {
   const data = (event as ExtendableMessageEvent).data as BootstrapMessage | undefined;
@@ -114,8 +117,9 @@ function reRoot(req: Request, url: URL): Request {
 /** The paths this SW answers (base already stripped). `/gremlin` (bare + `/gremlin/{id}`) is the Gremlin
  *  data + management plane; `/graphql/{id}` is the GraphQL edge; `/_replicator` + `/_scheduler` are the
  *  replication control plane (§9); `/docs` + `/openapi.json` are the self-describing API reference (the
- *  browser build's UI). NOT `/` — the app root serves the static landing page (index.html). Everything
- *  else passes through untouched. */
+ *  browser build's UI). NOT `/` — the app root serves the static index.html (which IS the docs shell,
+ *  byte-identical to `/docs`), so it falls through to the static host. Everything else passes through
+ *  untouched. */
 function isRoutedPath(pathname: string): boolean {
   return pathname === '/gremlin' || pathname.startsWith('/gremlin/') || pathname.startsWith('/graphql/')
     || pathname === '/_replicator' || pathname.startsWith('/_replicator/')

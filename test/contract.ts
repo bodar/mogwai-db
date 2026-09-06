@@ -294,11 +294,14 @@ function docsContract(getOrigin: () => string) {
       expect(html).toContain('/openapi.json');
     });
 
-    test('GET / redirects to the docs', async () => {
-      const res = await fetch(`${getOrigin()}/`);
-      expect(res.redirected).toBe(true);
-      expect(new URL(res.url).pathname).toBe('/docs');
-      expect(await res.text()).toContain('createApiReference');
+    test('GET / serves the docs directly (no redirect; the API reference is the site root)', async () => {
+      const res = await fetch(`${getOrigin()}/`, { redirect: 'manual' });
+      expect(res.status).toBe(200);
+      expect(res.redirected).toBe(false);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      const html = await res.text();
+      expect(html).toContain('createApiReference');
+      expect(html).toContain('/openapi.json');
     });
   });
 }

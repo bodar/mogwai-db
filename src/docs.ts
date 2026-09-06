@@ -374,13 +374,14 @@ const REPLICATION_CONFIG_SCHEMA = {
 
 // Minimal Scalar shell. Same-origin, so no proxyUrl (requests hit this server directly, never scalar.com's
 // proxy). Prefix-independent — it points at `./openapi.json` RELATIVE to this page, so it resolves whether
-// `/docs` is served at the origin root (Bun/CF) or under a sub-path (`/mogwai-db/docs` on a GitHub Pages
-// project site) — the browser build's service worker serves `/openapi.json` at the same base. `scalarUrl`
-// is the UMD standalone (defines `window.Scalar`): the CDN by default, or `./scalar.js` for the
-// self-contained browser build. `bootScript`, when set, is loaded FIRST — the browser build passes
-// `./mogwai-db.js` so THIS page also hosts the per-tab WorkerFactory (the graph data plane): the landing
-// page redirects here, so the docs page is the tab the user is left on and must host it, or graph requests
-// would have no Worker to route to. Bun/CF have real workers and pass no bootScript.
+// it is served at the origin root (Bun/CF) or under a sub-path (`/mogwai-db/` on a GitHub Pages project
+// site) — the browser build's service worker serves `/openapi.json` at the same base. `scalarUrl` is the
+// UMD standalone (defines `window.Scalar`): the CDN by default, or `./scalar.js` for the self-contained
+// browser build. `bootScript`, when set, is loaded FIRST — the browser build passes `./mogwai-db.js` so
+// THIS page also hosts the per-tab WorkerFactory (the graph data plane): the browser build serves this
+// SAME shell as BOTH its site root (index.html) and `/docs`, so it is the tab the user is on and must host
+// the Worker, or graph requests would have no Worker to route to. Bun/CF have real workers, pass no
+// bootScript, and serve the shell at `/` + `/docs` alike.
 function docsHtml(scalarUrl: string, bootScript?: string): string {
   return `<!doctype html>
 <html>
@@ -393,14 +394,30 @@ function docsHtml(scalarUrl: string, bootScript?: string): string {
     <div id="app"></div>
     <script src="${scalarUrl}"></script>
     <script>
-      Scalar.createApiReference('#app', { url: './openapi.json' })
+      // Mount Scalar. In the BROWSER build a Service Worker (booted by the head script above) is the local
+      // HTTP edge that serves ./openapi.json and the interactive "Test Request" fetches, so on a fresh visit
+      // — which lands BEFORE the SW controls the page — mount only once it takes control, or the first spec
+      // fetch races ahead of control and 404s from the static host. The SW claims clients on activate
+      // (skipWaiting + clients.claim), so this resolves with NO reload and no navigation. On a server (Bun/CF)
+      // there is no SW for this origin, so the flag is false and we mount immediately.
+      ;(async () => {
+        const sw = navigator.serviceWorker;
+        if (${bootScript ? 'true' : 'false'} && sw && !sw.controller) {
+          await new Promise((res) => {
+            const ready = () => { if (sw.controller) { sw.removeEventListener('controllerchange', ready); res(); } };
+            sw.addEventListener('controllerchange', ready);
+            ready(); // already controlled between the check and the attach
+          });
+        }
+        Scalar.createApiReference('#app', { url: './openapi.json' });
+      })();
     </script>
   </body>
 </html>
 `;
 }
 
-/** Build the static Scalar shell for `/docs`. Prefix- AND base-independent (it fetches `./openapi.json`
+/** Build the static Scalar shell served at both `/` and `/docs`. Prefix- AND base-independent (it fetches `./openapi.json`
  *  relative to the page), so it is built ONCE at router construction, unlike the spec — which is
  *  request-derived (`buildOpenApiSpec`, served at `/openapi.json`). `scalarUrl` selects where the Scalar UI
  *  module loads from (the pinned CDN by default; the browser build passes `./scalar.js`); `bootScript`

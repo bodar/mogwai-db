@@ -2,22 +2,25 @@ import { test, expect, describe, beforeAll } from 'bun:test';
 import { join } from 'node:path';
 import { browserInstance, browserLaneEnabled } from './support/harness.ts';
 import { bundleBrowser } from '../../src/browser/bundle.ts';
-import { LANDING_PAGE_HTML } from '../../src/browser/landing-page.ts';
+import { BROWSER_INDEX_HTML } from '../../src/browser/docs-page.ts';
 
 // END-TO-END: the browser build served under a SUB-PATH, exactly as a GitHub Pages project site is
 // (https://<owner>.github.io/<repo>/). This is the one test that exercises the WHOLE deployed shape in a
-// real Chrome: the shipped landing page boots the service worker, the SW re-roots requests against its
-// registration-scope base, and the API + the /docs UI both work under the sub-path. It is the regression
-// guard for the base-path routing (src/browser/service-worker.ts) that a root-served test cannot cover.
+// real Chrome: the site root IS the API docs (the Scalar shell), which boots the service worker in place;
+// the SW re-roots requests against its registration-scope base, and the API + the docs UI both work under
+// the sub-path. It is the regression guard for the base-path routing (src/browser/service-worker.ts) that a
+// root-served test cannot cover.
 //
-// Bundles the real entries on the fly (no dependency on `dist/`), serves the SAME landing page the packager
-// ships (src/browser/landing-page.ts), and asserts the redirect-to-docs handoff plus live graph writes.
+// Bundles the real entries on the fly (no dependency on `dist/`), serves the SAME index.html the packager
+// ships (src/browser/docs-page.ts — the docs shell), and asserts SW-readiness plus live graph writes. There
+// is no redirect hop and no reload: index.html IS the docs, and the shell defers mounting Scalar until the
+// SW controls the page (skipWaiting + clients.claim), so the whole surface is served by the local edge.
 const BASE = '/mogwai-db/';
 const wasmPath = () => Bun.fileURLToPath(import.meta.resolve('@sqlite.org/sqlite-wasm/sqlite3.wasm'));
 const bundle = (rel: string) => bundleBrowser(Bun.fileURLToPath(import.meta.resolve(rel)));
 
 describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages shape)', () => {
-  let out: { onDocs: string; docsHasScalar: boolean; scalarStatus: number; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
+  let out: { rootPath: string; rootHasScalar: boolean; docsHasScalar: boolean; scalarStatus: number; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
   let fatal: string | undefined;
 
   beforeAll(async () => {
@@ -30,7 +33,7 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
       'registry-worker.js': { body: await bundle('../../src/browser/registry-worker.ts'), type: 'text/javascript' },
       'sqlite3.wasm': { body: await Bun.file(wasmPath()).arrayBuffer(), type: 'application/wasm' },
       'scalar.js': { body: scalarJs, type: 'text/javascript' },
-      'index.html': { body: LANDING_PAGE_HTML, type: 'text/html; charset=utf-8' },
+      'index.html': { body: BROWSER_INDEX_HTML, type: 'text/html; charset=utf-8' },
     };
     const server = Bun.serve({ port: 0, async fetch(req) {
       const p = new URL(req.url).pathname;
@@ -50,16 +53,20 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
       page.on('response', (r) => { if (r.status() >= 400) logs.push(`[${r.status()}] ${r.url()}`); });
       // No network stubs: the browser build serves Scalar from its own `./scalar.js` (the vendored asset),
       // so the whole flow — landing page, SW, docs UI, and the graph API — is fully self-contained.
-      // Land on the app root under the sub-path; the shipped index.html boots the SW and redirects to ./docs.
+      // Land on the app root under the sub-path. The shipped index.html IS the docs (no redirect). On this
+      // FRESH visit the SW is not controlling yet; the docs shell DEFERS mounting Scalar until the SW takes
+      // control (skipWaiting + clients.claim → the page becomes controlled with NO reload, NO navigation).
       await page.goto(`http://localhost:${server.port}${BASE}`, { waitUntil: 'commit' });
-      await page.waitForURL(`**${BASE}docs`, { timeout: 45_000 });
-      await page.waitForLoadState('domcontentloaded');
-      // The docs UI actually mounts from the vendored Scalar asset (no CDN): #app is populated once
-      // createApiReference runs — proof the local ./scalar.js loaded and executed under the sub-path.
-      await page.waitForFunction(() => (document.querySelector('#app')?.childElementCount ?? 0) > 0, { timeout: 30_000 });
+      // Ready = the SW controls this page AND Scalar's #app has mounted from the vendored ./scalar.js. The
+      // shell mounts ONLY once controlled, so a populated #app proves control drove the mount. Nothing
+      // navigates, so the evaluate below runs in a document that will not be torn down under it.
+      await page.waitForFunction(() =>
+        !!navigator.serviceWorker.controller
+        && (document.querySelector('#app')?.childElementCount ?? 0) > 0,
+      { timeout: 60_000 });
       // From the (now controlled) docs page — which also hosts the WorkerFactory via ./mogwai-db.js — every
-      // path resolves RELATIVE to /mogwai-db/: the docs shell, the openapi spec, the vendored Scalar, and
-      // the graph API. Absolute-rooted paths would fall outside the SW scope and never be intercepted.
+      // path resolves RELATIVE to /mogwai-db/: the site root (the docs shell itself), the openapi spec, the
+      // vendored Scalar, and the graph API. Absolute-rooted paths would fall outside the SW scope.
       out = await page.evaluate(async () => {
         const g = 'e2e-' + Date.now();
         const put = await fetch('gremlin/' + g, { method: 'PUT' });
@@ -67,7 +74,10 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
         const info = await (await fetch('gremlin/' + g)).json() as any;
         const spec = await (await fetch('./openapi.json')).json() as any;
         return {
-          onDocs: location.pathname,
+          rootPath: location.pathname,
+          // The site ROOT itself serves the docs shell (no redirect): fetch('.') resolves to /mogwai-db/,
+          // which the SW leaves to the static host — proof the root IS the docs.
+          rootHasScalar: (await (await fetch('.')).text()).includes('createApiReference'),
           docsHasScalar: (await (await fetch('./docs')).text()).includes('createApiReference'),
           scalarStatus: (await fetch('./scalar.js')).status,
           openapi: String(spec.openapi),
@@ -85,9 +95,10 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
     }
   }, 90_000);
 
-  test('no fatal (redirect + evaluate completed)', () => { expect(fatal ?? null).toBeNull(); });
-  test('index redirects to the docs UI under the sub-path', () => { expect(out.onDocs).toBe(BASE + 'docs'); });
-  test('the docs shell is served (Scalar reference)', () => { expect(out.docsHasScalar).toBe(true); });
+  test('no fatal (readiness + evaluate completed)', () => { expect(fatal ?? null).toBeNull(); });
+  test('the app root IS the docs UI under the sub-path (no redirect hop)', () => { expect(out.rootPath).toBe(BASE); });
+  test('the site root serves the docs shell directly', () => { expect(out.rootHasScalar).toBe(true); });
+  test('the /docs alias still serves the same Scalar reference', () => { expect(out.docsHasScalar).toBe(true); });
   test('the Scalar UI is vendored (served locally, not a CDN)', () => { expect(out.scalarStatus).toBe(200); });
   test('openapi.json is served under the sub-path', () => { expect(out.openapi).toMatch(/^3\./); });
   test('the spec servers[0].url is the absolute sub-path base (so the Scalar "try it" composes)', () => {

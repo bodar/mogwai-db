@@ -22,7 +22,7 @@ import { mkdir, rm, chmod } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { version } from './version.ts';
-import { LANDING_PAGE_HTML } from '../src/browser/landing-page.ts';
+import { BROWSER_INDEX_HTML } from '../src/browser/docs-page.ts';
 import { SCALAR_VERSION } from '../src/docs.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -101,7 +101,8 @@ async function packageBrowser(): Promise<void> {
   await Bun.write(join(out, 'scalar.js'), Bun.file(scalar));
   console.log(`  browser/scalar.js          ${(Bun.file(scalar).size / 1024).toFixed(0)} KB (Scalar ${SCALAR_VERSION})`);
 
-  await Bun.write(join(out, 'index.html'), LANDING_PAGE_HTML);
+  // index.html IS the API docs (the same Scalar shell the SW serves at /docs) — the site root, no redirect.
+  await Bun.write(join(out, 'index.html'), BROWSER_INDEX_HTML);
   await Bun.write(join(out, 'README.md'), browserReadme(VERSION, sqlitePkg));
 
   await zipDir(out, join(DIST, `mogwai-db-${VERSION}-browser.zip`), ['.']);
@@ -201,8 +202,9 @@ folder and serve it: there are NO runtime downloads and NO CDN dependencies. Bui
 - \`worker.js\` — one dedicated Worker per graph (SQLite on the \`opfs-sahpool\` VFS).
 - \`sqlite3.wasm\` — the SQLite ${sqliteVer} WASM binary \`worker.js\` loads at runtime (fetched relative, so
   it MUST sit beside \`worker.js\`).
-- \`index.html\` — a real landing page: it boots the service worker, then opens \`/docs\`, the API reference.
-- \`scalar.js\` — the Scalar API-reference UI (loaded by \`/docs\`); shipped locally so the docs need no CDN.
+- \`index.html\` — the API reference itself (the interactive Scalar docs), served at the site root; it boots
+  the service worker in place, so opening it IS a live mogwai-db instance (no separate landing page).
+- \`scalar.js\` — the Scalar API-reference UI (loaded by the docs); shipped locally so the docs need no CDN.
 
 ## Use
 

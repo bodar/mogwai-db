@@ -40,4 +40,8 @@ function readInlineConfig(): MogwaiConfig {
   return configFromBrowser(undefined);
 }
 
+// SW-readiness is handled where it belongs — in the docs shell itself (src/docs.ts): it defers the Scalar
+// mount until the Service Worker CONTROLS the page, so the first ./openapi.json fetch and the interactive
+// "Test Request" fetches are served by the local edge. The SW claims clients on activate (skipWaiting +
+// clients.claim), so that resolves with no reload and no navigation — this bootstrap just installs it.
 void installMogwai({ config: readInlineConfig() });
