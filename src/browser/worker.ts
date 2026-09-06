@@ -32,9 +32,14 @@ self.onmessage = (e: MessageEvent<Boot>) => {
   const { port, graphId, config } = e.data;
   // The outbound Http seam is the Worker's global `fetch`, ALLOWLISTED (SSRF guard) from the config the
   // page injected — empty allowlist ⇒ io()/federate over http is denied (fail closed), exactly as Bun/CF.
+  // The one BROWSER-ONLY addition (src/http-allowlist.ts `trustedOrigin`): the Worker's OWN origin is
+  // permitted without an allowlist entry, so a same-origin `g.io("https://<this-site>/data/x.json")`
+  // demo dataset loads out of the box on GitHub Pages — the user's own browser fetching the very page it
+  // is on is not an SSRF vector. Every OTHER origin still goes through the allowlist. `self.location` is
+  // the Worker script's URL (page origin for a same-origin worker); guarded in case it is ever absent.
   host ??= GraphWorkerHost.open(graphId, {
     io: new OpfsIoStore(['io']),
-    http: allowlistedHttp(config?.httpAllowlist ?? []),
+    http: allowlistedHttp(config?.httpAllowlist ?? [], undefined, { trustedOrigin: self.location?.origin }),
   });
   newMessagePortRpcSession(port, new RpcPromise(host));
 };

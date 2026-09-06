@@ -22,7 +22,11 @@ export interface Harness {
  * runtime ONCE, then exercises both the gremlin data plane and the graph
  * management API (create/info/destroy over plain HTTP verbs).
  */
-export function graphContract(name: string, harness: Harness, opts: { servesAssets?: boolean } = {}) {
+export function graphContract(
+  name: string,
+  harness: Harness,
+  opts: { servesAssets?: boolean; extra?: (getOrigin: () => string) => void } = {},
+) {
   describe(name, () => {
     let origin: string;
     beforeAll(async () => {
@@ -43,6 +47,9 @@ export function graphContract(name: string, harness: Harness, opts: { servesAsse
     federationContract(() => origin);
     olapContract(() => origin);
     replicatorContract(() => origin);
+    // A per-runtime hook for assertions that only ONE runtime can make (e.g. io() from a URL over the real
+    // workerd DO boundary, which needs an allowlist + a fetchable doc server the shared contract can't set up).
+    opts.extra?.(() => origin);
   });
 }
 

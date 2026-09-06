@@ -69,3 +69,42 @@ describe('allowlistedHttp', () => {
     await expect(guarded(new Request('https://backup.example/x'))).rejects.toThrow(/redirect, which is not followed/);
   });
 });
+
+// The BROWSER-only same-origin bypass (`trustedOrigin`): a browser fetching its OWN origin is the user's
+// own browser reaching the page it is on — not an SSRF vector — so it is permitted with an EMPTY
+// allowlist (the same-origin GitHub Pages docs demo loads its dataset out of the box). Only a browser
+// entry sets it, to `self.location.origin`; a server never does (a DO doesn't know its own public origin).
+describe('allowlistedHttp with a trusted same-origin (browser)', () => {
+  const ORIGIN = 'https://owner.github.io';
+
+  test('same-origin passes even with an EMPTY allowlist (deny-all default)', async () => {
+    const { http, hits } = recordingBase();
+    const guarded = allowlistedHttp([], http, { trustedOrigin: ORIGIN });
+    const resp = await guarded(new Request(`${ORIGIN}/mogwai-db/data/modern.json`));
+    expect(resp.status).toBe(200);
+    expect(hits).toEqual(['owner.github.io']); // reached base — not blocked
+  });
+
+  test('a DIFFERENT origin is still denied (only the allowlist admits it)', async () => {
+    const { http, hits } = recordingBase();
+    const guarded = allowlistedHttp([], http, { trustedOrigin: ORIGIN });
+    await expect(guarded(new Request('http://169.254.169.254/latest/meta-data/'))).rejects.toThrow(/no host allowlist is configured/);
+    // A same HOST but different PORT is a different ORIGIN — not trusted.
+    await expect(guarded(new Request('https://owner.github.io:8443/x'))).rejects.toThrow(/not allowlisted|no host allowlist/);
+    expect(hits).toEqual([]);
+  });
+
+  test('a cross-origin host is still admitted by the allowlist alongside same-origin', async () => {
+    const { http, hits } = recordingBase();
+    const guarded = allowlistedHttp(['backup.example'], http, { trustedOrigin: ORIGIN });
+    expect((await guarded(new Request(`${ORIGIN}/x.json`))).status).toBe(200);      // same-origin
+    expect((await guarded(new Request('https://backup.example/x.json'))).status).toBe(200); // allowlisted
+    expect(hits).toEqual(['owner.github.io', 'backup.example']);
+  });
+
+  test('same-origin still refuses a redirect off-origin (scheme + redirect guards still apply)', async () => {
+    const redirecting: Http = () => Promise.resolve(new Response(null, { status: 302, headers: { Location: 'http://169.254.169.254/' } }));
+    const guarded = allowlistedHttp([], redirecting, { trustedOrigin: ORIGIN });
+    await expect(guarded(new Request(`${ORIGIN}/x`))).rejects.toThrow(/redirect, which is not followed/);
+  });
+});

@@ -46,7 +46,11 @@ const registry = new StubReplicatorRegistry(source);
 // time from a mutable allowlist, so a config arriving after SW start (or updated) takes effect without a
 // rebuild. A local→local job needs no http (localPeer), so it works even before any config arrives.
 let schedulerAllowlist: string[] = [];
-const schedulerHttp: Http = (req) => allowlistedHttp(schedulerAllowlist)(req);
+// Same browser-only same-origin trust as the graph Worker (src/http-allowlist.ts `trustedOrigin`): the
+// SW's OWN origin is permitted without an allowlist entry, so a same-origin replication peer works out of
+// the box, uniformly with same-origin io()/federate — the user's browser reaching its own site is not an
+// SSRF vector. Every other origin still goes through the (mutable) allowlist.
+const schedulerHttp: Http = (req) => allowlistedHttp(schedulerAllowlist, undefined, { trustedOrigin: scope.location?.origin })(req);
 const runTick = () => runDueReplications({ registry, manager, http: schedulerHttp });
 // Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer — a local
 // source routes to its graph Worker (via the manager), a remote one through the SW's allowlisted http.
