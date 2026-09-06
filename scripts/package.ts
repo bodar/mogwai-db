@@ -146,6 +146,13 @@ async function packageBinaries(): Promise<void> {
     // build number (src/version.ts folds the defined bare `MOGWAI_VERSION` to a literal).
     await run(['bun', 'build', '--compile', `--target=${t.bunTarget}`, `--define`, `MOGWAI_VERSION=${JSON.stringify(VERSION)}`, join(ROOT, 'src/bun/server.ts'), '--outfile', file]);
     console.log(`→ ${file}  (${(Bun.file(file).size / 1024 / 1024).toFixed(0)} MB)`);
+    // Also ship a GZIPPED copy: a `--compile` binary is ~100 MB raw but ~38 MB gzipped, and GitHub does
+    // NOT compress release assets, so the raw download is the full 100 MB. `-k` KEEPS the raw binary — the
+    // docker job COPYs it into the image (docker/Dockerfile), and only the release upload takes the `.gz`
+    // (ci.yml uploads `dist/bin/*.gz`). `-f` so a re-run overwrites a stale `.gz`. A `.gz` is a one-step
+    // `gunzip` on any platform (tar handles it on modern Windows too).
+    await run(['gzip', '-k', '-9', '-f', file]);
+    console.log(`→ ${file}.gz  (${(Bun.file(`${file}.gz`).size / 1024 / 1024).toFixed(0)} MB gzipped)`);
   }
 }
 

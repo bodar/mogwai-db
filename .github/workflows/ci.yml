@@ -179,7 +179,7 @@ jobs:
             --notes-file notes.md \
             "dist/mogwai-db-$V-browser.zip" \
             "dist/mogwai-db-$V-cloudflare.zip" \
-            dist/bin/mogwai-db-"$V"-*
+            dist/bin/mogwai-db-"$V"-*.gz
 
   # Multi-arch Docker images to GitHub Container Registry (ghcr.io) — same gate as the release: every
   # green push to trunk publishes `ghcr.io/<repo>:<version>` and `:latest` for linux/amd64 + linux/arm64.
