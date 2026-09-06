@@ -3,64 +3,59 @@
 This is an index, not a backlog or a conformance report. The feature matrix records
 per-step support; closed work belongs in git history or `docs/archive/`.
 
-**State (refreshed 2026-09-05).** L3 floor 1808/2286 (1806 unique). RelIR covers 1565/2395 corpus
+**State (refreshed 2026-09-06).** L3 floor 1834/2286 (1832 unique). RelIR covers 1576/2395 corpus
 prefixes (`mise run rel-blockers`); the decline contract holds — `lowerToRel` returns plan-or-null,
 never throws (`mise run rel-sweep`) — and the census has **0 `crashed` rows** (no fail-closed
-violations). All five test baselines are clean of parked defects: `known.ts`,
-`capability-baseline.ts`, and `laws.ts` `knownBroken` are EMPTY, and the L5 deep sweep is green across
-seeds — the generator is saturated at the committed depth, so a green L5 now measures coverage, not
-correctness (the one lattice gap it names: `filter(__.identity())` is not lowered).
+violations). All five test baselines are clean of parked defects: `known.ts`, `capability-baseline.ts`,
+and `laws.ts` `knownBroken` are EMPTY, and the L5 deep sweep is green across five fixed seeds (only
+`order` telemetry, which never gates) — the generator is saturated at the committed depth, so a green L5
+now measures coverage, not correctness. The one lattice gap it names: `filter(__.identity())` is not
+lowered.
 
 ## Compounding substrate
 
 - **RelIR completion — the ranked worklist.** Finish the algebra passes and generic lowering for
   nested child bodies, row operations, recursion, paths, and branch arms — shared mechanisms, not
   step-by-step projects. `mise run rel-blockers` ranks the open families by L3 upside:
-  **scalar-transform composition** (18 — `asNumber`/`asString`/`reverse`/`concat`/`asDate`… are ✅ at
-  global scope but don't compose in every shape/position, so this is value carriage, below),
-  **branch arms** (14 — `union`/`choose`/`coalesce`), **aliases** (13 — `select`/`as`), **writes** (10),
-  **row ops** (10 — `order`/`dedup`/`range`), **map shape** (9 — `group*`), **list shape** (9 —
-  `fold`/`unfold`), **side effects** (8 — `group`/`aggregate`/`cap`). Start with
+  **branch arms** (13 — `union`/`choose`/`coalesce`), **writes** (11 — `addE`/`property`/`addV`/`mergeV`/`mergeE`),
+  **scalar-transform composition** (11 — `asNumber`/`reverse`/`concat`/`asDate`… are ✅ at global scope but
+  don't compose in every shape/position, so this is value carriage, below), **aliases** (11 — `select`/`as`),
+  **map shape** (9 — `group*`), **list shape** (9 — `fold`/`unfold`), **row ops** (9 — `order`/`dedup`/`range`),
+  **side effects** (8 — `group`/`aggregate`/`cap`). Start with
   [the RelIR build plan](./2026-08-01-relir-build-plan.md) (§10 is the live-gap home).
-- **Emit/block walk unification — a correctness substrate.** `src/rel/emit.ts` and `src/rel/block.ts`
-  independently re-derive direct-source classification, FROM-alias assignment, and join-splice
-  eligibility; only a subset is shared. When the two copies drift, a plan `check.ts` admits (a
-  recursive-term P1 law) gets wrapped by the emitter into a `circular reference` / wrong rows — a named
-  silent-wrong-answer class. Lift the decision predicates (direct-source-ness, `aliasOf`,
-  `mayFuse ∧ spliceable ∧ free`) into shared helpers both consume — mechanical; full walk-unification
-  is unnecessary. Flagship of the correctness lifts.
+- **Emit/block walk unification — a correctness substrate; NARROWED.** The decision predicates
+  (`isDirectSource`/`aliasOf`/`free`/`maySplice`/`NEEDS_SUBQUERY`) are now SHARED — `src/rel/block.ts`
+  exports them and `src/rel/emit.ts` imports them. The residue is the `directSource` **constructor**
+  (`src/rel/emit.ts:218` builds the FROM item where `isDirectSource` only predicts) and FROM-alias
+  assignment; lift those two and the drift class (a plan `check.ts` admits, the emitter wraps into
+  `circular reference` / wrong rows — a named silent-wrong-answer class) closes. Smaller than the
+  original walk-unification framing; still the flagship correctness lift.
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
-  the 18-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's
+  the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's
   reducer **type** (`produced.vtype`) and **productivity** (empty-child NULL-ness) as two carried facts,
   so `by(sum/mean/…)` lands uniformly across `project`/`aggregate`/`store`/`where` (`group().by(k).by(__.…sum())`
   already works; the sibling hosts drop the fact). Rules RelIR §6·7; live gaps §10.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
-- **Encounter and order — the fan-out rejoin authority.** One root cause — a per-traverser-spliced body
-  doesn't thread channels/labels out to parent scope — produces the path-transparency decline for
-  `flatMap`/`local` under `path()`, child-body-label-escape, and the per-origin-unsafe barrier in a
-  fan-out body (`src/compiler/rel/lower/reduction.ts`). The same channel-seeding gap recurs at every
-  boundary (value/list resume, foreign/bound-graph rejoin — the federate path+encounter combo, the
-  barrier-resume transplant in `segment.ts`) and at new-position consumers (`otherV()` outside a
-  retained `fromV`, `where('a',eq('b')).by('key')`, list-valued alias dedup key). One substrate clears
-  a large read-side family; the barrier-in-body slice 2 and per-origin-in-arm items are its consumers.
-  Plan + reference-grounded increment ladder: [fan-out rejoin authority](./2026-09-05-fan-out-rejoin-authority-plan.md).
-- **Correlated per-incoming-row write-argument resolver — the property-VALUE family + merge WRITE arms
-  LANDED; the merge SEARCH remains.** The write lowering has a per-*traverser* correlated surface: a
-  `property(k, __.trav)` value resolves per owner through `ChildSeam.rows`/`.scalar`
-  (`resolveRuntimeValue`/`runtimePropertyStatements`, `src/compiler/rel/write.ts`), reference-exact per
-  `AddPropertyStep.handleTraversalValue` (0→skip, >1 under an effective single→raise, list/set→each; a
-  reducing body like `count()` falls back to the scalar arm), with FTS derived post-write from the
-  stored `{t,v}` tree (`refreshFts`, `src/refresh.ts`). Covers `property()` steps, the property MAP form,
-  `addV`/`mergeV` **tails** (element-rooted `AddPropertyStep`), and `mergeV` **onMatch/onCreate values**
-  (`mergeArmValueWrite`, DRIVER-rooted per `materializeMap(traverser)`, `MergeVertexStep.java:103`/`:153`).
-  Validated by `property-traversal-multivalue.feature`/`property-map-form.feature`/`merge-property-tail.feature`
-  + `test/property-traversal-value.test.ts`; drove L3 +5. **What remains — the merge SEARCH correlated per
-  driver — is DESIGNED and reference-pinned in its own plan:**
-  [correlated merge search](./2026-09-05-correlated-merge-search-plan.md) (the `pairs` + decorrelate-to-equi-join
-  design, the whole-map `materializeMap` resolution, why the map-literal `[k:__.trav]` stays declined, and
-  the build order incl. whole-arg/no-arg merge, edge runtime value, and meta). `matching`/`edgeCriteria`
-  are still input-independent — that plan is what makes them correlated. Ties to the supplied-`T.id` merge.
+- **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
+  substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
+  ([archived](./archive/2026-09-05-fan-out-rejoin-authority-plan.md)). Remaining are PATH-as-a-VALUE
+  consumers, each its own increment: **`path().order()`** whole-stream orderability (a JS barrier;
+  `orderStreamValue` already does element members — `src/compiler/rel/lower/order-dedup-local.ts`),
+  **`path().group()`** / a Path in a group VALUE (needs a `{t:'path'}` arm in `frameTypedNode`/`listNodeExpr`,
+  fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
+  (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
+  (Graph capabilities, below).
+- **Correlated write-argument resolver — the merge SEARCH map-driver LANDED; map-valued `mergeE` remains.**
+  The per-traverser correlated write surface (`property(k, __.trav)` values, the property MAP form,
+  `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, and the correlated `mergeV` SEARCH — a computed
+  criterion per driver, incl. the whole map AS the merge search) is on trunk (`src/compiler/rel/write.ts`).
+  Remaining, all designed in [correlated merge search](./2026-09-05-correlated-merge-search-plan.md) (4c):
+  **map-valued `mergeE`** (`inject(map).mergeE()`/`select("m").mergeE()`, endpoints from the map's `Direction`
+  keys), the general **map-producing traversal** driver, the whole-map **0-result RAISE**, and an **edge
+  runtime property value** (`option(onMatch,[k:__.trav])` on a mergeE, which declines the whole merge today).
+  The map-LITERAL `[k:__.trav]` stays permanently declined. Ties to PartitionStrategy partition-aware
+  upsert (Strategies, below).
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP
@@ -76,44 +71,55 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 ## Product capabilities
 
 - **Graph capabilities:** `tree`, graph algorithms, and the remaining strategy/options forms.
-  - **`match()` — mostly landed, residual gaps** (was indexed as unbuilt). Binding/filter patterns,
-    `and`/`or` filter regime, nested match, modulated bodies, keyed `dedup`, and top-level
-    `not/where(match)` are on the RelIR spine (drove L3 1480→1755). Residuals, each needing new
-    plumbing: a truly BINDING `or` branch (disjunctive-UNION + alias reconciliation), `local(match)`, a
-    `map(<mean>)` body, a `fold()` end, a filter-after-reduce / `count()` end, `ProductiveByStrategy`
-    null-keeping, `where('a',P)` over scalar aliases / non-eq ops, and a per-origin windowed slice in a
-    pattern body (a consumer of Encounter-and-order).
-    → [match plan](./2026-08-13-match-relir-lowering-plan.md).
+  - **`match()` — mostly landed, residual gaps.** Residuals, each needing new plumbing: a truly BINDING
+    `or` branch (disjunctive-UNION + alias reconciliation), `local(match)`, a `map(<mean>)` body, a
+    `fold()` end, a filter-after-reduce / `count()` end, `ProductiveByStrategy` null-keeping,
+    `where('a',P)` over scalar aliases / non-eq ops, and a per-origin windowed slice in a pattern body
+    (a consumer of the arm-major slice). → [match plan](./2026-08-13-match-relir-lowering-plan.md).
   - **Strategies** (`src/compiler/ir/strategies.ts`) — the largest L3 clusters:
-    `SubgraphStrategy(edges:/vertexProperties:)` criteria, `PartitionStrategy` with `mergeV`/`mergeE`
-    (partition-aware upsert — ties to the correlated write-arg item; supplied `T.id` on merge now lands),
-    and small config gaps
-    (`includeMetaProperties`, `ProductiveByStrategy` on a non-standard host). No injection rule yet
-    wraps a criterion around a mutation.
-  - **`subgraph('sg')`** side-effect collection into a named graph (matrix ❌, a sizeable L3 cluster)
+    `SubgraphStrategy(edges: __.or(…))` criteria (top L3 bucket, ×10) and `SubgraphStrategy(vertexProperties:)`
+    (×6), `PartitionStrategy` with `mergeV`/`mergeE` (×7 — partition-aware upsert, ties to the correlated
+    write-arg resolver; supplied `T.id` on merge now lands), and small config gaps (`includeMetaProperties`,
+    `ProductiveByStrategy` on a non-standard host). No injection rule yet wraps a criterion around a mutation.
+  - **`subgraph('sg')`** side-effect collection into a named graph (matrix ❌, a sizeable L3 cluster ×16)
     and **`withSack(seed, Operator)`** accumulator (bare `sack()` works) — matrix-fill.
+  - **Step-vocabulary L3 clusters** (matrix-fill, not ceiling): `format('%{k} …')` string interpolation
+    (×12), local reductions `mean(Scope.local)`/`sum(Scope.local)` over a value list (×10), string steps
+    inside `repeat` (`split`/`conjoin`, ×11), `inject(…,null,…).path()` null carriage under `path()` (×9),
+    and the read-only/mutation-guard family (`ReadOnlyStrategy.addV`, a mutating step in a value-argument
+    child — ×15; verify we reject with the reference's outcome, not merely an `UnsupportedTraversal`).
   - *Graph algorithms* — barrier substrate + GDS library DONE
     ([archived](./archive/2026-08-23-barrier-substrate-reshape-plan.md); execution plan
-    [here](./2026-07-24-graph-algorithms-plan.md)). Two pieces remain: **barrier-in-body slice 2**
-    (per-parent nesting for `local`/`union`-arm/`by`-child/unbounded-`repeat` bodies — a consumer of
-    Encounter-and-order; unbounded-`repeat` stays P3 fail-closed forever) and the **order-dependent GDS
-    algorithms** (`labelPropagation`/`louvain`/`eigenvector` — not clean set-based reuse).
+    [here](./2026-07-24-graph-algorithms-plan.md)); the native OLAP steps + the `relationshipWeightProperty`
+    monoid-completion substrate are on trunk. Open, in the plan's priority order: **the GDS parameter
+    superset** — cheap-win params with no substrate (`maxIterations`, `tolerance`, `consecutiveIds`,
+    `useWassermanFaust`, `maxDegree`),
+    `nodeSimilarity` `topK`/`similarityCutoff`/`degreeCutoff` (a scalability wall — `WHERE`/`ROW_NUMBER`
+    tweaks), `sourceNodes` (personalized pageRank/articleRank) and `seedProperty` (wcc) reading a
+    node-set/property into the seed, remaining weighted consumers (streaming degree, weighted betweenness/LPA),
+    `scaler`; and the **order-dependent algorithms** (`labelPropagation`/`louvain`/`eigenvector` — not clean
+    set-based reuse).
   - *Per-origin windowed slice — one increment left.* The substrate is DONE
-    ([archived](./archive/2026-08-25-per-origin-window-plan.md)) for `local`/`flatMap` and `match`
-    bodies. The remaining consumer is a per-origin slice inside a **`union`/`choose` arm or a
-    bounded-`repeat` body** — the branch substrate's traverser-major/arm-major question: the decline is
-    `slice && bodies.some(armBatches)` (`src/compiler/rel/lower/branch.ts`); the lift threads the
-    arm-minted origin through `mintTraverserMajor`.
-- **Services and graph movement.** `GraphSource` and mid-traversal federate INJECTION are DONE
-  ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md),
-  [injection-mapvalues](./archive/2026-08-28-federate-injection-mapvalues.md)). Remaining federate items
-  ([pushdown design](./2026-08-26-federate-pushdown-design.md) Open): **multi-graph mixing** (`union` of
-  two siblings + cross-graph identity) and a low-value **side-effect-boundary** widening. Three
-  by-design deferrals stay fail-closed (bound WRITES, FTS over a bound graph, the path+encounter combo —
-  a consumer of Encounter-and-order). **Lead:** the replication `gid` (below) could dissolve the ~375
-  LOC `graph`-channel machinery these phases extend, replacing composite `(graph,id)` with a
-  globally-unique rejoin — unrealized; `src/channels.ts` / `src/compiler/rel/boundgraph.ts` are still
-  gid-free.
+    ([archived](./archive/2026-08-25-per-origin-window-plan.md)) for `local`/`flatMap` and `match` bodies.
+    The remaining consumer is a per-origin slice inside a **`union`/`choose` arm or a bounded-`repeat` body**
+    — the branch substrate's traverser-major/arm-major question: the decline is `slice && bodies.some(armBatches)`
+    (`src/compiler/rel/lower/branch.ts`); the lift threads the arm-minted origin through `mintTraverserMajor`.
+- **Services and graph movement — federate Phases 1–3 LANDED; residual tails.** `GraphSource`,
+  mid-traversal INJECTION ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md),
+  [injection-mapvalues](./archive/2026-08-28-federate-injection-mapvalues.md)), and pushdown Phases 1–3
+  (`union` of two siblings, cross-graph `dedup` identity via the `graph` channel role, post-merge
+  `values`/bare-element reads) are on trunk. Remaining
+  ([pushdown design](./2026-08-26-federate-pushdown-design.md) Open):
+  - **Phase 2b** — cross-graph identity for `group().by(id)` (rowid + `.by(id)` composite) and
+    `has(T.id, <nested cross-graph scalar>)`.
+  - **Phase 3b** — post-merge reads still fail-closed: correlated id-only reads (`hasLabel`/`has(key)`),
+    live cross-graph movement (`out`/`in`), and the bound+BASE element-read mix
+    (`union(federate(A).V(), __.V()).values(...)` — base graph not yet an arm of the unified relation).
+  - **Side-effect-boundary** widening (low value — `cap` over a pre-barrier collection stays local).
+  - Three by-design deferrals stay fail-closed (bound WRITES, FTS over a bound graph, the path+encounter
+    combo). **Lead:** the `graph` `ChannelRole` (the composite `(graph,id)` discriminator) is now landed and
+    load-bearing across Phases 2/3, so the replication `gid` refactor (below) that would replace composite
+    `(graph,id)` with a globally-unique rejoin now has real ~375 LOC of `graph`-channel machinery to dissolve.
 - **Replication & HTTP interop — LANDED; residual tails.** The peer protocol, `gid`/`rev`/`seq`,
   tombstones, conflict preservation, filtered replication (F1–F3), and the worker-residency scheduler
   are on trunk across Bun/CF/browser
@@ -161,24 +167,32 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 - **Duplication consolidation is DONE** ([archived](./archive/2026-08-25-duplication-and-smells-plan.md))
   — kept for its "deliberately NOT flagged" list (the map of intentional parallels a future sweep must
   re-read before "fixing" anything). Fresh debt the substrate audit surfaced, highest-leverage first:
-  - **Identity-reprojection idiom repeated ~27×** across `src/compiler/rel/**` — the largest boilerplate
-    class; a partial helper exists (`src/compiler/rel/property.ts` `carryThrough`). Mechanical.
-  - **`OwnerSeek` strategies duplicate the safety-critical "owner → `sid` → DISTINCT" tail**
-    (`src/rel/passes/semijoin.ts`) — the trailing DISTINCT is load-bearing; extract
-    `distinctOwners`/`seekScan`. Mechanical, real safety win, cheapens adding an access-path strategy.
-  - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
-    `pathPositionProjection` also closes a latent bug: a mid-path value/list/map position under a
-    non-identity `by()` is silently treated as a vertex.
-  - **Four copied blocks in `write.ts`** (alias-carry-to-created, passthrough reproject, merged-create
-    spread, nested-spec decline loop).
-  - **Two parallel framing→`{t,v}` member encoders** (`producedMemberNode`, `fieldNode`) — a radar item:
-    a new framing arm must be added in lockstep or they drift.
-  - **Miscategorized deferral** (`src/compiler/ir/write-args.ts`): `property(T.id)` on an existing
-    element raises a clearable `Deferral` but id is immutable — it should be a permanent `Error` (else
-    never-clearable telemetry debt); `T.label`-append is genuine future work.
-  - **Non-JSON-transportable channels through the write snapshot** — an identical guard fires 4× on
-    `sack`/`path` channels or a JSONB-blob alias history through a write; extend `src/program.ts`'s
-    transportable set + `writeInputChannels`. Narrow (writes after `sack()`/`path()`).
+  - **Identity-reprojection idiom repeated ~43×** across `src/compiler/rel/**` and `src/rel/**` (the pure
+    form `X.channels.map(ch => [ch.col, col(Y.id, ch.col)])`; ~6 more with a per-channel override —
+    bulk→`1`, encounter→`sid`, origin→`col(input.id,'id')`, alias-override). The target helper already
+    exists (`withPayload`, `src/compiler/rel/build.ts:87`; local `carryThrough`,
+    `src/compiler/rel/property.ts:255`) but hard-wires "channel-source == reprojection-id", so ~50 sites
+    reading channels off a *different* relation can't adopt it. **Mechanical:** export an override-aware
+    `carriedExprs(channels, sourceId, overrides?)` + give `withPayload` an optional `from`; migrate.
+    Drift-safety win (a channel role handled inconsistently is a silent-wrong-answer risk).
+  - **`OwnerSeek` DISTINCT tail duplicated 3× in `src/rel/passes/semijoin.ts`** (`:218`, `:265`, `:300`) —
+    the `owner → 'sid' → DISTINCT` tail, DISTINCT load-bearing (`:65`). Extract `distinctOwners`. Mechanical,
+    real safety win, cheapens adding an access-path strategy.
+  - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts:261-296`, parallel to the
+    linear reader) — extracting `pathPositionProjection` also closes a live bug: the `else` at `path.ts:270`
+    treats a mid-path value/list/map position under a non-identity `by()` as a vertex. Architectural-ish.
+  - **Four copied blocks in `write.ts`** (carrier reproject-without-channels `:2539`, merged-create map
+    spread `:2761`, alias-carry-to-created `:1903`/`:2810`, nested-spec decline). Maintainability-only.
+  - **Two parallel framing→`{t,v}` member encoders** (`producedMemberNode`, `src/compiler/rel/modulator.ts:420`;
+    `fieldNode`, `src/compiler/rel/record.ts:237`) — a radar item: they consume different framing vocabularies
+    (4 vs 11 cases) and value-access models, so a merge is ARCHITECTURAL; keep as a must-edit-in-lockstep entry.
+  - **Miscategorized deferral** (`src/compiler/ir/write-args.ts:197`): `property(T.id)` on an existing
+    element raises a clearable `Deferral` but id is immutable — split into a permanent `Error` for `T.id`
+    (else never-clearable telemetry debt) from the kept `Deferral` for `T.label`-append (genuine future work).
+  - **Non-JSON-transportable channels through the write snapshot** — `writeInputChannels`
+    (`src/compiler/rel/write.ts:1530`) filters channels to `encounter|alias`, silently dropping `sack`/`path`
+    at 8 call sites; extend `src/program.ts:112`'s transportable set + this filter. Narrow (writes after
+    `sack()`/`path()`).
 - Keep the `antlr4ng` patch live until upstreamed; regenerate and compare `parser/` when updating
   TinkerPop.
 - Keep the architecture, bind-budget, type-check, conformance, and RelIR-decline gates green. Do not add
@@ -188,12 +202,14 @@ correctness (the one lattice gap it names: `filter(__.identity())` is not lowere
 
 - **FEDERATED `order`/`dedup(Scope.local)`/global-`order()` over an ELEMENT-membered list** — the
   BASE-graph case LANDED (D2, `order-dedup-local.ts`: carry rowids through the barrier, re-source at the
-  edge). A LANDED-FOREIGN element re-sources its key via `BoundGraph`, not the resume's `BaseGraph`
-  default, so the federated case still declines fail-closed until the resume threads the bound source —
-  rare and non-corpus. (The scalar-list case landed earlier.)
+  edge; nested + stream + global forms all covered). A LANDED-FOREIGN element re-sources its key via
+  `BoundGraph`, not the resume's `BaseGraph` default, so the federated case still declines fail-closed
+  until the resume threads the bound source — rare and non-corpus.
 - **Recursion barrier-in-term** (an aggregate/window inside a recursive `repeat` term) — a SQLite
   algebraic law; the refusal is the only correct answer, not a gap.
 - **Global `tail`/`sample` with no `encounter`** — a question about emission order a channel-less
   relation cannot answer; decline is correct.
 - **Unbounded-`repeat` body per-origin slice / barrier** — recursive-term collapse is algebraically
   impossible; P3 fail-closed forever.
+- **map-LITERAL `[k:__.trav]` as a merge argument** — a candidate-rooted `P.eq` on a per-driver value;
+  permanent decline (correlated merge search), distinct from the map-VALUED driver that landed.
