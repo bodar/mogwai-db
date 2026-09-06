@@ -53,7 +53,6 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[PETER,LOP] |
 
   @gap:path-position
-  @Unsupported
   Scenario: g_V_out_path_byXout_countX
     Given the modern graph
     And the traversal of
@@ -124,12 +123,10 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[josh,java] |
       | p[peter,java] |
 
-  # Blocked by the path by() edge/vertex duality, NOT by the scalar choose child: a path position is
-  # compiled for BOTH an edge and a vertex host, and `out()` (a vertex movement) is invalid from an edge,
-  # so the edge branch declines and takes the whole by() with it — the same wall as by(__.out().count())
-  # above. A vertex-movement child in a path position is its own increment (path-position shape inference).
+  # A vertex-movement inside the choose condition, once the path is proven vertex-only: `pathPositionKinds`
+  # says `g.V().out()` holds no edge position, so the by() builds ONLY the vertex host and `out()` (invalid
+  # from an edge) is never compiled from one. The same inference that unblocks by(__.out().count()) above.
   @gap:path-position
-  @Unsupported
   Scenario: g_V_out_path_byXchooseXout_constantXhasOutX_constantXleafXXX
     Given the modern graph
     And the traversal of

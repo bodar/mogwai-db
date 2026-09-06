@@ -206,5 +206,7 @@ export function shortestPathReconstruct(
   }
   const deduped = make.distinct({ id: fresh('sprd'), input: selected, channels, type: selected.type });
   const pathStep = { name: 'path', args: [] } as unknown as IRStep;
-  return pathPositions(deduped, pathStep, child, source, fresh);
+  // A synthetic bare `path()` with no by() and no chain to analyse — `undefined` kinds means cannot-say,
+  // which for an identity projection attempts every host and reproduces the full tag CASE unchanged.
+  return pathPositions(deduped, pathStep, undefined, child, source, fresh);
 }

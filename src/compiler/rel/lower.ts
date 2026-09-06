@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -1342,7 +1342,7 @@ function scalarTail(
     // it (fail-safe — a later `path()` then declines with no channel rather than framing a gap).
     if (pathCarried(rel)) {
       if (step.name === 'path' && (step.args ?? []).length === 0) {
-        const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
+        const positions = pathPositions(rel, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh);
         if (!positions) return null;
         return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
       }
@@ -1350,7 +1350,7 @@ function scalarTail(
         if ((step.args ?? []).length) return null;
         const cyclic = step.name === 'cyclicPath';
         const pred = step.modulators?.length
-          ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
+          ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh)
           : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
         if (!pred) return null;
         rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
@@ -4120,7 +4120,7 @@ function elementTail(
       // `from`/`to` scope to a SUB-path (`subPathMembers`, via the labels-on-path recorded when
       // `ChainFacts.demandsPathLabels` gated them on).
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
-      const positions = pathPositions(rel, step, childSeam(ctx, fresh), ctx.source, fresh);
+      const positions = pathPositions(rel, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -4135,7 +4135,7 @@ function elementTail(
       // (`pathSimpleByPredicate`); the bare form compares the raw objects (`pathSimplePredicate`).
       const cyclic = step.name === 'cyclicPath';
       const pred = step.modulators?.length
-        ? pathSimpleByPredicate(rel, cyclic, step, childSeam(ctx, fresh), ctx.source, fresh)
+        ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh)
         : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
       if (!pred) return null;
       rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });

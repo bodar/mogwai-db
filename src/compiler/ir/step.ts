@@ -211,6 +211,43 @@ const SHAPE_PRESERVING: ReadonlySet<string> = new Set([
   'simplePath', 'cyclicPath', 'none', 'drop',
 ]);
 
+/** What a PATH position holds: an ELEMENT (rejoined by rowid) or a self-contained VALUE (a mid-path
+ *  `values()`, whose `{v,t}` is stored in the position itself). */
+export type PathPositionKind = ElementKind | 'value';
+
+/**
+ * WHICH KINDS A PATH'S POSITIONS CAN HOLD across `steps[0..at)`, or `undefined` for **cannot say** —
+ * the sibling of `elementKindAt` for a `path()`, and its one consumer is `pathPositions`'s `by()`.
+ *
+ * A path holds MANY positions (one per appending step), so this accumulates the SET of kinds its
+ * appenders mint rather than the one kind at a position. Knowing a path is vertex-only lets the `by()`
+ * build ONLY the vertex host, so `by(__.out().count())` stops declining for an EDGE host the path never
+ * reaches — the same wall `elementKindAt` was built to let a Pass step around, one shape along.
+ *
+ * The third answer is load-bearing exactly as it is above: an unrecognised step — a branch, a repeat, a
+ * re-entry — returns `undefined`, and the caller then attempts every host, so an unproven path stays
+ * fail-closed rather than dropping a host whose position might yet appear. EXCLUDING a kind that can
+ * appear would be a wrong answer, so the walk only ever ADDS a kind it is certain of and defers
+ * everything else to cannot-say. A `values()` records a VALUE position (`appendValuePosition`), which
+ * holds no element and needs no element host — it adds `value` and is framed unconditionally.
+ *
+ * Like `elementKindAt`, this stays a local element-kind question and must not grow into a shape
+ * annotation (`src/compiler/CLAUDE.md`, the bright line): it answers vertex/edge/value/cannot-say and
+ * nothing about member encodings or framings.
+ */
+export function pathPositionKinds(steps: readonly IRStep[], at: number): ReadonlySet<PathPositionKind> | undefined {
+  const kinds = new Set<PathPositionKind>();
+  for (let i = 0; i < at && i < steps.length; i++) {
+    const name = steps[i].name;
+    if (name === 'V' || VERTEX_MOVES.has(name) || ENDPOINT_MOVES.has(name) || OTHER_V.has(name)) kinds.add('vertex');
+    else if (name === 'E' || EDGE_MOVES.has(name)) kinds.add('edge');
+    else if (name === 'values') kinds.add('value');
+    else if (SHAPE_PRESERVING.has(name)) continue; // a carrier — appends no position
+    else return undefined; // cannot say — the caller builds every host, fail-closed
+  }
+  return kinds;
+}
+
 /** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It is THE
  *  shared hinge of three scans, which is why it is a base here rather than a private helper: such an
  *  order() clears "needs an emission encounter" (a following slice sorts deterministically without

@@ -3,9 +3,9 @@ import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../r
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
-import type { IRStep } from '../ir/step.ts';
+import type { IRStep, PathPositionKind } from '../ir/step.ts';
 import { SHAPE_K, type AliasMap } from '../alias.ts';
-import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
+import { byEncounter, carriedCols, jsonField, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
@@ -17,6 +17,53 @@ import type { ChildSeam } from './child.ts';
  *  predicate-bearing child (`by(__.choose(<cond>, …))`) can build a correlated condition over the
  *  element the position holds. */
 const PATH_BY_ALIASES: AliasMap = new Map();
+
+/**
+ * ONE PER-POSITION PROJECTION, dispatched on the entry's TAG — the single assembler both `pathPositions`
+ * and `pathSimpleByPredicate` build a modulated `by()` through, so the edge/vertex/value dispatch is
+ * stated ONCE (it was built twice, and the second copy silently lacked a value arm).
+ *
+ * `want` is the set of kinds the path can actually hold (`pathPositionKinds`): an arm is built ONLY for a
+ * kind in it, so a vertex-only path skips the edge host and `by(__.out().count())` no longer dies for an
+ * edge position it never reaches. `armFor` builds a kind's projection or returns `null` to DECLINE the
+ * whole `by()` — a kind that CAN appear whose child the algebra cannot express is a fail-closed refusal,
+ * never a silently dropped branch. Vertex is the CASE `else` where present (an element with no explicit
+ * tag); otherwise the last built arm is, so a path proven to hold one kind collapses to that arm with no
+ * CASE at all.
+ */
+function positionNode(
+  want: ReadonlySet<PathPositionKind>, tag: Expr, armFor: (kind: PathPositionKind) => Expr | null,
+): Expr | null {
+  const arms: (readonly [PathPositionKind, Expr])[] = [];
+  for (const kind of ['edge', 'value', 'vertex'] as const) {
+    if (!want.has(kind)) continue;
+    const node = armFor(kind);
+    if (!node) return null; // a wanted kind whose child cannot be expressed — decline the whole by()
+    arms.push([kind, node]);
+  }
+  if (arms.length === 0) return null;
+  const whens: (readonly [Expr, Expr])[] = [];
+  let elseArm: Expr | undefined;
+  for (const [kind, node] of arms) {
+    if (kind === 'vertex') elseArm = node; // a vertex entry carries no distinguishing tag
+    else whens.push([{ kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K[kind]) }, node] as const);
+  }
+  if (elseArm === undefined) {
+    const last = whens.pop()!; // no vertex arm: the last non-vertex arm is the else
+    elseArm = last[1];
+  }
+  return whens.length === 0 ? elseArm : { kind: 'case', whens, else: elseArm };
+}
+
+/** The kinds a `by()` should ATTEMPT: the PROVEN set where `pathPositionKinds` had one, else the
+ *  fail-closed default. An IDENTITY `by()` attempts all three because its value arm (`valueNode`) never
+ *  declines, so framing a value position it might hold costs nothing; a MODULATED `by()` keeps today's
+ *  edge+vertex, because its value host's child CAN decline and attempting it speculatively would refuse a
+ *  property `by()` over a path whose positions were not proven. */
+const attemptKinds = (
+  kinds: ReadonlySet<PathPositionKind> | undefined, identity: boolean,
+): ReadonlySet<PathPositionKind> =>
+  kinds ?? new Set<PathPositionKind>(identity ? ['vertex', 'edge', 'value'] : ['vertex', 'edge']);
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -232,7 +279,8 @@ export function subPathMembers(members: Rel, from: string | undefined, to: strin
  * deep inside a table-valued function argument.
  */
 export function pathPositions(
-  rel: Rel, step: IRStep, child: ChildSeam, source: GraphSource, fresh: Minter,
+  rel: Rel, step: IRStep, kinds: ReadonlySet<PathPositionKind> | undefined,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
   if (!pathCarried(rel)) return null;
   const parsed = modulations(step, step.modulators?.length ?? 0, child);
@@ -257,38 +305,29 @@ export function pathPositions(
   const rowid: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] };
   const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
   // ONE `case` over the entry's own tag, whatever the path's length — which is the whole reason the entry
-  // carries a tag at all. Two arms because only element objects reach the append today; a VALUE position
-  // is a third arm here and an append at the retype, not a different encoding.
-  // A VALUE position (a `values()`/`id()`/`label()` mid-path) is self-contained — its `{v,t}` is stored
-  // IN the entry, so unlike an element it needs no rejoin. Reshape `{k,v,t}` → the `{t,v}` node the
-  // typed-tree framer reads. Its tag distinguishes it from a vertex (`else`), which would otherwise try
-  // to rejoin the value as a rowid.
+  // carries a tag at all, and the reason the dispatch is `positionNode` shared with the projected form.
+  // A VALUE position (a `values()` mid-path) is self-contained — its `{v,t}` is stored IN the entry, so
+  // unlike an element it needs no rejoin: reshape `{k,v,t}` → the `{t,v}` node the typed-tree framer reads.
   const valueNode: Expr = { kind: 'json-object', binary: false, entries: [
-    ['t', { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.t')] }],
-    ['v', { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] }],
+    ['t', jsonField(entry, 't')],
+    ['v', jsonField(entry, 'v')],
   ] };
-  const element: Expr = {
-    kind: 'case',
-    whens: [
-      [{ kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) }, source.elementNode('edge', rowid, fresh)],
-      [{ kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.value) }, valueNode],
-    ],
-    else: source.elementNode('vertex', rowid, fresh),
-  };
+  // The IDENTITY projection over one position — an element rejoined by rowid, a value reshaped in place.
+  // Every arm is total, so `positionNode` never declines here (the `!`), and a proven single-kind path
+  // collapses it to that arm with no CASE.
+  const element = positionNode(attemptKinds(kinds, true), tag, (kind) =>
+    kind === 'value' ? valueNode : source.elementNode(kind, rowid, fresh))!;
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;
     const row = { row: { rel: members, aliases: PATH_BY_ALIASES } };
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge', ...row }, source, fresh, child);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex', ...row }, source, fresh, child);
-    if (!edge || !vertex) return null;
-    return {
-      kind: 'case',
-      whens: [[
-        { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) },
-        edge,
-      ]],
-      else: vertex,
-    };
+    // A modulated `by()` runs against the position's own traverser — an ELEMENT host per element kind, a
+    // SCALAR host for a value position (its stored `{v,t}`). Only the kinds the path can hold are built,
+    // so a vertex-only path attempts neither an edge nor a value host, and a wanted host whose child
+    // cannot be expressed declines the whole `by()`.
+    return positionNode(attemptKinds(kinds, false), tag, (kind) =>
+      kind === 'value'
+        ? byNode(modulation, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
+        : byNode(modulation, { kind: 'element', id: rowid, elem: kind, ...row }, source, fresh, child));
   };
   const projected = parsed.map(projectedNode);
   if (projected.some((node) => node === null)) return null;
@@ -398,7 +437,8 @@ export function pathPositions(
  * an element entry and a value node never collide, so a mixed compare is exact by construction.
  */
 export function pathSimpleByPredicate(
-  rel: Rel, cyclic: boolean, step: IRStep, child: ChildSeam, source: GraphSource, fresh: Minter,
+  rel: Rel, cyclic: boolean, step: IRStep, kinds: ReadonlySet<PathPositionKind> | undefined,
+  child: ChildSeam, source: GraphSource, fresh: Minter,
 ): Expr | null {
   if (!pathCarried(rel)) return null;
   const parsed = modulations(step, step.modulators?.length ?? 0, child);
@@ -412,16 +452,17 @@ export function pathSimpleByPredicate(
   const entry = col(members.id, 'pv');
   const rowid: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] };
   const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
-  const isEdge: Expr = { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) };
   const perModulation = (modulation: Modulation): Expr | null => {
     // An identity `by()` compares the raw OBJECT, stripped of the gated `L` label array (see
     // `pathSimplePredicate`) so a label never makes two visits to one object look distinct.
     if (modulation.key.kind === 'identity') return { kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.L')] };
+    // The projected form is the SAME per-kind dispatch `pathPositions` builds — hosts only for the kinds
+    // the path can hold — so `simplePath().by(<vertex-movement>)` gains the vertex-only inference too.
     const row = { row: { rel: members, aliases: PATH_BY_ALIASES } };
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge', ...row }, source, fresh, child);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex', ...row }, source, fresh, child);
-    if (!edge || !vertex) return null;
-    return { kind: 'case', whens: [[isEdge, edge]], else: vertex };
+    return positionNode(attemptKinds(kinds, false), tag, (kind) =>
+      kind === 'value'
+        ? byNode(modulation, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
+        : byNode(modulation, { kind: 'element', id: rowid, elem: kind, ...row }, source, fresh, child));
   };
   const projected = parsed.map(perModulation);
   if (projected.some((node) => node === null)) return null;
