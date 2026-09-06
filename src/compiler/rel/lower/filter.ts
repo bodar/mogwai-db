@@ -317,10 +317,19 @@ export function valuePredicate(
   const args = last.args.map((a) => a.value);
   if (args.length !== 1) return null;
   // The value's own type is what a range comparison needs — a big long carried as decimal TEXT orders
-  // lexically otherwise — and the seam now reports it, so the subject type is read rather than assumed.
+  // lexically otherwise — and the seam reports it TWO ways, both of which must be read or the compare
+  // silently falls back to `SUBJECT_UNKNOWN`'s storage-class heuristic. A TRANSFORMED value
+  // (`asNumber`/`asDate`) carries a STATIC tag; a raw stored read (`values(k)`) carries a PER-ROW
+  // `vtype` column (`produced.vtype`, framing `PER_ROW('vtype')` — `reduction.ts`), which
+  // `predicateExpr`'s `perRow` arm casts by. Dropping the second was the bug this seam already fixed
+  // for `project`/`aggregate`/`store`: `where(__.values('age').is(P.gt(30)))` over a big long compared
+  // lexically. A numeric REDUCER (`result:'number'`) needs neither — its value is a native SQL number —
+  // so it stays `SUBJECT_UNKNOWN`, which is also where the `!produced.present` guard below expects it.
   const type: SubjectType = produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
-    : SUBJECT_UNKNOWN;
+    : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'perRow' && produced.vtype
+      ? { kind: 'perRow', vtype: produced.vtype }
+      : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
     (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   if (!pred) return null;

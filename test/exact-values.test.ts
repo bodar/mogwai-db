@@ -83,6 +83,15 @@ describe('numeric ordering/range over the exact tail (option b)', () => {
     expect(out.map((v) => BigInt(v).toString()).sort()).toEqual(
       ['10000000000000000', '9007199254740993']);
   });
+  test('where(__.values(long).is(P.gt)) compares numerically, not lexically', async () => {
+    // The `where(__.body.is(P))` path (valuePredicate → scalarChild) must carry the stored value's
+    // per-row vtype into the compare, exactly as the `has(k, P)` case above does. Without it a big long
+    // carried as decimal TEXT compares LEXICALLY: "10000000000000000" < "9007199254740992" (leading
+    // '1' < '9'), so 1e16 was wrongly DROPPED — a silent wrong answer this fixture pins.
+    const out = await values("g.V().where(__.values('n').is(P.gt(9007199254740992l))).values('n')", writes);
+    expect(out.map((v) => BigInt(v).toString()).sort()).toEqual(
+      ['10000000000000000', '9007199254740993']);
+  });
   test('bigdecimal ordering is numeric', async () => {
     const out = await values("g.V().order().by('d').values('d')", [
       `g.addV('t').property('d', 10.5m)`,
