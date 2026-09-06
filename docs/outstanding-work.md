@@ -3,7 +3,7 @@
 This is an index, not a backlog or a conformance report. The feature matrix records
 per-step support; closed work belongs in git history or `docs/archive/`.
 
-**State (refreshed 2026-09-06).** L3 floor 1834/2286 (1832 unique). RelIR covers 1576/2395 corpus
+**State (refreshed 2026-09-06).** L3 floor 1835/2286 (1833 unique). RelIR covers 1576/2395 corpus
 prefixes (`mise run rel-blockers`); the decline contract holds — `lowerToRel` returns plan-or-null,
 never throws (`mise run rel-sweep`) — and the census has **0 `crashed` rows** (no fail-closed
 violations). All five test baselines are clean of parked defects: `known.ts`, `capability-baseline.ts`,
@@ -39,16 +39,16 @@ lowered.
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
   (Graph capabilities, below).
-- **Correlated write-argument resolver — the merge SEARCH map-driver LANDED; map-valued `mergeE` remains.**
-  The per-traverser correlated write surface (`property(k, __.trav)` values, the property MAP form,
-  `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, and the correlated `mergeV` SEARCH — a computed
-  criterion per driver, incl. the whole map AS the merge search) is on trunk (`src/compiler/rel/write.ts`).
-  Remaining, all designed in [correlated merge search](./2026-09-05-correlated-merge-search-plan.md) (4c):
-  **map-valued `mergeE`** (`inject(map).mergeE()`/`select("m").mergeE()`, endpoints from the map's `Direction`
-  keys), the general **map-producing traversal** driver, the whole-map **0-result RAISE**, and an **edge
-  runtime property value** (`option(onMatch,[k:__.trav])` on a mergeE, which declines the whole merge today).
-  The map-LITERAL `[k:__.trav]` stays permanently declined. Ties to PartitionStrategy partition-aware
-  upsert (Strategies, below).
+- **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
+  general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
+  property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`
+  SEARCH, and the whole map AS the merge driver — `inject(map).mergeE()`/`select("m").mergeE()`, endpoints
+  from the map's `Direction` keys) is on trunk (`src/compiler/rel/write.ts`, `mergeVFromMap`/`mergeEFromMap`).
+  Remaining, all designed in [correlated merge search](./2026-09-05-correlated-merge-search-plan.md): the
+  general **non-`project` map-producing traversal** driver (`out().project(…)`, `select(dynMap)`), the
+  whole-map **0-result RAISE**, and an **edge runtime property value** (`option(onMatch,[k:__.trav])` on a
+  mergeE, which declines the whole merge today). The map-LITERAL `[k:__.trav]` stays permanently declined
+  (Superseded). Ties to PartitionStrategy partition-aware upsert (Strategies, below).
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP
@@ -90,13 +90,16 @@ lowered.
     `nodeSimilarity` `topK`/`similarityCutoff`/`degreeCutoff` (a scalability wall — `WHERE`/`ROW_NUMBER`
     tweaks), `sourceNodes` (personalized pageRank/articleRank) and `seedProperty` (wcc) reading a
     node-set/property into the seed, remaining weighted consumers (streaming degree, weighted betweenness/LPA),
-    `scaler`; and the **order-dependent algorithms** (`labelPropagation`/`louvain`/`eigenvector` — not clean
-    set-based reuse).
+    `scaler`; and the **iterative/order-dependent algorithms** (`labelPropagation`≈`peerPressure`+`maxIterations`,
+    `eigenvector` a clean per-iter join+GROUP BY, `louvain` the hard one — a harder substrate on the existing
+    barrier seam, all desired).
   - *Per-origin windowed slice — one increment left.* The substrate is DONE
     ([archived](./archive/2026-08-25-per-origin-window-plan.md)) for `local`/`flatMap` and `match` bodies.
-    The remaining consumer is a per-origin slice inside a **`union`/`choose` arm or a bounded-`repeat` body**
-    — the branch substrate's traverser-major/arm-major question: the decline is `slice && bodies.some(armBatches)`
-    (`src/compiler/rel/lower/branch.ts`); the lift threads the arm-minted origin through `mintTraverserMajor`.
+    The remaining consumer is a per-origin slice of a **BATCHED `union`/`choose` arm or bounded-`repeat` body
+    under an outer per-origin scope** — per-INCOMING-traverser, the branch substrate's traverser-major/arm-major
+    question: the decline is `slice && bodies.some(armBatches)` (`src/compiler/rel/lower/branch.ts`); the lift
+    threads the arm-minted origin through `mintTraverserMajor` (witness `repeat(union(out.order.by.limit(2),…))`).
+    A window INSIDE an arm is a different thing and is already correct — see Superseded.
 - **Services and graph movement — federate Phases 1–3 LANDED; residual tails.** `GraphSource`,
   mid-traversal INJECTION ([graph-source](./archive/2026-08-21-graph-source-abstraction-plan.md),
   [injection-mapvalues](./archive/2026-08-28-federate-injection-mapvalues.md)), and pushdown Phases 1–3
@@ -204,6 +207,12 @@ lowered.
   relation cannot answer; decline is correct.
 - **Unbounded-`repeat` body per-origin slice / barrier** — recursive-term collapse is algebraically
   impossible; P3 fail-closed forever.
+- **A per-origin window INSIDE a `union`/`choose` arm** (`union(out().limit(2), …)`) — `BranchStep` drains
+  every start into an arm before applying its barrier, so the window is GLOBAL and the current answer is
+  already correct; a per-origin window there would be WRONG (`BranchStep.standardAlgorithm` drains all starts
+  before the barrier — `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:143-148`;
+  per-origin-window plan §"semantics corrections"). Distinct from the batched-arm traverser-major slice
+  (Product capabilities), which IS a real increment.
 - **Emit/block "walk unification"** — CLOSED (`1b87885e`). All three decisions (direct-source
   classification, FROM-alias via exported `aliasOf`, splice eligibility) are lifted into `src/rel/block.ts`
   as the single source and the anti-drift gate pins the full alias set. There is no residual: `emit.ts`'s
