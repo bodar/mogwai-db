@@ -1,5 +1,5 @@
 {
-  "passing": 1835,
+  "passing": 1837,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1371,9 +1371,11 @@
     "g_injectX__feature___test__nullX_rTrimXlocalX",
     "g_injectX__feature___test__nullX_trim",
     "g_injectX__feature___test__nullX_trimXlocalX",
+    "g_injectXaX_concat_Xinject_List_b_cX",
     "g_injectXa_bX_concat",
     "g_injectXa_bX_concat_XcX",
     "g_injectXa_bX_concat_Xc_dX",
+    "g_injectXa_bX_concat_Xinject_c_dX",
     "g_injectXa_null_bX_combineXa_cX",
     "g_injectXa_null_bX_combineXa_null_cX",
     "g_injectXa_null_bX_conjoinXxyzX",
@@ -2193,8 +2195,6 @@
     "g_injectXUUIDXXX",
     "g_injectXa1_b2X_foldXm_addAllX",
     "g_injectXa1_b2_b4X_foldXm_addAllX",
-    "g_injectXaX_concat_Xinject_List_b_cX",
-    "g_injectXa_bX_concat_Xinject_c_dX",
     "g_injectXdatetimeXstr1XX_dateDiffXinjectXdatetimeXstr2XXX",
     "g_injectXhello_hiX_concatXV_values_order_byXnameX_valuesXnameXX",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_create",

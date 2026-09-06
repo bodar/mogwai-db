@@ -28,7 +28,8 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # prepare() has ALREADY added the split traverser. So `next()` returns the traverser's own value
   # and the literals are never reached. Hence "aa"/"bb", not "ac"/"bc". Upstream de-special-cased
   # this on purpose (CHANGELOG: "use TraversalUtil.apply on it as with any other child traversals").
-  @Unsupported
+  # NOW LOWERED — `scalarChild`'s inject arm models the degeneracy: a bare `__.inject(…)` child IS the
+  # host value, so the operand doubles the traverser and the literal is never read.
   Scenario: g_injectXa_bX_concatXinjectXcXX_doubles_the_traverser
     Given the empty graph
     And the traversal of
@@ -42,7 +43,6 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
       | bb |
 
   # Same rule with a LIST literal: still the traverser's own value, so "aa" and never "a[b,c]".
-  @Unsupported
   Scenario: g_injectXaX_concatXinjectXlistXX_doubles_the_traverser
     Given the empty graph
     And the traversal of

@@ -16,7 +16,7 @@ import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
-import type { RelFraming } from '../framing.ts';
+import { framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
@@ -1306,6 +1306,29 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // one-row entry relation with its two correlated sides and hand the WHOLE body to the normal framing
   // dispatcher. Thus every map-entry/list/scalar tail composes here at arbitrary depth.
   if (host.kind === 'scalar' && host.entry) return mapEntryChild(body, { ...host, entry: host.entry }, ctx, fresh);
+
+  // `__.inject(…)` AS A CHILD BODY IS DEGENERATE — the injected literal never surfaces and the operand
+  // is the host's OWN value. This is a real, uniform TinkerPop bug rather than a per-scenario quirk:
+  // `TraversalUtil.apply` re-applies the SAME child object per host traverser via `reset(); addStart(host)`
+  // (`vendor/tinkerpop/gremlin-core/.../util/TraversalUtil.java:41-53`), but `StartStep` latches
+  // `first=false` after its first application and `InjectStep.reset()` never restores it
+  // (`.../step/sideEffect/StartStep.java:59-77`, `.../step/sideEffect/InjectStep.java:46-50`), so the only
+  // traverser left on `starts` is the re-added host value. Hence `concat(__.inject("c"))` doubles the
+  // host and never reads "c" (`Concat.feature:60-93`). Every consumer of this seam (a `by()`, a concat /
+  // dateDiff operand, a choose/coalesce arm) applies its child the same way, so the fact lives HERE once:
+  // a trailing body continues against the SAME host; a bare inject IS the host, framed as itself.
+  if (first.name === 'inject') {
+    if (body.length > 1) return scalarChild(body.slice(1), host, ctx, fresh);
+    const self = hostSelf(host);
+    const cols = self && framingCols(self.framing);
+    const payload = cols?.[0];
+    if (!self || !payload) return null;
+    const typeCol = cols.find((column) => column.name !== payload.name);
+    return {
+      expr: self.col(payload.name), framing: self.framing,
+      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one',
+    };
+  }
 
   // A GraphStep inside a per-traverser child still splits each host traverser, but a reducing tail
   // has one answer independent of which host triggered it. Lower that source chain once as an
