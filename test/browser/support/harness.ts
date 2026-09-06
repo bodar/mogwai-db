@@ -139,7 +139,11 @@ export async function runBrowserWorker({ entry, extraWorkers = {}, timeoutMs = 6
     page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
     page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
-    await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
+    // Playwright's signature is waitForFunction(pageFunction, ARG, OPTIONS) — the options (the timeout)
+    // MUST be the THIRD arg. Passing `{ timeout }` as the second put it in the ARG slot, so Playwright
+    // ignored it and fell back to its 30s DEFAULT — which capped this wait at 30s regardless of `timeoutMs`
+    // and flaked the heavy replicator page on the cold CI runner. `undefined` arg, options third.
+    await page.waitForFunction('window.__done === true', undefined, { timeout: timeoutMs });
     const result = await page.evaluate('window.__result');
     if (result && typeof result === 'object' && 'workerError' in result)
       throw new Error(`worker threw before posting a result: ${(result as any).workerError}\n${consoleLines.join('\n')}`);
@@ -197,7 +201,11 @@ export async function runBrowserPage({ pageEntry, serviceWorker, extraWorkers = 
     page.on('console', (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
     page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
     await page.goto(`http://localhost:${server.port}/`);
-    await page.waitForFunction('window.__done === true', { timeout: timeoutMs });
+    // Playwright's signature is waitForFunction(pageFunction, ARG, OPTIONS) — the options (the timeout)
+    // MUST be the THIRD arg. Passing `{ timeout }` as the second put it in the ARG slot, so Playwright
+    // ignored it and fell back to its 30s DEFAULT — which capped this wait at 30s regardless of `timeoutMs`
+    // and flaked the heavy replicator page on the cold CI runner. `undefined` arg, options third.
+    await page.waitForFunction('window.__done === true', undefined, { timeout: timeoutMs });
     return await page.evaluate('window.__result');
   } catch (e) {
     throw new Error(`${e instanceof Error ? e.message : String(e)}\n--- browser console ---\n${consoleLines.join('\n')}`);
