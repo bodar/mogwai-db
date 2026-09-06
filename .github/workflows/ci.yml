@@ -153,6 +153,13 @@ jobs:
       # the SAME version this run's `gh` step reads (GITHUB_RUN_NUMBER fixes the patch), so names agree.
       - name: Build release artifacts
         run: mise run package
+      # Hand the browser build (dist/browser — the exact folder the browser zip is made from) to the
+      # `pages` job, so what GitHub Pages serves is byte-identical to the released zip, built once here.
+      - name: Upload browser site for Pages
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-site
+          path: dist/browser
       # Notes from the COMMITS since the last release — trunk-based means direct pushes, no PRs, so GitHub's
       # PR-based --generate-notes would be empty. On the FIRST release (no prior tag) fall back to the head
       # commit rather than dumping the whole history.
@@ -220,3 +227,51 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.ctx.outputs.version }}
+
+  # GitHub Pages — publish the BROWSER build as a static site, so the in-browser Gremlin database is live
+  # at the repo's Pages URL. It deploys the EXACT `dist/browser` folder the `release` job already built
+  # (and zipped), downloaded as an artifact — no rebuild, so the site is byte-identical to the release zip.
+  # Gated on `release` succeeding (which is itself gated on the green `ci` aggregate + a direct push to
+  # trunk), so Pages never serves a red or unreleased commit.
+  #
+  # A project Pages site is served from a SUB-PATH (https://<owner>.github.io/<repo>/). The build handles
+  # that: mogwai-db.js resolves its siblings via import.meta.url, index.html uses relative links, and the
+  # service worker strips its registration-scope base before routing (src/browser/service-worker.ts), so
+  # the API and the /docs UI both work under the sub-path.
+  #
+  # ONE-TIME repo setting: Settings → Pages → Build and deployment → Source = "GitHub Actions".
+  # `configure-pages` with enablement attempts this automatically, but if the org/repo forbids it the first
+  # run fails on that step until it is set by hand.
+  pages:
+    needs: [release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    # Serialize Pages deploys (never cancel one mid-flight — a half-deployed site is worse than a stale one).
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write # create the Pages deployment
+      id-token: write # the OIDC token deploy-pages exchanges to publish
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # The exact folder `release` built and zipped — no checkout, no rebuild.
+      - name: Download browser site
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-site
+          path: site
+      # `.nojekyll` so Pages serves the directory verbatim (no Jekyll pass); harmless for our filenames but
+      # standard for an asset site, and added HERE so it never enters the release zip.
+      - name: Disable Jekyll
+        run: touch site/.nojekyll
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

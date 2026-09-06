@@ -61,7 +61,7 @@ export function browserLaneEnabled(): boolean {
 // process exit (bun test ending kills it regardless); a leaked context would matter, a leaked browser
 // does not. `bun test test/browser` runs all files in one process, so this singleton is shared.
 let sharedBrowser: Promise<Browser> | undefined;
-function browserInstance(): Promise<Browser> {
+export function browserInstance(): Promise<Browser> {
   if (!sharedBrowser) {
     sharedBrowser = chromium.launch({
       headless: true,

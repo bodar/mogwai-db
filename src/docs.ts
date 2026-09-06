@@ -17,8 +17,13 @@
 
 const VERSION = '0.1.0';
 
-// Pinned so the rendered docs are reproducible; bump deliberately.
-const SCALAR_CDN = 'https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.62.5';
+// The Scalar reference UI — the UMD `standalone.js`, the ONE self-contained file (the ES-module build
+// dynamic-imports 180 sibling chunks). It defines `window.Scalar`. The browser build ships this file beside
+// the docs and passes `./scalar.js` (self-contained, no network) — see scripts/package.ts +
+// src/browser/service-worker.ts. Bun/CF default to the PINNED jsdelivr copy of the SAME version we depend
+// on (kept in sync with package.json's @scalar/api-reference); bump deliberately.
+export const SCALAR_VERSION = '1.67.0';
+const SCALAR_CDN = `https://cdn.jsdelivr.net/npm/@scalar/api-reference@${SCALAR_VERSION}/dist/browser/standalone.js`;
 
 export function buildOpenApiSpec(pathPrefix: string) {
  const graphPath = `/${pathPrefix}/{graphId}`;
@@ -261,31 +266,41 @@ const REPLICATION_CONFIG_SCHEMA = {
   properties: { id: { type: 'string' }, ...REPLICATION_CONFIG_INPUT_SCHEMA.properties },
 } as const;
 
-// Minimal Scalar shell. Same-origin, so no proxyUrl (requests hit this server
-// directly, never scalar.com's proxy). Prefix-independent — it just points at
-// /openapi.json, which the router serves for the running prefix.
-const DOCS_HTML = `<!doctype html>
+// Minimal Scalar shell. Same-origin, so no proxyUrl (requests hit this server directly, never scalar.com's
+// proxy). Prefix-independent — it points at `./openapi.json` RELATIVE to this page, so it resolves whether
+// `/docs` is served at the origin root (Bun/CF) or under a sub-path (`/mogwai-db/docs` on a GitHub Pages
+// project site) — the browser build's service worker serves `/openapi.json` at the same base. `scalarUrl`
+// is the UMD standalone (defines `window.Scalar`): the CDN by default, or `./scalar.js` for the
+// self-contained browser build. `bootScript`, when set, is loaded FIRST — the browser build passes
+// `./mogwai-db.js` so THIS page also hosts the per-tab WorkerFactory (the graph data plane): the landing
+// page redirects here, so the docs page is the tab the user is left on and must host it, or graph requests
+// would have no Worker to route to. Bun/CF have real workers and pass no bootScript.
+function docsHtml(scalarUrl: string, bootScript?: string): string {
+  return `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>mogwai-db API</title>
+    <title>mogwai-db API</title>${bootScript ? `\n    <script type="module" src="${bootScript}"></script>` : ''}
   </head>
   <body>
     <div id="app"></div>
-    <script src="${SCALAR_CDN}"></script>
+    <script src="${scalarUrl}"></script>
     <script>
-      Scalar.createApiReference('#app', { url: '/openapi.json' })
+      Scalar.createApiReference('#app', { url: './openapi.json' })
     </script>
   </body>
 </html>
 `;
+}
 
-/** Build the self-describing surface for a given graph-path prefix. Returns the
- *  JSON the router serves at `/openapi.json` and the Scalar shell for `/docs`. */
-export function buildDocs(pathPrefix: string) {
+/** Build the self-describing surface for a given graph-path prefix. Returns the JSON the router serves at
+ *  `/openapi.json` and the Scalar shell for `/docs`. `scalarUrl` selects where the Scalar UI module loads
+ *  from (the pinned CDN by default; the browser build passes `./scalar.js`); `bootScript` optionally boots
+ *  the browser factory on the docs page (the browser build passes `./mogwai-db.js`). */
+export function buildDocs(pathPrefix: string, scalarUrl: string = SCALAR_CDN, bootScript?: string) {
   return {
     OPENAPI_JSON: JSON.stringify(buildOpenApiSpec(pathPrefix)),
-    DOCS_HTML,
+    DOCS_HTML: docsHtml(scalarUrl, bootScript),
   };
 }

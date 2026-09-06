@@ -181,6 +181,13 @@ export function makeRouter(
    *  the outbound `http` a remote source needs lives at the composition root, not the router. Absent ⇒ a
    *  filter is stored unvalidated (a runtime that has not wired it yet). */
   validateFilter?: FilterValidator,
+  /** Where the `/docs` Scalar UI loads its module from. Defaults to the pinned CDN (Bun/CF); the browser
+   *  build passes `./scalar.js` so the docs are self-contained (the SW-served page, a shipped static asset). */
+  scalarUrl?: string,
+  /** A script the `/docs` page loads first. The browser build passes `./mogwai-db.js` so the docs page also
+   *  hosts the per-tab WorkerFactory (the landing page redirects here, so this is where the data plane must
+   *  live). Bun/CF pass nothing. */
+  bootScript?: string,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
@@ -197,7 +204,7 @@ export function makeRouter(
   // over-HTTP protocol and JSON envelope, never the Gremlin wire, so it does not share the
   // configurable gremlin prefix or the verb-dispatch below.
   const gqlPath = new RegExp('^/graphql/([^/]+)/?$');
-  const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix);
+  const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix, scalarUrl, bootScript);
 
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);

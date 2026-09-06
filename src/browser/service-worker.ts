@@ -49,28 +49,63 @@ const runTick = () => runDueReplications({ registry, manager, http: schedulerHtt
 // Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer — a local
 // source routes to its graph Worker (via the manager), a remote one through the SW's allowlisted http.
 const validateFilter = (source: string, filter: string) => validateReplicationFilter(peerForRef(manager, schedulerHttp, source), filter);
-const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter);
+// Two browser-only docs args, both relative to the SW-served /docs page and both plain static assets the SW
+// does NOT intercept (so neither bloats this worker bundle):
+//   - `./scalar.js`   — the vendored Scalar UI, so /docs is self-contained (no CDN).
+//   - `./mogwai-db.js` — boots THIS page's WorkerFactory: the landing page redirects to /docs, so the docs
+//     page is the tab the user is left on and must host the graph data plane (else queries have no Worker).
+const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter, './scalar.js', './mogwai-db.js');
 
 scope.addEventListener('message', (event) => {
   const data = (event as ExtendableMessageEvent).data as BootstrapMessage | undefined;
   if (data?.kind === 'mogwai-config') schedulerAllowlist = data.config.httpAllowlist ?? [];
 });
 
+// The path this SW is registered under: `/` at a root deploy, `/mogwai-db/` on a GitHub Pages project
+// site (or any sub-path host). Everything the router matches is rooted at `/`, so we STRIP this base
+// before routing — which is what lets the SAME build serve the API and docs from any sub-path, with the
+// bundle's `import.meta.url` sibling resolution already handling the script loads. Read LAZILY from the
+// registration scope (computing it at module top-level risks throwing before the SW installs).
+let base: string | undefined;
+function scopeBase(): string {
+  return (base ??= new URL(scope.registration.scope).pathname);
+}
+
 scope.addEventListener('fetch', (event) => {
-  const { pathname } = new URL(event.request.url);
-  if (!isGraphPath(pathname)) return; // not ours — fall through to the network (page, assets, wasm)
-  // makeRouter returns query FAILURES as GraphBinary trailers; a 503 here is only for an infra fault
-  // (no factory page open), never a user query error.
+  const url = new URL(event.request.url);
+  const BASE = scopeBase();
+  // Re-root the request against the SW's base so `/mogwai-db/gremlin/x` matches the router's `^/gremlin/`.
+  const path = url.pathname.startsWith(BASE) ? '/' + url.pathname.slice(BASE.length) : url.pathname;
+  if (!isRoutedPath(path)) return; // not ours — fall through to the network (the static index, assets, wasm)
+  // Hand the router a base-stripped request. Rebuild it only when the base changed the path — and rebuild
+  // it FIELD BY FIELD, never `new Request(newUrl, event.request)`: a top-level navigation (the /docs page
+  // load) is mode 'navigate', which the Request constructor cannot reproduce and THROWS on, so that form
+  // silently drops navigations to the network (a 404 on a sub-path). makeRouter returns query FAILURES as
+  // GraphBinary trailers; a 503 here is only for an infra fault (no factory page open), never a user error.
+  const routed = path === url.pathname ? event.request : reRoot(event.request, new URL(path + url.search, url.origin));
   event.respondWith(
-    router(event.request).catch((e) => new Response(String(e?.message ?? e), { status: 503 })),
+    router(routed).catch((e) => new Response(String(e?.message ?? e), { status: 503 })),
   );
 });
 
-/** The paths the graph edge owns. `/gremlin` (bare + `/gremlin/{id}`) is the Gremlin data + management
- *  plane; `/graphql/{id}` is the GraphQL edge; `/_replicator` + `/_scheduler` are the replication control
- *  plane (§9). Everything else passes through untouched. */
-function isGraphPath(pathname: string): boolean {
+/** Rebuild a request against a new (base-stripped) URL, copying only what the router needs and NOT the
+ *  restricted `navigate` mode. GET/HEAD carry no body; other verbs stream their body through (`duplex`
+ *  is required by Chromium when a request body is a stream). */
+function reRoot(req: Request, url: URL): Request {
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  const init: RequestInit & { duplex?: 'half' } = { method: req.method, headers: req.headers };
+  if (hasBody) { init.body = req.body; init.duplex = 'half'; }
+  return new Request(url, init);
+}
+
+/** The paths this SW answers (base already stripped). `/gremlin` (bare + `/gremlin/{id}`) is the Gremlin
+ *  data + management plane; `/graphql/{id}` is the GraphQL edge; `/_replicator` + `/_scheduler` are the
+ *  replication control plane (§9); `/docs` + `/openapi.json` are the self-describing API reference (the
+ *  browser build's UI). NOT `/` — the app root serves the static landing page (index.html). Everything
+ *  else passes through untouched. */
+function isRoutedPath(pathname: string): boolean {
   return pathname === '/gremlin' || pathname.startsWith('/gremlin/') || pathname.startsWith('/graphql/')
     || pathname === '/_replicator' || pathname.startsWith('/_replicator/')
-    || pathname.startsWith('/_scheduler/');
+    || pathname.startsWith('/_scheduler/')
+    || pathname === '/docs' || pathname === '/openapi.json';
 }

@@ -22,6 +22,8 @@ import { mkdir, rm, chmod } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { version } from './version.ts';
+import { LANDING_PAGE_HTML } from '../src/browser/landing-page.ts';
+import { SCALAR_VERSION } from '../src/docs.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const DIST = join(ROOT, 'dist');
@@ -88,7 +90,15 @@ async function packageBrowser(): Promise<void> {
   await Bun.write(join(out, 'sqlite3.wasm'), Bun.file(wasm));
   console.log(`  browser/sqlite3.wasm       ${(Bun.file(wasm).size / 1024 / 1024).toFixed(1)} MB (SQLite ${sqlitePkg})`);
 
-  await Bun.write(join(out, 'index.html'), INDEX_HTML);
+  // The Scalar API-reference UI, shipped as a static asset (the ES-module standalone) so /docs is fully
+  // self-contained — the service-worker-served docs page loads it from `./scalar.js`, never from a CDN. The
+  // SW deliberately does NOT intercept `/scalar.js` (it's plain static hosting), so it never enters any
+  // worker bundle and costs nothing until someone opens the docs.
+  const scalar = join(ROOT, 'node_modules/@scalar/api-reference/dist/browser/standalone.js');
+  await Bun.write(join(out, 'scalar.js'), Bun.file(scalar));
+  console.log(`  browser/scalar.js          ${(Bun.file(scalar).size / 1024).toFixed(0)} KB (Scalar ${SCALAR_VERSION})`);
+
+  await Bun.write(join(out, 'index.html'), LANDING_PAGE_HTML);
   await Bun.write(join(out, 'README.md'), browserReadme(VERSION, sqlitePkg));
 
   await zipDir(out, join(DIST, `mogwai-db-${VERSION}-browser.zip`), ['.']);
@@ -163,29 +173,7 @@ ${JSON.stringify(template, null, 2)}
 `;
 }
 
-const INDEX_HTML = `<!doctype html>
-<meta charset="utf-8">
-<title>mogwai-db</title>
-<!-- Include this ONE script; it registers the service worker and installs the per-tab worker factory.
-     mogwai-db.js resolves ./service-worker.js and ./worker.js relative to itself, so keep the four files
-     (mogwai-db.js, service-worker.js, worker.js, sqlite3.wasm) together at any path. -->
-<script type="module" src="./mogwai-db.js"></script>
-<script type="module">
-  // Any TinkerPop-4 client that speaks HTTP works unmodified; a plain fetch is enough to demo it.
-  addEventListener('load', async () => {
-    const g = 'demo';
-    const post = (gremlin) => fetch(\`/gremlin/\${g}\`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ gremlin }),
-    });
-    // The service worker needs a tick to take control on a first visit.
-    await new Promise((r) => setTimeout(r, 300));
-    await post("g.addV('person').property('name','marko')");
-    const info = await (await fetch(\`/gremlin/\${g}\`)).json();
-    document.body.textContent = 'mogwai-db running in your browser — graph "demo" has ' + JSON.stringify(info);
-  });
-</script>
-`;
+
 
 function browserReadme(version: string, sqlitePkg: string): string {
   const sqliteVer = sqlitePkg.replace(/-build\d+$/, '');
@@ -206,6 +194,8 @@ folder and serve it: there are NO runtime downloads and NO CDN dependencies. Bui
 - \`worker.js\` — one dedicated Worker per graph (SQLite on the \`opfs-sahpool\` VFS).
 - \`sqlite3.wasm\` — the SQLite ${sqliteVer} WASM binary \`worker.js\` loads at runtime (fetched relative, so
   it MUST sit beside \`worker.js\`).
+- \`index.html\` — a real landing page: it boots the service worker, then opens \`/docs\`, the API reference.
+- \`scalar.js\` — the Scalar API-reference UI (loaded by \`/docs\`); shipped locally so the docs need no CDN.
 
 ## Use
 
