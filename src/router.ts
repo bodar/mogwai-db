@@ -27,23 +27,27 @@ import { isUrl } from './replicate.ts';
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
 const BARE_ENDPOINT = '/gremlin';
 
-/** The GraphBinary media type (the data-plane DEFAULT), and the opt-in readable one. */
+/** The GraphBinary media type — now the EXPLICIT data-plane opt-in (the default flipped to readable JSON). */
 const GRAPHBINARY_MT = 'application/vnd.graphbinary-v4.0';
-const JSON_MT = 'application/json';
 
 /**
- * Content negotiation for the gremlin DATA plane: does this request want the readable UNTYPED-JSON
- * response, or GraphBinary (the default the real GLV clients get)?
+ * Content negotiation for the gremlin DATA plane, now DEFAULTING to readable UNTYPED-JSON (GraphSON):
+ * does this request EXPLICITLY ask for GraphBinary?
  *
- * JSON only when `Accept` names `application/json` AND does NOT name the GraphBinary type — so a stock
- * GLV (which sends `application/vnd.graphbinary-v4.0`, and may also list JSON while preferring binary)
- * always gets GraphBinary. A MISSING `Accept`, or `*​/*`, stays GraphBinary — the safety line: stock
- * clients that omit `Accept` are never broken. Parsed loosely by substring, mirroring
- * `graphql/edge.ts`'s `negotiate` (the audit-style clients never send q-values that reorder these two),
- * but NOT shared with it — the media types differ. It only ever UPGRADES to JSON when explicitly asked.
+ * True only when `Accept` names `application/vnd.graphbinary-v4.0` — the exact mirror of the old
+ * `wantsJson`, with the default inverted. This is SAFE because every real binary consumer sends that
+ * type EXPLICITLY, so it keeps getting binary: the TinkerPop GLV client
+ * (`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/driver/connection.ts:286` —
+ * `'Accept': this._responseSerializer.mimeType`, the GraphBinary mime by default) and our own federation
+ * transport (`src/http-federation.ts:98` — `Accept: GRAPHBINARY_MIME`). So the L3 conformance suite (which
+ * drives that client), the browser GLV, and federation all still get binary. A MISSING `Accept`, `*​/*`
+ * (what the Scalar docs "Test Request" panel sends), curl and browsers get readable JSON instead — the
+ * reason the docs demo "just makes sense" rather than showing a downloaded binary body. Parsed loosely by
+ * substring, mirroring `graphql/edge.ts`'s `negotiate` (the audit-style clients never send q-values that
+ * reorder these two), but NOT shared with it — the media types differ.
  */
-function wantsJson(accept: string | null): boolean {
-  return accept != null && accept.includes(JSON_MT) && !accept.includes(GRAPHBINARY_MT);
+function prefersBinary(accept: string | null): boolean {
+  return accept != null && accept.includes(GRAPHBINARY_MT);
 }
 
 // The docs' static assets, served from the injected AssetStore (Bun from the binary-embedded copy, CF from
@@ -97,10 +101,12 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
     const { gremlin, params, paramTypes, g, batchSize, bulked } = await parseRequest(raw);
     const id = pathId ?? g ?? 'g';
     const exec = mgr.executor(id);
-    // Content negotiation (opt-in): a JSON-accepting request gets the readable untyped-JSON response —
-    // UNLESS the executor can't render it (no `jsonAsync`) or the result shape isn't covered yet
-    // (`resolveJson` → null), in which case we fall through to the byte-identical GraphBinary path.
-    if (wantsJson(req.headers.get('Accept')) && exec.jsonAsync) {
+    // Content negotiation: readable untyped-JSON is now the DEFAULT — a request that does NOT explicitly
+    // ask for GraphBinary gets it, UNLESS the executor can't render it (no `jsonAsync`) or the result shape
+    // isn't covered yet (`resolveJson` → null), in which case we fall through to the byte-identical
+    // GraphBinary path (fail closed on shapes JSON can't render). An explicit GraphBinary Accept — what the
+    // GLV clients (connection.ts:286) and federation (http-federation.ts:98) send — skips straight to binary.
+    if (!prefersBinary(req.headers.get('Accept')) && exec.jsonAsync) {
       const json = await exec.jsonAsync(gremlin, params, paramTypes);
       if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
     }
@@ -118,8 +124,9 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
 // body is read — GET has none — so it reuses the JSON-request seam (`parseJsonQuery`) over fields it
 // assembles from the query string. `bindings` is an OPTIONAL JSON-encoded string; a malformed one throws
 // and rides the GraphBinary trailer via errorResponse, the same channel as any compile/SQL error. The
-// RESPONSE honours the same content negotiation as POST (`wantsJson`): GraphBinary by default (byte-
-// identical to POST), readable untyped JSON when the request opts in via `Accept: application/json`.
+// RESPONSE honours the same content negotiation as POST (`prefersBinary`): readable untyped JSON by
+// default, GraphBinary (byte-identical to POST) only when the request explicitly sends
+// `Accept: application/vnd.graphbinary-v4.0` — what the GLV clients + federation send.
 async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearchParams, accept: string | null, log: QueryLogger): Promise<Response> {
   try {
     const bindingsRaw = searchParams.get('bindings');
@@ -131,8 +138,8 @@ async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearc
       bulkResults: searchParams.get('bulk') === 'true',
     });
     const exec = mgr.executor(id);
-    // Same content negotiation as POST (opt-in JSON, GraphBinary default + fallback).
-    if (wantsJson(accept) && exec.jsonAsync) {
+    // Same content negotiation as POST (JSON default + fail-closed binary fallback; explicit binary opt-in).
+    if (!prefersBinary(accept) && exec.jsonAsync) {
       const json = await exec.jsonAsync(gremlin, params, paramTypes);
       if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
     }

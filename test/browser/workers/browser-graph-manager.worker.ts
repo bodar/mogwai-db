@@ -20,7 +20,9 @@ self.onmessage = async () => {
     const router = makeRouter(manager);
     const post = (graphId: string, gremlin: string) =>
       router(new Request(`http://x/gremlin/${graphId}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // Explicit GraphBinary Accept — `read` decodes the binary response, and JSON is now the router
+        // default (a missing Accept would return GraphSON JSON, unparseable by the GraphBinary reader).
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' },
         body: JSON.stringify({ gremlin, batchSize: 10_000 }),
       }));
     const read = async (graphId: string, gremlin: string): Promise<any[]> => {

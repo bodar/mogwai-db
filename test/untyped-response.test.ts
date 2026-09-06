@@ -1,10 +1,13 @@
-// The content-negotiated UNTYPED-JSON data-plane response (`Accept: application/json`) — the readable
-// form the browser docs "Test Request" panel shows. This asserts BOTH halves of the settled decision:
-//   1. an opt-in JSON request renders a readable array WITH element properties (the whole reason this
-//      renders from the decoded NODE TREE and not by decoding our GraphBinary back — the client's
-//      element deserializers hardcode empty properties);
-//   2. GraphBinary stays the DEFAULT and is BYTE-IDENTICAL to before — a MISSING `Accept` and an explicit
-//      GraphBinary `Accept` both get the exact same bytes a stock GLV client always got (the safety line).
+// The content-negotiated data-plane response, now DEFAULTING to readable UNTYPED-JSON (GraphSON) — the
+// form the browser docs "Test Request" panel shows (it sends `Accept: */*`). This asserts BOTH halves of
+// the settled decision:
+//   1. the default (or an explicit non-binary Accept) renders a readable array WITH element properties
+//      (the whole reason this renders from the decoded NODE TREE and not by decoding our GraphBinary back —
+//      the client's element deserializers hardcode empty properties);
+//   2. GraphBinary is now the EXPLICIT opt-in and stays BYTE-IDENTICAL — a request that names
+//      `application/vnd.graphbinary-v4.0` gets the exact same bytes a stock GLV client always got. That is
+//      SAFE because every real binary consumer sends that Accept explicitly (the GLV client
+//      connection.ts:286, our federation http-federation.ts:98), so nothing that wanted binary is broken.
 //
 // The router path is exercised end to end (`makeRouter` over a `BunGraphManager`), so negotiation,
 // fallback, and both verbs (POST + GET) are covered, not just the renderer in isolation.
@@ -111,43 +114,46 @@ describe('untyped JSON is opt-in and readable WITH properties', () => {
     // g.V().both() fans out and may RLE-collapse convergent traversers into (value, N) rows; the JSON
     // renderer expands the bulk exactly as the flat (un-bulked) GraphBinary frame does, so the two agree.
     const asJson = await jsonResults(await post('g.V().both()', JSON_MT));
-    const asBinary = await binaryResults(await post('g.V().both()')); // default → flat, bulk-expanded
+    const asBinary = await binaryResults(await post('g.V().both()', GRAPHBINARY_MT)); // explicit binary → flat, bulk-expanded
     expect(asJson.length).toBe(asBinary.length);
   });
 });
 
-describe('GraphBinary is the default and stays byte-identical', () => {
-  test('a MISSING Accept → GraphBinary (stock GLV clients that omit Accept are never broken)', async () => {
-    const data = await binaryResults(await post('g.V().count()')); // no Accept
-    expect(data.map(Number)).toEqual([6]);
+describe('JSON is now the default; GraphBinary is the explicit opt-in and stays byte-identical', () => {
+  test('a MISSING Accept → readable JSON now (the flipped default; the Scalar panel sends */* → JSON)', async () => {
+    expect(await jsonResults(await post('g.V().count()'))).toEqual([6]); // no Accept → JSON
   });
 
-  test('an explicit GraphBinary Accept → GraphBinary, and the bytes equal the no-Accept response', async () => {
-    const bytesNoAccept = Buffer.from(await (await post('g.V()')).arrayBuffer());
-    const bytesGb = Buffer.from(await (await post('g.V()', GRAPHBINARY_MT)).arrayBuffer());
-    expect(bytesGb.equals(bytesNoAccept)).toBe(true); // byte-identical: the framing path is untouched
+  test('an explicit GraphBinary Accept → GraphBinary, byte-stable — the framing path is untouched', async () => {
+    // The binary response the GLV clients (connection.ts:286) get. Deterministic framing, so two explicit-
+    // binary requests are byte-for-byte identical, and it decodes to the same six vertices as always.
+    const bytesA = Buffer.from(await (await post('g.V()', GRAPHBINARY_MT)).arrayBuffer());
+    const bytesB = Buffer.from(await (await post('g.V()', GRAPHBINARY_MT)).arrayBuffer());
+    expect(bytesB.equals(bytesA)).toBe(true);
+    expect((await binaryResults(await post('g.V()', GRAPHBINARY_MT))).length).toBe(6);
   });
 
-  test('an Accept that lists BOTH json and graphbinary prefers GraphBinary (a GLV that also accepts json)', async () => {
+  test('an Accept that lists BOTH json and graphbinary → GraphBinary (explicit graphbinary wins)', async () => {
     const res = await post('g.V().count()', `${JSON_MT}, ${GRAPHBINARY_MT}`);
     expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
   });
 
-  test('a deferred result shape (path) with Accept: application/json FALLS BACK to GraphBinary', async () => {
+  test('a deferred result shape (path) on the JSON default FALLS BACK to GraphBinary', async () => {
     // `path` is not yet renderable as untyped JSON → resolveJson returns null → the router serves the
-    // (unreadable-but-correct) GraphBinary response rather than a wrong JSON. Fail-closed.
-    const res = await post('g.V().out().path()', JSON_MT);
+    // (unreadable-but-correct) GraphBinary response rather than a wrong JSON. Fail-closed. Exercised via the
+    // default (no-Accept) request, which is now the JSON path.
+    const res = await post('g.V().out().path()');
     expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
   });
 });
 
 describe('the GET data plane negotiates the same way', () => {
-  test('GET ?gremlin= with Accept: application/json → readable JSON', async () => {
-    expect(await jsonResults(await get('g.V().count()', JSON_MT))).toEqual([6]);
+  test('GET ?gremlin= with no Accept → readable JSON (byte-for-byte the POST default)', async () => {
+    expect(await jsonResults(await get('g.V().count()'))).toEqual([6]);
   });
 
-  test('GET ?gremlin= with no Accept → GraphBinary (byte-for-byte the POST default)', async () => {
-    const data = await binaryResults(await get('g.V().count()'));
+  test('GET ?gremlin= with an explicit GraphBinary Accept → GraphBinary', async () => {
+    const data = await binaryResults(await get('g.V().count()', GRAPHBINARY_MT));
     expect(data.map(Number)).toEqual([6]);
   });
 });

@@ -11,7 +11,9 @@ const origin = location.origin;
 async function post(graphId: string, gremlin: string): Promise<Response> {
   return fetch(`${origin}/gremlin/${graphId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // Explicit GraphBinary Accept — `count()` below decodes the binary response, and JSON is now the edge
+    // default (a missing Accept would return GraphSON JSON, which the GraphBinary reader can't parse).
+    headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' },
     body: JSON.stringify({ gremlin, batchSize: 10_000 }),
   });
 }

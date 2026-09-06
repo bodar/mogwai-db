@@ -23,7 +23,9 @@ async function main() {
   const G = `swg-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const gremlinUrl = `${location.origin}/gremlin/${G}`;
   const postJson = (gremlinText: string) =>
-    fetch(gremlinUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gremlin: gremlinText, batchSize: 10_000 }) });
+    // Explicit GraphBinary Accept — `readCount` decodes the binary response, and JSON is now the edge
+    // default (a missing Accept would return GraphSON JSON, unparseable by the GraphBinary reader).
+    fetch(gremlinUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' }, body: JSON.stringify({ gremlin: gremlinText, batchSize: 10_000 }) });
   const readCount = async (gremlinText: string): Promise<number> => {
     const bytes = Buffer.from(await (await postJson(gremlinText)).arrayBuffer());
     const data = (await ioc.graphBinaryReader.readResponse(bytes)).result.data;

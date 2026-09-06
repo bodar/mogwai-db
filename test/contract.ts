@@ -438,10 +438,12 @@ function gremlinContract(getOrigin: () => string) {
       // accepted end-to-end. (Whether the HTTP layer advertises Content-Length vs
       // chunked transfer is runtime-dependent — Bun buffers small stream bodies — so
       // the deterministic chunk-pacing proof lives in test/streaming.test.ts instead.)
+      // The JSON default flipped, so this decoder of the BINARY stream sends the explicit
+      // GraphBinary Accept (what the GLV clients send — connection.ts:286).
       const { ioc } = await import('../src/io.ts');
       const res = await fetch(`${getOrigin()}/gremlin/stream-${Date.now()}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' },
         body: JSON.stringify({ gremlin: 'g.inject(1,2,3,4,5)', batchSize: 2 }),
       });
       expect(res.status).toBe(200);
@@ -480,9 +482,10 @@ function gremlinContract(getOrigin: () => string) {
       expect(arr[0].label).toEqual(['person']);
       expect(arr[0].properties.name[0].value).toBe('dan');
       expect(arr[0].properties.age[0].value).toBe(44);
-      // A stock GraphBinary client (no JSON Accept) is UNAFFECTED — still binary.
+      // A GraphBinary client that sends the explicit Accept (as the GLV clients do — connection.ts:286)
+      // still gets binary. The default now flipped to JSON, so binary is the opt-in.
       const binRes = await fetch(`${origin}/gremlin/${gid}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' },
         body: JSON.stringify({ gremlin: 'g.V().count()' }),
       });
       expect(binRes.headers.get('content-type')).toBe('application/vnd.graphbinary-v4.0');
@@ -659,10 +662,13 @@ function managementContract(getOrigin: () => string) {
       expect((await res.json() as any).error).toMatch(/gremlin/);
     });
 
-    test('GET ?gremlin= runs a read traversal and returns a GraphBinary body (200)', async () => {
-      // The cacheable read data plane. The body is GraphBinary (decoding it is out of scope here), so
-      // this asserts the transport — status + content type — not the decoded count.
-      const res = await fetch(`${graphUrl(freshId('get-query'))}?gremlin=${encodeURIComponent('g.V().count()')}`);
+    test('GET ?gremlin= runs a read traversal and returns a GraphBinary body (200) on explicit Accept', async () => {
+      // The cacheable read data plane. The JSON default flipped, so this asserts the BINARY transport — it
+      // sends the explicit GraphBinary Accept (what the GLV clients send). Status + content type, not the
+      // decoded count (decoding is out of scope here).
+      const res = await fetch(`${graphUrl(freshId('get-query'))}?gremlin=${encodeURIComponent('g.V().count()')}`, {
+        headers: { Accept: 'application/vnd.graphbinary-v4.0' },
+      });
       expect(res.status).toBe(200);
       expect(res.headers.get('Content-Type')).toBe('application/vnd.graphbinary-v4.0');
     });
