@@ -239,9 +239,10 @@ jobs:
   # service worker strips its registration-scope base before routing (src/browser/service-worker.ts), so
   # the API and the /docs UI both work under the sub-path.
   #
-  # ONE-TIME repo setting: Settings → Pages → Build and deployment → Source = "GitHub Actions".
-  # `configure-pages` with enablement attempts this automatically, but if the org/repo forbids it the first
-  # run fails on that step until it is set by hand.
+  # REQUIRED one-time repo setting: Settings → Pages → Build and deployment → Source = "GitHub Actions".
+  # We do NOT pass `enablement: true` to configure-pages: creating the Pages site over the API needs more
+  # than the workflow token has (it failed with "Resource not accessible by integration"), so enabling is a
+  # manual step and configure-pages just reads the already-enabled site here.
   pages:
     needs: [release]
     if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.release.result == 'success'
@@ -268,8 +269,6 @@ jobs:
       - name: Disable Jekyll
         run: touch site/.nojekyll
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
