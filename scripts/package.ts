@@ -132,6 +132,13 @@ async function packageBinaries(): Promise<void> {
   const out = join(DIST, 'bin');
   await mkdir(out, { recursive: true });
 
+  // Stage the example datasets the binary EMBEDS (src/bun/examples/*.graphson — BunAssetStore's
+  // `with { type: 'file' }` imports). Done HERE, not left to the `mise run examples` task, so
+  // `bun scripts/package.ts --binaries` is self-sufficient however it is invoked — the CI docker job runs
+  // it DIRECTLY (not via `mise run package`), so without this the compile fails "Could not resolve
+  // ./examples/modern.graphson". Idempotent (a plain copy), so re-running after the mise task is harmless.
+  await copyExamplesTo(join(ROOT, 'src', 'bun', 'examples'), '.graphson');
+
   for (const t of targets) {
     const file = join(out, `mogwai-db-${VERSION}-${t.name}${t.ext ?? ''}`);
     // `--define` stamps the version into the compiled binary so `mogwai-db --version` prints the real
