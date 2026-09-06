@@ -557,6 +557,22 @@ export interface MergeMaps {
    * `mergeV(__.project(…))` computed search (whose criteria are still per-KEY compile-time strings).
    */
   readonly matchFromDriver?: boolean;
+  /**
+   * The merge argument is a GENERAL map-producing TRAVERSAL — `mergeV(__.out().project(…))`,
+   * `mergeV(__.select(dynMap))`, `mergeV(__.valueMap())` — run PER DRIVER by
+   * `MergeElementStep.materializeMap` (`TraversalUtil.apply` = `.next()`), which takes the FIRST map and
+   * RAISES "The provided traverser does not map to a value" for a driver the body is unproductive on
+   * (`TraversalUtil.java:41-53`). Distinct from `matchFromDriver` (the traverser already IS the map) and
+   * from `match.computed` (a LEADING `project` whose keys are compile-time strings). `match` is an empty
+   * spec; the lowering resolves the body correlated per driver into a map stream and feeds the map-valued
+   * merge driver. Not set for an `identity`, a leading `project`, or a `select` of a `withSideEffect`
+   * constant (which resolves to a literal map here).
+   *
+   * Carried as the RAW nested CST (not a `stepChain`), because the lowering must `child.body`-NORMALIZE
+   * it (fold `by()`/`option()` modulators into their steps) exactly as it does every other nested body —
+   * a bare `stepChain` leaves `project('k').by(…)` as two steps and the child lowering declines it.
+   */
+  readonly matchTraversal?: unknown;
 }
 
 /** A whole-arg `__.identity()` — the merge argument is the traverser itself. Distinct from a `null`
@@ -567,6 +583,28 @@ function isTraverserIdentity(raw: any, params: Record<string, any>): boolean {
   return inner.length === 1 && inner[0].name === 'identity';
 }
 
+/**
+ * The merge argument is a GENERAL map-producing traversal — return its body, or `null` when it is one
+ * of the forms with a dedicated path (`identity` → `matchFromDriver`, a LEADING `project` → the computed
+ * search, a `select` of a `withSideEffect` constant → a literal map). The SHAPE (does the body actually
+ * produce a map?) is a lowering question the `child.rows` framing answers, so this carries any other
+ * nested traversal and the lowering declines a non-map body fail-closed.
+ */
+function generalMapArg(raw: any, params: Record<string, any>): unknown | null {
+  if (!isNested(raw)) return null;
+  const inner = stepChain(raw.nested, params);
+  if (inner.length === 1 && inner[0].name === 'identity') return null;
+  if (parseComputedMergeArg(raw, params)) return null;
+  // A BARE single `select(name)` stays with `resolveMergeArg`: a `withSideEffect` constant resolves to a
+  // literal map, an undeclared one is that resolver's own refusal — the map is a scope READ, not a
+  // producing traversal, and the preceding-step form (`…select("m").mergeV()`) already handles a bound
+  // alias. A MULTI-step body carrying a select (`__.out().select(…)`) is still a general producer.
+  if (inner.length === 1 && inner[0].name === 'select') return null;
+  // The RAW nested CST — the lowering normalizes it via `child.body` (modulator folding), which a
+  // `stepChain` here would skip.
+  return raw.nested;
+}
+
 export function mergeMaps(
   step: IRStep, mods: readonly Step[], op: MergeRole['op'],
   sideEffects: Map<string, any> | undefined, params: Record<string, any>,
@@ -575,8 +613,13 @@ export function mergeMaps(
   // mean "the driver's value IS the merge map" (`materializeMap` with an identity map traversal). The
   // match spec is empty; the lowering decomposes the driver's map value per driver.
   const matchFromDriver = step.args.length === 0 || isTraverserIdentity(step.args[0].value, params);
-  const match = matchFromDriver
-    ? { role: { op, kind: 'merge' as const }, label: null, id: undefined, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} } satisfies MergeSpec
+  // A GENERAL map-producing traversal argument (`mergeV(__.out().project(…))`, `mergeV(__.select(dynMap))`)
+  // is resolved per driver by the lowering, so `match` is empty and the body is carried, exactly as the
+  // map-VALUED driver is — the difference is only WHERE the map comes from (the body vs the traverser).
+  const matchTraversal = matchFromDriver ? undefined : generalMapArg(step.args[0]?.value, params);
+  const emptyMatch = { role: { op, kind: 'merge' as const }, label: null, id: undefined, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} } satisfies MergeSpec;
+  const match = matchFromDriver || matchTraversal
+    ? emptyMatch
     : normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
@@ -614,7 +657,7 @@ export function mergeMaps(
   // raises it per traverser; raising it once, before the lowering, is the same answer.
   requireEndpointOption(match, onCreate, outV, 'outV');
   requireEndpointOption(match, onCreate, inV, 'inV');
-  return { match, onCreate, onMatch, tail, ...(matchFromDriver ? { matchFromDriver } : {}), ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
+  return { match, onCreate, onMatch, tail, ...(matchFromDriver ? { matchFromDriver } : {}), ...(matchTraversal ? { matchTraversal } : {}), ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
 }
 
 /** `Merge.outV` in a `Direction` slot is a REFERENCE to `option(Merge.outV, …)`, so the option has to

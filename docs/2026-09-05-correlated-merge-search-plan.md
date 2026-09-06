@@ -1,11 +1,11 @@
 # Correlated merge search — build plan
 
-**Status (2026-09-06): increments 1 (mergeV computed VALUES), 2 (mergeE computed VALUES), 4a (map-valued
-`mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a `T.label` key → +2 L3), 4c-mergeE
-(map-valued `mergeE` — the edge host) and 4c-select (`select("m")` of a `withSideEffect` constant map → a
-map stream, unlocking the CORPUS `select("m").mergeE()` → L3 1834 → 1835) LANDED on trunk. Remaining: the
-GENERAL map-producing traversal as a merge argument (`mergeV(__.out().project(…))`/`mergeV(__.select(dynMap))`)
-+ the whole-map 0-result raise — a clean fail-closed decline today.** A fail-closed safety fix landed
+**Status (2026-09-06): COMPLETE — all increments LANDED on trunk. 1 (mergeV computed VALUES), 2 (mergeE
+computed VALUES), 4a (map-valued `mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a
+`T.label` key → +2 L3), 4c-mergeE (map-valued `mergeE` — the edge host), 4c-select (`select("m")` of a
+`withSideEffect` constant map → a map stream, unlocking the CORPUS `select("m").mergeE()` → L3 1834 → 1835)
+and 4c-traversal (the GENERAL map-producing traversal as a merge argument + the whole-map 0-result raise).**
+A fail-closed safety fix landed
 first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
 replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
 turned out to be ONE substrate** — see the 3+4 entry in the build order.
@@ -223,10 +223,19 @@ endpoints):
      merge driver for BOTH hosts, so **the CORPUS `g.inject(1).select("m").mergeE()` scenario passes — L3
      1834 → 1835.** Fail-closed: a non-map / unencodable side-effect constant falls through or declines.
      Tests added to `test/merge-search-map-{edge,vertex}.{feature,test.ts}`.
-   - **4c-traversal — the GENERAL map-producing traversal as merge argument** (`mergeV(__.out().project(…))`,
-     `mergeV(__.select(dynMap))` — a per-driver map that is not a leading `project` computed spec) + the
-     whole-map 0-result RAISE (`TraversalUtil.apply` = `next()` → throw "does not map to a value"). Still
-     declines (fail closed) — a clean deferral, not a wrong answer.
+   - ✅ **4c-traversal — LANDED — the GENERAL map-producing traversal as merge argument** + the whole-map
+     0-result RAISE. `mergeV(__.out().project(…))` / `mergeE(__.out().project(…))` — a body that is neither a
+     LEADING `project` (the computed search) nor `__.identity()` (the map-driver). `mergeMaps` carries the raw
+     nested CST as `matchTraversal` (`write-args.ts`); `mergeFromTraversal` (`lower.ts`) normalizes it via
+     `child.body` (modulator folding — a bare `stepChain` leaves `project('k').by(…)` as two steps), resolves
+     it correlated PER DRIVER via `childRows(perRow)`, collapses a RECORD framing to a map (`recordToMap`),
+     takes the FIRST map per driver (`materializeMap` = `.next()`), and feeds the map-valued merge driver.
+     A driver the body is UNPRODUCTIVE on is the raise "The provided traverser does not map to a value"
+     (`TraversalUtil.java:41-53`) — a guard on the LEFT-joined map stream's NULL rows, before any write. The
+     snapshot travels as JSON so `MAP_COL` is `json()` text. Declines fail-closed: a cannot-say driver kind,
+     a non-map body framing, a non-scalar record field, a LIST-valued map, and a BARE single `select` (which
+     stays with `resolveMergeArg`'s const/refusal). Tests: `test/merge-search-map-traversal.{feature,test.ts}`.
+     No L3 movement (the corpus has no such scenario — ceiling work).
 
 Each increment lands with L4 `.feature` scenarios (there are none yet — write them) and its own tests.
 No L3 movement expected (the corpus has no computed-merge scenarios) — this is ceiling work, validated by

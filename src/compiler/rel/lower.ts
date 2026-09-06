@@ -63,7 +63,7 @@ import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Ta
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
-import { childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
+import { childRows, childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
@@ -5010,10 +5010,112 @@ function mergedElements(
   // property, which is `vertex_properties` or `edge_properties` per this. `undefined` = cannot say
   // (after a branch/select), which a driver-rooted body declines rather than guessing (fail closed).
   const driverElem = elementKindAt(steps, at);
-  const effects = steps[at]!.name === 'mergeE'
+  const op = steps[at]!.name as 'mergeV' | 'mergeE';
+  // A GENERAL map-producing TRAVERSAL argument (`mergeV(__.out().project(…))`, `mergeV(__.select(dynMap))`)
+  // is resolved per driver here — the map is not on the stream (as `matchFromDriver`) nor a compile-time
+  // spec (as `match.computed`), but the FIRST result of a body run at the driver. Parsed once to spot it;
+  // a Deferral for any other reason falls through to the element-merge path, which re-parses and declines.
+  let maps: MergeMaps | undefined;
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params); }
+  catch (e) { if (!(e instanceof Deferral)) throw e; }
+  if (maps?.matchTraversal) {
+    const effects = mergeFromTraversal(input, maps, op, tail, driverElem, aliases, ctx, fresh);
+    return effects && { effects, at: end };
+  }
+  const effects = op === 'mergeE'
     ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh)
     : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
+}
+
+/**
+ * A GENERAL map-producing TRAVERSAL as the merge argument — `mergeV(__.out().project(…))`,
+ * `mergeV(__.select(dynMap))`, `mergeE(__.out().project(…))`. `MergeElementStep.materializeMap` runs the
+ * body at each driver and takes `.next()` (the FIRST map), raising "The provided traverser does not map to
+ * a value" for a driver the body is unproductive on (`TraversalUtil.java:41-53`).
+ *
+ * The body is resolved correlated PER DRIVER via `childRows` (perRow) — the same seam a `map`/`project`
+ * child uses — giving a map-framed relation keyed to the driver by `origin`. The FIRST map per driver is
+ * `.next()`; a driver with NONE is the raise (a guard binding, before any write). The resulting per-driver
+ * map becomes a MAP-valued stream that feeds the map-valued merge driver (`mergeVFromMap`/`mergeEFromMap`),
+ * so a general map producer composes through the SAME search/create as `inject(map)`/`select("m")`.
+ *
+ * Declines (fail closed): a driver whose kind we cannot state (a rooted body needs it), a body whose
+ * framing is not a MAP (a scalar/element merge argument is not a map), or a map whose values are not scalar
+ * (a LIST-valued `valueMap()` — the map-driver's own deferral).
+ */
+function mergeFromTraversal(
+  input: Rel, maps: MergeMaps, op: string, tail: readonly IRStep[],
+  driverElem: Elem | undefined, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+): Effects | null {
+  if (!driverElem) return null;
+  const child = childSeam(ctx, fresh);
+  // NORMALIZE the raw nested CST — fold `by()`/`option()` into their steps — exactly as every other
+  // nested body is normalized; a bare `stepChain` would leave `project('k').by(…)` as two steps.
+  const body = child.body(maps.matchTraversal, 'child');
+  if (!body) return null;
+  const resolved = childRows(body, input, driverElem, aliases, ctx, fresh, true);
+  if (!resolved) return null;
+  // A `project(…)` body produces a RECORD (fields as columns), which is a MAP once collapsed — the same
+  // boundary `fold()`/`select`/`as()` cross (`recordToMap`). A body that already produces a MAP
+  // (`valueMap()`, a nested `group()`) is a map directly. Anything else is not a map argument (fail
+  // closed). A record with a NON-scalar field would make the map's value a non-scalar node the search
+  // cannot compare against a stored property, so it declines rather than always-create.
+  let mapRel: Rel;
+  let valOf: MapOf;
+  if (resolved.framing.kind === 'record') {
+    if (!resolved.framing.fields.every((field) => field.framing.kind === 'scalar')) return null;
+    const mapped = recordToMap(resolved.rel, resolved.framing.fields, ctx.source, fresh);
+    if (!mapped) return null;
+    mapRel = mapped;
+    valOf = { kind: 'scalar' };
+  } else if (resolved.framing.kind === 'map') {
+    mapRel = resolved.rel;
+    valOf = resolved.framing.valOf;
+  } else return null;
+  const originCol = resolved.origin;
+  // THE FIRST MAP PER DRIVER — `materializeMap` = `.next()`. Rank the body's maps within each driver by
+  // its emission order (the body's encounter where it has one), keep the first.
+  const enc = mapRel.channels.find((channel) => channel.role === 'encounter');
+  const ranked = rowNumberWindow(mapRel, 'mrn', mapRel.channels, {
+    partitionBy: [col(mapRel.id, originCol)],
+    orderBy: enc ? [{ expr: col(mapRel.id, enc.col), dir: 'asc' }] : [],
+  }, fresh);
+  const firstMap = make.filter({ id: fresh('f'), input: ranked, channels: ranked.channels, type: ranked.type, pred: eq(col(ranked.id, 'mrn'), compilerInt(1)) });
+  const fm = make.project({ id: fresh('p'), input: firstMap, channels: [], type: typeOf(meta('morigin', 'int'), meta(MAP_COL, 'json', true)),
+    exprs: [['morigin', col(firstMap.id, originCol)], [MAP_COL, col(firstMap.id, MAP_COL)]] });
+  // THE MAP STREAM — one row per driver, its resolved map (NULL for a driver the body was unproductive on,
+  // which the guard below raises). A LEFT join keeps every driver so the raise can see the misses; it
+  // carries only the driver's encounter/alias channels (never the body's origin, which the map-valued
+  // driver's channel check refuses).
+  const keep = input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias');
+  const joined = make.join({
+    id: fresh('j'), left: input, right: fm, join: 'left', on: eq(col(input.id, 'id'), col(fm.id, 'morigin')), channels: [],
+    type: typeOf(...input.type.cols, meta('morigin', 'int', true), meta(MAP_COL, 'json', true)),
+  });
+  // `json()` the map, not `jsonb`: the stream is SNAPSHOTTED below and a retained binding travels as JSON
+  // (`src/program.ts`), which a raw `jsonb` blob cannot (the root `CLAUDE.md` bind rule). `mergeVFromMap`'s
+  // own `inputRows` re-`json()`s a `json`-typed column, so text here is what both readers want.
+  const mapStream = make.project({
+    id: fresh('p'), input: joined, channels: keep,
+    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(keep)),
+    exprs: [[MAP_COL, jsonOf(col(joined.id, MAP_COL))], ...keep.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
+  });
+  // Bind the stream once (snapshot) so the 0-result guard and the merge driver read ONE materialized map
+  // per driver, and push the guard BEFORE the merge's writes.
+  const bindings: Binding[] = [];
+  const streamName = fresh('mts');
+  bindings.push({ name: streamName, node: mapStream, snapshot: true });
+  const streamRef = make.ref({ id: fresh('r'), name: streamName, channels: keep, type: mapStream.type });
+  const misses = make.filter({ id: fresh('f'), input: streamRef, channels: streamRef.channels, type: streamRef.type,
+    pred: { kind: 'binary', op: 'is', left: col(streamRef.id, MAP_COL), right: compilerNull('text') } });
+  bindings.push({ name: fresh('gw'), guard: { message: 'The provided traverser does not map to a value', raiseWhen: 'rows' },
+    node: make.limit({ id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: misses, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]] }) }) });
+  const effects = op === 'mergeE'
+    ? mergeEFromMap(streamRef, maps, valOf, tail, ctx.ordered, child, fresh)
+    : mergeVFromMap(streamRef, maps, valOf, tail, ctx.ordered, child, fresh);
+  return effects && { bindings: [...bindings, ...effects.bindings], result: effects.result };
 }
 
 /** `mergeV()`/`mergeE()`/`…(__.identity())` over a MAP-valued stream — the driver's map IS the merge
