@@ -121,9 +121,19 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
     // parameter, named and cache-shared), a literal INLINES — the Golden Rule, matching the write path.
     // `transformExpr` holds the `step`, so the Arg name was never actually lost; the old `text = lit()`
     // that bound every literal is gone.
-    const strArgs = step.args.filter((a) => typeof a.value === 'string');
-    if (strArgs.length < 2) return null;
-    const from = constLit(strArgs[0]!), to = constLit(strArgs[1]!);
+    // The from/to are the only string-or-null args; a leading `Scope.local` token (a scalar is a
+    // one-element list, so per-element replace over a scalar is the global one — see the header note)
+    // rides in `step.args` and is skipped here, exactly as the old string-only filter did.
+    const [fromArg, toArg] = step.args.filter((a) => typeof a.value === 'string' || a.value === null);
+    if (!fromArg || !toArg) return null;
+    // A NULL search or replacement is a NO-OP — the original value is returned unchanged
+    // (`vendor/tinkerpop/gremlin-core/.../step/map/ReplaceGlobalStep.java:31-32,60`: "Any null arguments
+    // will be a no-op … StringUtils.replace" returns the text unchanged for a null searchString/
+    // replacement). Identity, not a decline: `replace(null,"g")` leaves "lop"/"ripple" as they are. A
+    // null traverser VALUE also stays null (`replace(NULL,…)` is NULL in SQLite), so `v` is right for both.
+    if (fromArg.value === null || toArg.value === null) return v;
+    if (typeof fromArg.value !== 'string' || typeof toArg.value !== 'string') return null;
+    const from = constLit(fromArg), to = constLit(toArg);
     return from && to ? call('replace', v, from, to) : null;
   },
   // TinkerPop resolves negative indices against the string length BEFORE slicing; passing them
