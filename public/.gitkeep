@@ -1,0 +1,3 @@
+# The Cloudflare Workers Static Assets directory (wrangler.jsonc `assets.directory`). It MUST exist
+# for `wrangler dev`/`deploy` — this keeps it committed even when empty. `mise run assets` populates
+# scalar.js here (gitignored — see .gitignore); do not commit the built asset.

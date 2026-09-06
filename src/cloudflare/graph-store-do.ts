@@ -29,6 +29,10 @@ export interface Env extends WorkerConfigEnv {
   /** Optional R2 bucket backing io() — where `io("data/x.json")` resolves. A binding, so an
    *  operator opts in per deployment; absent, io() fails closed naming it (NO_IO_STORE). */
   IO?: R2Bucket;
+  /** The Workers Static Assets binding (wrangler.jsonc `assets.binding`) backing the docs' static assets —
+   *  the Scalar UI module served at `/scalar.js` (CloudflareAssetStore). Read at the Worker edge, not in a
+   *  DO. `run_worker_first: true` keeps our router the sole router; the binding is pulled explicitly. */
+  ASSETS: Fetcher;
 }
 
 /** One Durable Object = one isolated graph database. The DO owns a

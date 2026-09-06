@@ -136,6 +136,14 @@ async function packageCloudflare(): Promise<void> {
   await run(['bunx', 'wrangler', 'deploy', '--dry-run', '--outdir', out, '--define', `process.env.MOGWAI_VERSION:${JSON.stringify(VERSION)}`]);
   if (!(await Bun.file(join(out, 'worker.js')).exists())) throw new Error('wrangler did not produce worker.js');
 
+  // The docs' Scalar UI, shipped as a Workers Static Asset so `wrangler deploy` uploads it and the deployed
+  // Worker serves /scalar.js from the ASSETS binding — no CDN. It sits in `public/` beside the config (the
+  // template's `assets.directory` is './public'), the same node_modules file the browser build ships.
+  const scalar = join(ROOT, 'node_modules/@scalar/api-reference/dist/browser/standalone.js');
+  await mkdir(join(out, 'public'), { recursive: true });
+  await Bun.write(join(out, 'public', 'scalar.js'), Bun.file(scalar));
+  console.log(`  cloudflare/public/scalar.js  ${(Bun.file(scalar).size / 1024).toFixed(0)} KB (Scalar ${SCALAR_VERSION})`);
+
   // The deploy config + script + README (overwriting wrangler's stub README). The config is DERIVED from
   // the repo's wrangler.jsonc so it cannot drift — same DO migration, R2 binding, compat — with `main`
   // pointed at the prebuilt bundle and `no_bundle` on, and the account left to the env.
@@ -149,7 +157,7 @@ async function packageCloudflare(): Promise<void> {
   await chmod(join(out, 'deploy.sh'), 0o755);
   await Bun.write(join(out, 'README.md'), cloudflareReadme(VERSION, bucket));
 
-  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md']);
+  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md', 'public/scalar.js']);
 }
 
 /** Zip named entries (relative to `dir`) into `zipPath`, replacing any existing archive. */
@@ -174,6 +182,9 @@ function cloudflareTemplate(): string {
     durable_objects: src.durable_objects,
     migrations: src.migrations,
     r2_buckets: src.r2_buckets,
+    // Workers Static Assets — the docs' Scalar UI (public/scalar.js, shipped in the zip). `run_worker_first`
+    // keeps our router the sole router; carried verbatim from the repo config so the release cannot drift.
+    assets: src.assets,
   };
   return `// mogwai-db — Cloudflare deploy config (prebuilt). Account + auth come from CLOUDFLARE_ACCOUNT_ID /
 // CLOUDFLARE_API_TOKEN in the environment; nothing here needs editing. See README.md.
@@ -256,8 +267,10 @@ provisioned per graph on first request (there is no create/drop API — addressi
 - \`deploy.sh\` — the one command above; checks the env, ensures the R2 bucket, deploys.
 - \`worker.js\` — the prebuilt Worker (exports the \`GraphDatabase\` Durable Object).
 - \`worker.js.map\` — sourcemap; mapped stack traces in the Cloudflare dashboard.
-- \`wrangler.jsonc\` — the deploy config: \`main\` → the bundle, \`no_bundle\`, the DO migration, the R2 binding.
-  Nothing needs editing — the account comes from the env vars.
+- \`wrangler.jsonc\` — the deploy config: \`main\` → the bundle, \`no_bundle\`, the DO migration, the R2 binding,
+  and the Workers Static Assets block. Nothing needs editing — the account comes from the env vars.
+- \`public/scalar.js\` — the docs' Scalar UI, uploaded as a Static Asset and served at \`/scalar.js\` (so the
+  interactive API reference at \`/\` is self-hosted, no CDN).
 `;
 }
 

@@ -1,8 +1,11 @@
 // Self-describing HTTP surface: a hand-written OpenAPI 3.1 spec for the four verbs on the graph path
 // (plus the GraphQL edge and the replication control plane), and a tiny Scalar shell that renders it as
 // an interactive reference. Both are served by the shared router (router.ts), so Bun, Cloudflare and the
-// browser build expose the same docs. No build step, no npm dep — Scalar loads from a CDN in the browser
-// (pinned), so the Worker bundle is untouched.
+// browser build expose the same docs. No build step, no npm dep in the Worker bundle — the Scalar UI module
+// is a separate static asset each runtime SELF-HOSTS: the browser ships `./scalar.js` as a static sibling,
+// and Bun/CF now serve it too via the AssetStore seam (src/assetstore.ts — Bun from a binary-embedded copy,
+// CF from the Workers Static Assets binding). `SCALAR_CDN` below is only the FALLBACK default, used by a
+// router wired with no AssetStore (bare test routers) — the pinned jsdelivr copy of the same version.
 //
 // The spec is REQUEST-DERIVED, not frozen at construction: the router builds it per request so that
 //   - `servers[0].url` is the ABSOLUTE base the request actually arrived on (`buildOpenApiSpec`'s `baseUrl`
@@ -19,9 +22,10 @@
 // (HTTP 200) with an unreadable body. OPTIONS is the graph-metadata (element counts) verb GET used to be.
 
 // The Scalar reference UI — the UMD `standalone.js`, the ONE self-contained file (the ES-module build
-// dynamic-imports 180 sibling chunks). It defines `window.Scalar`. The browser build ships this file beside
-// the docs and passes `./scalar.js` (self-contained, no network) — see scripts/package.ts +
-// src/browser/service-worker.ts. Bun/CF default to the PINNED jsdelivr copy of the SAME version we depend
+// dynamic-imports 180 sibling chunks). It defines `window.Scalar`. All three runtimes now SELF-HOST it and
+// pass `./scalar.js`: the browser ships it beside the docs, Bun serves a binary-embedded copy, CF the
+// Workers Static Assets binding (src/assetstore.ts + scripts/package.ts). The PINNED jsdelivr copy below is
+// only the FALLBACK for a router with no AssetStore wired (bare test routers) — the SAME version we depend
 // on (kept in sync with package.json's @scalar/api-reference); bump deliberately.
 export const SCALAR_VERSION = '1.67.0';
 const SCALAR_CDN = `https://cdn.jsdelivr.net/npm/@scalar/api-reference@${SCALAR_VERSION}/dist/browser/standalone.js`;

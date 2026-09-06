@@ -3,6 +3,7 @@ import type { Dependency } from '@bodar/yadic/types.ts';
 import type { GraphManager } from './manager.ts';
 import { makeRouter, type QueryLogger, type FilterValidator } from './router.ts';
 import type { ReplicatorRegistry } from './replicator-registry.ts';
+import type { AssetStore } from './assetstore.ts';
 
 // The runtime-agnostic dependency graph. Platform entry points provide the one
 // leaf that differs — a `GraphManager` abstracting graph lifecycle over Bun's
@@ -30,12 +31,20 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
    *  `src/version.ts` (the real build-stamped value; `'dev'` from source). Optional — absent, makeRouter
    *  defaults it to `'dev'`. */
   version?: string;
+  /** Where the docs' static assets live — the Bun binary-embedded copy or the CF Workers Static Assets
+   *  binding, behind the runtime-agnostic {@link AssetStore} seam. Optional; an entry that wires it also
+   *  sets `scalarUrl: './scalar.js'` so the docs load the Scalar UI same-origin instead of the CDN. */
+  assets?: AssetStore;
+  /** Where the docs shell loads the Scalar UI module from. Absent ⇒ makeRouter's pinned-CDN default; an
+   *  entry wiring `assets` passes `'./scalar.js'` so the UI is served locally by that AssetStore. */
+  scalarUrl?: string;
 }
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    // makeRouter's `scalarUrl`/`bootScript` (positions 7-8) are browser-only and left at their defaults
-    // here; `version` follows. The browser edge calls makeRouter directly, so it (not application) is where
-    // those docs args are set — see src/browser/service-worker.ts.
-    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick, deps.validateFilter, undefined, undefined, deps.version));
+    // `bootScript` (position 8) + `docsBaseUrl` (position 10) are browser-only and left at their defaults
+    // here — the browser edge calls makeRouter directly (src/browser/service-worker.ts). `scalarUrl` (7) and
+    // `assets` (11), by contrast, ARE set here: a server entry (Bun/CF) that wires an AssetStore also passes
+    // `scalarUrl: './scalar.js'` so the self-hosted UI loads same-origin. Absent both, makeRouter uses the CDN.
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick, deps.validateFilter, deps.scalarUrl, undefined, deps.version, undefined, deps.assets));
 }

@@ -23,6 +23,15 @@
   // provisions a LOCAL bucket, which is what lets the shared runtime contract exercise the R2 half of
   // the seam on workerd instead of only the filesystem half on Bun.
   "r2_buckets": [{ "binding": "IO", "bucket_name": "mogwai-io" }],
+
+  // Workers Static Assets: the docs' Scalar UI module, served at /scalar.js (src/cloudflare/CloudflareAssetStore.ts).
+  // `directory` is the committed `public/` dir; `mise run assets` populates public/scalar.js from node_modules
+  // (and the Cloudflare release ships it — scripts/package.ts). `run_worker_first: true` is LOAD-BEARING, not
+  // a tuning knob: our router owns ALL routing (`/` = the docs shell, `/openapi.json` per request, `/gremlin/…`),
+  // so the Worker must run first and pull assets from the `ASSETS` binding EXPLICITLY — never let CF auto-serve
+  // a static file that would shadow a route. The binding is optional at the type level only for the seam's
+  // shape; here it is always declared so the docs UI is self-hosted, no CDN.
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["GraphDatabase"] },
     { "tag": "v2", "new_sqlite_classes": ["ReplicatorRegistryDO"] }

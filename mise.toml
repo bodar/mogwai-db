@@ -179,12 +179,29 @@ sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.jso
 description = "Provision the pinned submodules (blobless+sparse: tinkerpop, calcite) + build/register the client"
 run = "bash scripts/init-submodule.sh"
 
+# Populate the Cloudflare Workers Static Assets dir (public/) with the docs' Scalar UI module, copied from
+# node_modules (the same file scripts/package.ts ships for the browser + Cloudflare releases). `public/` is
+# committed (with .gitkeep) so `wrangler dev`/`deploy` — which error on a missing assets directory — always
+# find it; this task fills in the gitignored `public/scalar.js` the CF runtime serves at /scalar.js.
+# `build`, `test` and `test:bracket` depend on this so the file exists before `wrangler` runs (dev in the
+# real-workerd cloudflare test, and the dry-run deploy in `build`). Bun does not need it — it embeds its own
+# copy into the binary (src/bun/BunAssetStore.ts) — but the copy is cheap and keeps the CF path exercised.
+[tasks.assets]
+description = "Populate public/ (CF static assets): copy the Scalar UI into public/scalar.js from node_modules"
+depends = ["install"]
+run = "cp node_modules/@scalar/api-reference/dist/browser/standalone.js public/scalar.js"
+sources = ["node_modules/@scalar/api-reference/dist/browser/standalone.js"]
+outputs = ["public/scalar.js"]
+
 # Every test task depends on `check` (tsc --noEmit): `bun test` runs TS WITHOUT type-checking,
 # so a test run must gate on the type-check first — else a type error ships green under a bare
 # `bun test` (which is how the build once went red after a refactor passed its tests).
 [tasks.test]
 description = "Full suite, fanned across cores: one `bun test` process per bracket, in parallel"
-depends = ["install", "check", "submodule"]
+# `assets` so public/scalar.js exists before the cloudflare test's `wrangler dev` boots (it errors on a
+# missing assets DIR, which is committed; the file makes CF's /scalar.js live too) and the Bun server's
+# GET /scalar.js assertion has its embedded copy.
+depends = ["install", "check", "submodule", "assets"]
 # ONE command on purpose (was a two-command array). scripts/test-all.ts fans the suite out into the SAME
 # brackets CI uses (scripts/brackets.ts), one `bun test <files>` child per bracket run CONCURRENTLY — so
 # a 24-core box actually uses its cores instead of pinning ~1 on a single `bun test`. The browser bracket
@@ -337,7 +354,7 @@ description = "Bundle the Cloudflare Worker (dry-run deploy)"
 # (resolving it through tsconfig `paths` instead was tried and fails this bundle), and why the
 # link: dep is a symlink rather than a copy. This used to go red in CI only, when npm's beta.2 —
 # which has no `./io` export — got installed in place of the link; that route is now closed.
-depends = ["install", "submodule"]
+depends = ["install", "submodule", "assets"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 # Bundles src/cloudflare/worker.ts (+ everything it imports, all under src/ and the generated parser)
 # per wrangler.jsonc — so those files are its inputs. Incremental so the ~seconds dry-run deploy in the
@@ -365,7 +382,9 @@ sources = ["src/**/*", "parser/**/*", "wrangler.jsonc", "tsconfig.json", "packag
 # `mise run test` keeps its edge and remains what a human runs.
 [tasks."test:bracket"]
 description = "One bracket of the suite for CI (MOGWAI_BRACKET=L1|…|other); brackets partition discovery by L-level"
-depends = ["install", "submodule"]
+# `assets` so the `other` bracket's cloudflare.test.ts finds public/scalar.js when `wrangler dev` boots in
+# CI (the same reason [tasks.test] has it — CI fans by bracket instead of running `test`).
+depends = ["install", "submodule", "assets"]
 run = "bun scripts/test-bracket.ts"
 [tasks.sql-hygiene]
 description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"

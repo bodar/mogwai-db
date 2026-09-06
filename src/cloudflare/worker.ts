@@ -3,6 +3,7 @@ import { VERSION } from '../version.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromWorkerEnv } from '../config.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
+import { CloudflareAssetStore } from './CloudflareAssetStore.ts';
 import { GraphDatabase, type Env } from './graph-store-do.ts';
 import { ReplicatorRegistryDO, CloudflareReplicatorRegistry } from './replicator-registry-do.ts';
 import { runDueReplications, type SchedulerDeps } from '../scheduler.ts';
@@ -47,6 +48,10 @@ export default {
       validateFilter: (source, filter) => validateReplicationFilter(peerForRef(manager, http, source), filter),
       // The build-stamped version for the OpenAPI spec (`'dev'` when unstamped).
       version: VERSION,
+      // Serve the docs' Scalar UI from the Workers Static Assets binding (`env.ASSETS`) and point the docs
+      // shell at it (`scalarUrl: './scalar.js'`) — self-hosted, no CDN. See src/assetstore.ts.
+      assets: new CloudflareAssetStore(env.ASSETS),
+      scalarUrl: './scalar.js',
     });
     return app.router(request);
   },

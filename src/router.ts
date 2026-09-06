@@ -17,6 +17,7 @@ import type { Http } from './api.ts';
 import { parseRequest, parseJsonQuery } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs, buildOpenApiSpec } from './docs.ts';
+import type { AssetStore } from './assetstore.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
 import { type ReplicatorRegistry, type ReplicationConfig, newConfigId } from './replicator-registry.ts';
 import { isUrl } from './replicate.ts';
@@ -24,6 +25,12 @@ import { isUrl } from './replicate.ts';
 /** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
 const BARE_ENDPOINT = '/gremlin';
+
+// The docs' static assets, served from the injected AssetStore (Bun from the binary-embedded copy, CF from
+// the Workers Static Assets binding) rather than a CDN. One entry today — the Scalar UI module `scalarUrl:
+// './scalar.js'` points at; the favicon + a logo are the planned follow-up and slot in here with no other
+// change. A GET whose path is in this set is offered to the AssetStore first; anything else routes as before.
+const DOCS_ASSET_PATHS = new Set(['/scalar.js']);
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -222,6 +229,12 @@ export function makeRouter(
    *  request no longer carries it. A THUNK is accepted as well as a string: the browser cannot read its
    *  registration scope at construction (before the SW installs), so it defers the read to request time. */
   docsBaseUrl?: string | (() => string | undefined),
+  /** Where the docs' static assets (the Scalar UI module `scalarUrl` names; later the favicon + logo) are
+   *  served from — the Bun binary-embedded copy or the CF Workers Static Assets binding, behind the runtime-
+   *  agnostic {@link AssetStore} seam. Optional: absent (bare test routers), those paths are not intercepted
+   *  and the docs shell falls back to the pinned CDN (`SCALAR_CDN`). An entry wiring this also passes
+   *  `scalarUrl: './scalar.js'` so the docs load the asset same-origin. */
+  assets?: AssetStore,
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
@@ -249,6 +262,13 @@ export function makeRouter(
     if (req.method === 'GET') {
       if (pathname === '/' || pathname === '/docs')
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      // The docs' static assets (the Scalar UI module; later the favicon + logo) — served from the injected
+      // AssetStore, so the UI is self-hosted, never a CDN. A router with no AssetStore skips this (the shell
+      // then uses SCALAR_CDN); an AssetStore that doesn't hold the path returns null and we fall through.
+      if (assets && DOCS_ASSET_PATHS.has(pathname)) {
+        const asset = await assets.get(pathname);
+        if (asset) return asset;
+      }
       if (pathname === '/openapi.json') {
         // Request-derived so `servers[0].url` is the ABSOLUTE base this request arrived on and the spec's
         // paths compose. `docsBaseUrl` (a string, or a thunk resolved now) OVERRIDES — the browser SW
