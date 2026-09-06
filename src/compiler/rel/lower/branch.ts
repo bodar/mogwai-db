@@ -3,6 +3,7 @@ import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts'
 import { and, carriedCols, eq, meta, notProduced, payloadCols, renumber, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import type { Binding } from '../../../rel/plan.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
 import { armBatches, isLocalScope } from '../../ir/step.ts';
@@ -36,8 +37,17 @@ import { augmentParent, BORD_ARM, BORD_PARENT, branchResult, continueAs, countTa
  *  element one, with `coalesce` in neither. */
 export const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce', 'optional']);
 
-/** A branch boundary returns the physical relation AND the label names its arms carried out. */
-export type BranchRel = FramedRel & { readonly aliases: AliasMap };
+/** A branch boundary returns the physical relation, the label names its arms carried out, AND any EFFECTS
+ *  its arm ran — a write in a SINGLE-arm branch (`union(__.mergeV(…))`) is a set-based statement over that
+ *  arm's input, so its bindings thread OUT here to become program bindings, exactly as a top-level write's
+ *  do. Absent for a read-only branch.
+ *
+ *  ⚠️ ONLY a single-arm branch may carry effects. A MULTI-arm branch with a write DECLINES (`mergeArms`),
+ *  because effects run BEFORE the result query: a sibling arm's read — a graph-global `out()`/`values()`,
+ *  or a `mergeV`/`mergeE` SEARCH, or even its own input snapshot — would observe the write and answer a
+ *  post-write state the reference (per-traverser, arm-interleaved) does not. A single arm has no sibling to
+ *  observe it, so it is identical to a top-level write followed by its tail. */
+export type BranchRel = FramedRel & { readonly aliases: AliasMap; readonly effects?: readonly Binding[] };
 
 /** Which arm-merging builder a step wants. Total over `BRANCH_HOSTS`, so a member added there without a
  *  builder is a compile error rather than a silent decline. */
@@ -208,7 +218,9 @@ export function unionArms(
     if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
     const only = continueAs(input, framing, bodies[0]!, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!only) return null;
-    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases }, ctx, fresh);
+    // A write in the single arm (`union(__.mergeV(…))`) threads its effects out — a `Tail`'s `effects`
+    // become the branch's, so the arm's write bindings reach the program instead of dangling.
+    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases, ...(only.effects?.length ? { effects: only.effects } : {}) }, ctx, fresh);
   }
 
   const slice = sliceableBranch(ctx, input);
@@ -415,6 +427,12 @@ export const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] =
 export function mergeArms(
   arms: readonly Tail[], base: Channels, labels: AliasMap, source: GraphSource, fresh: Minter,
 ): BranchRel | null {
+  // A WRITE in one of SEVERAL arms is not expressible: effects run before the result query, so a sibling
+  // arm would observe the mutation (a graph read, a `mergeV` search, or its own re-snapshotted input) and
+  // answer a post-write state — `union(__.addV('a'), __.addV('b'))` would make the second arm's input see
+  // the first's additions. Decline rather than answer wrong; a SINGLE-arm branch write is threaded by the
+  // caller instead (see `BranchRel`). A read-only multi-arm branch is unaffected.
+  if (arms.some((arm) => arm.effects?.length)) return null;
   let [first, ...rest] = arms as [Tail, ...Tail[]];
   // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
   // disagreement — see `meetScalarArms`. The re-projection is what makes the arms comparable at all,

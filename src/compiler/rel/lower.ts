@@ -240,6 +240,11 @@ export function branchResult<T extends FramedRel>(merged: T | null, ctx: ChainCt
   return !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh) as T;
 }
 
+/** Fold a branch's own effects (a write in one of its arms) into the tail lowered over its result — the
+ *  arm's write bindings run BEFORE the tail, exactly as a top-level write's precede their tail. */
+const withBranchEffects = (tail: Tail | null, merged: BranchRel): Tail | null =>
+  tail && (merged.effects?.length ? { ...tail, effects: [...merged.effects, ...(tail.effects ?? [])] } : tail);
+
 /**
  * THE FAN-OUT SORT KEY, carried past the merge as two `origin` channels (the role the channel core
  * declares for exactly this — `identical` merge so every arm agrees on it structurally, `empty` at a
@@ -1415,7 +1420,7 @@ function scalarTail(
     if (BRANCH_HOSTS.has(step.name)) {
       const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases);
+      return withBranchEffects(continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases), merged);
     }
 
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
@@ -4109,7 +4114,7 @@ function elementTail(
       // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
       // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
       // heavier slice form — it trips `framed`'s backstop and declines the traversal.
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases);
+      return withBranchEffects(continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases), merged);
     }
     if (step.name === 'repeat') {
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
@@ -4489,7 +4494,7 @@ function propertyTail(
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels);
-    return merged && continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases);
+    return merged && withBranchEffects(continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases), merged);
   }
 
   // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with
