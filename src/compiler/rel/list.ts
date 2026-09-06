@@ -300,31 +300,49 @@ function nonStringMember(of: ListOf, members: Rel): Expr {
   };
 }
 
-function localStringMemberGuard(step: IRStep, of: ListOf, input: Rel, fresh: Minter): Binding {
-  // The guard is its OWN statement, so it fences `input` inside its own tree — self-contained, and the
-  // shared relation ids cannot collide across two independent statements' alias namespaces. It reads the
-  // SAME list the main read does; a re-fold of a graph aggregate is one extra statement, inside P5. The
-  // explode is ROOTED at `source` (an `input`, not the sole-FROM correlated form `membersOf` builds for
-  // an OUTER row) so the `json_each` sees the fence's `list` column within the guard's own query.
+/**
+ * A per-MEMBER runtime VALUE guard: raise `message` iff any list member matches `offender`. The shared
+ * scaffolding behind the two member checks — `localStringMemberGuard` (a non-string member throws the
+ * `*LocalStep` type error) and `asStringNullMemberGuard` (a null member throws `AsStringLocalStep`'s
+ * "Can't parse null as String."). One fenced explode, one filter, one row probe.
+ *
+ * The guard is its OWN statement, so it fences `input` inside its own tree — self-contained, and the
+ * shared relation ids cannot collide across two independent statements' alias namespaces. It reads the
+ * SAME list the main read does; a re-fold of a graph aggregate is one extra statement, inside P5. The
+ * explode is ROOTED at `source` (an `input`, not the sole-FROM correlated form `membersOf` builds for
+ * an OUTER row) so the `json_each` sees the fence's `list` column within the guard's own query.
+ */
+function memberGuard(input: Rel, offender: (members: Rel) => Expr, message: string, fresh: Minter): Binding {
   const source = fenced(input, fresh);
   const members = make.explode({
     id: fresh('sgx'), input: source, expr: col(source.id, LIST_COL), channels: [], as: MEMBER,
     type: typeOf(...source.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
   });
   const offenders = make.filter({
-    id: fresh('sgf'), input: members, channels: [], type: members.type,
-    pred: nonStringMember(of, members),
+    id: fresh('sgf'), input: members, channels: [], type: members.type, pred: offender(members),
   });
   const one = make.project({
     id: fresh('sgp'), input: offenders, channels: [], type: typeOf(meta(MEMBER.ord, 'int')),
     exprs: [[MEMBER.ord, col(offenders.id, MEMBER.ord)]],
   });
   const node = make.limit({ id: fresh('sgl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
-  const guard: Guard = {
-    message: `The ${step.name}(local) step can only take string or list of strings`,
-    raiseWhen: 'rows',
-  };
+  const guard: Guard = { message, raiseWhen: 'rows' };
   return { name: `${fresh('sg')}`, node, guard };
+}
+
+function localStringMemberGuard(step: IRStep, of: ListOf, input: Rel, fresh: Minter): Binding {
+  return memberGuard(input, (members) => nonStringMember(of, members),
+    `The ${step.name}(local) step can only take string or list of strings`, fresh);
+}
+
+/** `asString(Scope.local)` raises on a null MEMBER — `AsStringLocalStep.map` stringifies each element
+ *  with `String.valueOf` but throws `"Can't parse null as String."` for a null element
+ *  (`vendor/tinkerpop/gremlin-core/.../step/map/AsStringLocalStep.java:57-59`). The null twin of
+ *  `localStringMemberGuard`: a runtime value guard firing only when a member is provably null. */
+function asStringNullMemberGuard(input: Rel, fresh: Minter): Binding {
+  return memberGuard(input,
+    (members) => ({ kind: 'binary', op: 'is', left: col(members.id, MEMBER.value), right: compilerNull() }),
+    `Can't parse null as String.`, fresh);
 }
 
 /**
@@ -386,11 +404,12 @@ export function listMemberOp(
     // The `*LocalStep`s that EXTEND `StringLocalStep` throw on a non-null non-string MEMBER (the set is
     // exactly `GLOBAL_STRING_THROWS` — every one has a `*GlobalStep`/`*LocalStep` pair over
     // `StringLocalStep`). `asString(local)` is NOT one: `AsStringLocalStep` stringifies each member
-    // (`String.valueOf`) and only a null member raises `Can't parse null as String.`, a different error
-    // this arm does not yet build — so it takes NO guard and its members coerce as before. The member
-    // type is per-row/unknown here (never a static tag), so this is a runtime VALUE guard, not a
-    // decline: it fires only when a member is provably non-string AT RUN TIME.
-    const guard = GLOBAL_STRING_THROWS.has(step.name) ? localStringMemberGuard(step, of, input, fresh) : undefined;
+    // (`String.valueOf`) and only a NULL member raises `Can't parse null as String.` — a different guard,
+    // built here. Both are runtime VALUE guards (the member type is per-row/unknown, never a static tag),
+    // firing only when a member is provably offending AT RUN TIME.
+    const guard = GLOBAL_STRING_THROWS.has(step.name) ? localStringMemberGuard(step, of, input, fresh)
+      : step.name === 'asString' ? asStringNullMemberGuard(input, fresh)
+        : undefined;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
     // the INPUT's type.

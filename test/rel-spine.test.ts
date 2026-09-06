@@ -257,9 +257,9 @@ const COVERED = [
   "g.inject(['a','b']).unfold().count()", "g.inject(['b','a']).unfold().order()",
   // member transforms — `Scope.local` maps over the members; the GLOBAL spelling is a permanent type
   // error on a collection (GLOBAL_STRING_ERRORS below), and a `StringLocalStep` local form carries a
-  // per-member RUNTIME guard, so it is a PROGRAM (see LOCAL_STRING_GUARDED below), not a plain read.
-  // `asString(Scope.local)` stays a read: `AsStringLocalStep` stringifies each member (no throw).
-  "g.inject([1,2]).asString(Scope.local)",
+  // per-member RUNTIME guard, so it is a PROGRAM (see the guarded-program test below), not a plain read.
+  // `asString(Scope.local)` now joins them: `AsStringLocalStep` stringifies each member but throws on a
+  // null one, so it too is a guarded program (below), no longer a plain read.
   // member predicates — `all` is "no member FAILS", which differs from "every member passes" once a
   // predicate can be NULL. This was wrong until 2026-08-03 (L4 list-member-predicate).
   "g.inject(['a','a']).all(P.eq('a'))", "g.inject(['a','b']).all(P.eq('a'))",
@@ -751,18 +751,21 @@ describe('the RelIR spine', () => {
   // here (never a static tag), so the check is a RUNTIME guard binding — the plan is a PROGRAM whose
   // guard raises iff a non-string member EXISTS. Not a decline (that would refuse the valid all-string
   // case) and not silent coercion (SQLite `upper(1)`=`'1'` is the wrong answer §12). `asString(local)`
-  // takes NO guard — `AsStringLocalStep` stringifies each member — so it stays a plain read (COVERED).
+  // is the null twin: `AsStringLocalStep` stringifies each member but throws on a NULL one
+  // (`AsStringLocalStep.java:57-59`), so it too is a guarded program — the guard fires on a null member.
   test('a local StringLocalStep transform is a guarded program', () => {
     for (const gremlin of [
       "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
       "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
       "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
       "g.inject(['ab','c']).length(Scope.local)", "g.V().values('name').fold().toUpper(Scope.local)",
+      "g.inject([1,2]).asString(Scope.local)", "g.inject([1,null]).asString(Scope.local)",
     ]) expect(compile(gremlin, {}).kind, gremlin).toBe('program');
   });
 
   // The guard FIRES on a provably-non-string member (a literal int list, an `age` fold), keeps a valid
-  // all-string list (a `name` fold, a null-bearing string list), and never fires for `asString`.
+  // all-string list (a `name` fold, a null-bearing string list); the `asString` twin fires on a NULL
+  // member ("Can't parse null as String.") and keeps a null-free list.
   test('a local StringLocalStep guard raises on a non-string member, passes strings', async () => {
     for (const gremlin of [
       'g.inject([1,2]).trim(Scope.local)', 'g.inject([1,2]).length(Scope.local)',
@@ -770,6 +773,8 @@ describe('the RelIR spine', () => {
       'g.V().hasLabel("person").values("age").order().fold().trim(Scope.local)',
     ]) expect(() => exec(seededStore()).buffers(gremlin, {}, {}), gremlin)
       .toThrow('step can only take string or list of strings');
+    for (const gremlin of ['g.inject([1,null]).asString(Scope.local)', 'g.inject(null,1).asString()'])
+      expect(() => exec(seededStore()).buffers(gremlin, {}, {}), gremlin).toThrow("Can't parse null as String.");
     const want: [string, unknown[]][] = [
       ["g.inject(['a','b']).trim(Scope.local)", [['a', 'b']]],
       ['g.inject(["feature","tESt",null]).toUpper(Scope.local)', [['FEATURE', 'TEST', null]]],

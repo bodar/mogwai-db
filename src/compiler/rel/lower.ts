@@ -1045,6 +1045,21 @@ function concatEmptyGuard(rel: Rel, presents: readonly Expr[], fresh: Minter): B
   return { name: `${fresh('cg')}`, node, guard: { message: 'The provided traverser does not map to a value', raiseWhen: 'rows' } };
 }
 
+/** `asString()`/`asString(Scope.local)` over a SCALAR stream raises on a NULL value — a runtime guard,
+ *  the scalar twin of `list.ts`'s `asStringNullMemberGuard`. `AsStringGlobalStep.map` (and
+ *  `AsStringLocalStep.map` for a null item) throw `"Can't parse null as String."`
+ *  (`vendor/tinkerpop/gremlin-core/.../step/map/AsStringGlobalStep.java:44-45`), where SQL
+ *  `CAST(v AS TEXT)` would silently yield NULL. Fires only when a surviving row's value is null. */
+function asStringNullGuard(rel: Rel, value: Expr, fresh: Minter): Binding {
+  const offenders = make.filter({
+    id: fresh('agf'), input: rel, channels: rel.channels, type: rel.type,
+    pred: { kind: 'binary', op: 'is', left: value, right: compilerNull() },
+  });
+  const one = make.project({ id: fresh('agp'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const node = make.limit({ id: fresh('agl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
+  return { name: `${fresh('ag')}`, node, guard: { message: `Can't parse null as String.`, raiseWhen: 'rows' } };
+}
+
 /** The outcome of `collectionArm`: `'pass'` — not one of its step names, the caller keeps looking;
  *  `'continue'` — a side-effect step handled, the caller's loop continues with its relation unchanged;
  *  `{tail}` — the step re-rooted the stream, return this. */
@@ -1558,6 +1573,26 @@ function scalarTail(
       if (!cv.present) return null;
       const guard = concatEmptyGuard(rel, [cv.present], fresh);
       const tail = scalarTail(projected, { kind: 'scalar', type: STATIC('long') }, steps, at + 1, bulked, ctx, fresh, labels);
+      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+    }
+
+    // `asString()` over a SCALAR value RAISES on a null — the reference stringifies with `String.valueOf`
+    // but throws "Can't parse null as String." for a null traverser (global) or a null item (local)
+    // (`AsStringGlobalStep.java:44-45`, `AsStringLocalStep.java:51-52`). SQL `CAST(v AS TEXT)` gives NULL,
+    // so the transform rides a runtime null guard. Scope is not consulted here for the reason
+    // `transformExpr` states — a scalar IS a one-element list, so both forms are the same over a value;
+    // a LIST host's `asString(local)` (member stringify + a null-member guard) is `list.ts`'s.
+    if (step.name === 'asString') {
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', out.kind === 'scalar' ? out.type : undefined);
+      if (!tx) return null;
+      const carried = rel.channels;
+      const projected = make.project({
+        id: fresh('as'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
+        exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      const guard = asStringNullGuard(rel, col(rel.id, 'v'), fresh);
+      const tail = scalarTail(projected, { kind: 'scalar', type: tx.type ?? UNKNOWN }, steps, at + 1, bulked, ctx, fresh, labels);
       return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
     }
 
