@@ -27,10 +27,10 @@ import { isUrl } from './replicate.ts';
 const BARE_ENDPOINT = '/gremlin';
 
 // The docs' static assets, served from the injected AssetStore (Bun from the binary-embedded copy, CF from
-// the Workers Static Assets binding) rather than a CDN. One entry today — the Scalar UI module `scalarUrl:
-// './scalar.js'` points at; the favicon + a logo are the planned follow-up and slot in here with no other
-// change. A GET whose path is in this set is offered to the AssetStore first; anything else routes as before.
-const DOCS_ASSET_PATHS = new Set(['/scalar.js']);
+// the Workers Static Assets binding) rather than a CDN. Three entries: the Scalar UI module `scalarUrl:
+// './scalar.js'` points at, the favicon the docs shell links, and the brand logo the API reference shows.
+// A GET whose path is in this set is offered to the AssetStore first; anything else routes as before.
+const DOCS_ASSET_PATHS = new Set(['/scalar.js', '/favicon.ico', '/logo.png']);
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -229,7 +229,7 @@ export function makeRouter(
    *  request no longer carries it. A THUNK is accepted as well as a string: the browser cannot read its
    *  registration scope at construction (before the SW installs), so it defers the read to request time. */
   docsBaseUrl?: string | (() => string | undefined),
-  /** Where the docs' static assets (the Scalar UI module `scalarUrl` names; later the favicon + logo) are
+  /** Where the docs' static assets (the Scalar UI module `scalarUrl` names, the favicon, the logo) are
    *  served from — the Bun binary-embedded copy or the CF Workers Static Assets binding, behind the runtime-
    *  agnostic {@link AssetStore} seam. Optional: absent (bare test routers), those paths are not intercepted
    *  and the docs shell falls back to the pinned CDN (`SCALAR_CDN`). An entry wiring this also passes
@@ -262,7 +262,7 @@ export function makeRouter(
     if (req.method === 'GET') {
       if (pathname === '/' || pathname === '/docs')
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-      // The docs' static assets (the Scalar UI module; later the favicon + logo) — served from the injected
+      // The docs' static assets (the Scalar UI module, the favicon, the logo) — served from the injected
       // AssetStore, so the UI is self-hosted, never a CDN. A router with no AssetStore skips this (the shell
       // then uses SCALAR_CDN); an AssetStore that doesn't hold the path returns null and we fall through.
       if (assets && DOCS_ASSET_PATHS.has(pathname)) {

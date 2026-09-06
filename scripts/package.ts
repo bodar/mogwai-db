@@ -101,6 +101,15 @@ async function packageBrowser(): Promise<void> {
   await Bun.write(join(out, 'scalar.js'), Bun.file(scalar));
   console.log(`  browser/scalar.js          ${(Bun.file(scalar).size / 1024).toFixed(0)} KB (Scalar ${SCALAR_VERSION})`);
 
+  // The favicon + logo, our COMMITTED source assets (public/, unlike the built scalar.js), shipped beside
+  // the docs so the static host serves them for the browser docs (`<link rel=icon>` + the spec's `x-logo`
+  // both use relative `./favicon.ico` / `./logo.png`). In the zip because it archives `.` below.
+  for (const asset of ['favicon.ico', 'logo.png']) {
+    const src = join(ROOT, 'public', asset);
+    await Bun.write(join(out, asset), Bun.file(src));
+    console.log(`  browser/${asset.padEnd(18)} ${(Bun.file(src).size / 1024).toFixed(0)} KB`);
+  }
+
   // index.html IS the API docs (the same Scalar shell the SW serves at /docs) — the site root, no redirect.
   await Bun.write(join(out, 'index.html'), BROWSER_INDEX_HTML);
   await Bun.write(join(out, 'README.md'), browserReadme(VERSION, sqlitePkg));
@@ -144,6 +153,14 @@ async function packageCloudflare(): Promise<void> {
   await Bun.write(join(out, 'public', 'scalar.js'), Bun.file(scalar));
   console.log(`  cloudflare/public/scalar.js  ${(Bun.file(scalar).size / 1024).toFixed(0)} KB (Scalar ${SCALAR_VERSION})`);
 
+  // The favicon + logo (our committed public/ source assets) ship as Static Assets alongside scalar.js, so the
+  // deployed Worker serves /favicon.ico and /logo.png from the ASSETS binding — same self-hosted, no-CDN story.
+  for (const asset of ['favicon.ico', 'logo.png']) {
+    const src = join(ROOT, 'public', asset);
+    await Bun.write(join(out, 'public', asset), Bun.file(src));
+    console.log(`  cloudflare/public/${asset.padEnd(11)} ${(Bun.file(src).size / 1024).toFixed(0)} KB`);
+  }
+
   // The deploy config + script + README (overwriting wrangler's stub README). The config is DERIVED from
   // the repo's wrangler.jsonc so it cannot drift — same DO migration, R2 binding, compat — with `main`
   // pointed at the prebuilt bundle and `no_bundle` on, and the account left to the env.
@@ -157,7 +174,7 @@ async function packageCloudflare(): Promise<void> {
   await chmod(join(out, 'deploy.sh'), 0o755);
   await Bun.write(join(out, 'README.md'), cloudflareReadme(VERSION, bucket));
 
-  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md', 'public/scalar.js']);
+  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md', 'public/scalar.js', 'public/favicon.ico', 'public/logo.png']);
 }
 
 /** Zip named entries (relative to `dir`) into `zipPath`, replacing any existing archive. */
@@ -216,6 +233,8 @@ folder and serve it: there are NO runtime downloads and NO CDN dependencies. Bui
 - \`index.html\` — the API reference itself (the interactive Scalar docs), served at the site root; it boots
   the service worker in place, so opening it IS a live mogwai-db instance (no separate landing page).
 - \`scalar.js\` — the Scalar API-reference UI (loaded by the docs); shipped locally so the docs need no CDN.
+- \`favicon.ico\`, \`logo.png\` — the site favicon and the brand logo shown in the API reference (served beside
+  index.html; referenced relatively so they work at any deploy path).
 
 ## Use
 
@@ -271,6 +290,8 @@ provisioned per graph on first request (there is no create/drop API — addressi
   and the Workers Static Assets block. Nothing needs editing — the account comes from the env vars.
 - \`public/scalar.js\` — the docs' Scalar UI, uploaded as a Static Asset and served at \`/scalar.js\` (so the
   interactive API reference at \`/\` is self-hosted, no CDN).
+- \`public/favicon.ico\`, \`public/logo.png\` — the site favicon and the brand logo shown in the API reference,
+  served the same way (\`/favicon.ico\`, \`/logo.png\`).
 `;
 }
 

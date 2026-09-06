@@ -186,6 +186,8 @@ run = "bash scripts/init-submodule.sh"
 # `build`, `test` and `test:bracket` depend on this so the file exists before `wrangler` runs (dev in the
 # real-workerd cloudflare test, and the dry-run deploy in `build`). Bun does not need it — it embeds its own
 # copy into the binary (src/bun/BunAssetStore.ts) — but the copy is cheap and keeps the CF path exercised.
+# The OTHER two Static Assets — public/favicon.ico + public/logo.png — are COMMITTED source assets (our own,
+# not built from node_modules), so they need no populate step here; they are already in public/ for wrangler.
 [tasks.assets]
 description = "Populate public/ (CF static assets): copy the Scalar UI into public/scalar.js from node_modules"
 depends = ["install"]

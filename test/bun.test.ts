@@ -19,7 +19,7 @@ graphContract('bun', {
   stop() {
     server?.stop(true);
   },
-});
+}, { servesAssets: true }); // the Bun server wires BunAssetStore, so the docs served-asset contract runs
 
 // The Bun AssetStore seam (BunAssetStore): the Bun server SELF-HOSTS the docs' Scalar UI at /scalar.js from
 // a copy embedded in the binary — no CDN — and the docs shell references it locally. This is the Bun-only
@@ -38,6 +38,27 @@ test('bun serves the Scalar UI at /scalar.js (text/javascript), and /docs refere
     const docs = await (await fetch(`${origin}/docs`)).text();
     expect(docs).toContain('src="./scalar.js"');
     expect(docs).not.toContain('cdn.jsdelivr.net');
+  } finally {
+    srv.stop(true);
+  }
+});
+
+// The favicon + logo (increment 4b) are our COMMITTED source assets (public/favicon.ico, public/logo.png)
+// that BunAssetStore EMBEDS via `with { type: 'file' }`. The shared docsContract already proves they serve
+// as images and are referenced (it runs here with servesAssets:true, and against real workerd for CF); this
+// Bun-specific test proves the extra thing only the embed mechanism can get wrong — the served bytes are the
+// ACTUAL committed file, byte-for-byte, not a stale or truncated copy (the `with { type: 'file' }` analogue
+// of the scalar.js served test above).
+test('bun serves the EXACT committed favicon + logo bytes (the embedded copy is the real file)', async () => {
+  const srv = startServer({ port: 0 });
+  try {
+    const origin = `http://localhost:${srv.port}`;
+    for (const [path, file] of [['/favicon.ico', 'public/favicon.ico'], ['/logo.png', 'public/logo.png']] as const) {
+      const served = new Uint8Array(await (await fetch(`${origin}${path}`)).arrayBuffer());
+      const onDisk = new Uint8Array(await Bun.file(join(import.meta.dir, '..', file)).arrayBuffer());
+      expect(served.length).toBe(onDisk.length);
+      expect(Buffer.from(served).equals(Buffer.from(onDisk))).toBe(true);
+    }
   } finally {
     srv.stop(true);
   }

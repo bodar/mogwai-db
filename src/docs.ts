@@ -42,12 +42,24 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
     title: 'mogwai-db',
     version,
     description:
+      // The brand logo, made VISIBLE in the reference: Scalar renders `info.description` as markdown, so a
+      // markdown image paints it at the top of the docs (the `x-logo` below is unrendered by Scalar 1.67).
+      // Relative URL — composes under a GitHub Pages sub-path, resolving to the `/logo.png` the AssetStore
+      // serves (Bun/CF) or the static sibling (browser).
+      '![mogwai-db](./logo.png)\n\n' +
       'A TinkerPop 4 Gremlin server compiled onto SQLite. Each graph is addressed ' +
       `at \`${graphPath}\` and springs into existence on first access. \`POST\` (body) and ` +
       'the cacheable `GET` (`?gremlin=`) both run a Gremlin traversal; `OPTIONS` returns ' +
       'graph metadata (element counts); `PUT`/`DELETE` manage the graph lifecycle. All ' +
       'management verbs are idempotent and create-on-demand. A stock TinkerPop client ' +
       'may also POST to the bare `/gremlin` endpoint, naming the graph in the `g` field.',
+    // The brand logo, carried as `x-logo` — the Redoc/Scalar convention on `info`. RELATIVE URL (like
+    // `./openapi.json` and `./scalar.js`) so it composes under a GitHub Pages sub-path, resolving to the
+    // `/logo.png` the AssetStore seam serves (Bun/CF) or the static sibling (browser build). NOTE: Scalar
+    // 1.67 does not itself render `x-logo` (verified: no `x-logo`/`xLogo` in its standalone bundle; its only
+    // branding config is `favicon`, which we set via the shell's `<link rel=icon>` instead) — so this is the
+    // spec-level REFERENCE, future-proof for a Redoc/x-logo-aware consumer, not a header the docs paint today.
+    'x-logo': { url: './logo.png', altText: 'mogwai-db' },
   },
   servers: [{ url: baseUrl, description: 'This server' }],
   paths: {
@@ -422,7 +434,11 @@ function docsHtml(scalarUrl: string, bootScript?: string): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>mogwai-db API</title>${bootScript ? `\n    <script type="module" src="${bootScript}"></script>` : ''}
+    <title>mogwai-db API</title>
+    <!-- RELATIVE href so it resolves under a GitHub Pages sub-path (\`/mogwai-db/favicon.ico\`), not only the
+         origin root. Served from the AssetStore seam (src/assetstore.ts) on Bun/CF, the static sibling in the
+         browser build — same as \`./scalar.js\` below. -->
+    <link rel="icon" href="./favicon.ico" />${bootScript ? `\n    <script type="module" src="${bootScript}"></script>` : ''}
   </head>
   <body>
     <div id="app"></div>

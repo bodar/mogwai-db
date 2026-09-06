@@ -20,12 +20,17 @@ const wasmPath = () => Bun.fileURLToPath(import.meta.resolve('@sqlite.org/sqlite
 const bundle = (rel: string) => bundleBrowser(Bun.fileURLToPath(import.meta.resolve(rel)));
 
 describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages shape)', () => {
-  let out: { rootPath: string; rootHasScalar: boolean; docsHasScalar: boolean; scalarStatus: number; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
+  let out: { rootPath: string; rootHasScalar: boolean; docsHasScalar: boolean; scalarStatus: number; faviconStatus: number; logoStatus: number; specLogo: string; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
   let fatal: string | undefined;
 
   beforeAll(async () => {
     // The Scalar UI standalone — shipped as a plain static asset by the packager; served here the same way.
     const scalarJs = await Bun.file(join(import.meta.dir, '../../node_modules/@scalar/api-reference/dist/browser/standalone.js')).text();
+    // The favicon + logo, our committed source assets the packager ships beside index.html (increment 4b) —
+    // served here the same way so this e2e stays faithful to the deployed browser build (the shell links
+    // `./favicon.ico`, the spec's `x-logo` points at `./logo.png`, both under the sub-path).
+    const favicon = await Bun.file(join(import.meta.dir, '../../public/favicon.ico')).arrayBuffer();
+    const logo = await Bun.file(join(import.meta.dir, '../../public/logo.png')).arrayBuffer();
     const files: Record<string, { body: string | ArrayBuffer; type: string }> = {
       'mogwai-db.js': { body: await bundle('../../src/browser/mogwai.ts'), type: 'text/javascript' },
       'service-worker.js': { body: await bundle('../../src/browser/service-worker.ts'), type: 'text/javascript' },
@@ -33,6 +38,8 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
       'registry-worker.js': { body: await bundle('../../src/browser/registry-worker.ts'), type: 'text/javascript' },
       'sqlite3.wasm': { body: await Bun.file(wasmPath()).arrayBuffer(), type: 'application/wasm' },
       'scalar.js': { body: scalarJs, type: 'text/javascript' },
+      'favicon.ico': { body: favicon, type: 'image/x-icon' },
+      'logo.png': { body: logo, type: 'image/png' },
       'index.html': { body: BROWSER_INDEX_HTML, type: 'text/html; charset=utf-8' },
     };
     const server = Bun.serve({ port: 0, async fetch(req) {
@@ -80,6 +87,10 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
           rootHasScalar: (await (await fetch('.')).text()).includes('createApiReference'),
           docsHasScalar: (await (await fetch('./docs')).text()).includes('createApiReference'),
           scalarStatus: (await fetch('./scalar.js')).status,
+          // The favicon + logo resolve RELATIVE to /mogwai-db/ too — served by the static host, self-contained.
+          faviconStatus: (await fetch('./favicon.ico')).status,
+          logoStatus: (await fetch('./logo.png')).status,
+          specLogo: String(spec.info?.['x-logo']?.url),
           openapi: String(spec.openapi),
           serverUrl: String(spec.servers?.[0]?.url),
           putStatus: put.status,
@@ -100,6 +111,11 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
   test('the site root serves the docs shell directly', () => { expect(out.rootHasScalar).toBe(true); });
   test('the /docs alias still serves the same Scalar reference', () => { expect(out.docsHasScalar).toBe(true); });
   test('the Scalar UI is vendored (served locally, not a CDN)', () => { expect(out.scalarStatus).toBe(200); });
+  test('the favicon + logo serve from the static host under the sub-path, and the spec points at ./logo.png', () => {
+    expect(out.faviconStatus).toBe(200);
+    expect(out.logoStatus).toBe(200);
+    expect(out.specLogo).toBe('./logo.png');
+  });
   test('openapi.json is served under the sub-path', () => { expect(out.openapi).toMatch(/^3\./); });
   test('the spec servers[0].url is the absolute sub-path base (so the Scalar "try it" composes)', () => {
     // Request-derived + SW-supplied: the SW strips /mogwai-db/ before routing, so the base is threaded via

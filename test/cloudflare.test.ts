@@ -55,4 +55,4 @@ graphContract('cloudflare', {
     proc?.kill();
     await proc?.exited;
   },
-});
+}, { servesAssets: true }); // the Worker serves /scalar.js, /favicon.ico, /logo.png from the ASSETS binding

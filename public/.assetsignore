@@ -1,4 +1,5 @@
 # Keep git housekeeping files out of the uploaded Static Assets set (gitignore syntax; wrangler
-# excludes this file itself). Only scalar.js — the docs UI served at /scalar.js — should ship.
+# excludes this file itself). What ships: scalar.js (the docs UI at /scalar.js), favicon.ico and
+# logo.png (the committed favicon + brand logo). Only the git dotfiles below are excluded.
 .gitkeep
 .gitignore

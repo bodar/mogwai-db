@@ -13,12 +13,21 @@
 // Kept in sync with `SCALAR_VERSION` (src/docs.ts) — the same package the pinned-CDN fallback names — and
 // with scripts/package.ts, which copies the same file for the browser + Cloudflare releases.
 import scalarStandalone from '../../node_modules/@scalar/api-reference/dist/browser/standalone.js' with { type: 'file' };
+// The favicon + logo come from the COMMITTED `public/` (our own source assets), not node_modules — unlike
+// scalar.js above (a build artifact `mise run assets` copies in). All three embed the same way: `with { type:
+// 'file' }` makes `bun build --compile` copy the file into the standalone binary, so a self-hosted server
+// serves them with no sidecar files and no CDN, and the same imports resolve to the real on-disk paths in dev.
+import favicon from '../../public/favicon.ico' with { type: 'file' };
+import logo from '../../public/logo.png' with { type: 'file' };
 import { type AssetStore, contentTypeFor } from '../assetstore.ts';
 
 export class BunAssetStore implements AssetStore {
   async get(path: string): Promise<Response | null> {
-    if (path === '/scalar.js')
-      return new Response(Bun.file(scalarStandalone), { headers: { 'Content-Type': contentTypeFor(path) } });
-    return null; // not one of our assets — the router falls through to its own routes
+    const file = path === '/scalar.js' ? scalarStandalone
+      : path === '/favicon.ico' ? favicon
+      : path === '/logo.png' ? logo
+      : null;
+    if (file === null) return null; // not one of our assets — the router falls through to its own routes
+    return new Response(Bun.file(file), { headers: { 'Content-Type': contentTypeFor(path) } });
   }
 }

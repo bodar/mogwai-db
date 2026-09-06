@@ -22,7 +22,7 @@ export interface Harness {
  * runtime ONCE, then exercises both the gremlin data plane and the graph
  * management API (create/info/destroy over plain HTTP verbs).
  */
-export function graphContract(name: string, harness: Harness) {
+export function graphContract(name: string, harness: Harness, opts: { servesAssets?: boolean } = {}) {
   describe(name, () => {
     let origin: string;
     beforeAll(async () => {
@@ -34,7 +34,11 @@ export function graphContract(name: string, harness: Harness) {
 
     gremlinContract(() => origin);
     managementContract(() => origin);
-    docsContract(() => origin);
+    // `servesAssets`: whether THIS harness wires an AssetStore (Bun + CF do; the bun-wasm leaf builds a bare
+    // `application()` router with none, so it serves the docs shell but not the /scalar.js, /favicon.ico,
+    // /logo.png assets). The docs shell + spec REFERENCE the assets regardless (that HTML/JSON is unconditional
+    // — asserted for every runtime); only the served-asset round-trip is gated on an AssetStore being present.
+    docsContract(() => origin, opts.servesAssets ?? false);
     ioContract(() => origin);
     federationContract(() => origin);
     olapContract(() => origin);
@@ -272,7 +276,7 @@ function federationContract(getOrigin: () => string) {
 
 // The self-describing docs surface: an OpenAPI spec + an interactive Scalar
 // reference, served identically on both runtimes.
-function docsContract(getOrigin: () => string) {
+function docsContract(getOrigin: () => string, servesAssets: boolean) {
   describe('docs', () => {
     test('GET /openapi.json serves a valid OpenAPI spec', async () => {
       const res = await fetch(`${getOrigin()}/openapi.json`);
@@ -302,6 +306,33 @@ function docsContract(getOrigin: () => string) {
       const html = await res.text();
       expect(html).toContain('createApiReference');
       expect(html).toContain('/openapi.json');
+    });
+
+    // The favicon + logo (increment 4b) are REFERENCED by the docs surface RELATIVELY (so they compose under a
+    // GitHub Pages sub-path) — the shell links `./favicon.ico`, the spec carries the logo as the Redoc/Scalar
+    // `info.x-logo`. That HTML/JSON is unconditional (docsHtml/buildOpenApiSpec always emit it), so it holds
+    // for EVERY runtime, AssetStore or not.
+    test('the docs surface references the favicon + logo relatively', async () => {
+      const html = await (await fetch(`${getOrigin()}/docs`)).text();
+      expect(html).toContain('href="./favicon.ico"');
+      const spec = (await (await fetch(`${getOrigin()}/openapi.json`)).json()) as any;
+      expect(spec.info['x-logo'].url).toBe('./logo.png');
+    });
+
+    // The SERVED-asset round-trip is gated on the harness wiring an AssetStore (Bun from the binary-embedded
+    // copy, CF from the Workers Static Assets binding via real workerd; the bun-wasm leaf builds a bare router
+    // with none and skips this). `test.if` keeps the assertion in the shared contract while running it only
+    // where the seam is present, so both AssetStore runtimes are exercised without a duplicate per-file test.
+    test.if(servesAssets)('GET /favicon.ico + /logo.png serve as images', async () => {
+      const favicon = await fetch(`${getOrigin()}/favicon.ico`);
+      expect(favicon.status).toBe(200);
+      expect(favicon.headers.get('content-type')).toContain('image'); // an image type, not octet-stream
+      expect((await favicon.arrayBuffer()).byteLength).toBeGreaterThan(100); // real icon bytes, not a 404 body
+
+      const logo = await fetch(`${getOrigin()}/logo.png`);
+      expect(logo.status).toBe(200);
+      expect(logo.headers.get('content-type')).toBe('image/png');
+      expect((await logo.arrayBuffer()).byteLength).toBeGreaterThan(1000); // the real logo, not empty/404
     });
   });
 }
