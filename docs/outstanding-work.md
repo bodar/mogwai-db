@@ -23,13 +23,6 @@ lowered.
   **map shape** (9 — `group*`), **list shape** (9 — `fold`/`unfold`), **row ops** (9 — `order`/`dedup`/`range`),
   **side effects** (8 — `group`/`aggregate`/`cap`). Start with
   [the RelIR build plan](./2026-08-01-relir-build-plan.md) (§10 is the live-gap home).
-- **Emit/block walk unification — a correctness substrate; NARROWED.** The decision predicates
-  (`isDirectSource`/`aliasOf`/`free`/`maySplice`/`NEEDS_SUBQUERY`) are now SHARED — `src/rel/block.ts`
-  exports them and `src/rel/emit.ts` imports them. The residue is the `directSource` **constructor**
-  (`src/rel/emit.ts:218` builds the FROM item where `isDirectSource` only predicts) and FROM-alias
-  assignment; lift those two and the drift class (a plan `check.ts` admits, the emitter wraps into
-  `circular reference` / wrong rows — a named silent-wrong-answer class) closes. Smaller than the
-  original walk-unification framing; still the flagship correctness lift.
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
   the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's
@@ -211,5 +204,11 @@ lowered.
   relation cannot answer; decline is correct.
 - **Unbounded-`repeat` body per-origin slice / barrier** — recursive-term collapse is algebraically
   impossible; P3 fail-closed forever.
+- **Emit/block "walk unification"** — CLOSED (`1b87885e`). All three decisions (direct-source
+  classification, FROM-alias via exported `aliasOf`, splice eligibility) are lifted into `src/rel/block.ts`
+  as the single source and the anti-drift gate pins the full alias set. There is no residual: `emit.ts`'s
+  `directSource` GATES on the shared `isDirectSource` (throws on drift) and BUILDS the `FromItem` — which is
+  emit's job by design (block predicts structure, emit constructs SQL). Moving construction into `block.ts`
+  would collapse the predict/construct separation the gate depends on — it would be wrong, not deferred.
 - **map-LITERAL `[k:__.trav]` as a merge argument** — a candidate-rooted `P.eq` on a per-driver value;
   permanent decline (correlated merge search), distinct from the map-VALUED driver that landed.
