@@ -109,10 +109,16 @@ describe('replicator config CRUD (Phase 5b)', () => {
   });
 
   test('OpenAPI documents the replicator endpoints (the UI falls out for free)', () => {
-    const spec = buildOpenApiSpec('gremlin');
+    const spec = buildOpenApiSpec('gremlin', 'http://localhost:8182', 'dev');
     expect(spec.paths['/_replicator']).toBeDefined();
     expect(spec.paths['/_replicator/{configId}']).toBeDefined();
     expect(spec.paths['/_replicator'].get).toBeDefined();
     expect(spec.paths['/_replicator'].post).toBeDefined();
+    // The base and version are threaded through, not frozen.
+    expect(spec.servers[0].url).toBe('http://localhost:8182');
+    expect(spec.info.version).toBe('dev');
+    // The GraphQL edge is documented (POST + GET).
+    expect(spec.paths['/graphql/{graphId}'].post).toBeDefined();
+    expect(spec.paths['/graphql/{graphId}'].get).toBeDefined();
   });
 });

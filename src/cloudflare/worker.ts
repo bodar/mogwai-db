@@ -1,4 +1,5 @@
 import { application } from '../application.ts';
+import { VERSION } from '../version.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromWorkerEnv } from '../config.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
@@ -44,6 +45,8 @@ export default {
       runTick: () => runDueReplications(schedulerDeps(env)),
       // Save-time filter validation (filtered-replication-plan §2): trial-run against the source peer.
       validateFilter: (source, filter) => validateReplicationFilter(peerForRef(manager, http, source), filter),
+      // The build-stamped version for the OpenAPI spec (`'dev'` when unstamped).
+      version: VERSION,
     });
     return app.router(request);
   },

@@ -10,6 +10,7 @@
 // `WorkerFactory` stub). The only native messages are the `Bootstrap` port hand-offs capnweb cannot carry.
 import './buffer-global.ts'; // MUST be first — installs Buffer before the wire (http.ts/io.ts) inits
 import { makeRouter } from '../router.ts';
+import { VERSION } from '../version.ts';
 import type { GraphManager } from '../manager.ts';
 import { BrowserGraphManager } from './BrowserGraphManager.ts';
 import { FactoryStubSource } from './factory-stub-source.ts';
@@ -54,7 +55,11 @@ const validateFilter = (source: string, filter: string) => validateReplicationFi
 //   - `./scalar.js`   — the vendored Scalar UI, so /docs is self-contained (no CDN).
 //   - `./mogwai-db.js` — boots THIS page's WorkerFactory: the landing page redirects to /docs, so the docs
 //     page is the tab the user is left on and must host the graph data plane (else queries have no Worker).
-const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter, './scalar.js', './mogwai-db.js');
+//   - `VERSION` — the build-stamped version for the OpenAPI `info.version` (scripts/package.ts defines it).
+//   - `docsBaseUrl` — the LAZY thunk below: the OpenAPI `servers[0].url` must be the sub-path base
+//     (`/mogwai-db/`), which the SW STRIPS before routing, so the request can't reveal it. Passed as a
+//     thunk because the SW cannot read its registration scope at construction (before it installs).
+const router = makeRouter(manager, undefined, undefined, registry, runTick, validateFilter, './scalar.js', './mogwai-db.js', VERSION, docsBaseUrl);
 
 scope.addEventListener('message', (event) => {
   const data = (event as ExtendableMessageEvent).data as BootstrapMessage | undefined;
@@ -69,6 +74,14 @@ scope.addEventListener('message', (event) => {
 let base: string | undefined;
 function scopeBase(): string {
   return (base ??= new URL(scope.registration.scope).pathname);
+}
+
+// The absolute base for the OpenAPI `servers[0].url` — the SW's full registration scope with the trailing
+// slash trimmed (`https://owner.github.io/mogwai-db/` → `…/mogwai-db`; a root deploy `…/` → the bare
+// origin), so the spec's `/gremlin/{graphId}` paths compose against it. Read LAZILY (like scopeBase) — the
+// router calls this only when serving /openapi.json, by when the SW is active and the scope is readable.
+function docsBaseUrl(): string {
+  return new URL(scope.registration.scope).href.replace(/\/+$/, '');
 }
 
 scope.addEventListener('fetch', (event) => {

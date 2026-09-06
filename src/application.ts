@@ -26,9 +26,16 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
    *  entry point from its `manager` + allowlisted `http` (`validateReplicationFilter` over `peerForRef`).
    *  Optional — absent, a filter is stored unvalidated. */
   validateFilter?: FilterValidator;
+  /** The version stamped into the OpenAPI `info.version` — the entry points pass `VERSION` from
+   *  `src/version.ts` (the real build-stamped value; `'dev'` from source). Optional — absent, makeRouter
+   *  defaults it to `'dev'`. */
+  version?: string;
 }
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick, deps.validateFilter));
+    // makeRouter's `scalarUrl`/`bootScript` (positions 7-8) are browser-only and left at their defaults
+    // here; `version` follows. The browser edge calls makeRouter directly, so it (not application) is where
+    // those docs args are set — see src/browser/service-worker.ts.
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix, deps.log, deps.registry, deps.runTick, deps.validateFilter, undefined, undefined, deps.version));
 }

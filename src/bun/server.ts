@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { application } from '../application.ts';
+import { VERSION } from '../version.ts';
 import { verboseLogger } from '../router.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromBun, type MogwaiConfig } from '../config.ts';
@@ -61,7 +62,7 @@ export function startServer(config: Partial<MogwaiConfig> = {}) {
     : undefined;
   // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
   // is its channel). `log` (from `$MOGWAI_LOG`) turns the one-line-per-query access log back on.
-  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined, registry, runTick, validateFilter });
+  const app = application({ manager, pathPrefix, log: log ? verboseLogger : undefined, registry, runTick, validateFilter, version: VERSION });
   const server = Bun.serve({ port, fetch: app.router });
   // Stop the background scheduler when the server is stopped, so a test (or a graceful shutdown) leaks no
   // timer. Wrap `stop` rather than changing the return type, so existing callers are unaffected.
@@ -83,9 +84,16 @@ if (import.meta.main) {
       'io-dir': { type: 'string' },
       'path-prefix': { type: 'string' },
       'allow-host': { type: 'string', multiple: true },
+      version: { type: 'boolean', short: 'v' },
       help: { type: 'boolean', short: 'h' },
     },
   });
+  // `--version`/`-v`: print the build-stamped version and exit, before any server work (a stated
+  // requirement — a compiled binary must report its own version). `VERSION` is `'dev'` unstamped.
+  if (values.version) {
+    console.log(VERSION);
+    process.exit(0);
+  }
   if (values.help) {
     console.log(
       [
@@ -98,6 +106,7 @@ if (import.meta.main) {
         '  --path-prefix <p>   graph path prefix (MOGWAI_PATH_PREFIX, "gremlin")',
         '  --allow-host <h>    permit io()/federate to fetch this host (repeatable; MOGWAI_HTTP_ALLOWLIST,',
         '                      comma-separated). NONE set ⇒ outbound HTTP is DISABLED (deny all).',
+        '  -v, --version       print the version and exit',
         '  -h, --help          this help',
       ].join('\n'),
     );

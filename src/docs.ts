@@ -1,21 +1,21 @@
-// Self-describing HTTP surface: a hand-written OpenAPI 3.1 spec for the four
-// verbs on the graph path, plus a tiny Scalar shell that renders it as an interactive
-// reference. Both are served by the shared router (router.ts), so Bun and
-// Cloudflare expose the same docs. No build step, no npm dep — Scalar loads from
-// a CDN in the browser (pinned), so the Worker bundle is untouched.
+// Self-describing HTTP surface: a hand-written OpenAPI 3.1 spec for the four verbs on the graph path
+// (plus the GraphQL edge and the replication control plane), and a tiny Scalar shell that renders it as
+// an interactive reference. Both are served by the shared router (router.ts), so Bun, Cloudflare and the
+// browser build expose the same docs. No build step, no npm dep — Scalar loads from a CDN in the browser
+// (pinned), so the Worker bundle is untouched.
 //
-// The graph-path prefix is configurable (router.ts owns the default, `gremlin`), so the
-// docs are BUILT from the prefix the router is running — `buildDocs(prefix)` — and
-// can never drift from the live route. The bare `/gremlin` endpoint is a fixed
-// TinkerPop convention, independent of the prefix.
+// The spec is REQUEST-DERIVED, not frozen at construction: the router builds it per request so that
+//   - `servers[0].url` is the ABSOLUTE base the request actually arrived on (`buildOpenApiSpec`'s `baseUrl`
+//     arg), so the paths below compose correctly under a root deploy (Bun/CF) AND a sub-path one (GitHub
+//     Pages at `/mogwai-db/`), where the browser SW supplies the base it can no longer recover from the
+//     already-stripped request; and
+//   - `info.version` carries the real stamped version (`src/version.ts`), not a hardcoded constant.
+// The graph-path prefix is likewise passed in (router.ts owns the default, `gremlin`), so the docs can
+// never drift from the live route. The bare `/gremlin` endpoint is a fixed TinkerPop convention.
 //
-// The management verbs (PUT/GET/DELETE) are plain JSON and fully interactive in
-// the "Test Request" panel. The gremlin POST accepts a JSON request body today,
-// but its RESPONSE is GraphBinary (binary) — a readable JSON/GraphSON response is
-// a planned improvement (see docs/2026-07-13-graphson-untyped-scope.md), so the
-// try-it panel will show the request working (HTTP 200) with an unreadable body.
-
-const VERSION = '0.1.0';
+// The management verbs (PUT/GET/DELETE) and the GraphQL edge are plain JSON and fully interactive in the
+// "Test Request" panel. The gremlin POST accepts a JSON request body today, but its RESPONSE is
+// GraphBinary (binary) — the try-it panel shows the request working (HTTP 200) with an unreadable body.
 
 // The Scalar reference UI — the UMD `standalone.js`, the ONE self-contained file (the ES-module build
 // dynamic-imports 180 sibling chunks). It defines `window.Scalar`. The browser build ships this file beside
@@ -25,13 +25,17 @@ const VERSION = '0.1.0';
 export const SCALAR_VERSION = '1.67.0';
 const SCALAR_CDN = `https://cdn.jsdelivr.net/npm/@scalar/api-reference@${SCALAR_VERSION}/dist/browser/standalone.js`;
 
-export function buildOpenApiSpec(pathPrefix: string) {
+/** Build the OpenAPI 3.1 document. `baseUrl` is the ABSOLUTE origin (`servers[0].url`) the paths compose
+ *  against — the request's own origin (Bun/CF), or the browser build's sub-path base; `version` is the
+ *  stamped `src/version.ts` value. Both are passed in per request so neither is frozen at construction. */
+export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: string) {
  const graphPath = `/${pathPrefix}/{graphId}`;
+ const graphqlPath = `/graphql/{graphId}`;
  return {
   openapi: '3.1.0',
   info: {
     title: 'mogwai-db',
-    version: VERSION,
+    version,
     description:
       'A TinkerPop 4 Gremlin server compiled onto SQLite. Each graph is addressed ' +
       `at \`${graphPath}\` and springs into existence on first access. \`POST\` runs a ` +
@@ -39,7 +43,7 @@ export function buildOpenApiSpec(pathPrefix: string) {
       'management verbs are idempotent and create-on-demand. A stock TinkerPop client ' +
       'may also POST to the bare `/gremlin` endpoint, naming the graph in the `g` field.',
   },
-  servers: [{ url: '/', description: 'This server' }],
+  servers: [{ url: baseUrl, description: 'This server' }],
   paths: {
     [graphPath]: {
       parameters: [
@@ -158,13 +162,95 @@ export function buildOpenApiSpec(pathPrefix: string) {
         responses: { '204': { description: 'Destroyed (or already absent).' } },
       },
     },
+    [graphqlPath]: {
+      parameters: [
+        {
+          name: 'graphId',
+          in: 'path',
+          required: true,
+          description: 'Tenant/graph identifier. Any string; created on first use.',
+          schema: { type: 'string' },
+          example: 'demo',
+        },
+      ],
+      post: {
+        summary: 'Run a GraphQL query (JSON body)',
+        description:
+          'GraphQL-over-HTTP against the graph, whose GraphQL schema is REFLECTED from the graph itself. ' +
+          'The body is the standard `{query, variables, operationName, extensions}` object; only `query` ' +
+          'is required. The response is a spec-shaped `{data}` / `{errors}` envelope. Two response media ' +
+          'types are offered and the request `Accept` chooses: `application/graphql-response+json` (the ' +
+          'modern one) returns 4xx for a parse/validation failure, while `application/json` (the legacy ' +
+          'transport) returns 200 with `{errors}`; an execution failure of a valid document is always 200 ' +
+          'with `{errors}`. A POST must carry `Content-Type: application/json`.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['query'],
+                properties: {
+                  query: { type: 'string', description: 'The GraphQL document to execute.' },
+                  variables: {
+                    type: 'object',
+                    additionalProperties: true,
+                    description: 'Variable values referenced by the query. A JSON `null` means absent.',
+                  },
+                  operationName: {
+                    type: 'string',
+                    description: 'Selects the operation when the document defines more than one.',
+                  },
+                  extensions: {
+                    type: 'object',
+                    additionalProperties: true,
+                    description: 'Reserved for implementer extensions (e.g. `mogwai:explain` to return the lowered Gremlin).',
+                  },
+                },
+              },
+              examples: {
+                query: {
+                  summary: 'Select fields off a type',
+                  value: { query: '{ person { name age } }' },
+                },
+                introspection: {
+                  summary: 'Introspect the reflected schema',
+                  value: { query: '{ __schema { queryType { name } } }' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'A `{data}` (and/or `{errors}`) GraphQL envelope.', content: GRAPHQL_RESPONSE_CONTENT },
+          '400': { description: 'Malformed transport (missing `Content-Type`, non-JSON body, or bad params).', content: GRAPHQL_RESPONSE_CONTENT },
+        },
+      },
+      get: {
+        summary: 'Run a GraphQL query (query string)',
+        description:
+          'The GET form of GraphQL-over-HTTP: `query` is a query-string parameter, and `variables` / ' +
+          '`extensions` are JSON-ENCODED strings (a malformed one is a 400). Response semantics match the ' +
+          'POST form (`Accept` selects the media type and its error-status behaviour).',
+        parameters: [
+          { name: 'query', in: 'query', required: true, description: 'The GraphQL document.', schema: { type: 'string' }, example: '{ person { name } }' },
+          { name: 'variables', in: 'query', required: false, description: 'JSON-encoded variable map.', schema: { type: 'string' } },
+          { name: 'operationName', in: 'query', required: false, description: 'Operation to select when the document has several.', schema: { type: 'string' } },
+          { name: 'extensions', in: 'query', required: false, description: 'JSON-encoded implementer extensions.', schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'A `{data}` (and/or `{errors}`) GraphQL envelope.', content: GRAPHQL_RESPONSE_CONTENT },
+          '400': { description: 'Malformed transport (missing/JSON-invalid params).', content: GRAPHQL_RESPONSE_CONTENT },
+        },
+      },
+    },
     '/_replicator': {
       get: {
         summary: 'List replication jobs',
         description:
           'List all persistent replication jobs (§9). Ongoing replication is a standalone job — a ' +
           '`{source, target, continuous, …}` document run by the worker-residency scheduler — kept in the ' +
-          'top-level `_replicator` control plane, CouchDB-style. NOT per-graph.',
+          'top-level `_replicator` control plane. NOT per-graph.',
         responses: {
           '200': {
             description: 'The stored replication jobs.',
@@ -217,14 +303,14 @@ export function buildOpenApiSpec(pathPrefix: string) {
     '/_scheduler/jobs': {
       get: {
         summary: 'Replication scheduler jobs',
-        description: 'Per-config scheduler state (CouchDB `_scheduler/jobs`): state, error count, last run info.',
+        description: 'Per-config scheduler state: state, error count, last run info.',
         responses: { '200': { description: 'Scheduler jobs.', content: { 'application/json': { schema: { type: 'object', properties: { jobs: { type: 'array', items: { type: 'object' } } } } } } } },
       },
     },
     '/_scheduler/docs': {
       get: {
         summary: 'Replication jobs with scheduler state',
-        description: 'Each replication job merged with its scheduler state (CouchDB `_scheduler/docs`).',
+        description: 'Each replication job merged with its scheduler state.',
         responses: { '200': { description: 'Jobs + state.', content: { 'application/json': { schema: { type: 'object', properties: { docs: { type: 'array', items: { type: 'object' } } } } } } } },
       },
     },
@@ -244,6 +330,26 @@ export function buildOpenApiSpec(pathPrefix: string) {
   },
  } as const;
 }
+
+// The GraphQL `{data, errors}` envelope, offered at BOTH media types the GraphQL-over-HTTP spec defines
+// (`application/graphql-response+json` — modern, 4xx on failure — and `application/json` — legacy, 200 on
+// failure). Same body schema; the request `Accept` picks the media type and its error-status semantics.
+const GRAPHQL_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    data: { type: 'object', additionalProperties: true, nullable: true, description: 'The query result, keyed by root field.' },
+    errors: {
+      type: 'array',
+      description: 'Present when the request errored; each carries a `message` and (for a document error) `locations`.',
+      items: { type: 'object', properties: { message: { type: 'string' }, locations: { type: 'array', items: { type: 'object' } } } },
+    },
+    extensions: { type: 'object', additionalProperties: true, description: 'Implementer extensions (e.g. the lowered Gremlin under `mogwai:explain`).' },
+  },
+} as const;
+const GRAPHQL_RESPONSE_CONTENT = {
+  'application/json': { schema: GRAPHQL_RESPONSE_SCHEMA },
+  'application/graphql-response+json': { schema: GRAPHQL_RESPONSE_SCHEMA },
+} as const;
 
 // A stored replication job (§9·2). `source`/`target` are graph refs — a local graph id or a remote
 // `http(s)` graph URL. The INPUT form omits `id` (generated on POST, path-supplied on PUT).
@@ -294,13 +400,11 @@ function docsHtml(scalarUrl: string, bootScript?: string): string {
 `;
 }
 
-/** Build the self-describing surface for a given graph-path prefix. Returns the JSON the router serves at
- *  `/openapi.json` and the Scalar shell for `/docs`. `scalarUrl` selects where the Scalar UI module loads
- *  from (the pinned CDN by default; the browser build passes `./scalar.js`); `bootScript` optionally boots
- *  the browser factory on the docs page (the browser build passes `./mogwai-db.js`). */
-export function buildDocs(pathPrefix: string, scalarUrl: string = SCALAR_CDN, bootScript?: string) {
-  return {
-    OPENAPI_JSON: JSON.stringify(buildOpenApiSpec(pathPrefix)),
-    DOCS_HTML: docsHtml(scalarUrl, bootScript),
-  };
+/** Build the static Scalar shell for `/docs`. Prefix- AND base-independent (it fetches `./openapi.json`
+ *  relative to the page), so it is built ONCE at router construction, unlike the spec — which is
+ *  request-derived (`buildOpenApiSpec`, served at `/openapi.json`). `scalarUrl` selects where the Scalar UI
+ *  module loads from (the pinned CDN by default; the browser build passes `./scalar.js`); `bootScript`
+ *  optionally boots the browser factory on the docs page (the browser build passes `./mogwai-db.js`). */
+export function buildDocs(scalarUrl: string = SCALAR_CDN, bootScript?: string) {
+  return { DOCS_HTML: docsHtml(scalarUrl, bootScript) };
 }

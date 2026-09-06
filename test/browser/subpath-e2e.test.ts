@@ -17,7 +17,7 @@ const wasmPath = () => Bun.fileURLToPath(import.meta.resolve('@sqlite.org/sqlite
 const bundle = (rel: string) => bundleBrowser(Bun.fileURLToPath(import.meta.resolve(rel)));
 
 describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages shape)', () => {
-  let out: { onDocs: string; docsHasScalar: boolean; scalarStatus: number; openapi: string; putStatus: number; postStatus: number; vertexCount: number };
+  let out: { onDocs: string; docsHasScalar: boolean; scalarStatus: number; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
   let fatal: string | undefined;
 
   beforeAll(async () => {
@@ -71,6 +71,7 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
           docsHasScalar: (await (await fetch('./docs')).text()).includes('createApiReference'),
           scalarStatus: (await fetch('./scalar.js')).status,
           openapi: String(spec.openapi),
+          serverUrl: String(spec.servers?.[0]?.url),
           putStatus: put.status,
           postStatus: post.status,
           vertexCount: info.vertexCount,
@@ -89,6 +90,12 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
   test('the docs shell is served (Scalar reference)', () => { expect(out.docsHasScalar).toBe(true); });
   test('the Scalar UI is vendored (served locally, not a CDN)', () => { expect(out.scalarStatus).toBe(200); });
   test('openapi.json is served under the sub-path', () => { expect(out.openapi).toMatch(/^3\./); });
+  test('the spec servers[0].url is the absolute sub-path base (so the Scalar "try it" composes)', () => {
+    // Request-derived + SW-supplied: the SW strips /mogwai-db/ before routing, so the base is threaded via
+    // docsBaseUrl. It must end with the sub-path (no trailing slash) so `/gremlin/{graphId}` composes right.
+    expect(out.serverUrl).toMatch(/\/mogwai-db$/);
+    expect(out.serverUrl).toMatch(/^https?:\/\//);
+  });
   test('the graph API works under the sub-path', () => {
     expect(out.putStatus).toBe(201);
     expect(out.postStatus).toBe(200);

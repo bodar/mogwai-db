@@ -16,7 +16,7 @@ import type { GraphManager } from './manager.ts';
 import type { Http } from './api.ts';
 import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
-import { buildDocs } from './docs.ts';
+import { buildDocs, buildOpenApiSpec } from './docs.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
 import { type ReplicatorRegistry, type ReplicationConfig, newConfigId } from './replicator-registry.ts';
 import { isUrl } from './replicate.ts';
@@ -188,6 +188,15 @@ export function makeRouter(
    *  hosts the per-tab WorkerFactory (the landing page redirects here, so this is where the data plane must
    *  live). Bun/CF pass nothing. */
   bootScript?: string,
+  /** The version stamped into the OpenAPI `info.version` (`src/version.ts`). Defaults to `'dev'` for
+   *  callers that don't stamp one (tests, the conformance host). */
+  version = 'dev',
+  /** OVERRIDE for the OpenAPI `servers[0].url` base. Left undefined (Bun/CF), the `/openapi.json` handler
+   *  derives the base from the request's own origin. The browser build passes one because on a sub-path
+   *  deploy (GitHub Pages `/mogwai-db/`) the SW STRIPS that base before the router sees the path, so the
+   *  request no longer carries it. A THUNK is accepted as well as a string: the browser cannot read its
+   *  registration scope at construction (before the SW installs), so it defers the read to request time. */
+  docsBaseUrl?: string | (() => string | undefined),
 ): Http {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   // The replicator control plane is TOP-LEVEL (like /docs), not under the graph prefix: `/_replicator`
@@ -204,7 +213,7 @@ export function makeRouter(
   // over-HTTP protocol and JSON envelope, never the Gremlin wire, so it does not share the
   // configurable gremlin prefix or the verb-dispatch below.
   const gqlPath = new RegExp('^/graphql/([^/]+)/?$');
-  const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix, scalarUrl, bootScript);
+  const { DOCS_HTML } = buildDocs(scalarUrl, bootScript);
 
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);
@@ -214,8 +223,17 @@ export function makeRouter(
       if (pathname === '/') return Response.redirect(new URL('/docs', req.url).toString(), 302);
       if (pathname === '/docs')
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-      if (pathname === '/openapi.json')
-        return new Response(OPENAPI_JSON, { headers: { 'Content-Type': 'application/json' } });
+      if (pathname === '/openapi.json') {
+        // Request-derived so `servers[0].url` is the ABSOLUTE base this request arrived on and the spec's
+        // paths compose. `docsBaseUrl` (a string, or a thunk resolved now) OVERRIDES — the browser SW
+        // supplies its sub-path base, which it strips before routing so the request can't reveal it. Bun/CF
+        // leave it undefined and fall back to the request origin (e.g. `http://localhost:8182`).
+        const override = typeof docsBaseUrl === 'function' ? docsBaseUrl() : docsBaseUrl;
+        const base = override ?? new URL(req.url).origin;
+        return new Response(JSON.stringify(buildOpenApiSpec(pathPrefix, base, version)), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // The replicator control plane (§9) — top-level CRUD over persistent replication jobs. Matched before
