@@ -428,6 +428,43 @@ function gremlinContract(getOrigin: () => string) {
       expect(parsed.result.data.map((x: any) => Number(x))).toEqual([1, 2, 3, 4, 5]);
     });
 
+    test('content negotiation: Accept application/json returns readable untyped JSON (real edge, incl. workerd)', async () => {
+      // Exercise the CONTENT-NEGOTIATED JSON response over the real HTTP edge on THIS runtime — crucially
+      // including the Cloudflare DO RPC boundary (the json path ships to the DO and renders in the store
+      // tier), which only a real-workerd run proves (a green Bun run is not sufficient — see the workerd
+      // structured-clone wall). A fresh graph so it is isolated from the seed above.
+      const origin = getOrigin();
+      const gid = `json-${Date.now()}`;
+      await fetch(`${origin}/gremlin/${gid}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gremlin: "g.addV('person').property('name','dan').property('age',44)" }),
+      });
+      // A scalar reducer → a one-element JSON array of a plain number (NOT GraphBinary).
+      const countRes = await fetch(`${origin}/gremlin/${gid}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ gremlin: 'g.V().count()' }),
+      });
+      expect(countRes.headers.get('content-type')).toContain('application/json');
+      expect((await countRes.json()) as number[]).toEqual([1]);
+      // A vertex → an untyped object carrying its MATERIALIZED properties (the whole point: rendered from
+      // the node tree, which keeps properties — not the property-dropping GraphBinary decode).
+      const vRes = await fetch(`${origin}/gremlin/${gid}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ gremlin: "g.V().hasLabel('person')" }),
+      });
+      const arr = (await vRes.json()) as any[];
+      expect(arr).toHaveLength(1);
+      expect(arr[0].label).toEqual(['person']);
+      expect(arr[0].properties.name[0].value).toBe('dan');
+      expect(arr[0].properties.age[0].value).toBe(44);
+      // A stock GraphBinary client (no JSON Accept) is UNAFFECTED — still binary.
+      const binRes = await fetch(`${origin}/gremlin/${gid}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gremlin: 'g.V().count()' }),
+      });
+      expect(binRes.headers.get('content-type')).toBe('application/vnd.graphbinary-v4.0');
+    });
+
     test('vertex round-trips id, label, and materialized properties', async () => {
       const v = (await g.V().has('name', 'ada').next()).value;
       expect(v.id).toBe(ada.id);

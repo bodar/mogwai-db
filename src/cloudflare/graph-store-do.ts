@@ -15,7 +15,7 @@ import { NO_IO_STORE } from '../iostore.ts';
 import { allowlistedHttp } from '../http-allowlist.ts';
 import { configFromWorkerEnv, type WorkerConfigEnv } from '../config.ts';
 import { httpAwareIoStore } from '../http-io.ts';
-import { rpcTry, type RpcFailure, type RpcResult } from '../rpc.ts';
+import { rpcTry, type JsonResult, type RpcFailure, type RpcResult } from '../rpc.ts';
 import type { ReplicatorRegistryDO } from './replicator-registry-do.ts';
 
 // Env extends WorkerConfigEnv, which carries the shared config source: `PATH_PREFIX`, the outbound-HTTP
@@ -90,6 +90,19 @@ export class GraphDatabase extends DurableObject<Env> {
    *  the storage tier. */
   async framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<RpcResult<Framed[]>> {
     return rpcTry(() => this.executor().framedAsync(gremlin, params, paramTypes));
+  }
+
+  /** Data-plane RPC: compile + run + render the UNTYPED-JSON response inside the DO (the readable
+   *  `Accept: application/json` form), returning the JSON array string — or `null` when the result shape
+   *  is not yet renderable, so the edge falls back to GraphBinary. The node tree must be built where the
+   *  store lives (element properties come from the rows), and a JSON string crosses the RPC boundary
+   *  trivially. GraphBinary stays the default the real GLV clients get. */
+  async json(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<RpcResult<JsonResult>> {
+    return rpcTry(async () => {
+      const rendered = await this.executor().jsonAsync(gremlin, params, paramTypes);
+      // `null` (an unsupported shape) can't cross as an RPC payload — wrap it so the edge can fall back.
+      return rendered === null ? { unsupported: true } : { json: rendered };
+    });
   }
 
   /** Data-plane RPC: run + FRAME an ALREADY-COMPILED plan — a `read` Compiled or a `program` write,

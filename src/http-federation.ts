@@ -109,6 +109,9 @@ export class HttpForeignExecutor implements Executor {
   framedAsync(): Promise<Framed[]> {
     return Promise.reject(new Error(`federate(http): a client-wire query cannot be run against a remote peer (${this.url}); a URI graph id is reachable only as a federation target`));
   }
+  jsonAsync(): Promise<string | null> {
+    return Promise.reject(new Error(`federate(http): a client-wire query cannot be run against a remote peer (${this.url}); a URI graph id is reachable only as a federation target`));
+  }
   framed(): Framed[] {
     throw new Error(`federate(http): a synchronous query cannot be run against a remote peer (${this.url})`);
   }

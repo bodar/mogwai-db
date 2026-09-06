@@ -105,6 +105,13 @@ export class GraphWorkerHost extends RpcTarget {
     return this.executor.framedAsync(gremlin, params, paramTypes);
   }
 
+  /** Compile + run + render the readable UNTYPED-JSON response (content negotiation, `Accept:
+   *  application/json`) — the JSON array string, or `null` when the result shape is not yet renderable so
+   *  the manager falls back to GraphBinary. The browser twin of the DO `json` RPC. */
+  json(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<string | null> {
+    return this.executor.jsonAsync(gremlin, params, paramTypes);
+  }
+
   /** The detached-row transfer a sibling's federated hop lands through — the manager invokes this
    *  when another graph's Worker federates INTO this one (the browser twin of the DO `runForeign` RPC). */
   runForeign(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {

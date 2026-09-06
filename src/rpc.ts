@@ -19,12 +19,19 @@ import type { Framed } from './execute.ts';
 import type { ForeignResult } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 
+/** The untyped-JSON data-plane result crossing a DO RPC (`GraphDatabase.json`) — the readable
+ *  `Accept: application/json` response rendered inside the DO. A WRAPPER rather than a bare `string |
+ *  null`, because the RPC payload bound forbids `null`: `{ json }` carries the rendered array string,
+ *  `{ unsupported: true }` says the shape is not renderable so the edge falls back to GraphBinary. Neither
+ *  arm carries `__rpcError`, so `rpcUnwrap`'s brand discriminant still separates success from failure. */
+export type JsonResult = { readonly json: string } | { readonly unsupported: true };
+
 /** The data-plane payloads that may cross a data-plane RPC boundary (a DO RPC or a browser Worker
  *  postMessage). `Framed[]` (framed()/runFramed()), `ForeignResult`
- *  (runForeign(), a federated hop — a shape-tagged result, elements or a reduced scalar), and `BarrierInput[]`
- *  (readHead(), Worker-driven federation §4·2). A new RPC that returns something else must add its
- *  payload here — the bound is deliberately closed. */
-type RpcPayload = Framed[] | ForeignResult | BarrierInput[];
+ *  (runForeign(), a federated hop — a shape-tagged result, elements or a reduced scalar), `BarrierInput[]`
+ *  (readHead(), Worker-driven federation §4·2), and `JsonResult` (json(), the readable response). A new
+ *  RPC that returns something else must add its payload here — the bound is deliberately closed. */
+type RpcPayload = Framed[] | ForeignResult | BarrierInput[] | JsonResult;
 
 /** A failure crossing a data-plane RPC boundary as data. The brand key (`__rpcError`) is what `rpcUnwrap`
  *  discriminates on — a success payload never carries it (an array cannot, and `ForeignResult`'s

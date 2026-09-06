@@ -78,11 +78,12 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
         summary: 'Run a Gremlin traversal',
         description:
           'Execute a Gremlin traversal against the graph (created on demand). The ' +
-          'request may be JSON (shown here) or GraphBinary. The RESPONSE is always ' +
-          'GraphBinary (`application/vnd.graphbinary-v4.0`) — a binary body the ' +
-          '"Test Request" panel cannot render; a JSON/GraphSON response is a planned ' +
-          'improvement. HTTP status is always 200; Gremlin errors ride the ' +
-          'GraphBinary status trailer inside the body.',
+          'request may be JSON (shown here) or GraphBinary. The response is content-' +
+          'negotiated: GraphBinary (`application/vnd.graphbinary-v4.0`) by DEFAULT — ' +
+          'the compact binary the real GLV clients get — or, when the request sends ' +
+          '`Accept: application/json`, a readable UNTYPED-JSON array (this panel does ' +
+          'that, so the result renders here). HTTP status is always 200; Gremlin ' +
+          'errors ride the GraphBinary status trailer inside the body.',
         requestBody: {
           required: true,
           content: {
@@ -124,8 +125,10 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
         },
         responses: {
           '200': {
-            description: 'GraphBinary-framed result stream (binary).',
-            content: { 'application/vnd.graphbinary-v4.0': { schema: { type: 'string', format: 'binary' } } },
+            description:
+              'The result. Content-negotiated: a readable UNTYPED-JSON array when the request sent ' +
+              '`Accept: application/json` (as this panel does), else the default GraphBinary stream (binary).',
+            content: GREMLIN_RESULT_CONTENT,
           },
         },
       },
@@ -153,10 +156,11 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
           'Execute a read traversal built from the URL, the CACHEABLE counterpart to the ' +
           'POST body form (a GET is cacheable by any HTTP intermediary; a POST is not). The ' +
           'traversal comes from the required `gremlin` query parameter — no request body is ' +
-          'read. The RESPONSE is GraphBinary (`application/vnd.graphbinary-v4.0`), identical ' +
-          'to POST: a binary body the "Test Request" panel cannot render, HTTP status always ' +
-          '200 with Gremlin errors on the GraphBinary status trailer. For graph metadata ' +
-          '(element counts) use OPTIONS; a missing `gremlin` parameter is a 400.',
+          'read. The response is content-negotiated exactly as POST: GraphBinary ' +
+          '(`application/vnd.graphbinary-v4.0`) by default, or a readable UNTYPED-JSON array ' +
+          'when the request sends `Accept: application/json`. HTTP status always 200 with ' +
+          'Gremlin errors on the GraphBinary status trailer. For graph metadata (element ' +
+          'counts) use OPTIONS; a missing `gremlin` parameter is a 400.',
         parameters: [
           { name: 'gremlin', in: 'query', required: true, description: 'The Gremlin traversal string.', schema: { type: 'string' }, example: 'g.V().count()' },
           { name: 'bindings', in: 'query', required: false, description: 'JSON-encoded parameter bindings referenced by the traversal (a malformed value errors on the trailer).', schema: { type: 'string' } },
@@ -164,8 +168,10 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
         ],
         responses: {
           '200': {
-            description: 'GraphBinary-framed result stream (binary).',
-            content: { 'application/vnd.graphbinary-v4.0': { schema: { type: 'string', format: 'binary' } } },
+            description:
+              'The result. Content-negotiated: a readable UNTYPED-JSON array with `Accept: application/json`, ' +
+              'else the default GraphBinary stream (binary).',
+            content: GREMLIN_RESULT_CONTENT,
           },
           '400': {
             description: 'The required `gremlin` query parameter is absent.',
@@ -376,6 +382,18 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
   },
  } as const;
 }
+
+// The gremlin data-plane result, offered at BOTH negotiated media types. `application/json` is listed
+// FIRST so the Scalar "Test Request" panel selects it (and sends `Accept: application/json`), making the
+// browser response readable out of the box; a real GLV client sends the GraphBinary Accept and gets the
+// binary. The JSON body is an ARRAY of the (bulk-expanded) result values in untyped GraphSON element
+// form (`src/untyped.ts`) — heterogeneous, so `items` is unconstrained.
+const GREMLIN_RESULT_CONTENT = {
+  'application/json': {
+    schema: { type: 'array', items: {}, description: 'Result values as an untyped-JSON array (opt-in via `Accept: application/json`).' },
+  },
+  'application/vnd.graphbinary-v4.0': { schema: { type: 'string', format: 'binary' } },
+} as const;
 
 // The GraphQL `{data, errors}` envelope, offered at BOTH media types the GraphQL-over-HTTP spec defines
 // (`application/graphql-response+json` — modern, 4xx on failure — and `application/json` — legacy, 200 on

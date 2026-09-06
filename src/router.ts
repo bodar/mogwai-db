@@ -15,7 +15,7 @@
 import type { GraphManager } from './manager.ts';
 import type { Http } from './api.ts';
 import { parseRequest, parseJsonQuery } from './wire.ts';
-import { streamBuffers, errorResponse } from './http.ts';
+import { streamBuffers, jsonResultResponse, errorResponse } from './http.ts';
 import { buildDocs, buildOpenApiSpec } from './docs.ts';
 import type { AssetStore } from './assetstore.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
@@ -25,6 +25,25 @@ import { isUrl } from './replicate.ts';
 /** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
  *  `g` field). A fixed convention, independent of the configurable graph prefix. */
 const BARE_ENDPOINT = '/gremlin';
+
+/** The GraphBinary media type (the data-plane DEFAULT), and the opt-in readable one. */
+const GRAPHBINARY_MT = 'application/vnd.graphbinary-v4.0';
+const JSON_MT = 'application/json';
+
+/**
+ * Content negotiation for the gremlin DATA plane: does this request want the readable UNTYPED-JSON
+ * response, or GraphBinary (the default the real GLV clients get)?
+ *
+ * JSON only when `Accept` names `application/json` AND does NOT name the GraphBinary type — so a stock
+ * GLV (which sends `application/vnd.graphbinary-v4.0`, and may also list JSON while preferring binary)
+ * always gets GraphBinary. A MISSING `Accept`, or `*​/*`, stays GraphBinary — the safety line: stock
+ * clients that omit `Accept` are never broken. Parsed loosely by substring, mirroring
+ * `graphql/edge.ts`'s `negotiate` (the audit-style clients never send q-values that reorder these two),
+ * but NOT shared with it — the media types differ. It only ever UPGRADES to JSON when explicitly asked.
+ */
+function wantsJson(accept: string | null): boolean {
+  return accept != null && accept.includes(JSON_MT) && !accept.includes(GRAPHBINARY_MT);
+}
 
 // The docs' static assets, served from the injected AssetStore (Bun from the binary-embedded copy, CF from
 // the Workers Static Assets binding) rather than a CDN. Three entries: the Scalar UI module `scalarUrl:
@@ -75,7 +94,15 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
     const raw = Buffer.from(await req.arrayBuffer());
     const { gremlin, params, paramTypes, g, batchSize, bulked } = await parseRequest(raw);
     const id = pathId ?? g ?? 'g';
-    const framed = await mgr.executor(id).framedAsync(gremlin, params, paramTypes);
+    const exec = mgr.executor(id);
+    // Content negotiation (opt-in): a JSON-accepting request gets the readable untyped-JSON response —
+    // UNLESS the executor can't render it (no `jsonAsync`) or the result shape isn't covered yet
+    // (`resolveJson` → null), in which case we fall through to the byte-identical GraphBinary path.
+    if (wantsJson(req.headers.get('Accept')) && exec.jsonAsync) {
+      const json = await exec.jsonAsync(gremlin, params, paramTypes);
+      if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
+    }
+    const framed = await exec.framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });
     return streamBuffers(framed, batchSize, bulked);
   } catch (e: any) {
@@ -89,8 +116,9 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
 // body is read — GET has none — so it reuses the JSON-request seam (`parseJsonQuery`) over fields it
 // assembles from the query string. `bindings` is an OPTIONAL JSON-encoded string; a malformed one throws
 // and rides the GraphBinary trailer via errorResponse, the same channel as any compile/SQL error. The
-// RESPONSE is GraphBinary, byte-identical to POST — content negotiation is a later increment.
-async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearchParams, log: QueryLogger): Promise<Response> {
+// RESPONSE honours the same content negotiation as POST (`wantsJson`): GraphBinary by default (byte-
+// identical to POST), readable untyped JSON when the request opts in via `Accept: application/json`.
+async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearchParams, accept: string | null, log: QueryLogger): Promise<Response> {
   try {
     const bindingsRaw = searchParams.get('bindings');
     const rawBatch = searchParams.get('batchSize');
@@ -100,7 +128,13 @@ async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearc
       batchSize: rawBatch != null ? Number(rawBatch) : undefined,
       bulkResults: searchParams.get('bulk') === 'true',
     });
-    const framed = await mgr.executor(id).framedAsync(gremlin, params, paramTypes);
+    const exec = mgr.executor(id);
+    // Same content negotiation as POST (opt-in JSON, GraphBinary default + fallback).
+    if (wantsJson(accept) && exec.jsonAsync) {
+      const json = await exec.jsonAsync(gremlin, params, paramTypes);
+      if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
+    }
+    const framed = await exec.framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });
     return streamBuffers(framed, batchSize, bulked);
   } catch (e: any) {
@@ -416,7 +450,7 @@ export function makeRouter(
         // instead (the old behaviour) would mask a caller who meant to send one. Point them at OPTIONS.
         if (!searchParams.get('gremlin'))
           return json({ error: `GET /${pathPrefix}/{id} requires a \`gremlin\` query parameter, e.g. ?gremlin=g.V().count(). Use OPTIONS for graph metadata, or POST with a JSON/GraphBinary body.` }, 400);
-        return runGetQuery(mgr, id, searchParams, log);
+        return runGetQuery(mgr, id, searchParams, req.headers.get('Accept'), log);
       }
       case 'OPTIONS': {
         // Graph METADATA — the element counts (+ stamped version) the old GET served, now on the HTTP

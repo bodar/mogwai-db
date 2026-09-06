@@ -10,7 +10,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import type { Compiled } from '../sql/kernel/render.ts';
 import type { BarrierInput } from '../services/spi/types.ts';
 import type { GraphDatabase } from './graph-store-do.ts';
-import { rpcUnwrap, type RpcFailure, type RpcResult } from '../rpc.ts';
+import { rpcUnwrap, type JsonResult, type RpcFailure, type RpcResult } from '../rpc.ts';
 
 /** The edge-side executor for one DO: compile (and render) at the Worker (edge-compilation), then run
  *  the plan on the DO. A non-segment plan (read or write) ships to `runFramed`; a federation segment is
@@ -55,6 +55,16 @@ class EdgeExecutor implements RemoteExecutor {
       return rpcUnwrap(await this.stub.runFramed(final) as RpcResult<Framed[]>);
     }
     return this.runOnDo(gremlin, params, paramTypes);
+  }
+
+  /** The readable untyped-JSON path (content-negotiated). Unlike `framedAsync`, this does NOT edge-compile:
+   *  the readable form is a docs convenience, not a hot path, so it ships the string to the DO, whose own
+   *  executor compiles + runs + renders the node tree (where the store — and thus element properties —
+   *  lives) and returns the JSON array string. `null` (an unsupported shape) makes the router fall back to
+   *  `framedAsync` (GraphBinary); the DO then runs the plan for real exactly once. */
+  async jsonAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<string | null> {
+    const r = rpcUnwrap(await this.stub.json(gremlin, params, paramTypes) as RpcResult<JsonResult>);
+    return 'unsupported' in r ? null : r.json;
   }
 
   async runForeign(gremlin: string, params: Record<string, any>, depth: number, _paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {

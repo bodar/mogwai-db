@@ -34,6 +34,16 @@ function frameTrailer(status = 200, message: string | null = null): Buffer {
   return Buffer.concat(parts);
 }
 
+/** The content-negotiated UNTYPED-JSON data-plane response (`Accept: application/json`) — the readable
+ *  form the browser docs "Test Request" panel shows. `body` is the already-rendered JSON array string
+ *  (`execute.ts resolveJson`); this only wraps it in a `Response` with the JSON content type. A whole
+ *  buffered body (not the chunked GraphBinary stream), because a readable result is small and the point
+ *  is a plain, cacheable JSON document. GraphBinary (`streamBuffers`) remains the default the real GLV
+ *  clients get; this is opt-in. */
+export function jsonResultResponse(body: string): Response {
+  return new Response(body, { headers: { 'Content-Type': 'application/json' } });
+}
+
 /** A pre-stream failure: HEADER + status trailer, no values. HTTP stays 200; the
  *  message rides the GraphBinary trailer and the client raises ResponseError. */
 export function errorResponse(message: string): Response {
