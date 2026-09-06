@@ -27,7 +27,7 @@ import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { comparableTheta, CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
@@ -1060,6 +1060,24 @@ function asStringNullGuard(rel: Rel, value: Expr, fresh: Minter): Binding {
   return { name: `${fresh('ag')}`, node, guard: { message: `Can't parse null as String.`, raiseWhen: 'rows' } };
 }
 
+/** `asNumber(GType.X)` over a RUNTIME value NARROWS to a bounded integer type and must RAISE on overflow —
+ *  `asNumberConst` does so at compile time over a literal (`Can't convert number of type … to X due to
+ *  overflow.`), and SQL cannot, so a runtime narrowing rides this guard: raise iff the pre-cast value is
+ *  outside `[min, max]`. Only the bounded GTypes (byte/short/int) carry a range; long/bigint/real never
+ *  overflow a 64-bit SQLite integer/real, so their callers pass no guard. */
+function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, disp: string, fresh: Minter): Binding {
+  const outOfRange: Expr = { kind: 'binary', op: 'or',
+    left: { kind: 'binary', op: '<', left: value, right: compilerInt(min) },
+    right: { kind: 'binary', op: '>', left: value, right: compilerInt(max) } };
+  const offenders = make.filter({ id: fresh('nof'), input: rel, channels: rel.channels, type: rel.type, pred: outOfRange });
+  const one = make.project({ id: fresh('nop'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const node = make.limit({ id: fresh('nol'), input: one, channels: [], type: one.type, count: compilerInt(1) });
+  // The source type in the message is the reducer's own — a `sum`/`mean` over integers is a Long in
+  // TinkerPop; unwitnessed (no corpus scenario overflows a runtime narrowing), so a wrong source name
+  // would fail loudly and prompt a refinement rather than mis-answer.
+  return { name: `${fresh('no')}`, node, guard: { message: `Can't convert number of type Long to ${disp} due to overflow.`, raiseWhen: 'rows' } };
+}
+
 /** The outcome of `collectionArm`: `'pass'` — not one of its step names, the caller keeps looking;
  *  `'continue'` — a side-effect step handled, the caller's loop continues with its relation unchanged;
  *  `{tail}` — the step re-rooted the stream, return this. */
@@ -1576,6 +1594,38 @@ function scalarTail(
       return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
     }
 
+    // A bare `asNumber()` over a stream that is ALREADY numeric is IDENTITY — `AsNumberStep.map` returns
+    // a Number unchanged. A reducer result (`result:'number'`) carries its type in the `vt` column, not a
+    // static tag, so `transformExpr` (which sees only the static tag, UNKNOWN here) cannot tell it is
+    // numeric — and the cast subfamily's literal-decline would refuse it, since `seed.kind==='values'`
+    // stays true past the reducer though the value is no longer a compile-time literal. State it here:
+    // the value and its `vt`-carried type ride through unchanged. (§6·7 — carry the fact, don't re-derive.)
+    if (step.name === 'asNumber' && !args.length && out.kind === 'scalar' && out.result === 'number') continue;
+
+    // `asNumber(GType.X)` over a stream ALREADY numeric (a reducer result) is a runtime NARROWING. Over a
+    // compile-time literal this const-folds and raises on overflow (`asNumberConst`); over a runtime value
+    // `transformExpr` declines (the cast subfamily's literal-gate, and `seed.kind==='values'` stays true
+    // past the reducer), so it is handled here: cast to the target storage class, and — for a BOUNDED
+    // GType (byte/short/int) — ride an overflow guard that raises TinkerPop's message iff the pre-cast
+    // value is out of range. `d[15].b` for the corpus `…sum().asNumber(GType.BYTE)` (15 is in range).
+    if (step.name === 'asNumber' && args.length && out.kind === 'scalar' && out.result === 'number') {
+      let spec; try { spec = numericSpec(args[0]); } catch { return null; }
+      if (!spec) return null;
+      const value = col(rel.id, 'v');
+      const cast: Expr = spec.as === 'bigdecimal' ? value : { kind: 'cast', arg: value, to: spec.int ? 'int' : 'real' };
+      const carried = rel.channels;
+      const projected = make.project({
+        id: fresh('an'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
+        exprs: [['v', cast], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      const framing: RelFraming = { kind: 'scalar', type: STATIC(spec.as) };
+      if (spec.min === undefined) { rel = projected; out = framing; continue; }
+      const guard = asNumberOverflowGuard(rel, value, spec.min, spec.max!, spec.disp, fresh);
+      const tail = scalarTail(projected, framing, steps, at + 1, bulked, ctx, fresh, labels);
+      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+    }
+
     // `asString()` over a SCALAR value RAISES on a null — the reference stringifies with `String.valueOf`
     // but throws "Can't parse null as String." for a null traverser (global) or a null item (local)
     // (`AsStringGlobalStep.java:44-45`, `AsStringLocalStep.java:51-52`). SQL `CAST(v AS TEXT)` gives NULL,
@@ -1946,7 +1996,7 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   // required error becoming the wrong error. The module's `null` contract still means "not learned
   // yet"; this is not that.
   const vals = [...args];
-  let folded: { at: number; as?: string };
+  let folded: { at: number; as?: string; perRow?: (ValueType | null)[] };
   // A `CoercionDeferral` is vocabulary the fold has not learned, so it DECLINES like any other; a
   // `ValueParseError` is the traversal's answer and travels on.
   try { folded = foldConstantCoercions(steps as IRStep[], vals); }
@@ -1979,7 +2029,12 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   // it means "the JS client genuinely cannot say", and this was "our source cannot carry two". A
   // mixed `inject(UUID(…), datetime(…))` discarded BOTH declared types and framed both by guessing
   // at a JS string and a JS number — a wrong wire CLASS, not a wrong tag.
-  const declared: readonly (ValueType | null)[] = folded.at === 1 ? injectValueTypes(steps, vals.length) : [];
+  // A bare `asNumber()` over MIXED numeric subtypes hands back the per-value tags it computed
+  // (`foldConstantCoercions.perRow`, §6·7) — the values are already coerced, so these are the POST-fold
+  // subtypes, not the original arg types `injectValueTypes` would read. Otherwise the per-arg declared
+  // types drive the per-row framing, but only for a first-position source (a fold past position 1 has
+  // retyped the stream, so the declared arg types no longer describe the values).
+  const declared: readonly (ValueType | null)[] = folded.perRow ?? (folded.at === 1 ? injectValueTypes(steps, vals.length) : []);
   const uniform = declared.length > 0 && declared.every((t) => t !== null && t === declared[0]);
   const perRowType = declared.some((t) => t !== null) && !uniform;
   // Computed before the rows because a tail member's inline is only sound when the stream frames

@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,844<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,845<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -184,7 +184,7 @@ heterogeneous stream frames each value by its own tag.
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | |
 | `asString` | ✅ | works over every shape (a collection renders through a JS barrier) and through a global `order().fold()` (a nested barrier); a NULL value / list member RAISES `Can't parse null as String.` via a runtime guard (`AsStringGlobalStep`/`AsStringLocalStep`) |
-| `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
+| `asNumber` | 🟡 | mixed numeric subtypes ride per-row (§6·7); a bare `asNumber()` / `asNumber(GType)` after a reducer works (`GType` rides a runtime overflow guard); ❌ over an `unfold()`-ed list member |
 | `reverse` | ✅ | ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
 | `split` | 🟡 | ❌ `split(Scope.local, sep)` over a folded list, and a LIST-shaped head — both fail-closed deferrals |
 

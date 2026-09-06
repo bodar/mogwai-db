@@ -296,11 +296,18 @@ const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dat
  * Typed on `Step`, not the compiler's `IRStep`: the fold reads `name` and `args` only, so it stays
  * on the front-end side of the boundary with the coercion semantics it is made of.
  */
-export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at: number; as?: ValueType } {
+export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at: number; as?: ValueType; perRow?: (ValueType | null)[] } {
   let at = 1;
   let as: ValueType | undefined;
+  // §6·7 — when a bare `asNumber()` coerces a stream of MIXED numeric subtypes, the whole stream cannot
+  // share one static tag, so each value keeps its own (the per-row spelling). Set only by that arm; a
+  // later uniform coercion (`asBool`/`asDate`/…) re-coerces every value and clears it.
+  let perRow: (ValueType | null)[] | undefined;
   for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {
     const step = steps[at];
+    // Cleared each iteration: `perRow` is meaningful only when the asNumber-mixed arm is the LAST
+    // coercion in the prefix — any following uniform coercion re-coerces every value and supersedes it.
+    perRow = undefined;
     // A traversal date is an apply-style child value, not a constant coercion. Leave it
     // for the scalar dispatcher, which provisions the correlated child scope.
     if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, {})) break;
@@ -320,21 +327,22 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
           continue;
         }
         const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
-        let uniform: ValueType | undefined;
+        const subtypes: (ValueType | null)[] = [];
         for (let i = 0; i < vals.length; i++) {
           // A null object stays null (`AsNumberStep.map` returns null before parsing), and contributes
           // no subtype to the uniform decision — it frames as null whatever tag the stream settles on.
-          if (vals[i] === null || vals[i] === undefined) continue;
+          if (vals[i] === null || vals[i] === undefined) { subtypes.push(null); continue; }
           const out = asNumberBare(vals[i], flatType(argTypes[i]));
           vals[i] = out.val;
-          if (uniform === undefined) uniform = out.as;
-          else if (uniform !== out.as)
-            // NOT LEARNED YET, so it is a `Deferral` rather than the traversal's own error: an
-            // instrument that treats every throw out of the fold as a contract violation would
-            // otherwise read this as one (§6·5 — two facts, one message, and the class is which).
-            throw new CoercionDeferral('asNumber() over a stream of mixed numeric subtypes not yet supported');
+          subtypes.push(out.as);
         }
-        as = uniform;
+        const nonNull = subtypes.filter((t): t is ValueType => t != null);
+        // §6·7 — a UNIFORM subtype is one static tag; MIXED subtypes ride PER ROW, each value keeping
+        // its own tag, rather than declining. A widening inside the Number family changes no answer
+        // Gremlin can be asked (`GremlinValueComparator` treats every `Number` subclass as one type),
+        // so carrying the per-row tag is exact and costs one column — never a discard, never a guess.
+        if (nonNull.every((t) => t === (nonNull[0] ?? t))) { as = nonNull[0]; perRow = undefined; }
+        else { as = undefined; perRow = subtypes; }
       }
       continue;
     }
@@ -370,5 +378,5 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
     as = 'long';
   }
-  return { at, as };
+  return perRow ? { at, as, perRow } : { at, as };
 }

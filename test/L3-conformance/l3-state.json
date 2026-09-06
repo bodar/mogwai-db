@@ -1,5 +1,5 @@
 {
-  "passing": 1844,
+  "passing": 1845,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1299,6 +1299,7 @@
     "g_injectX1_2X_asString",
     "g_injectX1_2X_asStringXlocalX",
     "g_injectX1_2_3X_tailXlocal_1X_unfold",
+    "g_injectX1_2_3_4_0x5X_asNumber_sum_asNumberXGType_BYTEX",
     "g_injectX1_2_3_4_5X_limitXlocal_1X",
     "g_injectX1_2_3_4_5X_tailXlocal_2X",
     "g_injectX1_2_3_4_5_6X_rangeXlocal_1_2X",
@@ -2181,7 +2182,6 @@
     "g_injectX1X_coalesceXEX_hasLabelXtestsX_addEXtestsX_from_V_hasXnameX_XjoshXX_toXV_hasXnameX_XvadasXXX",
     "g_injectX1_1X_set",
     "g_injectX1_2_3_4X_unfold_asNumber",
-    "g_injectX1_2_3_4_0x5X_asNumber_sum_asNumberXGType_BYTEX",
     "g_injectX1_3X_injectX100_300X",
     "g_injectX1_3_100_300X_set",
     "g_injectX1_null_nullX_path",
