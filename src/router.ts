@@ -14,7 +14,7 @@
 // the official cucumber harness / stock GLVs POST to), so it stays regardless.
 import type { GraphManager } from './manager.ts';
 import type { Http } from './api.ts';
-import { parseRequest } from './wire.ts';
+import { parseRequest, parseJsonQuery } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
 import { buildDocs, buildOpenApiSpec } from './docs.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
@@ -73,6 +73,31 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
     return streamBuffers(framed, batchSize, bulked);
   } catch (e: any) {
     log({ id: pathId ?? 'g', gremlin: '', ok: false, error: e.message });
+    return errorResponse(e.message);
+  }
+}
+
+// The GET data plane: a READ query built from the URL query string (`?gremlin=…`), the CACHEABLE
+// counterpart to the POST body form (a GET is cacheable by any HTTP intermediary; a POST is not). No
+// body is read — GET has none — so it reuses the JSON-request seam (`parseJsonQuery`) over fields it
+// assembles from the query string. `bindings` is an OPTIONAL JSON-encoded string; a malformed one throws
+// and rides the GraphBinary trailer via errorResponse, the same channel as any compile/SQL error. The
+// RESPONSE is GraphBinary, byte-identical to POST — content negotiation is a later increment.
+async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearchParams, log: QueryLogger): Promise<Response> {
+  try {
+    const bindingsRaw = searchParams.get('bindings');
+    const rawBatch = searchParams.get('batchSize');
+    const { gremlin, params, paramTypes, batchSize, bulked } = parseJsonQuery({
+      gremlin: searchParams.get('gremlin')!, // caller already checked present + non-empty
+      bindings: bindingsRaw ? JSON.parse(bindingsRaw) : undefined,
+      batchSize: rawBatch != null ? Number(rawBatch) : undefined,
+      bulkResults: searchParams.get('bulk') === 'true',
+    });
+    const framed = await mgr.executor(id).framedAsync(gremlin, params, paramTypes);
+    log({ id, gremlin, ok: true, results: framed.length });
+    return streamBuffers(framed, batchSize, bulked);
+  } catch (e: any) {
+    log({ id, gremlin: '', ok: false, error: e.message });
     return errorResponse(e.message);
   }
 }
@@ -365,15 +390,31 @@ export function makeRouter(
       case 'PUT': // create-if-absent (idempotent)
         await mgr.create(id);
         return json({ id, created: true }, 201);
-      case 'GET': // info — auto-creates empty on demand, mirroring CF provisioning
-        return json({ id, ...(await mgr.info(id)) });
+      case 'GET': { // read query from `?gremlin=` — the cacheable data-plane verb (metadata moved to OPTIONS)
+        const searchParams = new URL(req.url).searchParams;
+        // Require the query parameter: a bare GET has no traversal to run, and silently serving metadata
+        // instead (the old behaviour) would mask a caller who meant to send one. Point them at OPTIONS.
+        if (!searchParams.get('gremlin'))
+          return json({ error: `GET /${pathPrefix}/{id} requires a \`gremlin\` query parameter, e.g. ?gremlin=g.V().count(). Use OPTIONS for graph metadata, or POST with a JSON/GraphBinary body.` }, 400);
+        return runGetQuery(mgr, id, searchParams, log);
+      }
+      case 'OPTIONS': {
+        // Graph METADATA — the element counts (+ stamped version) the old GET served, now on the HTTP
+        // metadata verb. Auto-creates the graph empty on demand via `mgr.info`, exactly as the old GET
+        // did (existence isn't separately detectable, matching Durable Objects, so this never 404s on a
+        // well-formed id). Minor overload: it doubles as the literal HTTP OPTIONS verb, hence the `Allow`.
+        return new Response(JSON.stringify({ id, version, ...(await mgr.info(id)) }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', 'Allow': 'GET, POST, PUT, DELETE, OPTIONS' },
+        });
+      }
       case 'DELETE': // teardown (idempotent — deleting twice is fine)
         await mgr.destroy(id);
         return new Response(null, { status: 204 });
       default:
         return new Response('Method not allowed', {
           status: 405,
-          headers: { Allow: 'GET, POST, PUT, DELETE' },
+          headers: { Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
         });
     }
   };

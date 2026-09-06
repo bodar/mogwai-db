@@ -37,8 +37,8 @@ async function main() {
     if (n !== 2) throw new Error(`count = ${n}`);
   });
 
-  await check('the Service Worker routes a management GET (JSON) to the manager', async () => {
-    const j = await (await fetch(gremlinUrl)).json() as any;
+  await check('the Service Worker routes a management OPTIONS (JSON) to the manager', async () => {
+    const j = await (await fetch(gremlinUrl, { method: 'OPTIONS' })).json() as any;
     if (j.vertexCount !== 2) throw new Error(JSON.stringify(j));
   });
 

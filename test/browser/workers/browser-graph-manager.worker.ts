@@ -46,8 +46,8 @@ self.onmessage = async () => {
       const d = (await read(A, "g.V().hasLabel('person').values('name')")).map(String).sort();
       if (JSON.stringify(d) !== JSON.stringify(['marko', 'vadas'])) throw new Error(JSON.stringify(d));
     });
-    await check('management GET returns counts JSON, auto-creating an empty graph', async () => {
-      const j = await (await router(new Request(`http://x/gremlin/coord-fresh-${stamp}`))).json() as any;
+    await check('management OPTIONS returns counts JSON, auto-creating an empty graph', async () => {
+      const j = await (await router(new Request(`http://x/gremlin/coord-fresh-${stamp}`, { method: 'OPTIONS' }))).json() as any;
       if (j.vertexCount !== 0 || j.edgeCount !== 0) throw new Error(JSON.stringify(j));
     });
     await check('management PUT creates (201)', async () => {
@@ -57,7 +57,7 @@ self.onmessage = async () => {
     await check('destroy wipes the store; re-address recreates it empty', async () => {
       const del = await router(new Request(`http://x/gremlin/${A}`, { method: 'DELETE' }));
       if (del.status !== 204) throw new Error(`delete status ${del.status}`);
-      const j = await (await router(new Request(`http://x/gremlin/${A}`))).json() as any;
+      const j = await (await router(new Request(`http://x/gremlin/${A}`, { method: 'OPTIONS' }))).json() as any;
       if (j.vertexCount !== 0) throw new Error(`after destroy A = ${JSON.stringify(j)}`);
     });
 

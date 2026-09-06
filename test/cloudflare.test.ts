@@ -11,15 +11,15 @@ let proc: ReturnType<typeof Bun.spawn> | undefined;
 // non-/gremlin path) is served by a plain static docs/404 response that never instantiates a DO, so it
 // goes green the instant the isolate loads — while the DO namespace is still warming. The first
 // DO-touching request then races that warmup and workerd answers 503, which is the management PUT
-// flake. So probe a real `GET /gremlin/{id}` (auto-creates + touches its DO) and treat a 503 — or any
-// non-2xx — as NOT-yet-ready. A fresh id per probe keeps the warmup graphs off the shared ids the tests
-// use (wrangler dev persists to disk).
+// flake. So probe a real `OPTIONS /gremlin/{id}` (the metadata verb — auto-creates + touches its DO) and
+// treat a 503 — or any non-2xx — as NOT-yet-ready. A fresh id per probe keeps the warmup graphs off the
+// shared ids the tests use (wrangler dev persists to disk).
 async function waitForReady(origin: string, timeoutMs = 50_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = '';
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${origin}/gremlin/warmup-${Date.now()}`, { signal: AbortSignal.timeout(2_000) });
+      const res = await fetch(`${origin}/gremlin/warmup-${Date.now()}`, { method: 'OPTIONS', signal: AbortSignal.timeout(2_000) });
       if (res.ok) return; // the DO answered — the subsystem is live, not just the script loaded
       last = `HTTP ${res.status}`;
     } catch (e) {

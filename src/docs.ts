@@ -13,9 +13,10 @@
 // The graph-path prefix is likewise passed in (router.ts owns the default, `gremlin`), so the docs can
 // never drift from the live route. The bare `/gremlin` endpoint is a fixed TinkerPop convention.
 //
-// The management verbs (PUT/GET/DELETE) and the GraphQL edge are plain JSON and fully interactive in the
-// "Test Request" panel. The gremlin POST accepts a JSON request body today, but its RESPONSE is
-// GraphBinary (binary) — the try-it panel shows the request working (HTTP 200) with an unreadable body.
+// The management verbs (PUT/OPTIONS/DELETE) and the GraphQL edge are plain JSON and fully interactive in
+// the "Test Request" panel. Both gremlin data-plane verbs — POST (JSON/GraphBinary body) and the cacheable
+// GET (`?gremlin=`) — RESPOND with GraphBinary (binary): the try-it panel shows the request working
+// (HTTP 200) with an unreadable body. OPTIONS is the graph-metadata (element counts) verb GET used to be.
 
 // The Scalar reference UI — the UMD `standalone.js`, the ONE self-contained file (the ES-module build
 // dynamic-imports 180 sibling chunks). It defines `window.Scalar`. The browser build ships this file beside
@@ -38,8 +39,9 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
     version,
     description:
       'A TinkerPop 4 Gremlin server compiled onto SQLite. Each graph is addressed ' +
-      `at \`${graphPath}\` and springs into existence on first access. \`POST\` runs a ` +
-      'Gremlin traversal; `PUT`/`GET`/`DELETE` manage the graph lifecycle. All ' +
+      `at \`${graphPath}\` and springs into existence on first access. \`POST\` (body) and ` +
+      'the cacheable `GET` (`?gremlin=`) both run a Gremlin traversal; `OPTIONS` returns ' +
+      'graph metadata (element counts); `PUT`/`DELETE` manage the graph lifecycle. All ' +
       'management verbs are idempotent and create-on-demand. A stock TinkerPop client ' +
       'may also POST to the bare `/gremlin` endpoint, naming the graph in the `g` field.',
   },
@@ -130,14 +132,41 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
         },
       },
       get: {
-        summary: 'Graph info (element counts)',
+        summary: 'Run a Gremlin read traversal (query string)',
         description:
-          'Return element counts for the graph, creating it empty on demand. Existence ' +
-          'is not separately detectable (matching Durable Objects), so this never 404s ' +
-          'on a well-formed id — a fresh graph reports zero counts.',
+          'Execute a read traversal built from the URL, the CACHEABLE counterpart to the ' +
+          'POST body form (a GET is cacheable by any HTTP intermediary; a POST is not). The ' +
+          'traversal comes from the required `gremlin` query parameter — no request body is ' +
+          'read. The RESPONSE is GraphBinary (`application/vnd.graphbinary-v4.0`), identical ' +
+          'to POST: a binary body the "Test Request" panel cannot render, HTTP status always ' +
+          '200 with Gremlin errors on the GraphBinary status trailer. For graph metadata ' +
+          '(element counts) use OPTIONS; a missing `gremlin` parameter is a 400.',
+        parameters: [
+          { name: 'gremlin', in: 'query', required: true, description: 'The Gremlin traversal string.', schema: { type: 'string' }, example: 'g.V().count()' },
+          { name: 'bindings', in: 'query', required: false, description: 'JSON-encoded parameter bindings referenced by the traversal (a malformed value errors on the trailer).', schema: { type: 'string' } },
+          { name: 'batchSize', in: 'query', required: false, description: 'Results per response chunk (default 64). Paces the chunked GraphBinary response.', schema: { type: 'integer' } },
+        ],
         responses: {
           '200': {
-            description: 'Element counts.',
+            description: 'GraphBinary-framed result stream (binary).',
+            content: { 'application/vnd.graphbinary-v4.0': { schema: { type: 'string', format: 'binary' } } },
+          },
+          '400': {
+            description: 'The required `gremlin` query parameter is absent.',
+            content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string' } } } } },
+          },
+        },
+      },
+      options: {
+        summary: 'Graph metadata (element counts)',
+        description:
+          'Return element counts and the server version for the graph, creating it empty on ' +
+          'demand. Existence is not separately detectable (matching Durable Objects), so this ' +
+          'never 404s on a well-formed id — a fresh graph reports zero counts. This is the ' +
+          'metadata verb the graph GET used to serve; GET now runs a read traversal.',
+        responses: {
+          '200': {
+            description: 'Element counts and version. The `Allow` header lists the supported verbs.',
             content: {
               'application/json': {
                 schema: {
@@ -146,9 +175,10 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
                     id: { type: 'string' },
                     vertexCount: { type: 'integer' },
                     edgeCount: { type: 'integer' },
+                    version: { type: 'string' },
                   },
                 },
-                example: { id: 'demo', vertexCount: 6, edgeCount: 6 },
+                example: { id: 'demo', vertexCount: 6, edgeCount: 6, version: '1.0.0' },
               },
             },
           },

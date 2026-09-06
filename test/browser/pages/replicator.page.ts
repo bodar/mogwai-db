@@ -25,7 +25,7 @@ async function main() {
 
   const gremlin = (g: string, text: string) =>
     fetch(`${O}/gremlin/${g}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gremlin: text, batchSize: 10_000 }) });
-  const vertexCount = async (g: string): Promise<number> => ((await (await fetch(`${O}/gremlin/${g}`)).json()) as any).vertexCount;
+  const vertexCount = async (g: string): Promise<number> => ((await (await fetch(`${O}/gremlin/${g}`, { method: 'OPTIONS' })).json()) as any).vertexCount;
 
   await check('registry CRUD round-trips through the SW to the persistent registry Worker', async () => {
     const id = `rjob-crud-${ts}`;

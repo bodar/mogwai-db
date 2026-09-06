@@ -18,7 +18,7 @@ describe.skipIf(!browserLaneEnabled())('browser: Service Worker edge + unmodifie
 
   const NAMES = [
     'a plain fetch is intercepted by the Service Worker and reaches the store',
-    'the Service Worker routes a management GET (JSON) to the manager',
+    'the Service Worker routes a management OPTIONS (JSON) to the manager',
     'the UNMODIFIED TinkerPop GLV works over the Service Worker edge (fetch)',
   ];
 

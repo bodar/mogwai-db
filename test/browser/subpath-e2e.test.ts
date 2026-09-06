@@ -71,7 +71,7 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
         const g = 'e2e-' + Date.now();
         const put = await fetch('gremlin/' + g, { method: 'PUT' });
         const post = await fetch('gremlin/' + g, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ gremlin: "g.addV('x')" }) });
-        const info = await (await fetch('gremlin/' + g)).json() as any;
+        const info = await (await fetch('gremlin/' + g, { method: 'OPTIONS' })).json() as any;
         const spec = await (await fetch('./openapi.json')).json() as any;
         return {
           rootPath: location.pathname,

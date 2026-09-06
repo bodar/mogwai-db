@@ -110,8 +110,8 @@ function replicatorContract(getOrigin: () => string) {
       });
       const tick = (await (await fetch(`${getOrigin()}/_scheduler/run`, { method: 'POST' })).json()) as { ran: number };
       expect(tick.ran).toBeGreaterThanOrEqual(1);
-      // The target now holds the replicated vertex.
-      const info = (await (await fetch(`${getOrigin()}/gremlin/${dst}`)).json()) as { vertexCount: number };
+      // The target now holds the replicated vertex. Metadata (counts) is the OPTIONS verb.
+      const info = (await (await fetch(`${getOrigin()}/gremlin/${dst}`, { method: 'OPTIONS' })).json()) as { vertexCount: number };
       expect(info.vertexCount).toBe(1);
       await fetch(`${getOrigin()}/_replicator/sched-${src}`, { method: 'DELETE' });
     });
@@ -281,7 +281,7 @@ function docsContract(getOrigin: () => string) {
       const spec = (await res.json()) as any;
       expect(spec.openapi).toMatch(/^3\./);
       expect(Object.keys(spec.paths['/gremlin/{graphId}'])).toEqual(
-        expect.arrayContaining(['post', 'put', 'get', 'delete']),
+        expect.arrayContaining(['post', 'put', 'get', 'options', 'delete']),
       );
     });
 
@@ -505,7 +505,7 @@ function gremlinContract(getOrigin: () => string) {
 function ioContract(getOrigin: () => string) {
   describe('io', () => {
     const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
-    const counts = async (id: string) => (await (await fetch(graphUrl(id))).json()) as any;
+    const counts = async (id: string) => (await (await fetch(graphUrl(id), { method: 'OPTIONS' })).json()) as any;
 
     test('a graph dumps itself out and reads back into another — GraphSON and CSV', async () => {
       // One prefix per run: the io namespace is per-DEPLOYMENT (one bucket / one directory), not per
@@ -556,10 +556,24 @@ function managementContract(getOrigin: () => string) {
       expect(res.status).toBe(201);
     });
 
-    test('GET returns element counts, auto-creating an empty graph', async () => {
-      const res = await fetch(graphUrl(freshId('get')));
+    test('OPTIONS returns element counts, auto-creating an empty graph', async () => {
+      const res = await fetch(graphUrl(freshId('meta')), { method: 'OPTIONS' });
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ vertexCount: 0, edgeCount: 0 });
+    });
+
+    test('GET with no `gremlin` param is a 400 (metadata moved to OPTIONS)', async () => {
+      const res = await fetch(graphUrl(freshId('get-bare')));
+      expect(res.status).toBe(400);
+      expect((await res.json() as any).error).toMatch(/gremlin/);
+    });
+
+    test('GET ?gremlin= runs a read traversal and returns a GraphBinary body (200)', async () => {
+      // The cacheable read data plane. The body is GraphBinary (decoding it is out of scope here), so
+      // this asserts the transport — status + content type — not the decoded count.
+      const res = await fetch(`${graphUrl(freshId('get-query'))}?gremlin=${encodeURIComponent('g.V().count()')}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('Content-Type')).toBe('application/vnd.graphbinary-v4.0');
     });
 
     test('full lifecycle: write, count, destroy, recreated empty', async () => {
@@ -570,14 +584,14 @@ function managementContract(getOrigin: () => string) {
         await g.addV('person').property('name', 'x').iterate();
         await g.addV('person').property('name', 'y').iterate();
 
-        const before = (await (await fetch(graphUrl(id))).json()) as any;
+        const before = (await (await fetch(graphUrl(id), { method: 'OPTIONS' })).json()) as any;
         expect(before.vertexCount).toBe(2);
 
         const del = await fetch(graphUrl(id), { method: 'DELETE' });
         expect(del.status).toBe(204);
 
         // Re-addressing recreates the graph empty (CF provisioning; Bun mirrors).
-        const after = (await (await fetch(graphUrl(id))).json()) as any;
+        const after = (await (await fetch(graphUrl(id), { method: 'OPTIONS' })).json()) as any;
         expect(after.vertexCount).toBe(0);
       } finally {
         await drc.close();

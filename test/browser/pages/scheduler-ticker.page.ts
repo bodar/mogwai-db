@@ -34,7 +34,7 @@ async function main() {
     fetch(`${O}${path}`, { method, ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   const gremlin = (g: string, text: string) =>
     fetch(`${O}/gremlin/${g}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gremlin: text, batchSize: 10_000 }) });
-  const vertexCount = async (g: string): Promise<number> => ((await (await fetch(`${O}/gremlin/${g}`)).json()) as any).vertexCount;
+  const vertexCount = async (g: string): Promise<number> => ((await (await fetch(`${O}/gremlin/${g}`, { method: 'OPTIONS' })).json()) as any).vertexCount;
   const jobOf = async (id: string): Promise<any> => {
     const docs = (await (await jsonReq('/_scheduler/docs', 'GET')).json()) as any;
     return docs.docs.find((d: any) => d.id === id)?.job ?? null;

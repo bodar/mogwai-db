@@ -18,7 +18,7 @@ describe.skipIf(!browserLaneEnabled())('browser: manager + makeRouter over per-g
     'router → manager → worker: count on graph A',
     'multi-graph isolation: B is its own Worker + store',
     'values read back through the full edge',
-    'management GET returns counts JSON, auto-creating an empty graph',
+    'management OPTIONS returns counts JSON, auto-creating an empty graph',
     'management PUT creates (201)',
     'destroy wipes the store; re-address recreates it empty',
   ];

@@ -111,38 +111,56 @@ async function decodeFields(r: StreamReaderT): Promise<{ fields: Map<any, any>; 
   return { fields, paramTypes };
 }
 
+/** The JSON-request shape — a decoded body, and equally the field set the router's `?gremlin=` GET
+ *  handler assembles by hand from the query string (GET has no body to sniff). */
+export interface JsonQuery {
+  gremlin: string;
+  parameters?: Record<string, any>;
+  bindings?: Record<string, any>;
+  g?: string;
+  batchSize?: number;
+  resultIterationBatchSize?: number;
+  bulkResults?: boolean;
+}
+
+/** Build a {@link ParsedQuery} from an ALREADY-PARSED JSON request object. The reuse seam shared by
+ *  `parseRequest`'s JSON branch and the router's cacheable `GET ?gremlin=…` path — the two entries that
+ *  carry no GraphBinary type tags. `paramTypes` is therefore always empty: the write seam infers a
+ *  param's vtype from its JS value downstream (same as the JSON body path has always done). */
+export function parseJsonQuery(msg: JsonQuery): ParsedQuery {
+  // batchSize wins over resultIterationBatchSize; 0 / negative / non-numeric → default.
+  const n = Number(msg.batchSize ?? msg.resultIterationBatchSize);
+  return {
+    gremlin: msg.gremlin,
+    params: msg.parameters ?? msg.bindings ?? {},
+    paramTypes: {},
+    g: msg.g,
+    batchSize: n > 0 ? n : DEFAULT_BATCH_SIZE,
+    bulked: msg.bulkResults === true,
+  };
+}
+
 export async function parseRequest(raw: Buffer): Promise<ParsedQuery> {
-  let gremlin: string;
-  let params: Record<string, any>;
-  let paramTypes: Record<string, TypeNode> = {};
-  let g: string | undefined;
-  let rawBatch: any;
-  let bulked = false;
   if (raw[0] === 0x84) {
     // GraphBinary request: 0x84, fields map (bare), gremlin string (bare). The client's
     // deserializers pull from a StreamReader (async since the response-streaming rework,
     // apache/tinkerpop#3395); fromBuffer wraps a COMPLETE buffer, so every read resolves
     // from memory with no I/O — the reader just owns the cursor we used to advance by hand.
     const r = StreamReader.fromBuffer(raw.subarray(1)) as StreamReaderT;
-    const { fields, paramTypes: pt } = await decodeFields(r);
-    paramTypes = pt;
+    const { fields, paramTypes } = await decodeFields(r);
     // BARE (not fully-qualified) — the request writes the gremlin string with no leading
     // type byte, so deserializeValue, not deserialize (which would demand one).
-    gremlin = await ioc.stringSerializer.deserializeValue(r, 0x00, ioc.DataType.STRING);
+    const gremlin = await ioc.stringSerializer.deserializeValue(r, 0x00, ioc.DataType.STRING);
     const bindings = fields?.get?.('bindings') ?? fields?.get?.('parameters') ?? {};
-    params = bindings instanceof Map ? Object.fromEntries(bindings) : bindings;
-    g = fields?.get?.('g');
-    rawBatch = fields?.get?.('batchSize') ?? fields?.get?.('resultIterationBatchSize');
-    bulked = fields?.get?.('bulkResults') === true;
-  } else {
-    const msg = JSON.parse(raw.toString('utf8'));
-    gremlin = msg.gremlin;
-    params = msg.parameters ?? msg.bindings ?? {};
-    g = msg.g;
-    rawBatch = msg.batchSize ?? msg.resultIterationBatchSize;
-    bulked = msg.bulkResults === true;
+    const params = bindings instanceof Map ? Object.fromEntries(bindings) : bindings;
+    const rawBatch = fields?.get?.('batchSize') ?? fields?.get?.('resultIterationBatchSize');
+    const n = Number(rawBatch); // batchSize wins; 0 / negative / non-numeric → default.
+    return {
+      gremlin, params, paramTypes,
+      g: fields?.get?.('g'),
+      batchSize: n > 0 ? n : DEFAULT_BATCH_SIZE,
+      bulked: fields?.get?.('bulkResults') === true,
+    };
   }
-  // batchSize wins over resultIterationBatchSize; 0 / negative / non-numeric → default.
-  const n = Number(rawBatch);
-  return { gremlin, params, paramTypes, g, batchSize: n > 0 ? n : DEFAULT_BATCH_SIZE, bulked };
+  return parseJsonQuery(JSON.parse(raw.toString('utf8')));
 }
