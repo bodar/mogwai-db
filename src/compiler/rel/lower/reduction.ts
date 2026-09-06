@@ -1338,13 +1338,25 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
   // arbitrary-first-row behaviour.
   if (first.name === 'V' || first.name === 'E') {
     const rooted = rootedRead(body, ctx, fresh);
-    if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count'
-      || !collapsedToOneRow(rooted.rel)) return null;
-    const scalar = make.project({
-      id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-      exprs: [['v', col(rooted.rel.id, 'v')]],
-    });
-    return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar') return null;
+    // A reducing barrier (`__.V().count()`) collapses to EXACTLY one row and is always productive — the
+    // fast path is unchanged.
+    if (rooted.framing.result === 'count' && collapsedToOneRow(rooted.rel)) {
+      const scalar = make.project({
+        id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+        exprs: [['v', col(rooted.rel.id, 'v')]],
+      });
+      return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    }
+    // THE GENERAL rooted operand — `TraversalUtil.apply` takes the operand's FIRST result (`P.resolve` /
+    // a `ScalarMapStep`, `vendor/tinkerpop/gremlin-core/.../P.java` `tv.next()`), and where the body ends
+    // in `order()` the first is the ORDERED first, which `firstRootedValue` reads off the encounter
+    // channel (`build.ts` — the one authority the predicate/list operand seams share). An EMPTY re-source
+    // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
+    // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
+    // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
+    const value = firstRootedValue(rooted, fresh);
+    return value && { expr: value, framing: rooted.framing, present: { kind: 'exists', plan: rooted.rel, negated: false }, yields: 'first' };
   }
 
   // THE RECORD ARM — `by(__.project('a','b')…)`, one traverser in and one MAP out.
