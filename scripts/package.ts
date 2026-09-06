@@ -80,9 +80,10 @@ async function packageBrowser(): Promise<void> {
   };
   for (const [name, entry] of Object.entries(entries)) {
     // Stamp the version into the bundle so `src/version.ts` reads the real build number (else it folds to
-    // `'dev'`). The define replaces the `process.env.MOGWAI_VERSION` read in place — there is no `process`
-    // in the browser, so this is the only way the browser learns its version.
-    const js = await bundleBrowser(join(ROOT, entry), { minify: true, define: { 'process.env.MOGWAI_VERSION': JSON.stringify(VERSION) } });
+    // `'dev'`). The define replaces the bare `MOGWAI_VERSION` identifier in place — a bare identifier, not
+    // `process.env.…`, precisely because there is no `process` in the browser (see src/version.ts), so this
+    // is the only way the browser learns its version.
+    const js = await bundleBrowser(join(ROOT, entry), { minify: true, define: { MOGWAI_VERSION: JSON.stringify(VERSION) } });
     await Bun.write(join(out, name), js);
     console.log(`  browser/${name.padEnd(18)} ${(js.length / 1024).toFixed(0)} KB`);
   }
@@ -142,8 +143,8 @@ async function packageBinaries(): Promise<void> {
   for (const t of targets) {
     const file = join(out, `mogwai-db-${VERSION}-${t.name}${t.ext ?? ''}`);
     // `--define` stamps the version into the compiled binary so `mogwai-db --version` prints the real
-    // build number (src/version.ts folds the defined `process.env.MOGWAI_VERSION` to a literal).
-    await run(['bun', 'build', '--compile', `--target=${t.bunTarget}`, `--define`, `process.env.MOGWAI_VERSION=${JSON.stringify(VERSION)}`, join(ROOT, 'src/bun/server.ts'), '--outfile', file]);
+    // build number (src/version.ts folds the defined bare `MOGWAI_VERSION` to a literal).
+    await run(['bun', 'build', '--compile', `--target=${t.bunTarget}`, `--define`, `MOGWAI_VERSION=${JSON.stringify(VERSION)}`, join(ROOT, 'src/bun/server.ts'), '--outfile', file]);
     console.log(`→ ${file}  (${(Bun.file(file).size / 1024 / 1024).toFixed(0)} MB)`);
   }
 }
@@ -155,9 +156,9 @@ async function packageCloudflare(): Promise<void> {
 
   // Bundle the Worker exactly as `wrangler deploy` would, but write it to disk instead of deploying.
   // Produces worker.js (+ .map) — the same bytes a live deploy would upload. `--define` stamps the version
-  // into the bundle (wrangler's esbuild folds `process.env.MOGWAI_VERSION` to the literal — the worker has
+  // into the bundle (wrangler's esbuild folds the bare `MOGWAI_VERSION` to the literal — the worker has
   // no build-time env otherwise); the value is JSON-quoted per wrangler's `KEY:VALUE` define syntax.
-  await run(['bunx', 'wrangler', 'deploy', '--dry-run', '--outdir', out, '--define', `process.env.MOGWAI_VERSION:${JSON.stringify(VERSION)}`]);
+  await run(['bunx', 'wrangler', 'deploy', '--dry-run', '--outdir', out, '--define', `MOGWAI_VERSION:${JSON.stringify(VERSION)}`]);
   if (!(await Bun.file(join(out, 'worker.js')).exists())) throw new Error('wrangler did not produce worker.js');
 
   // The docs' Scalar UI, shipped as a Workers Static Asset so `wrangler deploy` uploads it and the deployed

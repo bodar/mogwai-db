@@ -54,7 +54,7 @@ function loadExampleRequests(baseUrl: string): Record<string, { summary: string;
 export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: string) {
  const graphPath = `/${pathPrefix}/{graphId}`;
  const graphqlPath = `/graphql/{graphId}`;
- return {
+ const spec = {
   openapi: '3.1.0',
   info: {
     title: 'mogwai-db',
@@ -80,6 +80,14 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
     'x-logo': { url: './logo.png', altText: 'mogwai-db' },
   },
   servers: [{ url: baseUrl, description: 'This server' }],
+  // The group order Scalar renders in the sidebar. Every operation carries one of these tags (stamped
+  // below, by path), so the flat endpoint list becomes three sections: the graph plane, the GraphQL edge,
+  // and the replication control plane.
+  tags: [
+    { name: 'Gremlin', description: `The graph plane on \`${graphPath}\`: run a traversal (POST body, or the cacheable GET \`?gremlin=\`), read metadata (OPTIONS), and manage the graph lifecycle (PUT/DELETE). A stock TinkerPop client may also POST to the bare \`/gremlin\`.` },
+    { name: 'GraphQL', description: 'GraphQL-over-HTTP on `/graphql/{graphId}` (POST + GET), against a schema reflected from the graph.' },
+    { name: 'Replication', description: 'The replication control plane: persistent jobs (`/_replicator`) and the worker-residency scheduler (`/_scheduler`).' },
+  ],
   paths: {
     [graphPath]: {
       parameters: [
@@ -407,7 +415,19 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
       },
     },
   },
- } as const;
+ };
+ // Stamp a group TAG onto every operation — OpenAPI tags are per-OPERATION, but the group is decided by
+ // PATH: the graph plane (`graphPath`) → Gremlin, the GraphQL edge (`graphqlPath`) → GraphQL, everything
+ // else (`_replicator`/`_scheduler`) → Replication. Done here, once, rather than repeated on all ~15
+ // operation literals, so a new path or verb joins its group automatically. Scalar reads these + the
+ // top-level `tags` order to render the grouped, ordered sidebar.
+ const VERBS = ['get', 'put', 'post', 'delete', 'options', 'patch', 'head', 'trace'] as const;
+ for (const p of Object.keys(spec.paths)) {
+   const tag = p === graphPath ? 'Gremlin' : p === graphqlPath ? 'GraphQL' : 'Replication';
+   const ops = (spec.paths as Record<string, Record<string, { tags?: string[] }>>)[p]!;
+   for (const v of VERBS) if (ops[v]) ops[v]!.tags = [tag];
+ }
+ return spec;
 }
 
 // The gremlin data-plane result, offered at BOTH negotiated media types. `application/json` is listed

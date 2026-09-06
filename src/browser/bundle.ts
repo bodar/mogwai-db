@@ -27,7 +27,7 @@ export function browserBundlePlugin(): BunPlugin {
 /** Bundle a browser worker/entry to a single ESM string, with the browser shims applied. Throws with
  *  the bundler logs on failure (a missing polyfill export surfaces HERE, at build, not at runtime).
  *  `minify` for the shipped release artifacts (the test lane leaves it off for readable stacks); `define`
- *  substitutes build-time constants (the packager stamps `process.env.MOGWAI_VERSION` — src/version.ts). */
+ *  substitutes build-time constants (the packager stamps the bare `MOGWAI_VERSION` — src/version.ts). */
 export async function bundleBrowser(entry: string, opts: { minify?: boolean; define?: Record<string, string> } = {}): Promise<string> {
   const out = await Bun.build({
     entrypoints: [entry],

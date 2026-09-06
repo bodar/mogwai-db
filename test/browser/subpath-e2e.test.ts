@@ -16,11 +16,15 @@ import { BROWSER_INDEX_HTML } from '../../src/browser/docs-page.ts';
 // is no redirect hop and no reload: index.html IS the docs, and the shell defers mounting Scalar until the
 // SW controls the page (skipWaiting + clients.claim), so the whole surface is served by the local edge.
 const BASE = '/mogwai-db/';
+// A stamped version, injected via the SAME `define` the packager uses (scripts/package.ts), so this proves
+// the version REACHES the browser at runtime — the regression guard for the `typeof process` bug that hid
+// the stamp and made the deployed site read 'dev' (see src/version.ts).
+const TEST_VERSION = '9.9.9-e2e';
 const wasmPath = () => Bun.fileURLToPath(import.meta.resolve('@sqlite.org/sqlite-wasm/sqlite3.wasm'));
-const bundle = (rel: string) => bundleBrowser(Bun.fileURLToPath(import.meta.resolve(rel)));
+const bundle = (rel: string) => bundleBrowser(Bun.fileURLToPath(import.meta.resolve(rel)), { define: { MOGWAI_VERSION: JSON.stringify(TEST_VERSION) } });
 
 describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages shape)', () => {
-  let out: { rootPath: string; rootHasScalar: boolean; docsHasScalar: boolean; scalarStatus: number; faviconStatus: number; logoStatus: number; specLogo: string; openapi: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
+  let out: { rootPath: string; rootHasScalar: boolean; docsHasScalar: boolean; scalarStatus: number; faviconStatus: number; logoStatus: number; specLogo: string; openapi: string; version: string; serverUrl: string; putStatus: number; postStatus: number; vertexCount: number };
   let fatal: string | undefined;
 
   beforeAll(async () => {
@@ -92,6 +96,7 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
           logoStatus: (await fetch('./logo.png')).status,
           specLogo: String(spec.info?.['x-logo']?.url),
           openapi: String(spec.openapi),
+          version: String(spec.info?.version),
           serverUrl: String(spec.servers?.[0]?.url),
           putStatus: put.status,
           postStatus: post.status,
@@ -117,6 +122,11 @@ describe.skipIf(!browserLaneEnabled())('browser: sub-path deploy (GitHub Pages s
     expect(out.specLogo).toBe('./logo.png');
   });
   test('openapi.json is served under the sub-path', () => { expect(out.openapi).toMatch(/^3\./); });
+  test('the stamped version reaches the browser (info.version is the defined value, not "dev")', () => {
+    // The SW bundle was built with `define: { MOGWAI_VERSION }` above, exactly as the packager stamps a
+    // release. If info.version is 'dev' here, the stamp is not reaching runtime — the bug src/version.ts fixes.
+    expect(out.version).toBe(TEST_VERSION);
+  });
   test('the spec servers[0].url is the absolute sub-path base (so the Scalar "try it" composes)', () => {
     // Request-derived + SW-supplied: the SW strips /mogwai-db/ before routing, so the base is threaded via
     // docsBaseUrl. It must end with the sub-path (no trailing slash) so `/gremlin/{graphId}` composes right.

@@ -120,5 +120,13 @@ describe('replicator config CRUD (Phase 5b)', () => {
     // The GraphQL edge is documented (POST + GET).
     expect(spec.paths['/graphql/{graphId}'].post).toBeDefined();
     expect(spec.paths['/graphql/{graphId}'].get).toBeDefined();
+    // Operations are grouped by tag (Scalar renders a grouped sidebar): the top-level tags declare the order,
+    // and every operation carries its group's tag (stamped by path).
+    expect(spec.tags.map((t) => t.name)).toEqual(['Gremlin', 'GraphQL', 'Replication']);
+    expect((spec.paths['/gremlin/{graphId}'].post as { tags?: string[] }).tags).toEqual(['Gremlin']);
+    expect((spec.paths['/gremlin/{graphId}'].get as { tags?: string[] }).tags).toEqual(['Gremlin']);
+    expect((spec.paths['/graphql/{graphId}'].post as { tags?: string[] }).tags).toEqual(['GraphQL']);
+    expect((spec.paths['/_replicator'].get as { tags?: string[] }).tags).toEqual(['Replication']);
+    expect((spec.paths['/_scheduler/run'].post as { tags?: string[] }).tags).toEqual(['Replication']);
   });
 });
