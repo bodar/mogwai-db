@@ -24,6 +24,8 @@ import { join, dirname } from 'node:path';
 import { version } from './version.ts';
 import { BROWSER_INDEX_HTML } from '../src/browser/docs-page.ts';
 import { SCALAR_VERSION } from '../src/docs.ts';
+import { EXAMPLE_DATASETS } from '../src/examples.ts';
+import { copyExamplesTo } from './copy-examples.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const DIST = join(ROOT, 'dist');
@@ -110,6 +112,12 @@ async function packageBrowser(): Promise<void> {
     console.log(`  browser/${asset.padEnd(18)} ${(Bun.file(src).size / 1024).toFixed(0)} KB`);
   }
 
+  // The example datasets (src/examples.ts), copied straight from the vendored GraphSON corpus as static
+  // siblings the SW deliberately does NOT intercept (like scalar.js) — so the docs demo self-seeds via
+  // `g.io("./examples/<name>.json").read()` (same-origin, auto-allowed). Under `.` below, so they zip in.
+  const examples = await copyExamplesTo(join(out, 'examples'), '.json');
+  for (const p of examples) console.log(`  browser/examples/${p.slice(p.lastIndexOf('/') + 1).padEnd(20)} ${(Bun.file(p).size / 1024).toFixed(0)} KB`);
+
   // index.html IS the API docs (the same Scalar shell the SW serves at /docs) — the site root, no redirect.
   await Bun.write(join(out, 'index.html'), BROWSER_INDEX_HTML);
   await Bun.write(join(out, 'README.md'), browserReadme(VERSION, sqlitePkg));
@@ -161,6 +169,13 @@ async function packageCloudflare(): Promise<void> {
     console.log(`  cloudflare/public/${asset.padEnd(11)} ${(Bun.file(src).size / 1024).toFixed(0)} KB`);
   }
 
+  // The example datasets, uploaded as Static Assets alongside scalar.js so the deployed Worker serves
+  // /examples/<name>.json from the ASSETS binding — the docs demo self-seeds via io()-from-URL (a
+  // self-hosted instance allowlists its own host for the fetch). Copied from the vendored corpus, not
+  // from public/, so a `dist/` build never depends on `mise run examples` having populated public/ first.
+  const cfExamples = await copyExamplesTo(join(out, 'public', 'examples'), '.json');
+  for (const p of cfExamples) console.log(`  cloudflare/public/examples/${p.slice(p.lastIndexOf('/') + 1).padEnd(18)} ${(Bun.file(p).size / 1024).toFixed(0)} KB`);
+
   // The deploy config + script + README (overwriting wrangler's stub README). The config is DERIVED from
   // the repo's wrangler.jsonc so it cannot drift — same DO migration, R2 binding, compat — with `main`
   // pointed at the prebuilt bundle and `no_bundle` on, and the account left to the env.
@@ -174,7 +189,11 @@ async function packageCloudflare(): Promise<void> {
   await chmod(join(out, 'deploy.sh'), 0o755);
   await Bun.write(join(out, 'README.md'), cloudflareReadme(VERSION, bucket));
 
-  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), ['worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md', 'public/scalar.js', 'public/favicon.ico', 'public/logo.png']);
+  await zipDir(out, join(DIST, `mogwai-db-${VERSION}-cloudflare.zip`), [
+    'worker.js', 'worker.js.map', 'wrangler.jsonc', 'deploy.sh', 'README.md',
+    'public/scalar.js', 'public/favicon.ico', 'public/logo.png',
+    ...EXAMPLE_DATASETS.map((d) => `public/examples/${d.name}.json`),
+  ]);
 }
 
 /** Zip named entries (relative to `dir`) into `zipPath`, replacing any existing archive. */
@@ -235,6 +254,8 @@ folder and serve it: there are NO runtime downloads and NO CDN dependencies. Bui
 - \`scalar.js\` — the Scalar API-reference UI (loaded by the docs); shipped locally so the docs need no CDN.
 - \`favicon.ico\`, \`logo.png\` — the site favicon and the brand logo shown in the API reference (served beside
   index.html; referenced relatively so they work at any deploy path).
+- \`examples/*.json\` — the standard TinkerPop reference graphs (modern, crew, sink, grateful-dead). The docs'
+  "Load example" entries seed a graph from these via \`g.io("./examples/<name>.json").read()\` (same-origin).
 
 ## Use
 
@@ -292,6 +313,9 @@ provisioned per graph on first request (there is no create/drop API — addressi
   interactive API reference at \`/\` is self-hosted, no CDN).
 - \`public/favicon.ico\`, \`public/logo.png\` — the site favicon and the brand logo shown in the API reference,
   served the same way (\`/favicon.ico\`, \`/logo.png\`).
+- \`public/examples/*.json\` — the standard TinkerPop reference graphs (modern, crew, sink, grateful-dead),
+  served at \`/examples/<name>.json\`. The docs' "Load example" entries seed a graph from these via
+  \`g.io(...).read()\`; a self-hosted instance must allowlist its own host for the fetch (io() SSRF guard).
 `;
 }
 

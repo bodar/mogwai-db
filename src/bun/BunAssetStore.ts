@@ -19,14 +19,34 @@ import scalarStandalone from '../../node_modules/@scalar/api-reference/dist/brow
 // serves them with no sidecar files and no CDN, and the same imports resolve to the real on-disk paths in dev.
 import favicon from '../../public/favicon.ico' with { type: 'file' };
 import logo from '../../public/logo.png' with { type: 'file' };
+// The `/examples/` reference-graph datasets (src/examples.ts), embedded the same way as scalar.js/favicon:
+// `with { type: 'file' }` makes `bun build --compile` copy each into the standalone binary, so a self-hosted
+// server (and the compiled `mogwai-db` binary) serves the example graphs with no sidecar files. The staged
+// sources are `.graphson` (NOT `.json`) so tsc types them as file-path strings via the `*.graphson` ambient
+// (asset-imports.d.ts); they are populated from the vendored corpus by `mise run examples`
+// (scripts/copy-examples.ts) and served at the friendly `/examples/<name>.json` path below.
+import exampleModern from './examples/modern.graphson' with { type: 'file' };
+import exampleCrew from './examples/crew.graphson' with { type: 'file' };
+import exampleSink from './examples/sink.graphson' with { type: 'file' };
+import exampleGratefulDead from './examples/grateful-dead.graphson' with { type: 'file' };
 import { type AssetStore, contentTypeFor } from '../assetstore.ts';
+
+// Served path → the embedded file's on-disk (or `/$bunfs/root/…`) path. Keyed by the friendly `.json` name
+// the docs' "Load example" entries fetch; the values are the `.graphson` embed copies. Kept in step with
+// src/examples.ts (the mapping's single source of truth) — a new dataset adds a line here and there.
+const EXAMPLE_FILES: Record<string, string> = {
+  '/examples/modern.json': exampleModern,
+  '/examples/crew.json': exampleCrew,
+  '/examples/sink.json': exampleSink,
+  '/examples/grateful-dead.json': exampleGratefulDead,
+};
 
 export class BunAssetStore implements AssetStore {
   async get(path: string): Promise<Response | null> {
     const file = path === '/scalar.js' ? scalarStandalone
       : path === '/favicon.ico' ? favicon
       : path === '/logo.png' ? logo
-      : null;
+      : EXAMPLE_FILES[path] ?? null;
     if (file === null) return null; // not one of our assets — the router falls through to its own routes
     return new Response(Bun.file(file), { headers: { 'Content-Type': contentTypeFor(path) } });
   }

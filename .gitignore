@@ -13,6 +13,11 @@ build/
 *.tsbuildinfo
 .wrangler/
 
+# Example-dataset staging (`mise run examples`) — build artifacts copied from the vendored GraphSON corpus,
+# like public/scalar.js. public/examples/*.json (served) + src/bun/examples/*.graphson (Bun binary embed).
+public/examples/
+src/bun/examples/
+
 # L3 telemetry artifacts (always on; transient per-run capture — the durable
 # cross-run state lives in the committed test/L3-conformance/l3-state.json)
 test/L3-conformance/l3-telemetry.ndjson

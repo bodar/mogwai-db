@@ -18,6 +18,7 @@ import { parseRequest, parseJsonQuery } from './wire.ts';
 import { streamBuffers, jsonResultResponse, errorResponse } from './http.ts';
 import { buildDocs, buildOpenApiSpec } from './docs.ts';
 import type { AssetStore } from './assetstore.ts';
+import { isExamplePath } from './examples.ts';
 import { handlePost, handleGet } from './graphql/edge.ts';
 import { type ReplicatorRegistry, type ReplicationConfig, newConfigId } from './replicator-registry.ts';
 import { isUrl } from './replicate.ts';
@@ -48,7 +49,8 @@ function wantsJson(accept: string | null): boolean {
 // The docs' static assets, served from the injected AssetStore (Bun from the binary-embedded copy, CF from
 // the Workers Static Assets binding) rather than a CDN. Three entries: the Scalar UI module `scalarUrl:
 // './scalar.js'` points at, the favicon the docs shell links, and the brand logo the API reference shows.
-// A GET whose path is in this set is offered to the AssetStore first; anything else routes as before.
+// A GET whose path is in this set — or a known `/examples/<name>.json` reference-graph dataset
+// (isExamplePath) — is offered to the AssetStore first; anything else routes as before.
 const DOCS_ASSET_PATHS = new Set(['/scalar.js', '/favicon.ico', '/logo.png']);
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -296,10 +298,13 @@ export function makeRouter(
     if (req.method === 'GET') {
       if (pathname === '/' || pathname === '/docs')
         return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-      // The docs' static assets (the Scalar UI module, the favicon, the logo) — served from the injected
-      // AssetStore, so the UI is self-hosted, never a CDN. A router with no AssetStore skips this (the shell
-      // then uses SCALAR_CDN); an AssetStore that doesn't hold the path returns null and we fall through.
-      if (assets && DOCS_ASSET_PATHS.has(pathname)) {
+      // The docs' static assets (the Scalar UI module, the favicon, the logo) plus the `/examples/*.json`
+      // reference-graph datasets (src/examples.ts) — served from the injected AssetStore, so both the UI and
+      // the example graphs are self-hosted, never a CDN. This is what makes the docs demo self-seeding: the
+      // OpenAPI "Load example" entries send `g.io("<origin>/examples/<name>.json").read()`, which fetches
+      // right back here. A router with no AssetStore skips this (the shell then uses SCALAR_CDN, and
+      // /examples 404s); an AssetStore that doesn't hold the path returns null and we fall through.
+      if (assets && (DOCS_ASSET_PATHS.has(pathname) || isExamplePath(pathname))) {
         const asset = await assets.get(pathname);
         if (asset) return asset;
       }

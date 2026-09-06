@@ -30,6 +30,24 @@
 export const SCALAR_VERSION = '1.67.0';
 const SCALAR_CDN = `https://cdn.jsdelivr.net/npm/@scalar/api-reference@${SCALAR_VERSION}/dist/browser/standalone.js`;
 
+import { EXAMPLE_DATASETS } from './examples.ts';
+
+/** The "Load example" request-body examples for the POST op — one per reference-graph dataset
+ *  (src/examples.ts). Each runs `g.io("<baseUrl>/examples/<name>.json").read()`, seeding the graph from the
+ *  server's OWN `/examples/` asset. `baseUrl` is dynamic (the request origin, or the browser sub-path base),
+ *  NEVER a hardcoded host — same-origin is exactly what increment 6a auto-allows, so the browser/Pages demo
+ *  loads these out of the box; a self-hosted Bun/CF instance must allowlist its own host (the io() SSRF
+ *  guard is deny-all by default) for the cross-origin fetch. Keyed `load_<name>` (a `-` becomes `_` so the
+ *  key is a legal identifier). */
+function loadExampleRequests(baseUrl: string): Record<string, { summary: string; value: { gremlin: string } }> {
+  return Object.fromEntries(
+    EXAMPLE_DATASETS.map((d) => [
+      `load_${d.name.replace(/-/g, '_')}`,
+      { summary: `Load example: ${d.name} graph (${d.summary})`, value: { gremlin: `g.io("${baseUrl}/examples/${d.name}.json").read()` } },
+    ]),
+  );
+}
+
 /** Build the OpenAPI 3.1 document. `baseUrl` is the ABSOLUTE origin (`servers[0].url`) the paths compose
  *  against — the request's own origin (Bun/CF), or the browser build's sub-path base; `version` is the
  *  stamped `src/version.ts` value. Both are passed in per request so neither is frozen at construction. */
@@ -83,7 +101,12 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
           'the compact binary the real GLV clients get — or, when the request sends ' +
           '`Accept: application/json`, a readable UNTYPED-JSON array (this panel does ' +
           'that, so the result renders here). HTTP status is always 200; Gremlin ' +
-          'errors ride the GraphBinary status trailer inside the body.',
+          'errors ride the GraphBinary status trailer inside the body.\n\n' +
+          'Try a **Load example** entry to seed the graph from a bundled reference dataset: it runs ' +
+          '`g.io("' + baseUrl + '/examples/<name>.json").read()`, importing the graph from this ' +
+          "server's own `/examples/`. This loads out of the box on the browser/Pages demo (same-origin, " +
+          'auto-allowed); a self-hosted Bun/CF instance must allowlist its own host for the fetch (the ' +
+          'io() SSRF guard is deny-all by default). Then run `g.V().count()`.',
         requestBody: {
           required: true,
           content: {
@@ -119,6 +142,10 @@ export function buildOpenApiSpec(pathPrefix: string, baseUrl: string, version: s
                   summary: 'With bindings',
                   value: { gremlin: 'g.V().has(\"name\", name).values(\"age\")', bindings: { name: 'dan' } },
                 },
+                // One "Load example: <name> graph" per reference dataset — seeds this graph from the
+                // server's own /examples/<name>.json via increment 6a's io()-from-URL (see the op
+                // description). Dynamic `baseUrl`, never a hardcoded host.
+                ...loadExampleRequests(baseUrl),
               },
             },
           },

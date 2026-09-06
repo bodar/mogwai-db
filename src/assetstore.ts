@@ -26,9 +26,9 @@ export interface AssetStore {
 }
 
 /** The `Content-Type` for a served asset, by extension. Deliberately tiny — it covers only what the docs
- *  surface actually ships (the Scalar UI module today; the favicon + a logo image are the planned
- *  follow-up). An unknown extension falls back to `application/octet-stream` so a mis-added asset is inert,
- *  never mislabelled. */
+ *  surface actually ships (the Scalar UI module, the favicon + logo, and the `/examples/*.json` datasets).
+ *  An unknown extension falls back to `application/octet-stream` so a mis-added asset is inert, never
+ *  mislabelled. */
 export function contentTypeFor(path: string): string {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
   switch (ext) {
@@ -36,6 +36,7 @@ export function contentTypeFor(path: string): string {
     case 'ico': return 'image/x-icon';
     case 'svg': return 'image/svg+xml';
     case 'png': return 'image/png';
+    case 'json': return 'application/json'; // the /examples/ reference-graph datasets
     default: return 'application/octet-stream';
   }
 }

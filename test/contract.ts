@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import gremlin from 'gremlin';
 import './support/undici-shim.ts'; // Bun's undici Agent lacks close() — see the shim's header
+import { EXAMPLE_NAMES } from '../src/examples.ts';
 
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
@@ -340,6 +341,21 @@ function docsContract(getOrigin: () => string, servesAssets: boolean) {
       expect(logo.status).toBe(200);
       expect(logo.headers.get('content-type')).toBe('image/png');
       expect((await logo.arrayBuffer()).byteLength).toBeGreaterThan(1000); // the real logo, not empty/404
+    });
+
+    // The example datasets (increment 6b) — the standard TinkerPop reference graphs, served at
+    // /examples/<name>.json from the AssetStore so the docs' "Load example" entries can io()-seed a graph
+    // from the server's own origin. Gated on `servesAssets` like the favicon/logo round-trip above.
+    test.if(servesAssets)('GET /examples/<name>.json serve the reference graphs as JSON', async () => {
+      for (const name of EXAMPLE_NAMES) {
+        const res = await fetch(`${getOrigin()}/examples/${name}.json`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toContain('application/json');
+        // Real GraphSON bytes (newline-delimited adjacency), not a 404 body — first line parses as a vertex.
+        const text = await res.text();
+        expect(text.length).toBeGreaterThan(100);
+        expect(JSON.parse(text.split('\n')[0]!)).toHaveProperty('label');
+      }
     });
   });
 }

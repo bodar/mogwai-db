@@ -195,6 +195,25 @@ run = "cp node_modules/@scalar/api-reference/dist/browser/standalone.js public/s
 sources = ["node_modules/@scalar/api-reference/dist/browser/standalone.js"]
 outputs = ["public/scalar.js"]
 
+# Stage the example datasets (src/examples.ts) from the vendored TinkerPop GraphSON corpus into the two
+# locations that serve them: public/examples/*.json (CF Static Assets + the browser release copy them) and
+# src/bun/examples/*.graphson (the Bun binary-EMBED copies — the `.graphson` extension is load-bearing, see
+# scripts/copy-examples.ts). Both are gitignored build artifacts, exactly like public/scalar.js above.
+# `build`, `test` and `test:bracket` depend on this (alongside `assets`) so the /examples/ paths exist
+# before `wrangler dev`/`deploy` runs and before the Bun server's embedded copies are imported at runtime.
+# `depends = ["submodule"]`: the source corpus lives in the tinkerpop submodule. `sources` deliberately
+# omits the vendored `.json` files (globbing the submodule symlink in a linked worktree is fragile — same
+# reasoning as the corpus note on `[tasks.check]`); a pin bump is re-run fresh by CI, which starts clean.
+[tasks.examples]
+description = "Stage the example datasets: public/examples/*.json (CF/browser) + src/bun/examples/*.graphson (Bun embed) from the vendored GraphSON corpus"
+depends = ["submodule"]
+run = "bun scripts/copy-examples.ts"
+sources = ["scripts/copy-examples.ts", "src/examples.ts"]
+outputs = [
+  "public/examples/modern.json", "public/examples/crew.json", "public/examples/sink.json", "public/examples/grateful-dead.json",
+  "src/bun/examples/modern.graphson", "src/bun/examples/crew.graphson", "src/bun/examples/sink.graphson", "src/bun/examples/grateful-dead.graphson",
+]
+
 # Every test task depends on `check` (tsc --noEmit): `bun test` runs TS WITHOUT type-checking,
 # so a test run must gate on the type-check first — else a type error ships green under a bare
 # `bun test` (which is how the build once went red after a refactor passed its tests).
@@ -202,8 +221,9 @@ outputs = ["public/scalar.js"]
 description = "Full suite, fanned across cores: one `bun test` process per bracket, in parallel"
 # `assets` so public/scalar.js exists before the cloudflare test's `wrangler dev` boots (it errors on a
 # missing assets DIR, which is committed; the file makes CF's /scalar.js live too) and the Bun server's
-# GET /scalar.js assertion has its embedded copy.
-depends = ["install", "check", "submodule", "assets"]
+# GET /scalar.js assertion has its embedded copy. `examples` for the same reasons: it stages the Bun-embed
+# .graphson copies BunAssetStore imports at load time, and the CF /examples/*.json the cloudflare test hits.
+depends = ["install", "check", "submodule", "assets", "examples"]
 # ONE command on purpose (was a two-command array). scripts/test-all.ts fans the suite out into the SAME
 # brackets CI uses (scripts/brackets.ts), one `bun test <files>` child per bracket run CONCURRENTLY — so
 # a 24-core box actually uses its cores instead of pinning ~1 on a single `bun test`. The browser bracket
@@ -328,24 +348,27 @@ run = "bun run test/L1-corpus/regen-corpus.ts"
 description = "Print the derived release version (major from package.json · commit count · build/timestamp)"
 run = "bun scripts/version.ts"
 
+# The package tasks depend on `examples` (→ `submodule`): the browser + Cloudflare zips copy the example
+# datasets from the vendored corpus (scripts/package.ts), and the Bun binaries EMBED the staged
+# src/bun/examples/*.graphson copies BunAssetStore imports — both need the corpus staged/present first.
 [tasks.package]
 description = "Build the release artifacts under dist/: the browser zip + the Bun binaries (all targets)"
-depends = ["install"]
+depends = ["install", "examples"]
 run = "bun scripts/package.ts"
 
 [tasks."package:browser"]
 description = "Just the browser zip: dist/browser/{mogwai,service-worker,worker}.js + sqlite3.wasm, zipped"
-depends = ["install"]
+depends = ["install", "examples"]
 run = "bun scripts/package.ts --browser"
 
 [tasks."package:binaries"]
 description = "Just the Bun standalone binaries (pass a subset via `--binaries=linux-x64,darwin-arm64`)"
-depends = ["install"]
+depends = ["install", "examples"]
 run = "bun scripts/package.ts --binaries"
 
 [tasks."package:cloudflare"]
 description = "Just the Cloudflare zip: the prebuilt Worker + a wrangler.jsonc deploy template + README"
-depends = ["install"]
+depends = ["install", "examples"]
 run = "bun scripts/package.ts --cloudflare"
 
 [tasks.build]
@@ -356,7 +379,7 @@ description = "Bundle the Cloudflare Worker (dry-run deploy)"
 # (resolving it through tsconfig `paths` instead was tried and fails this bundle), and why the
 # link: dep is a symlink rather than a copy. This used to go red in CI only, when npm's beta.2 —
 # which has no `./io` export — got installed in place of the link; that route is now closed.
-depends = ["install", "submodule", "assets"]
+depends = ["install", "submodule", "assets", "examples"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 # Bundles src/cloudflare/worker.ts (+ everything it imports, all under src/ and the generated parser)
 # per wrangler.jsonc — so those files are its inputs. Incremental so the ~seconds dry-run deploy in the
@@ -385,8 +408,9 @@ sources = ["src/**/*", "parser/**/*", "wrangler.jsonc", "tsconfig.json", "packag
 [tasks."test:bracket"]
 description = "One bracket of the suite for CI (MOGWAI_BRACKET=L1|…|other); brackets partition discovery by L-level"
 # `assets` so the `other` bracket's cloudflare.test.ts finds public/scalar.js when `wrangler dev` boots in
-# CI (the same reason [tasks.test] has it — CI fans by bracket instead of running `test`).
-depends = ["install", "submodule", "assets"]
+# CI (the same reason [tasks.test] has it — CI fans by bracket instead of running `test`). `examples` for
+# the /examples/*.json datasets (CF serves them; the Bun server embeds the .graphson staging copies).
+depends = ["install", "submodule", "assets", "examples"]
 run = "bun scripts/test-bracket.ts"
 [tasks.sql-hygiene]
 description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
