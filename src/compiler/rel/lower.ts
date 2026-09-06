@@ -27,7 +27,7 @@ import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { comparableTheta, CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
@@ -1519,6 +1519,45 @@ function scalarTail(
       if (!mayBeEmpty.length) { rel = projected; out = { kind: 'scalar', type: UNKNOWN }; continue; }
       const guard = concatEmptyGuard(rel, mayBeEmpty, fresh);
       const tail = scalarTail(projected, { kind: 'scalar', type: UNKNOWN }, steps, at + 1, bulked, ctx, fresh, labels);
+      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+    }
+
+    // `dateDiff(__.<t>)` — a TRAVERSAL right operand is a per-traverser CHILD (`TraversalUtil.apply`),
+    // exactly as concat's operand is, and it inherits the SAME InjectStep degeneracy:
+    // `dateDiff(__.inject(datetime(x)))` diffs the subject against its OWN value → `d[0]`
+    // (`DateDiff.feature:48-58`), because the injected literal never surfaces. So the operand resolves
+    // through `scalarChild` (the inject/rooted arms included) and the result is `subject_ms - operand_ms`,
+    // a `long` — `DateDiffStep.map` (`vendor/tinkerpop/gremlin-core/.../step/map/DateDiffStep.java:61-99`).
+    // The pure `transformExpr` arm keeps declining a nested operand (it has no `ChainCtx`/seam to resolve
+    // one); this is that decline's correlated-child counterpart, beside concat's for the same reason.
+    // ⚠️ ONLY a non-constant nested operand — `constant(datetime|null)` is a COMPILE-TIME fold the pure
+    // `transformExpr` arm below owns (`isDateDiffConstant`/`dateDiffOtherMs`), and intercepting it here
+    // would re-route a constant subtraction through a needless child scope. Every OTHER nested body
+    // (`inject(datetime(…))`, a movement) is this seam's.
+    if (step.name === 'dateDiff' && args.length === 1 && args[0] !== null && isNested(args[0]) && !isDateDiffConstant(args[0], {})) {
+      const seam = childSeam(ctx, fresh);
+      const host: ChildHost = {
+        kind: 'scalar', value: col(rel.id, 'v'),
+        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}), row: { rel, aliases: labels },
+      };
+      const body = seam.body(args[0].nested, 'child');
+      if (!body) return null;
+      const cv = scalarChild(body, host, ctx, fresh);
+      if (!cv || cv.framing.kind !== 'scalar') return null;
+      const diff: Expr = { kind: 'binary', op: '-', left: col(rel.id, 'v'), right: cv.expr };
+      const carried = rel.channels;
+      const projected = make.project({
+        id: fresh('dd'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
+        exprs: [['v', diff], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      // An EMPTY operand (`dateDiff(__.V(99999))`) maps to no value and must RAISE, exactly as concat's
+      // does (`TraversalUtil.apply` — the same guard message). A provably-productive operand (the inject
+      // degeneracy, a live alias) continues the fold; otherwise the guard rides on the tail's effects.
+      if (cv.present === ALWAYS_PRODUCTIVE) { rel = projected; out = { kind: 'scalar', type: STATIC('long') }; continue; }
+      if (!cv.present) return null;
+      const guard = concatEmptyGuard(rel, [cv.present], fresh);
+      const tail = scalarTail(projected, { kind: 'scalar', type: STATIC('long') }, steps, at + 1, bulked, ctx, fresh, labels);
       return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
     }
 

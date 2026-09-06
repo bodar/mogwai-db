@@ -1,5 +1,5 @@
 {
-  "passing": 1840,
+  "passing": 1841,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1402,6 +1402,7 @@
     "g_injectXdatetimeX_isXtypeOfXGType_DATETIMEXX_groupCount",
     "g_injectXdatetimeXstr1XX_dateDiffXconstantXdatetimeXstr2XXX",
     "g_injectXdatetimeXstr1XX_dateDiffXdatetimeXstr2XX",
+    "g_injectXdatetimeXstr1XX_dateDiffXinjectXdatetimeXstr2XXX",
     "g_injectXdatetimeXstrXX_dateAddXDT_hour_2X",
     "g_injectXdatetimeXstrXX_dateAddXday_11X",
     "g_injectXdatetimeXstrXX_dateAddXhour_1X",
@@ -2198,7 +2199,6 @@
     "g_injectXUUIDXXX",
     "g_injectXa1_b2X_foldXm_addAllX",
     "g_injectXa1_b2_b4X_foldXm_addAllX",
-    "g_injectXdatetimeXstr1XX_dateDiffXinjectXdatetimeXstr2XXX",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_create",
     "g_injectXlist1_list2_list3X_fold_asXmX_mergeVXselectXmX_limitXlocal_1X_unfoldX_optionXonCreate_selectXmX_rangeXlocal_1_2X_unfoldX_optionXonMatch_selectXmX_tailXlocalX_unfoldX_to_match",
     "g_injectXlistX_isXtypeOfXGType_LISTXX_groupCount",
