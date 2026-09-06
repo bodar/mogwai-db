@@ -40,15 +40,10 @@ async function main() {
     return docs.docs.find((d: any) => d.id === id)?.job ?? null;
   };
 
-  // Warm the control plane before the checks — a just-activated Service Worker can drop the FIRST
-  // body-carrying request's body (a Chromium/Playwright SW timing artifact → a spurious 400), and the
-  // registry Worker spawns lazily. Retry a throwaway PUT until it lands, then delete it.
-  const warm = await until(
-    async () => (await jsonReq(`/_replicator/__warmup-${ts}`, 'PUT', { source: 'a', target: 'b' })).status,
-    (st) => st === 201, 10_000,
-  );
-  await jsonReq(`/_replicator/__warmup-${ts}`, 'DELETE');
-  if (warm !== 201) throw new Error('control plane never became ready (warmup PUT never returned 201)');
+  // No control-plane warm-up: `installMogwai()` above resolved once the Service Worker controls this page,
+  // and the registry Worker's lazy spawn is awaited event-based inside the edge — so the first intercepted
+  // request lands. `until` below is NOT a readiness hack: it waits for the BACKGROUND TIMER to have ticked
+  // and driven a replication, a timer-driven side effect the page has no event for.
 
   await check('an elected tab auto-syncs a local→local job on the timer (no manual run)', async () => {
     const src = `tsrc-${ts}`, dst = `tdst-${ts}`;

@@ -6,10 +6,18 @@
 // FAILOVER, and the one browser reality it turns on: a hard-killed leader tab does NOT gracefully close
 // its MessagePort (capnweb only sees a close when the peer sends an explicit `null` via abort()), so the
 // SW's stub to a dead Worker does not break on its own — an in-flight call HANGS. The reliable death
-// signal is the NEW leader pushing a fresh port (its Web Lock callback fires when the dead tab's lock
-// releases). So on a new `mogwai-graph-port` for a graph we already hold, we DISPOSE the old stub — which
-// aborts its session and rejects its hung calls — and install the new one. BrowserGraphManager then sees
-// a changed current stub on that rejection and retries the call once against the new leader.
+// signal is a DIFFERENT tab pushing a fresh port (its Web Lock callback fires when the dead tab's lock
+// releases). So on a `mogwai-graph-port` from a NEW OWNER for a graph we already hold, we DISPOSE the old
+// stub — which aborts its session and rejects its hung calls — and install the new one. BrowserGraphManager
+// then sees a changed current stub on that rejection and retries the call once against the new leader.
+//
+// But a port re-delivered by the SAME owner (tab) is NOT a failover — it is a duplicate. On a COLD START
+// the page can hold two control sessions to the SW briefly (the proactive `openControl()` plus one the SW
+// solicits via `mogwai-need-control` when the first request races ahead), and a graph/registry
+// solicitation fans out to both, so the one leader delivers a port TWICE. Disposing the live stub on that
+// second (same-owner) delivery aborts the in-flight call — the "RPC session was shut down by disposing the
+// main stub" 400 seen intermittently under load. So we key the decision on `owner`: same owner ⇒ keep the
+// live stub and drop the redundant port; different owner ⇒ genuine failover, dispose and swap.
 import { newMessagePortRpcSession, type RpcStub } from 'capnweb';
 import type { GraphStubSource } from './BrowserGraphManager.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
@@ -26,6 +34,9 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
 
   /** The CURRENT direct stub per graph — replaced on failover. */
   private readonly current = new Map<string, RpcStub<GraphWorkerHost>>();
+  /** The owner (tab) behind each current graph stub — a re-delivery from this owner is a duplicate, not a
+   *  failover, so it must not dispose the live stub. */
+  private readonly currentOwner = new Map<string, string>();
   /** Resolvers waiting for a graph's next port (a pending `open`). */
   private readonly portWaiters = new Map<string, Array<() => void>>();
   /** In-flight solicitations, so concurrent first-touchers share one `openGraph` round. */
@@ -33,6 +44,8 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
 
   /** The CURRENT registry stub (singleton) — replaced on failover, exactly like a graph's. */
   private currentRegistry?: RpcStub<ReplicatorRegistryHost>;
+  /** The owner (tab) behind the current registry stub — twin of {@link currentOwner}. */
+  private currentRegistryOwner?: string;
   private registryWaiters: Array<() => void> = [];
   private solicitingRegistry?: Promise<RpcStub<ReplicatorRegistryHost>>;
 
@@ -53,21 +66,24 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
       for (const id of this.current.keys()) void factory.openGraph(id).catch(() => {});
       if (this.currentRegistry || this.solicitingRegistry) void factory.openRegistry().catch(() => {});
     } else if (data?.kind === 'mogwai-graph-port') {
-      this.acceptPort(data.graphId, data.port);
+      this.acceptPort(data.graphId, data.port, data.owner);
     } else if (data?.kind === 'mogwai-registry-port') {
-      this.acceptRegistryPort(data.port);
+      this.acceptRegistryPort(data.port, data.owner);
     }
   }
 
-  /** A leader delivered the registry port. On FAILOVER (we already held a stub) dispose the old one — that
-   *  aborts its session and rejects any hung call, which lets the wrapper retry against the new leader. */
-  private acceptRegistryPort(port: MessagePort): void {
-    const next = newMessagePortRpcSession<ReplicatorRegistryHost>(port);
-    const prev = this.currentRegistry;
-    if (prev && prev !== next) {
-      try { prev[Symbol.dispose](); } catch { /* a dead stub throws on dispose — harmless */ }
+  /** A leader delivered the registry port. If we already hold a stub from a DIFFERENT owner this is a
+   *  FAILOVER: dispose the old one — that aborts its session and rejects any hung call, which lets the
+   *  wrapper retry against the new leader. If it is the SAME owner it is a duplicate re-delivery (cold-start
+   *  double solicitation), so keep the live stub and drop the redundant port — disposing it would reject
+   *  the in-flight call. */
+  private acceptRegistryPort(port: MessagePort, owner: string): void {
+    if (this.currentRegistry) {
+      if (this.currentRegistryOwner === owner) { closePort(port); return; }
+      try { this.currentRegistry[Symbol.dispose](); } catch { /* a dead stub throws on dispose — harmless */ }
     }
-    this.currentRegistry = next;
+    this.currentRegistry = newMessagePortRpcSession<ReplicatorRegistryHost>(port);
+    this.currentRegistryOwner = owner;
     const waiters = this.registryWaiters;
     this.registryWaiters = [];
     for (const w of waiters) w();
@@ -91,20 +107,24 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
     return this.currentRegistry!;
   }
 
-  /** A leader delivered a port for `id`. If we already held a stub (this is a FAILOVER — the old leader
-   *  died), dispose it: that aborts its session and rejects any hung in-flight call, which is what lets
-   *  the manager notice the change and retry. Then install the new stub and wake any pending `open`. */
-  private acceptPort(id: string, port: MessagePort): void {
-    const next = newMessagePortRpcSession<GraphWorkerHost>(port);
+  /** A leader delivered a port for `id`. If we already hold a stub from a DIFFERENT owner this is a
+   *  FAILOVER (the old leader died): dispose it — that aborts its session and rejects any hung in-flight
+   *  call, which is what lets the manager notice the change and retry against the new leader. If it is the
+   *  SAME owner it is a duplicate re-delivery (cold-start double solicitation): keep the live stub and drop
+   *  the redundant port, because disposing it would reject the in-flight call. Then install the new stub
+   *  (failover / first delivery only) and wake any pending `open`. */
+  private acceptPort(id: string, port: MessagePort, owner: string): void {
     const prev = this.current.get(id);
-    if (prev && prev !== next) {
+    if (prev) {
+      if (this.currentOwner.get(id) === owner) { closePort(port); return; }
       try {
         prev[Symbol.dispose]();
       } catch {
         // a stub whose own port already died throws on dispose — harmless, the point is to break it.
       }
     }
-    this.current.set(id, next);
+    this.current.set(id, newMessagePortRpcSession<GraphWorkerHost>(port));
+    this.currentOwner.set(id, owner);
     const waiters = this.portWaiters.get(id);
     if (waiters) {
       this.portWaiters.delete(id);
@@ -150,6 +170,7 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
       }
       this.current.delete(id);
     }
+    this.currentOwner.delete(id);
   }
 
   /** At least one control session, soliciting one from any open page if we have none. Bounded so a missing
@@ -164,4 +185,10 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
     });
     return this.factories;
   }
+}
+
+/** Close a redundant duplicate port hand-off (a same-owner re-delivery) so the transferred channel and its
+ *  orphaned worker-side session do not leak. Best-effort — an already-closed port is harmless. */
+function closePort(port: MessagePort): void {
+  try { port.close(); } catch { /* already closed */ }
 }

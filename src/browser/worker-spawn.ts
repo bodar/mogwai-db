@@ -12,11 +12,17 @@ import type { MogwaiConfig } from '../config.ts';
 
 /** The native messages between the Service Worker edge and a WorkerFactory page. All are transport
  *  bootstraps: `*-port` hands a MessagePort over (transferred), `need-control` is the SW re-soliciting a
- *  control session after it (or its ports) was reaped. */
+ *  control session after it (or its ports) was reaped.
+ *
+ *  `owner` on a `*-port` is the id of the WorkerFactory (tab) that spawned the Worker behind the port. The
+ *  SW uses it to tell a genuine cross-tab FAILOVER (a DIFFERENT tab took leadership → dispose the dead
+ *  stub, swap in the new one) from a same-tab RE-DELIVERY (the SAME tab delivered a port again — e.g. a
+ *  cold-start duplicate solicitation across two control sessions → keep the live stub, never dispose it
+ *  mid-call). Disposing on a re-delivery is exactly what rejected the in-flight call as a spurious 400. */
 export type BootstrapMessage =
   | { kind: 'mogwai-control-port'; port: MessagePort } // factory → SW: a port to the WorkerFactory RPC session
-  | { kind: 'mogwai-graph-port'; graphId: string; port: MessagePort } // factory → SW: a port to a graph's Worker
-  | { kind: 'mogwai-registry-port'; port: MessagePort } // factory → SW: a port to the singleton registry Worker
+  | { kind: 'mogwai-graph-port'; graphId: string; port: MessagePort; owner: string } // factory → SW: a port to a graph's Worker
+  | { kind: 'mogwai-registry-port'; port: MessagePort; owner: string } // factory → SW: a port to the singleton registry Worker
   | { kind: 'mogwai-config'; config: MogwaiConfig } // factory → SW: the runtime config (the scheduler's http allowlist)
   | { kind: 'mogwai-need-control' }; // SW → factory: (re)open a control session
 

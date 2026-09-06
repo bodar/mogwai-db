@@ -30,6 +30,11 @@ interface Leadership {
  *  callback fires → it becomes leader, spawns the Worker (re-opening opfs-sahpool over the committed data)
  *  and pushes the SW a fresh port. No heartbeats, no announcement protocol. */
 export class WorkerFactory extends RpcTarget {
+  /** This tab's identity, stamped on every port hand-off so the SW can distinguish a same-tab re-delivery
+   *  (keep the live stub) from a cross-tab failover (swap it) — see `BootstrapMessage.owner`. Unique per
+   *  WorkerFactory instance = per tab; a tab holds a graph's Web Lock for life, so it never re-elects
+   *  itself, which is why "same owner" always means a duplicate delivery and never a new Worker. */
+  private readonly ownerId = crypto.randomUUID();
   private readonly graphs = new Map<string, Leadership>();
   /** This tab's stake in the SINGLETON registry Worker — the same Web-Lock leadership as a graph, keyed
    *  `mogwai-registry`, so exactly one tab owns the registry Worker and the rest fail over to it. */
@@ -115,7 +120,7 @@ export class WorkerFactory extends RpcTarget {
       g.worker = s.worker;
       return s.port;
     })();
-    this.post({ kind: 'mogwai-graph-port', graphId: id, port });
+    this.post({ kind: 'mogwai-graph-port', graphId: id, port, owner: this.ownerId });
   }
 
   /** As registry leader: spawn the registry Worker if we don't own one yet (on failover re-opens its
@@ -126,7 +131,7 @@ export class WorkerFactory extends RpcTarget {
       g.worker = s.worker;
       return s.port;
     })();
-    this.post({ kind: 'mogwai-registry-port', port });
+    this.post({ kind: 'mogwai-registry-port', port, owner: this.ownerId });
   }
 
   /** Post a Bootstrap (port hand-off) to the controlling Service Worker, transferring the port. */
@@ -238,26 +243,24 @@ function startSchedulerTicker(intervalMs: number): () => void {
  *  is not raced by activation. In a fresh page the SW installs (skipWaiting) and claims (clients.claim),
  *  which sets `serviceWorker.controller` (firing `controllerchange`).
  *
- *  Race-free by construction: a naive `await ready; if (!controller) await once('controllerchange')` can
- *  MISS the event when it fires between `ready` resolving and the listener attaching — an infinite hang
- *  that surfaces only under CI timing. So this listens AND polls, re-checking `controller` on both, and is
- *  BOUNDED: past the deadline it resolves anyway, turning a would-be hang into a clear downstream failure
- *  (an un-intercepted fetch gets the page HTML, not GraphBinary) rather than a timeout with no diagnosis. */
+ *  Purely EVENT-DRIVEN, and race-free WITHOUT polling: `controllerchange` can only be dispatched on a
+ *  later event-loop turn, so as long as the listener is ATTACHED before the final `controller` re-check —
+ *  both of which run synchronously inside the Promise executor — no transition can slip between them. (The
+ *  hang the earlier poll guarded against came from the opposite order: check `controller`, THEN attach, so
+ *  an event firing in the gap was lost. Attach-then-recheck closes that gap outright.) `controller` being
+ *  set is a stronger signal than `serviceWorker.ready` (an active registration that may not yet control
+ *  this page), so it is the only condition awaited. BOUNDED by a deadline so a SW that never claims fails
+ *  loudly downstream (an un-intercepted fetch gets the page HTML, not GraphBinary) rather than hanging. */
 export async function registerServiceWorker(url: string | URL, scope?: string, controlTimeoutMs = 30_000): Promise<ServiceWorkerRegistration> {
-  const reg = await navigator.serviceWorker.register(url.toString(), { type: 'module', ...(scope ? { scope } : {}) });
-  await navigator.serviceWorker.ready;
-  if (navigator.serviceWorker.controller) return reg;
+  const sw = navigator.serviceWorker;
+  const reg = await sw.register(url.toString(), { type: 'module', ...(scope ? { scope } : {}) });
+  if (sw.controller) return reg; // warm start: an existing SW already controls this page
   await new Promise<void>((resolve) => {
-    const done = () => {
-      navigator.serviceWorker.removeEventListener('controllerchange', onChange);
-      clearInterval(poll);
-      clearTimeout(deadline);
-      resolve();
-    };
-    const onChange = () => { if (navigator.serviceWorker.controller) done(); };
-    navigator.serviceWorker.addEventListener('controllerchange', onChange);
-    const poll = setInterval(() => { if (navigator.serviceWorker.controller) done(); }, 50);
+    const done = () => { sw.removeEventListener('controllerchange', onChange); clearTimeout(deadline); resolve(); };
+    const onChange = () => { if (sw.controller) done(); };
     const deadline = setTimeout(done, controlTimeoutMs); // bound: never hang, fail loudly downstream
+    sw.addEventListener('controllerchange', onChange);
+    if (sw.controller) done(); // re-check AFTER attaching — closes the attach/fire gap with no poll
   });
   return reg;
 }
