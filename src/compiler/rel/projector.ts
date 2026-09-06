@@ -12,7 +12,8 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byExpr, modulations, scopedHost, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
-import { carriedCols, meta, typeOf, type Minter } from './build.ts';
+import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
+import { correlatedMapKey } from './map.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -174,6 +175,18 @@ function formatValue(
       const value = byExpr(modulation, host, source, fresh, false, child);
       if (!value) return null;
       pieces.push(value);
+      continue;
+    }
+    // A MAP host (`elementMap()`/`valueMap()`/`group()`) resolves a named token against its OWN entries
+    // first (`Scoping`/`FormatStep`: a Map traverser is not an Element, so the property branch is skipped
+    // and the map scope is read directly). Only a SCALAR value side concatenates; an absent key yields
+    // NULL, which `||` propagates so the whole token poisons the result and drops the traverser — the
+    // reference's productive-absent ("software drops out" of `elementMap().format(…)`). `scopeValue` has
+    // no minter, so the correlated read is done here where `fresh` is in scope.
+    if (host.kind === 'map') {
+      if (host.valOf.kind !== 'scalar') return null;
+      if (host.keys && !host.keys.includes(part.name)) return null;
+      pieces.push(jsonField(correlatedMapKey(host.map, part.name, fresh).node, 'v'));
       continue;
     }
     const scoped = scopedHost(part.name, host);

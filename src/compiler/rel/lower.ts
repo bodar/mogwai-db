@@ -2493,6 +2493,18 @@ function mapTail(
       continue;
     }
 
+    // `math`/`format` over a MAP host — `_` / `%{name}` resolve against the map's OWN entries
+    // (`Scoping.getScopeValue` tries the traverser Map first), which is the by()-child / scope vocabulary
+    // `mapHostChild` and `scopeValue`'s map arm answer. Placed BEFORE the blanket modulator decline
+    // because a projector READS its `by()` ring (the same reason `BY_READERS` is exempt in the scalar
+    // tail). One lowering at every host (§6·6). `math` yields a Double, `format` a String — a scalar
+    // stream, so the rest of the chain continues through `continueAs`.
+    if (REL_PROJECTORS.has(step.name)) {
+      const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels } };
+      const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh);
+      return projected && continueAs(projected.rel, projected.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
     if (step.modulators?.length || step.optionArms) return null;
 
     // THE MAP-VALUED MERGE DRIVER — `mergeV()`/`mergeV(__.identity())` where the traverser (this map) IS

@@ -1560,6 +1560,24 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Re
 }
 
 /**
+ * A single host map's value at KEY, CORRELATED — the child-seam twin of `mapKey` (which reads a RELATION
+ * of maps). Returns the first matching entry's VALUE-SIDE node and the key's presence, both as correlated
+ * subqueries over the one host `map` value (`pairsOf` is correlated — no `input`). `mapHostChild` /
+ * `scopeValue`'s map arm decode the node per `valOf` (the same `$.v`/`$.t` split `sideOf` makes). A
+ * missing key is a productive-absent — `present` false drops the traverser (`Scoping`/`Select.feature`),
+ * never a productive null.
+ */
+export function correlatedMapKey(map: Expr, key: string, fresh: Minter): { node: Expr; present: Expr } {
+  const probe = pairsOf(map, fresh);
+  const present: Expr = { kind: 'exists', negated: false,
+    plan: make.filter({ id: fresh('cmf'), input: probe, channels: [], type: probe.type, pred: keyMatches(col(probe.id, PAIR.value), key) }) };
+  const valuePairs = pairsOf(map, fresh);
+  const matched = make.filter({ id: fresh('cmv'), input: valuePairs, channels: [], type: valuePairs.type, pred: keyMatches(col(valuePairs.id, PAIR.value), key) });
+  const node = firstOf(matched, pairSide(col(matched.id, PAIR.value), 'values'), col(matched.id, PAIR.ord), fresh);
+  return { node, present };
+}
+
+/**
  * `select(k1, k2, …)` over a MAP traverser — a SUB-MAP of the named keys, or `null` to decline.
  *
  * `SelectStep.processNextStart` (≥2 keys,

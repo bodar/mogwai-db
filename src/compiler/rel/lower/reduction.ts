@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, firstRootedValue, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -22,8 +22,8 @@ import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
 import { isReducer } from '../reducer.ts';
-import { LIST_COL, correlatedListMembers } from '../list.ts';
-import { elementHost, elementValueMap, MAP_COL } from '../map.ts';
+import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
+import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
@@ -1415,6 +1415,12 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: Chain
     return scalarChild(body.slice(1), rerooted, ctx, fresh);
   }
 
+  // A MAP host's `select(<key>)` reads the map's OWN entry (`Scoping` tries the traverser Map first), a
+  // DIFFERENT question from the alias re-root below — so it is intercepted here, before the generic
+  // `select` arm can mis-read it as an alias. Every other map-host child body declines (a map has no
+  // value/token/property to project; a rooted `V()`/`E()` body was handled above).
+  if (host.kind === 'map') return mapHostChild(body, host, ctx, fresh);
+
   // A `select(<label>)` RE-ROOT — the alias analogue of the endpoint/owner reroots above, so a child
   // body may read a bound label and continue against it. A bare `select('a')` yields the aliased
   // traverser itself (an element or a value); a chain past it continues against the new host.
@@ -1839,11 +1845,67 @@ export function scalarHostChild(
  * `listTail` — so `by(__.unfold().count()|sum()|fold())` and a trailing member reducer reduce through
  * the same `correlatedReduce` collapse arms whatever the members are. Only a MIXED list declines.
  */
+/**
+ * A child body over a MAP host — `by(__.select(<key>)…)`, the child-seam twin of `mapTail`'s chain-level
+ * `select(<key>)` (`Scoping.getScopeValue` tries the traverser Map first). The correlated key read
+ * (`correlatedMapKey`) reroots the host to the value side's shape — the same `sideOf` split `mapTail`
+ * makes — and the body CONTINUES against it (`scalarChild`), so `select(k).unfold()`, `select(k).values()`,
+ * a nested `select(k1).select(k2)`, all compose. A missing key is a productive-absent (`present` false),
+ * threaded onto the recursed value so the host (a `math`/`format` projector) drops the whole traverser.
+ */
+function mapHostChild(
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'map' }>, ctx: ChainCtx, fresh: Minter,
+): ChildValue | null {
+  const first = body[0]!;
+  if (first.name !== 'select' || first.modulators?.length) return null;
+  const spec = selectSpec(first);
+  if (!spec || spec.labels.length !== 1) return null;
+  const key = spec.labels[0]!;
+  // Map-key-vs-alias precedence (`Scoping`): a key NOT in the static key set cannot be a map key. The
+  // child seam has no alias vocabulary here, so it declines rather than guessing (fail-closed).
+  if (host.keys && !host.keys.includes(key)) return null;
+  const { node, present } = correlatedMapKey(host.map, key, fresh);
+  const valOf = host.valOf;
+  // Reroot to the value side's shape (the `sideOf` decode: a `{t,v}` scalar, a list/map blob).
+  let reHost: ChildHost;
+  if (valOf.kind === 'scalar') {
+    const value = jsonField(node, 'v');
+    const vtype = jsonField(node, 't');
+    if (body.length === 1) return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
+    reHost = { kind: 'scalar', value, vtype, row: host.row };
+  } else if (valOf.kind === 'list') {
+    reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row: host.row };
+  } else if (valOf.kind === 'map') {
+    reHost = { kind: 'map', map: jsonOf(jsonField(node, 'v')), keyOf: { kind: 'scalar' }, valOf: valOf.of, row: host.row };
+  } else return null; // an `elem` value side reroots to an element — a later increment
+  // A bare `select(k)` of a list/map value is that collection traverser; a scalar consumer cannot use it,
+  // so decline here and let a consumer that can (the caller narrows) handle a tail-less form later.
+  if (body.length === 1) return null;
+  const rerooted = scalarChild(body.slice(1), reHost, ctx, fresh);
+  if (!rerooted) return null;
+  // Thread the key's presence onto the recursed value: an absent key means the whole child produced
+  // nothing. `ALWAYS_PRODUCTIVE` on the tail collapses to just the key's presence; a real tail predicate
+  // ANDs; a tail that cannot say leaves the key's presence as the honest floor.
+  const present2 = rerooted.present === ALWAYS_PRODUCTIVE || !rerooted.present ? present : and(present, rerooted.present);
+  return { ...rerooted, present: present2 };
+}
+
 export function listHostChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'list' }>, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null {
   const first = body[0];
-  if (!first || first.name !== 'unfold' || first.args.length || body.length < 2) return null;
+  if (!first || first.name !== 'unfold' || first.args.length) return null;
+  // A BARE trailing `unfold()` yields the FIRST member — `TraversalUtil.produce`'s `.next()`, the
+  // `yields:'first'` twin of a multi-valued property read. Only a SCALAR member is a value a scalar
+  // ChildValue can carry (`firstScalarMember`); an element/map/nested-list member declines. This is what
+  // makes `by(__.select(k).unfold())` over a `valueMap()` map land (the per-key value is a list).
+  if (body.length === 1) {
+    const m = firstScalarMember(host.list, host.of, fresh);
+    return m && {
+      expr: m.value, framing: { kind: 'scalar', type: m.vtype ? PER_ROW('vtype') : UNKNOWN },
+      ...(m.vtype ? { vtype: m.vtype } : {}), present: m.present, yields: 'first',
+    };
+  }
   const members = correlatedListMembers(host.list, host.of, fresh);
   if (!members) return null;
   // The body after `unfold()` is the ordinary correlated body over the exploded members — the SAME

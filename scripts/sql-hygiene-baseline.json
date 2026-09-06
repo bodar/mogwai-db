@@ -56,13 +56,13 @@
   "asNumber": {
     "binds": 0,
     "bytes": 900,
-    "compiler": 11,
+    "compiler": 44,
     "bound": 0
   },
   "asString": {
     "binds": 0,
     "bytes": 1847,
-    "compiler": 37,
+    "compiler": 73,
     "bound": 0
   },
   "both": {
@@ -211,8 +211,8 @@
   },
   "format": {
     "binds": 0,
-    "bytes": 1749,
-    "compiler": 20,
+    "bytes": 8368,
+    "compiler": 53,
     "bound": 0
   },
   "group": {
@@ -355,8 +355,8 @@
   },
   "math": {
     "binds": 0,
-    "bytes": 958,
-    "compiler": 12,
+    "bytes": 5123,
+    "compiler": 43,
     "bound": 0
   },
   "max": {
