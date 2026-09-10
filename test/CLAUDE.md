@@ -18,7 +18,7 @@
 - **Run `mise run test`, NOT bare `bun test`.** The mise task carries the `depends` that set up
   the environment — `install`, `submodule`, and crucially `check` (`tsc --noEmit`). Bare `bun test`
   skips type-checking and the submodule, so green there can hide broken types. This is ENFORCED: a
-  PreToolUse hook (`.claude/hooks/reroute-bun-test.py`) rewrites a bare `bun test [args]` to
+  PreToolUse hook (`.claude/hooks/reroute-bun-test.ts`) rewrites a bare `bun test [args]` to
   `mise run test [-- args]`, so the fast inner loop on one file is `mise run test -- <file>` (which
   runs a targeted single `bun test` after the deps have set up). `mise run test` itself fans the suite
   across cores — one `bun test` process per bracket (`scripts/test-all.ts`, sharing the CI bracket

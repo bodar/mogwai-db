@@ -292,7 +292,7 @@ remaining cross-cutting substrate.
 
 **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule, and is
   serial instead of the cored fan-out). This is now ENFORCED, not just asked: a project PreToolUse Bash
-  hook (`.claude/hooks/reroute-bun-test.py`, wired in `.claude/settings.json`) transparently rewrites a
+  hook (`.claude/hooks/reroute-bun-test.ts`, wired in `.claude/settings.json`) transparently rewrites a
   bare `bun test [args]` into `mise run test [-- args]` (and denies a `bun test` buried in a compound
   command rather than mis-rewriting). See `test/CLAUDE.md`. Build graph:
   `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
