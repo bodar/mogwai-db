@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Claude Code on the web (remote) session bootstrap for mogwai-db.
 #
 # This bootstrap needs OUTBOUND egress to two hosts beyond the image: mise.run (the
@@ -9,6 +9,12 @@
 # satisfied without a redundant download.
 #
 # Step 0 is unrelated to any of that: it repairs git refs the clone gets wrong.
+#
+# The shebang resolves bash through PATH rather than `/bin/bash`, which is NOT a path every
+# machine has — a NixOS host ships only `/bin/sh`. `settings.json` executes this file directly,
+# so a hard-coded interpreter turns every session start on such a host into a hook failure,
+# including the LOCAL sessions the guard below exits from immediately. Every other script here
+# already resolves its interpreter this way; this one was the outlier.
 set -euo pipefail
 
 # Web sessions only — local machines have their own toolchain setup.
