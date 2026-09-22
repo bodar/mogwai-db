@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { KCORE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, UND, changedCount, decorateBarrier, iterateInSql, nodeCount, stringParam, type Slot } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- kcore — k-core decomposition (coreness), a BSP fixpoint decorate barrier ----------
 //
@@ -31,22 +32,20 @@ export function createKCoreService(store: GraphStore | undefined): Service {
         core: (store, run): number => {
           const backstop = nodeCount(store) + 1;
           // Seed est[v] = undirected degree (0 for an isolated vertex, which then stays 0).
-          const seed = () => store.query(
-            `WITH ${UND}
-             ${STATE_INSERT} SELECT ?, 0, 0, n.id, 0, COALESCE(d.c, 0)
-               FROM nodes n LEFT JOIN (SELECT x, COUNT(*) AS c FROM und GROUP BY x) d ON d.x = n.id`,
-            [run]);
+          const seed = () => execute(store,
+            q`WITH ${UND}
+             ${STATE_INSERT} SELECT ${value(run)}, 0, 0, n.id, 0, COALESCE(d.c, 0)
+               FROM nodes n LEFT JOIN (SELECT x, COUNT(*) AS c FROM und GROUP BY x) d ON d.x = n.id`);
           // est[v] ← H-INDEX of neighbours' estimates: rank neighbour ests desc, take the largest rank r
           // whose est ≥ r. An isolated vertex has no neighbour rows → 0.
-          const step = (prev: Slot, next: Slot) => store.query(
-            `WITH ${UND},
-               pe AS (SELECT id, cval AS est FROM barrier_state WHERE run = ? AND round = ? AND channel = 0),
+          const step = (prev: Slot, next: Slot) => execute(store,
+            q`WITH ${UND},
+               pe AS (SELECT id, cval AS est FROM barrier_state WHERE run = ${value(run)} AND round = ${value(prev)} AND channel = 0),
                ne AS (SELECT und.x AS v, pe.est AS e FROM und JOIN pe ON pe.id = und.y),
                ranked AS (SELECT v, e, ROW_NUMBER() OVER (PARTITION BY v ORDER BY e DESC) AS r FROM ne),
                hidx AS (SELECT v, COALESCE(MAX(CASE WHEN e >= r THEN r END), 0) AS h FROM ranked GROUP BY v)
              ${STATE_INSERT}
-               SELECT ?, ?, 0, n.id, 0, COALESCE(hidx.h, 0) FROM nodes n LEFT JOIN hidx ON hidx.v = n.id`,
-            [run, prev, run, next]);
+               SELECT ${value(run)}, ${value(next)}, 0, n.id, 0, COALESCE(hidx.h, 0) FROM nodes n LEFT JOIN hidx ON hidx.v = n.id`);
           return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
         },

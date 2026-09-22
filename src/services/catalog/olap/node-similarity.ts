@@ -2,6 +2,7 @@ import type { BarrierRelation, Service } from '../../spi/types.ts';
 import { NODE_SIMILARITY_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, syncBarrier } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- nodeSimilarity — Jaccard node similarity, the first PAIR-OUTPUT barrier ------------
 //
@@ -35,16 +36,15 @@ export function createNodeSimilarityService(store: GraphStore | undefined): Serv
         // Jaccard over out-neighbour sets. `inter` = common out-neighbour count per ordered pair (u≠v);
         // union = deg(u)+deg(v)−inter. Both directions (u,v) and (v,u) are emitted (same score). A node
         // with no out-neighbours never enters `nbr`, so it forms no pair.
-        store.query(
-          `WITH nbr(x, y) AS (SELECT DISTINCT src, tgt FROM edges),
+        execute(store,
+          q`WITH nbr(x, y) AS (SELECT DISTINCT src, tgt FROM edges),
              deg(x, d) AS (SELECT x, COUNT(*) FROM nbr GROUP BY x),
              inter AS (SELECT a.x AS u, b.x AS v, COUNT(*) AS i
                          FROM nbr a JOIN nbr b ON a.y = b.y AND a.x <> b.x
                         GROUP BY a.x, b.x)
            ${STATE_INSERT}
-             SELECT ?, 0, inter.u, inter.v, 0, 1.0 * inter.i / (du.d + dv.d - inter.i)
-               FROM inter JOIN deg du ON du.x = inter.u JOIN deg dv ON dv.x = inter.v`,
-          [run]);
+             SELECT ${value(run)}, 0, inter.u, inter.v, 0, 1.0 * inter.i / (du.d + dv.d - inter.i)
+               FROM inter JOIN deg du ON du.x = inter.u JOIN deg dv ON dv.x = inter.v`);
         return { kind: 'relation-ref', run, round: 0 };
       }),
     }),

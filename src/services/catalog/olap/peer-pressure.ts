@@ -1,7 +1,8 @@
 import type { Service } from '../../spi/types.ts';
 import { PEER_PRESSURE_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, stringParam, type Slot } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, stringParam, vec, type Slot } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- peerPressure — peerPressure(), a DECORATE barrier ----------
 //
@@ -30,25 +31,23 @@ export function createPeerPressureService(store: GraphStore | undefined): Servic
       return {
         channels: [{ key, channel: 0, vtype: 'int' }], // a cluster id is a vertex id (integer rowid, modern graph)
         core: (store, run): number => {
-          const { cte, labelBinds } = adjacencyCte(scope);
+          const cte = adjacencyCte(scope);
           // Seed each cluster to the vertex's external id (in `cval`, in SQL). Each round: every vertex
           // tallies the votes of {itself} ∪ {its voters} (strength 1 each; `e` is voter→receiver) and
           // adopts the max-total cluster, ties to the smallest cluster-id STRING (CAST … AS TEXT,
           // matching the reference's .toString().compareTo). ROW_NUMBER picks the winner per vertex,
           // written to the next slot.
-          const seed = () => store.query(
-            `${STATE_INSERT} SELECT ?, 0, 0, id, 0, COALESCE(uid, id) FROM nodes`,
-            [run]);
-          const step = (prev: Slot, next: Slot) => store.query(
-            `WITH ${cte},
-               ${VEC},
+          const seed = () => execute(store,
+            q`${STATE_INSERT} SELECT ${value(run)}, 0, 0, id, 0, COALESCE(uid, id) FROM nodes`);
+          const step = (prev: Slot, next: Slot) => execute(store,
+            q`WITH ${cte},
+               ${vec(run, prev)},
                votes AS (SELECT id, v AS c FROM vec
                          UNION ALL SELECT e.tgt AS id, voter.v AS c FROM e JOIN vec voter ON voter.id = e.src),
                tally AS (SELECT id, c, COUNT(*) AS total FROM votes GROUP BY id, c),
                ranked AS (SELECT id, c, ROW_NUMBER() OVER (PARTITION BY id ORDER BY total DESC, CAST(c AS TEXT) ASC) AS rn FROM tally)
              ${STATE_INSERT}
-               SELECT ?, ?, 0, id, 0, c FROM ranked WHERE rn = 1`,
-            [...labelBinds, run, prev, run, next]);
+               SELECT ${value(run)}, ${value(next)}, 0, id, 0, c FROM ranked WHERE rn = 1`);
           return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), PP_MAX_ITERATIONS, (d) => d === 0);
         },

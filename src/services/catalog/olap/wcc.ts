@@ -1,7 +1,8 @@
 import type { Service } from '../../spi/types.ts';
 import { WCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, weightedAdjacencyCte, type Slot } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, vec, weightedAdjacencyCte, type Slot } from './kernel.ts';
+import { empty, execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- wcc — connectedComponent(), a DECORATE barrier ----------
 //
@@ -55,26 +56,23 @@ export function createWccService(store: GraphStore | undefined): Service {
       return {
         channels: [{ key, channel: 0, vtype: 'string' }], // a component id is the min external-id STRING
         core: (store, run): number => {
-          const { cte, labelBinds } = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
+          const cte = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
           // Weighted: only edges with w > threshold connect (an extra WHERE + a threshold bind).
-          const edgeFilter = weightKey ? ' WHERE e.w > ?' : '';
-          const filterBind = weightKey ? [threshold] : [];
+          const edgeFilter = weightKey ? q` WHERE e.w > ${value(threshold)}` : empty;
           // Seed each component to the vertex's external-id STRING (stored in `cval`, in SQL). Each
           // round takes the lexicographic MIN over {self} ∪ {neighbours} (the `e` CTE carries both
           // directions for bothE), writing the next slot. Fixpoint in ≤ diameter rounds; |V|+1 is the
           // safe backstop — one scalar COUNT, not the vertex vector.
           const backstop = nodeCount(store) + 1;
-          const seed = () => store.query(
-            `${STATE_INSERT} SELECT ?, 0, 0, id, 0, CAST(COALESCE(uid, id) AS TEXT) FROM nodes`,
-            [run]);
-          const step = (prev: Slot, next: Slot) => store.query(
-            `WITH ${cte},
-               ${VEC},
+          const seed = () => execute(store,
+            q`${STATE_INSERT} SELECT ${value(run)}, 0, 0, id, 0, CAST(COALESCE(uid, id) AS TEXT) FROM nodes`);
+          const step = (prev: Slot, next: Slot) => execute(store,
+            q`WITH ${cte},
+               ${vec(run, prev)},
                adj AS (SELECT e.tgt AS id, vec.v AS v FROM e JOIN vec ON vec.id = e.src${edgeFilter}
                        UNION ALL SELECT id, v FROM vec)
              ${STATE_INSERT}
-               SELECT ?, ?, 0, n.id, 0, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`,
-            [...labelBinds, run, prev, ...filterBind, run, next]);
+               SELECT ${value(run)}, ${value(next)}, 0, n.id, 0, MIN(adj.v) FROM nodes n JOIN adj ON adj.id = n.id GROUP BY n.id`);
           return iterateInSql(store, run, seed, step,
             (p, n) => changedCount(store, run, p, n), backstop, (d) => d === 0);
         },

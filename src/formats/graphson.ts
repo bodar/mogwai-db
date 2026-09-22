@@ -36,6 +36,8 @@ import {
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
+import { q, type Expression } from '../sql/kernel/q.ts';
+import { edges } from '../sql/schema.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
@@ -493,7 +495,7 @@ function incidenceJson(
 export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<string> {
   // `hex(gid)` so the 16-byte BLOB rides as a hex string on both runtimes (a raw BLOB read diverges);
   // `json(rev)` so the JSONB rev blob rides as its `{gen, hash}` TEXT, nested as an object on the wire.
-  for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', 'hex(gid) AS gid', 'json(rev) AS rev'], pageSize)) {
+  for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', q`hex(gid) AS gid`, q`json(rev) AS rev`], pageSize)) {
     const ids = page.map((v) => v.id);
     const extId = new Map<number, number | string>(page.map((v) => [v.id, v.uid ?? v.id]));
 
@@ -501,9 +503,10 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
     const props = vertexPropsForOwners(store, ids, true); // GraphSON JSON-parses each value — collections as json() text
 
     // Both incidence directions, per the header. `owner` is the vertex this side hangs off.
-    const edgeSql = (endpointCol: 'src' | 'tgt') => (ph: string) =>
-      `SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, e.${endpointCol} AS owner, hex(e.gid) AS gid, json(e.rev) AS rev
-       FROM edges e JOIN labels l ON l.id = e.label WHERE e.${endpointCol} IN (${ph}) ORDER BY e.${endpointCol}, e.id`;
+    const e = edges.as('e');
+    const edgeSql = (endpointCol: 'src' | 'tgt') => (members: Expression) =>
+      q`SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, ${e.c[endpointCol]} AS owner, hex(e.gid) AS gid, json(e.rev) AS rev
+       FROM ${e} JOIN labels l ON l.id = e.label WHERE ${e.c[endpointCol]} IN (${members}) ORDER BY ${e.c[endpointCol]}, e.id`;
     const outE = rowsForOwners<EdgeRow>(store, edgeSql('src'), ids);
     const inE = rowsForOwners<EdgeRow>(store, edgeSql('tgt'), ids);
     const edgeProps = edgePropsForOwners(store, [...new Set([...outE, ...inE].map((e) => e.id))], true);

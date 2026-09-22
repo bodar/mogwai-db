@@ -2,6 +2,7 @@ import type { BarrierInput, BarrierRelation, CallParams, DecorateChannel, Servic
 import type { GraphStore } from '../../../storage.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
 import { isTraversalParam } from '../../params/call-params.ts';
+import { empty, execute, q, textLiteral, value, type Expression } from '../../../sql/kernel/q.ts';
 
 // The shared OLAP BARRIER KERNEL — the substrate every graph algorithm in `olap/` builds on: the edge
 // message scope, the `barrier_state` scratch fragments + the in-SQL fixpoint driver (`iterateInSql`),
@@ -72,26 +73,25 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
 
 /** The ONE directed-`e(…)` builder every OLAP adjacency shares — the scope's direction (out reads
  *  edges as-is, in swaps src/tgt, both unions) and the label filter, over a caller-chosen projection.
- *  `colDecl` is the CTE's column list (`'src, tgt'`, `'src, tgt, w'`); `extra` is the SELECT suffix
- *  after `src, tgt` (`''`, `', <w> AS w'`) applied identically to the forward and reversed selects. The
- *  label filter is ONE json_each bind, prepended to a statement's binds before its run/round binds; a
- *  `both` form repeats the filter so its bind repeats too (positional `?`). Extracted so the weight and
- *  hop variants below cannot drift from the unweighted one. */
-function directedAdjacency(scope: EdgeScope, colDecl: string, extra: string): { cte: string; labelBinds: string[] } {
-  const labelBinds = scope.labels.length ? [JSON.stringify(scope.labels)] : [];
-  const filter = scope.labels.length
-    ? ' WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(?)))' : '';
-  const fwd = `SELECT src, tgt${extra} FROM edges${filter}`;
-  const rev = `SELECT tgt AS src, src AS tgt${extra} FROM edges${filter}`;
-  const body = scope.direction === 'out' ? fwd : scope.direction === 'in' ? rev : `${fwd} UNION ALL ${rev}`;
-  const binds = scope.direction === 'both' ? [...labelBinds, ...labelBinds] : labelBinds;
-  return { cte: `e(${colDecl}) AS (${body})`, labelBinds: binds };
+ *  `colDecl` is the CTE's column list (`src, tgt`, `src, tgt, w`); `extra` is the SELECT suffix after
+ *  `src, tgt` (`empty`, `, <w> AS w`) applied identically to the forward and reversed selects. The
+ *  label filter is ONE json_each bind carried IN the node, so a `both` form's two filters bind twice
+ *  with no caller bookkeeping — a statement's binds fall out of its tree in text order. Extracted so the
+ *  weight and hop variants below cannot drift from the unweighted one. */
+function directedAdjacency(scope: EdgeScope, colDecl: Expression, extra: Expression): Expression {
+  const filter = (): Expression => scope.labels.length
+    ? q` WHERE label IN (SELECT id FROM labels WHERE name IN (SELECT value FROM json_each(${value(JSON.stringify(scope.labels))})))`
+    : empty;
+  const fwd = q`SELECT src, tgt${extra} FROM edges${filter()}`;
+  const rev = q`SELECT tgt AS src, src AS tgt${extra} FROM edges${filter()}`;
+  const body = scope.direction === 'out' ? fwd : scope.direction === 'in' ? rev : q`${fwd} UNION ALL ${rev}`;
+  return q`e(${colDecl}) AS (${body})`;
 }
 
 /** A directed-adjacency CTE `e(src, tgt)` for a scope — "v's contribution flows src→tgt". The
  *  UNWEIGHTED form; a weighted algorithm uses {@link weightedAdjacencyCte}. */
-export function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: string[] } {
-  return directedAdjacency(scope, 'src, tgt', '');
+export function adjacencyCte(scope: EdgeScope): Expression {
+  return directedAdjacency(scope, q`src, tgt`, empty);
 }
 
 /** A directed-adjacency CTE `e(src, tgt, w)` carrying each edge's WEIGHT — the shared substrate for
@@ -99,12 +99,12 @@ export function adjacencyCte(scope: EdgeScope): { cte: string; labelBinds: strin
  *  for weighted shortest path. `weightKey` names an edge property read as the weight (COALESCE 0 for a
  *  missing/absent value); `undefined` → the constant `1` (hop distance — the unweighted shortest-path
  *  case, which still wants a `w` column). The key is a parsed literal (the user's Gremlin / a config
- *  param naming a property), so it INLINES as a SQL literal — no bind (the bind rule, root CLAUDE.md);
- *  the only bind is the optional label filter, as in {@link adjacencyCte}. */
-export function weightedAdjacencyCte(scope: EdgeScope, weightKey: string | undefined): { cte: string; labelBinds: string[] } {
-  const w = weightKey === undefined ? '1'
-    : `COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = '${weightKey.replace(/'/g, "''")}'), 0)`;
-  return directedAdjacency(scope, 'src, tgt, w', `, ${w} AS w`);
+ *  param naming a property), so it INLINES as a kernel `textLiteral` — no bind (the bind rule, root
+ *  CLAUDE.md); the only bind is the optional label filter, as in {@link adjacencyCte}. */
+export function weightedAdjacencyCte(scope: EdgeScope, weightKey: string | undefined): Expression {
+  const w = weightKey === undefined ? q`1`
+    : q`COALESCE((SELECT value FROM edge_properties WHERE edge = edges.id AND key = ${textLiteral(weightKey)}), 0)`;
+  return directedAdjacency(scope, q`src, tgt, w`, q`, ${w} AS w`);
 }
 
 // The barrier scratch is the general `barrier_state(run, round, scope, id, channel, cval)` — one row per
@@ -112,14 +112,16 @@ export function weightedAdjacencyCte(scope: EdgeScope, weightKey: string | undef
 // A NODE-KEYED, SINGLE-CHANNEL fixpoint (wcc/pageRank/peerPressure) uses `scope` 0 and `channel` 0; the
 // two extra key dims stay literal 0 here and become live for the pair-keyed (Brandes/similarity) and
 // multi-channel (shortest-path dist + predecessor) consumers. Centralised so those consumers extend ONE
-// pair of fragments, not three copies of the SQL.
+// pair of fragments, not three copies of the SQL. Every statement here is a `q` node run through
+// `execute`: a value is a `value()` hole, never a `?` kept in step with a hand-ordered bind array.
 
 /** The INSERT column list for the scratch. A single-channel writer supplies `scope`/`channel` as the
- *  literal `0`s in its SELECT (`?, <round>, 0, <id>, 0, <cval>`). */
-export const STATE_INSERT = 'INSERT INTO barrier_state(run, round, scope, id, channel, cval)';
-/** The prior-slot vector, node-keyed single channel — the read half all three algorithms share. Binds:
- *  `run, round`. Pins `scope = 0 AND channel = 0` so it stays correct once a run holds other channels. */
-export const VEC = 'vec AS (SELECT id, cval AS v FROM barrier_state WHERE run = ? AND round = ? AND scope = 0 AND channel = 0)';
+ *  literal `0`s in its SELECT (`<run>, <round>, 0, <id>, 0, <cval>`). */
+export const STATE_INSERT = q`INSERT INTO barrier_state(run, round, scope, id, channel, cval)`;
+/** The prior-slot vector, node-keyed single channel — the read half all three algorithms share. Pins
+ *  `scope = 0 AND channel = 0` so it stays correct once a run holds other channels. */
+export const vec = (run: number, round: number): Expression =>
+  q`vec AS (SELECT id, cval AS v FROM barrier_state WHERE run = ${value(run)} AND round = ${value(round)} AND scope = 0 AND channel = 0)`;
 
 /** A round `slot` in `barrier_state` — the vector alternates between two slots so a run holds at
  *  most two vectors, cur and next. */
@@ -214,8 +216,8 @@ export const stringParam = (params: CallParams, key: string, dflt: string): stri
 
 /** The undirected, de-duplicated adjacency `und(x, y)` — both directions, no self-loops, no parallels.
  *  Shared by the undirected algorithms (k-core, triangle count / LCC). */
-export const UND = 'und(x, y) AS (SELECT DISTINCT a, b FROM '
-  + '(SELECT src AS a, tgt AS b FROM edges UNION SELECT tgt AS a, src AS b FROM edges) WHERE a <> b)';
+export const UND = q`und(x, y) AS (SELECT DISTINCT a, b FROM
+  (SELECT src AS a, tgt AS b FROM edges UNION SELECT tgt AS a, src AS b FROM edges) WHERE a <> b)`;
 
 /** Drive an OLAP relaxation to a fixpoint ENTIRELY in SQL. The vector lives in `barrier_state`
  *  under `run`, in alternating slots (0/1) — it never enters JS. `seed()` writes slot 0; `step(prev,
@@ -292,19 +294,17 @@ export const changedCount = (store: GraphStore, run: number, prev: Slot, next: S
 export function relaxShortestPath(
   store: GraphStore, run: number, sourceIds: readonly number[], scope: EdgeScope, distanceKey: string | undefined,
 ): Slot {
-  const { cte, labelBinds } = weightedAdjacencyCte(scope, distanceKey);
+  const cte = weightedAdjacencyCte(scope, distanceKey);
   const backstop = store.query<{ c: number }>('SELECT COUNT(*) AS c FROM nodes')[0].c;
-  const seed = () => store.query(
-    `${STATE_INSERT} SELECT ?, 0, s.value, s.value, 0, 0.0 FROM json_each(?) s`,
-    [run, JSON.stringify(sourceIds)]);
-  const step = (prev: Slot, next: Slot) => store.query(
-    `WITH ${cte},
-       prev AS (SELECT scope, id, cval AS d FROM barrier_state WHERE run = ? AND round = ? AND channel = 0),
+  const seed = () => execute(store,
+    q`${STATE_INSERT} SELECT ${value(run)}, 0, s.value, s.value, 0, 0.0 FROM json_each(${value(JSON.stringify(sourceIds))}) s`);
+  const step = (prev: Slot, next: Slot) => execute(store,
+    q`WITH ${cte},
+       prev AS (SELECT scope, id, cval AS d FROM barrier_state WHERE run = ${value(run)} AND round = ${value(prev)} AND channel = 0),
        relaxed AS (SELECT scope, id, d FROM prev
                    UNION ALL SELECT prev.scope, e.tgt AS id, prev.d + e.w AS d FROM prev JOIN e ON e.src = prev.id)
      ${STATE_INSERT}
-       SELECT ?, ?, scope, id, 0, MIN(d) FROM relaxed GROUP BY scope, id`,
-    [...labelBinds, run, prev, run, next]);
+       SELECT ${value(run)}, ${value(next)}, scope, id, 0, MIN(d) FROM relaxed GROUP BY scope, id`);
   return iterateInSql(store, run, seed, step,
     (p, n) => changedOrNew(store, run, p, n), backstop, (d) => d === 0);
 }

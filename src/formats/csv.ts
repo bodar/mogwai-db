@@ -43,6 +43,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
+import { execute, identifier, q, type Expression } from '../sql/kernel/q.ts';
 
 // ---------- RFC 4180 ----------
 
@@ -462,10 +463,12 @@ interface PropColumn { key: string; vtype: CanonicalType | null; array: boolean;
  * point at which an export stops being portable, since both vendors key a property by name alone;
  * that is a property of a heterogeneous graph, not of this writer.
  */
-function propColumns(store: GraphStore, table: 'vertex_properties' | 'edge_properties', owner: string): PropColumn[] {
-  const rows = store.query<{ key: string; vtype: string | null; most: number }>(
-    `SELECT key, vtype, max(n) AS most FROM
-       (SELECT ${owner} AS owner, key, vtype, count(*) AS n FROM ${table} GROUP BY ${owner}, key, vtype)
+function propColumns(store: GraphStore, table: 'vertex_properties' | 'edge_properties', owner: 'node' | 'edge'): PropColumn[] {
+  const t = identifier(table);
+  const o = identifier(owner);
+  const rows = execute<{ key: string; vtype: string | null; most: number }>(store,
+    q`SELECT key, vtype, max(n) AS most FROM
+       (SELECT ${o} AS owner, key, vtype, count(*) AS n FROM ${t} GROUP BY ${o}, key, vtype)
      GROUP BY key, vtype ORDER BY key, vtype`);
   return rows.map(({ key, vtype, most }) => {
     const canonical = (vtype ?? null) as CanonicalType | null;
@@ -557,8 +560,8 @@ export function* csvEdgeLines(store: GraphStore, pageSize = 200): Generator<stri
     store, 'edges', ['id', 'uid', 'src', 'label', 'tgt'], pageSize)) {
     // Two lookups per page, both over a chunked id set and both cached ACROSS pages: a graph has few
     // distinct labels, and an endpoint recurs constantly.
-    fill(store, 'labels', 'name', page.map((e) => e.label), labelNames);
-    fill(store, 'nodes', 'COALESCE(uid, id)', [...page.map((e) => e.src), ...page.map((e) => e.tgt)], extIds);
+    fill(store, 'labels', q`name`, page.map((e) => e.label), labelNames);
+    fill(store, 'nodes', q`COALESCE(uid, id)`, [...page.map((e) => e.src), ...page.map((e) => e.tgt)], extIds);
     const props = edgePropsForOwners(store, page.map((e) => e.id), false);
     for (const e of page) {
       const ext = String(e.uid ?? e.id);
@@ -571,11 +574,11 @@ export function* csvEdgeLines(store: GraphStore, pageSize = 200): Generator<stri
 }
 
 /** Cache-filling lookup: read only the ids not already known, chunked. */
-function fill(store: GraphStore, table: string, expr: string, ids: readonly number[], into: Map<number, string>): void {
+function fill(store: GraphStore, table: 'labels' | 'nodes', expr: Expression, ids: readonly number[], into: Map<number, string>): void {
   const missing = [...new Set(ids.filter((id) => !into.has(id)))];
   if (!missing.length) return;
   for (const row of rowsForOwners<{ owner: number; v: string | number }>(store,
-    (ph) => `SELECT id AS owner, ${expr} AS v FROM ${table} WHERE id IN (${ph})`, missing))
+    (members) => q`SELECT id AS owner, ${expr} AS v FROM ${identifier(table)} WHERE id IN (${members})`, missing))
     into.set(row.owner, String(row.v));
 }
 

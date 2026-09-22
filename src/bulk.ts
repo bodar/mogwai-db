@@ -40,6 +40,7 @@ import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { refreshElements } from './refresh.ts';
 import { deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
+import { execute, identifier, q, value } from './sql/kernel/q.ts';
 
 /** Landing a PRESERVED rev on a matched vertex during `'replace'` (replication apply): the rev crosses
  *  as its `{gen, hash}` JSON text wrapped in `jsonb()`, and dirty=3 tells the refresh to keep it. */
@@ -224,8 +225,8 @@ export class BulkLoader {
     this.emptyTarget = this.nextNode === 1 && this.nextEdge === 1;
   }
 
-  private maxOf(table: string): number {
-    return this.store.query<{ m: number | null }>(`SELECT max(id) AS m FROM ${table}`)[0].m ?? 0;
+  private maxOf(table: 'nodes' | 'edges' | 'vertex_properties' | 'edge_properties'): number {
+    return execute<{ m: number | null }>(this.store, q`SELECT max(id) AS m FROM ${identifier(table)}`)[0].m ?? 0;
   }
 
   /** Intern a label name, memoized — the per-element path re-interns for every element (8,857
@@ -456,18 +457,19 @@ export class BulkLoader {
   private existing(table: 'nodes' | 'edges', column: 'id', ids: readonly number[]): Set<number> {
     if (!ids.length) return new Set();
     this.counts.statements++;
-    return new Set(this.store.query<{ v: number }>(
-      `SELECT ${column} AS v FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`,
-      [JSON.stringify(ids)]).map((r) => r.v));
+    const c = identifier(column);
+    return new Set(execute<{ v: number }>(this.store,
+      q`SELECT ${c} AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(JSON.stringify(ids))}))`)
+      .map((r) => r.v));
   }
 
   /** The existing rowid for each of `uids` that is already present — one `json_each` read. */
   private existingUid(table: 'nodes' | 'edges', uids: readonly string[]): Map<string, number> {
     if (!uids.length) return new Map();
     this.counts.statements++;
-    return new Map(this.store.query<{ id: number; uid: string }>(
-      `SELECT id, uid FROM ${table} WHERE uid IN (SELECT value FROM json_each(?))`,
-      [JSON.stringify(uids)]).map((r) => [r.uid, r.id] as const));
+    return new Map(execute<{ id: number; uid: string }>(this.store,
+      q`SELECT id, uid FROM ${identifier(table)} WHERE uid IN (SELECT value FROM json_each(${value(JSON.stringify(uids))}))`)
+      .map((r) => [r.uid, r.id] as const));
   }
 
   /** Remove a matched vertex's owned rows — everything but the `nodes` row itself and its edges — so
@@ -525,7 +527,7 @@ export class BulkLoader {
     }
   }
 
-  private assertFree(table: string, column: 'id' | 'uid', values: readonly unknown[], remedy: string): void {
+  private assertFree(table: 'nodes' | 'edges', column: 'id' | 'uid', values: readonly unknown[], remedy: string): void {
     if (!values.length) return;
     // The batch's ids cross as ONE JSON bind exploded by `json_each` — a membership set sized by DATA
     // is a single value, never an `IN (…)` list the DO bind cap would reject (§6·2). `json_each` routes
@@ -536,9 +538,9 @@ export class BulkLoader {
     // LIMIT 1 names whichever the scan reached first — so the same failed load reported a different id
     // depending on SQLite's scan direction (`mise run test:perturbed`). The lowest one is stable and is
     // the one a user re-running the load will hit first anyway.
-    const clash = this.store.query<{ v: unknown }>(
-      `SELECT MIN(${column}) AS v FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`,
-      [JSON.stringify([...values])])[0];
+    const c = identifier(column);
+    const clash = execute<{ v: unknown }>(this.store,
+      q`SELECT MIN(${c}) AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(JSON.stringify([...values]))}))`)[0];
     this.counts.statements++;
     if (clash !== undefined && clash.v !== null)
       throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
@@ -564,7 +566,7 @@ export class BulkLoader {
     const landed = this.vertexIds.get(String(id));
     if (landed !== undefined) return landed;
     const col = typeof id === 'number' ? 'id' : 'uid';
-    const row = this.store.query<{ id: number }>(`SELECT id FROM nodes WHERE ${col}=?`, [id])[0];
+    const row = execute<{ id: number }>(this.store, q`SELECT id FROM nodes WHERE ${identifier(col)} = ${value(id)}`)[0];
     this.counts.statements++;
     if (!row) throw new Error(`bulk load: edge ${String(edge.id ?? edge.label)} references unknown vertex ${String(id)}`);
     this.vertexIds.set(String(id), row.id);

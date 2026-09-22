@@ -122,6 +122,18 @@ export function render(node: Expression): { sql: string; binds: any[] } {
   return renderStatement(sql(node));
 }
 
+/** The minimal seam a rendered statement runs against — `GraphStore.query` satisfies it. Structural,
+ *  so the kernel depends on no concrete store. */
+export interface Queryable { query<T = any>(sql: string, binds?: readonly unknown[]): T[]; }
+
+/** Render a statement and run it. The way a runtime module (a drain, a set write, an OLAP round)
+ *  issues SQL built through `q`: its binds come from the `value()` holes in text order, so no call
+ *  site keeps a positional bind array in step with a string it concatenated. */
+export function execute<T = any>(store: Queryable, node: Expression): T[] {
+  const { sql: text, binds } = render(node);
+  return store.query<T>(text, binds);
+}
+
 /** Identifier-shaped name → spliced raw; else double-quoted. SQL keyword legality is
  * position-dependent (`key` is a legal column name here), so a context-neutral renderer must not
  * blanket-quote a keyword table. */

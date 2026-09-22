@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { CLOSENESS_SERVICE_NAME, HARMONIC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, relaxShortestPath, stringParam } from './kernel.ts';
+import { execute, q, value, type Expression } from '../../../sql/kernel/q.ts';
 
 // ---------- closeness — closeness centrality, a scope-keyed DECORATE barrier ----------
 //
@@ -25,27 +26,26 @@ const HARMONIC_KEY = 'harmonic';
  *  `cval > 0`) — written at (scope 0, channel 0) for the decorate resume. Every vertex gets a row (LEFT
  *  JOIN), so an unreached vertex aggregates over zero rows; `scoreExpr` must be null-safe there. The two
  *  algorithms differ ONLY in that one expression, which is why they share this. */
-function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCount: number) => string): number {
+function distanceCentrality(store: GraphStore, run: number, scoreExpr: (nodeCount: number) => Expression): number {
   const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
   if (ids.length === 0) return 0;
   const distRound = relaxShortestPath(store, run, ids, { direction: 'in', labels: [] }, undefined);
   const scoreRound = 2; // relaxShortestPath alternates slots 0/1 only, so 2 is a free round
   store.query('DELETE FROM barrier_state WHERE run = ? AND round = ?', [run, scoreRound]);
-  store.query(
-    `${STATE_INSERT}
-       SELECT ?, ?, 0, n.id, 0, ${scoreExpr(ids.length)}
+  execute(store,
+    q`${STATE_INSERT}
+       SELECT ${value(run)}, ${value(scoreRound)}, 0, n.id, 0, ${scoreExpr(ids.length)}
          FROM nodes n
          LEFT JOIN barrier_state bs
-           ON bs.run = ? AND bs.round = ? AND bs.channel = 0 AND bs.scope = n.id AND bs.cval > 0
-        GROUP BY n.id`,
-    [run, scoreRound, run, distRound]);
+           ON bs.run = ${value(run)} AND bs.round = ${value(distRound)} AND bs.channel = 0 AND bs.scope = n.id AND bs.cval > 0
+        GROUP BY n.id`);
   return scoreRound;
 }
 
 /** One distance-centrality DECORATE barrier — closeness or harmonic — given its name, default property
  *  key, and the per-scope reduction expression. Both are call-only, `internal: true`, GDS-style. */
 function distanceCentralityService(
-  serviceName: string, defaultKey: string, scoreExpr: (nodeCount: number) => string, store: GraphStore | undefined,
+  serviceName: string, defaultKey: string, scoreExpr: (nodeCount: number) => Expression, store: GraphStore | undefined,
 ): Service {
   return decorateBarrier({
     name: serviceName,
@@ -62,7 +62,7 @@ function distanceCentralityService(
  *  of their distances; 0 when none reach. */
 export const createClosenessService = (store: GraphStore | undefined): Service =>
   distanceCentralityService(CLOSENESS_SERVICE_NAME, CLOSENESS_KEY,
-    () => 'CASE WHEN COALESCE(SUM(bs.cval), 0) > 0 THEN CAST(COUNT(bs.cval) AS REAL) / SUM(bs.cval) ELSE 0.0 END',
+    () => q`CASE WHEN COALESCE(SUM(bs.cval), 0) > 0 THEN CAST(COUNT(bs.cval) AS REAL) / SUM(bs.cval) ELSE 0.0 END`,
     store);
 
 /** harmonic = (Σ 1/dist over reaching nodes) / (N−1) — GDS HarmonicCentrality. Unlike closeness it sums
@@ -70,5 +70,5 @@ export const createClosenessService = (store: GraphStore | undefined): Service =
  *  compiler-held constant inlined into the expression; N≤1 → 0 (no other nodes, and no division by zero). */
 export const createHarmonicService = (store: GraphStore | undefined): Service =>
   distanceCentralityService(HARMONIC_SERVICE_NAME, HARMONIC_KEY,
-    (n) => n <= 1 ? '0.0' : `COALESCE(SUM(1.0 / bs.cval), 0) / ${n - 1}.0`,
+    (n) => n <= 1 ? q`0.0` : q`COALESCE(SUM(1.0 / bs.cval), 0) / ${n - 1}.0`,
     store);

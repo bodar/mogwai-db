@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { SCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- scc — strongly connected components, a ONE-SHOT decorate barrier ----------
 //
@@ -38,8 +39,8 @@ export function createSccService(store: GraphStore | undefined): Service {
           // scc(v, rep): for each v, the min external-id over all u that are MUTUALLY reachable with v
           // (r1: v→u, r2: u→v). v is always its own co-member (reach holds (v,v)), so every vertex is
           // covered and gets at least itself as a candidate representative.
-          store.query(
-            `WITH RECURSIVE
+          execute(store,
+            q`WITH RECURSIVE
                reach(a, b) AS (
                  SELECT id, id FROM nodes
                  UNION
@@ -51,8 +52,7 @@ export function createSccService(store: GraphStore | undefined): Service {
                    JOIN nodes n ON n.id = r1.b
                   GROUP BY r1.a)
              ${STATE_INSERT}
-               SELECT ?, 0, 0, n.id, 0, scc.rep FROM nodes n JOIN scc ON scc.v = n.id`,
-            [run]);
+               SELECT ${value(run)}, 0, 0, n.id, 0, scc.rep FROM nodes n JOIN scc ON scc.v = n.id`);
           return 0;
         },
       };

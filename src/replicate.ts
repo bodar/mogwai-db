@@ -20,6 +20,7 @@
 import type { GraphStore } from './storage.ts';
 import { loadBulk, type BulkEdge, type BulkProperty, type BulkVertex } from './bulk.ts';
 import { deleteMembers, insertSet } from './setwrite.ts';
+import { execute, identifier, q, value } from './sql/kernel/q.ts';
 import { refreshElements } from './refresh.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
 import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
@@ -77,14 +78,13 @@ const upper = (gid: string): string => gid.toUpperCase();
  *  (never a data-sized placeholder list, §6·2), the same access path `_revs_diff` uses. */
 function resolveGids(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, number> {
   if (!gids.length) return new Map();
-  const rows = store.query<{ gid: string; id: number }>(
-    `SELECT hex(gid) AS gid, id FROM ${table} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))`,
-    [JSON.stringify(gids.map(upper))]);
+  const rows = execute<{ gid: string; id: number }>(store,
+    q`SELECT hex(gid) AS gid, id FROM ${identifier(table)} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
   return new Map(rows.map((r) => [r.gid, r.id]));
 }
 
 const maxId = (store: GraphStore, table: 'nodes' | 'edges'): number =>
-  (store.query<{ m: number | null }>(`SELECT max(id) AS m FROM ${table}`)[0].m ?? 0);
+  (execute<{ m: number | null }>(store, q`SELECT max(id) AS m FROM ${identifier(table)}`)[0].m ?? 0);
 
 /**
  * Apply a batch of replicated changes to `store`, idempotently and keyed by GID. Deletes first, then the
@@ -140,18 +140,21 @@ export function applyChanges(store: GraphStore, cs: ChangeSet): void {
  */
 function applyUids(store: GraphStore, table: 'nodes' | 'edges', items: readonly { gid: string; uid?: string | null }[]): void {
   const kind = table === 'nodes' ? 'vertex' : 'edge';
+  const t = identifier(table);
+  const setUid = (uid: string | null, gid: string) =>
+    execute(store, q`UPDATE ${t} SET uid = ${value(uid)} WHERE hex(gid) = ${value(gid)}`);
   for (const it of items) {
     if (it.uid == null) continue;
     const gid = upper(it.gid);
-    const holder = store.query<{ gid: string }>(`SELECT hex(gid) AS gid FROM ${table} WHERE uid = ?`, [it.uid])[0];
+    const holder = execute<{ gid: string }>(store, q`SELECT hex(gid) AS gid FROM ${t} WHERE uid = ${value(it.uid)}`)[0];
     if (holder && upper(holder.gid) !== gid) {
       if (gid < upper(holder.gid)) { // incoming wins the uid (lower gid)
-        store.query(`UPDATE ${table} SET uid = NULL WHERE hex(gid) = ?`, [upper(holder.gid)]); // strip loser FIRST (UNIQUE)
-        store.query(`UPDATE ${table} SET uid = ? WHERE hex(gid) = ?`, [it.uid, gid]);
+        setUid(null, upper(holder.gid)); // strip loser FIRST (UNIQUE)
+        setUid(it.uid, gid);
         shadowUid(store, holder.gid, it.uid, kind); // surface the existing loser's uid-loss
       } else shadowUid(store, gid, it.uid, kind); // incoming loses — it keeps uid NULL, surface
     } else if (!holder) {
-      store.query(`UPDATE ${table} SET uid = ? WHERE hex(gid) = ?`, [it.uid, gid]); // no collision
+      setUid(it.uid, gid); // no collision
     }
     // holder is this same gid → uid already assigned, nothing to do (idempotent re-apply)
   }
@@ -337,9 +340,8 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
 /** hex(gid) → the live rev-tree this graph holds for it, for a set of gids. */
 function localRevs(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, Rev> {
   if (!gids.length) return new Map();
-  const rows = store.query<{ gid: string; rev: string | null }>(
-    `SELECT hex(gid) AS gid, json(rev) AS rev FROM ${table} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))`,
-    [JSON.stringify(gids.map(upper))]);
+  const rows = execute<{ gid: string; rev: string | null }>(store,
+    q`SELECT hex(gid) AS gid, json(rev) AS rev FROM ${identifier(table)} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
   const out = new Map<string, Rev>();
   for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, rev); }
   return out;

@@ -43,7 +43,7 @@ const decorateName = (run: number, channel: number): string => `_mogwai_decorate
  *  **The `scope=0 AND channel=<channel>` pin is load-bearing, not decoration.** `(run, round)` alone
  *  selects EVERY channel/scope a run holds, so a multi-channel algorithm (HITS hub+auth) or a non-zero
  *  scope would return several rows per id and the decorate join would silently multiply the stream.
- *  Pinned to the ONE `(scope=0, channel)` cell, it reads exactly that property — the same shape `VEC`
+ *  Pinned to the ONE `(scope=0, channel)` cell, it reads exactly that property — the same shape the OLAP kernel's `vec`
  *  carries. A multi-channel decorate is one binding PER channel (the resume stacks a layer each). */
 function decorateBinding(run: number, round: number, channel: number, name: string, fresh: Minter): Rel {
   const scan = make.scan({

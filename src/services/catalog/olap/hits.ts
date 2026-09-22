@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { HITS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, decorateBarrier, stringParam } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- hits — HITS (Kleinberg hubs & authorities), a MULTI-CHANNEL DECORATE barrier ----------
 //
@@ -62,29 +63,27 @@ export function createHitsService(store: GraphStore | undefined): Service {
           // SEED round 0: hub = auth = 1 for every vertex (the reference init). The first auth half-step
           // overwrites auth from these hubs, so only hub=1 is load-bearing, but seeding both keeps round 0
           // a complete two-channel snapshot.
-          store.query(`${STATE_INSERT} SELECT ?, 0, 0, id, ?, 1.0 FROM nodes`, [run, HITS_HUB_CHANNEL]);
-          store.query(`${STATE_INSERT} SELECT ?, 0, 0, id, ?, 1.0 FROM nodes`, [run, HITS_AUTH_CHANNEL]);
+          for (const channel of [HITS_HUB_CHANNEL, HITS_AUTH_CHANNEL])
+            execute(store, q`${STATE_INSERT} SELECT ${value(run)}, 0, 0, id, ${value(channel)}, 1.0 FROM nodes`);
           for (let r = 1; r <= iterations; r++) {
             // auth[r][v] = Σ hub[r-1][u] for u→v (in-neighbours). Every vertex gets a row (LEFT JOIN),
             // so an authority-less vertex is 0 rather than absent.
-            store.query(
-              `${STATE_INSERT}
-                 SELECT ?, ?, 0, n.id, ?, COALESCE(SUM(ph.cval), 0)
+            execute(store,
+              q`${STATE_INSERT}
+                 SELECT ${value(run)}, ${value(r)}, 0, n.id, ${value(HITS_AUTH_CHANNEL)}, COALESCE(SUM(ph.cval), 0)
                    FROM nodes n
                    LEFT JOIN edges e ON e.tgt = n.id
-                   LEFT JOIN barrier_state ph ON ph.run = ? AND ph.round = ? AND ph.channel = ? AND ph.id = e.src
-                  GROUP BY n.id`,
-              [run, r, HITS_AUTH_CHANNEL, run, r - 1, HITS_HUB_CHANNEL]);
+                   LEFT JOIN barrier_state ph ON ph.run = ${value(run)} AND ph.round = ${value(r - 1)} AND ph.channel = ${value(HITS_HUB_CHANNEL)} AND ph.id = e.src
+                  GROUP BY n.id`);
             hitsNormalize(store, run, r, HITS_AUTH_CHANNEL);
             // hub[r][v] = Σ auth[r][w] for v→w (out-neighbours), reading the JUST-normalised auth.
-            store.query(
-              `${STATE_INSERT}
-                 SELECT ?, ?, 0, n.id, ?, COALESCE(SUM(ca.cval), 0)
+            execute(store,
+              q`${STATE_INSERT}
+                 SELECT ${value(run)}, ${value(r)}, 0, n.id, ${value(HITS_HUB_CHANNEL)}, COALESCE(SUM(ca.cval), 0)
                    FROM nodes n
                    LEFT JOIN edges e ON e.src = n.id
-                   LEFT JOIN barrier_state ca ON ca.run = ? AND ca.round = ? AND ca.channel = ? AND ca.id = e.tgt
-                  GROUP BY n.id`,
-              [run, r, HITS_HUB_CHANNEL, run, r, HITS_AUTH_CHANNEL]);
+                   LEFT JOIN barrier_state ca ON ca.run = ${value(run)} AND ca.round = ${value(r)} AND ca.channel = ${value(HITS_AUTH_CHANNEL)} AND ca.id = e.tgt
+                  GROUP BY n.id`);
             hitsNormalize(store, run, r, HITS_HUB_CHANNEL);
           }
           return iterations;

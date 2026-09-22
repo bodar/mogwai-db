@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { ARTICLE_RANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam, weightedAdjacencyCte } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- articleRank — ArticleRank, a MULTI-CHANNEL BSP decorate barrier ----------
 //
@@ -69,43 +70,41 @@ export function createArticleRankService(store: GraphStore | undefined): Service
         core: (store, run): number => {
           const N = nodeCount(store);
           const alpha = 1 - damping;
-          const { cte, labelBinds } = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
+          const cte = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
           // per-sender out-degree denominator: weighted (Σw, absent when 0 → does not send) or a count.
           const odCte = weightKey
-            ? 'od AS (SELECT src AS id, SUM(w) AS c FROM e GROUP BY src HAVING SUM(w) > 0)'
-            : 'od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src)';
+            ? q`od AS (SELECT src AS id, SUM(w) AS c FROM e GROUP BY src HAVING SUM(w) > 0)`
+            : q`od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src)`;
           // per-edge message numerator: the delta, scaled by the edge weight when weighted.
-          const msgNum = weightKey ? 'pd.d * e.w' : 'pd.d';
+          const msgNum = weightKey ? q`pd.d * e.w` : q`pd.d`;
           // avgDegree = mean (weighted) out-degree over the scope = (Σw or |E|) / |N| — one scalar,
           // matching GDS's DegreeFunctions over Orientation.NATURAL (weighted when a weight is set).
-          const E = store.query<{ c: number }>(
-            `WITH ${cte} SELECT ${weightKey ? 'COALESCE(SUM(w), 0)' : 'COUNT(*)'} AS c FROM e`, labelBinds)[0].c;
+          const E = execute<{ c: number }>(store,
+            q`WITH ${cte} SELECT ${weightKey ? q`COALESCE(SUM(w), 0)` : q`COUNT(*)`} AS c FROM e`)[0].c;
           const avgDeg = E / N;
           // SEED round 0: rank = delta = alpha for every vertex (GDS init + the initial superstep's send).
-          store.query(`${STATE_INSERT} SELECT ?, 0, 0, id, ?, ? FROM nodes`, [run, AR_RANK_CHANNEL, alpha]);
-          store.query(`${STATE_INSERT} SELECT ?, 0, 0, id, ?, ? FROM nodes`, [run, AR_DELTA_CHANNEL, alpha]);
+          for (const channel of [AR_RANK_CHANNEL, AR_DELTA_CHANNEL])
+            execute(store, q`${STATE_INSERT} SELECT ${value(run)}, 0, 0, id, ${value(channel)}, ${value(alpha)} FROM nodes`);
           // GDS runs maxIterations SUPERSTEPS (0..maxIterations−1); superstep 0 only sends, so there are
           // maxIterations−1 ACCUMULATION rounds after the seed.
           for (let r = 1; r < maxIterations; r++) {
             // delta[r][v] = damping · Σ over senders u→v with prevDelta[u] > tolerance of
             //   prevDelta[u] / (outdeg[u] + avgDeg). od = per-sender out-degree in the scope.
-            store.query(
-              `WITH ${cte}, ${odCte},
-                 pd AS (SELECT id, cval AS d FROM barrier_state WHERE run = ? AND round = ? AND channel = ?),
-                 msg AS (SELECT e.tgt AS id, SUM(${msgNum} / (od.c + ?)) AS m
+            execute(store,
+              q`WITH ${cte}, ${odCte},
+                 pd AS (SELECT id, cval AS d FROM barrier_state WHERE run = ${value(run)} AND round = ${value(r - 1)} AND channel = ${value(AR_DELTA_CHANNEL)}),
+                 msg AS (SELECT e.tgt AS id, SUM(${msgNum} / (od.c + ${value(avgDeg)})) AS m
                            FROM e JOIN pd ON pd.id = e.src JOIN od ON od.id = e.src
-                          WHERE pd.d > ? GROUP BY e.tgt)
+                          WHERE pd.d > ${value(tolerance)} GROUP BY e.tgt)
                ${STATE_INSERT}
-                 SELECT ?, ?, 0, n.id, ?, ? * COALESCE(msg.m, 0) FROM nodes n LEFT JOIN msg ON msg.id = n.id`,
-              [...labelBinds, run, r - 1, AR_DELTA_CHANNEL, avgDeg, tolerance, run, r, AR_DELTA_CHANNEL, damping]);
+                 SELECT ${value(run)}, ${value(r)}, 0, n.id, ${value(AR_DELTA_CHANNEL)}, ${value(damping)} * COALESCE(msg.m, 0) FROM nodes n LEFT JOIN msg ON msg.id = n.id`);
             // rank[r][v] = prevRank[v] + delta[r][v].
-            store.query(
-              `WITH pr AS (SELECT id, cval AS rk FROM barrier_state WHERE run = ? AND round = ? AND channel = ?),
-                 nd AS (SELECT id, cval AS d FROM barrier_state WHERE run = ? AND round = ? AND channel = ?)
+            execute(store,
+              q`WITH pr AS (SELECT id, cval AS rk FROM barrier_state WHERE run = ${value(run)} AND round = ${value(r - 1)} AND channel = ${value(AR_RANK_CHANNEL)}),
+                 nd AS (SELECT id, cval AS d FROM barrier_state WHERE run = ${value(run)} AND round = ${value(r)} AND channel = ${value(AR_DELTA_CHANNEL)})
                ${STATE_INSERT}
-                 SELECT ?, ?, 0, n.id, ?, COALESCE(pr.rk, 0) + COALESCE(nd.d, 0)
-                   FROM nodes n LEFT JOIN pr ON pr.id = n.id LEFT JOIN nd ON nd.id = n.id`,
-              [run, r - 1, AR_RANK_CHANNEL, run, r, AR_DELTA_CHANNEL, run, r, AR_RANK_CHANNEL]);
+                 SELECT ${value(run)}, ${value(r)}, 0, n.id, ${value(AR_RANK_CHANNEL)}, COALESCE(pr.rk, 0) + COALESCE(nd.d, 0)
+                   FROM nodes n LEFT JOIN pr ON pr.id = n.id LEFT JOIN nd ON nd.id = n.id`);
           }
           return maxIterations - 1;
         },

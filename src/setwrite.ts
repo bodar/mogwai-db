@@ -23,6 +23,7 @@ import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
 import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
 import { runProgram, type RowSource } from './program.ts';
+import { execute, identifier, list, q, textLiteral, value, type Expression } from './sql/kernel/q.ts';
 
 /** One column of a set-insert target. `jsonb` wraps the cell in `jsonb(<text>)` — the collection /
  *  meta shape, whose JSON TEXT crosses and lets SQLite build the blob (a raw blob bind would diverge
@@ -101,7 +102,7 @@ export function insertSet(
  */
 export function deleteMembers(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  store.query(`DELETE FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`, [JSON.stringify([...ids])]);
+  execute(store, q`DELETE FROM ${identifier(table)} WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(JSON.stringify([...ids]))}))`);
   return 1;
 }
 
@@ -112,7 +113,7 @@ export function deleteMembers(store: RowSource, table: string, column: string, i
  *  changes content without re-landing the element row (bulk `'replace'`, and replication apply). */
 export function markMembersDirty(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  store.query(`UPDATE ${table} SET dirty = 2 WHERE ${column} IN (SELECT value FROM json_each(?))`, [JSON.stringify([...ids])]);
+  execute(store, q`UPDATE ${identifier(table)} SET dirty = 2 WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(JSON.stringify([...ids]))}))`);
   return 1;
 }
 
@@ -138,15 +139,14 @@ export function updateSet(
   for (const row of rows)
     if (row.length !== columns.length + 1)
       throw new Error(`updateSet(${table}): row has ${row.length} values for a key + ${columns.length} columns`);
-  const cell = (at: number): string => {
-    const extract = `json_extract(u.value, '$[${at}]')`;
+  const extractAt = (at: number): Expression => q`json_extract(u.value, ${textLiteral(`$[${at}]`)})`;
+  const cell = (at: number): Expression => {
     const col = columns[at - 1]!;
-    return col.blob ? `unhex(${extract})` : col.jsonb ? `jsonb(${extract})` : extract;
+    return col.blob ? q`unhex(${extractAt(at)})` : col.jsonb ? q`jsonb(${extractAt(at)})` : extractAt(at);
   };
-  const assignments = columns.map((c, i) => `${c.name} = ${cell(i + 1)}`).join(', ');
-  store.query(
-    `UPDATE ${table} SET ${assignments} FROM json_each(?) AS u WHERE ${table}.${keyColumn} = json_extract(u.value, '$[0]')`,
-    [JSON.stringify(rows)],
-  );
+  const assignments = list(columns.map((c, i) => q`${identifier(c.name)} = ${cell(i + 1)}`));
+  const t = identifier(table);
+  execute(store,
+    q`UPDATE ${t} SET ${assignments} FROM json_each(${value(JSON.stringify(rows))}) AS u WHERE ${t}.${identifier(keyColumn)} = ${extractAt(0)}`);
   return 1;
 }

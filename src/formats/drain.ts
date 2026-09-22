@@ -11,12 +11,11 @@
 // json_group_array per element would make the statement's shape depend on the page.
 
 import type { IoSink } from '../iostore.ts';
+import { execute, identifier, list, q, value, type Expression, type Queryable } from '../sql/kernel/q.ts';
 
 /** The minimal store seam a drain reads through — `GraphStore.query` satisfies it. Typed
  *  structurally so this module depends on no concrete store. */
-export interface RowWriter {
-  query<T = any>(sql: string, binds?: readonly unknown[]): T[];
-}
+export type RowWriter = Queryable;
 
 /**
  * Read rows for a set of owner ids as ONE statement: the ids cross as a single JSON bind exploded by
@@ -24,13 +23,13 @@ export interface RowWriter {
  * up to `pageSize` owners, which past 100 would breach a Durable Object's bind cap as N placeholders —
  * one JSON value keeps the bind count fixed at 1 however large the page.
  *
- * `sql` receives the membership SUBQUERY the caller drops into its `IN (…)` position, so a call site
- * still writes its projection and `IN (${ph})` exactly as before and never counts binds itself. An
- * empty page reads nothing.
+ * `sql` receives the membership SUBQUERY — a `q` node carrying the one bind — which the caller drops
+ * into its `IN (…)` position, so a call site writes its projection and `IN (${members})` and never
+ * counts binds itself. An empty page reads nothing.
  */
-export function rowsForOwners<T>(w: RowWriter, sql: (ph: string) => string, ids: readonly number[]): T[] {
+export function rowsForOwners<T>(w: RowWriter, sql: (members: Expression) => Expression, ids: readonly number[]): T[] {
   if (!ids.length) return [];
-  return w.query<T>(sql('SELECT value FROM json_each(?)'), [JSON.stringify([...ids])]);
+  return execute<T>(w, sql(q`SELECT value FROM json_each(${value(JSON.stringify([...ids]))})`));
 }
 
 /**
@@ -42,16 +41,18 @@ export function rowsForOwners<T>(w: RowWriter, sql: (ph: string) => string, ids:
  * reused across every page. The two binds are the cursor and the page size — bounded by the QUERY,
  * never by DATA, so this is the one read that legitimately binds rather than exploding a JSON value.
  *
- * `columns` must include `id` — it is the cursor. The rows come back exactly as `query` gives them, so
- * a caller reads its own column names.
+ * `columns` must include `id` — it is the cursor. A bare string is a column NAME (spelled by the
+ * kernel's `identifier`); a computed column (`hex(gid) AS gid`) is a `q` node. The rows come back
+ * exactly as `query` gives them, so a caller reads its own column names.
  */
 export function* keysetPages<T extends { id: number }>(
-  w: RowWriter, table: string, columns: readonly string[], pageSize = 500,
+  w: RowWriter, table: 'nodes' | 'edges', columns: readonly (string | Expression)[], pageSize = 500,
 ): Generator<T[]> {
-  const sql = `SELECT ${columns.join(', ')} FROM ${table} WHERE id > ? ORDER BY id LIMIT ?`;
+  const projection = list(columns.map((c) => typeof c === 'string' ? identifier(c) : c));
   let after = -1;
   for (;;) {
-    const rows = w.query<T>(sql, [after, pageSize]);
+    const rows = execute<T>(w,
+      q`SELECT ${projection} FROM ${identifier(table)} WHERE id > ${value(after)} ORDER BY id LIMIT ${value(pageSize)}`);
     if (!rows.length) return;
     yield rows;
     if (rows.length < pageSize) return;
@@ -131,26 +132,26 @@ export interface PropRow { id: number; owner: number; key: string; value: unknow
  *  JSON-parses the value (GraphSON's `valueNodeFromStored`) must ask for its `json()` TEXT — a raw blob
  *  would arrive as a byte Map; a drain that re-emits the value as a cell (CSV) leaves it raw. This is the
  *  same wrap the write-path readers use (`write.ts` readVertexProps). */
-const valueExpr = (asText: boolean): string =>
-  asText ? "CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value" : 'value';
+const valueExpr = (asText: boolean): Expression =>
+  asText ? q`CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value` : q`value`;
 
 /** A page of vertex owners' label names, grouped by owner (a vertex's labels in insertion order). */
 export const labelsForOwners = (w: RowWriter, ids: readonly number[]): Map<number, { owner: number; name: string }[]> =>
   groupByOwner(rowsForOwners<{ owner: number; name: string }>(w,
-    (ph) => `SELECT vl.node AS owner, l.name AS name FROM vertex_labels vl JOIN labels l ON l.id = vl.label
-             WHERE vl.node IN (${ph}) ORDER BY vl.node, vl.label`, ids));
+    (members) => q`SELECT vl.node AS owner, l.name AS name FROM vertex_labels vl JOIN labels l ON l.id = vl.label
+             WHERE vl.node IN (${members}) ORDER BY vl.node, vl.label`, ids));
 
 /** A page of vertex owners' properties, grouped by owner. `asText` wraps a collection value as `json()`
  *  TEXT for a caller that JSON-parses it. Carries the meta bag as `json()` TEXT (vertices only). */
 export const vertexPropsForOwners = (w: RowWriter, ids: readonly number[], asText: boolean): Map<number, PropRow[]> =>
   groupByOwner(rowsForOwners<PropRow>(w,
-    (ph) => `SELECT id, node AS owner, key, ${valueExpr(asText)}, vtype,
+    (members) => q`SELECT id, node AS owner, key, ${valueExpr(asText)}, vtype,
                     CASE WHEN meta IS NULL THEN NULL ELSE json(meta) END AS meta
-             FROM vertex_properties WHERE node IN (${ph}) ORDER BY node, id`, ids));
+             FROM vertex_properties WHERE node IN (${members}) ORDER BY node, id`, ids));
 
 /** A page of edge owners' properties, grouped by owner. Edges carry no meta (always NULL). `asText` as
  *  for `vertexPropsForOwners`. */
 export const edgePropsForOwners = (w: RowWriter, ids: readonly number[], asText: boolean): Map<number, PropRow[]> =>
   groupByOwner(rowsForOwners<PropRow>(w,
-    (ph) => `SELECT id, edge AS owner, key, ${valueExpr(asText)}, vtype, NULL AS meta FROM edge_properties
-             WHERE edge IN (${ph}) ORDER BY edge, id`, ids));
+    (members) => q`SELECT id, edge AS owner, key, ${valueExpr(asText)}, vtype, NULL AS meta FROM edge_properties
+             WHERE edge IN (${members}) ORDER BY edge, id`, ids));

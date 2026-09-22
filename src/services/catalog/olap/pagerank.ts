@@ -1,7 +1,8 @@
 import type { Service } from '../../spi/types.ts';
 import { PAGERANK_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
-import { STATE_INSERT, VEC, adjacencyCte, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, sumAbsDelta, weightedAdjacencyCte, type Slot } from './kernel.ts';
+import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, sumAbsDelta, vec, weightedAdjacencyCte, type Slot } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- pageRank — pageRank(), a DECORATE barrier ----------
 //
@@ -56,48 +57,45 @@ export function createPageRankService(store: GraphStore | undefined): Service {
         seedFromInput: true, // initial rank = incoming count
         core: (store, run, rows): number => {
           const N = nodeCount(store); // one scalar, not the vertex set
-          const { cte, labelBinds } = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
+          const cte = weightKey ? weightedAdjacencyCte(scope, weightKey) : adjacencyCte(scope);
           // out-degree = message denominator: a weighted count (Σw, dangling when 0) or a plain count.
           const odCte = weightKey
-            ? 'od AS (SELECT src AS id, SUM(w) AS c FROM e GROUP BY src HAVING SUM(w) > 0)'
-            : 'od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src)';
+            ? q`od AS (SELECT src AS id, SUM(w) AS c FROM e GROUP BY src HAVING SUM(w) > 0)`
+            : q`od AS (SELECT src AS id, COUNT(*) AS c FROM e GROUP BY src)`;
           // per-edge message: weighted by e.w, or the unweighted even split.
-          const msgVal = weightKey ? '? * vec.v * e.w / od.c' : '? * vec.v / od.c';
+          const msgVal = weightKey ? q`${value(alpha)} * vec.v * e.w / od.c` : q`${value(alpha)} * vec.v / od.c`;
           // SEED slot 0, in SQL. A bare source → the uniform 1/N rank. A non-bare prefix hands us its
           // incoming per-vertex traverser count (`rows`, one per traverser carrying the EXTERNAL id) —
           // TinkerPop's HaltedTraversersCount — which cross as ONE json bind (O(input traversers), the
           // input that already crossed the boundary), matched to internal ids and counted per vertex.
           // Both then iterate the SAME relaxation; only the seed differs (PageRankVertexProgram:164,181-183).
           const seed = rows.length > 0
-            ? () => store.query(
-                `${STATE_INSERT}
-                   SELECT ?, 0, 0, n.id, 0, COUNT(j.value) FROM nodes n
-                     LEFT JOIN json_each(?) j ON CAST(COALESCE(n.uid, n.id) AS TEXT) = CAST(j.value AS TEXT)
-                   GROUP BY n.id`,
-                [run, JSON.stringify(rows.map((r) => r.injectedValue))])
-            : () => store.query(
-                `${STATE_INSERT} SELECT ?, 0, 0, id, 0, 1.0 / ? FROM nodes`,
-                [run, N]);
+            ? () => execute(store,
+                q`${STATE_INSERT}
+                   SELECT ${value(run)}, 0, 0, n.id, 0, COUNT(j.value) FROM nodes n
+                     LEFT JOIN json_each(${value(JSON.stringify(rows.map((r) => r.injectedValue)))}) j
+                       ON CAST(COALESCE(n.uid, n.id) AS TEXT) = CAST(j.value AS TEXT)
+                   GROUP BY n.id`)
+            : () => execute(store,
+                q`${STATE_INSERT} SELECT ${value(run)}, 0, 0, id, 0, 1.0 / ${value(N)} FROM nodes`);
           // TELEPORTATION ENERGY off the prev slot — one scalar: Σ (1−α)·rank over all vertices, plus
           // α·rank for the DANGLING ones (out-degree 0 sinks redistribute their whole rank). Then each
           // round: messages[v] = Σ_{u→v} α·pr[u]/outdeg[u] (in SQL, joining the real edges) plus the
           // teleport share localTerminal = teleport/N, written to the next slot.
-          const teleportOf = (prev: Slot): number => store.query<{ t: number }>(
-            `WITH ${cte}, ${odCte},
-               ${VEC}
-             SELECT COALESCE(SUM((1 - ?) * vec.v + CASE WHEN od.c IS NULL THEN ? * vec.v ELSE 0 END), 0) AS t
-               FROM vec LEFT JOIN od ON od.id = vec.id`,
-            [...labelBinds, run, prev, alpha, alpha])[0].t;
+          const teleportOf = (prev: Slot): number => execute<{ t: number }>(store,
+            q`WITH ${cte}, ${odCte},
+               ${vec(run, prev)}
+             SELECT COALESCE(SUM((1 - ${value(alpha)}) * vec.v + CASE WHEN od.c IS NULL THEN ${value(alpha)} * vec.v ELSE 0 END), 0) AS t
+               FROM vec LEFT JOIN od ON od.id = vec.id`)[0].t;
           const step = (prev: Slot, next: Slot) => {
             const localTerminal = teleportOf(prev) / N;
-            store.query(
-              `WITH ${cte}, ${odCte},
-                 ${VEC},
+            execute(store,
+              q`WITH ${cte}, ${odCte},
+                 ${vec(run, prev)},
                  msg AS (SELECT e.tgt AS id, SUM(${msgVal}) AS m
                            FROM e JOIN vec ON vec.id = e.src JOIN od ON od.id = e.src GROUP BY e.tgt)
                ${STATE_INSERT}
-                 SELECT ?, ?, 0, n.id, 0, COALESCE(msg.m, 0) + ? FROM nodes n LEFT JOIN msg ON msg.id = n.id`,
-              [...labelBinds, run, prev, alpha, run, next, localTerminal]);
+                 SELECT ${value(run)}, ${value(next)}, 0, n.id, 0, COALESCE(msg.m, 0) + ${value(localTerminal)} FROM nodes n LEFT JOIN msg ON msg.id = n.id`);
           };
           // `times` caps propagation rounds exactly (no ε short-circuit — times=0 means output the seed
           // as-is; times=1 means one round); default runs to ε-convergence within PR_MAX_ITERATIONS.

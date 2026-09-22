@@ -2,6 +2,7 @@ import type { Service } from '../../spi/types.ts';
 import { BETWEENNESS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
+import { execute, q, value } from '../../../sql/kernel/q.ts';
 
 // ---------- betweenness — Brandes betweenness centrality ----------------------------------------
 //
@@ -50,58 +51,55 @@ export function createBetweennessService(store: GraphStore | undefined): Service
         channels: [{ key, channel: 0, vtype: 'double' }],
         core: (store, run): number => {
           const N = nodeCount(store);
-          const { cte: E, labelBinds } = adjacencyCte(scope);
+          const E = adjacencyCte(scope);
 
           // FORWARD: seed level 0 — every node is its own source with one shortest path to itself.
-          store.query(`${STATE_INSERT} SELECT ?, 0, id, id, ${SIGMA}, 1 FROM nodes`, [run]);
+          execute(store, q`${STATE_INSERT} SELECT ${value(run)}, 0, id, id, ${SIGMA}, 1 FROM nodes`);
           let maxLevel = 0;
           for (let level = 0; level < N; level++) {
             // Nodes one hop beyond level `level` not yet reached (for that source): σ = Σ predecessors' σ.
-            const inserted = store.query(
-              `WITH ${E},
-                 frontier AS (SELECT scope, id, cval AS sigma FROM barrier_state WHERE run = ? AND round = ? AND channel = ${SIGMA}),
+            const inserted = execute(store,
+              q`WITH ${E},
+                 frontier AS (SELECT scope, id, cval AS sigma FROM barrier_state WHERE run = ${value(run)} AND round = ${value(level)} AND channel = ${SIGMA}),
                  nextf AS (SELECT f.scope AS scope, e.tgt AS id, SUM(f.sigma) AS sigma
                              FROM frontier f JOIN e ON e.src = f.id GROUP BY f.scope, e.tgt)
                ${STATE_INSERT}
-                 SELECT ?, ?, nf.scope, nf.id, ${SIGMA}, nf.sigma FROM nextf nf
+                 SELECT ${value(run)}, ${value(level + 1)}, nf.scope, nf.id, ${SIGMA}, nf.sigma FROM nextf nf
                   WHERE NOT EXISTS (SELECT 1 FROM barrier_state s
-                          WHERE s.run = ? AND s.channel = ${SIGMA} AND s.round <= ? AND s.scope = nf.scope AND s.id = nf.id)
-               RETURNING id`,
-              [...labelBinds, run, level, run, level + 1, run, level]);
+                          WHERE s.run = ${value(run)} AND s.channel = ${SIGMA} AND s.round <= ${value(level)} AND s.scope = nf.scope AND s.id = nf.id)
+               RETURNING id`);
             if (inserted.length === 0) break;
             maxLevel = level + 1;
           }
 
           // BACKWARD: walk levels in reverse; δ at level L reads the already-computed δ at level L+1.
           for (let level = maxLevel; level >= 0; level--) {
-            store.query(
-              `WITH ${E},
-                 cur AS (SELECT scope, id, cval AS sigma FROM barrier_state WHERE run = ? AND round = ? AND channel = ${SIGMA}),
+            // cur=level L; up=successors at level L+1 — BOTH its σ (s.round) and δ (d.round) are at L+1;
+            // insert δ for level L.
+            execute(store,
+              q`WITH ${E},
+                 cur AS (SELECT scope, id, cval AS sigma FROM barrier_state WHERE run = ${value(run)} AND round = ${value(level)} AND channel = ${SIGMA}),
                  up AS (SELECT s.scope, s.id, s.cval AS sigma, COALESCE(d.cval, 0) AS delta
                           FROM barrier_state s
-                          LEFT JOIN barrier_state d ON d.run = ? AND d.round = ? AND d.channel = ${DELTA} AND d.scope = s.scope AND d.id = s.id
-                         WHERE s.run = ? AND s.round = ? AND s.channel = ${SIGMA}),
+                          LEFT JOIN barrier_state d ON d.run = ${value(run)} AND d.round = ${value(level + 1)} AND d.channel = ${DELTA} AND d.scope = s.scope AND d.id = s.id
+                         WHERE s.run = ${value(run)} AND s.round = ${value(level + 1)} AND s.channel = ${SIGMA}),
                  contrib AS (SELECT cur.scope, cur.id, SUM(1.0 * cur.sigma / up.sigma * (1.0 + up.delta)) AS d
                                FROM cur JOIN e ON e.src = cur.id JOIN up ON up.scope = cur.scope AND up.id = e.tgt
                               GROUP BY cur.scope, cur.id)
                ${STATE_INSERT}
-                 SELECT ?, ?, cur.scope, cur.id, ${DELTA}, COALESCE(contrib.d, 0)
-                   FROM cur LEFT JOIN contrib ON contrib.scope = cur.scope AND contrib.id = cur.id`,
-              // cur=level L (run,L); up=successors at level L+1 — BOTH its σ (s.round) and δ (d.round) are
-              // at L+1; insert δ for level L (run,L).
-              [...labelBinds, run, level, run, level + 1, run, level + 1, run, level]);
+                 SELECT ${value(run)}, ${value(level)}, cur.scope, cur.id, ${DELTA}, COALESCE(contrib.d, 0)
+                   FROM cur LEFT JOIN contrib ON contrib.scope = cur.scope AND contrib.id = cur.id`);
           }
 
           // Betweenness[v] = Σ over sources s≠v of δ[s][v]. Written at (scope 0, channel 0) in a fresh
           // round the BFS never used, so the decorate binding reads exactly this. Every vertex gets a row.
           const finalRound = maxLevel + 1;
-          store.query(
-            `${STATE_INSERT}
-               SELECT ?, ?, 0, n.id, 0, COALESCE(SUM(bs.cval), 0)
+          execute(store,
+            q`${STATE_INSERT}
+               SELECT ${value(run)}, ${value(finalRound)}, 0, n.id, 0, COALESCE(SUM(bs.cval), 0)
                  FROM nodes n
-                 LEFT JOIN barrier_state bs ON bs.run = ? AND bs.channel = ${DELTA} AND bs.scope <> bs.id AND bs.id = n.id
-                GROUP BY n.id`,
-            [run, finalRound, run]);
+                 LEFT JOIN barrier_state bs ON bs.run = ${value(run)} AND bs.channel = ${DELTA} AND bs.scope <> bs.id AND bs.id = n.id
+                GROUP BY n.id`);
           return finalRound;
         },
       };

@@ -15,6 +15,7 @@
 // no-op promises (`storeRegistry`).
 
 import type { Sql } from './api.ts';
+import { execute, identifier, list, q, relation, render, value, type Expression } from './sql/kernel/q.ts';
 
 /** A persistent replication job (CouchDB's `_replicator` document — §9·2). `source`/`target` are graph refs
  *  (a local graph id, or a remote `http(s)` graph URL); exactly one direction is remote, as with the one-shot
@@ -105,7 +106,15 @@ const rowToConfig = (r: ConfigRow): ReplicationConfig => ({
   filter: r.filter, placement: r.placement, checkpointInterval: r.checkpoint_interval, useCheckpoints: !!r.use_checkpoints,
 });
 
-const COLS = 'id, source, target, continuous, create_target, filter, placement, checkpoint_interval, use_checkpoints';
+/** The config table's columns, declared once as a kernel relation so every projection is spelled by the
+ *  kernel (`rc.c.x` fails closed on a column the table does not declare). */
+const replicationConfig = relation('replication_config',
+  ['id', 'source', 'target', 'continuous', 'create_target', 'filter', 'placement', 'checkpoint_interval', 'use_checkpoints']);
+/** The config projection — bare column names, or qualified by `alias` for a join. */
+const configCols = (alias?: string): Expression => {
+  const rc = alias ? replicationConfig.as(alias) : replicationConfig;
+  return list(rc.cols.map((c) => alias ? rc.c[c] : identifier(c)));
+};
 
 /** The synchronous store-tier for the registry — the same logic the CF DO runs internally and Bun runs
  *  in-process. Owns its own schema over the `Sql` transport (a dedicated control-plane sqlite, never a
@@ -118,36 +127,38 @@ export class ReplicatorStore {
     // IF NOT EXISTS` never adds a column to a table that already exists. So each column added after the first
     // release is applied idempotently here: an add is skipped when the column is already present. Append new
     // columns to this list, never edit the CREATE above for them.
-    this.ensureColumn('replication_job', 'history', 'history TEXT');
-    this.ensureColumn('replication_config', 'placement', 'placement TEXT'); // filtered-replication-plan §8/F2
+    this.ensureColumn('replication_job', 'history', 'TEXT');
+    this.ensureColumn('replication_config', 'placement', 'TEXT'); // filtered-replication-plan §8/F2
   }
 
-  /** Add `column` (`decl` = its full DDL, e.g. `"history TEXT"`) to `table` if it is not already present —
-   *  an idempotent `ALTER TABLE … ADD COLUMN` (SQLite has no `IF NOT EXISTS` for it). */
-  private ensureColumn(table: string, column: string, decl: string): void {
-    const cols = this.sql.query<{ name: string }>(`PRAGMA table_info(${table})`);
-    if (!cols.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${decl}`);
+  /** Add `column` of storage class `type` to `table` if it is not already present — an idempotent
+   *  `ALTER TABLE … ADD COLUMN` (SQLite has no `IF NOT EXISTS` for it). DDL takes no binds, so the
+   *  rendered statement's bind list is empty by construction. */
+  private ensureColumn(table: 'replication_job' | 'replication_config', column: string, type: 'TEXT' | 'INTEGER'): void {
+    const t = identifier(table);
+    const cols = execute<{ name: string }>(this.sql, q`PRAGMA table_info(${t})`);
+    if (!cols.some((c) => c.name === column)) this.sql.exec(render(q`ALTER TABLE ${t} ADD COLUMN ${identifier(column)} ${type}`).sql);
   }
 
   /** Upsert a job by id (create or replace) — idempotent, so a PUT of the same doc is a no-op change. */
   putConfig(c: ReplicationConfig): void {
-    this.sql.query(
-      `INSERT INTO replication_config(${COLS}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    const row = list([c.id, c.source, c.target, c.continuous ? 1 : 0, c.createTarget ? 1 : 0,
+      c.filter ?? null, c.placement ?? null, c.checkpointInterval ?? null, c.useCheckpoints === false ? 0 : 1].map(value));
+    execute(this.sql,
+      q`INSERT INTO replication_config(${configCols()}) VALUES(${row})
        ON CONFLICT(id) DO UPDATE SET source = excluded.source, target = excluded.target,
          continuous = excluded.continuous, create_target = excluded.create_target, filter = excluded.filter,
          placement = excluded.placement,
-         checkpoint_interval = excluded.checkpoint_interval, use_checkpoints = excluded.use_checkpoints`,
-      [c.id, c.source, c.target, c.continuous ? 1 : 0, c.createTarget ? 1 : 0,
-        c.filter ?? null, c.placement ?? null, c.checkpointInterval ?? null, c.useCheckpoints === false ? 0 : 1]);
+         checkpoint_interval = excluded.checkpoint_interval, use_checkpoints = excluded.use_checkpoints`);
   }
 
   getConfig(id: string): ReplicationConfig | null {
-    const r = this.sql.query<ConfigRow>(`SELECT ${COLS} FROM replication_config WHERE id = ?`, [id])[0];
+    const r = execute<ConfigRow>(this.sql, q`SELECT ${configCols()} FROM replication_config WHERE id = ${value(id)}`)[0];
     return r ? rowToConfig(r) : null;
   }
 
   listConfigs(): ReplicationConfig[] {
-    return this.sql.query<ConfigRow>(`SELECT ${COLS} FROM replication_config ORDER BY id`).map(rowToConfig);
+    return execute<ConfigRow>(this.sql, q`SELECT ${configCols()} FROM replication_config ORDER BY id`).map(rowToConfig);
   }
 
   /** Delete by id; returns whether a job existed (so the router can 404 a delete of nothing if it wants —
@@ -167,14 +178,13 @@ export class ReplicatorStore {
    *  to `running`, so an overlapping runner skips it. This runs as ONE synchronous span (the DO/process
    *  serializes calls), so the select-then-claim is atomic against another tick. */
   claimDue(now: number, leaseMs: number, max: number): ReplicationConfig[] {
-    const rows = this.sql.query<ConfigRow>(
-      `SELECT ${COLS.split(', ').map((c) => 'c.' + c).join(', ')}
+    const rows = execute<ConfigRow>(this.sql,
+      q`SELECT ${configCols('c')}
        FROM replication_config c LEFT JOIN replication_job j ON j.config_id = c.id
        WHERE j.config_id IS NULL OR (
-         COALESCE(j.next_run, 0) <= ? AND (j.lease_until IS NULL OR j.lease_until <= ?)
+         COALESCE(j.next_run, 0) <= ${value(now)} AND (j.lease_until IS NULL OR j.lease_until <= ${value(now)})
          AND j.state NOT IN ('completed', 'failed'))
-       ORDER BY COALESCE(j.next_run, 0) LIMIT ?`,
-      [now, now, max]);
+       ORDER BY COALESCE(j.next_run, 0) LIMIT ${value(max)}`);
     const claimed = rows.map(rowToConfig);
     for (const c of claimed) {
       this.sql.query(
