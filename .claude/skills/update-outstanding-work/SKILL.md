@@ -43,8 +43,8 @@ a ratchet is where an open defect goes to be forgotten. Read all five every refr
 | Artifact | What it parks | Failure mode to look for |
 |---|---|---|
 | `test/L3-conformance/l3-state.json` | the passing floor | count moved; `passed` shrank |
-| `test/L7-census/deferrals.tsv` | 873 throwing traversals, **17 `crashed`** | a `crashed` row absent from the index (fail-closed VIOLATIONS) |
-| `test/L7-census/goldens.tsv` | 1,425 executing + result digest | — (a two-way baseline; the census gate owns it) |
+| `test/L7-census/deferrals.tsv` | 761 throwing traversals (382 `deferred`, 379 `unbound`), **0 `crashed`** | a `crashed` row absent from the index (fail-closed VIOLATIONS) |
+| `test/L7-census/goldens.tsv` | 1,634 executing (1,629 `ran`, 5 `nondet`) + result digest | — (a two-way baseline; the census gate owns it) |
 | `test/L5-properties/known.ts` | fast-path divergences, one per ROOT CAUSE | a diagnosed entry with no index line |
 | `test/L5-properties/capability-baseline.ts` | `KNOWN_RAW_WITNESSES` — raw failures reached by generated compositions | same; these are usually malformed SQL or a bind rejection |
 

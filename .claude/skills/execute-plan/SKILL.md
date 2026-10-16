@@ -57,8 +57,10 @@ For each logical item, smallest shippable unit first:
    CI run on a change that cannot affect the build, so the plan reaches trunk for free on the next
    item's push. (It does get to trunk — just not on its own.)
 7. **Watch that commit's CI async, and keep moving.** Kick off a background check of the pushed
-   commit's GitHub Actions run (`mcp__github__actions_list` / `actions_get` / `get_job_logs` for the
-   commit you just pushed) and immediately start the next item — do not block on the run. If it comes
+   commit's GitHub Actions run and immediately start the next item. **Prefer the command line** —
+   `gh run list --commit <sha>`, then `gh run watch <id> --exit-status` as a background Bash task
+   (`gh run view <id> --log-failed` when red); fall back to the GitHub MCP
+   (`mcp__github__actions_list` / `actions_get` / `get_job_logs`) only where `gh` is unavailable — do not block on the run. If it comes
    back red, fix-forward on trunk as its own item before it compounds; do not let a red trunk sit while
    you build on top of it.
 
