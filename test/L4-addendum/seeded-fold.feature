@@ -414,6 +414,76 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | result             |
       | m[{"s":"d[59].i"}] |
 
+  # ---- PATH PROCESSORS. PathRetractionStrategy, also a default strategy (.../TraversalStrategies.java:286),
+  # inserts a NoOpBarrierStep after EVERY PathProcessor step (math, where, simplePath, …) whose next step
+  # is not a Barrier, labels or no (.../strategy/optimization/PathRetractionStrategy.java:134-141). Its
+  # keepLabels retraction can make traversers whose paths differed equal there, so they merge. ----
+
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mathX_x0_plus5X_isXgtX0XX_foldX0_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 3).math("_ * 0 + 5").is(P.gt(0)).fold(0, Operator.sum)
+      """
+    # The barrier after math merges 5.0 x3 into one traverser, which the fold adds once.
+    When iterated to list
+    Then the result should be unordered
+      | result   |
+      | d[5.0].d |
+
+  @Unsupported
+  Scenario: g_V_mathX5X_isXgtX0XX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().math("5").is(P.gt(0)).fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result   |
+      | d[5.0].d |
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX1X_whereXasXaX_outX_constantX5X_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(1).where(__.as("a").out()).constant(5).fold(0, Operator.sum)
+      """
+    # Nothing after the where() reads 'a', so its keepLabels is empty: the three surviving traversers
+    # are all `1` with a retracted path, and the barrier after where() merges them into 1 x3.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @gap:seeded-fold
+  Scenario: g_injectX1_2_3X_mathX_x0_plus5X_foldX0_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 3).math("_ * 0 + 5").fold(0, Operator.sum)
+      """
+    # The next step after math is the fold, itself a Barrier, so no NoOpBarrierStep lands: all three add.
+    When iterated to list
+    Then the result should be unordered
+      | result    |
+      | d[15.0].d |
+
+  @gap:seeded-fold
+  Scenario: g_V_hasXageX_whereXoutX_valuesXageX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("age").where(__.out()).values("age").fold(0, Operator.sum)
+      """
+    # A barrier does land after where(), but over three DISTINCT vertices it merges nothing — 29 + 32 + 35.
+    When iterated to list
+    Then the result should be unordered
+      | result  |
+      | d[96].i |
+
   # ---- ARITHMETIC EDGES. NumberHelper.mathOperationWithPromote promotes int -> long on overflow and
   # RETHROWS at 64 bits (.../util/NumberHelper.java:400-425); the long helpers throw `long overflow`
   # (:167-177) and Java's integer division throws `/ by zero`. ----

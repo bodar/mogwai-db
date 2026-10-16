@@ -208,6 +208,10 @@ export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel',
 //   the next step is itself a `Barrier`
 //   (`…/strategy/optimization/LazyBarrierStrategy.java:105-127`) — and it runs per traversal, so a child
 //   traversal starts the count afresh;
+// - **`PathRetractionStrategy`, ALSO default** (`…/traversal/TraversalStrategies.java:286`), inserts one
+//   after every `PathProcessor` (`math`, `where`, `simplePath`, `select`, `dedup`, …) whose next step is
+//   not a `Barrier`, labels or no (`…/strategy/optimization/PathRetractionStrategy.java:134-141`) — and
+//   `FilterRankingStrategy` runs first, so a ranked `where()` may have moved (`lastBeforeConsumer`);
 // - **an explicit `barrier()`** and every collecting barrier (`order()`, `aggregate()`, …);
 // - **a start step's own iterator** — `ExpandableStepIterator.add(Iterator)` drains it INTO the
 //   `TraverserSet` (`…/step/util/ExpandableStepIterator.java:61-63`), so `inject(1, 1, 2)` and `V(1, 1)`
@@ -222,10 +226,33 @@ export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel',
 /** Steps that neither expand nor merge a traverser and whose children (if any) produce a VALUE or a
  *  verdict rather than stream rows — filters and one-to-one maps. None is a `FlatMapStep` or a barrier. */
 const NEITHER_EXPANDS_NOR_MERGES: ReadonlySet<string> = new Set([
-  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
-  'as', 'identity', 'constant', 'id', 'label', 'key', 'value', 'limit', 'range', 'skip', 'simplePath',
-  'cyclicPath', 'math', 'project', 'valueMap', 'elementMap', 'propertyMap',
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'filter', 'not', 'and', 'or',
+  'as', 'identity', 'constant', 'id', 'label', 'key', 'value', 'limit', 'range', 'skip',
+  'project', 'valueMap', 'elementMap', 'propertyMap',
 ]);
+
+/** The `PathProcessor` steps the scan lets through, each a position where `PathRetractionStrategy` —
+ *  ALSO a default strategy (`…/traversal/TraversalStrategies.java:286`) — inserts a `NoOpBarrierStep`
+ *  unless the next step is a `Barrier`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/PathRetractionStrategy.java:134-141`).
+ *  It does so whether or not a label is involved, and its `keepLabels` retraction can make two traversers
+ *  whose paths differed EQUAL there (`ImmutablePath.retract`), so the barrier merges on the object alone.
+ *  The other `PathProcessor`s (`select`, `path`, `tree`, `format`, `match`, `dedup`) are in no set here,
+ *  so the scan already answers `false` at them. */
+const PATH_PROCESSORS: ReadonlySet<string> = new Set(['where', 'math', 'simplePath', 'cyclicPath']);
+
+/** The steps `FilterRankingStrategy` ranks. It runs BEFORE `PathRetractionStrategy` and moves a filter in
+ *  front of a higher-ranked one it directly follows
+ *  (`…/strategy/optimization/FilterRankingStrategy.java:113-131, 174-199`), so a ranked `where()` written
+ *  last may no longer be last when the barrier is placed. A rank-0 step (`math`, `simplePath`) never moves. */
+const RANKED_FILTERS: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'dedup', 'order',
+]);
+
+/** IR steps that are no step in the reference — a label rides the previous step, an `identity()` is
+ *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
+const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity']);
 
 /** The flat-map steps — the positions `LazyBarrierStrategy` counts, and after the first of which it bulks. */
 const FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V,
@@ -270,16 +297,33 @@ export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted
     sawFlatMap = steps[0]!.name !== 'inject';
     from = 1;
   }
+  // Is the stream still pairwise DISTINCT here (`referenceDistinctAt`)? A barrier over distinct traversers
+  // merges nothing, so a path-processing FILTER over such a stream is harmless wherever it sits.
+  let distinct = true;
   for (let i = from; i < at; i++) {
     const name = steps[i]!.name;
-    if (NEITHER_EXPANDS_NOR_MERGES.has(name)) continue;
-    if (!FLAT_MAPS.has(name)) return false;
-    // A flat-map after the first is followed by a `NoOpBarrierStep` — unless the next step is the
-    // consumer at `at`, a `Barrier` itself, which is the one exemption the strategy makes.
-    if (sawFlatMap && i + 1 !== at) return false;
-    sawFlatMap = true;
+    if (PATH_PROCESSORS.has(name)) {
+      if (!(distinct && DISTINCT_PRESERVING.has(name)) && !lastBeforeConsumer(steps, i, at)) return false;
+    } else if (FLAT_MAPS.has(name)) {
+      // A flat-map after the first is followed by a `NoOpBarrierStep` — unless the next step is the
+      // consumer at `at`, a `Barrier` itself, which is the one exemption the strategy makes.
+      if (sawFlatMap && i + 1 !== at) return false;
+      sawFlatMap = true;
+    } else if (!NEITHER_EXPANDS_NOR_MERGES.has(name)) return false;
+    distinct &&= DISTINCT_PRESERVING.has(name);
   }
   return true;
+}
+
+/** Is the path processor at `i` the step the reference runs IMMEDIATELY before the consumer at `at`, so
+ *  `PathRetractionStrategy` places no barrier after it? Not when another step follows it, and not when it
+ *  is a ranked filter directly after another ranked filter `FilterRankingStrategy` could move behind it. */
+function lastBeforeConsumer(steps: readonly IRStep[], i: number, at: number): boolean {
+  if (i + 1 !== at) return false;
+  if (!RANKED_FILTERS.has(steps[i]!.name)) return true;
+  let j = i - 1;
+  while (j >= 0 && NOT_A_REFERENCE_STEP.has(steps[j]!.name)) j--;
+  return j < 0 || !RANKED_FILTERS.has(steps[j]!.name);
 }
 
 /** A root start step whose traversers the scan can name: a `V()`/`E()`/`inject()` the user wrote (not a
@@ -290,7 +334,7 @@ const knownStart = (start: IRStep | undefined): boolean =>
 
 /** Steps that keep a stream of pairwise-DISTINCT traversers distinct — filters, which only drop. */
 const DISTINCT_PRESERVING: ReadonlySet<string> = new Set([
-  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'as', 'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
   'identity', 'limit', 'range', 'skip', 'simplePath', 'cyclicPath',
 ]);
 
