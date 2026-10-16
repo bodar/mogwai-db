@@ -92,6 +92,13 @@ export interface Guard {
    * a column name rather than an expression.
    */
   readonly valueColumn?: string;
+  /**
+   * The text AFTER the interpolated value, for a sentence that names its value MID-sentence —
+   * `AddPropertyStep`'s *"Single-cardinality property requires exactly one value, but traversal
+   * produced N results"* (`step/sideEffect/AddPropertyStep.java:178-181`) puts the count between two
+   * fixed halves. Meaningless without `valueColumn`, and absent for every sentence that ends on it.
+   */
+  readonly tail?: string;
 }
 export interface Plan { readonly bindings: readonly Binding[]; readonly result: Rel; }
 

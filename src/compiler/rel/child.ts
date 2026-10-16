@@ -89,8 +89,14 @@ export interface ChildSeam {
    * the join's `ON`, which is what the ordinary fold's movements already build from an input relation.
    * That is also why the origin has to be a CHANNEL — a join keeps its input's channels and drops its
    * payload (§3.5), so a plain column naming the parent would not survive the first hop.
+   *
+   * `originFrom` names the INPUT column the origin is seeded from — the host's `id` by default. A
+   * write host passes its snapshot's POSITION instead (`ord`), because an element id does not name a
+   * TRAVERSER: `g.V(2,4).in().property(…)` visits marko twice, and the reference runs the value body
+   * once per traverser (`AddPropertyStep.sideEffect`), so two traversers on one vertex must stay two
+   * origins rather than pooling into one whose row count would read as a multi-valued result.
    */
-  readonly rows: (body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap) => ChildRows | null;
+  readonly rows: (body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, originFrom?: string) => ChildRows | null;
   /**
    * Run the ordinary fold over a supplied stream. This is not another way to consume a child
    * result: the recursive walk needs the body relation itself, rooted at its `SelfRef`, so it hands

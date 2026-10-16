@@ -85,7 +85,7 @@ export function runSteps(store: RowSource, { steps, columns }: RenderedProgram):
         // `'rows'` guard can have one — an `'empty'` guard has no row to read it from — and the append
         // is the first row's, which is the row the message is about.
         throw new Error(guard.valueColumn !== undefined && rows.length
-          ? `${guard.message}${(rows[0] as Record<string, unknown>)[guard.valueColumn]}`
+          ? `${guard.message}${(rows[0] as Record<string, unknown>)[guard.valueColumn]}${guard.tail ?? ''}`
           : guard.message);
     }
     if (step.result) result = rows;

@@ -163,10 +163,24 @@ export type ParsedProperty =
   | { kind: 'token'; token: string; value: ArgValue; meta: boolean }
   /** `property(null, …)` — a null KEY adds nothing, which is TinkerPop's null case. (The map form
    *  never reaches here: `desugarPropertyMap` expanded it before lowering ever saw the chain.) */
-  | { kind: 'none' };
+  | { kind: 'none' }
+  /** `property(<traversal>)` — the single-argument MAP form (TinkerPop 4,
+   *  `dsl/graph/GraphTraversal.java:4147-4153`): the body is run per traverser and its ONE `Map`
+   *  result becomes a property per entry (`AddPropertyStep.handleTraversalValue`, `mapForm`). It is
+   *  never folded into an `addV`/`addE` — the overload appends an `AddPropertyStep` unconditionally —
+   *  which is why it is its own arm rather than a `prop` whose key happens to be missing. */
+  | { kind: 'mapBody'; nested: { nested: any } };
 
 export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
+  // The MAP FORM has no value argument at all, so it is recognized before the (key, value) read —
+  // reading `args[1]` of a one-argument step was a TypeError out of a verify Pass, i.e. a crash where
+  // the contract is an answer or a decline. (A literal Map argument never reaches here: the
+  // `desugarPropertyMap` Pass expanded it.)
+  if (s.args.length === 1 && isNested(s.args[0]!.value)) return { kind: 'mapBody', nested: s.args[0]!.value as { nested: any } };
   const { cardinality, off } = readCardinality(s.args.map((a) => a.value));
+  // Anything else short of a (key, value) pair is a shape this parse does not know — not learned yet,
+  // never a crash.
+  if (s.args.length < off + 2) throw new Deferral(`property() with ${s.args.length} argument(s) not supported`);
   const keyArg = s.args[off]!;
   const valueArg = s.args[off + 1]!;
   let key = keyArg.value, val = valueArg.value;
@@ -195,6 +209,7 @@ export function parsePropertyTail(steps: readonly Step[], what: string, sideEffe
     if (s.name !== 'property') throw new Deferral(`step not implemented after ${what}: ${s.name}()`);
     const p = parseProperty(s, sideEffects, params);
     if (p.kind === 'token') throw new Deferral(`property(T.${p.token}) on an existing element not yet supported`);
+    if (p.kind === 'mapBody') throw new Deferral(`property(<traversal>) after ${what} not yet supported`);
     if (p.kind === 'prop') specs.push(p.spec);
   }
   return specs;

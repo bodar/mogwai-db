@@ -50,7 +50,6 @@ Feature: mogwai addendum — a traversal-valued property() yields EVERY result, 
   # An EDGE has no cardinality, so a multi-result traversal value takes the first result rather than
   # raising the single-cardinality error a vertex would.
   @gap:property-traversal-multivalue
-  @Unsupported
   Scenario: g_EX7X_propertyXnames_outV_bothXknowsX_valuesXnameXX
     Given the modern graph
     And the traversal of

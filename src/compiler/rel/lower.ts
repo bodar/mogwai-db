@@ -4408,7 +4408,7 @@ function elementTail(
     }
     if (step.name === 'addV') {
       if (pathCarried(rel)) return null;
-      const added = addedVertices(rel, steps, at, ctx, fresh);
+      const added = addedVertices(rel, steps, at, ctx, fresh, elem, labels);
       if (!added) return null;
       // The LABELS carry, because the relation carries their columns: `addV` correlates its new rows
       // back to the input row that made them, so a label bound before the creation is still bound
@@ -5181,10 +5181,13 @@ function addedEdges(
 
 function addedVertices(
   input: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  elem: Elem | null = null, aliases: AliasMap = NO_ALIASES,
 ): { readonly effects: Effects; readonly at: number } | null {
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, childSeam(ctx, fresh), fresh);
+  // The INCOMING stream's kind and live labels ride in for the creation's FOLDED parameters, whose
+  // traversal values are resolved against the traverser `addV` consumes, not the vertex it makes.
+  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, childSeam(ctx, fresh), fresh, elem, aliases);
   return effects && { effects, at: end };
 }
 

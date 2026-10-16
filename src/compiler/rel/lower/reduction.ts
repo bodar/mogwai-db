@@ -58,7 +58,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     ? correlatedExists(body, subject, fresh, ctx, true) ?? valuePredicate(body, subject, fresh, ctx, true)
     : bodyPredicate(body, subject, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
-  rows: (body, input, elem, aliases) => childRows(body, input, elem, aliases, ctx, fresh),
+  rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, false, originFrom),
   // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
   // every step whose lowering READS `bulked` — the slice family and a grouping barrier — mints a
   // `limit`/`window`/`sort`/`aggregate` node, and each of those is refused outright inside a
@@ -554,7 +554,7 @@ export function originDomainOf(seeded: Rel, fresh: Minter): Rel {
 
 export function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
-  perRow = false, needsFromV = false,
+  perRow = false, needsFromV = false, originFrom = 'id',
 ): ChildRows | null {
   // A per-ROW body REUSES an origin already on the input (`mintRowOrigin` is idempotent), so a caller
   // that pre-numbered to capture a channel keyed by origin — `flatMapRejoin`'s path-hide numbers the
@@ -570,7 +570,7 @@ export function childRows(
       // in a different order from `elementCols` — which the factory catches, and which would otherwise be
       // a schema desync no test names.
       exprs: [['id', col(input.id, 'id')],
-        ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, 'id') : col(input.id, channel.col)] as const)],
+        ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, originFrom) : col(input.id, channel.col)] as const)],
     });
   })();
   // THE HOST'S LABELS RIDE IN, and handing over `NO_ALIASES` was a WRONG ANSWER rather than a
