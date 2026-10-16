@@ -979,7 +979,10 @@ export function correlatedReduce(
       };
     }
   }
-  const tail = continueAs(root, rootAs, body, from, false, inBody(ctx), fresh, NO_ALIASES);
+  // A correlated reduction is a PER-TRAVERSER child: TinkerPop runs the body as its own traversal, one
+  // parent traverser at a time (`TraversalUtil.apply`), so the body's step list begins it — the fact a
+  // consumer that depends on where the reference bulked needs (`ChainCtx.traversal`).
+  const tail = continueAs(root, rootAs, body, from, false, { ...inBody(ctx), traversal: { steps: body, rooted: false } }, fresh, NO_ALIASES);
   // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say. `result` is a
   // TYPE fact, not a CARDINALITY one: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so a
   // non-collapsed subquery has as many rows as the fan-out and SQLite silently takes the first

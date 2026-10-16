@@ -6,6 +6,7 @@
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
 import { type Sql } from './api.ts';
+import { raisedMessage, RaisedByQuery } from './rel/raise.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -236,7 +237,14 @@ export class GraphStore {
     // precision past 2^53. coerceBindValue makes every bind lossless: boolean→1/0,
     // in-range bigint→number, big bigint / BigDecimal / Duration → canonical decimal
     // text. So has('sold', true) and an exact 64-bit id behave identically on both.
-    return this.sql.query<T>(sql, binds.map(coerceBindValue));
+    // A ROW-LEVEL RAISE (`src/rel/raise.ts`) aborts the statement through SQLite's own error; this is
+    // the one seam both runtimes cross, so it is where the error becomes the message it carries.
+    try {
+      return this.sql.query<T>(sql, binds.map(coerceBindValue));
+    } catch (error) {
+      const raised = raisedMessage(error);
+      throw raised === null ? error : new RaisedByQuery(raised);
+    }
   }
 
   /** Allocate a fresh OLAP-barrier run token (see the `barrier_state` schema note). Atomic per

@@ -190,6 +190,16 @@ export interface ChainCtx extends FilterCtx {
    * closed rather than answering a silently-truncated multiset (`fold`/`group` dispatch in `lower.ts`).
    */
   readonly originDomain?: Rel;
+  /**
+   * THE TRAVERSAL THIS SCOPE'S `steps` BEGIN — set only where the step list a tail is handed is known
+   * to be the reference's whole traversal from its first step: a rooted chain lowered from its source
+   * (`rooted`), or a per-traverser child body (`by()`), which TinkerPop runs as its own traversal with
+   * one parent traverser at a time. A consumer whose answer depends on where the REFERENCE bulked
+   * (`referenceUnbulkedAt`, `ir/bulk.ts`) compares the `steps` it holds against this BY IDENTITY, so a
+   * resumed tail, a rewritten chain or an inherited parent scope cannot be mistaken for one — each is a
+   * different array, and the consumer declines.
+   */
+  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
 }
 
 /**

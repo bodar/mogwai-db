@@ -328,3 +328,196 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     Then the result should be unordered
       | result |
       | person |
+
+  # ---- BULK. A non-list fold applies its operator ONCE per traverser whatever its bulk
+  # (FoldStep.projectTraverser, .../step/map/FoldStep.java:58-68), and the default LazyBarrierStrategy
+  # merges equal traversers after every flat-map but the first (.../strategy/optimization/
+  # LazyBarrierStrategy.java:105-127), as does a start step's TraverserSet
+  # (.../step/util/ExpandableStepIterator.java:61-63). So a bulk-SENSITIVE operator over a stream the
+  # reference may have bulked has an answer the rows cannot give: it declines. ----
+
+  @Unsupported
+  Scenario: g_V_both_valuesXageX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().both().values("age").fold(0, Operator.sum)
+      """
+    # A barrier lands after `both()` (the second flat-map); marko and josh arrive x3 and add once.
+    When iterated to list
+    Then the result should be unordered
+      | result   |
+      | d[123].i |
+
+  @Unsupported
+  Scenario: g_V_both_barrier_valuesXageX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().both().barrier().values("age").fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result   |
+      | d[123].i |
+
+  @Unsupported
+  Scenario: g_V_hasXname_markoX_projectXsX_byXboth_both_valuesXageX_foldX0_sumXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").project("s").by(__.both().both().values("age").fold(0, Operator.sum))
+      """
+    # The by() child is its own traversal: a barrier lands after its second `both()`, so marko x3,
+    # josh and peter add once each — 29 + 32 + 35.
+    When iterated to list
+    Then the result should be unordered
+      | result             |
+      | m[{"s":"d[96].i"}] |
+
+  @Unsupported
+  Scenario: g_injectX1_1_2X_foldX0_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 1, 2).fold(0, Operator.sum)
+      """
+    # inject drains its arguments into ONE TraverserSet, so the two 1s arrive as one traverser of bulk 2.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+
+  @gap:seeded-fold
+  Scenario: g_V_both_valuesXageX_foldX0_maxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().both().values("age").fold(0, Operator.max)
+      """
+    # max is idempotent, so where the reference bulked does not change the answer.
+    When iterated to list
+    Then the result should be unordered
+      | result  |
+      | d[35].i |
+
+  @gap:seeded-fold
+  Scenario: g_V_hasXname_markoX_projectXsX_byXboth_valuesXageX_foldX0_sumXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").project("s").by(__.both().values("age").fold(0, Operator.sum))
+      """
+    # One flat-map in the child before the fold: no barrier, so every traverser adds — 27 + 32.
+    When iterated to list
+    Then the result should be unordered
+      | result             |
+      | m[{"s":"d[59].i"}] |
+
+  # ---- ARITHMETIC EDGES. NumberHelper.mathOperationWithPromote promotes int -> long on overflow and
+  # RETHROWS at 64 bits (.../util/NumberHelper.java:400-425); the long helpers throw `long overflow`
+  # (:167-177) and Java's integer division throws `/ by zero`. ----
+
+  @gap:seeded-fold
+  Scenario: g_injectXmax_1X_foldX0L_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(9223372036854775807L, 1L).fold(0L, Operator.sum)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "long overflow"
+
+  @gap:seeded-fold
+  Scenario: g_injectXhalf_4X_foldX1L_multX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(4611686018427387904L, 4L).fold(1L, Operator.mult)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "long overflow"
+
+  @gap:seeded-fold
+  Scenario: g_injectX0_5X_foldX1_divX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(0, 5).fold(1, Operator.div)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "/ by zero"
+
+  @gap:seeded-fold
+  Scenario: g_injectXintmax_1X_foldX0_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(2147483647, 1).fold(0, Operator.sum)
+      """
+    # An int overflow at 32 bits is retried as a long, and the result stays a long.
+    When iterated to list
+    Then the result should be unordered
+      | result          |
+      | d[2147483648].l |
+
+  @gap:seeded-fold
+  Scenario: g_injectX1_2X_foldX0L_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2).fold(0L, Operator.sum)
+      """
+    # The highest common class of a long seed and int members is long, whatever the magnitude.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  @gap:seeded-fold
+  Scenario: g_injectX1_2_5X_foldX0_minX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2.5).fold(0, Operator.min)
+      """
+    # min(0, 2.5) is computed in the common class, Double, so the int seed answers as 0.0.
+    When iterated to list
+    Then the result should be unordered
+      | result   |
+      | d[0.0].d |
+
+  @Unsupported
+  Scenario: g_injectX0X_foldX0_0_divX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(0).fold(0.0, Operator.div)
+      """
+    # A double operand makes it floating point, which answers NaN rather than raise; SQLite has no NaN.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[NaN] |
+
+  @gap:seeded-fold
+  Scenario: g_injectX1_a_2X_foldX0_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, "a", 2).fold(0, Operator.sum)
+      """
+    # Operator.sum casts each member to Number.
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "ClassCastException"
+
+  @gap:seeded-fold
+  Scenario: g_V_valuesXageX_foldXz_minX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().values("age").fold("z", Operator.min)
+      """
+    # "z".compareTo(29) is the reference's ClassCastException.
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "ClassCastException"

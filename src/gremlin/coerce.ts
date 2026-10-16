@@ -248,10 +248,13 @@ export const asDateSql = (e: Expression): Expression =>
  *  TEXT (a long > 2^53 would frame as a string; bigdecimal/char/duration likewise), or it is
  *  storage-ambiguous with another type (a datetime is epoch-millis → Long, a uuid is TEXT →
  *  String, a boolean is the INTEGER `1`/`0` → Int — measured: an undeclared `inject(true)` framed as
- *  an Int on the wire, and `fold(true, Operator.and)` could not tell its members from integers).
+ *  an Int on the wire, and `fold(true, Operator.and)` could not tell its members from integers). A
+ *  `byte`/`short`/`float` is the same second case — an INTEGER or a REAL that inference reads as an
+ *  `int`/`double` — and the difference is an ANSWER, not a label: `NumberHelper` folds a `float` in
+ *  32-bit precision, so `fold(0, Operator.sum)` over an undeclared `0.1f, 0.2f` would add doubles.
  *  Everything else is recoverable from the value, so declaring it buys nothing. */
 const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
-  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean',
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean', 'byte', 'short', 'float',
 ]);
 
 /** The declared framing tag of EACH of a bare inject's first `count` arguments — `null` where the

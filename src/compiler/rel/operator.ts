@@ -1,16 +1,16 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerReal, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
+import { raiseExpr } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { isOperatorArg, type MergePolicy } from '../../gremlin/frontend.ts';
-import { flatType, REDUCER_CLASSES } from '../../gremlin/types.ts';
+import { isOperatorArg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { flatType } from '../../gremlin/types.ts';
 import { perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { eq, meta, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { constLit } from './const.ts';
 import type { FramedRel } from './framing.ts';
-import { CAST_TO_REAL, NUMERIC_CAST_TO_INT, NUMERIC_VTYPES, storedCompareOn } from './predicate.ts';
-import { isLongSumClass, SAFE_INT } from './reducer.ts';
+import { SAFE_INT } from './reducer.ts';
 
 /**
  * `Operator` — ONE FOLD STEP, in the algebra, and the SEEDED LEFT FOLD that iterates it.
@@ -41,13 +41,22 @@ import { isLongSumClass, SAFE_INT } from './reducer.ts';
  *
  * `NumberHelper.mathOperationWithPromote` opens with `if (null == a || null == b) return a;`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:401-402`),
- * so for the arithmetic four a NULL VALUE is the identity and a NULL ACCUMULATOR propagates. SQL's
- * arithmetic already propagates a NULL accumulator, so only the value side needs spelling. `min`/`max`
+ * so for the arithmetic four a NULL VALUE is the identity and a NULL ACCUMULATOR propagates. `min`/`max`
  * and `and`/`or` are symmetric instead — each returns whichever side is non-null
  * (`NumberHelper.min:556-559`, `Operator.and`/`Operator.or`) — and SQLite's scalar `MIN`/`MAX` return
  * NULL when any argument is, so those need both sides spelled. Getting this from the reference rather
  * than from the fixture matters: every corpus scenario drops its unproductive members before the fold,
  * so a `ProductiveByStrategy` traversal is the only place the difference shows and no scenario names it.
+ *
+ * ## The ANSWER can be an error, and SQLite's operators are not Java's at the edges
+ *
+ * SQLite's INTEGER is a Java `long` and its REAL a `double`, and between them its `+ - * /` are
+ * `NumberHelper`'s — except that SQLite PROMOTES a 64-bit overflow to REAL and answers NULL for `x / 0`,
+ * where the reference throws `long overflow` and `/ by zero`. So the step (`foldStep`) checks exactly
+ * those edges and RAISES mid-walk (`raiseExpr`, `src/rel/raise.ts`); a class it does not reproduce
+ * (`byte`/`short`/`float`/`BigInteger`/`BigDecimal`) or a non-finite double raises a deferral; and the
+ * result's CLASS (`int`/`long`/`double`) is carried as flags beside the accumulator rather than guessed
+ * from its magnitude.
  */
 
 /**
@@ -65,7 +74,7 @@ export const ASSIGN = 'assign';
  *  (`AggregateStep.java:131-132`). A collection question, not an expression one. */
 export const BULK_OPS: ReadonlySet<string> = new Set([ADD_ALL, ASSIGN]);
 
-/** The operators `mergeStep` spells — every `Operator` that folds MEMBER BY MEMBER. `sumLong` is
+/** The operators `foldStep` spells — every `Operator` that folds MEMBER BY MEMBER. `sumLong` is
  *  absent: it is `add` narrowed to `long` by a cast the Gremlin string grammar cannot even produce a
  *  use for here, so admitting it would claim a promotion rule nothing has asked for. */
 export const FOLD_OPS: ReadonlySet<string> = new Set(['sum', 'minus', 'mult', 'div', 'min', 'max', 'and', 'or']);
@@ -80,38 +89,254 @@ export const FOLD_OPS: ReadonlySet<string> = new Set(['sum', 'minus', 'mult', 'd
  */
 export const COLLECTION_OPS: ReadonlySet<string> = new Set([...FOLD_OPS, ...BULK_OPS]);
 
-/** `a IS NULL` / `a IS NOT NULL`. */
-const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
+/**
+ * The operators for which folding a value TWICE is folding it ONCE — `min`/`max`/`and`/`or` are
+ * idempotent, so a fold over them answers the same whether or not the reference bulked equal
+ * traversers before it (`FoldStep.projectTraverser` applies the operator once per traverser, whatever its
+ * bulk). Every other operator is bulk-SENSITIVE, and a caller must prove the reference bulked nothing
+ * (`referenceUnbulkedAt`, `ir/bulk.ts`) before folding rows that may repeat.
+ */
+export const BULK_INVARIANT_OPS: ReadonlySet<string> = new Set(['min', 'max', 'and', 'or']);
 
-/** The reference's symmetric null rule: whichever side is non-null, else the combination. Spelled for
- *  `min`/`max`/`and`/`or`, whose SQL spellings all answer NULL where the reference answers a value. */
-const eitherOr = (acc: Expr, value: Expr, combined: Expr): Expr => ({
-  kind: 'case',
-  whens: [[isNull(acc), value], [isNull(value), acc]],
-  else: combined,
-});
-
-/** The arithmetic null rule: a NULL VALUE is the identity; a NULL accumulator propagates, which SQL's
- *  own arithmetic already does. */
-const identityOnNull = (acc: Expr, value: Expr, combined: Expr): Expr => ({
-  kind: 'case', whens: [[isNull(value), acc]], else: combined,
-});
+/** Does this operator produce a BOOLEAN rather than a value whose class the fold discovers? */
+const isLogicalOp = (operator: string): boolean => operator === 'and' || operator === 'or';
+const isExtremum = (operator: string): boolean => operator === 'min' || operator === 'max';
 
 /**
- * ONE FOLD STEP — the accumulator so far combined with the next value, or `null` for an operator this
- * does not spell (a caller declines on it).
+ * A member's CLASS, as the walk reads it — a small code rather than the vtype string, because the walk
+ * consults it in several arms and a code is short where every arm is paid for in statement text.
  *
- * `div` is SQLite's plain `/`, deliberately: on two integers it is integer division and on a real
- * operand it is real, which is exactly `NumberHelper.div`'s "highest common number class" promotion.
- * Forcing REAL would answer `128.0` where the reference answers the integer `128`.
+ * `int`/`long`/`double` are the three `Number` classes this fold reproduces EXACTLY: SQLite's INTEGER is
+ * a Java `long` and its REAL a `double`, and `NumberHelper`'s promotion between them is spelled below.
+ * `UNSUPPORTED` is every other `Number` — a `byte`/`short` keeps its own class through the reference's
+ * arithmetic, a `float` is folded in 32-bit precision, a `BigInteger` never overflows and a `BigDecimal`
+ * is exact; none of those is a SQLite storage class, so a fold over one RAISES a deferral rather than
+ * answer a nearby number. `OTHER` is everything that is not a `Number`, a `String` or a `Boolean`.
  */
-export function mergeStep(operator: string, acc: Expr, value: Expr): Expr | null {
-  const arith = (op: '+' | '-' | '*' | '/'): Expr =>
-    identityOnNull(acc, value, { kind: 'binary', op, left: acc, right: value });
-  const extremum = (fn: 'MIN' | 'MAX'): Expr =>
-    eitherOr(acc, value, { kind: 'call', fn, args: [acc, value] });
-  const logical = (op: 'and' | 'or'): Expr =>
-    eitherOr(acc, value, { kind: 'binary', op, left: acc, right: value });
+const KIND = { none: 0, int: 1, long: 2, double: 3, string: 4, boolean: 5, unsupported: 8, other: 9 } as const;
+const UNSUPPORTED_NUMBERS: readonly string[] = ['byte', 'short', 'float', 'bigint', 'bigdecimal'];
+const kindOfTag = (tag: string): number =>
+  tag === 'int' ? KIND.int : tag === 'long' ? KIND.long : tag === 'double' ? KIND.double
+    : tag === 'string' ? KIND.string : tag === 'boolean' ? KIND.boolean
+      : UNSUPPORTED_NUMBERS.includes(tag) ? KIND.unsupported : KIND.other;
+
+const INT32_MAX = 2147483647;
+const INT32_MIN = -2147483648;
+
+// ---- small Expr spellings, named so the arms below read as the reference's rules ----
+const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+const isNull = (e: Expr): Expr => bin('is', e, compilerNull());
+const eqInt = (e: Expr, n: number): Expr => bin('=', e, compilerInt(n));
+const inInts = (e: Expr, ns: readonly number[]): Expr => ({ kind: 'in-list', expr: e, values: ns.map(compilerInt) });
+const typeOfIs = (e: Expr, storage: 'integer' | 'real' | 'text'): Expr => bin('=', { kind: 'call', fn: 'typeof', args: [e] }, compilerText(storage));
+const outsideInt32 = (e: Expr): Expr => bin('or', bin('>', e, compilerInt(INT32_MAX)), bin('<', e, compilerInt(INT32_MIN)));
+const outsideInt32Integer = (e: Expr): Expr => bin('and', typeOfIs(e, 'integer'), outsideInt32(e));
+/** A REAL within the finite range — SQLite carries `±Infinity` as a REAL and a NaN as NULL, and both
+ *  fail this. Only for a REAL: `abs` of the INTEGER -2^63 is itself an overflow error. */
+const finiteReal = (e: Expr): Expr => bin('<=', { kind: 'call', fn: 'abs', args: [e] }, compilerReal(Number.MAX_VALUE));
+const when = (pred: Expr, then: Expr, otherwise?: Expr): Expr => ({ kind: 'case', whens: [[pred, then]], ...(otherwise ? { else: otherwise } : {}) });
+
+/**
+ * A member's class CODE (`KIND`), read off the type channel wherever the stream has one — the operand
+ * side of the reducer vocabulary's eligibility, decided per member. A NULL value is `none` whatever its
+ * tag: `NumberHelper` treats a null operand as the identity (`mathOperationWithPromote:401-402`,
+ * `min:556-559`), so it is not a class question at all.
+ *
+ * - **a STATIC class** is one code for every member;
+ * - **a PER-ROW tag** is decided per member, and a NULL tag ("infer this one from the value") falls back
+ *   to the storage class;
+ * - **NO tag** leaves only the storage class: an INTEGER is an `int` unless it is outside the 32-bit
+ *   range (a `long`, which is how a GraphSON reader would type it), a REAL a `double`, TEXT a `String`.
+ */
+function memberKind(value: Expr, tag: string | undefined, rowTag: Expr | null): Expr {
+  if (tag !== undefined) return when(isNull(value), compilerInt(KIND.none), compilerInt(kindOfTag(tag)));
+  const byStorage: Expr = {
+    kind: 'case',
+    whens: [
+      [isNull(value), compilerInt(KIND.none)],
+      [typeOfIs(value, 'integer'), when(outsideInt32(value), compilerInt(KIND.long), compilerInt(KIND.int))],
+      [typeOfIs(value, 'real'), compilerInt(KIND.double)],
+      [typeOfIs(value, 'text'), compilerInt(KIND.string)],
+    ],
+    else: compilerInt(KIND.other),
+  };
+  if (!rowTag) return byStorage;
+  const tagIn = (tags: readonly string[]): Expr => ({ kind: 'in-list', expr: rowTag, values: tags.map(compilerText) });
+  return {
+    kind: 'case',
+    whens: [
+      [isNull(rowTag), byStorage],
+      [isNull(value), compilerInt(KIND.none)],
+      ...(['int', 'long', 'double', 'string', 'boolean'] as const).map((t) => [tagIn([t]), compilerInt(kindOfTag(t))] as const),
+      [tagIn(UNSUPPORTED_NUMBERS), compilerInt(KIND.unsupported)],
+    ],
+    else: compilerInt(KIND.other),
+  };
+}
+
+/**
+ * A member's VALUE in the storage class its code names. A `long` past 2^53 rides as decimal TEXT
+ * (`types.ts`, `SAFE_INT`) and must be read back as the INTEGER it is — the §6·7 bug `sum()` already
+ * fixed (`inject(9007199254740993L, 1L).fold(0L, Operator.sum)` answered `1` when a `typeof` guard
+ * excluded it). Only a tagged member needs the cast: an untagged one already has its own storage class.
+ */
+function memberValue(value: Expr, tag: string | undefined, rowTag: Expr | null): Expr {
+  const asInt: Expr = { kind: 'cast', arg: value, to: 'int' };
+  const asReal: Expr = { kind: 'cast', arg: value, to: 'real' };
+  if (tag !== undefined) return tag === 'int' || tag === 'long' ? asInt : tag === 'double' ? asReal : value;
+  if (!rowTag) return value;
+  return {
+    kind: 'case',
+    whens: [
+      [{ kind: 'in-list', expr: rowTag, values: [compilerText('int'), compilerText('long')] }, asInt],
+      [bin('=', rowTag, compilerText('double')), asReal],
+    ],
+    else: value,
+  };
+}
+
+/**
+ * The SEED's class, or `null` for a seed this fold does not take (a decline: the traversal's answer is
+ * the reference's own exception, or a class the walk does not reproduce). The seed is a compile-time
+ * literal or a user parameter, so this is a static question.
+ *
+ * `Operator.sum`/`minus`/`mult`/`div` cast both sides to `Number` (`Operator.java:40-86`) — and the cast
+ * happens BEFORE `mathOperationWithPromote`'s null check, so a NULL seed is legal and propagates. `min`/
+ * `max` take a `Comparable`. `and`/`or` take a boolean, and a NULL seed there is DECLINED: `and(null, b)`
+ * answers `b` UNCAST (`Operator.java:131-168`), so the accumulator would become whatever the first member
+ * is, and the result would no longer be the boolean this fold frames.
+ */
+function seedClass(operator: string, seed: Arg): 'int' | 'long' | 'double' | 'string' | 'boolean' | 'null' | null {
+  const value = seed.value;
+  const cls = value === null ? 'null'
+    : typeof value === 'boolean' ? 'boolean'
+      : typeof value === 'string' ? 'string'
+        : typeof value === 'number' && Number.isFinite(value) ? numberClass(value, flatType(seed.type))
+          : null;
+  if (cls === null) return null;
+  if (isLogicalOp(operator)) return cls === 'boolean' ? cls : null;
+  if (cls === 'null' || cls === 'int' || cls === 'long' || cls === 'double') return cls;
+  return isExtremum(operator) && cls === 'string' ? cls : null;
+}
+
+/** A finite number's class: its declared one where the channel said, else what a GraphSON reader infers. */
+const numberClass = (value: number, declared: string | null): 'int' | 'long' | 'double' | null => {
+  if (declared === 'int' || declared === 'long' || declared === 'double') return declared;
+  if (declared !== null) return null;
+  if (!Number.isInteger(value)) return 'double';
+  return value > INT32_MAX || value < INT32_MIN ? 'long' : 'int';
+};
+
+/** The member classes an operator can fold — a STATIC class outside it is every member's exception (or
+ *  a class this walk does not reproduce), so the traversal declines rather than raise on every row. */
+const staticKindFolds = (operator: string, seed: string, kind: number): boolean => {
+  if (isLogicalOp(operator)) return kind === KIND.boolean;
+  const numeric = kind === KIND.int || kind === KIND.long || kind === KIND.double;
+  if (!isExtremum(operator)) return numeric;
+  // `min`/`max` compare two numbers numerically and two strings by `compareTo`; a string against a
+  // number is `"z".compareTo(27)`, the reference's exception
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597`).
+  return seed === 'string' ? kind === KIND.string : seed === 'null' ? numeric || kind === KIND.string : numeric;
+};
+
+/**
+ * The messages a fold RAISES mid-walk. Two are the reference's own, verbatim: `Math.addExact`/
+ * `subtractExact`/`multiplyExact` and `LONG_NUMBER_HELPER.div` throw `long overflow` at the 64th bit,
+ * and `mathOperationWithPromote` RETHROWS it there rather than promote further
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:167-177,400-425`);
+ * integer division by zero is Java's `/ by zero`, rethrown the same way. The other three are named
+ * rather than imitated: two DEFERRALS — answers the reference gives that this walk does not reproduce
+ * (a non-finite double, a class outside `int`/`long`/`double`/`String`) — and the reference's own
+ * `ClassCastException` (a member the operator cannot act on), whose Java text names JVM modules. Every
+ * message is inlined in the statement, which is why they are short.
+ */
+const raises = (operator: string) => ({
+  overflow: 'long overflow',
+  divByZero: '/ by zero',
+  nonFinite: `Operator.${operator}: a non-finite double result is not supported`,
+  unsupported: `Operator.${operator}: byte, short, float, BigInteger, BigDecimal and non-scalar values are not supported`,
+  cannotAct: `ClassCastException: Operator.${operator} cannot act on this value`,
+});
+
+/** The walk's columns: the member ordinal reached so far, the accumulator, and the two class flags —
+ *  "a `long` has been seen" and "a `double` has been seen", which together are the result's class
+ *  (`NumberHelper.getHighestCommonNumberClass` over every operand so far). Named apart from the member
+ *  relation's own columns so the recursive term's join declares no duplicate. */
+const FOLD_POS = 'fo';
+const FOLD_ACC = 'fa';
+const FOLD_LONG = 'fl';
+const FOLD_REAL = 'fr';
+/** The member relation's columns as the term reads them — its value (raw, then classified), its type
+ *  tag where the stream carries one per row, its class code, and its position. */
+const MEMBER_RAW = 'mr';
+const MEMBER_TAG = 'mt';
+const MEMBER_VAL = 'mv';
+const MEMBER_KIND = 'mk';
+const MEMBER_ORD = 'mo';
+
+/**
+ * ONE FOLD STEP — the accumulator `acc` combined with the member `value` of class code `kind`, as the
+ * reference computes it, RAISING exactly where it raises. `null` for an operator this does not spell.
+ *
+ * - **arithmetic** (`sum`/`minus`/`mult`/`div`): a NULL member is the identity and a NULL accumulator
+ *   propagates (`mathOperationWithPromote:401-402`). On two INTEGERs SQLite's operators are a Java
+ *   `long`'s — `/` truncates toward zero exactly as Java does — except at the two edges SQLite does NOT
+ *   share: it promotes an overflow to REAL where the reference raises `long overflow`, and answers NULL
+ *   for `x / 0` where it raises `/ by zero`. On a REAL operand it is `double` arithmetic, whose one
+ *   unrepresentable answer is a non-finite double (SQLite answers NULL; the reference answers
+ *   `Infinity`/`NaN`), which raises a deferral.
+ * - **`min`/`max`**: either side NULL answers the other (`NumberHelper.min:556-559`); two numbers
+ *   compare numerically and two strings by `compareTo`, and a mixed pair is the reference's exception.
+ * - **`and`/`or`**: the seed is a boolean (`seedClass`), so the accumulator never is NULL and only a
+ *   NULL member is the identity; a non-boolean member is `(boolean)`'s exception.
+ */
+function foldStep(operator: string, acc: Expr, value: Expr, kind: Expr): Expr | null {
+  const say = raises(operator);
+  const raise = (message: string): Expr => raiseExpr(message, value);
+  const numeric = inInts(kind, [KIND.int, KIND.long, KIND.double]);
+  const integral = inInts(kind, [KIND.int, KIND.long]);
+  const not = (e: Expr): Expr => ({ kind: 'unary', op: 'not', arg: e });
+  const arith = (op: '+' | '-' | '*' | '/'): Expr => {
+    const result = bin(op, acc, value);
+    const intByInt = bin('and', typeOfIs(acc, 'integer'), integral);
+    return {
+      kind: 'case',
+      whens: [
+        [eqInt(kind, KIND.none), acc],
+        [eqInt(kind, KIND.unsupported), raise(say.unsupported)],
+        // `(Number) b` — a String, a Boolean, a collection or an element is the reference's exception.
+        [not(numeric), raise(say.cannotAct)],
+        [isNull(acc), compilerNull()],
+        ...(op === '/' ? [[bin('and', intByInt, eqInt(value, 0)), raise(say.divByZero)] as const] : []),
+        // `long` arithmetic: SQLite answers a REAL exactly where `Math.*Exact` would throw.
+        [intByInt, when(typeOfIs(result, 'integer'), result, raise(say.overflow))],
+        // `double` arithmetic (an operand is REAL, so the result is): a NULL is a NaN and anything past
+        // the finite range an infinity — both comparisons are then false.
+        [finiteReal(result), result],
+      ],
+      else: raise(say.nonFinite),
+    };
+  };
+  const extremum = (fn: 'MIN' | 'MAX'): Expr => ({
+    kind: 'case',
+    whens: [
+      [eqInt(kind, KIND.none), acc],
+      // A `Boolean`, a `UUID`, a `Date` are `Comparable` and the reference answers over them; this walk
+      // does not reproduce their order or class, so they DEFER. A collection is the reference's exception.
+      [inInts(kind, [KIND.unsupported, KIND.boolean, KIND.other]), raise(say.unsupported)],
+      [isNull(acc), value],
+      [bin('!=', typeOfIs(acc, 'text'), eqInt(kind, KIND.string)), raise(say.cannotAct)],
+    ],
+    else: { kind: 'call', fn, args: [acc, value] },
+  });
+  const logical = (op: 'and' | 'or'): Expr => ({
+    kind: 'case',
+    whens: [
+      [eqInt(kind, KIND.none), acc],
+      [not(eqInt(kind, KIND.boolean)), raise(say.cannotAct)],
+    ],
+    else: bin(op, acc, value),
+  });
   switch (operator) {
     case 'sum': return arith('+');
     case 'minus': return arith('-');
@@ -125,101 +350,6 @@ export function mergeStep(operator: string, acc: Expr, value: Expr): Expr | null
   }
 }
 
-/** Does this operator produce a BOOLEAN rather than a value whose storage class the fold discovers?
- *  `and`/`or` do, and nothing else does — which is what decides whether the result's type is stated
- *  statically or read off `typeof(…)` at the wire (the `result: 'number'` framing arm). */
-export const isLogicalOp = (operator: string): boolean => operator === 'and' || operator === 'or';
-
-/**
- * WHAT AN OPERATOR CAN ACT ON — the operand side of the reducer vocabulary's ELIGIBILITY policy
- * (`reducer.ts`), stated for the `Operator` set rather than restated per site, and READ OFF THE TYPE
- * CHANNEL wherever the stream has one. `null` declines.
- *
- * `Operator.sum`/`minus`/`mult`/`div` cast both sides to `Number` (`Operator.java:40-86`), `min`/`max`
- * take a `Comparable` (`NumberHelper.min:582`, `max:639`: two `Number`s compare numerically, anything
- * else by `compareTo`) and `and`/`or` a `boolean` (`Operator.java:131-168`). The reference raises a
- * `ClassCastException` on anything else. So the answer has three arms, by how much the channel says:
- *
- * - **a STATIC class** is a fact about every member. A `Number` class is CAST to its storage class
- *   (`storedCompareOn`, the one authority `order().by()` and `sum()` also use): a `long` past 2^53 rides
- *   as decimal TEXT (`types.ts`, `SAFE_INT`), and a `typeof` guard would EXCLUDE it — the §6·7 bug
- *   `sum()` already fixed (`lower.ts`, `isLongSumClass`), which answered `1` for
- *   `inject(9007199254740993L, 1L).fold(0L, Operator.sum)`. A class the operator cannot act on at all
- *   (a `string` into `sum`, a `boolean` into `max`) makes EVERY member the reference's exception, so it
- *   DECLINES rather than fold nothing into the seed.
- * - **a PER-ROW tag** decides the same question per member, through the same cast. A member whose tag
- *   the operator cannot act on reads as NULL — the identity for every operator here — which is the
- *   reducer's own policy (`reducer.ts`, "ELIGIBILITY"): a row-level answer cannot raise, and a
- *   heterogeneous stream is that policy's documented divergence (§6·7n). A NULL tag ("infer this one
- *   from the value") falls back to the storage class.
- * - **NO tag** leaves only the storage class, so it is the reducer's `typeof` guard exactly.
- *
- * **A BOOLEAN is the one class a storage class cannot see**: it is an INTEGER on this substrate
- * (`constLit` spells `true` as `1`), so the logical pair needs a channel that says `boolean` and
- * DECLINES without one — `typeof` would let an age into `Operator.and`.
- */
-function eligibleOperand(operator: string, seed: unknown, value: Expr, type: ScalarType, members: Rel): Expr | null {
-  const tag = staticTypeOf(type);
-  const typeCol = perRowColumnOf(type);
-  const rowTag = typeCol ? col(members.id, typeCol) : null;
-  const when = (pred: Expr, then: Expr): Expr => ({ kind: 'case', whens: [[pred, then]] });
-  const tagIn = (tagExpr: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list', expr: tagExpr, values: tags.map(compilerText) });
-  if (isLogicalOp(operator)) {
-    if (tag !== undefined) return tag === 'boolean' ? value : null;
-    return rowTag ? when(tagIn(rowTag, ['boolean']), value) : null;
-  }
-  // The tags (and, untagged, the storage classes) a member may carry: a `Number` — and for `min`/`max`
-  // whatever is `Comparable` WITH THE SEED. Two numbers compare numerically and two strings by
-  // `compareTo`, but a string against a number is the reference's exception
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597`,
-  // `"z".compareTo(27)`), so a string seed admits only strings and a number seed only numbers. Only a
-  // NULL seed — which takes the first member as-is — leaves both, the reducer's own `comparable` set.
-  // Over a STATIC class a mismatch is every member's exception, so it declines (the arm just below).
-  const comparable = operator === 'min' || operator === 'max';
-  const numbers = !comparable || typeof seed !== 'string';
-  const strings = comparable && typeof seed !== 'number';
-  if (tag !== undefined) {
-    if (NUMERIC_VTYPES.includes(tag)) return numbers ? storedCompareOn(compilerText(tag))(value) : null;
-    return tag === 'string' && strings ? value : null;
-  }
-  const byStorage = tagIn({ kind: 'call', fn: 'typeof', args: [value] },
-    numbers && strings ? REDUCER_CLASSES.comparable : numbers ? REDUCER_CLASSES.arithmetic : ['text']);
-  if (!rowTag) return when(byStorage, value);
-  // `storedCompareOn`'s two casts, spelled as arms of the ONE eligibility `CASE` rather than nested
-  // inside a second one: the member value is often an expression the emitter inlines at every use, so
-  // each arm that names it is paid for in statement text (the `sql-hygiene` ratchet measured it).
-  const cast = (to: 'int' | 'real'): Expr => ({ kind: 'cast', arg: value, to });
-  return {
-    kind: 'case',
-    whens: [
-      ...(numbers ? [[tagIn(rowTag, NUMERIC_CAST_TO_INT), cast('int')], [tagIn(rowTag, CAST_TO_REAL), cast('real')]] as const : []),
-      ...(strings ? [[tagIn(rowTag, ['string']), value]] as const : []),
-      [{ kind: 'binary', op: 'and', left: { kind: 'binary', op: 'is', left: rowTag, right: compilerNull() }, right: byStorage }, value],
-    ],
-  };
-}
-
-/**
- * Is this SEED a value `operator` can fold into without the reference's own `ClassCastException`? The
- * seed is a compile-time literal, so this is a static question and a refusal is a DECLINE: the
- * traversal's answer is an exception we do not spell, and computing `'a' + 1` would be a wrong one.
- * Whether the seed is comparable with the MEMBERS is `eligibleOperand`'s question, asked against the
- * stream's type channel.
- */
-const seedAdmitted = (operator: string, seed: unknown): boolean =>
-  seed === null
-  || (isLogicalOp(operator) ? typeof seed === 'boolean'
-    : operator === 'min' || operator === 'max' ? typeof seed === 'number' || typeof seed === 'string'
-      : typeof seed === 'number');
-
-/** The walk's two columns: the member ordinal reached so far, and the accumulator. Named apart from
- *  the member relation's own `v`/order columns so the recursive term's join declares no duplicate. */
-const FOLD_POS = 'fo';
-const FOLD_ACC = 'fa';
-/** The member relation's columns as the term reads them — its value, and its position in the order. */
-const MEMBER_VAL = 'mv';
-const MEMBER_ORD = 'mo';
-
 /**
  * THE SEEDED LEFT FOLD — a member relation folded into ONE value by a member-by-member `Operator`, as a
  * `Recursive` walk over the ordered members. `null` declines.
@@ -228,11 +358,14 @@ const MEMBER_ORD = 'mo';
  *
  * - `withSideEffect(k, seed, Operator.x)` + `cap(k)`: `sideEffects.add(k, v)` is
  *   `set(k, getReducer(k).apply(get(k), v))`
- *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversalSideEffects.java:88-91`).
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversalSideEffects.java:88-91`),
+ *   once per member WITH its multiplicity (`AggregateStep.processAllStarts` iterates the `BulkSet`), so
+ *   every member row folds;
  * - `fold(seed, Operator.x)`: `ReducingBarrierStep.processAllStarts` is
  *   `seed = reducingBiOperator.apply(seed, projectTraverser(start))` for every start, the seed supplied
  *   once up front (`…/step/util/ReducingBarrierStep.java:99-111`), and `FoldBiOperator` applies the
- *   declared function and nothing else (`…/step/map/FoldStep.java:84-101`).
+ *   declared function and nothing else (`…/step/map/FoldStep.java:84-101`) — once per TRAVERSER, which
+ *   is why the caller, not this walk, answers whether a row may stand for a bulked one.
  *
  * That is a walk, not an aggregate: see the header for why picking SQL aggregates instead would answer
  * two operators wrongly. `order` names the columns that order the members (the caller's encounter, or a
@@ -245,6 +378,9 @@ const MEMBER_ORD = 'mo';
  * is legal precisely because the join opens a nested SELECT for it (`block.ts`: the barrier laws stop
  * at every nested SELECT, measured).
  *
+ * **The walk RAISES where the reference raises** (`foldStep`, through `raiseExpr`): a member is folded
+ * in order, so the first member the reference would throw on is the first this walk throws on.
+ *
  * **ZERO members still answer the SEED**, and it falls out rather than needing an arm: the walk's seed
  * row is `(0, seed)` and no member joins to it, so the last row IS the seed — `get(k)` over a side
  * effect nothing added to, and `FoldStep`'s seed over an empty stream (`hasNextBarrier` is true once
@@ -252,8 +388,8 @@ const MEMBER_ORD = 'mo';
  * serves a CORRELATED child (`by(__.values(k).fold(0, Operator.sum))`), whose member relation reads the
  * outer row and which a fence would cut off from it.
  *
- * The answer is ONE row with `v` (and, for a numeric fold, `vt`) and NO channels: it is a fresh
- * traverser, which is what a reducing barrier emits.
+ * The answer is ONE row with `v` and `vt` and NO channels: it is a fresh traverser, which is what a
+ * reducing barrier emits.
  */
 export function seededLeftFold(
   members: Rel, value: string, type: ScalarType, order: readonly string[], policy: MergePolicy,
@@ -264,46 +400,76 @@ export function seededLeftFold(
   // different facts: `addAll`/`assign` are a member-relation question this walk does not answer, and
   // anything else is not an `Operator` this fold spells at all.
   if (operator === undefined || BULK_OPS.has(operator) || !FOLD_OPS.has(operator)) return null;
-  if (!seedAdmitted(operator, policy.seed.value)) return null;
-  const seed = constLit(policy.seed);
-  // A COLLECTION seed has no scalar literal form, which is `constLit`'s own answer — and it is only
-  // ever legal for the BULK pair, already refused above.
-  if (!seed) return null;
-  const operand = eligibleOperand(operator, policy.seed.value, col(members.id, value), type, members);
-  if (!operand) return null;
+  const seedCls = seedClass(operator, policy.seed);
+  if (seedCls === null) return null;
+  const literal = constLit(policy.seed);
+  if (!literal) return null;
+  // A numeric seed is CAST to its class's storage class: a user PARAMETER binds as INTEGER on Bun and
+  // REAL on DO (root CLAUDE.md), and the walk reads the accumulator's storage class as its class.
+  const seed: Expr = seedCls === 'int' || seedCls === 'long' ? { kind: 'cast', arg: literal, to: 'int' }
+    : seedCls === 'double' ? { kind: 'cast', arg: literal, to: 'real' } : literal;
+  const staticTag = staticTypeOf(type);
+  if (staticTag !== undefined && !staticKindFolds(operator, seedCls, kindOfTag(staticTag))) return null;
 
   const keys = order.map((_, i) => `k${i}`);
   const keyCols = keys.map((key) => meta(key, 'any', true));
-  // The members, narrowed to what the fold reads — and to what the operator can ACT on, so the
-  // eligibility rule is applied once, here, rather than inside every iteration. Narrowing is also what
-  // keeps the walk's join from declaring a column name twice.
+  const typeCol = perRowColumnOf(type);
+  // The members, narrowed to what the fold reads — the raw value, its per-row tag, its order keys.
+  // Narrowing is also what keeps the walk's join from declaring a column name twice.
   const narrowed = make.project({
-    id: fresh('sn'), input: members, channels: [], type: typeOf(meta(MEMBER_VAL, 'any', true), ...keyCols),
-    exprs: [[MEMBER_VAL, operand],
+    id: fresh('sn'), input: members, channels: [],
+    type: typeOf(meta(MEMBER_RAW, 'any', true), ...(typeCol ? [meta(MEMBER_TAG, 'text', true)] : []), ...keyCols),
+    exprs: [[MEMBER_RAW, col(members.id, value)],
+      ...(typeCol ? [[MEMBER_TAG, col(members.id, typeCol)] as const] : []),
       ...order.map((name, i) => [keys[i]!, col(members.id, name)] as const)],
   });
-  const numbered = rowNumberWindow(narrowed, MEMBER_ORD, [],
+  const ordinals = rowNumberWindow(narrowed, MEMBER_ORD, [],
     { partitionBy: [], orderBy: keys.map((key) => ({ expr: col(narrowed.id, key), dir: 'asc' as const })) }, fresh);
+  // Each member CLASSIFIED — its value in its class's storage class, and its class code — AFTER the
+  // window, whose nested SELECT makes the raw value a plain column: classified before it, the stream's
+  // own value expression (often a `CASE` over the stored vtype) was inlined at each of a dozen uses.
+  const raw = col(ordinals.id, MEMBER_RAW);
+  const rowTag = typeCol ? col(ordinals.id, MEMBER_TAG) : null;
+  const numbered = make.project({
+    id: fresh('sc'), input: ordinals, channels: [],
+    type: typeOf(meta(MEMBER_VAL, 'any', true), meta(MEMBER_KIND, 'int'), meta(MEMBER_ORD, 'int')),
+    exprs: [[MEMBER_VAL, memberValue(raw, staticTag, rowTag)], [MEMBER_KIND, memberKind(raw, staticTag, rowTag)],
+      [MEMBER_ORD, col(ordinals.id, MEMBER_ORD)]],
+  });
 
-  const walkType = typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true));
+  const walkType = typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true), meta(FOLD_LONG, 'int'), meta(FOLD_REAL, 'int'));
   const walkId = fresh('sr');
   let foldable = true;
   const walk = make.recursive({
-    id: walkId, name: `fd_${walkId}`, channels: [], type: walkType, cols: [FOLD_POS, FOLD_ACC],
-    seed: make.values({ id: fresh('ss'), channels: [], type: walkType, rows: [[compilerInt(0), seed]] }),
+    id: walkId, name: `fd_${walkId}`, channels: [], type: walkType, cols: [FOLD_POS, FOLD_ACC, FOLD_LONG, FOLD_REAL],
+    seed: make.values({
+      id: fresh('ss'), channels: [], type: walkType,
+      rows: [[compilerInt(0), seed, compilerInt(seedCls === 'long' ? 1 : 0), compilerInt(seedCls === 'double' ? 1 : 0)]],
+    }),
     step: (self) => {
       const joined = make.join({
         id: fresh('sj'), left: self, right: numbered, join: 'inner', channels: [],
-        type: typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true),
-          meta(MEMBER_VAL, 'any', true), ...keyCols, meta(MEMBER_ORD, 'int')),
-        on: eq(col(numbered.id, MEMBER_ORD),
-          { kind: 'binary', op: '+', left: col(self.id, FOLD_POS), right: compilerInt(1) }),
+        type: typeOf(...walkType.cols, meta(MEMBER_VAL, 'any', true), meta(MEMBER_KIND, 'int'), meta(MEMBER_ORD, 'int')),
+        on: eq(col(numbered.id, MEMBER_ORD), bin('+', col(self.id, FOLD_POS), compilerInt(1))),
       });
-      const folded = mergeStep(operator, col(joined.id, FOLD_ACC), col(joined.id, MEMBER_VAL));
+      const acc = col(joined.id, FOLD_ACC);
+      const kind = col(joined.id, MEMBER_KIND);
+      const folded = foldStep(operator, acc, col(joined.id, MEMBER_VAL), kind);
       if (!folded) { foldable = false; return self; }
+      // THE CLASS FLAGS. A `long` member makes the class `long` and a `double` one `double`
+      // (`getHighestCommonNumberClass`); so does an `int` result outside 32 bits, because
+      // `INTEGER_NUMBER_HELPER` overflows there and `mathOperationWithPromote` retries the operation as
+      // a `long` (`NumberHelper.java:400-425`) — after which every later operand meets a `long`. That
+      // last fact is read off the INCOMING accumulator, one step late, rather than off `folded`: the
+      // emitter inlines `folded` at every use, and three copies of the whole step tripled the statement.
+      // The final accumulator is checked once more where the class is stated (below), so no
+      // intermediate result escapes the check.
+      const flag = (column: string, set: Expr): Expr => when(set, compilerInt(1), col(joined.id, column));
+      const promoted = bin('or', eqInt(kind, KIND.long), outsideInt32Integer(acc));
       return make.project({
         id: fresh('sp'), input: joined, channels: [], type: walkType,
-        exprs: [[FOLD_POS, col(joined.id, MEMBER_ORD)], [FOLD_ACC, folded]],
+        exprs: [[FOLD_POS, col(joined.id, MEMBER_ORD)], [FOLD_ACC, folded],
+          [FOLD_LONG, flag(FOLD_LONG, promoted)], [FOLD_REAL, flag(FOLD_REAL, eqInt(kind, KIND.double))]],
       });
     },
   });
@@ -320,38 +486,41 @@ export function seededLeftFold(
       terms: [{ expr: col(walk.id, FOLD_POS), dir: 'desc' }],
     }),
   });
-  // **THE RESULT'S STORAGE CLASS IS DYNAMIC, exactly as a numeric reducer's is** — `NumberHelper`
-  // returns the highest common class of the operands, so a fold of integers is an integer and one
-  // touching a real is a real, and there is no compile-time tag to give. That is the `result: 'number'`
-  // framing arm and its `vt` column (`reducer.ts`, `framing.ts`). `and`/`or` are the exception: they
-  // answer a BOOLEAN, which `typeof` would report as `integer`, so they state their type.
-  //
-  // **AN INTEGER PAST 2^53 LEAVES AS EXACT TEXT**, which is `sumTower`'s rule (`reducer.ts`) for the
-  // same reason: a JS number cannot carry it, so the wire would round the low bits away. Only a `long`
-  // (or a `bigint`, when the members are) reaches that magnitude — a Java `int` cannot — so that is the
-  // `vt` it frames under, and the framer's `long`/`bigint` arm reads the decimal string through `BigInt`.
-  const logical = isLogicalOp(operator);
   const acc = col(deepest.id, FOLD_ACC);
-  const storage: Expr = { kind: 'call', fn: 'typeof', args: [acc] };
-  const pastSafe: Expr = {
-    kind: 'binary', op: 'and',
-    left: { kind: 'binary', op: '=', left: storage, right: compilerText('integer') },
-    right: { kind: 'binary', op: '>', left: { kind: 'call', fn: 'abs', args: [acc] }, right: compilerInt(SAFE_INT) },
-  };
-  const memberClass = staticTypeOf(type);
-  const wide = compilerText(memberClass !== undefined && isLongSumClass(memberClass) ? memberClass : 'long');
+  if (isLogicalOp(operator)) {
+    return {
+      rel: make.project({ id: fresh('sv'), input: deepest, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', acc]] }),
+      framing: { kind: 'scalar', type: STATIC('boolean'), productiveNull },
+    };
+  }
+  // THE RESULT'S CLASS IS THE FLAGS', stated as a Gremlin vtype the framer resolves exactly (`int`/
+  // `long`/`double`/`string`) rather than a storage class it would guess a width for: a `long` seed or
+  // member makes a `long` even where the value fits 32 bits, and a `double` makes `min(1, 2.5)` the
+  // `Double` `1.0`, where SQLite's `MIN` answers the INTEGER `1`. An integer past 2^53 leaves as exact
+  // decimal TEXT under `long` — `sumTower`'s rule (`reducer.ts`), because a JS number cannot carry it.
+  const isLong = bin('or', eqInt(col(deepest.id, FOLD_LONG), 1), outsideInt32Integer(acc));
+  const isReal = bin('or', eqInt(col(deepest.id, FOLD_REAL), 1), typeOfIs(acc, 'real'));
+  const pastSafe = bin('or', bin('>', acc, compilerInt(SAFE_INT)), bin('<', acc, compilerInt(-SAFE_INT)));
   return {
     rel: make.project({
       id: fresh('sv'), input: deepest, channels: [],
-      type: typeOf(meta('v', 'any', true), ...(logical ? [] : [meta('vt', 'text', true)])),
-      exprs: logical ? [['v', acc]] : [
-        ['v', { kind: 'case', whens: [[pastSafe, { kind: 'cast', arg: acc, to: 'text' }]], else: acc }],
-        ['vt', { kind: 'case', whens: [[pastSafe, wide]], else: storage }],
+      type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+      exprs: [
+        ['v', {
+          kind: 'case',
+          whens: [[typeOfIs(acc, 'text'), acc], [isReal, { kind: 'cast', arg: acc, to: 'real' }],
+            [pastSafe, { kind: 'cast', arg: acc, to: 'text' }]],
+          else: acc,
+        }],
+        ['vt', {
+          kind: 'case',
+          whens: [[isNull(acc), compilerNull()], [typeOfIs(acc, 'text'), compilerText('string')],
+            [isReal, compilerText('double')], [isLong, compilerText('long')]],
+          else: compilerText('int'),
+        }],
       ],
     }),
-    framing: logical
-      ? { kind: 'scalar', type: STATIC('boolean'), productiveNull }
-      : { kind: 'scalar', type: UNKNOWN, result: 'number', productiveNull },
+    framing: { kind: 'scalar', type: UNKNOWN, result: 'number', productiveNull },
   };
 }
 

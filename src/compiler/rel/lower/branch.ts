@@ -7,6 +7,7 @@ import type { Binding } from '../../../rel/plan.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
 import { armBatches, isLocalScope } from '../../ir/step.ts';
+import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
@@ -53,9 +54,9 @@ export type BranchRel = FramedRel & { readonly aliases: AliasMap; readonly effec
  *  builder is a compile error rather than a silent decline. */
 export function branchArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
 ): BranchRel | null {
-  return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels)
+  return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels, position)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels)
       : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
         : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels)
@@ -191,10 +192,29 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
   return batchedBranch(normalized, input, graph, fresh, labels);
 }
 
+/** Where a branch step sits — the step list it belongs to and its index — for an arm that needs to know
+ *  what the reference handed it (`armScope`). */
+export type BranchPosition = { readonly steps: readonly IRStep[]; readonly at: number };
+
+/**
+ * THE SCOPE A `union()` ARM LOWERS IN. Every arm is `inArmBody`; an arm additionally BEGINS a traversal
+ * (`ChainCtx.traversal`) only when the reference provably hands it a stream of distinct, unbulked
+ * traversers — `BranchStep` drains every start into the arm's ONE `TraverserSet`, which merges equal ones
+ * (`referenceDistinctAt`). Only then may a bulk-sensitive consumer in the arm (a seeded fold reducing the
+ * whole input) read its rows as the reference's traversers; anywhere else it declines.
+ */
+const armScope = (ctx: ChainCtx, position: BranchPosition | undefined) => {
+  const distinct = !!position && ctx.traversal?.steps === position.steps
+    && referenceDistinctAt(position.steps, position.at, ctx.traversal.rooted);
+  return (body: readonly IRStep[]): ChainCtx =>
+    (distinct ? { ...inArmBody(ctx), traversal: { steps: body, rooted: false } } : inArmBody(ctx));
+};
+
 export function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
 ): BranchRel | null {
+  const armCtx = armScope(ctx, position);
   if (step.modulators?.length || step.optionArms) return null;
   // A `union` is a fresh UNORDERED stream (`BranchStep` drains arm-by-arm and every scenario of
   // `Union.feature` asserts unordered), so a position the input carried OR an arm minted inside itself
@@ -216,7 +236,7 @@ export function unionArms(
   // label or a SLICE-demanded one carry merge questions the multi-arm path owns — all three decline here.
   if (args.length === 1) {
     if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
-    const only = continueAs(input, framing, bodies[0]!, 0, bulked, inArmBody(ctx), fresh, labels);
+    const only = continueAs(input, framing, bodies[0]!, 0, bulked, armCtx(bodies[0]!), fresh, labels);
     if (!only) return null;
     // A write in the single arm (`union(__.mergeV(…))`) threads its effects out — a `Tail`'s `effects`
     // become the branch's, so the arm's write bindings reach the program instead of dangling.
@@ -233,7 +253,7 @@ export function unionArms(
   const source = slice ? augmentParent(input, fresh) : input;
   const arms: Tail[] = [];
   for (const body of bodies) {
-    const arm = continueAs(source, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
+    const arm = continueAs(source, framing, body!, 0, bulked, armCtx(body!), fresh, labels);
     if (!arm) return null;
     arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
   }

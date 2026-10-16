@@ -10,7 +10,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { bulkObservedFrom } from '../ir/bulk.ts';
+import { bulkObservedFrom, referenceUnbulkedAt } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -55,7 +55,7 @@ import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPa
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
-import { ADD_ALL, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
+import { ADD_ALL, BULK_INVARIANT_OPS, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
@@ -258,6 +258,12 @@ const withBranchEffects = (tail: Tail | null, merged: BranchRel): Tail | null =>
  */
 export const BORD_PARENT: Channel = { col: 'bord_p', role: 'origin' };
 export const BORD_ARM: Channel = { col: 'bord_a', role: 'origin' };
+
+/** Does the stream reaching `steps[at]` hold exactly the reference's traversers — none merged by a
+ *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
+ *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
+const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
+  ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted);
 
 /** Does a SLICE-demanded branch take the traverser-major lowering here? Only when the input carries no
  *  positional (`origin`) key already: a branch NESTED inside another's sliced arm would freeze a SECOND parent
@@ -1452,7 +1458,7 @@ function scalarTail(
     // because it needs no subject at all; `choose` took an `elem` and so could not be reached from a
     // value stream at all, which read as a missing branch lowering rather than a missing caller (§6·6).
     if (BRANCH_HOSTS.has(step.name)) {
-      const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels);
+      const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels, { steps, at });
       if (!merged) return null;
       return withBranchEffects(continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases), merged);
     }
@@ -1909,15 +1915,19 @@ function scalarTail(
         // approximated: it needs the walk partitioned by origin and seeded off the origin DOMAIN, which
         // `foldPerOrigin` does for the list fold and nothing does for this one yet.
         //
-        // The `bulk` channel needs no arm, and the reason is positional: a `fold` — either overload —
-        // is `'reads-rows'` to the collapse authority (`ir/bulk.ts`, `verdictOf`'s default), so no
-        // movement collapse is ever introduced in front of one and every row here IS one traverser.
-        // That matters more for this overload than for the list one: the non-list
-        // `FoldStep.projectTraverser` applies the operator ONCE per traverser whatever its bulk
+        // BULK, from both sides. OURS: a `fold` — either overload — is `'reads-rows'` to the collapse
+        // authority (`ir/bulk.ts`, `verdictOf`'s default), so no movement collapse is introduced in
+        // front of one and every row here is one of the reference's traversers EXPANDED by its bulk.
+        // THE REFERENCE'S: the non-list `FoldStep.projectTraverser` applies the operator ONCE per
+        // traverser whatever its bulk
         // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:58-68`),
-        // so the reference's answer over a BULKED traverser depends on where its strategies bulked —
-        // and a stream that never bulks is the one on which every strategy set agrees.
+        // and its DEFAULT `LazyBarrierStrategy` merges equal traversers after every flat-map but the
+        // first — so `V().both().values('age').fold(0, sum)` adds marko's 29 ONCE (123, not 245). Only
+        // an operator for which folding a value twice IS folding it once (`min`/`max`/`and`/`or`) is
+        // indifferent; every other one folds only a stream the reference provably never bulked before
+        // this position (`referenceUnbulkedAt`), and declines anywhere it cannot say.
         if (rel.channels.some((channel) => channel.role === 'origin')) return null;
+        if (!BULK_INVARIANT_OPS.has(declared.operator ?? '') && !unbulkedAt(ctx, steps, at)) return null;
         const folded = seededLeftFold(rel, 'v', streamType, encounter ? [encounter.col] : ['v'], declared, true, fresh);
         return folded && continueAs(folded.rel, folded.framing, steps, at + 1, false, ctx, fresh, labels);
       }
@@ -2600,8 +2610,11 @@ function mapTail(
       // `fold(<map>, Operator.addAll)` — every map `putAll` into the seed (`mapsMerged`). Every other
       // seeded form over a map is the reference's own exception (`addAll` with a non-map seed raises
       // "Objects must be both of Map or Collection"; an arithmetic `Operator` casts the map to `Number`)
-      // and declines here. A per-origin stream declines for the scalar fold's reason.
+      // and declines here. A per-origin stream declines for the scalar fold's reason, and so does one the
+      // reference may have BULKED: `putAll` once per traverser is not bulk-invariant, because merging
+      // `a, b, a` into `a×2, b` moves the LAST put of a shared key from `a` to `b` (`referenceUnbulkedAt`).
       if (declared.operator !== ADD_ALL || rel.channels.some((channel) => channel.role === 'origin')) return null;
+      if (!unbulkedAt(ctx, steps, at)) return null;
       const merged = mapsMerged(rel, declared.seed, keyOf, valOf, encounter ? [encounter.col] : [], fresh);
       return merged && mapTail(merged, keyOf, valOf, steps, at + 1, ctx, fresh, labels);
     }
@@ -3223,7 +3236,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // the emitter's scope would see one id naming two relations).
   const fresh = minter();
   const settled = settle(opts);
-  const chain = lowerChain(steps, settled, fresh);
+  const chain = lowerChain(steps, settled, fresh, true);
   return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.rawListElements);
 }
 
@@ -3752,8 +3765,16 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
   };
 }
 
-export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { ctx, facts } = chainCtxOf(steps, opts);
+export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter, root = false): Tail | null {
+  const analysed = chainCtxOf(steps, opts);
+  const { facts } = analysed;
+  // Only the ROOT traversal, lowered from its own source over the base graph, is known to be the
+  // reference's whole traversal from its first step (`ChainCtx.traversal`). A nested rooted read
+  // (`rootedRead`, a source-union arm) may run once per parent traverser of a GLOBAL child; a seeded
+  // resume (`opts.seed`) is a tail whose prefix ran elsewhere; and a re-sourced chain (a decorate
+  // barrier's resume drops its `call()`, a federated arm reads a landed marker) is a REWRITTEN list.
+  const ctx: ChainCtx = root && !opts.seed && analysed.ctx.source === BaseGraph
+    ? { ...analysed.ctx, traversal: { steps, rooted: true } } : analysed.ctx;
   const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
@@ -4282,7 +4303,7 @@ function elementTail(
       // edge mints `fromV`, and the peer merge carries it because all arms mint it uniformly (`mergeArms`).
       const feeds = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
       const hostCtx = feeds === (ctx.needsFromV ?? false) ? ctx : { ...ctx, needsFromV: feeds };
-      const merged = branchArms(step, rel, framing, bulked, hostCtx, fresh, labels);
+      const merged = branchArms(step, rel, framing, bulked, hostCtx, fresh, labels, { steps, at });
       if (!merged) return null;
       // `bulked` after a merge is the value that ENTERED it, and it no longer needs the `|| ctx.collapse`
       // conservatism it used to carry. That existed because "an arm may have collapsed and the arm
@@ -4670,7 +4691,7 @@ function propertyTail(
   // needs no condition; `choose` and `coalesce` fold their condition/arm bodies through a property
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
-    const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels);
+    const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels, { steps, at: from });
     return merged && withBranchEffects(continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases), merged);
   }
 

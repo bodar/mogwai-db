@@ -1,4 +1,4 @@
-import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
+import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
@@ -189,3 +189,122 @@ function reducingGroupCollapseTerminal(step: IRStep): boolean {
  *  cannot tell an `as()` bound before a collapse from one bound after it. */
 export { COLLAPSE_PROJ };
 export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
+
+// ---------- WHERE THE REFERENCE BULKS — the converse question, asked of a PREFIX ----------
+//
+// Everything above asks where WE may introduce a multiplicity. A consumer that reads ROWS where the
+// reference reads TRAVERSERS asks the converse: could the reference have MERGED two equal traversers
+// before this position? Almost every consumer is indifferent — a reducer weights by bulk, a list fold
+// expands it — but a NON-LIST `fold(seed, Operator.x)` is not: `FoldStep.projectTraverser` hands the
+// operator the traverser's object ONCE whatever its bulk
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:58-68`),
+// so `sum` over a bulked `29×3` adds 29 once. Our rows are the reference's traversers EXPANDED by bulk,
+// so the two answers agree exactly when the reference bulked nothing before the fold.
+//
+// The reference merges equal traversers wherever a `TraverserSet` receives more than one:
+//
+// - **`LazyBarrierStrategy`, a DEFAULT strategy** (`…/traversal/TraversalStrategies.java:287`), inserts a
+//   `NoOpBarrierStep` after every flat-map step but the FIRST (a `GraphStep` counting as one), unless
+//   the next step is itself a `Barrier`
+//   (`…/strategy/optimization/LazyBarrierStrategy.java:105-127`) — and it runs per traversal, so a child
+//   traversal starts the count afresh;
+// - **an explicit `barrier()`** and every collecting barrier (`order()`, `aggregate()`, …);
+// - **a start step's own iterator** — `ExpandableStepIterator.add(Iterator)` drains it INTO the
+//   `TraverserSet` (`…/step/util/ExpandableStepIterator.java:61-63`), so `inject(1, 1, 2)` and `V(1, 1)`
+//   reach their next step as `1×2, 2`.
+//
+// So the answer is a scan that models those positions and is CONSERVATIVE everywhere it cannot: an
+// unlearned step, a non-literal source argument or a source the scan does not know answers `false`,
+// which costs the caller a decline and never an answer. Over-counting a flat-map (a `V().has(…)` that the
+// reference does not count, an `outE()` it skips) only adds barriers the reference does not have, so the
+// scan never needs to be as precise as `LazyBarrierStrategy` to be SOUND.
+
+/** Steps that neither expand nor merge a traverser and whose children (if any) produce a VALUE or a
+ *  verdict rather than stream rows — filters and one-to-one maps. None is a `FlatMapStep` or a barrier. */
+const NEITHER_EXPANDS_NOR_MERGES: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'as', 'identity', 'constant', 'id', 'label', 'key', 'value', 'limit', 'range', 'skip', 'simplePath',
+  'cyclicPath', 'math', 'project', 'valueMap', 'elementMap', 'propertyMap',
+]);
+
+/** The flat-map steps — the positions `LazyBarrierStrategy` counts, and after the first of which it bulks. */
+const FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V,
+  new Set(['values', 'properties', 'V', 'E']));
+
+/** A source argument's EQUALITY key, or `undefined` where the scan cannot say. Deliberately COARSER
+ *  than Java's `equals` (`1` and `1L` share a key, as do `1` and `"1"`), because a false collision only
+ *  declines while a missed one would answer. */
+function literalKey(value: unknown): string | undefined {
+  if (value === null || ['string', 'number', 'boolean', 'bigint'].includes(typeof value)) return String(value);
+  if (Array.isArray(value) || value instanceof Map) {
+    try {
+      return JSON.stringify(value, (_k, v) => (v instanceof Map ? [...v.entries()] : typeof v === 'bigint' ? String(v) : v));
+    } catch { return undefined; }
+  }
+  return undefined;
+}
+
+/** Are a start step's arguments literal and pairwise distinct — so its `TraverserSet` merges nothing? */
+function distinctLiterals(step: IRStep): boolean {
+  const keys = new Set<string>();
+  for (const a of step.args ?? []) {
+    const key = literalKey(a.value);
+    if (key === undefined || keys.has(key)) return false;
+    keys.add(key);
+  }
+  return true;
+}
+
+/**
+ * Does the reference reach position `at` of `steps` with EVERY traverser still at bulk 1 — so a consumer
+ * that reads rows reads exactly the reference's traversers? `steps` must BEGIN the traversal: `rooted`
+ * when `steps[0]` is the root's start step, `false` for a child traversal handed one parent traverser at
+ * a time (a `by()` body), whose incoming bulk scales every member alike and so never changes a
+ * per-traverser answer. Conservative: `false` wherever the scan cannot see (above).
+ */
+export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted: boolean): boolean {
+  let from = 0;
+  let sawFlatMap = false;
+  if (rooted) {
+    if (!knownStart(steps[0])) return false;
+    sawFlatMap = steps[0]!.name !== 'inject';
+    from = 1;
+  }
+  for (let i = from; i < at; i++) {
+    const name = steps[i]!.name;
+    if (NEITHER_EXPANDS_NOR_MERGES.has(name)) continue;
+    if (!FLAT_MAPS.has(name)) return false;
+    // A flat-map after the first is followed by a `NoOpBarrierStep` — unless the next step is the
+    // consumer at `at`, a `Barrier` itself, which is the one exemption the strategy makes.
+    if (sawFlatMap && i + 1 !== at) return false;
+    sawFlatMap = true;
+  }
+  return true;
+}
+
+/** A root start step whose traversers the scan can name: a `V()`/`E()`/`inject()` the user wrote (not a
+ *  landed marker standing in for a federated arm) over literal, pairwise-distinct arguments. */
+const knownStart = (start: IRStep | undefined): boolean =>
+  !!start && !start.landedSource && start.graphTag == null && distinctLiterals(start)
+  && (start.name === 'V' || start.name === 'E' || start.name === 'inject');
+
+/** Steps that keep a stream of pairwise-DISTINCT traversers distinct — filters, which only drop. */
+const DISTINCT_PRESERVING: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'identity', 'limit', 'range', 'skip', 'simplePath', 'cyclicPath',
+]);
+
+/**
+ * Does the reference reach position `at` with a stream of PAIRWISE-DISTINCT traversers, each at bulk 1?
+ * Stronger than `referenceUnbulkedAt`, and the question a GLOBAL child asks of its parent: a `union()`
+ * arm holding a barrier receives every parent traverser into ONE `TraverserSet` (`BranchStep`, arm-major —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:120-152`),
+ * which merges equal ones even where no barrier was inserted. A start that names distinct traversers,
+ * followed only by filters, is the shape the scan can vouch for; a child traversal (`rooted: false`)
+ * starts from ONE traverser, which is distinct by itself.
+ */
+export function referenceDistinctAt(steps: readonly IRStep[], at: number, rooted: boolean): boolean {
+  if (rooted && !knownStart(steps[0])) return false;
+  for (let i = rooted ? 1 : 0; i < at; i++) if (!DISTINCT_PRESERVING.has(steps[i]!.name)) return false;
+  return true;
+}
