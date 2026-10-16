@@ -458,6 +458,98 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | result |
       | d[5].i |
 
+  # ---- A WRAPPED where(). InlineFilterStrategy runs before PathRetractionStrategy and splices a filter()
+  # or and() whose children are all FilterSteps into the parent (InlineFilterStrategy.java:80-84, 196-213),
+  # so the where() lands in the root and gets the same NoOpBarrierStep after it. ----
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_isXgtX0XX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).filter(__.where(__.as("a").out())).is(P.gt(0)).fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_constantX5X_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).filter(__.where(__.as("a").out())).constant(5).fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX5X_andXwhereXasXaX_outXX_isXgtX0XX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).and(__.where(__.as("a").out())).is(P.gt(0)).fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX5X_andXwhereXasXaX_outX_isXgtX0XX_constantX5X_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).and(__.where(__.as("a").out()), __.is(P.gt(0))).constant(5).fold(0, Operator.sum)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @Unsupported
+  Scenario: g_V_asXaX_constantX5X_filterXfilterXwhereXasXaX_outXXX_constantX5X_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).filter(__.filter(__.where(__.as("a").out()))).constant(5).fold(0, Operator.sum)
+      """
+    # The strategy re-runs to a fixpoint, so the nested wrapper inlines all the way down.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @gap:seeded-fold
+  Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).filter(__.where(__.as("a").out())).fold(0, Operator.sum)
+      """
+    # Inlined, the where() is the step directly before the fold, a Barrier, so no NoOpBarrierStep lands.
+    When iterated to list
+    Then the result should be unordered
+      | result  |
+      | d[15].i |
+
+  @gap:seeded-fold
+  Scenario: g_V_asXaX_constantX5X_notXwhereXasXaX_outXX_constantX5X_foldX0_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").constant(5).not(__.where(__.as("a").out())).constant(5).fold(0, Operator.sum)
+      """
+    # NotStep is neither inlined nor a PathProcessor: its child runs per traverser and no barrier lands
+    # in the root — vadas, lop and ripple each add 5.
+    When iterated to list
+    Then the result should be unordered
+      | result  |
+      | d[15].i |
+
   @gap:seeded-fold
   Scenario: g_injectX1_2_3X_mathX_x0_plus5X_foldX0_sumX
     Given the empty graph

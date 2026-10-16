@@ -250,6 +250,51 @@ const RANKED_FILTERS: ReadonlySet<string> = new Set([
   'dedup', 'order',
 ]);
 
+/** The connectives whose children the reference may splice into the parent: `filter` and `and`
+ *  (`InlineFilterStrategy.processTraversalFilterStep`/`processAndStep`). `or` inlines only `has()`
+ *  children (`processOrStep`), but it is listed too — a decline there costs an opportunity, never an
+ *  answer. `not` is absent: `NotStep` is neither inlined nor a `PathProcessor`, so its child runs per
+ *  traverser and no barrier lands in this traversal. */
+const INLINED_FILTERS: ReadonlySet<string> = new Set(['filter', 'and', 'or']);
+
+/** Every `PathProcessor` the IR can name — gremlin-core's implementors are `WhereTraversalStep`,
+ *  `WherePredicateStep`, `MathStep`, `PathFilterStep`, `SelectStep`, `SelectOneStep`,
+ *  `TraversalSelectStep`, `PathStep`, `TreeStep`/`TreeSideEffectStep`, `FormatStep` and `MatchStep` —
+ *  plus `dedup`, which reads labels too. */
+const ANY_PATH_PROCESSOR: ReadonlySet<string> = unionOf(PATH_PROCESSORS,
+  new Set(['select', 'path', 'tree', 'format', 'match', 'dedup']));
+
+/** Could inlining `step` land a `PathProcessor` in this traversal? Its children's TOP-LEVEL steps are
+ *  what is spliced, and the strategy re-runs until nothing changes, so a nested `filter(and(where(…)))`
+ *  inlines all the way down — the walk descends through the connectives only. A path processor's OWN
+ *  child (a `where(__.as('a').out())`'s `select`) is never spliced: it stays that step's per-traverser
+ *  child. Conservative: a child the scan cannot read answers `true`. */
+function holdsPathProcessor(step: IRStep): boolean {
+  const values: unknown[] = [...(step.args ?? []).map((a) => a.value), ...(step.modulators ?? []).flat()];
+  for (const v of values) {
+    if (!isNested(v)) continue;
+    let chain: readonly IRStep[];
+    try { chain = stepChain(v.nested, {}); } catch { return true; }
+    if (chain.some((c) => ANY_PATH_PROCESSOR.has(c.name) || (INLINED_FILTERS.has(c.name) && holdsPathProcessor(c)))) return true;
+  }
+  return false;
+}
+
+/** Is `step` a `filter`/`and` holding exactly ONE child that is exactly ONE `PATH_PROCESSORS` step (a
+ *  label or `identity()` aside)? Inlined, that step alone stands where the wrapper stood. The wrapper's
+ *  name is ranked (`RANKED_FILTERS`), so `lastBeforeConsumer` applies the ranked-filter rule to it,
+ *  which is exact for `where()` and stricter than needed for a rank-0 `math()`. */
+function soleChildIsPathProcessor(step: IRStep): boolean {
+  if (step.name !== 'filter' && step.name !== 'and') return false;
+  if (step.modulators?.length) return false;
+  const args = step.args ?? [];
+  if (args.length !== 1 || !isNested(args[0]!.value)) return false;
+  let chain: readonly IRStep[];
+  try { chain = stepChain(args[0]!.value.nested, {}); } catch { return false; }
+  const real = chain.filter((c) => !NOT_A_REFERENCE_STEP.has(c.name));
+  return real.length === 1 && PATH_PROCESSORS.has(real[0]!.name);
+}
+
 /** IR steps that are no step in the reference — a label rides the previous step, an `identity()` is
  *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
 const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity']);
@@ -304,6 +349,15 @@ export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted
     const name = steps[i]!.name;
     if (PATH_PROCESSORS.has(name)) {
       if (!(distinct && DISTINCT_PRESERVING.has(name)) && !lastBeforeConsumer(steps, i, at)) return false;
+    } else if (INLINED_FILTERS.has(name) && holdsPathProcessor(steps[i]!)) {
+      // `InlineFilterStrategy` runs BEFORE `PathRetractionStrategy` (its POSTS) and splices a `filter()` or
+      // `and()` whose children hold only `FilterStep`s into THIS traversal
+      // (`…/strategy/optimization/InlineFilterStrategy.java:80-84, 196-213` and `processAndStep`), so a
+      // wrapped `where()` lands here as a root PathProcessor and gets the same barrier — followed by
+      // whatever else the child held. So it passes over a still-DISTINCT stream (a barrier there merges
+      // nothing), or — when its whole child is ONE path processor, which is what then sits in the
+      // wrapper's place — where that bare step would: last before the consumer.
+      if (!distinct && !(soleChildIsPathProcessor(steps[i]!) && lastBeforeConsumer(steps, i, at))) return false;
     } else if (FLAT_MAPS.has(name)) {
       // A flat-map after the first is followed by a `NoOpBarrierStep` — unless the next step is the
       // consumer at `at`, a `Barrier` itself, which is the one exemption the strategy makes.
