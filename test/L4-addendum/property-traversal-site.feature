@@ -386,3 +386,34 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
     Then the result should have a count of 2
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"b\",\"marko\")"
     And the graph should return 1 for count of "g.V().has(\"name\",\"vadas\").has(\"b\",\"vadas\")"
+
+  # A LABEL MUTATION races the same way, and every spelling of a label read sees it. The multi-label
+  # `labels()` (`LabelsStep`): the first knows-edge counts marko's one label, then marko gains `z` through
+  # the later `addLabel` before the second edge's body runs — 1 and 2, not 1 and 1.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1X_outEXknowsX_propertyXn_outV_labels_countX_outV_addLabelXzX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).outE("knows").property("n", __.outV().labels().count()).outV().addLabel("z")
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.E().has(\"n\",1)"
+    And the graph should return 1 for count of "g.E().has(\"n\",2)"
+
+  # The three-argument `has(label, key, value)` reads the label too (`HasStep` with a `T.label` container):
+  # marko's body finds no `z` vertex, then marko becomes one before vadas's body runs — 0 and 1.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_propertyXn_V_hasXz_name_markoX_countX_addLabelXzX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property("n", __.V().has("z","name","marko").count()).addLabel("z")
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.V().has(\"n\",0)"
+    And the graph should return 1 for count of "g.V().has(\"n\",1)"

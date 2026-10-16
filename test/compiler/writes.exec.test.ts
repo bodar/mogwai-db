@@ -594,6 +594,29 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     expect(run(one, "g.V(1).values('a')").map((r) => r.v)).toEqual([0]);
   });
 
+  test('a body that reads a label, in any spelling, meets a later label mutation', () => {
+    const seen = /read what another traverser writes/;
+    // Every spelling of a LABEL read meets a later label mutation: the multi-label `labels()` (edge, map
+    // and runtime-key arms), the three-argument `has(label, key, value)`, `has(T.label, …)`, a label read
+    // nested in a modulator — and a `dropLabel`, not only an `addLabel`.
+    refuses("g.V(1).outE('knows').property('n', __.outV().labels().count()).outV().addLabel('z')", seen, 'g.E(7,8).valueMap()');
+    refuses("g.V(1,2).property(__.project('k').by(__.V(1).labels().count())).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1,2).property(__.constant('k'), __.V(1).labels().count()).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1).outE('knows').property('n', __.outV().has('z','name','marko').count()).outV().addLabel('z')", seen, 'g.E(7,8).valueMap()');
+    refuses("g.V(1,2).property('n', __.V().has('z','name','marko').count()).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1,2).property('n', __.V().has('person','name','marko').count()).dropLabel('person')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1,2).property('n', __.V().has(T.label, 'z').count()).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1,2).property('n', __.V().group().by(T.label).count(local)).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    // A label mutation the body cannot see is not a race: one edge's body counting its out-vertex's
+    // labels with no label write anywhere answers, and so does a body that reads no label at all.
+    const unlabelled = seededStore();
+    run(unlabelled, "g.V(1).outE('knows').property('n', __.outV().labels().count())");
+    expect(run(unlabelled, "g.E(7,8).values('n')").map((r) => r.v)).toEqual([1, 1]);
+    const named = seededStore();
+    run(named, "g.V(1,2).property('n', __.values('name')).addLabel('z')");
+    expect(run(named, "g.V(1,2).values('n')").map((r) => r.v)).toEqual(['marko', 'vadas']);
+  });
+
   test('a value that resolves to null', () => {
     refuses("g.E(7).property('weight', __.inV().values('name').constant(null))", /resolved to null/, 'g.E(7).valueMap()');
     refuses("g.V(1).addV('y').property('n', __.values('name').constant(null))", /resolved to null/, 'g.V().count()');

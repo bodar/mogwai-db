@@ -49,6 +49,16 @@ lowered.
   whole-map **0-result RAISE**, and an **edge runtime property value** (`option(onMatch,[k:__.trav])` on a
   mergeE, which declines the whole merge today). The map-LITERAL `[k:__.trav]` stays permanently declined
   (Superseded). Ties to PartitionStrategy partition-aware upsert (Strategies, below).
+- **`property(k, __.trav)` sequential-read refusals — hoist the guard to the PROGRAM's first statement.**
+  `sequentialGuard` (`src/compiler/rel/write.ts`) refuses at RUN time a body that could read what another
+  traverser writes (the reference runs one traverser through every mutating step before the next,
+  `AddPropertyStep.java:93-121` + `LazyBarrierStrategy.java:93-125`). It runs ahead of its own
+  `property()` run, but not ahead of an EARLIER write step, so
+  `g.V(1,2).addV('x').property(single,'n', __.V().hasLabel('x').count())` raises the "not supported yet"
+  error AFTER the `addV` has created its vertices. Not a wrong answer, but a refusal that mutates. The fix is
+  to compute every guard's host from the pre-write snapshot (an `addV` host is one row per INPUT
+  traverser, so its count is the input's) and emit all guards before the plan's first statement. The real
+  feature behind the refusals is a per-traverser write driver, which is the general driver above.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP

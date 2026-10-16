@@ -28,6 +28,7 @@ import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type RelFraming } from './framing.ts';
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, OTHER_V, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
+import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -812,17 +813,45 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
 interface BodyReach { readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean; readonly labels: boolean }
 
 const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
-const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE, new Set(['call', 'mergeV', 'mergeE', 'addV', 'addE', 'io']));
-const ELEMENT_MOVES: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V);
+const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
+const ELEMENT_MOVES: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, new Set(['toE', 'toV']));
 /** Steps whose answer can be an element bound EARLIER on the traverser's path, not the current one. */
 const LABEL_READING_STEPS: ReadonlySet<string> = new Set(['select', 'path', 'simplePath', 'cyclicPath', 'tree', 'match', 'cap', 'sack']);
+/** Steps that read an element's LABEL — what `addLabel`/`dropLabel` change: `label()`, the multi-label
+ *  `labels()` (`LabelsStep`, `vendor/tinkerpop/gremlin-test/…/features/sideEffect/DropLabel.feature:30`),
+ *  `hasLabel()`, and the two maps that carry `T.label`. Two other spellings are caught per step in
+ *  `bodyReach`: a `T.label` token anywhere in a step's arguments or modulators (`has(T.label, …)`,
+ *  `by(T.label)`, `readsLabelToken`), and the THREE-argument `has(label, key, value)`, which `HasStep`
+ *  composes with a `T.label` container (`GraphTraversal.has(String label, String propertyKey, …)`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java`)
+ *  — `lower/filter.ts` lowers it to `hasLabelClause` AND the property clause for the same reason. */
+const LABEL_READS: ReadonlySet<string> = new Set(['label', 'labels', 'hasLabel', 'elementMap', 'valueMap']);
+/** Steps whose reads this walk cannot enumerate — a service (`call()`, which may search any key or
+ *  label), a merge (its match map reads keys AND `T.label`, possibly through a parameter), a graph
+ *  document or algorithm, a body-level write. Each reads EVERYTHING: any key, any label, any element. */
+const OPAQUE_STEPS: ReadonlySet<string> = new Set([
+  'call', 'mergeV', 'mergeE', 'io', 'read', 'write', 'subgraph', 'profile', 'pageRank', 'peerPressure', 'connectedComponent', 'shortestPath',
+  'addV', 'addE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels',
+]);
+/**
+ * Steps that by THEMSELVES read no property key and no label and stay on their traverser's element or
+ * value — their arguments, modulators and nested bodies are still walked. The walk is an ALLOWLIST of
+ * non-readers rather than a list of readers because a reader list is closed only until the next step
+ * lands, and a missed reader is a wrong answer where a missed non-reader only costs a refusal — the trade
+ * `ir/labels.ts` makes for `as()` labels. A step in NONE of these sets is treated as `OPAQUE_STEPS`.
+ */
+const READS_NOTHING: ReadonlySet<string> = new Set([
+  'as', 'identity', 'barrier', 'by', 'option', 'times', 'until', 'emit', 'with', 'from', 'to', 'loops', 'index', 'id', 'key', 'value', 'element',
+  'is', 'where', 'not', 'and', 'or', 'filter', 'dedup', 'limit', 'range', 'skip', 'tail', 'coin', 'sample', 'timeLimit', 'none', 'discard', 'hasId', 'fail',
+  'local', 'map', 'flatMap', 'union', 'coalesce', 'choose', 'optional', 'repeat', 'branch', 'sideEffect',
+  'constant', 'inject', 'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'math', 'project', 'order', 'group', 'groupCount', 'aggregate',
+  'asString', 'toUpper', 'toLower', 'length', 'trim', 'lTrim', 'rTrim', 'replace', 'split', 'substring', 'concat', 'format',
+  'asDate', 'dateAdd', 'dateDiff', 'asNumber', 'asBool', 'combine', 'difference', 'disjunct', 'intersect', 'merge', 'product', 'reverse', 'conjoin', 'all', 'any',
+]);
+const KNOWN_READS: ReadonlySet<string> = unionOf(KEY_READING_STEPS, GRAPH_SOURCES, ELEMENT_MOVES, LABEL_READING_STEPS, LABEL_READS, OPAQUE_STEPS, READS_NOTHING);
 /** `math()`'s own vocabulary — the current value `_` and `FUNCTIONS`; every OTHER identifier in its
  *  expression is a variable, i.e. a label it reads (`MathStep.getVariables`,
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:188-208`). */
-/** Steps that read an element's LABEL — what `addLabel`/`dropLabel` change. A `T.label` token anywhere
- *  in a step's arguments or modulators (`has(T.label, …)`, `by(T.label)`) is the other spelling
- *  (`readsLabelToken`). */
-const LABEL_READS: ReadonlySet<string> = new Set(['label', 'hasLabel', 'elementMap', 'valueMap']);
 const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'atan', 'cbrt', 'ceil', 'cos', 'cosh', 'exp', 'floor', 'log', 'log10', 'log2', 'signum', 'sin', 'sinh', 'sqrt', 'tan', 'tanh']);
 
 function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
@@ -852,9 +881,11 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
   const walk = (body: readonly IRStep[]): void => {
     for (const step of body) {
       const args = step.args.map((a) => a.value);
+      if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) { all = true; leaves = true; sources = true; labels = true; }
       if (GRAPH_SOURCES.has(step.name)) { sources = true; leaves = true; }
       if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) leaves = true;
-      if (LABEL_READS.has(step.name) || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
+      if (LABEL_READS.has(step.name) || (step.name === 'has' && args.length >= 3)
+        || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
       // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
       // `math()`'s expression.
       if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) leaves = true;
@@ -956,11 +987,17 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
       switch (step.name) {
         case 'addV': creates = true; break;
         case 'addE': creates = true; edges = true; break;
-        case 'mergeV': creates = true; anyKey = true; break;
-        case 'mergeE': creates = true; edges = true; anyKey = true; break;
+        // A merge's onMatch map APPENDS a `T.label` to the found vertex (`MergeVertexStep.java:106-113`,
+        // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java`).
+        case 'mergeV': creates = true; anyKey = true; labels = true; break;
+        case 'mergeE': creates = true; edges = true; anyKey = true; labels = true; break;
         case 'drop': drops = true; anyKey = true; break;
         case 'addLabel': case 'dropLabel': case 'dropLabels': labels = true; break;
+        // `io()` survives as itself only in a nested body read afresh; the top-level chain has been
+        // through `desugarIo`, which turns it into `call(IO_SERVICE_NAME, …)` — the one service that
+        // writes the graph (the OLAP services write only their scratch `barrier_state`).
         case 'io': unreadable = true; break;
+        case 'call': if (args[0] === IO_SERVICE_NAME) unreadable = true; break;
         case 'property': {
           if (run < 0 && ownable) run = runs++;
           if (run >= 0) runOf.set(step, run);
