@@ -105,9 +105,10 @@ const STATIC_SUBJECT_CAST: Record<string, SqlType> = { bigdecimal: 'real', long:
 /** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
 const CAST_TO_INT = ['byte', 'short', 'int', 'long', 'bigint', 'datetime', 'duration'];
-const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
-const NUMERIC_CAST_TO_INT = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
-const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
+export const CAST_TO_REAL: readonly string[] = ['float', 'double', 'bigdecimal'];
+export const NUMERIC_CAST_TO_INT: readonly string[] = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
+/** The vtypes that name a `Number` — a `datetime`/`duration` is numeric to SQLite and not to Gremlin. */
+export const NUMERIC_VTYPES: readonly string[] = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
 
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered

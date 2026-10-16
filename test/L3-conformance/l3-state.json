@@ -1,5 +1,5 @@
 {
-  "passing": 1851,
+  "passing": 1852,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1491,6 +1491,7 @@
     "g_injectXthat_this_test_nullX_replaceXh_jX",
     "g_injectXthat_this_test_nullX_splitXemptyX",
     "g_injectXtrueX_asBool",
+    "g_injectXtrueX_isXtypeOfXGType_BOOLEANX",
     "g_injectXxx1X_combineXV_valuesXnameX_foldX_unfold",
     "g_inject_match_midTraversal_noMatch_emptyResult",
     "g_inject_match_midTraversal_selectXa_bX_byXnameX",
@@ -2210,7 +2211,6 @@
     "g_injectXnullX_mergeXinjectX1XX",
     "g_injectXnullX_productXinjectX1XX",
     "g_injectXsetX_isXtypeOfXGType_SETXX_groupCount",
-    "g_injectXtrueX_isXtypeOfXGType_BOOLEANX",
     "g_injectXuuidX_isXtypeOfXGType_UUIDXX_groupCount",
     "g_io_readXgraphmlX",
     "g_io_readXkryoX",

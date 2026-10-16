@@ -247,9 +247,11 @@ export const asDateSql = (e: Expression): Expression =>
  *  would get them wrong. Two reasons, both needing the declared type: it rides as decimal/char
  *  TEXT (a long > 2^53 would frame as a string; bigdecimal/char/duration likewise), or it is
  *  storage-ambiguous with another type (a datetime is epoch-millis → Long, a uuid is TEXT →
- *  String). Everything else is recoverable from the value, so declaring it buys nothing. */
+ *  String, a boolean is the INTEGER `1`/`0` → Int — measured: an undeclared `inject(true)` framed as
+ *  an Int on the wire, and `fold(true, Operator.and)` could not tell its members from integers).
+ *  Everything else is recoverable from the value, so declaring it buys nothing. */
 const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
-  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid',
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean',
 ]);
 
 /** The declared framing tag of EACH of a bare inject's first `count` arguments — `null` where the

@@ -4,7 +4,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import { sliceOf, type IRStep } from '../ir/step.ts';
+import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
@@ -263,6 +263,17 @@ const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
     && modulation.key.body[0]!.name === 'fold' && !modulation.key.body[0]!.args.length
     && modulation.order === undefined ? undefined : modulation);
 
+/**
+ * Is this value-body step a REDUCING barrier — one that turns a group's pooled members into one value?
+ * The `ReducingBarrierStep` subclasses (`…/step/util/ReducingBarrierStep.java`): `fold` (either
+ * overload), `count`, the four numeric reducers, `tree`, and the barrier forms of `group`/`groupCount`.
+ * A `Scope.local` form is a `MapStep` over one value, and a LABELLED `group("a")`/`groupCount("a")` is a
+ * side-effect step, so neither is a barrier at all.
+ */
+const reducesPool = (step: IRStep): boolean =>
+  !isLocalScope(step) && (isReducer(step.name) || step.name === 'count' || step.name === 'fold' || step.name === 'tree'
+    || ((step.name === 'group' || step.name === 'groupCount') && !step.args.some((a) => typeof a.value === 'string')));
+
 export function groupRows(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): GroupRows | null {
@@ -335,13 +346,24 @@ export function groupRows(
   // per-entry child (the mapValues idiom), so a terminal count/fold belongs INSIDE that child rather
   // than reducing every row that shares the new group key.
   if (valueBy?.key.kind === 'child' && !lastOnly && !(host.kind === 'scalar' && host.entry)) {
-    const terminal = valueBy.key.body.at(-1)?.name;
+    const body = valueBy.key.body;
+    const terminal = body.at(-1)?.name;
+    // THE POOL IS CUT AT THE FIRST REDUCING BARRIER, not at the last step. `Grouping.determineBarrierStep`
+    // returns the value traversal's FIRST non-local `Barrier`; every member's traverser runs up to it into
+    // ONE pool per key, and `doFinalReduction` then runs the REST of the traversal over the reduced value
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125`).
+    // Both pooled arms below build only a reduction that ENDS the body; a reducing barrier with steps
+    // after it (`by(__.values(k).sum().fold())`, `by(__.values(k).fold(0, Operator.sum).fold())`) would
+    // otherwise fall through to the per-member child, which reduces each member ALONE and then collects
+    // — a plausible-looking wrong value (`{person:[35]}` where the reference pools to `{person:[123]}`).
+    // So it declines here, the one place that knows the body is a group value.
+    const pooledAt = body.findIndex(reducesPool);
+    if (pooledAt >= 0 && pooledAt !== body.length - 1) return null;
     // A SEEDED `fold(seed, Operator.x)` pools exactly as the list fold does — it is the same
     // `ReducingBarrierStep` — but it reduces the pool to ONE VALUE per key, which neither pooled arm
-    // below builds (`groupCollected` collects a list, `groupReduced` spells the four reducers). Falling
-    // through to the per-member child would fold each member alone, a plausible-looking wrong value, so
-    // it declines here instead.
-    if (terminal === 'fold' && valueBy.key.body.at(-1)!.args.length) return null;
+    // below builds (`groupCollected` collects a list, `groupReduced` spells the four reducers). It
+    // declines for the same reason as above.
+    if (terminal === 'fold' && body.at(-1)!.args.length) return null;
     // A `by(<pre>.fold())` COLLECTS the pooled child rows into a LIST per key — the same pool
     // `groupReduced` builds, folded rather than reduced. `fold()` is a reducing barrier that SEEDS `[]`,
     // so an empty pool keeps its key with `l[]` (not a dropped key), which is why it is `groupCollected`

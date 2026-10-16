@@ -205,8 +205,8 @@
   },
   "fold": {
     "binds": 4,
-    "bytes": 1353,
-    "compiler": 14,
+    "bytes": 1426,
+    "compiler": 26,
     "bound": 0
   },
   "format": {

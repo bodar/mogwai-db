@@ -221,3 +221,110 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     Then the result should be unordered
       | result                                       |
       | m[{"person":"d[123].i","software":"d[0].i"}] |
+
+  @Unsupported
+  Scenario: g_V_groupXlabelX_byXvaluesXageX_foldX0_sumX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(label).by(__.values("age").fold(0, Operator.sum).fold())
+      """
+    # `Grouping.determineBarrierStep` pools at the FIRST non-local Barrier — the seeded fold, not the
+    # trailing `fold()` — and `doFinalReduction` runs `fold()` over the pooled value
+    # (vendor/tinkerpop/gremlin-core/.../step/Grouping.java:74-125). Reducing each member alone and
+    # collecting would answer `person:[35]`; no pooled arm cuts the body at a non-terminal barrier yet.
+    When iterated to list
+    Then the result should be unordered
+      | result                                             |
+      | m[{"person":"l[d[123].i]","software":"l[d[0].i]"}] |
+
+  @gap:seeded-fold
+  Scenario: g_injectXbig_1X_foldX0L_sumX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(9007199254740993L, 1L).fold(0L, Operator.sum)
+      """
+    # A long past 2^53 rides as exact decimal text, and must still be a `Number` to `Operator.sum` —
+    # the sum stays exact and leaves as a long, as `sum()` does.
+    When iterated to list
+    Then the result should be unordered
+      | result                |
+      | d[9007199254740994].l |
+
+  @gap:seeded-fold
+  Scenario: g_injectXbig_1X_foldX0_maxX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(9007199254740993L, 1L).fold(0, Operator.max)
+      """
+    # The text-carried long compares as a NUMBER, not as a string, and frames as the long it is.
+    When iterated to list
+    Then the result should be unordered
+      | result                |
+      | d[9007199254740993].l |
+
+  @gap:seeded-fold
+  Scenario: g_withSideEffectXa_0L_sumX_injectXbig_1X_aggregateXaX_capXaX
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSideEffect("a", 0L, Operator.sum).inject(9007199254740993L, 1L).aggregate("a").cap("a")
+      """
+    # The side-effect reduction is the same left fold, so it is exact past 2^53 for the same reason.
+    When iterated to list
+    Then the result should be unordered
+      | result                |
+      | d[9007199254740994].l |
+
+  @gap:seeded-fold
+  Scenario: g_injectXtrue_falseX_foldXtrue_andX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(true, false).fold(true, Operator.and)
+      """
+    # `Operator.and` is `(boolean) a && (boolean) b` (Operator.java). An injected boolean is declared
+    # BOOLEAN on the type channel, so the fold can tell it from the integer it is stored as.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | false  |
+
+  @gap:seeded-fold
+  Scenario: g_injectXfalse_trueX_foldXfalse_orX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(false, true).fold(false, Operator.or)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | true   |
+
+  @gap:seeded-fold
+  Scenario: g_withSideEffectXa_true_andX_injectXtrue_falseX_aggregateXaX_capXaX
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSideEffect("a", true, Operator.and).inject(true, false).aggregate("a").cap("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | false  |
+
+  @gap:seeded-fold
+  Scenario: g_V_label_foldXz_minX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().label().fold("z", Operator.min)
+      """
+    # A string seed over a stream statically of strings compares by `compareTo`.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | person |

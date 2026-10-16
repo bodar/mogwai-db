@@ -9,6 +9,8 @@ import type { IRStep } from '../ir/step.ts';
 import { eq, meta, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { constLit } from './const.ts';
 import type { FramedRel } from './framing.ts';
+import { CAST_TO_REAL, NUMERIC_CAST_TO_INT, NUMERIC_VTYPES, storedCompareOn } from './predicate.ts';
+import { isLongSumClass, SAFE_INT } from './reducer.ts';
 
 /**
  * `Operator` — ONE FOLD STEP, in the algebra, and the SEEDED LEFT FOLD that iterates it.
@@ -129,48 +131,81 @@ export function mergeStep(operator: string, acc: Expr, value: Expr): Expr | null
 export const isLogicalOp = (operator: string): boolean => operator === 'and' || operator === 'or';
 
 /**
- * WHICH STORAGE CLASSES AN OPERATOR CAN ACT ON — the operand side of the reducer vocabulary's
- * ELIGIBILITY policy (`reducer.ts`), stated for the `Operator` set rather than restated per site.
+ * WHAT AN OPERATOR CAN ACT ON — the operand side of the reducer vocabulary's ELIGIBILITY policy
+ * (`reducer.ts`), stated for the `Operator` set rather than restated per site, and READ OFF THE TYPE
+ * CHANNEL wherever the stream has one. `null` declines.
  *
  * `Operator.sum`/`minus`/`mult`/`div` cast both sides to `Number` (`Operator.java:40-86`), `min`/`max`
- * take a `Comparable` (`NumberHelper.min:582`, `max:639`) and `and`/`or` a `boolean`
- * (`Operator.java:131-168`). The reference raises a `ClassCastException` on anything else; a row-level
- * reducer meeting the same value contributes NOTHING instead (`reducer.ts`, "ELIGIBILITY … none of which
- * is negotiable"), so a fold applies the SAME rule rather than a second policy for the same cast — an
- * ineligible member reads as NULL, which every operator above treats as the identity.
+ * take a `Comparable` (`NumberHelper.min:582`, `max:639`: two `Number`s compare numerically, anything
+ * else by `compareTo`) and `and`/`or` a `boolean` (`Operator.java:131-168`). The reference raises a
+ * `ClassCastException` on anything else. So the answer has three arms, by how much the channel says:
+ *
+ * - **a STATIC class** is a fact about every member. A `Number` class is CAST to its storage class
+ *   (`storedCompareOn`, the one authority `order().by()` and `sum()` also use): a `long` past 2^53 rides
+ *   as decimal TEXT (`types.ts`, `SAFE_INT`), and a `typeof` guard would EXCLUDE it — the §6·7 bug
+ *   `sum()` already fixed (`lower.ts`, `isLongSumClass`), which answered `1` for
+ *   `inject(9007199254740993L, 1L).fold(0L, Operator.sum)`. A class the operator cannot act on at all
+ *   (a `string` into `sum`, a `boolean` into `max`) makes EVERY member the reference's exception, so it
+ *   DECLINES rather than fold nothing into the seed.
+ * - **a PER-ROW tag** decides the same question per member, through the same cast. A member whose tag
+ *   the operator cannot act on reads as NULL — the identity for every operator here — which is the
+ *   reducer's own policy (`reducer.ts`, "ELIGIBILITY"): a row-level answer cannot raise, and a
+ *   heterogeneous stream is that policy's documented divergence (§6·7n). A NULL tag ("infer this one
+ *   from the value") falls back to the storage class.
+ * - **NO tag** leaves only the storage class, so it is the reducer's `typeof` guard exactly.
  *
  * **A BOOLEAN is the one class a storage class cannot see**: it is an INTEGER on this substrate
- * (`constLit` spells `true` as `1`), so `typeof` alone would let an age into `Operator.and` and a `true`
- * into `Operator.sum` — both a `ClassCastException` in the reference, both a silent number here. The
- * stream's own TYPE channel is what can tell them apart, so the logical pair needs one that says
- * `boolean` (statically, or per row) and DECLINES without it, and the rest exclude a member that says
- * so. `null` is that decline.
+ * (`constLit` spells `true` as `1`), so the logical pair needs a channel that says `boolean` and
+ * DECLINES without one — `typeof` would let an age into `Operator.and`.
  */
-function eligibleOperand(operator: string, value: Expr, type: ScalarType, members: Rel): Expr | null {
+function eligibleOperand(operator: string, seed: unknown, value: Expr, type: ScalarType, members: Rel): Expr | null {
   const tag = staticTypeOf(type);
   const typeCol = perRowColumnOf(type);
-  const rowTag = typeCol ? coalesceText(col(members.id, typeCol)) : null;
-  const when = (pred: Expr): Expr => ({ kind: 'case', whens: [[pred, value]] });
+  const rowTag = typeCol ? col(members.id, typeCol) : null;
+  const when = (pred: Expr, then: Expr): Expr => ({ kind: 'case', whens: [[pred, then]] });
+  const tagIn = (tagExpr: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list', expr: tagExpr, values: tags.map(compilerText) });
   if (isLogicalOp(operator)) {
-    if (tag === 'boolean') return value;
-    return rowTag ? when({ kind: 'binary', op: '=', left: rowTag, right: compilerText('boolean') }) : null;
+    if (tag !== undefined) return tag === 'boolean' ? value : null;
+    return rowTag ? when(tagIn(rowTag, ['boolean']), value) : null;
   }
-  if (tag === 'boolean') return null;
-  const classes: Expr = {
-    kind: 'in-list', expr: { kind: 'call', fn: 'typeof', args: [value] },
-    values: (operator === 'min' || operator === 'max' ? REDUCER_CLASSES.comparable : REDUCER_CLASSES.arithmetic).map(compilerText),
+  // The tags (and, untagged, the storage classes) a member may carry: a `Number` — and for `min`/`max`
+  // whatever is `Comparable` WITH THE SEED. Two numbers compare numerically and two strings by
+  // `compareTo`, but a string against a number is the reference's exception
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597`,
+  // `"z".compareTo(27)`), so a string seed admits only strings and a number seed only numbers. Only a
+  // NULL seed — which takes the first member as-is — leaves both, the reducer's own `comparable` set.
+  // Over a STATIC class a mismatch is every member's exception, so it declines (the arm just below).
+  const comparable = operator === 'min' || operator === 'max';
+  const numbers = !comparable || typeof seed !== 'string';
+  const strings = comparable && typeof seed !== 'number';
+  if (tag !== undefined) {
+    if (NUMERIC_VTYPES.includes(tag)) return numbers ? storedCompareOn(compilerText(tag))(value) : null;
+    return tag === 'string' && strings ? value : null;
+  }
+  const byStorage = tagIn({ kind: 'call', fn: 'typeof', args: [value] },
+    numbers && strings ? REDUCER_CLASSES.comparable : numbers ? REDUCER_CLASSES.arithmetic : ['text']);
+  if (!rowTag) return when(byStorage, value);
+  // `storedCompareOn`'s two casts, spelled as arms of the ONE eligibility `CASE` rather than nested
+  // inside a second one: the member value is often an expression the emitter inlines at every use, so
+  // each arm that names it is paid for in statement text (the `sql-hygiene` ratchet measured it).
+  const cast = (to: 'int' | 'real'): Expr => ({ kind: 'cast', arg: value, to });
+  return {
+    kind: 'case',
+    whens: [
+      ...(numbers ? [[tagIn(rowTag, NUMERIC_CAST_TO_INT), cast('int')], [tagIn(rowTag, CAST_TO_REAL), cast('real')]] as const : []),
+      ...(strings ? [[tagIn(rowTag, ['string']), value]] as const : []),
+      [{ kind: 'binary', op: 'and', left: { kind: 'binary', op: 'is', left: rowTag, right: compilerNull() }, right: byStorage }, value],
+    ],
   };
-  return when(rowTag
-    ? { kind: 'binary', op: 'and', left: { kind: 'binary', op: '!=', left: rowTag, right: compilerText('boolean') }, right: classes }
-    : classes);
 }
 
-/** A per-row type tag with its NULL spelled as the empty tag, so a `!=` against it is never NULL. */
-const coalesceText = (tag: Expr): Expr => ({ kind: 'call', fn: 'COALESCE', args: [tag, compilerText('')] });
-
-/** Is this SEED a value `operator` can fold into without the reference's own `ClassCastException`?
- *  The seed is a compile-time literal, so this is a static question and a refusal is a DECLINE: the
- *  traversal's answer is an exception we do not spell, and computing `'a' + 1` would be a wrong one. */
+/**
+ * Is this SEED a value `operator` can fold into without the reference's own `ClassCastException`? The
+ * seed is a compile-time literal, so this is a static question and a refusal is a DECLINE: the
+ * traversal's answer is an exception we do not spell, and computing `'a' + 1` would be a wrong one.
+ * Whether the seed is comparable with the MEMBERS is `eligibleOperand`'s question, asked against the
+ * stream's type channel.
+ */
 const seedAdmitted = (operator: string, seed: unknown): boolean =>
   seed === null
   || (isLogicalOp(operator) ? typeof seed === 'boolean'
@@ -234,7 +269,7 @@ export function seededLeftFold(
   // A COLLECTION seed has no scalar literal form, which is `constLit`'s own answer — and it is only
   // ever legal for the BULK pair, already refused above.
   if (!seed) return null;
-  const operand = eligibleOperand(operator, col(members.id, value), type, members);
+  const operand = eligibleOperand(operator, policy.seed.value, col(members.id, value), type, members);
   if (!operand) return null;
 
   const keys = order.map((_, i) => `k${i}`);
@@ -290,13 +325,29 @@ export function seededLeftFold(
   // touching a real is a real, and there is no compile-time tag to give. That is the `result: 'number'`
   // framing arm and its `vt` column (`reducer.ts`, `framing.ts`). `and`/`or` are the exception: they
   // answer a BOOLEAN, which `typeof` would report as `integer`, so they state their type.
+  //
+  // **AN INTEGER PAST 2^53 LEAVES AS EXACT TEXT**, which is `sumTower`'s rule (`reducer.ts`) for the
+  // same reason: a JS number cannot carry it, so the wire would round the low bits away. Only a `long`
+  // (or a `bigint`, when the members are) reaches that magnitude — a Java `int` cannot — so that is the
+  // `vt` it frames under, and the framer's `long`/`bigint` arm reads the decimal string through `BigInt`.
   const logical = isLogicalOp(operator);
   const acc = col(deepest.id, FOLD_ACC);
+  const storage: Expr = { kind: 'call', fn: 'typeof', args: [acc] };
+  const pastSafe: Expr = {
+    kind: 'binary', op: 'and',
+    left: { kind: 'binary', op: '=', left: storage, right: compilerText('integer') },
+    right: { kind: 'binary', op: '>', left: { kind: 'call', fn: 'abs', args: [acc] }, right: compilerInt(SAFE_INT) },
+  };
+  const memberClass = staticTypeOf(type);
+  const wide = compilerText(memberClass !== undefined && isLongSumClass(memberClass) ? memberClass : 'long');
   return {
     rel: make.project({
       id: fresh('sv'), input: deepest, channels: [],
       type: typeOf(meta('v', 'any', true), ...(logical ? [] : [meta('vt', 'text', true)])),
-      exprs: [['v', acc], ...(logical ? [] : [['vt', { kind: 'call', fn: 'typeof', args: [acc] } as Expr] as const])],
+      exprs: logical ? [['v', acc]] : [
+        ['v', { kind: 'case', whens: [[pastSafe, { kind: 'cast', arg: acc, to: 'text' }]], else: acc }],
+        ['vt', { kind: 'case', whens: [[pastSafe, wide]], else: storage }],
+      ],
     }),
     framing: logical
       ? { kind: 'scalar', type: STATIC('boolean'), productiveNull }

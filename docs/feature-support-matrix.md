@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,851<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,852<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -85,8 +85,8 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 
 | Step | | Notes |
 |---|:--:|---|
-| `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | |
-| `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one) |
+| `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `fold(seed, Operator.x)`, `unfold()` | ✅ | ❌ `fold(seed, Operator.assign)`; a list seed other than `[]`; `and`/`or` over a stream with no boolean type channel |
+| `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one); a value `by()` with steps AFTER its first reducing barrier (`by(__.values(k).sum().fold())` — the pool is cut there); a seeded `fold(seed, Operator.x)` value |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
 | `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`), a base-graph ELEMENT-membered list by carrying member rowids through the barrier and re-sourcing at the edge. ❌ `Column`-keyed order forms; a FEDERATED element-membered list (its keys re-source via `BoundGraph`, not the resume's base default) |
 

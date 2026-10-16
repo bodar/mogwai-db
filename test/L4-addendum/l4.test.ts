@@ -103,6 +103,9 @@ function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string
   // kinds resolve through `elementRefs`, which keys vertices by their `name` and edges by their
   // (outV, label, inV) triple — an edge's identity IS that triple, which is why upstream spells it
   // that way and why no fixture needs a synthetic edge name.
+  // `true`/`false` — a Boolean, as upstream's `parseValue` reads them
+  // (vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/feature-steps.js:455-462).
+  if (t === 'true' || t === 'false') return canon(t === 'true');
   const eref = t.match(/^[ve]\[(.+)\]$/);
   if (eref && refs?.has(`${t}.id`)) return 'E' + String(refs.get(`${t}.id`));
   // Match the JS client's actual GraphBinary decode: a bigint (`.n`, BigInteger 0x23) is ALWAYS a
