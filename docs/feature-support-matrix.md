@@ -203,7 +203,7 @@ heterogeneous stream frames each value by its own tag.
 | Step | | Notes |
 |---|:--:|---|
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a runtime/computed label; `addE` after `addE`; `addInE` |
-| `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ✅ `property(k, __.trav)` per traverser (vertex + edge, runtime key, meta, the `property(__.trav)` map form; folded into `addV`/`addE` it reads the incoming traverser; 0→skip, >1 under single→raise, list/set→each); 🚫 refuses a null result, a "first" pick with no stated order, and a body that can read what an earlier traverser of the same step wrote |
+| `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ✅ `property(k, __.trav)` per traverser (vertex + edge, runtime key, meta, the `property(__.trav)` map form; folded into `addV`/`addE` it reads the incoming traverser; 0→skip, >1 under single→raise, list/set→each); 🚫 refuses a null result, a "first" pick with no stated order, and, over >1 traverser, a body that could read what another traverser writes at any mutating step of the program (the lazy pipeline interleaves them per traverser) |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
 | `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅ (upsert-by-id, both hosts); ❌ a map-valued `inject`/`union` feeding the merge; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |

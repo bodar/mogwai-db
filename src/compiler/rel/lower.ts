@@ -42,7 +42,7 @@ import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, propertyDrop, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
@@ -2937,6 +2937,15 @@ export interface Lowering {
    * wire. Off everywhere but the barrier head, where the head is read back into JS and never framed.
    */
   readonly rawListElements?: boolean;
+  /**
+   * WHAT THE WHOLE PROGRAM WRITES (`ProgramWrites`, `write.ts`) — handed DOWN to a rooted sub-chain, as
+   * `collections` is, because the question it answers (can a write's body observe another traverser's
+   * write?) is about the PROGRAM, not the chain being folded: a write a rooted body reaches races the
+   * enclosing chain's writes too. Absent (`null`), the chain being lowered is taken as the whole program,
+   * which is exactly right at every top-level entry point — and a resume's tail is everything after a
+   * barrier, by which point every earlier write has run to completion.
+   */
+  readonly writes?: ProgramWrites | null;
 }
 
 /**
@@ -2966,6 +2975,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   collections: opts.collections ?? new Map(),
   seed: opts.seed ?? null,
   rawListElements: opts.rawListElements ?? false,
+  writes: opts.writes ?? null,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
@@ -3752,7 +3762,7 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes } = settle(opts);
   const facts = analyzeChain(steps as IRStep[]);
   return {
     facts,
@@ -3761,6 +3771,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       demandsPathLabels: facts.demandsPathLabels,
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
+      writes: writes ?? programWrites(steps, params),
     },
   };
 }

@@ -53,6 +53,7 @@ import { BRANCH_HOSTS } from './branch.ts';
 export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   params: ctx.params,
   sideEffects: ctx.sideEffects,
+  writes: ctx.writes,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
   predicate: (body, subject, negated) => (negated
     ? correlatedExists(body, subject, fresh, ctx, true) ?? valuePredicate(body, subject, fresh, ctx, true)
@@ -757,6 +758,7 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
     // lesson at a second seam — coverage must measure what the algebra can express, never what the
     // caller remembered to pass.
     services: ctx.services, sack: ctx.sack, sideEffectPolicies: ctx.sideEffectPolicies, collections: ctx.collections,
+    writes: ctx.writes,
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };

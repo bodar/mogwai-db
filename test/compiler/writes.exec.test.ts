@@ -548,8 +548,8 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
   };
 
   test('a body reading the key it writes, over an element the stream visits twice', () => {
-    refuses("g.V(2,4).in().property(single,'age', __.values('age').math('_+1'))", /reads what another traverser/, "g.V(1).values('age')");
-    refuses("g.V(2,4).in().property(list,'age', __.values('age'))", /reads what another traverser/, "g.V(1).properties('age').count()");
+    refuses("g.V(2,4).in().property(single,'age', __.values('age').math('_+1'))", /read what another traverser writes/, "g.V(1).values('age')");
+    refuses("g.V(2,4).in().property(list,'age', __.values('age'))", /read what another traverser writes/, "g.V(1).properties('age').count()");
     // …a body that never reads the written key is the loop exactly, and is written.
     const store = seededStore();
     run(store, "g.V(2,4).in().property(single,'x', __.values('name'))");
@@ -557,11 +557,41 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
   });
 
   test('a creation parameter whose body could see an earlier traverser’s creation', () => {
-    refuses("g.V(1,2).addV('x').property('n', __.V().count())", /reads what another traverser/, 'g.V().count()');
-    refuses("g.V(1,4).addE('e').to(__.V(2)).property('w', __.out().count())", /reads what another traverser/, 'g.E().count()');
+    refuses("g.V(1,2).addV('x').property('n', __.V().count())", /read what another traverser writes/, 'g.V().count()');
+    refuses("g.V(1,4).addE('e').to(__.V(2)).property('w', __.out().count())", /read what another traverser writes/, 'g.E().count()');
     // One traverser has nobody before it.
     const store = seededStore();
     expect(run(store, "g.V(4).addE('e').to(__.V(2)).property('w', __.out().count()).values('w')").map((r) => r.v)).toEqual([2]);
+  });
+
+  // The reference's loop is the whole lazy PIPELINE, not one step: traverser 1 runs through every later
+  // mutating step before traverser 2's body in an earlier one is resolved, and traverser 2 through every
+  // earlier one before its own body in a later one (`LazyBarrierStrategy` puts no barrier after a short
+  // id source). So a body that can observe ANY other write in the program refuses over >1 traverser.
+  test('a body that could observe another step’s write, earlier or later', () => {
+    const seen = /read what another traverser writes/;
+    // A LATER step's key, reached by movement / by re-sourcing — the edge, map-form and runtime-key arms.
+    refuses("g.E(7,8).property('a', __.outV().outE().values('b').count()).property('b', 1)", seen, 'g.E(7,8).valueMap()');
+    refuses("g.V(1,2).property(__.project('k').by(__.V(1).values('b').count())).property('b','x')", seen, 'g.V(1,2).valueMap()');
+    refuses("g.V(1,2).property(__.constant('k'), __.V(1).values('b').count()).property('b','x')", seen, 'g.V(1,2).valueMap()');
+    // An EARLIER step's key on another element, a later step's creation, drop, or label mutation.
+    refuses("g.V(1,2).property('m','x').property('c', __.out().values('m').count())", seen, 'g.V(1,2,3,4).valueMap()');
+    refuses("g.V(1,2).property('b','x').property('a', __.V(2).values('b').count())", seen, 'g.V(1,2).valueMap()');
+    // (The refusal is ahead of its own RUN, not of an earlier STEP: the `addV` has already created — as any
+    // run-time raise at a later step leaves an earlier one's writes — but no `n` is written.)
+    refuses("g.V(1,2).addV('x').property(single,'n', __.V().hasLabel('x').count())", seen, "g.V().values('n')");
+    refuses("g.V(1,2).property('a', __.V().count()).drop()", seen, 'g.V().count()');
+    refuses("g.V(1,2).property('l', __.label()).addLabel('z')", seen, 'g.V(1,2).valueMap()');
+    // A later step that writes the key onto ANOTHER element the body's own element may be.
+    refuses("g.V(1,2).property('a', __.values('name')).out().property('name', 'q')", seen, 'g.V().valueMap()');
+    // …while a body that reads only its own element's keys, written by its own RUN, is the loop exactly.
+    const store = seededStore();
+    run(store, "g.V(1,2).property('a', __.values('name')).property('b', __.values('a'))");
+    expect(run(store, "g.V(1,2).values('b')").map((r) => r.v)).toEqual(['marko', 'vadas']);
+    // …and one traverser has nobody to race.
+    const one = seededStore();
+    run(one, "g.V(1).property('a', __.out().values('b').count()).property('b', 1)");
+    expect(run(one, "g.V(1).values('a')").map((r) => r.v)).toEqual([0]);
   });
 
   test('a value that resolves to null', () => {

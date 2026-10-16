@@ -299,3 +299,90 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "must have a String or T on even array indices"
+
+  # THE LOOP IS THE WHOLE LAZY PIPELINE, NOT ONE STEP. With no barrier between them (`LazyBarrierStrategy`
+  # adds none after a short id source or a single flat-map, `LazyBarrierStrategy.java:93-125`), traverser 1
+  # runs through EVERY mutating step before traverser 2's body in an earlier one resolves. Here the second
+  # knows-edge's body counts the `b` the first edge's run has already written by the LATER step: one
+  # edge gets 0, the other 1 — where a plan that runs each step for every traverser gives 0 to both.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1X_outEXknowsX_propertyXa_outV_outE_valuesXbX_countX_propertyXb_1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).outE("knows").property("a", __.outV().outE().values("b").count()).property("b", 1)
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.E().has(\"a\",0)"
+    And the graph should return 1 for count of "g.E().has(\"a\",1)"
+
+  # The same race through the MAP form: vadas's body re-sources marko after marko's run wrote `b`.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_propertyXprojectXkX_byXV1_valuesXbX_countXX_propertyXb_xX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property(__.project("k").by(__.V(1).values("b").count())).property("b","x")
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"k\",0)"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"vadas\").has(\"k\",1)"
+
+  # …and through a runtime KEY.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_propertyXconstantXkX_V1_valuesXbX_countX_propertyXb_xX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property(__.constant("k"), __.V(1).values("b").count()).property("b","x")
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"k\",0)"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"vadas\").has(\"k\",1)"
+
+  # An EARLIER step's key, read on another element: marko's body runs before vadas's `m` exists, so
+  # marko counts 0 — a plan that writes every `m` first counts vadas's.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_propertyXm_xX_propertyXc_out_valuesXmX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property("m","x").property("c", __.out().values("m").count())
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 2 for count of "g.V().has(\"c\",0)"
+
+  # A later traverser's CREATION: the first new vertex counts itself, the second counts both.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_addVXxX_propertyXsingle_n_V_hasLabelXxX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).addV("x").property(Cardinality.single, "n", __.V().hasLabel("x").count())
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.V().has(\"n\",1)"
+    And the graph should return 1 for count of "g.V().has(\"n\",2)"
+
+  # A body that reads only its own element's keys, written by its own run, IS the loop: written.
+  @gap:property-traversal-site
+  Scenario: g_VX1_2X_propertyXa_valuesXnameXX_propertyXb_valuesXaXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property("a", __.values("name")).property("b", __.values("a"))
+      """
+    When iterated to list
+    Then the result should have a count of 2
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"b\",\"marko\")"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"vadas\").has(\"b\",\"vadas\")"

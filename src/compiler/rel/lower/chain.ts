@@ -10,6 +10,7 @@ import type { Service } from '../../../services/spi/types.ts';
 import type { Collections } from '../collection.ts';
 import type { LabelRegime } from '../../../api.ts';
 import type { ChainRead, Subject } from '../child.ts';
+import type { ProgramWrites } from '../write.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
 // threads, and the carried-channel constants the whole lowering mints and reads. It lives in its own
@@ -166,6 +167,9 @@ export interface ChainCtx extends FilterCtx {
    * would see the graph AFTER the write.
    */
   readonly mutating: boolean;
+  /** What the whole PROGRAM writes — `Lowering.writes`, settled: inherited from an enclosing chain,
+   *  else summarized from this one. Read by a write whose body could race another traverser's write. */
+  readonly writes: ProgramWrites;
   /** A map-entry child reads `select(Column.values)` from this correlated value cell. */
   readonly entryValue?: import('../../../rel/expr.ts').Expr;
   /**

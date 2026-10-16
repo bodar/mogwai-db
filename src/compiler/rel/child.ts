@@ -7,6 +7,7 @@ import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
+import type { ProgramWrites } from './write.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -70,6 +71,10 @@ export interface ChildSeam {
    */
   readonly params: Record<string, any>;
   readonly sideEffects: Map<string, any>;
+  /** WHAT THE WHOLE PROGRAM WRITES — a compile-scope fact for the same reason the two environments above
+   *  are: a write's runtime value body is a nested argument, and whether it can observe another
+   *  traverser's write is a question about every write in the program (`sequentialGuard`). */
+  readonly writes: ProgramWrites;
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
   readonly scalar: (body: readonly IRStep[], host: ChildHost) => ChildValue | null;
   /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */

@@ -9,7 +9,7 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { arg, isNested } from '../../gremlin/frontend.ts';
+import { arg, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
@@ -407,12 +407,17 @@ export interface PropertyRuntimeSet {
   readonly cardinality: VertexCardinality | null;
   /** META-PROPERTIES — on each written row, or patched onto an equal value a `set` element already holds. */
   readonly meta: readonly MetaPropSpec[] | null;
+  /** The `property()` step this write came from, by IDENTITY — how `sequentialGuard` finds its own run
+   *  in `ProgramWrites`. Absent, every other write in the program counts as another traverser's. */
+  readonly step?: IRStep;
 }
 
 /** `property(__.trav)` — the single-argument MAP form (`mapFormStatements`). */
 export interface PropertyMapSet {
   readonly kind: 'map';
   readonly body: readonly IRStep[];
+  /** See `PropertyRuntimeSet.step`. */
+  readonly step?: IRStep;
 }
 
 /**
@@ -582,7 +587,7 @@ function existingRows(elem: Elem, owners: Rel, key: Expr, guard: ((owner: Expr) 
  */
 function propertyStatements(
   elem: Elem, owners: Rel, write: PropertyWrite, bind: Binder, fresh: Minter,
-  child: ChildSeam, aliases: AliasMap, guard: Guarder,
+  child: ChildSeam, aliases: AliasMap, guard: Guarder, sequenced = false,
 ): boolean {
   const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
   // A MEMBERSHIP test is against one column, and the snapshot carries the traverser's channels too —
@@ -594,10 +599,12 @@ function propertyStatements(
   // (one row per child result, not per owner) and per-traverser raises the constant path never needs —
   // so it runs its own statement builder (`ownerSite` → `prepareRuntimeWrite`/`mapFormStatements`) and
   // DECLINES (`false`) where the body does not lower to a scalar. Nothing after this line is shared.
+  // `sequenced` says the caller has already pushed this write's `sequenceGuard`, ahead of the run.
   if (write.kind === 'runtime' || write.kind === 'map') {
     const { site, targets } = ownerSite(owners, elem, aliases, fresh);
+    if (!sequenced) sequenceGuard(site, write, child, guard, fresh);
     if (write.kind === 'map') return mapFormStatements(elem, site, targets, write.body, bind, fresh, child, guard);
-    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard);
+    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, undefined, true);
     if (!apply) return false;
     apply(targets, bind);
     return true;
@@ -802,7 +809,7 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
  *  - `sources` — the body re-sources the graph (`V()`/`E()`/`call()`), the only way to reach an element
  *    with no edges, which is what a vertex an `addV` just made is.
  */
-interface BodyReach { readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean }
+interface BodyReach { readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean; readonly labels: boolean }
 
 const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
 const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE, new Set(['call', 'mergeV', 'mergeE', 'addV', 'addE', 'io']));
@@ -812,11 +819,15 @@ const LABEL_READING_STEPS: ReadonlySet<string> = new Set(['select', 'path', 'sim
 /** `math()`'s own vocabulary — the current value `_` and `FUNCTIONS`; every OTHER identifier in its
  *  expression is a variable, i.e. a label it reads (`MathStep.getVariables`,
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:188-208`). */
+/** Steps that read an element's LABEL — what `addLabel`/`dropLabel` change. A `T.label` token anywhere
+ *  in a step's arguments or modulators (`has(T.label, …)`, `by(T.label)`) is the other spelling
+ *  (`readsLabelToken`). */
+const LABEL_READS: ReadonlySet<string> = new Set(['label', 'hasLabel', 'elementMap', 'valueMap']);
 const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'atan', 'cbrt', 'ceil', 'cos', 'cosh', 'exp', 'floor', 'log', 'log10', 'log2', 'signum', 'sin', 'sinh', 'sqrt', 'tan', 'tanh']);
 
 function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
   const keys = new Set<string>();
-  let all = false, leaves = false, sources = false;
+  let all = false, leaves = false, sources = false, labels = false;
   const strings = (value: unknown, into: (s: string) => void): void => {
     if (typeof value === 'string') { into(value); return; }
     if (value == null || typeof value !== 'object' || isNested(value)) return;
@@ -828,7 +839,7 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
   const nested = (value: unknown): void => {
     if (isNested(value)) {
       const body = child.body(value.nested, 'child');
-      if (body === null) { all = true; leaves = true; sources = true; return; }
+      if (body === null) { all = true; leaves = true; sources = true; labels = true; return; }
       walk(body);
       return;
     }
@@ -843,6 +854,7 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
       const args = step.args.map((a) => a.value);
       if (GRAPH_SOURCES.has(step.name)) { sources = true; leaves = true; }
       if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) leaves = true;
+      if (LABEL_READS.has(step.name) || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
       // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
       // `math()`'s expression.
       if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) leaves = true;
@@ -864,43 +876,168 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
     }
   };
   walk(steps);
-  return { keys: all ? 'all' : keys, leaves, sources };
+  return { keys: all ? 'all' : keys, leaves, sources, labels };
+}
+
+/** Does a `T.label` token sit anywhere in these argument values (a predicate's operands, a collection)? */
+const readsLabelToken = (values: readonly unknown[]): boolean => values.some(function found(value: unknown): boolean {
+  if (isTokenArg(value)) return value.token === 'label';
+  if (value == null || typeof value !== 'object' || isNested(value)) return false;
+  if (value instanceof Map) return [...value.keys(), ...value.values()].some(found);
+  if (Array.isArray(value)) return value.some(found);
+  return ('value' in value && found((value as { value: unknown }).value)) || ('operands' in value && found((value as { operands: unknown }).operands));
+});
+
+/**
+ * WHAT A WHOLE PROGRAM CAN WRITE — every mutation at any nesting depth, summarized for `sequentialGuard`.
+ *
+ * The reference's one-traverser-at-a-time loop is not a property of ONE step: a lazy pipeline with no
+ * barrier between two mutating steps (`LazyBarrierStrategy` adds none after a `g.V(ids)` source of fewer
+ * than five ids, nor after a single flat-map, `strategy/optimization/LazyBarrierStrategy.java:93-125`)
+ * hands traverser 1 through EVERY later step before traverser 2's body in an earlier step runs — and
+ * traverser 2 through every EARLIER step before traverser 1's body in a later one. So
+ * `g.E(7,8).property('a', __.outV().outE().values('b').count()).property('b', 1)` gives ONE of the two
+ * edges `a=1` (the other's `b` already exists), where a plan that runs each step for every traverser
+ * gives `0` to both. A body is therefore safe only if it cannot observe anything ANOTHER traverser writes
+ * anywhere in that pipeline — earlier step or later — and the pipeline's extent is not decided here (a
+ * barrier, a nested write, a `sideEffect` body), so this summarizes the whole PROGRAM. Every answer
+ * over-approximates, which costs a refusal and never an answer.
+ *
+ *  - `writers` — every `property()` step's keys (`'all'` for a key only known at run time, or the map
+ *    form), with the RUN it belongs to — a maximal sequence of consecutive `property()` steps in one
+ *    chain, which writes every traverser's OWN element — and whether it writes an element the program
+ *    has just CREATED (the run right after an `addV`/`addE`, folded or not), which only a body that can
+ *    REACH a new element observes. A writer inside a `repeat()`/`option()` region or a nested body is
+ *    never anyone's own run (`-1`). `runOf` finds a step's run by identity.
+ *  - `anyKey` — a merge (its match arm writes onto a found element) or a drop: any key, any element.
+ *  - `labels` — a label mutation; `creates`/`edges` — a new vertex or edge (an edge is reachable by
+ *    movement, a vertex only by re-sourcing the graph); `drops` — an element or property removal.
+ *
+ * A nested body the walk cannot read, or an `io()` (a read loads a whole graph), is `EVERYTHING_WRITTEN`.
+ */
+export interface ProgramWrites {
+  readonly writers: readonly KeyWriter[];
+  readonly runOf: ReadonlyMap<IRStep, number>;
+  readonly anyKey: boolean;
+  readonly labels: boolean;
+  readonly creates: boolean;
+  readonly edges: boolean;
+  readonly drops: boolean;
+}
+interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
+
+export const EVERYTHING_WRITTEN: ProgramWrites = { writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true };
+
+/** Steps after which the traverser is still the element an `addV`/`addE` just made. */
+const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
+
+export function programWrites(steps: readonly IRStep[], params: Record<string, any>): ProgramWrites {
+  const writers: KeyWriter[] = [];
+  const runOf = new Map<IRStep, number>();
+  let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false;
+  const nested = (value: unknown): void => {
+    if (isNested(value)) {
+      let body: readonly IRStep[];
+      try { body = stepChain(value.nested, params); } catch { unreadable = true; return; }
+      walk(body, false);
+      return;
+    }
+    if (value == null || typeof value !== 'object') return;
+    if (value instanceof Map) { for (const [k, v] of value) { nested(k); nested(v); } return; }
+    if (Array.isArray(value)) { for (const v of value) nested(v); return; }
+    if ('value' in value) nested((value as { value: unknown }).value);
+    if ('operands' in value) nested((value as { operands: unknown }).operands);
+  };
+  const walk = (chain: readonly IRStep[], ownable: boolean): void => {
+    let fresh = false, run = -1;
+    for (const step of chain) {
+      const args = step.args.map((a) => a.value);
+      if (step.name !== 'property') run = -1;
+      switch (step.name) {
+        case 'addV': creates = true; break;
+        case 'addE': creates = true; edges = true; break;
+        case 'mergeV': creates = true; anyKey = true; break;
+        case 'mergeE': creates = true; edges = true; anyKey = true; break;
+        case 'drop': drops = true; anyKey = true; break;
+        case 'addLabel': case 'dropLabel': case 'dropLabels': labels = true; break;
+        case 'io': unreadable = true; break;
+        case 'property': {
+          if (run < 0 && ownable) run = runs++;
+          if (run >= 0) runOf.set(step, run);
+          const key = readCardinality(args).rest[0];
+          writers.push({ run, keys: typeof key === 'string' ? new Set([key]) : 'all', fresh });
+          break;
+        }
+      }
+      fresh = step.name === 'addV' || step.name === 'addE' || (fresh && KEEPS_FRESH.has(step.name));
+      for (const value of args) nested(value);
+      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value);
+      for (const [, value] of step.withArgs ?? []) nested(value);
+      if (step.repeatRegion) walk(step.repeatRegion as IRStep[], false);
+      if (step.optionArms) walk(step.optionArms as IRStep[], false);
+    }
+  };
+  walk(steps, true);
+  return unreadable ? EVERYTHING_WRITTEN : { writers, runOf, anyKey, labels, creates, edges, drops };
 }
 
 /**
  * THE REFERENCE RUNS ONE TRAVERSER AT A TIME; A WRITE HERE IS ONE STATEMENT — and the two only agree when
- * no traverser's value body can observe what an EARLIER traverser of the same step wrote.
+ * no traverser's value body can observe what ANOTHER traverser writes, at this step or at any other.
  *
  * `AddPropertyStep.sideEffect` resolves a traverser's body and mutates, and only then is the next
- * traverser pulled (`step/sideEffect/AddPropertyStep.java:93-121`) — no barrier sits in between for a
+ * traverser pulled (`step/sideEffect/AddPropertyStep.java:93-121`) — and the lazy pipeline first hands
+ * that traverser on through every LATER step, since no barrier sits in between for a short id source or a
  * single movement (`LazyBarrierStrategy` inserts one only after a SECOND flat-map,
  * `strategy/optimization/LazyBarrierStrategy.java:93-125`). So `g.V(2,4).in().property(single, 'age',
- * __.values('age').math('_+1'))` meets marko twice and the second visit reads the first's 30: 31.0. Every
- * body here is read once, before any write — which is the reference exactly when nothing a body reads was
- * written by another traverser, and a different answer otherwise. Where that cannot be ruled out
- * statically, a guard rules it out at run time and REFUSES the rest, before anything is written:
+ * __.values('age').math('_+1'))` meets marko twice and the second visit reads the first's 30: 31.0; and
+ * `g.E(7,8).property('a', __.outV().outE().values('b').count()).property('b', 1)` lets the second edge's
+ * body count the first edge's `b`. The plan runs each step for EVERY traverser, each body read before its
+ * own step writes — the reference exactly when nothing a body reads is written by another traverser
+ * anywhere in the program (`ProgramWrites`), and a different answer otherwise. Where that cannot be ruled
+ * out statically, a guard rules it out at run time and REFUSES — before the write's RUN writes anything (`sequenceGuard`):
  *
- *  - an ORDINARY step writes the keys it names onto the traverser's own element, so a body that reads none
- *    of them is safe outright. One that does is safe while it stays on its own element and no element
- *    occurs twice in the stream (the guard: an element id repeated in the host), and while the stream is ONE
- *    traverser if it can leave its element (the guard: a second host row);
- *  - a FOLDED parameter writes onto an element the creation MAKES, which a body can only reach by
- *    re-sourcing the graph — or, for an `addE`, by any movement, since the new edge hangs off vertices the
- *    body can walk to. Such a body is safe only over a single traverser.
+ *  - keys written by this write's OWN RUN land on each traverser's own element, so a body that reads one
+ *    is safe while it stays on its own element and no element occurs twice in the stream (the guard: an
+ *    element id repeated in the host) — and only while the stream is ONE traverser if it can leave its
+ *    element (the guard: a second host row);
+ *  - keys written ANYWHERE ELSE (another run, a nested write, a merge, a drop) may land on any element,
+ *    and a label mutation on any element's labels, so a body that reads one is safe only over one
+ *    traverser;
+ *  - keys written onto a NEW element, and new or removed elements themselves, are seen only by a body that
+ *    can reach them — by re-sourcing the graph, or by any movement for a new edge or a removal — and such
+ *    a body too is safe only over one traverser. A FOLDED parameter's own keys are of this kind: they
+ *    land on the element its creation makes.
  *
- * `keys` is `null` for a key only known at run time — then ANY key the body reads may be the written one.
+ * `keys` is the write's own keys, `null` for a key only known at run time — then ANY key the body reads
+ * may be the written one. `step` is the write's own `property()` step, which names its run; absent, or
+ * not found (a nested body normalized afresh), no other write counts as its own run, which only refuses
+ * more.
  */
 function sequentialGuard(
-  site: RuntimeSite, elem: Elem, bodies: readonly (readonly IRStep[])[], keys: readonly string[] | null,
+  site: RuntimeSite, bodies: readonly (readonly IRStep[])[], keys: readonly string[] | null, step: IRStep | undefined,
   child: ChildSeam, guard: Guarder, fresh: Minter,
 ): void {
+  const program = child.writes;
+  const run = step === undefined ? undefined : program.runOf.get(step);
+  const mine: KeySet = keys === null ? 'all' : new Set(keys);
+  let own: KeySet = site.resolve === 'all' ? mine : new Set<string>();
+  let created: KeySet = site.resolve === 'all' ? new Set<string>() : mine;
+  let elsewhere: KeySet = program.anyKey ? 'all' : new Set<string>();
+  for (const writer of program.writers) {
+    if (writer.fresh) created = unite(created, writer.keys);
+    else if (run !== undefined && writer.run === run) own = unite(own, writer.keys);
+    else elsewhere = unite(elsewhere, writer.keys);
+  }
   const reaches = bodies.map((body) => bodyReach(body, child));
-  const readsWritten = reaches.some((reach) => reach.keys === 'all' || (keys === null ? reach.keys.size > 0 : keys.some((k) => (reach.keys as ReadonlySet<string>).has(k))));
   const leaves = reaches.some((reach) => reach.leaves);
-  const perElement = site.resolve === 'all' && readsWritten && !leaves;
-  const perStream = site.resolve === 'all'
-    ? readsWritten && leaves
-    : reaches.some((reach) => reach.sources || (elem === 'edge' && reach.leaves));
+  const readsOwn = reaches.some((reach) => meets(reach.keys, own));
+  const readsElsewhere = reaches.some((reach) => meets(reach.keys, elsewhere) || (program.labels && reach.labels));
+  const seesNew = reaches.some((reach) => (reach.sources && (program.creates || program.drops))
+    || (reach.leaves && (program.edges || program.drops))
+    || (meets(reach.keys, created) && (reach.sources || (program.edges && reach.leaves))));
+  const perStream = readsElsewhere || seesNew || (readsOwn && (leaves || site.resolve === 'first'));
+  const perElement = !perStream && readsOwn;
   if (!perElement && !perStream) return;
   const counts = make.aggregate({
     id: fresh('rc'), input: site.host, channels: [], type: typeOf(...(perElement ? [meta('id', 'int')] : []), meta('n', 'int')),
@@ -910,6 +1047,28 @@ function sequentialGuard(
   guard(make.project({ id: fresh('p'), input: repeated, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(repeated.id, 'n')]] }),
     { message: SEQUENTIAL_READ, raiseWhen: 'rows' });
 }
+
+/**
+ * A runtime or map-form write's `sequentialGuard` over `site`: every body it resolves, and its own keys
+ * (`null` — any — for a runtime key, and for the map form, whose program writer is `'all'` anyway).
+ *
+ * Its own function because WHEN it runs is the caller's to choose. The guard reads only the site's host,
+ * so it can run ahead of a whole `property()` run (`elementProperty`) — which is what keeps a refusal at
+ * the run's third step from leaving the first two written.
+ */
+function sequenceGuard(site: RuntimeSite, write: PropertyRuntimeSet | PropertyMapSet, child: ChildSeam, guard: Guarder, fresh: Minter): void {
+  const bodies = write.kind === 'map' ? [write.body]
+    : [...('body' in write.value ? [write.value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])];
+  sequentialGuard(site, bodies, write.kind === 'runtime' && typeof write.key === 'string' ? [write.key] : null, write.step, child, guard, fresh);
+}
+
+type KeySet = ReadonlySet<string> | 'all';
+const unite = (a: KeySet, b: KeySet): KeySet => (a === 'all' || b === 'all' ? 'all' : new Set([...a, ...b]));
+/** Can a body that reads `read` observe a write of `written`? */
+const meets = (read: KeySet, written: KeySet): boolean =>
+  read === 'all' ? written === 'all' || written.size > 0
+  : written === 'all' ? read.size > 0
+  : [...read].some((key) => written.has(key));
 
 /**
  * A NULL value the body resolved, refused before anything is written. A non-productive framing is the
@@ -925,7 +1084,7 @@ function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
     { message: NULL_VALUE, raiseWhen: 'rows' });
 }
 
-const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here reads what another traverser of the same step writes, and TinkerPop applies each traverser\'s write before resolving the next one\'s value';
+const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
 const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
 
@@ -1127,9 +1286,12 @@ function keyedRows(values: Rel, targets: Rel, key: RuntimeKey, fresh: Minter): R
  *  - **Several traversers on ONE element** are the reference's loop run once each, so `single` leaves the
  *    LAST one's value, `set` keeps one copy of each distinct value, and `list` keeps all — the per-element
  *    reduction below states that as windows instead of as N statements. That is the loop only while no
- *    run's body reads what an earlier run wrote (the second run of `__.values('age').math('_+1')` reads
- *    the first's result); the caller's `sequentialGuard` refuses every write where that is possible, so
- *    what reaches here reads the same values whichever order the runs take.
+ *    traverser's body reads what ANOTHER traverser wrote — at this step (the second run of
+ *    `__.values('age').math('_+1')` reads the first's result) or at any other mutating step of the
+ *    program, earlier or later, since the reference's lazy pipeline interleaves them per traverser. The
+ *    caller's `sequentialGuard` refuses, at run time and before anything is written, every write whose
+ *    body it cannot prove blind to all of those (`ProgramWrites` over-approximates them), so what reaches
+ *    here reads the same values whichever order the traversers take.
  *
  * **THE VALUE IS READ BEFORE ANYTHING IT COULD READ IS CHANGED.** The reference resolves the body and
  * THEN mutates, so `property(single, 'age', __.values('age').math('_+1'))` reads the OLD age. Deleting
@@ -1290,7 +1452,7 @@ const RUNTIME_WRITTEN_TYPE: RelType = typeOf(meta('id', 'int'), meta('owner', 'i
  */
 function prepareRuntimeWrite(
   elem: Elem, site: RuntimeSite, write: PropertyRuntimeSet, fresh: Minter, child: ChildSeam, guard: Guarder,
-  bind?: Binder,
+  bind?: Binder, sequenced = false,
 ): ((targets: Rel, bind: Binder) => void) | null {
   const value = write.value;
   const resolved = 'body' in value ? resolveValueRows(value.body, site, child, fresh) : {
@@ -1305,9 +1467,8 @@ function prepareRuntimeWrite(
   };
   if (!resolved) return null;
   // Before anything is resolved into a write: whether one statement can stand for the reference's
-  // one-traverser-at-a-time loop (`sequentialGuard`).
-  sequentialGuard(site, elem, [...('body' in value ? [value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])],
-    typeof write.key === 'string' ? [write.key] : null, child, guard, fresh);
+  // one-traverser-at-a-time loop — unless the caller asked that ahead of its whole run.
+  if (!sequenced) sequenceGuard(site, write, child, guard, fresh);
   let key: RuntimeKey;
   if (typeof write.key === 'string') key = { kind: 'const', expr: propertyKeyExpr(write.key, write.keyName) };
   else {
@@ -1354,14 +1515,16 @@ function transportableValues(values: Rel, fresh: Minter): Rel {
  * `select(a, b)`) — because then every entry is a column, and the whole write is the runtime writer over a
  * UNION of one keyed row set per field: ONE insert, so the body is read once, before anything changes, as
  * the reference reads it. Declined: an EDGE (a map entry is a vertex-cardinality write), a map whose keys
- * only exist at run time, and a field whose value is not a scalar or may be a productive null.
+ * only exist at run time, a field whose value is not a scalar, and an OPTIONAL field that may be a
+ * productive null (a required one is refused at run time only if a null actually arrives).
  *
  * The refusals are the reference's: >1 result is *"property(traversal) requires the traversal to produce
  * a Map, but got: "* naming the first result's class — a `LinkedHashMap`, which is what both record
  * producers build (`ProjectStep.java:64`, `SelectStep`). 0 results is no mutation.
  */
 function mapFormStatements(
-  elem: Elem, site: RuntimeSite, targets: Rel, body: readonly IRStep[], bind: Binder, fresh: Minter, child: ChildSeam, guard: Guarder,
+  elem: Elem, site: RuntimeSite, targets: Rel, body: readonly IRStep[], bind: Binder, fresh: Minter,
+  child: ChildSeam, guard: Guarder,
 ): boolean {
   if (elem === 'edge') return false;
   const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
@@ -1372,9 +1535,12 @@ function mapFormStatements(
   // `sq` carries for the writer's per-traverser ordering, there being one map per traverser.
   const perField: Rel[] = [];
   for (const [index, field] of rows.framing.fields.entries()) {
-    // A productive NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit — and a
-    // field that can carry one is declined rather than written as a stored null.
-    if (field.framing.kind !== 'scalar' || field.framing.productiveNull) return false;
+    // A productive NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit. For a
+    // REQUIRED field the row says whether one arrived, so `nullValueGuard` below refuses it at run time
+    // exactly as the step form does (`resolveValueRows`). An OPTIONAL field cannot say: its absence IS a
+    // null first column (`record.ts` `presence`), so a real null and a missing entry are one row — and
+    // they owe different answers (a removal vs. no mutation). That one is declined.
+    if (field.framing.kind !== 'scalar' || (field.optional && field.framing.productiveNull)) return false;
     try { validatePropertyKey(field.key); } catch { return false; }
     const cols = framingCols(field.framing);
     if (!cols) return false;
@@ -1402,9 +1568,9 @@ function mapFormStatements(
   guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(many.id, 'o')]] }),
     { message: 'property(traversal) requires the traversal to produce a Map, but got: LinkedHashMap', raiseWhen: 'rows' });
   const entries = perField.length === 1 ? perField[0]! : make.union({ id: fresh('u'), inputs: perField, all: true, channels: [], type: perField[0]!.type });
-  // The map's entries are writes like any other: refused where one statement cannot stand for the
-  // reference's per-traverser loop, or where an entry the map DOES have holds a null.
-  sequentialGuard(site, elem, [body], rows.framing.fields.map((field) => field.key), child, guard, fresh);
+  // The map's entries are writes like any other: refused where an entry the map DOES have holds a null —
+  // and, by the caller before the run's first statement (`sequenceGuard`), where one statement cannot
+  // stand for the reference's per-traverser loop.
   nullValueGuard(entries, guard, fresh);
   const keyed = make.join({
     id: fresh('j'), left: entries, right: targets, join: 'inner', channels: [],
@@ -1578,7 +1744,11 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
   const owners = bind(seeded.result, true, carried);
   // A runtime value body that does not lower to a scalar DECLINES the whole write (`false`), which is
   // the ordinary miss the fold turns into `UnsupportedTraversal` — never a silent skip.
-  for (const write of writes) if (!propertyStatements(elem, owners, write, bind, fresh, child, aliases, guard)) return null;
+  // Every runtime write's sequential refusal FIRST, before the run's first statement: it reads only the
+  // snapshot, so asking it early changes no answer, and asking it late would leave the run's earlier
+  // writes applied by a traversal that is then refused.
+  for (const write of writes) if (write.kind === 'runtime' || write.kind === 'map') sequenceGuard(ownerSite(owners, elem, aliases, fresh).site, write, child, guard, fresh);
+  for (const write of writes) if (!propertyStatements(elem, owners, write, bind, fresh, child, aliases, guard, true)) return null;
   // Touch the rev of every mutated element: a `property()` write changed their content (§5·1).
   bind(markDirty(elem, idsOf(owners, fresh), fresh));
   // Back to an ELEMENT relation. `property()` is element-PRESERVING, so this IS the snapshot — no
@@ -1848,13 +2018,13 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
     if (parsed.kind === 'mapBody') {
       const body = child.body(parsed.nested.nested, 'child');
       if (!body?.length) return null;
-      writes.push({ kind: 'map', body });
+      writes.push({ kind: 'map', body, step });
       continue;
     }
     if (parsed.kind !== 'prop') return null;
     const write = writeOf(parsed.spec, elem, child, true);
     if (!write) return null;
-    writes.push(write);
+    writes.push(write.kind === 'runtime' ? { ...write, step } : write);
   }
   return writes.length ? writes : null;
 }
