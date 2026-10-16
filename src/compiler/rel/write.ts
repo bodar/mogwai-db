@@ -13,7 +13,7 @@ import { arg, isNested } from '../../gremlin/frontend.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
-import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
@@ -27,6 +27,7 @@ import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type RelFraming } from './framing.ts';
+import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, OTHER_V, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -787,6 +788,148 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
 });
 
 /**
+ * WHAT A RUNTIME BODY CAN OBSERVE — the property keys it may read, and whether it can leave the traverser
+ * it was handed. A static, FAIL-CLOSED walk over the body and everything nested in it (arguments,
+ * predicate operands, `by()` modulators, repeat/option bodies): every answer over-approximates, because
+ * the only use of it is to REFUSE (`sequentialGuard`), and an over-approximation costs a refusal where a
+ * miss would cost a wrong answer. `labels.ts` makes the same trade for label reads, for the same reason.
+ *
+ *  - `keys` — a string argument of a key-reading step or a `by()` modulator; `'all'` for a whole-payload
+ *    read (`values()`/`properties()`/`valueMap()`/… with no key, `hasKey`/`hasValue`) or a nested body
+ *    this walk cannot normalize.
+ *  - `leaves` — the body can reach an element OTHER than its own traverser's: a movement, a graph source,
+ *    or a label/path read (an alias names whatever element the traverser passed earlier).
+ *  - `sources` — the body re-sources the graph (`V()`/`E()`/`call()`), the only way to reach an element
+ *    with no edges, which is what a vertex an `addV` just made is.
+ */
+interface BodyReach { readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean }
+
+const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
+const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE, new Set(['call', 'mergeV', 'mergeE', 'addV', 'addE', 'io']));
+const ELEMENT_MOVES: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V);
+/** Steps whose answer can be an element bound EARLIER on the traverser's path, not the current one. */
+const LABEL_READING_STEPS: ReadonlySet<string> = new Set(['select', 'path', 'simplePath', 'cyclicPath', 'tree', 'match', 'cap', 'sack']);
+/** `math()`'s own vocabulary — the current value `_` and `FUNCTIONS`; every OTHER identifier in its
+ *  expression is a variable, i.e. a label it reads (`MathStep.getVariables`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:188-208`). */
+const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'atan', 'cbrt', 'ceil', 'cos', 'cosh', 'exp', 'floor', 'log', 'log10', 'log2', 'signum', 'sin', 'sinh', 'sqrt', 'tan', 'tanh']);
+
+function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
+  const keys = new Set<string>();
+  let all = false, leaves = false, sources = false;
+  const strings = (value: unknown, into: (s: string) => void): void => {
+    if (typeof value === 'string') { into(value); return; }
+    if (value == null || typeof value !== 'object' || isNested(value)) return;
+    if (value instanceof Map) { for (const [k, v] of value) { strings(k, into); strings(v, into); } return; }
+    if (Array.isArray(value)) { for (const v of value) strings(v, into); return; }
+    if ('value' in value) strings((value as { value: unknown }).value, into);
+    if ('operands' in value) strings((value as { operands: unknown }).operands, into);
+  };
+  const nested = (value: unknown): void => {
+    if (isNested(value)) {
+      const body = child.body(value.nested, 'child');
+      if (body === null) { all = true; leaves = true; sources = true; return; }
+      walk(body);
+      return;
+    }
+    if (value == null || typeof value !== 'object') return;
+    if (value instanceof Map) { for (const v of value.values()) nested(v); return; }
+    if (Array.isArray(value)) { for (const v of value) nested(v); return; }
+    if ('value' in value) nested((value as { value: unknown }).value);
+    if ('operands' in value) nested((value as { operands: unknown }).operands);
+  };
+  const walk = (body: readonly IRStep[]): void => {
+    for (const step of body) {
+      const args = step.args.map((a) => a.value);
+      if (GRAPH_SOURCES.has(step.name)) { sources = true; leaves = true; }
+      if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) leaves = true;
+      // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
+      // `math()`'s expression.
+      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) leaves = true;
+      if (step.name === 'math') strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) leaves = true; });
+      if (KEY_READING_STEPS.has(step.name)) {
+        let named = false;
+        strings(args, (s) => { keys.add(s); named = true; });
+        if (!named || step.name === 'hasKey' || step.name === 'hasValue') all = true;
+      }
+      // `format('%{name}')` reads a property OR a label by that name.
+      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; } });
+      for (const modulator of step.modulators ?? []) for (const value of modulator) {
+        strings(value, (s) => keys.add(s));
+        nested(value);
+      }
+      for (const value of args) nested(value);
+      if (step.repeatRegion) walk(step.repeatRegion as IRStep[]);
+      if (step.optionArms) walk(step.optionArms as IRStep[]);
+    }
+  };
+  walk(steps);
+  return { keys: all ? 'all' : keys, leaves, sources };
+}
+
+/**
+ * THE REFERENCE RUNS ONE TRAVERSER AT A TIME; A WRITE HERE IS ONE STATEMENT — and the two only agree when
+ * no traverser's value body can observe what an EARLIER traverser of the same step wrote.
+ *
+ * `AddPropertyStep.sideEffect` resolves a traverser's body and mutates, and only then is the next
+ * traverser pulled (`step/sideEffect/AddPropertyStep.java:93-121`) — no barrier sits in between for a
+ * single movement (`LazyBarrierStrategy` inserts one only after a SECOND flat-map,
+ * `strategy/optimization/LazyBarrierStrategy.java:93-125`). So `g.V(2,4).in().property(single, 'age',
+ * __.values('age').math('_+1'))` meets marko twice and the second visit reads the first's 30: 31.0. Every
+ * body here is read once, before any write — which is the reference exactly when nothing a body reads was
+ * written by another traverser, and a different answer otherwise. Where that cannot be ruled out
+ * statically, a guard rules it out at run time and REFUSES the rest, before anything is written:
+ *
+ *  - an ORDINARY step writes the keys it names onto the traverser's own element, so a body that reads none
+ *    of them is safe outright. One that does is safe while it stays on its own element and no element
+ *    occurs twice in the stream (the guard: an element id repeated in the host), and while the stream is ONE
+ *    traverser if it can leave its element (the guard: a second host row);
+ *  - a FOLDED parameter writes onto an element the creation MAKES, which a body can only reach by
+ *    re-sourcing the graph — or, for an `addE`, by any movement, since the new edge hangs off vertices the
+ *    body can walk to. Such a body is safe only over a single traverser.
+ *
+ * `keys` is `null` for a key only known at run time — then ANY key the body reads may be the written one.
+ */
+function sequentialGuard(
+  site: RuntimeSite, elem: Elem, bodies: readonly (readonly IRStep[])[], keys: readonly string[] | null,
+  child: ChildSeam, guard: Guarder, fresh: Minter,
+): void {
+  const reaches = bodies.map((body) => bodyReach(body, child));
+  const readsWritten = reaches.some((reach) => reach.keys === 'all' || (keys === null ? reach.keys.size > 0 : keys.some((k) => (reach.keys as ReadonlySet<string>).has(k))));
+  const leaves = reaches.some((reach) => reach.leaves);
+  const perElement = site.resolve === 'all' && readsWritten && !leaves;
+  const perStream = site.resolve === 'all'
+    ? readsWritten && leaves
+    : reaches.some((reach) => reach.sources || (elem === 'edge' && reach.leaves));
+  if (!perElement && !perStream) return;
+  const counts = make.aggregate({
+    id: fresh('rc'), input: site.host, channels: [], type: typeOf(...(perElement ? [meta('id', 'int')] : []), meta('n', 'int')),
+    groupBy: perElement ? [col(site.host.id, 'id')] : [], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+  });
+  const repeated = make.filter({ id: fresh('rf'), input: counts, channels: [], type: counts.type, pred: { kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) } });
+  guard(make.project({ id: fresh('p'), input: repeated, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(repeated.id, 'n')]] }),
+    { message: SEQUENTIAL_READ, raiseWhen: 'rows' });
+}
+
+/**
+ * A NULL value the body resolved, refused before anything is written. A non-productive framing is the
+ * framer's signal for "no result", yet `constant(null)` still carries its null as a row — so a null here is
+ * either a real null, which the reference turns into a REMOVAL of the key (`ElementHelper.attachProperties`,
+ * `structure/util/ElementHelper.java:316-381`), or no value at all, which is no mutation. The two need
+ * different statements and the row cannot say which it is; storing it, which is neither, is the one answer
+ * known to be wrong.
+ */
+function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
+  const nulls = make.filter({ id: fresh('f'), input: values, channels: [], type: values.type, pred: { kind: 'binary', op: 'is', left: col(values.id, 'v'), right: compilerNull() } });
+  guard(make.project({ id: fresh('p'), input: nulls, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(nulls.id, 'o')]] }),
+    { message: NULL_VALUE, raiseWhen: 'rows' });
+}
+
+const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here reads what another traverser of the same step writes, and TinkerPop applies each traverser\'s write before resolving the next one\'s value';
+const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
+const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
+
+/**
  * A runtime body → its rows over the site's host, normalized to `VALUE_ROW_COLS`, plus whether the body
  * can yield MANY per traverser (which decides the >1 raise). Two child arms, whichever fits:
  *
@@ -801,10 +944,17 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
  *
  * `null` declines: a non-scalar result (an element/list/map value is not a property value), or a
  * reducer whose productivity the arm cannot state (a 0-result would be indistinguishable from a value).
+ * A NULL row is not declined here but refused at run time by the writer (`nullValueGuard`): a framing's
+ * `productiveNull` only says a null MAY be real (every numeric reducer states it, and `sum()` over ages
+ * never yields one), so declining on it refused writes that are always answerable, while the row itself is
+ * the only thing that knows whether a null actually arrived.
+ *
+ * The `framing` rides out because a KEY's type check needs the type the body STATES, not only the one a
+ * row stores (`runtimeKeyRows`).
  */
 function resolveValueRows(
   body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, fresh: Minter,
-): { readonly rel: Rel; readonly mayBeMulti: boolean } | null {
+): { readonly rel: Rel; readonly mayBeMulti: boolean; readonly framing: RelFraming } | null {
   const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
   if (rows && rows.framing.kind === 'scalar') {
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
@@ -817,6 +967,7 @@ function resolveValueRows(
           ['sq', encounter ? col(rows.rel.id, encounter.col) : compilerInt(0)]],
       }),
       mayBeMulti: true,
+      framing: rows.framing,
     };
   }
   const host: ChildHost = { kind: 'element', id: col(site.host.id, 'id'), elem: site.hostElem, row: { rel: site.host, aliases: site.aliases } };
@@ -835,11 +986,40 @@ function resolveValueRows(
   return {
     rel: make.project({ id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS), exprs: VALUE_ROW_COLS.map((column) => [column.name, col(kept.id, column.name)] as const) }),
     mayBeMulti: false,
+    framing: produced.framing,
   };
 }
 
-/** The FIRST row per traverser — `TraversalUtil.apply`'s `next()` — by the child's own order. */
-function firstPerTraverser(rel: Rel, fresh: Minter): Rel {
+/**
+ * The FIRST row per traverser — `TraversalUtil.apply`'s `next()`, `handleTraversalValue`'s
+ * `results.get(0)` — by the child's own order, `sq`.
+ *
+ * WHICH row is first is the body's ITERATION order, and the plan states one only where the child rows
+ * carry an encounter that separates them. Where it does not — `sq` is the constant `0` when the child has
+ * no encounter channel, and a host encounter carried through a fan-out is one value for every row it fans
+ * out to — several DIFFERENT values tie for first, and taking one would be the scan's choice dressed as
+ * the reference's: `addE(…).property('w', __.out().values('name'))` names whichever neighbour SQLite
+ * visits first. So a tie between different values RAISES, before anything is written; a tie between
+ * equal values is no choice at all and passes (`__.out().values('lang')` over two `java` rows).
+ */
+function firstPerTraverser(rel: Rel, guard: Guarder, fresh: Minter): Rel {
+  const tied = make.window({
+    id: fresh('rn'), input: rel, channels: [], type: typeOf(...rel.type.cols, meta('lo', 'any', true), meta('hi', 'any', true), meta('tlo', 'text', true), meta('thi', 'text', true)),
+    specs: (['lo', 'hi', 'tlo', 'thi'] as const).map((name) => [name, {
+      kind: 'window-expr', fn: name.endsWith('lo') ? 'min' : 'max',
+      args: [name.startsWith('t') ? { kind: 'call', fn: 'coalesce', args: [col(rel.id, 'vt'), compilerText('')] } : col(rel.id, 'v')],
+      spec: { partitionBy: [col(rel.id, 'o'), col(rel.id, 'sq')], orderBy: [] },
+    }] as const),
+  });
+  const leading = rowNumberWindow(tied, 'lead', [], { partitionBy: [col(tied.id, 'o')], orderBy: [{ expr: col(tied.id, 'sq'), dir: 'asc' }] }, fresh);
+  const ambiguous = make.filter({
+    id: fresh('f'), input: leading, channels: [], type: leading.type,
+    pred: and(eq(col(leading.id, 'lead'), compilerInt(1)), or(
+      { kind: 'binary', op: 'is not', left: col(leading.id, 'lo'), right: col(leading.id, 'hi') },
+      { kind: 'binary', op: 'is not', left: col(leading.id, 'tlo'), right: col(leading.id, 'thi') })),
+  });
+  guard(make.project({ id: fresh('p'), input: ambiguous, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ambiguous.id, 'o')]] }),
+    { message: UNORDERED_FIRST, raiseWhen: 'rows' });
   const ranked = rowNumberWindow(rel, 'rk', [], { partitionBy: [col(rel.id, 'o')], orderBy: [{ expr: col(rel.id, 'sq'), dir: 'asc' }] }, fresh);
   const first = make.filter({ id: fresh('rf'), input: ranked, channels: [], type: ranked.type, pred: eq(col(ranked.id, 'rk'), compilerInt(1)) });
   return make.project({ id: fresh('rv'), input: first, channels: [], type: rel.type, exprs: rel.type.cols.map((column) => [column.name, col(first.id, column.name)] as const) });
@@ -866,18 +1046,27 @@ function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter
  * (`structure/util/ElementHelper.java:80-90`, `Property.Exceptions` `structure/Property.java:134-143`),
  * so they ride as guards exactly as a runtime label's do. A NON-STRING key the reference refuses by a
  * cast — a `ClassCastException` on the step path, `legalPropertyKeyValueArray`'s sentence on the folded
- * one (`ElementHelper.java:121-128`); the second is the one with portable text, so it is the one raised.
+ * one (`structure/util/ElementHelper.java:98-105`); the second is the one with portable text, so it is the one raised.
  */
 function runtimeKeyRows(body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter): Rel | null {
   const resolved = resolveValueRows(body, site, child, fresh);
   if (!resolved) return null;
   absentGuard(site, resolved.rel, guard, fresh);
-  const first = firstPerTraverser(resolved.rel, fresh);
+  const first = firstPerTraverser(resolved.rel, guard, fresh);
   const keyText = (rel: Rel): Expr => ({ kind: 'cast', arg: col(rel.id, 'v'), to: 'text' });
   const typeOfKey: Expr = { kind: 'call', fn: 'typeof', args: [col(first.id, 'v')] };
+  // A String is TEXT, but not all TEXT is a String: a uuid, a datetime or an exact-decimal tail is stored
+  // as text too, and says so either in the row's own type (`vt`, a `values()` read of a typed property)
+  // or in the type the body's framing STATES for every row (`constant(UUID(…))`). Either one naming a
+  // type other than `string` is the reference's non-String key.
+  const { framing } = resolved;
+  const statedOther = framing.kind === 'scalar' && framing.type.kind === 'static' && framing.type.type !== 'string';
+  const notString: Expr = statedOther ? { kind: 'binary', op: '!=', left: typeOfKey, right: text('null') } : or(
+    { kind: 'binary', op: '!=', left: typeOfKey, right: text('text') },
+    { kind: 'binary', op: '!=', left: { kind: 'call', fn: 'coalesce', args: [col(first.id, 'vt'), text('string')] }, right: text('string') });
   const rules: readonly (readonly [Expr, string, boolean])[] = [
     [eq(typeOfKey, text('null')), 'Property key can not be null', false],
-    [{ kind: 'binary', op: '!=', left: typeOfKey, right: text('text') }, 'The provided key/value array must have a String or T on even array indices', false],
+    [notString, 'The provided key/value array must have a String or T on even array indices', false],
     [eq(keyText(first), text('')), 'Property key can not be the empty string', false],
     [{ kind: 'binary', op: 'like', left: keyText(first), right: text('~%') }, 'Property key can not be a hidden key: ', true],
   ];
@@ -937,7 +1126,10 @@ function keyedRows(values: Rel, targets: Rel, key: RuntimeKey, fresh: Minter): R
  *    null for an edge, `:174-176`, so it falls to `results.get(0)`).
  *  - **Several traversers on ONE element** are the reference's loop run once each, so `single` leaves the
  *    LAST one's value, `set` keeps one copy of each distinct value, and `list` keeps all — the per-element
- *    reduction below states that as windows instead of as N statements.
+ *    reduction below states that as windows instead of as N statements. That is the loop only while no
+ *    run's body reads what an earlier run wrote (the second run of `__.values('age').math('_+1')` reads
+ *    the first's result); the caller's `sequentialGuard` refuses every write where that is possible, so
+ *    what reaches here reads the same values whichever order the runs take.
  *
  * **THE VALUE IS READ BEFORE ANYTHING IT COULD READ IS CHANGED.** The reference resolves the body and
  * THEN mutates, so `property(single, 'age', __.values('age').math('_+1'))` reads the OLD age. Deleting
@@ -1016,7 +1208,11 @@ function runtimeWriteRows(
   const kept = keep ? make.filter({ id: fresh('f'), input: ranked, channels: [], type: ranked.type, pred: keep }) : ranked;
   // IN TRAVERSER ORDER, then the child's own: rowids are assigned in source order, and a multi-property's
   // values read back in rowid order, so this is what keeps `property(list, k, __.out().values('name'))`
-  // listing the names in the order the body produced them.
+  // listing the names in the order the body produced them — WHERE THE PLAN STATES ONE. `sq` is the child's
+  // encounter, and a body with none (or one a fan-out does not refine) ties every result of a traverser at
+  // one `sq`; those rows are inserted in whatever order SQLite yields them, which is not claimed to be the
+  // reference's iteration order. It decides only the ORDER of the values a list/set holds, never WHICH
+  // values are written (unlike a "first" pick, which `firstPerTraverser` refuses on a tie).
   const ordered = make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, 'o'), dir: 'asc' }, { expr: col(kept.id, 'sq'), dir: 'asc' }] });
 
   // An EDGE property is an UPSERT on `(edge, key)`, so the row id SURVIVES and the refresh — which skips a
@@ -1105,8 +1301,13 @@ function prepareRuntimeWrite(
       exprs: [['o', col(site.host.id, site.origin)], ['v', value.expr], ['vt', value.vtype === null ? compilerNull('text') : compilerText(value.vtype)], ['sq', compilerInt(0)]],
     }),
     mayBeMulti: false,
+    framing: { kind: 'scalar', type: { kind: 'unknown' } } as RelFraming,
   };
   if (!resolved) return null;
+  // Before anything is resolved into a write: whether one statement can stand for the reference's
+  // one-traverser-at-a-time loop (`sequentialGuard`).
+  sequentialGuard(site, elem, [...('body' in value ? [value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])],
+    typeof write.key === 'string' ? [write.key] : null, child, guard, fresh);
   let key: RuntimeKey;
   if (typeof write.key === 'string') key = { kind: 'const', expr: propertyKeyExpr(write.key, write.keyName) };
   else {
@@ -1118,7 +1319,10 @@ function prepareRuntimeWrite(
   // writer's header).
   const first = site.resolve === 'first' || elem === 'edge';
   if (site.resolve === 'first') absentGuard(site, resolved.rel, guard, fresh);
-  const values = first ? firstPerTraverser(resolved.rel, fresh) : resolved.rel;
+  const values = first ? firstPerTraverser(resolved.rel, guard, fresh) : resolved.rel;
+  // Only the values the write APPLIES are asked: a null behind the first result of a folded parameter or
+  // an edge value is never applied by the reference either.
+  nullValueGuard(values, guard, fresh);
   const taken = bind ? bind(transportableValues(values, fresh), true) : values;
   return (targets, bindLater) => runtimeWriteRows(
     elem, keyedRows(taken, targets, key, fresh), resolved.mayBeMulti && !first, write.cardinality, write.meta, bindLater, guard, fresh,
@@ -1198,6 +1402,10 @@ function mapFormStatements(
   guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(many.id, 'o')]] }),
     { message: 'property(traversal) requires the traversal to produce a Map, but got: LinkedHashMap', raiseWhen: 'rows' });
   const entries = perField.length === 1 ? perField[0]! : make.union({ id: fresh('u'), inputs: perField, all: true, channels: [], type: perField[0]!.type });
+  // The map's entries are writes like any other: refused where one statement cannot stand for the
+  // reference's per-traverser loop, or where an entry the map DOES have holds a null.
+  sequentialGuard(site, elem, [body], rows.framing.fields.map((field) => field.key), child, guard, fresh);
+  nullValueGuard(entries, guard, fresh);
   const keyed = make.join({
     id: fresh('j'), left: entries, right: targets, join: 'inner', channels: [],
     type: typeOf(...entries.type.cols, meta('to', 'int'), meta('owner', 'int')),
@@ -1663,7 +1871,11 @@ function foldsIntoAddV(step: IRStep, child: ChildSeam): boolean {
   try { parsed = parseProperty(step, child.sideEffects, child.params); } catch { return false; }
   if (parsed.kind !== 'prop') return false;
   const { spec } = parsed;
-  return spec.meta === null && (isNested(spec.key) || (typeof spec.key === 'string' && spec.cardinality === null));
+  // The test is on the key AS WRITTEN: `key instanceof Traversal` holds for `__.constant('k')` too, which
+  // the parse has already folded to the string it names — and a traversal key folds whatever cardinality
+  // came with it, a string key only without one.
+  const writtenKey = step.args[readCardinality(step.args.map((a) => a.value)).off]?.value;
+  return spec.meta === null && (isNested(writtenKey) || (typeof spec.key === 'string' && spec.cardinality === null));
 }
 
 /**
@@ -2014,7 +2226,14 @@ export function elementAddV(
   // written in, because the folded ones are applied by `addVertex` itself.
   const foldedSteps = tokens.rest.filter((s) => foldsIntoAddV(s, child));
   const laterSteps = tokens.rest.filter((s) => !foldsIntoAddV(s, child));
-  const foldedWrites = foldedSteps.length ? propertyWrites(foldedSteps, 'vertex', child) : [];
+  // A folded parameter carries NO cardinality: `GraphTraversal.property` folds a TRAVERSAL key whatever
+  // cardinality was given and hands the creation only `addProperty(key, value)`
+  // (`dsl/graph/GraphTraversal.java:4034-4037`), so the write takes the graph's default for the key — and
+  // declares nothing on the new element, which a declared cardinality here would (and every later write to
+  // that key would then read it). A string key folds only without one, so this is only ever a traversal
+  // key — a runtime one, or a `__.constant('k')` the parse already folded to its string.
+  const foldedParsed = foldedSteps.length ? propertyWrites(foldedSteps, 'vertex', child) : [];
+  const foldedWrites = foldedParsed && foldedParsed.map((write) => ((write.kind === 'runtime' || write.kind === 'set') && write.cardinality !== null ? { ...write, cardinality: null } : write));
   const writes = laterSteps.length ? propertyWrites(laterSteps, 'vertex', child) : [];
   if (!foldedWrites || !writes) return null;
   // ONE ROW ONLY for a supplied id, and the refusal is arithmetic rather than caution: N input rows

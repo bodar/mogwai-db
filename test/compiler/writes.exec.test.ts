@@ -535,4 +535,46 @@ test('inject(v1,…).mergeV runs once per injected value (arity, not always 1)',
   expect(run(store, 'g.inject(1,2,3).mergeV([:])').length).toBe(18);
   expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
 });
+
+// A traversal-valued property() is one statement over every traverser; the reference is a loop that
+// writes before it reads the next traverser's value. Where the two can disagree the write REFUSES — and
+// the refusal must come before anything is written, so each case also reads the graph back unchanged.
+describe('property(k, <traversal>) refuses what one statement cannot answer', () => {
+  const refuses = (q: string, message: RegExp, unchanged: string) => {
+    const store = seededStore();
+    const before = run(store, unchanged);
+    expect(() => run(store, q)).toThrow(message);
+    expect(run(store, unchanged)).toEqual(before);
+  };
+
+  test('a body reading the key it writes, over an element the stream visits twice', () => {
+    refuses("g.V(2,4).in().property(single,'age', __.values('age').math('_+1'))", /reads what another traverser/, "g.V(1).values('age')");
+    refuses("g.V(2,4).in().property(list,'age', __.values('age'))", /reads what another traverser/, "g.V(1).properties('age').count()");
+    // …a body that never reads the written key is the loop exactly, and is written.
+    const store = seededStore();
+    run(store, "g.V(2,4).in().property(single,'x', __.values('name'))");
+    expect(run(store, "g.V(1).values('x')").map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('a creation parameter whose body could see an earlier traverser’s creation', () => {
+    refuses("g.V(1,2).addV('x').property('n', __.V().count())", /reads what another traverser/, 'g.V().count()');
+    refuses("g.V(1,4).addE('e').to(__.V(2)).property('w', __.out().count())", /reads what another traverser/, 'g.E().count()');
+    // One traverser has nobody before it.
+    const store = seededStore();
+    expect(run(store, "g.V(4).addE('e').to(__.V(2)).property('w', __.out().count()).values('w')").map((r) => r.v)).toEqual([2]);
+  });
+
+  test('a value that resolves to null', () => {
+    refuses("g.E(7).property('weight', __.inV().values('name').constant(null))", /resolved to null/, 'g.E(7).valueMap()');
+    refuses("g.V(1).addV('y').property('n', __.values('name').constant(null))", /resolved to null/, 'g.V().count()');
+  });
+
+  test('a first result the plan states no order for', () => {
+    refuses("g.V(1).addV('c').property('w', __.properties().value())", /no order to say which is first/, 'g.V().count()');
+  });
+
+  test('a key that is not a String, however it is stored', () => {
+    refuses("g.V(1).property(__.constant(UUID('2c8e5c1e-0f1a-4d1a-9b7e-1a2b3c4d5e6f')).identity(), 'x')", /String or T on even array indices/, 'g.V(1).valueMap()');
+  });
+});
 });

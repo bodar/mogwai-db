@@ -186,7 +186,10 @@ export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined
   let key = keyArg.value, val = valueArg.value;
   let keyName = keyArg.name, valueName = valueArg.name;
   const metaArgs = s.args.slice(off + 2);
-  { const ck = constFromNested(key, sideEffects, params); if (ck.has) { key = ck.value; keyName = null; } }
+  // A constant KEY folds to its literal — unless the constant is a TEXT-carried non-String (a uuid, a
+  // datetime), which would fold to a string the reference never sees: it refuses that key as not a String
+  // (`ElementHelper.legalPropertyKeyValueArray`), and the runtime-key path is the one that says so.
+  { const ck = constFromNested(key, sideEffects, params); if (ck.has && !(typeof ck.value === 'string' && ck.vtype !== null && ck.vtype !== 'string')) { key = ck.value; keyName = null; } }
   { const cv = constFromSelect(val, sideEffects, params); if (cv.has) { val = cv.value; valueName = null; } }
   if (key == null || (typeof key === 'object' && !isNested(key) && !isTokenArg(key))) return { kind: 'none' };
   if (isTokenArg(key)) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
