@@ -352,3 +352,46 @@ describe('scalar coalesce — monoid completion (a semigroup reducer + a constan
       .toThrow(UnsupportedTraversal);
   });
 });
+
+describe('seeded fold — fold(seed, Operator.x)', () => {
+  // `operator.ts`'s ONE walk, shared with `withSideEffect(k, seed, Operator.x)`: a member-by-member
+  // `Operator` is a LEFT FOLD, so it lowers to a `WITH RECURSIVE` over the ordered members and never to
+  // an SQL aggregate (`mult` has none, integer `div` is not `seed / PRODUCT`). The answer's class is
+  // dynamic, so the shape is the numeric scalar arm (`vt`), always productive (a seeded barrier).
+  test('a numeric operator is one recursive walk, framed by its dynamic class', () => {
+    const p = read('g.V().values("age").fold(1, Operator.mult)');
+    expect(p.sql).toContain('WITH RECURSIVE');
+    expect(p.sql).toContain('typeof(');
+    expect(p.sql).not.toMatch(/\bsum\(/i);
+    expect(p.shape).toEqual({ kind: 'scalar', productiveNull: true });
+  });
+
+  test('the walk is not fenced, so a correlated by() child hosts it', () => {
+    // A fence would be a named CTE that cannot read the outer row (`correlatedReduce`'s decline), so
+    // the per-traverser form compiling at all is the assertion.
+    const p = read('g.V().project("s").by(__.out().values("age").fold(0, Operator.sum))');
+    expect(p.sql).toContain('WITH RECURSIVE');
+  });
+
+  test('fold([], Operator.addAll) is the plain list fold', () => {
+    // `FoldStep()`'s own seed and function (`FoldStep.java:46-48`) — byte-identical SQL to `fold()`.
+    expect(read('g.V().values("age").fold([], Operator.addAll)').sql).toBe(read('g.V().values("age").fold()').sql);
+  });
+
+  test('a map seed with addAll merges into one map value', () => {
+    const p = read('g.inject(["a":1],["b":2]).fold(["c":3], Operator.addAll)');
+    expect(p.shape.kind).toBe('mapValue');
+    expect(p.sql).not.toContain('WITH RECURSIVE');
+  });
+
+  test('a form the reference raises on declines rather than answering', () => {
+    // An element is not a `Number` (`Operator.sum` casts), a string seed is not one either, and
+    // `addAll` over a scalar seed is "Objects must be both of Map or Collection".
+    for (const q of [
+      'g.V().fold(0, Operator.sum)',
+      'g.V().values("age").fold("a", Operator.sum)',
+      'g.V().values("age").fold(0, Operator.addAll)',
+      'g.inject(["a":1]).fold([:], Operator.sum)',
+    ]) expect(() => read(q)).toThrow(UnsupportedTraversal);
+  });
+});

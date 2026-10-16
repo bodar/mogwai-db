@@ -1,6 +1,5 @@
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { recursiveViolation } from '../../rel/recursive.ts';
 import { type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -16,7 +15,7 @@ import { foldElements, foldScalars, inferredVtype, LIST_COL, NODE_COL } from './
 import { carriedCols, collectedArray, eq, jsonOf, meta, rowNumberWindow, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
-import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
+import { ADD_ALL, ASSIGN, COLLECTION_OPS, seededLeftFold } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
 
@@ -772,121 +771,17 @@ function seedAsSite({ sites, of, merge }: Collection, source: GraphSource, fresh
     { sites, of, merge }, source, fresh);
 }
 
-/** The walk's two columns: the member ordinal reached so far, and the accumulator. Named apart from
- *  the member relation's own `v`/order columns so the recursive term's join declares no duplicate. */
-const FOLD_POS = 'fo';
-const FOLD_ACC = 'fa';
-/** The member relation's columns as the term reads them — its value, and its position in the order. */
-const MEMBER_VAL = 'mv';
-const MEMBER_ORD = 'mo';
-
 /**
- * THE SEEDED LEFT FOLD — `withSideEffect(k, seed, Operator.x)`'s reduction, as a `Recursive` walk over
- * the ordered member relation. `null` declines.
+ * `withSideEffect(k, seed, Operator.x)`'s reduction — the SEEDED LEFT FOLD over the accumulated members,
+ * which is `operator.ts`'s one walk (`seededLeftFold`), shared with `fold(seed, Operator.x)`. The order is
+ * the one Phase 2 already pinned (the site ordinal, then that site's encounter), so nothing new decides it.
  *
- * `sideEffects.add(k, v)` is `set(k, getReducer(k).apply(get(k), v))`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversalSideEffects.java:88-91`)
- * — a LEFT FOLD over the members in order, seeded by the declared supplier. That is a walk, not an
- * aggregate: see `operator.ts` for why picking nine SQL aggregates instead would answer two of them
- * wrongly. The order is the one Phase 2 already pinned (the site ordinal, then that site's encounter),
- * so nothing new decides it.
- *
- * **Only ONE node here is the walk, and the ordinal comes from OUTSIDE it.** A recursive term may hold
- * no window function (`recursive.ts`, `BARRIER_IN_TERM`), so the `ROW_NUMBER` that turns "the members
- * in order" into "the member at position n" is computed on the member relation and JOINED in — which
- * is legal precisely because the join opens a nested SELECT for it (`block.ts`: the barrier laws stop
- * at every nested SELECT, measured).
- *
- * **A collection NOTHING reached still answers the SEED**, and it falls out rather than needing an arm:
- * the walk's seed row is `(0, seed)` and no member joins to it, so the last row IS the seed — which is
- * `get(k)` over a side effect nothing added to, exactly.
+ * `NumberHelper`/`Operator` act on a VALUE (`(Number) a`, `(boolean) a`), so an element-membered
+ * collection folded by an arithmetic operator is a ClassCastException in the reference and a decline
+ * here. A `reduced` member is a map a grouping barrier already built — a different reduction.
  */
-function seededFold(
-  members: Rel, order: readonly string[], of: Members, policy: MergePolicy, fresh: Minter,
-): FramedRel | null {
-  const operator = policy.operator;
-  // The BULK pair is named rather than falling into the generic decline, because the two refusals are
-  // different facts: `addAll`/`assign` are a member-relation question this route has not built, and
-  // anything else is not an `Operator` this fold spells at all.
-  if (operator === undefined || BULK_OPS.has(operator) || !FOLD_OPS.has(operator)) return null;
-  // `NumberHelper`/`Operator` act on a VALUE (`(Number) a`, `(boolean) a`), so an element-membered
-  // collection folded by an arithmetic operator is a ClassCastException in the reference and a decline
-  // here. A `reduced` member is a map a grouping barrier already built — a different reduction.
-  if (of.kind !== 'scalars') return null;
-  const seed = constLit(policy.seed);
-  // A COLLECTION seed has no scalar literal form, which is `constLit`'s own answer — and it is only
-  // ever legal for the BULK pair, already refused above.
-  if (!seed) return null;
-
-  const keys = order.map((_, i) => `k${i}`);
-  const keyCols = keys.map((key) => meta(key, 'any', true));
-  // The members, narrowed to what the fold reads. Narrowing is the same move `accumulated` makes and
-  // for the same reason: past this point a row is a member, and the walk's join must declare no column
-  // name twice.
-  const narrowed = make.project({
-    id: fresh('sn'), input: members, channels: [], type: typeOf(meta(MEMBER_VAL, 'any', true), ...keyCols),
-    exprs: [[MEMBER_VAL, col(members.id, 'v')],
-      ...order.map((name, i) => [keys[i]!, col(members.id, name)] as const)],
-  });
-  // A member's POSITION in the fold. `ROW_NUMBER` over no order terms is well-defined and arbitrary,
-  // which is the same licence `foldScalars` takes over a site with no encounter channel: the reference
-  // pins no order on a capped collection at all.
-  const numbered = rowNumberWindow(narrowed, MEMBER_ORD, [],
-    { partitionBy: [], orderBy: keys.map((key) => ({ expr: col(narrowed.id, key), dir: 'asc' as const })) }, fresh);
-
-  const walkType = typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true));
-  const walkId = fresh('sr');
-  let foldable = true;
-  const walk = make.recursive({
-    id: walkId, name: `fd_${walkId}`, channels: [], type: walkType, cols: [FOLD_POS, FOLD_ACC],
-    seed: make.values({ id: fresh('ss'), channels: [], type: walkType, rows: [[compilerInt(0), seed]] }),
-    step: (self) => {
-      const joined = make.join({
-        id: fresh('sj'), left: self, right: numbered, join: 'inner', channels: [],
-        type: typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true),
-          meta(MEMBER_VAL, 'any', true), ...keyCols, meta(MEMBER_ORD, 'int')),
-        on: eq(col(numbered.id, MEMBER_ORD),
-          { kind: 'binary', op: '+', left: col(self.id, FOLD_POS), right: compilerInt(1) }),
-      });
-      const folded = mergeStep(operator, col(joined.id, FOLD_ACC), col(joined.id, MEMBER_VAL));
-      if (!folded) { foldable = false; return self; }
-      return make.project({
-        id: fresh('sp'), input: joined, channels: [], type: walkType,
-        exprs: [[FOLD_POS, col(joined.id, MEMBER_ORD)], [FOLD_ACC, folded]],
-      });
-    },
-  });
-  // One authority for SQLite's recursive-term laws, asked as a DECLINE here exactly as `repeatWalk`
-  // asks it — and asking constructs the memoised step, so `foldable` reports the inner decline too.
-  if (recursiveViolation(walk) || !foldable) return null;
-
-  // THE LAST ROW IS THE ANSWER — the fold is linear, so the greatest ordinal is the completed
-  // accumulator. Both nodes sit OUTSIDE the walk, where an `ORDER BY … LIMIT` means what it says.
-  const deepest = make.limit({
-    id: fresh('sl'), channels: [], type: walkType, count: compilerInt(1),
-    input: make.sort({
-      id: fresh('so'), input: walk, channels: [], type: walkType,
-      terms: [{ expr: col(walk.id, FOLD_POS), dir: 'desc' }],
-    }),
-  });
-  // **THE RESULT'S STORAGE CLASS IS DYNAMIC, exactly as a numeric reducer's is** — `NumberHelper`
-  // returns the highest common class of the operands, so a fold of integers is an integer and one
-  // touching a real is a real, and there is no compile-time tag to give. That is the `result: 'number'`
-  // framing arm and its `vt` column (`reducer.ts`, `framing.ts`). `and`/`or` are the exception: they
-  // answer a BOOLEAN, which `typeof` would report as `integer`, so they state their type.
-  const logical = isLogicalOp(operator);
-  const value = col(deepest.id, FOLD_ACC);
-  return {
-    rel: make.project({
-      id: fresh('sv'), input: deepest, channels: [],
-      type: typeOf(meta('v', 'any', true), ...(logical ? [] : [meta('vt', 'text', true)])),
-      exprs: [['v', value], ...(logical ? [] : [['vt', { kind: 'call', fn: 'typeof', args: [value] } as Expr] as const])],
-    }),
-    framing: logical
-      ? { kind: 'scalar', type: STATIC('boolean'), productiveNull: of.productiveNull }
-      : { kind: 'scalar', type: UNKNOWN, result: 'number', productiveNull: of.productiveNull },
-  };
-}
+const seededFold = (members: Rel, order: readonly string[], of: Members, policy: MergePolicy, fresh: Minter): FramedRel | null =>
+  of.kind === 'scalars' ? seededLeftFold(members, 'v', of.type, order, policy, of.productiveNull, fresh) : null;
 
 /** The column a member ITSELF occupies, plus the one its type rides in when it has one. What a site
  *  must project down to before it can be unioned with another — everything else it carries (its

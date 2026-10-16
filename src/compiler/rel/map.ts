@@ -260,7 +260,8 @@ const named = (modulation: Modulation | undefined): Modulation | undefined =>
  *  `groupCollected`'s pool. */
 const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
   (modulation && modulation.key.kind === 'child' && modulation.key.body.length === 1
-    && modulation.key.body[0]!.name === 'fold' && modulation.order === undefined ? undefined : modulation);
+    && modulation.key.body[0]!.name === 'fold' && !modulation.key.body[0]!.args.length
+    && modulation.order === undefined ? undefined : modulation);
 
 export function groupRows(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
@@ -335,6 +336,12 @@ export function groupRows(
   // than reducing every row that shares the new group key.
   if (valueBy?.key.kind === 'child' && !lastOnly && !(host.kind === 'scalar' && host.entry)) {
     const terminal = valueBy.key.body.at(-1)?.name;
+    // A SEEDED `fold(seed, Operator.x)` pools exactly as the list fold does — it is the same
+    // `ReducingBarrierStep` — but it reduces the pool to ONE VALUE per key, which neither pooled arm
+    // below builds (`groupCollected` collects a list, `groupReduced` spells the four reducers). Falling
+    // through to the per-member child would fold each member alone, a plausible-looking wrong value, so
+    // it declines here instead.
+    if (terminal === 'fold' && valueBy.key.body.at(-1)!.args.length) return null;
     // A `by(<pre>.fold())` COLLECTS the pooled child rows into a LIST per key — the same pool
     // `groupReduced` builds, folded rather than reduced. `fold()` is a reducing barrier that SEEDS `[]`,
     // so an empty pool keeps its key with `l[]` (not a dropped key), which is why it is `groupCollected`
@@ -1459,6 +1466,99 @@ export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
   // a bare `json_each` element as a JSON STRING otherwise, which would double-encode the `[key,val]` pair.
   const sliced = collectedOf(taken, jsonOf(col(taken.id, PAIR.value)), [{ expr: col(taken.id, PAIR.ord), dir: 'asc' }], MAP_COL, fresh);
   return withPayload(rel, [[MAP_COL, sliced]], [meta(MAP_COL, 'json', true)], fresh);
+}
+
+/** The columns a merged ENTRY rides in on its way into `mapsMerged`'s one map: its key node as JSON text
+ *  (the merge's equality), the whole `[key, value]` pair, and the three ordinals that place it — which
+ *  side it came from (the seed is 0, the stream 1), the traverser's emission position, and the entry's
+ *  position within its own map. */
+const MERGED = { key: 'zk', pair: 'zp', side: 'zs', at: 'za', entry: 'ze', ord: 'zo', first: 'zf', last: 'zl' } as const;
+
+/**
+ * `fold(<map>, Operator.addAll)` over a MAP stream — every traverser's map `putAll` into the seed, in
+ * emission order. `null` declines.
+ *
+ * `addAll(a, b)` on two maps is `a.putAll(b)` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Operator.java:178-196`),
+ * and a non-collection seed makes `FoldStep` a VALUE fold that hands the operator each traverser's map
+ * whole (`…/step/map/FoldStep.java:51-68`, `listFold` false). The seed is the gremlin-lang map literal,
+ * a `LinkedHashMap` — so the answer is two facts about each KEY, which is why this is two windows and not
+ * a `GROUP BY`:
+ *
+ * - **its VALUE is the LAST one put** — a later map's entry replaces an earlier one (`Fold.feature`,
+ *   `g_injectXa1_b2_b4X_foldXm_addAllX`: `b` answers `4`, not `2`);
+ * - **its POSITION is the FIRST one's** — `LinkedHashMap.put` on a present key replaces the value IN
+ *   PLACE, so insertion order is first occurrence.
+ *
+ * Every entry of every map, plus the seed's own, becomes one row; one `ROW_NUMBER` over (side, emission,
+ * entry) gives the putAll ORDER, a second window per key takes the first position and ranks the last
+ * occurrence, and the last occurrences collect into the pairs array by first position. Two keys are the
+ * same key when their `{t,v}` nodes are — the map vocabulary's one key encoding, which is what a
+ * `LinkedHashMap`'s `equals` on the key reads here.
+ *
+ * The stream must carry its pairs in `MAP_COL` and is exploded through a FENCE for `json_each`'s reason
+ * (`build.ts`, `fenced`): a map stream's column is often an aggregate (`group()`), which a table-valued
+ * argument cannot re-inline.
+ */
+export function mapsMerged(
+  input: Rel, seed: { readonly value: unknown; readonly type: TypeNode | null; readonly name: string | null },
+  keyOf: MapOf, valOf: MapOf, order: readonly string[], fresh: Minter,
+): Rel | null {
+  if (!(seed.value instanceof Map) || order.length !== 1) return null;
+  // A NON-EMPTY seed's entries are `{t,v}` SCALAR nodes (`mapLiteralBlob`), so they share a map with the
+  // stream's only where the stream's sides are scalar too; an element- or list-valued map beside them
+  // would be a pairs array whose two halves the framer must read by two different rules.
+  if (seed.value.size && (keyOf.kind !== 'scalar' || valOf.kind !== 'scalar')) return null;
+  const blob = seed.value.size ? mapLiteralBlob(seed.value, seed.type, seed.name) : null;
+  if (seed.value.size && !blob) return null;
+
+  const rowType = typeOf(meta(MERGED.key, 'text', true), meta(MERGED.pair, 'json', true),
+    meta(MERGED.side, 'int'), meta(MERGED.at, 'any', true), meta(MERGED.entry, 'int'));
+  const entryRow = (from: Rel, pair: Expr, side: number, at: Expr, entry: Expr): Rel => make.project({
+    id: fresh('zr'), input: from, channels: [], type: rowType,
+    exprs: [[MERGED.key, pairSide(pair, 'keys')], [MERGED.pair, pair],
+      [MERGED.side, compilerInt(side)], [MERGED.at, at], [MERGED.entry, entry]],
+  });
+
+  const rel = fenced(input, fresh);
+  const streamed = make.explode({
+    id: fresh('zx'), input: rel, expr: col(rel.id, MAP_COL), channels: rel.channels, as: PAIR,
+    type: typeOf(...rel.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+  });
+  // The EMISSION position decides which value a repeated key keeps, so a stream without exactly one has
+  // no answer to give here (the guard at the top). A fold is a collecting consumer (`analyzeChain`), so a
+  // chain that reaches one carries its encounter.
+  const at = col(streamed.id, order[0]!);
+  const rows: Rel[] = [entryRow(streamed, col(streamed.id, PAIR.value), 1, at, col(streamed.id, PAIR.ord))];
+  if (blob) {
+    const seeded = pairsOf(blob, fresh);
+    rows.unshift(entryRow(seeded, col(seeded.id, PAIR.value), 0, compilerInt(0), col(seeded.id, PAIR.ord)));
+  }
+  const all = rows.length === 1 ? rows[0]! : make.union({ id: fresh('zu'), inputs: rows, all: true, channels: [], type: rowType });
+
+  // The putAll ORDER — one position per entry, across the seed and every traverser's map.
+  const sequenced = rowNumberWindow(all, MERGED.ord, [], {
+    partitionBy: [],
+    orderBy: [MERGED.side, MERGED.at, MERGED.entry].map((name) => ({ expr: col(all.id, name), dir: 'asc' as const })),
+  }, fresh);
+  const byKey = { partitionBy: [col(sequenced.id, MERGED.key)], orderBy: [] };
+  const placed = make.window({
+    id: fresh('zw'), input: sequenced, channels: [],
+    type: typeOf(...sequenced.type.cols, meta(MERGED.first, 'int'), meta(MERGED.last, 'int')),
+    specs: [
+      [MERGED.first, { kind: 'window-expr', fn: 'min', args: [col(sequenced.id, MERGED.ord)], spec: byKey }],
+      [MERGED.last, { kind: 'window-expr', fn: 'row_number', args: [],
+        spec: { ...byKey, orderBy: [{ expr: col(sequenced.id, MERGED.ord), dir: 'desc' }] } }],
+    ],
+  });
+  const survivors = make.filter({
+    id: fresh('zf'), input: placed, channels: [], type: placed.type,
+    pred: eq(col(placed.id, MERGED.last), compilerInt(1)),
+  });
+  return make.aggregate({
+    id: fresh('zm'), input: survivors, channels: [], type: typeOf(meta(MAP_COL, 'json')),
+    groupBy: [],
+    aggs: [[MAP_COL, collectedArray(jsonOf(col(survivors.id, MERGED.pair)), [{ expr: col(survivors.id, MERGED.first), dir: 'asc' }])]],
+  });
 }
 
 /**

@@ -1376,7 +1376,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   }
   const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
   if (!inner?.length) return null;
-  if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
+  if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold' && !inner[1].args.length) {
     const value = inner[0].args[0]?.value, extra = inner[0].args[1]?.value;
     if (extra !== undefined || value === undefined) return null;
     // A COMPILER-BUILT single-element list wrapping the constant — always inlined (the `[value]` list is

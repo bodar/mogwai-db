@@ -45,7 +45,7 @@ import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -55,6 +55,7 @@ import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPa
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
+import { ADD_ALL, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
@@ -1891,13 +1892,35 @@ function scalarTail(
     // the decision every later member read depends on); what this side owns is the two facts it needs
     // — the per-row type column if the values carry one, and the emission order to fold IN.
     if (step.name === 'fold') {
-      if (args.length || isLocalScope(step)) return null;
+      const declared = foldDeclared(step);
+      if (!declared || isLocalScope(step)) return null;
       const encounter = encounterOf(rel.channels);
       // The stream's OWN type channel crosses into the member channel; a `perRow` type whose column
       // the relation does not actually carry degrades to `unknown` rather than claiming a column that
       // is not there (`assertStreamColumns`' rule, stated at the one seam that can violate it).
       const streamType = out.kind === 'scalar' && !(perRowColumnOf(out.type) && !carries(perRowColumnOf(out.type)!))
         ? out.type : UNKNOWN;
+      // `fold(seed, Operator.x)` — a SEEDED fold, and a scalar stream is the one shape whose members an
+      // `Operator` can act on (an element is a `ClassCastException` in the reference; a collection seed
+      // over scalars is `addAll`'s member-relation question). The walk is `operator.ts`'s, shared with
+      // `withSideEffect(k, seed, Operator.x)`: the members in emission order, the value column `v`.
+      if (declared !== PLAIN_FOLD) {
+        // A PER-ORIGIN stream (a `local()` body continuing past the fold) is declined rather than
+        // approximated: it needs the walk partitioned by origin and seeded off the origin DOMAIN, which
+        // `foldPerOrigin` does for the list fold and nothing does for this one yet.
+        //
+        // The `bulk` channel needs no arm, and the reason is positional: a `fold` — either overload —
+        // is `'reads-rows'` to the collapse authority (`ir/bulk.ts`, `verdictOf`'s default), so no
+        // movement collapse is ever introduced in front of one and every row here IS one traverser.
+        // That matters more for this overload than for the list one: the non-list
+        // `FoldStep.projectTraverser` applies the operator ONCE per traverser whatever its bulk
+        // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:58-68`),
+        // so the reference's answer over a BULKED traverser depends on where its strategies bulked —
+        // and a stream that never bulks is the one on which every strategy set agrees.
+        if (rel.channels.some((channel) => channel.role === 'origin')) return null;
+        const folded = seededLeftFold(rel, 'v', streamType, encounter ? [encounter.col] : ['v'], declared, true, fresh);
+        return folded && continueAs(folded.rel, folded.framing, steps, at + 1, false, ctx, fresh, labels);
+      }
       // A per-origin fold is SEEDED per origin — see the element fold above; fail closed without a domain.
       const origin = rel.channels.find((channel) => channel.role === 'origin');
       if (origin && !ctx.originDomain) return null;
@@ -2302,7 +2325,7 @@ function listTail(
     // list, so `foldLists` collects each `LIST_COL` value whole and the result `of` is
     // `{kind:'list', of: items}` — the nested shape the already-recursive framer expands. A GLOBAL fold
     // only (a `fold(Scope.local)` is not a step); the encounter orders the members.
-    if (step.name === 'fold' && !(step.args ?? []).length && !isLocalScope(step)) {
+    if (step.name === 'fold' && foldDeclared(step) === PLAIN_FOLD && !isLocalScope(step)) {
       const encounter = encounterOf(rel.channels);
       const folded = foldLists(rel, items, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
@@ -2423,7 +2446,7 @@ function pathTail(
     // collection member (`GremlinValueComparator.Type.Path`), so the outer list's member arm is `path`
     // and each member frames as a PATH (labels + objects), NOT a bare list — the SAME `foldLists` the list
     // stream uses, over the path's `LIST_COL`; the encounter orders the members.
-    if (step.name === 'fold' && !args.length && !isLocalScope(step)) {
+    if (step.name === 'fold' && foldDeclared(step) === PLAIN_FOLD && !isLocalScope(step)) {
       const encounter = encounterOf(rel.channels);
       const folded = foldPaths(rel, of, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
@@ -2566,10 +2589,21 @@ function mapTail(
     // is the same barrier the record fold reaches after collapsing — the value-side member shape is the
     // map's own `valOf`, carried through unchanged (a list member is a whole map, framed by the one
     // `{t:'map'}` rule).
-    if (step.name === 'fold' && !args.length && !isLocalScope(step)) {
+    if (step.name === 'fold' && !isLocalScope(step)) {
+      const declared = foldDeclared(step);
+      if (!declared) return null;
       const encounter = encounterOf(rel.channels);
-      const folded = foldMaps(rel, MAP_COL, valOf, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
-      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
+      if (declared === PLAIN_FOLD) {
+        const folded = foldMaps(rel, MAP_COL, valOf, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+        return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
+      }
+      // `fold(<map>, Operator.addAll)` — every map `putAll` into the seed (`mapsMerged`). Every other
+      // seeded form over a map is the reference's own exception (`addAll` with a non-map seed raises
+      // "Objects must be both of Map or Collection"; an arithmetic `Operator` casts the map to `Number`)
+      // and declines here. A per-origin stream declines for the scalar fold's reason.
+      if (declared.operator !== ADD_ALL || rel.channels.some((channel) => channel.role === 'origin')) return null;
+      const merged = mapsMerged(rel, declared.seed, keyOf, valOf, encounter ? [encounter.col] : [], fresh);
+      return merged && mapTail(merged, keyOf, valOf, steps, at + 1, ctx, fresh, labels);
     }
 
     const column = selectedColumn(step);
@@ -4317,7 +4351,7 @@ function elementTail(
     // `listPayload` expands it at the root, so a following `range(local)`/`unfold().limit(1)` throws
     // rows away before anything computes a property bag for them.
     if (step.name === 'fold') {
-      if (step.args.length || isLocalScope(step) || step.modulators?.length) return null;
+      if (foldDeclared(step) !== PLAIN_FOLD || isLocalScope(step) || step.modulators?.length) return null;
       // `fold()` is a COLLECTING BARRIER: it gathers the surviving element traversers into one list and
       // emits a single new traverser, so any carried path is consumed with them (`dropPath`). A
       // `simplePath().fold()` collects the elements that survived the filter — the path did its work.
@@ -4979,7 +5013,7 @@ function recordTail(
     // traverser: `project(k…).by(…).fold()`, the GraphQL to-many object field. The collapse is
     // `recordToMap` — the same boundary `select`/wire cross — so the fold sees a `MAP_COL` whatever the
     // fields were, and the member shape is the map's self-describing pairs array (`MapOf.scalar`).
-    if (step.name === 'fold' && !step.args.length && !isLocalScope(step)) {
+    if (step.name === 'fold' && foldDeclared(step) === PLAIN_FOLD && !isLocalScope(step)) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       const encounter = encounterOf(rel.channels);

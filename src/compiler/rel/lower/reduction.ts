@@ -31,6 +31,7 @@ import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
@@ -1000,6 +1001,28 @@ export function correlatedReduce(
     });
     return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
   }
+  const scalarOf = (column: string): Rel => make.project({
+    id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
+    exprs: [[column, col(tail.rel.id, column)]],
+  });
+  // A SEEDED `fold(seed, Operator.x)` — a scalar out of a fold, so neither the list arm above nor the
+  // reducer arms below. It is `count()`'s productivity, not `sum()`'s: `FoldStep` supplies its seed
+  // before it draws a start (`ReducingBarrierStep.processAllStarts`, `…/step/util/ReducingBarrierStep.java:99-111`),
+  // so a host whose sub-stream is EMPTY still emits the seed — ALWAYS productive. That holds only where
+  // the fold ENDS the body: a step after it (`.is(…)`) can drop the one row, and the reducer arm below
+  // would then read productivity off the fold's own input, which a seeded walk always has. So a seeded
+  // fold anywhere else in the body declines rather than inherit that probe.
+  const seededFoldAt = body.findIndex((step) => step.name === 'fold' && foldDeclared(step) !== PLAIN_FOLD);
+  if (seededFoldAt >= 0) {
+    if (seededFoldAt !== body.length - 1 || tail.framing.kind !== 'scalar') return null;
+    return {
+      expr: { kind: 'scalar', plan: scalarOf('v') },
+      framing: tail.framing,
+      ...(tail.framing.result === 'number' ? { vtype: { kind: 'scalar', plan: scalarOf('vt') } as Expr } : {}),
+      present: ALWAYS_PRODUCTIVE,
+      yields: 'one',
+    };
+  }
   if (tail.framing.kind !== 'scalar' || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
   // `count()` and the numeric reducers differ only in empty-input productivity: `CountGlobalStep` seeds
   // 0 (COALESCEd, ALWAYS productive), while `SumGlobalStep` leaves SQL's NULL alone and the by()
@@ -1008,10 +1031,6 @@ export function correlatedReduce(
   // that projects a second column (a record field, a collection member) lands it beside the value and
   // `by(sum())` composes exactly as `by(count())` does; a map side that carries one expression ignores
   // it.
-  const scalarOf = (column: string): Rel => make.project({
-    id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
-    exprs: [[column, col(tail.rel.id, column)]],
-  });
   const scalar = scalarOf('v');
   if (tail.framing.result === 'count')
     return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };

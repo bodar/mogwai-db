@@ -1,14 +1,25 @@
-import { compilerNull, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import * as make from '../../rel/factory.ts';
+import { recursiveViolation } from '../../rel/recursive.ts';
+import type { Rel } from '../../rel/rel.ts';
+import { isOperatorArg, type MergePolicy } from '../../gremlin/frontend.ts';
+import { flatType, REDUCER_CLASSES } from '../../gremlin/types.ts';
+import { perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
+import type { IRStep } from '../ir/step.ts';
+import { eq, meta, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { constLit } from './const.ts';
+import type { FramedRel } from './framing.ts';
 
 /**
- * `Operator` — ONE FOLD STEP, in the algebra.
+ * `Operator` — ONE FOLD STEP, in the algebra, and the SEEDED LEFT FOLD that iterates it.
  *
  * A Gremlin `Operator.x` is a `BinaryOperator<Object>` and nothing more
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Operator.java`).
  * Every place a traversal declares one — `withSideEffect(k, seed, Operator.x)`, `withSack(seed,
- * Operator.x)`, `sack(Operator.x).by(v)` — folds it the same way, so the EXPRESSION belongs in one
- * module. This is §6·4's split applied a second time: the operator SET is data (`SACK_OPS`,
- * `ir/step.ts`) and the SQL is emission, owned by the layer that emits it.
+ * Operator.x)`, `sack(Operator.x).by(v)`, `fold(seed, Operator.x)` — folds it the same way, so the
+ * EXPRESSION and the WALK belong in one module. This is §6·4's split applied a second time: the
+ * operator SET is data (`SACK_OPS`, `ir/step.ts`) and the SQL is emission, owned by the layer that
+ * emits it.
  *
  * ## The two categories, and why the distinction is not cosmetic
  *
@@ -116,3 +127,204 @@ export function mergeStep(operator: string, acc: Expr, value: Expr): Expr | null
  *  `and`/`or` do, and nothing else does — which is what decides whether the result's type is stated
  *  statically or read off `typeof(…)` at the wire (the `result: 'number'` framing arm). */
 export const isLogicalOp = (operator: string): boolean => operator === 'and' || operator === 'or';
+
+/**
+ * WHICH STORAGE CLASSES AN OPERATOR CAN ACT ON — the operand side of the reducer vocabulary's
+ * ELIGIBILITY policy (`reducer.ts`), stated for the `Operator` set rather than restated per site.
+ *
+ * `Operator.sum`/`minus`/`mult`/`div` cast both sides to `Number` (`Operator.java:40-86`), `min`/`max`
+ * take a `Comparable` (`NumberHelper.min:582`, `max:639`) and `and`/`or` a `boolean`
+ * (`Operator.java:131-168`). The reference raises a `ClassCastException` on anything else; a row-level
+ * reducer meeting the same value contributes NOTHING instead (`reducer.ts`, "ELIGIBILITY … none of which
+ * is negotiable"), so a fold applies the SAME rule rather than a second policy for the same cast — an
+ * ineligible member reads as NULL, which every operator above treats as the identity.
+ *
+ * **A BOOLEAN is the one class a storage class cannot see**: it is an INTEGER on this substrate
+ * (`constLit` spells `true` as `1`), so `typeof` alone would let an age into `Operator.and` and a `true`
+ * into `Operator.sum` — both a `ClassCastException` in the reference, both a silent number here. The
+ * stream's own TYPE channel is what can tell them apart, so the logical pair needs one that says
+ * `boolean` (statically, or per row) and DECLINES without it, and the rest exclude a member that says
+ * so. `null` is that decline.
+ */
+function eligibleOperand(operator: string, value: Expr, type: ScalarType, members: Rel): Expr | null {
+  const tag = staticTypeOf(type);
+  const typeCol = perRowColumnOf(type);
+  const rowTag = typeCol ? coalesceText(col(members.id, typeCol)) : null;
+  const when = (pred: Expr): Expr => ({ kind: 'case', whens: [[pred, value]] });
+  if (isLogicalOp(operator)) {
+    if (tag === 'boolean') return value;
+    return rowTag ? when({ kind: 'binary', op: '=', left: rowTag, right: compilerText('boolean') }) : null;
+  }
+  if (tag === 'boolean') return null;
+  const classes: Expr = {
+    kind: 'in-list', expr: { kind: 'call', fn: 'typeof', args: [value] },
+    values: (operator === 'min' || operator === 'max' ? REDUCER_CLASSES.comparable : REDUCER_CLASSES.arithmetic).map(compilerText),
+  };
+  return when(rowTag
+    ? { kind: 'binary', op: 'and', left: { kind: 'binary', op: '!=', left: rowTag, right: compilerText('boolean') }, right: classes }
+    : classes);
+}
+
+/** A per-row type tag with its NULL spelled as the empty tag, so a `!=` against it is never NULL. */
+const coalesceText = (tag: Expr): Expr => ({ kind: 'call', fn: 'COALESCE', args: [tag, compilerText('')] });
+
+/** Is this SEED a value `operator` can fold into without the reference's own `ClassCastException`?
+ *  The seed is a compile-time literal, so this is a static question and a refusal is a DECLINE: the
+ *  traversal's answer is an exception we do not spell, and computing `'a' + 1` would be a wrong one. */
+const seedAdmitted = (operator: string, seed: unknown): boolean =>
+  seed === null
+  || (isLogicalOp(operator) ? typeof seed === 'boolean'
+    : operator === 'min' || operator === 'max' ? typeof seed === 'number' || typeof seed === 'string'
+      : typeof seed === 'number');
+
+/** The walk's two columns: the member ordinal reached so far, and the accumulator. Named apart from
+ *  the member relation's own `v`/order columns so the recursive term's join declares no duplicate. */
+const FOLD_POS = 'fo';
+const FOLD_ACC = 'fa';
+/** The member relation's columns as the term reads them — its value, and its position in the order. */
+const MEMBER_VAL = 'mv';
+const MEMBER_ORD = 'mo';
+
+/**
+ * THE SEEDED LEFT FOLD — a member relation folded into ONE value by a member-by-member `Operator`, as a
+ * `Recursive` walk over the ordered members. `null` declines.
+ *
+ * Two places declare one, and both are the same left fold:
+ *
+ * - `withSideEffect(k, seed, Operator.x)` + `cap(k)`: `sideEffects.add(k, v)` is
+ *   `set(k, getReducer(k).apply(get(k), v))`
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversalSideEffects.java:88-91`).
+ * - `fold(seed, Operator.x)`: `ReducingBarrierStep.processAllStarts` is
+ *   `seed = reducingBiOperator.apply(seed, projectTraverser(start))` for every start, the seed supplied
+ *   once up front (`…/step/util/ReducingBarrierStep.java:99-111`), and `FoldBiOperator` applies the
+ *   declared function and nothing else (`…/step/map/FoldStep.java:84-101`).
+ *
+ * That is a walk, not an aggregate: see the header for why picking SQL aggregates instead would answer
+ * two operators wrongly. `order` names the columns that order the members (the caller's encounter, or a
+ * named collection's site ordinal then encounter); with none, `ROW_NUMBER` over no terms is well-defined
+ * and arbitrary, the licence `foldScalars` takes over a stream with no encounter.
+ *
+ * **Only ONE node here is the walk, and the ordinal comes from OUTSIDE it.** A recursive term may hold
+ * no window function (`recursive.ts`, `BARRIER_IN_TERM`), so the `ROW_NUMBER` that turns "the members
+ * in order" into "the member at position n" is computed on the member relation and JOINED in — which
+ * is legal precisely because the join opens a nested SELECT for it (`block.ts`: the barrier laws stop
+ * at every nested SELECT, measured).
+ *
+ * **ZERO members still answer the SEED**, and it falls out rather than needing an arm: the walk's seed
+ * row is `(0, seed)` and no member joins to it, so the last row IS the seed — `get(k)` over a side
+ * effect nothing added to, and `FoldStep`'s seed over an empty stream (`hasNextBarrier` is true once
+ * `processAllStarts` has drawn the supplier), exactly. Nothing here is materialized, so the same plan
+ * serves a CORRELATED child (`by(__.values(k).fold(0, Operator.sum))`), whose member relation reads the
+ * outer row and which a fence would cut off from it.
+ *
+ * The answer is ONE row with `v` (and, for a numeric fold, `vt`) and NO channels: it is a fresh
+ * traverser, which is what a reducing barrier emits.
+ */
+export function seededLeftFold(
+  members: Rel, value: string, type: ScalarType, order: readonly string[], policy: MergePolicy,
+  productiveNull: boolean, fresh: Minter,
+): FramedRel | null {
+  const operator = policy.operator;
+  // The BULK pair is named rather than falling into the generic decline, because the two refusals are
+  // different facts: `addAll`/`assign` are a member-relation question this walk does not answer, and
+  // anything else is not an `Operator` this fold spells at all.
+  if (operator === undefined || BULK_OPS.has(operator) || !FOLD_OPS.has(operator)) return null;
+  if (!seedAdmitted(operator, policy.seed.value)) return null;
+  const seed = constLit(policy.seed);
+  // A COLLECTION seed has no scalar literal form, which is `constLit`'s own answer — and it is only
+  // ever legal for the BULK pair, already refused above.
+  if (!seed) return null;
+  const operand = eligibleOperand(operator, col(members.id, value), type, members);
+  if (!operand) return null;
+
+  const keys = order.map((_, i) => `k${i}`);
+  const keyCols = keys.map((key) => meta(key, 'any', true));
+  // The members, narrowed to what the fold reads — and to what the operator can ACT on, so the
+  // eligibility rule is applied once, here, rather than inside every iteration. Narrowing is also what
+  // keeps the walk's join from declaring a column name twice.
+  const narrowed = make.project({
+    id: fresh('sn'), input: members, channels: [], type: typeOf(meta(MEMBER_VAL, 'any', true), ...keyCols),
+    exprs: [[MEMBER_VAL, operand],
+      ...order.map((name, i) => [keys[i]!, col(members.id, name)] as const)],
+  });
+  const numbered = rowNumberWindow(narrowed, MEMBER_ORD, [],
+    { partitionBy: [], orderBy: keys.map((key) => ({ expr: col(narrowed.id, key), dir: 'asc' as const })) }, fresh);
+
+  const walkType = typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true));
+  const walkId = fresh('sr');
+  let foldable = true;
+  const walk = make.recursive({
+    id: walkId, name: `fd_${walkId}`, channels: [], type: walkType, cols: [FOLD_POS, FOLD_ACC],
+    seed: make.values({ id: fresh('ss'), channels: [], type: walkType, rows: [[compilerInt(0), seed]] }),
+    step: (self) => {
+      const joined = make.join({
+        id: fresh('sj'), left: self, right: numbered, join: 'inner', channels: [],
+        type: typeOf(meta(FOLD_POS, 'int'), meta(FOLD_ACC, 'any', true),
+          meta(MEMBER_VAL, 'any', true), ...keyCols, meta(MEMBER_ORD, 'int')),
+        on: eq(col(numbered.id, MEMBER_ORD),
+          { kind: 'binary', op: '+', left: col(self.id, FOLD_POS), right: compilerInt(1) }),
+      });
+      const folded = mergeStep(operator, col(joined.id, FOLD_ACC), col(joined.id, MEMBER_VAL));
+      if (!folded) { foldable = false; return self; }
+      return make.project({
+        id: fresh('sp'), input: joined, channels: [], type: walkType,
+        exprs: [[FOLD_POS, col(joined.id, MEMBER_ORD)], [FOLD_ACC, folded]],
+      });
+    },
+  });
+  // One authority for SQLite's recursive-term laws, asked as a DECLINE here exactly as `repeatWalk`
+  // asks it — and asking constructs the memoised step, so `foldable` reports the inner decline too.
+  if (recursiveViolation(walk) || !foldable) return null;
+
+  // THE LAST ROW IS THE ANSWER — the fold is linear, so the greatest ordinal is the completed
+  // accumulator. Both nodes sit OUTSIDE the walk, where an `ORDER BY … LIMIT` means what it says.
+  const deepest = make.limit({
+    id: fresh('sl'), channels: [], type: walkType, count: compilerInt(1),
+    input: make.sort({
+      id: fresh('so'), input: walk, channels: [], type: walkType,
+      terms: [{ expr: col(walk.id, FOLD_POS), dir: 'desc' }],
+    }),
+  });
+  // **THE RESULT'S STORAGE CLASS IS DYNAMIC, exactly as a numeric reducer's is** — `NumberHelper`
+  // returns the highest common class of the operands, so a fold of integers is an integer and one
+  // touching a real is a real, and there is no compile-time tag to give. That is the `result: 'number'`
+  // framing arm and its `vt` column (`reducer.ts`, `framing.ts`). `and`/`or` are the exception: they
+  // answer a BOOLEAN, which `typeof` would report as `integer`, so they state their type.
+  const logical = isLogicalOp(operator);
+  const acc = col(deepest.id, FOLD_ACC);
+  return {
+    rel: make.project({
+      id: fresh('sv'), input: deepest, channels: [],
+      type: typeOf(meta('v', 'any', true), ...(logical ? [] : [meta('vt', 'text', true)])),
+      exprs: [['v', acc], ...(logical ? [] : [['vt', { kind: 'call', fn: 'typeof', args: [acc] } as Expr] as const])],
+    }),
+    framing: logical
+      ? { kind: 'scalar', type: STATIC('boolean'), productiveNull }
+      : { kind: 'scalar', type: UNKNOWN, result: 'number', productiveNull },
+  };
+}
+
+/** `fold()` with no arguments — the ordinary LIST fold, which every fold site already lowers. */
+export const PLAIN_FOLD = 'plain';
+
+/**
+ * WHAT A `fold` STEP DECLARES — the plain list fold, a seeded `(seed, Operator.x)` policy, or `null` for
+ * a form this does not read (a decline).
+ *
+ * `fold(seed, foldFunction)` is the only other overload (`GraphTraversal.fold(E2, BiFunction)`), and in
+ * the Gremlin string grammar its function is an `Operator`. **`fold([], Operator.addAll)` IS the plain
+ * fold**, by the reference's own construction: the no-argument `FoldStep` constructor is
+ * `this(traversal, ArrayListSupplier.instance(), Operator.addAll)` (`…/step/map/FoldStep.java:46-48`) —
+ * an empty `ArrayList` seed, `addAll`, and `listFold` because that seed is a `Collection`. A `Set` seed is
+ * NOT that (its `addAll` dedups), so only an empty LIST literal takes the identity.
+ */
+export function foldDeclared(step: IRStep): typeof PLAIN_FOLD | MergePolicy | null {
+  const args = step.args ?? [];
+  if (!args.length) return PLAIN_FOLD;
+  const [seed, fn, extra] = args;
+  if (!seed || !fn || extra || !isOperatorArg(fn.value)) return null;
+  const operator = fn.value.operator;
+  if (operator === ADD_ALL && seed.name == null && Array.isArray(seed.value) && !seed.value.length && flatType(seed.type) === 'list')
+    return PLAIN_FOLD;
+  return { seed, operator };
+}

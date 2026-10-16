@@ -963,7 +963,9 @@ export function collapseFoldCountLocal(steps: IRStep[]): IRStep[] {
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const next = steps[i + 1];
-    if (s.name === 'fold' && !s.modulators && next?.name === 'count'
+    // Only the LIST fold: a seeded `fold(seed, Operator.x)` emits one VALUE, whose `count(local)` is
+    // not the number of traversers that reached it.
+    if (s.name === 'fold' && !s.modulators && !s.args.length && next?.name === 'count'
       && next.args.some((a) => isScopeArg(a.value) && a.value.scope === 'local')) {
       out.push({ ...next, args: next.args.filter((a) => !(isScopeArg(a.value) && a.value.scope === 'local')) });
       i++; // consume both fold and count(Scope.local)
