@@ -429,10 +429,24 @@ export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): Canonica
     // An integer beyond int32 range is a `long`, not an `int` — inferring `int` would both
     // mis-type it AND overflow the strict Int framer (frameValue). This matches the client's
     // own magnitude-based Number strategy and, for such values, agrees with the wire truth.
-    case 'number': return !Number.isInteger(jsValue) ? 'double'
-      : jsValue >= -2147483648 && jsValue <= 2147483647 ? 'int' : 'long';
+    case 'number': return numberClassOf(jsValue);
     default: return null;
   }
+}
+
+/**
+ * THE CLASS OF AN UNTYPED JS NUMBER — what a value with no declared type (a JSON-request parameter, a
+ * typeless client's binding) IS, decided the way the reference GLV decides it when it serializes the same
+ * number (`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/structure/io/binary/internals/NumberSerializationStrategy.js:77-95`,
+ * and `GremlinLang`'s literal twin, `lib/process/gremlin-lang.ts:107-115`): an Int within int32, a Long within
+ * ±2^53, and a Double for everything else — a fraction, a non-finite, a negative zero, and a whole number
+ * past 2^53, which is "a huge double that only appears integral" (and past 2^63 is no Long at all: storing
+ * it under a `long` tag made every later read raise).
+ */
+export function numberClassOf(value: number): 'int' | 'long' | 'double' {
+  if (!Number.isInteger(value) || Object.is(value, -0)) return 'double';
+  if (value >= -2147483648 && value <= 2147483647) return 'int';
+  return Number.isSafeInteger(value) ? 'long' : 'double';
 }
 
 // ---------- self-describing typed-JSON for stored COLLECTION values (Option B) ----------

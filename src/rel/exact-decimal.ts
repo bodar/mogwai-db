@@ -14,7 +14,9 @@
 // controls ask here: a compiler-held REAL literal (`emit.ts`) is spelled as an exact product of in-range
 // factors instead, and a run-time REAL entering a JSON text (`asExactReal`, `compiler/rel/build.ts`) or spelled
 // as a BigDecimal's digits (`doubleDecimalText`, `compiler/rel/float.ts`) DEFERS in-row outside it rather than
-// carry a different number. Zero and ±Infinity are exact everywhere (`0.0`, the overflow literal `9e999`).
+// carry a different number — unless the JSON text is one only the wire reads, which carries it exactly
+// (`binary64Carrier`, `compiler/rel/build.ts`). Zero and ±Infinity are exact everywhere (`0.0`, the overflow
+// literal `9e999`).
 
 import { compilerReal, type BinaryOp, type Expr } from './expr.ts';
 
@@ -70,3 +72,43 @@ export function exactRealSpelling(x: number): string | null {
   const head = String(w);
   return `(${/[.eE]/.test(head) ? head : `${head}.0`}${`*${factor}`.repeat(steps)})`;
 }
+
+// ---------- a binary64 OUTSIDE the range, carried exactly to the wire ----------
+//
+// Outside the range no decimal TEXT crosses SQLite exactly in EITHER direction (measured on 3.51.2, 5 000
+// random doubles per band: `printf('%!.17g', x)` is read back as x by JS for only 55-90% of them, SQLite's
+// own `CAST`/JSON reader reads JS's correctly rounded `String(x)` back as x for only 63-91%), so no JSON
+// NUMBER can carry such a value into a JSON text SQLite will read again. But a JSON text only the WIRE reads
+// (an element's property bag — `compiler/rel/element.ts`) needs no SQL reader: it needs a spelling SQL can
+// WRITE exactly and JS can READ exactly. Multiplying by a power of two is exact in binary64 whenever the
+// product is representable (it moves only the exponent), so the value rides as `<w>p<n>` — `x = w × 2^n`,
+// with `w` brought INSIDE the range by one such multiplication, where SQLite's `printf('%!.17g')` is exact —
+// as a JSON STRING under a binary64 `{t,v}` tag, which no decimal text (a BigDecimal's `12.50`) can be
+// mistaken for: it holds a `p`. `binary64OfCarrier` is the reading half, applied by both JSON readers of
+// SQLite's text (`json-exact.ts`).
+
+/**
+ * The three powers of two the carrier scales by — each band's `w = x × 2^-n` lands inside [1e-80, 1e116]:
+ * - `large`, every |x| > 1e116: w ∈ (1e116·2^-640, 2^1024·2^-640) = (2.2E-77, 3.9E115);
+ * - `small`, |x| ∈ [~1e-190, 1e-80): w = x·2^500 ∈ [3.3E-40, 3.3E70);
+ * - `tiny`, the rest down to `Double.MIN_VALUE` (2^-1074): w = x·2^1000 ∈ [2^-74, 1.1E111).
+ * `small` fits anywhere from 3E-231 up and `tiny` anywhere up to 9E-186, so the boundary between them
+ * need not be exact (`binary64Carrier`, `compiler/rel/build.ts`).
+ */
+export const CARRIER_BANDS = { large: 640, small: -500, tiny: -1000 } as const;
+const CARRIER_EXPONENTS: ReadonlySet<number> = new Set(Object.values(CARRIER_BANDS));
+/** `<w>p<n>`: a 17-significant-digit `printf` spelling, then the power of two. */
+const CARRIER = /^(-?\d+(?:\.\d+)?(?:e[+-]\d+)?)p(-?\d+)$/;
+
+/** The binary64 a wire carrier spells (`binary64Carrier`, `compiler/rel/build.ts`), or `null` for any other
+ *  value. `w × 2^n` is one exact multiplication: the product IS the value the writer started from. */
+export function binary64OfCarrier(v: unknown): number | null {
+  if (typeof v !== 'string') return null;
+  const m = CARRIER.exec(v);
+  if (!m || !CARRIER_EXPONENTS.has(Number(m[2]))) return null;
+  return Number(m[1]) * 2 ** Number(m[2]);
+}
+
+
+/** Can this JSON text hold a wire carrier? The cheap pre-test a reader skips its reviver on. */
+export const mayHoldCarrier = (text: string): boolean => /\dp-?\d/.test(text);

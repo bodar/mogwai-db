@@ -40,6 +40,11 @@ export interface Sql {
   query<T = any>(sql: string, binds?: readonly unknown[]): T[];
   /** Release the underlying handle, if any (Bun closes bun:sqlite; the DO owns none). Optional. */
   close?(): void;
+  /** Run `fn` as ONE atomic unit — every write it made is kept if it returns and undone if it throws —
+   *  nesting safely inside an enclosing unit. A DO cannot `BEGIN`/`SAVEPOINT` through `sql.exec`, so this
+   *  is each runtime's own primitive (`transactionSync`, bun's `transaction`, OO1's `savepoint`).
+   *  Optional: a driver without it runs `fn` bare (`GraphStore.atomically`). */
+  atomically?<T>(fn: () => T): T;
 }
 
 // ---- graph capabilities ----

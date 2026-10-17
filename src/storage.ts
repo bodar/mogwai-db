@@ -230,6 +230,11 @@ export class GraphStore {
     for (const statement of SCHEMA) this.sql.exec(statement);
   }
 
+  /** Run `fn` as one atomic unit on the driver (`Sql.atomically`) — or bare, on a driver without one. */
+  atomically<T>(fn: () => T): T {
+    return this.sql.atomically ? this.sql.atomically(fn) : fn();
+  }
+
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
     // Normalize bind types at the one seam both runtimes cross (coerceBindValue,
     // gremlin-types). bun:sqlite accepts boolean/bigint; DO ctx.storage.sql

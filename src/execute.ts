@@ -14,7 +14,7 @@ import { untyped } from './untyped.ts';
 import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
-import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from './json-exact.ts';
+import { exactNumberOf, isExactNumber, parseElementJson, parseExactJson, type ExactNumber } from './json-exact.ts';
 import { bigDecimalOfCarrier } from './gremlin/float.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -228,7 +228,7 @@ function typedValueBuffer(v: any, row: any, type: ScalarType, site: string): Buf
 // bare scalar frames by its uniform tag (or infers); an element arrives as a JSON object
 // string (SQL elementValueResult) → vertexBuffer/edgeBuffer to keep props; a list via frameListOf.
 function mapSideBuffer(raw: any, of: MapOf): Buffer {
-  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
+  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(parseElementJson(raw));
   if (of.kind === 'list') return frameListOf(raw, of.of);
   // scalar: always a self-describing {t,v} node (JSON text) → frame each its own exact type.
   return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw));
@@ -354,15 +354,15 @@ const framePropertyRow = (x: any): Buffer =>
 
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
-const propsOf = (props: any): Record<string, any> => typeof props === 'string' ? JSON.parse(props) : props;
+const propsOf = (props: any): Record<string, any> => parseElementJson(props);
 const rowVertex = (r: any): Buffer => vertexBuffer(r.id, labelsOf(r.label), propsOf(r.props));
 const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, propsOf(r.props));
 
 // Frame one element (vertex/edge/property) from prefixed columns (k_* / v_*).
 function elementBuffer(r: any, prefix: string, elem: ElemShape): Buffer {
-  if (elem === 'edge') return edgeBuffer(r[`${prefix}_id`], r[`${prefix}_label`], r[`${prefix}_src`], r[`${prefix}_tgt`], JSON.parse(r[`${prefix}_props`]));
+  if (elem === 'edge') return edgeBuffer(r[`${prefix}_id`], r[`${prefix}_label`], r[`${prefix}_src`], r[`${prefix}_tgt`], propsOf(r[`${prefix}_props`]));
   if (elem === 'property') return propertyBuffer(r[`${prefix}_owner`], r[`${prefix}_pk`], r[`${prefix}_pv`]);
-  return vertexBuffer(r[`${prefix}_id`], labelsOf(r[`${prefix}_label`]), JSON.parse(r[`${prefix}_props`]));
+  return vertexBuffer(r[`${prefix}_id`], labelsOf(r[`${prefix}_label`]), propsOf(r[`${prefix}_props`]));
 }
 
 // path(): one GraphBinary Path per row (mirrors PathSerializer). {objects} is
@@ -689,8 +689,8 @@ export function* frameResolved(store: GraphStore, plan: Executable): Generator<F
 function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape): Generator<Buffer> {
   switch (shape.kind) {
     case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
-    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens, shape.labelSet); return;
-    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.labelSet); return;
+    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, propsOf(r.props), shape.keys, shape.tokens, shape.labelSet); return;
+    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, propsOf(r.props), shape.keys, shape.labelSet); return;
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.
@@ -768,7 +768,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.
     case 'jsonbElementList': for (const r of rows) {
-      const items = JSON.parse(r.list);
+      const items = parseElementJson(r.list) as any[];
       yield listBuffer(items.map(shape.elem === 'edge' ? rowEdge : rowVertex));
     } return;
     // A set-VALUE stream (intersect/difference/disjunct, or a stored typed set): frame each
@@ -864,7 +864,7 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
     // The whole-stream element fold (`fold()` over vertices/edges) — ONE list of element nodes.
     case 'list': return [{ t: 'list', v: rows.map((r) => foreignElementNode(r, shape.elem)) }];
     // A relational element-list value per row (element members already expanded to payload objects).
-    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: JSON.parse(r.list).map((it: any) => foreignElementNode(it, shape.elem)) }));
+    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: (parseElementJson(r.list) as any[]).map((it: any) => foreignElementNode(it, shape.elem)) }));
     // A per-row self-describing node already (`unfold()` over a mixed collection): pass through.
     case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : parseExactJson(r.node)));
     // A whole-map VALUE per row (`project`/`valueMap`/`group` folded to a map value).
@@ -911,7 +911,7 @@ const labelTokenNode = (label: string, labelSet: boolean): FrameNode =>
 function valueMapNode(r: any, keys: string[] | null, tokens: boolean, labelSet: boolean): FrameNode {
   const pairs: [FrameNode, FrameNode][] = [];
   if (tokens) { pairs.push([ID_TOKEN, { t: null, v: r.id }]); pairs.push([LABEL_TOKEN, labelTokenNode(r.label, labelSet)]); }
-  const props = JSON.parse(r.props) as Record<string, ValueNode[]>;
+  const props = propsOf(r.props) as Record<string, ValueNode[]>;
   for (const key of keys ?? Object.keys(props)) if (key in props) pairs.push([key, { t: 'list', v: props[key] }]);
   return { t: 'map', v: pairs };
 }
@@ -920,7 +920,7 @@ function valueMapNode(r: any, keys: string[] | null, tokens: boolean, labelSet: 
  *  key, with the id/label tokens ALWAYS present. */
 function elementMapNode(r: any, keys: string[] | null, labelSet: boolean): FrameNode {
   const pairs: [FrameNode, FrameNode][] = [[ID_TOKEN, { t: null, v: r.id }], [LABEL_TOKEN, labelTokenNode(r.label, labelSet)]];
-  const props = JSON.parse(r.props) as Record<string, ValueNode[]>;
+  const props = propsOf(r.props) as Record<string, ValueNode[]>;
   for (const key of keys ?? Object.keys(props)) if (key in props) pairs.push([key, props[key][0]]);
   return { t: 'map', v: pairs };
 }
@@ -956,7 +956,7 @@ function mapNode(r: any, entries: MapEntry[]): FrameNode {
 /** One side (key/value) of a Map.Entry row as a node — the node twin of `mapSideBuffer`: an element
  *  arm, a list arm, else a self-describing `{t,v}` scalar node (already parsed, or JSON text). */
 function mapSideNode(raw: any, of: MapOf): FrameNode {
-  if (of.kind === 'elem') return raw == null ? null : foreignElementNode(JSON.parse(raw), of.elem);
+  if (of.kind === 'elem') return raw == null ? null : foreignElementNode(parseElementJson(raw), of.elem);
   if (of.kind === 'list') return raw == null ? null : { t: 'list', v: foreignListNodes(raw, of.of) };
   return raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw);
 }

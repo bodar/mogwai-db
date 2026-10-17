@@ -3,9 +3,13 @@ import { emit, emitProgram, isRowsBind, type Emitted } from './rel/emit.ts';
 import type { Guard, Plan } from './rel/plan.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 
-/** The one thing a program needs of a store: run a statement, get rows back. Deliberately not
- * `GraphStore` — a program is relational, and nothing here knows what a vertex is. */
-export interface RowSource { query<T = any>(sql: string, binds?: readonly unknown[]): T[]; }
+/** The one thing a program needs of a store: run a statement, get rows back — and, where the store has
+ * one, an ATOMIC unit to run them in (`GraphStore.atomically`). Deliberately not `GraphStore` — a program
+ * is relational, and nothing here knows what a vertex is. */
+export interface RowSource {
+  query<T = any>(sql: string, binds?: readonly unknown[]): T[];
+  atomically?<T>(fn: () => T): T;
+}
 
 /**
  * A program RENDERED to plain, transport-safe data — the form that CROSSES an RPC (edge-compilation
@@ -68,7 +72,17 @@ export function runProgram(store: RowSource, program: Plan, tail?: Emitted): rea
  * raises when its row count is the wrong one. Needs no algebra and no `emit` — everything it reads is
  * the plain `RenderedProgram`, which is why this is the ONLY half that has to run on the DO.
  */
-export function runSteps(store: RowSource, { steps, columns }: RenderedProgram): readonly Record<string, unknown>[] {
+export function runSteps(store: RowSource, program: RenderedProgram): readonly Record<string, unknown>[] {
+  // ONE ATOMIC UNIT: a program's writes are kept only if every step of it answers. A step after a write —
+  // the echo that frames what was written, a guard, a row-level deferral — can still raise, and outside a
+  // unit the write it follows stays committed while the client is told the traversal failed: a report
+  // that is not the answer. So a failing request leaves the graph as it found it, which is TinkerPop's
+  // transactional contract — a unit of work ends in COMMIT or ROLLBACK, never half of each
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Transaction.java:147-149`).
+  return store.atomically ? store.atomically(() => runStepsIn(store, program)) : runStepsIn(store, program);
+}
+
+function runStepsIn(store: RowSource, { steps, columns }: RenderedProgram): readonly Record<string, unknown>[] {
   const retained = new Map<string, readonly Record<string, unknown>[]>();
   let result: readonly Record<string, unknown>[] = [];
 

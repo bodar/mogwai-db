@@ -45,6 +45,11 @@ export class BunSqlite implements Sql {
     this.db.close();
   }
 
+  /** bun's `transaction` — a `SAVEPOINT` when one is already open, so it nests. */
+  atomically<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   /** Snapshot the whole database to a portable byte buffer (bun:sqlite `serialize`). BunSqlite-ONLY
    *  and deliberately NOT on the shared `Sql` interface: the DO runtime (`ctx.storage.sql`) has no
    *  such primitive, and the one caller is the test seed template (test/support/graph.ts). Building

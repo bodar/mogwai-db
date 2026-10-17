@@ -101,4 +101,8 @@ export class CfLimitedSql implements Sql {
   close(): void {
     this.inner.close?.();
   }
+
+  atomically<T>(fn: () => T): T {
+    return this.inner.atomically ? this.inner.atomically(fn) : fn();
+  }
 }

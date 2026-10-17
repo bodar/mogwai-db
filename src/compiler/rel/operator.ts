@@ -4,7 +4,7 @@ import { recursiveViolation } from '../../rel/recursive.ts';
 import { raiseExpr } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { isOperatorArg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
-import { flatType } from '../../gremlin/types.ts';
+import { flatType, numberClassOf } from '../../gremlin/types.ts';
 import { perRowColumnOf, STATIC, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { eq, meta, rowNumberWindow, typeOf, type Minter } from './build.ts';
@@ -223,8 +223,7 @@ function seedClass(operator: string, seed: Arg): 'int' | 'long' | 'double' | 'st
 const numberClass = (value: number, declared: string | null): 'int' | 'long' | 'double' | null => {
   if (declared === 'int' || declared === 'long' || declared === 'double') return declared;
   if (declared !== null) return null;
-  if (!Number.isInteger(value)) return 'double';
-  return value > INT32_MAX || value < INT32_MIN ? 'long' : 'int';
+  return numberClassOf(value);
 };
 
 /** The member classes an operator can fold — a STATIC class outside it is every member's exception (or

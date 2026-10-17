@@ -30,7 +30,7 @@
 
 // A number past 2^53 is spelled with a run of 16+ digits, or with an exponent (`2.7e+19`); a whole Double
 // with a point (`1.0`, `-0.0`).
-import { hasExactDecimal, INEXACT_DECIMAL } from './rel/exact-decimal.ts';
+import { binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 
 const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
@@ -52,12 +52,49 @@ export const exactNumberOf = (value: ExactNumber): { readonly integral: boolean;
  *  runtime lacks source-text access the number stays `JSON.parse`'s — a reader that compares it then sees
  *  a bare unsafe integer, which ORDERABILITY declines rather than ranks (`orderability.ts`). */
 export function parseExactJson(text: string): any {
-  if (!rawJson.rawJSON || !WIDE_DIGITS.test(text)) return JSON.parse(text);
-  const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown =>
-    typeof value === 'number' && Number.isInteger(value) && context?.source !== undefined
+  const carried = mayHoldCarrier(text);
+  if (!carried && (!rawJson.rawJSON || !WIDE_DIGITS.test(text))) return JSON.parse(text);
+  const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown => {
+    if (carried) {
+      // A whole Double past 2^53 stays a raw exact number spelled with its exponent (every carried value
+      // is outside [1e-80, 1e116], so `String` spells a whole one `1e+300`), as SQLite's own `1.0e+300` would.
+      const leaf = carriedLeaf(value, (x) => rawJson.rawJSON && Number.isInteger(x) ? rawJson.rawJSON(String(x)) : x);
+      if (leaf !== undefined) return leaf;
+    }
+    return rawJson.rawJSON && typeof value === 'number' && Number.isInteger(value) && context?.source !== undefined
       && (!Number.isSafeInteger(value) || !INTEGRAL.test(context.source))
-      ? rawJson.rawJSON!(context.source) : value;
+      ? rawJson.rawJSON(context.source) : value;
+  };
   return JSON.parse(text, reviver as (key: string, value: unknown) => unknown);
+}
+
+/** The tags whose `{t,v}` leaf may hold a binary64 wire carrier (`binary64Carrier`, `compiler/rel/build.ts`). */
+const BINARY64_TAGS: ReadonlySet<unknown> = new Set(['double', 'float', 'real', 'bigdecimal']);
+
+/** A `{t,v}` leaf whose `v` is a binary64 wire carrier, with `v` read back as the number it carries
+ *  (`as` picks that number's JS form); `undefined` for any other value. */
+function carriedLeaf(value: unknown, as: (x: number) => unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const node = value as { t?: unknown; v?: unknown };
+  if (!BINARY64_TAGS.has(node.t)) return undefined;
+  const x = binary64OfCarrier(node.v);
+  return x === null ? undefined : { ...node, v: as(x) };
+}
+
+/**
+ * AN ELEMENT PAYLOAD — one element, a list of them, or an element's property bag (`{key: [{t,v}, …]}`,
+ * an edge's `{key: {t,v}}`) — as JSON text or already parsed: the one reader of the wire-only JSON
+ * `compiler/rel/element.ts` builds. A binary64 no decimal spelling crosses SQLite exactly rides there as a
+ * wire carrier (`binary64Carrier`, `compiler/rel/build.ts`), read back here to the number `JSON.parse`
+ * would have produced from its exact spelling; everything else is `JSON.parse`'s own.
+ */
+export function parseElementJson(json: unknown): any {
+  if (typeof json !== 'string') return json;
+  if (!mayHoldCarrier(json)) return JSON.parse(json);
+  return JSON.parse(json, (_key, value: unknown) => {
+    const leaf = carriedLeaf(value, (x) => x);
+    return leaf === undefined ? value : leaf;
+  });
 }
 
 /** `JSON.stringify`, spelling a negative zero `-0.0` — the writing half of the module rule, for a

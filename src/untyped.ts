@@ -28,6 +28,7 @@
 // different, response-shaped rendering.
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
 import { valueNodeFromStored } from './gremlin/types.ts';
+import { parseElementJson } from './json-exact.ts';
 
 /**
  * One `FrameNode` → plain JS (a `JSON.stringify`-able value). Total over the FrameNode union: a
@@ -120,4 +121,4 @@ const asLabels = (label: any): string[] =>
 
 /** An element's props field → the `{ key: [valueNode] }` object. Already an object from
  *  `foreignElementNode`/`propsOf`; a raw JSON-text form is parsed. */
-const asProps = (props: any): Record<string, any> => (typeof props === 'string' ? JSON.parse(props) : props);
+const asProps = (props: any): Record<string, any> => parseElementJson(props);

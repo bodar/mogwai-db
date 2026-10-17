@@ -53,7 +53,7 @@ export class GraphDatabase extends DurableObject<Env> {
     super(ctx, env);
     // Schema DDL runs synchronously here (GraphStore ctor); no async init, so
     // no blockConcurrencyWhile needed — it completes before any RPC.
-    this.store = new GraphStore(new DurableObjectSqlite(ctx.storage.sql));
+    this.store = new GraphStore(new DurableObjectSqlite(ctx.storage.sql, (fn) => ctx.storage.transactionSync(fn)));
   }
 
   /** Restore the schema if this instance was wiped by a prior destroy() and is

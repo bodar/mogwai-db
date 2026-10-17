@@ -6,7 +6,7 @@ import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
 import type { RelId, SortTerm, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, flatType, normalizeTypeName, numberClassOf, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 import { adjacent, decimalCompare, decimalOf, doubleText, floatingDecimal, floatText } from '../../gremlin/float.ts';
 import { floatValueOf } from './float.ts';
@@ -185,7 +185,7 @@ function boundClass(value: unknown, boundType: TypeNode | null): NumClass | null
   if (declared !== null && NUM_CLASS[declared]) return NUM_CLASS[declared]!;
   if (typeof value === 'bigint') return value >= -(2n ** 63n) && value < 2n ** 63n ? 'long' : 'bigint';
   if (value instanceof BigDecimal) return 'bigdecimal';
-  if (typeof value === 'number') return !Number.isInteger(value) ? 'double' : Math.abs(value) <= 2147483647 ? 'int32' : 'long';
+  if (typeof value === 'number') { const cls = numberClassOf(value); return cls === 'int' ? 'int32' : cls; }
   return null;
 }
 const magnitude = (value: unknown): number =>

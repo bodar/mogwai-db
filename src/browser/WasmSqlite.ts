@@ -40,6 +40,11 @@ export class WasmSqlite implements Sql {
     return rows as T[];
   }
 
+  /** OO1's `savepoint` — released on return, rolled back on a throw, and nestable. */
+  atomically<T>(fn: () => T): T {
+    return this.db.savepoint(() => fn());
+  }
+
   /** Close the database AND release the VFS's resources, synchronously: when this returns, nothing of
    *  this store holds an OPFS lock. Idempotent (OO1 `close()` and the pool's `pauseVfs()` both are). */
   close(): void {
