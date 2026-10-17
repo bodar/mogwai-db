@@ -5,12 +5,11 @@ import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import { seeded } from '../support/graph.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { outcomeOf, ALL_GENERIC } from './oracle.ts';
+import { outcomeOf, ALL_GENERIC, INTERNAL_ERROR } from './oracle.ts';
 import { transitionWitnesses, traversal } from './generate.ts';
 import { KNOWN_RAW_WITNESSES } from './capability-baseline.ts';
 import { L5_SEED } from './seed.ts';
 
-const RAW_FAILURE = /^(?:Binding expected |.*\b(?:TypeError|RangeError)\b)|\b(?:syntax error|constraint failed|no such (?:column|table))\b/i;
 
 describe('L5 capability ratchet', () => {
   test('every declared transition witness and generated composition either execute or fail closed', () => {
@@ -25,7 +24,7 @@ describe('L5 capability ratchet', () => {
       const outcome = outcomeOf(seeded(MODERN_SEED), query, ALL_GENERIC);
       if (outcome.kind === 'rows') { ran++; continue; }
       deferred++;
-      if (RAW_FAILURE.test(outcome.message)) {
+      if (INTERNAL_ERROR.test(outcome.message)) {
         const expected = KNOWN_RAW_WITNESSES.get(query);
         if (expected === outcome.message) seenKnown.add(query);
         else raw.push(`${query}\n    ${outcome.message}`);
@@ -44,5 +43,29 @@ describe('L5 capability ratchet', () => {
       return outcome.kind === 'rows' || outcome.message !== message;
     }).map(([query]) => query);
     expect(stale).toEqual([]);
+  }, 120_000);
+
+  /**
+   * NO INTERNAL ERROR ESCAPES — deeper compositions than the ratchet above draws, plus the internal
+   * errors reviewers reached by hand, each run as a fixed witness. A throw must be `UnsupportedTraversal`
+   * or the reference's own error; one matching `INTERNAL_ERROR` is a plan we built ill-formed or SQL we
+   * emitted wrong, and it fails here with no baseline to absorb it.
+   */
+  test('no generated composition surfaces an internal error', () => {
+    const witnesses = [
+      "g.V().hasLabel('person').order().by(addV('x').fold())",
+      "g.V().as('a').out('knows').union(select('a'), identity())",
+      "g.V().local(__.fold().unfold().optional(__.identity()).has('name','lop')).both().fold().count(local)",
+      "g.E().filter(__.inV().dedup().group().by('lang').select('keys'))",
+      "g.V(1).as('a','a').select(Pop.all,'a')",
+    ];
+    const deep = fc.sample(traversal({ steps: 8, depth: 3 }), { seed: L5_SEED, numRuns: 200 }).map((generated) => generated.query);
+    const internal: string[] = [];
+    for (const query of [...witnesses, ...deep]) {
+      const outcome = outcomeOf(seeded(MODERN_SEED), query, ALL_GENERIC);
+      if (outcome.kind === 'threw' && !outcome.message.startsWith('this traversal is not supported yet') && INTERNAL_ERROR.test(outcome.message))
+        internal.push(`${query}\n    ${outcome.message}`);
+    }
+    expect(internal).toEqual([]);
   }, 120_000);
 });

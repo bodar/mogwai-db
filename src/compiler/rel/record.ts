@@ -436,7 +436,7 @@ export function recordField(
  */
 export function selectKeys(
   step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, source: GraphSource, fresh: Minter,
-  host?: { readonly framing: RelFraming; readonly named: (label: string) => boolean },
+  host?: { readonly framing: RelFraming; readonly named: (label: string) => boolean; readonly hidden: (label: string) => boolean },
 ): FramedRel | null {
   const spec = selectSpec(step);
   if (!spec) return null;
@@ -463,7 +463,11 @@ export function selectKeys(
    * named key DECLINES here — answering the alias would be the wrong scope.
    */
   if (host && spec.labels.some((label) => host.named(label))) return null;
-  if (host && spec.labels.some((label) => !liveAliases(aliases, rel).has(label)))
+  const missing = spec.labels.filter((label) => !liveAliases(aliases, rel).has(label));
+  // A key this alias map lacks but an ENCLOSING scope binds is on the path all the same — this body was
+  // lowered without the channel that holds it — so it is not the empty answer below: decline.
+  if (host && missing.some((label) => host.hidden(label))) return null;
+  if (host && missing.length)
     return {
       // §3.3's spelling of the empty relation: `Values` refuses to express one, so it is a false
       // `Filter` — and the framing is the HOST's, because a stream with no rows has no shape of its

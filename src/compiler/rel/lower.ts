@@ -61,6 +61,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
+import { someStepDeep } from '../ir/walk.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
@@ -438,6 +439,19 @@ export const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: A
  * chain analyze reports as demanding none — so the law has to be stated where the position is
  * visible, not where the chain is.
  */
+/**
+ * MAY THESE ROWS MERGE INTO `coalesce`'s RLE — the relation-side conditions, stated ONCE for both
+ * collapse sites (`elementTail`, `detachedTail`); the suffix condition (`bulkObservedFrom`) is the
+ * caller's, because only the caller holds the position. No live emission order (see `coalesce`), every
+ * carried channel groupable (`CHANNEL_GROUP_POLICY`), and a `bulk` channel to SUM: the collapse is a
+ * RE-ENCODING of the multiplicity the rows already carry (`isReEncoding`, src/rel/obligations.ts), so a
+ * stream with none — a `local()` result rejoined without one — has nothing to re-encode, and a grouped
+ * `SUM(bulk)` over it is the checker's "Aggregate must either apply the barrier channel contract …"
+ * internal error rather than a plan.
+ */
+const collapsible = (rel: Rel): boolean =>
+  !encounterOf(rel.channels) && groupableChannels(rel.channels) && rel.channels.some((channel) => channel.role === 'bulk');
+
 const coalesce = (rel: Rel, fresh: Minter): Rel =>
   make.aggregate({
     id: fresh('cl'), input: rel, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
@@ -1122,7 +1136,9 @@ function rankedRows(
 export function lowerRankHead(
   steps: readonly IRStep[], opts: Lowering, step: IRStep,
 ): { readonly head: RelLowering; readonly dirs: readonly ('asc' | 'desc')[] } | null {
-  if (steps.some((s) => MUTATING_STEPS.has(s.name))) return null;
+  // At ANY depth — a write inside the order's own `by()` (`order().by(addV('x').fold())`) re-runs in the
+  // resume exactly as one in the prefix does.
+  if (someStepDeep(steps, settle(opts).params, (s) => MUTATING_STEPS.has(s.name), true)) return null;
   if (nondeterministic(steps, settle(opts).params)) return null;
   const fresh = minter();
   const sink: RankSink = {};
@@ -1264,7 +1280,7 @@ function collectionArm(
     const constSelect = selectSideEffectConstant(step, rel, ctx, fresh);
     if (constSelect !== 'pass')
       return { tail: constSelect && continueAs(constSelect.rel, constSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
-    const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing, named: namedElsewhere(ctx) });
+    const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh, { framing, ...selectScope(ctx) });
     if (!selected) return { tail: null };
     return { tail: continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels) };
   }
@@ -2407,7 +2423,7 @@ function listTail(
     // from here exactly as it does from the scalar tail.
     if (step.name === 'select') {
       const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-        { framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, named: namedElsewhere(ctx) });
+        { framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, ...selectScope(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2617,7 +2633,7 @@ function pathTail(
     // shape and `continueAs` picks the loop. A named collection is `namedElsewhere`'s decline, as there.
     if (step.name === 'select') {
       const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-        { framing: { kind: 'path', of, scalars }, named: namedElsewhere(ctx) });
+        { framing: { kind: 'path', of, scalars }, ...selectScope(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2798,7 +2814,7 @@ function mapTail(
         if (liveAliases(labels, rel).has(key)) {
           if (keys && !keys.includes(key)) {
             const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-              { framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, named: namedElsewhere(ctx) });
+              { framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, ...selectScope(ctx) });
             return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
           }
           return null;
@@ -2868,6 +2884,19 @@ function mapTail(
  */
 const namedElsewhere = (ctx: ChainCtx) => (label: string): boolean =>
   ctx.sideEffects.has(label) || ctx.sideEffectPolicies.has(label) || ctx.collections.has(label);
+
+/**
+ * THE SCOPES `selectKeys` CANNOT SEE, as the record builder's `host` asks for them: `named` (a side
+ * effect, which WINS over a path label) and `hidden` — a path label an ENCLOSING scope bound that this
+ * body was handed no alias channel for (`ChainCtx.enclosingLabels`). A hidden label is on the
+ * traverser's path all the same (`Scoping.getScopeValue` reads `traverser.path()`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * so its absence from the alias map is not the EMPTY answer an unbound key is: the read declines.
+ */
+const selectScope = (ctx: ChainCtx) => ({
+  named: namedElsewhere(ctx),
+  hidden: (label: string): boolean => ctx.enclosingLabels?.has(label) ?? false,
+});
 
 /** The two payload columns a Map.Entry relation carries — `framingCols` names the same pair, and
  *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
@@ -4252,7 +4281,7 @@ function detachedTail(
       // that retypes to a scalar (`…out().values()`) would answer N traversers as one row. The bound
       // movement already carries `bulk` (the seed mints it), so `coalesce` is the same
       // `SUM(bulk) GROUP BY id` RLE the base uses.
-      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels)
+      const collapsing = ctx.collapse && collapsible(moved.rel)
         && bulkObservedFrom(steps, from + 1);
       return detachedTail(collapsing ? coalesce(moved.rel, fresh) : moved.rel, moved.elem, steps, from + 1, ctx, fresh, subgraph, collapsing || bulked);
     }
@@ -4414,7 +4443,7 @@ function elementTail(
       // for why it is positional). Without it a widened collapse is not slower, it is WRONG: only the
       // `elements` framing arm carries `bulk` to the wire, so a chain that retypes to a scalar and
       // ends would answer N traversers as one row.
-      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels)
+      const collapsing = ctx.collapse && collapsible(moved.rel)
         && bulkObservedFrom(steps, at + 1);
       rel = collapsing ? coalesce(moved.rel, fresh) : moved.rel;
       bulked = bulked || collapsing;
@@ -5203,7 +5232,7 @@ function recordTail(
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }
       const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-        { framing: { kind: 'record', fields }, named: namedElsewhere(ctx) });
+        { framing: { kind: 'record', fields }, ...selectScope(ctx) });
       return selected && continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 

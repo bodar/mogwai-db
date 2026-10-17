@@ -1,6 +1,6 @@
 import { isOperatorArg, type Arg, type Step } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
-import { eachChainDeep } from './labels.ts';
+import { eachChainDeep, rawBodies } from './walk.ts';
 import { ranPerTraverser, type IRStep } from './step.ts';
 
 // ---------- fold-seed: where a MUTABLE `fold(seed, Operator)` seed is ONE object across parents ----------
@@ -54,7 +54,7 @@ export const foldsIntoMutableSeed = (s: Step): boolean =>
  */
 export function perTraverserMutableFold(steps: readonly Step[], params: Record<string, any>): Step | null {
   let found: Step | null = null;
-  eachChainDeep(steps, params, (chain) => {
+  eachChainDeep(steps, rawBodies(params), (chain) => {
     if (found) return;
     const nested = chain !== steps;
     found = chain.find((s) => foldsIntoMutableSeed(s) && (nested || ranPerTraverser(s as IRStep))) ?? null;

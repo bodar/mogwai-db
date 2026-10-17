@@ -9,7 +9,7 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { arg, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { arg, isNested, isTokenArg } from '../../gremlin/frontend.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
@@ -30,6 +30,7 @@ import { fieldCol, framingCols, type RelFraming } from './framing.ts';
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, OTHER_V, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
+import { eachChildChain, rawBodies, valueNodes, type BodyReader } from '../ir/walk.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -859,26 +860,10 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
   const keys = new Set<string>();
   let all = false, leaves = false, sources = false, labels = false;
   const strings = (value: unknown, into: (s: string) => void): void => {
-    if (typeof value === 'string') { into(value); return; }
-    if (value == null || typeof value !== 'object' || isNested(value)) return;
-    if (value instanceof Map) { for (const [k, v] of value) { strings(k, into); strings(v, into); } return; }
-    if (Array.isArray(value)) { for (const v of value) strings(v, into); return; }
-    if ('value' in value) strings((value as { value: unknown }).value, into);
-    if ('operands' in value) strings((value as { operands: unknown }).operands, into);
+    for (const n of valueNodes(value)) if (typeof n === 'string') into(n);
   };
-  const nested = (value: unknown): void => {
-    if (isNested(value)) {
-      const body = child.body(value.nested, 'child');
-      if (body === null) { all = true; leaves = true; sources = true; labels = true; return; }
-      walk(body);
-      return;
-    }
-    if (value == null || typeof value !== 'object') return;
-    if (value instanceof Map) { for (const v of value.values()) nested(v); return; }
-    if (Array.isArray(value)) { for (const v of value) nested(v); return; }
-    if ('value' in value) nested((value as { value: unknown }).value);
-    if ('operands' in value) nested((value as { operands: unknown }).operands);
-  };
+  const read: BodyReader = (nested) => child.body(nested, 'child');
+  const opaque = (): void => { all = true; leaves = true; sources = true; labels = true; };
   const walk = (body: readonly IRStep[]): void => {
     for (const step of body) {
       const args = step.args.map((a) => a.value);
@@ -898,13 +883,8 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
       }
       // `format('%{name}')` reads a property OR a label by that name.
       if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; } });
-      for (const modulator of step.modulators ?? []) for (const value of modulator) {
-        strings(value, (s) => keys.add(s));
-        nested(value);
-      }
-      for (const value of args) nested(value);
-      if (step.repeatRegion) walk(step.repeatRegion as IRStep[]);
-      if (step.optionArms) walk(step.optionArms as IRStep[]);
+      for (const modulator of step.modulators ?? []) for (const value of modulator) strings(value, (s) => keys.add(s));
+      eachChildChain(step, read, (c) => walk(c as IRStep[]), opaque);
     }
   };
   walk(steps);
@@ -912,13 +892,8 @@ function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
 }
 
 /** Does a `T.label` token sit anywhere in these argument values (a predicate's operands, a collection)? */
-const readsLabelToken = (values: readonly unknown[]): boolean => values.some(function found(value: unknown): boolean {
-  if (isTokenArg(value)) return value.token === 'label';
-  if (value == null || typeof value !== 'object' || isNested(value)) return false;
-  if (value instanceof Map) return [...value.keys(), ...value.values()].some(found);
-  if (Array.isArray(value)) return value.some(found);
-  return ('value' in value && found((value as { value: unknown }).value)) || ('operands' in value && found((value as { operands: unknown }).operands));
-});
+const readsLabelToken = (values: readonly unknown[]): boolean =>
+  values.some((value) => { for (const n of valueNodes(value)) if (isTokenArg(n) && n.token === 'label') return true; return false; });
 
 /**
  * WHAT A WHOLE PROGRAM CAN WRITE — every mutation at any nesting depth, summarized for `sequentialGuard`.
@@ -1011,19 +986,7 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
   let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false;
-  const nested = (value: unknown): void => {
-    if (isNested(value)) {
-      let body: readonly IRStep[];
-      try { body = stepChain(value.nested, params); } catch { unreadable = true; return; }
-      walk(body, false);
-      return;
-    }
-    if (value == null || typeof value !== 'object') return;
-    if (value instanceof Map) { for (const [k, v] of value) { nested(k); nested(v); } return; }
-    if (Array.isArray(value)) { for (const v of value) nested(v); return; }
-    if ('value' in value) nested((value as { value: unknown }).value);
-    if ('operands' in value) nested((value as { operands: unknown }).operands);
-  };
+  const read = rawBodies(params);
   const walk = (chain: readonly IRStep[], ownable: boolean): void => {
     let fresh = false, run = -1;
     for (const step of chain) {
@@ -1054,11 +1017,7 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
         }
       }
       fresh = step.name === 'addV' || step.name === 'addE' || (fresh && KEEPS_FRESH.has(step.name));
-      for (const value of args) nested(value);
-      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value);
-      for (const [, value] of step.withArgs ?? []) nested(value);
-      if (step.repeatRegion) walk(step.repeatRegion as IRStep[], false);
-      if (step.optionArms) walk(step.optionArms as IRStep[], false);
+      eachChildChain(step, read, (c) => walk(c as IRStep[], false), () => { unreadable = true; });
     }
   };
   walk(steps, true);

@@ -34,7 +34,8 @@
 // sorting another. Whatever slips past both — a key the resume meets that the head never ranked — fails
 // the resume statement (`rankJoin`), never sorts as an unranked NULL.
 
-import { isNested, isOrderArg, stepChain } from '../../gremlin/frontend.ts';
+import { isOrderArg } from '../../gremlin/frontend.ts';
+import { someStepDeep, someValueNode } from '../ir/walk.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -201,22 +202,8 @@ const RANKED_RANK = 'rkv';
  * not normalize is treated as random — fail closed.
  */
 export function nondeterministic(steps: readonly IRStep[], params: Record<string, any>): boolean {
-  const random = (value: unknown): boolean => {
-    if (isOrderArg(value)) return value.order === 'shuffle';
-    if (isNested(value)) {
-      let body: readonly IRStep[];
-      try { body = stepChain(value.nested, params) as IRStep[]; } catch { return true; }
-      return nondeterministic(body, params);
-    }
-    if (value == null || typeof value !== 'object') return false;
-    if (Array.isArray(value)) return value.some(random);
-    return ('value' in value && random((value as { value: unknown }).value))
-      || ('operands' in value && random((value as { operands: unknown }).operands));
-  };
-  return steps.some((step) => RANDOM_STEPS.has(step.name)
-    || (step.args ?? []).some((a) => random(a.value))
-    || (step.modulators ?? []).some((m) => m.some(random))
-    || nondeterministic([...(step.repeatRegion ?? []), ...(step.optionArms ?? [])] as IRStep[], params));
+  return someStepDeep(steps, params, (step) => RANDOM_STEPS.has(step.name)
+    || someValueNode(step, (n) => isOrderArg(n) && n.order === 'shuffle'), true);
 }
 
 /** The steps that DRAW — their answer is a random choice, not a function of the graph. */

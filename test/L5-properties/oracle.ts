@@ -43,6 +43,19 @@ export type Outcome =
 // `weigh` moved to `test/support/multiset.ts` — the census needs the same answer, and its own copy
 // was subtly different in the one way that matters (see that module's header).
 
+/**
+ * AN INTERNAL ERROR — a throw no query may surface. The decline contract is that a traversal either
+ * answers, raises `UnsupportedTraversal`, or raises the REFERENCE's own error; what matches here is
+ * none of those: a checker invariant (`RelIR: …`, a plan the lowering built ill-formed), SQLite refusing
+ * SQL we emitted (`misuse of aggregate function`, `no such column`, `syntax error`, …), a bind the
+ * runtime rejected, or a raw JS fault. One pattern, read by every L5 sweep that gates on it.
+ */
+export const INTERNAL_ERROR = new RegExp([
+  String.raw`^RelIR:`,
+  String.raw`^(?:Binding expected |.*\b(?:TypeError|RangeError|ReferenceError)\b)`,
+  String.raw`\b(?:syntax error|constraint failed|no such (?:column|table|function)|misuse of (?:aggregate|window)|ambiguous column|circular reference|datatype mismatch|wrong number of arguments|is not a function|Cannot read properties)\b`,
+].join('|'), 'i');
+
 /** Run `q` against `store` under `fastPaths`, capturing a throw as an outcome. */
 export function outcomeOf(store: GraphStore, q: string, fastPaths: FastPathConfig): Outcome {
   try {

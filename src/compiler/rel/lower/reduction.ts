@@ -1344,8 +1344,15 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
 }
 
-export function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
+  // The host's labels are on the child's path; the roots below re-enter the fold WITHOUT their alias
+  // channels, so they ride in as `enclosingLabels` — a scope read of one declines instead of answering
+  // the unbound key's empty result.
+  const hostLabels = host.row?.aliases;
+  const ctx: ChainCtx = hostLabels?.size
+    ? { ...outer, enclosingLabels: new Set([...(outer.enclosingLabels ?? []), ...hostLabels.keys()]) }
+    : outer;
   const first = body[0]!;
 
   // An unfolded map entry is a real child host, not a special `select(Column.values)` pattern. Seed a

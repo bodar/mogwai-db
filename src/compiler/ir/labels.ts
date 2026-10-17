@@ -1,5 +1,6 @@
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 import { PATH_FAMILY, isStreamBarrier, type IRStep } from './step.ts';
+import { eachChainDeep, eachChildChain, eachStepDeep, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 
 // ---------- labels: who BINDS one, who READS one ----------
 //
@@ -71,46 +72,15 @@ const IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/g;
 
 /** Every string reachable in an argument value, including through a predicate's operands. Deliberately
  *  indiscriminate — see the fail-closed note above. */
-function collectStrings(value: any, into: Set<string>): void {
-  if (typeof value === 'string') {
-    into.add(value);
-    if (value.length) for (const token of value.match(IDENTIFIER) ?? []) into.add(token);
-    return;
+function collectStrings(value: unknown, into: Set<string>): void {
+  for (const n of valueNodes(value)) {
+    if (typeof n !== 'string') continue;
+    into.add(n);
+    if (n.length) for (const token of n.match(IDENTIFIER) ?? []) into.add(token);
   }
-  if (value == null || typeof value !== 'object') return;
-  if (isNested(value)) return; // a nested body is walked as a body, not scraped as a value
-  if (value instanceof Map) { for (const [key, member] of value) { collectStrings(key, into); collectStrings(member, into); } return; }
-  if (Array.isArray(value)) { for (const v of value) collectStrings(v, into); return; }
-  // An `Arg` ({value,…}) and a `Pred` ({op, operands}) are the two shapes a label rides inside.
-  if ('value' in value) collectStrings((value as any).value, into);
-  if ('operands' in value) collectStrings((value as any).operands, into);
 }
 
 interface Acc { readonly labels: Set<string>; all: boolean }
-
-/** Walk into every nested TRAVERSAL reachable in an argument value — mirroring `collectStrings`'
- *  shape, because a nested body hides in the same places a string does.
- *
- *  A PREDICATE OPERAND is the one that matters and the one a direct `isNested(arg.value)` test misses:
- *  in `has('age', gt(__.select('a').values('age')))` the argument IS the `Pred`, and the traversal
- *  reading the label sits inside its `operands`. Measured: scanning only the argument itself made that
- *  label look dead, and retracting it answered `[]` where `['josh','peter']` was expected. */
-function descend(value: any, params: Record<string, any>, acc: Acc): void {
-  if (isNested(value)) {
-    let body: Step[];
-    // A body needing params this scan does not have is a body whose reads are UNKNOWN. `verifyStandard`
-    // may skip such a body because it never deletes anything; every caller here does, so the catch has
-    // to fail closed instead of skipping.
-    try { body = stepChain(value.nested, params); } catch { acc.all = true; return; }
-    walkReads(body, params, acc);
-    return;
-  }
-  if (value == null || typeof value !== 'object') return;
-  if (value instanceof Map) { for (const member of value.values()) descend(member, params, acc); return; }
-  if (Array.isArray(value)) { for (const v of value) descend(v, params, acc); return; }
-  if ('value' in value) descend((value as any).value, params, acc);
-  if ('operands' in value) descend((value as any).operands, params, acc);
-}
 
 /** Every `as()` label reachable at ANY depth inside a match()'s arguments is a READ of the enclosing
  *  scope — the variable-location rule `matchLabelsOf`'s note explains, applied recursively so it holds
@@ -119,26 +89,14 @@ function descend(value: any, params: Record<string, any>, acc: Acc): void {
  *  pattern re-roots on but a naive scan would call a bind — e.g. a pre-bound `b` used only as a
  *  BACK EDGE `as('b')` inside an `or` branch — would be retracted before the match and answer wrong
  *  (`g.V().as('a').out().as('b').match(…, or(as('a').out('knows').as('b'), …))`). Fail closed on a body
- *  this scan cannot parse, exactly as `descend` does — an unknown read is not a licence to delete. */
-function matchAsReads(s: Step, params: Record<string, any>, acc: Acc): void {
-  const visit = (chain: readonly Step[]): void => {
-    for (const st of chain) {
-      for (const l of asLabelsOf(st)) acc.labels.add(l);
-      for (const a of st.args ?? []) if (isNested(a.value)) {
-        let body: Step[];
-        try { body = stepChain(a.value.nested, params); } catch { acc.all = true; return; }
-        visit(body);
-      }
-    }
-  };
-  for (const { value: a } of s.args ?? []) if (isNested(a)) {
-    let body: Step[];
-    try { body = stepChain(a.nested, params); } catch { acc.all = true; return; }
-    visit(body);
-  }
+ *  this scan cannot parse — an unknown read is not a licence to delete. */
+function matchAsReads(s: Step, read: BodyReader, acc: Acc): void {
+  const unreadable = (): void => { acc.all = true; };
+  eachChildChain(s, read, (pattern) =>
+    eachStepDeep(pattern, read, (st) => { for (const l of asLabelsOf(st)) acc.labels.add(l); }, unreadable), unreadable);
 }
 
-function walkReads(chain: readonly Step[], params: Record<string, any>, acc: Acc): void {
+function walkReads(chain: readonly Step[], read: BodyReader, acc: Acc): void {
   for (const s of chain) {
     // `path()` emits the labels bound along it; `simplePath()`/`cyclicPath()` do not, but they share
     // the family's from()/to() scoping and cost nothing to treat alike.
@@ -154,7 +112,7 @@ function walkReads(chain: readonly Step[], params: Record<string, any>, acc: Acc
     // __.as('b').in().count().as('c'))` answered at trunk and DEFERRED here, because both outer binds
     // were retracted as unread. `matchLabelsOf` is the same bind-side helper the pass uses, read here
     // from the other direction — inside a match, a variable's every mention is a use.
-    if (s.name === 'match') matchAsReads(s, params, acc);
+    if (s.name === 'match') matchAsReads(s, read, acc);
     // An `as()` BINDS; a bind is not a read, and counting one would make every label read itself.
     // Liveness is therefore per label NAME rather than per bind site, which is also what makes a
     // REBIND (`as('a')…as('a')`, whose history a later `select(Pop.first)` can read back) safe: both
@@ -162,19 +120,21 @@ function walkReads(chain: readonly Step[], params: Record<string, any>, acc: Acc
     if (s.name !== 'as') for (const a of s.args ?? []) collectStrings(a.value, acc.labels);
     if (typeof ir.from === 'string') acc.labels.add(ir.from);
     if (typeof ir.to === 'string') acc.labels.add(ir.to);
-    for (const m of ir.modulators ?? []) for (const v of m) { collectStrings(v, acc.labels); descend(v, params, acc); }
-    for (const a of s.args ?? []) descend(a.value, params, acc);
-    // The folded clusters are not in the chain that hosts them, so a scan that only walked `args`
-    // would miss a `repeat()`'s own until()/emit() and a `choose()`'s arms entirely.
-    if (ir.repeatRegion) walkReads(ir.repeatRegion, params, acc);
-    if (ir.optionArms) walkReads(ir.optionArms, params, acc);
+    for (const m of ir.modulators ?? []) for (const v of m) collectStrings(v, acc.labels);
+    for (const [, v] of ir.withArgs ?? []) collectStrings(v, acc.labels);
+    // Every child chain (`eachChildChain`) — a nested argument, a PREDICATE OPERAND included (in
+    // `has('age', gt(__.select('a').values('age')))` the argument IS the `Pred` and the traversal reading
+    // the label sits inside its `operands`; measured, missing it retracted a live label and answered
+    // `[]`), a `by()`, and the folded repeat()/choose() clusters. A body this scan cannot parse has
+    // UNKNOWN reads, and every caller here deletes on the answer, so it fails closed rather than skipping.
+    eachChildChain(s, read, (c) => walkReads(c, read, acc), () => { acc.all = true; });
   }
 }
 
 /** Every label the tree reads, at any depth. */
 export function labelReads(steps: readonly Step[], params: Record<string, any>): LabelReads {
   const acc: Acc = { labels: new Set<string>(), all: false };
-  walkReads(steps, params, acc);
+  walkReads(steps, rawBodies(params), acc);
   return acc;
 }
 
@@ -187,28 +147,20 @@ export function preBarrierSelectRead(
 ): string | null {
   let found: string | null = null;
   let ambiguous = false;
-  const visit = (value: unknown): void => {
-    if (isNested(value)) {
-      let body: Step[];
-      try { body = stepChain(value.nested, params); } catch { ambiguous = true; return; }
-      const first = body[0];
-      const label = body.length === 1 && first?.name === 'select' && !(first as IRStep).modulators?.length
-        && first.args.length === 1 && typeof first.args[0]?.value === 'string'
-        ? first.args[0].value
-        : null;
-      if (label && bound.has(label)) {
-        if (found && found !== label) ambiguous = true;
-        else found = label;
-      }
-      for (const step of body) for (const arg of step.args ?? []) visit(arg.value);
-      return;
+  const read = rawBodies(params);
+  const unreadable = (): void => { ambiguous = true; };
+  const visit = (body: readonly Step[]): void => {
+    const first = body[0];
+    const label = body.length === 1 && first?.name === 'select' && !(first as IRStep).modulators?.length
+      && first.args.length === 1 && typeof first.args[0]?.value === 'string'
+      ? first.args[0].value
+      : null;
+    if (label && bound.has(label)) {
+      if (found && found !== label) ambiguous = true;
+      else found = label;
     }
-    if (value == null || typeof value !== 'object') return;
-    if (Array.isArray(value)) { for (const member of value) visit(member); return; }
-    if ('value' in value) visit((value as any).value);
-    if ('operands' in value) visit((value as any).operands);
   };
-  for (const step of steps) for (const arg of step.args ?? []) visit(arg.value);
+  for (const step of steps) eachChildChain(step, read, (c) => eachChainDeep(c, read, visit, unreadable), unreadable);
   return ambiguous ? null : found;
 }
 
@@ -219,24 +171,8 @@ export function preBarrierSelectRead(
  *  it wrong here licenses a deletion. Over-answering costs a retraction; under-answering costs an
  *  answer. */
 function carriesBarrier(s: Step, params: Record<string, any>): boolean {
-  if (isStreamBarrier(s as IRStep)) return true;
-  const ir = s as IRStep;
-  // Structural, for `descend`'s reason: a barrier can sit inside a nested traversal that is itself a
-  // PREDICATE OPERAND rather than a bare argument.
-  const nested = (value: any): boolean => {
-    if (isNested(value)) {
-      let body: Step[];
-      try { body = stepChain(value.nested, params); } catch { return true; }
-      return body.some((inner) => carriesBarrier(inner, params));
-    }
-    if (value == null || typeof value !== 'object') return false;
-    if (Array.isArray(value)) return value.some(nested);
-    return (('value' in value) && nested((value as any).value))
-      || (('operands' in value) && nested((value as any).operands));
-  };
-  if ((s.args ?? []).some((a) => nested(a.value))) return true;
-  if ((ir.modulators ?? []).some((m) => m.some(nested))) return true;
-  return [...(ir.repeatRegion ?? []), ...(ir.optionArms ?? [])].some((inner) => carriesBarrier(inner, params));
+  // Every child position, a predicate operand's traversal included; an unreadable body counts as one.
+  return someStepDeep([s], params, (inner) => isStreamBarrier(inner as IRStep), true);
 }
 
 /** The labels bound UNCONDITIONALLY before `index` — collected from TOP-LEVEL steps only, which is
@@ -296,39 +232,6 @@ export function cardinalityOnlyTerminalAt(steps: readonly Step[], index: number,
  *  `cap`, whose keys name one. A bare `group()`/`tree()` names nothing. */
 const SIDE_EFFECT_KEYED: ReadonlySet<string> = new Set(['aggregate', 'store', 'group', 'groupCount', 'tree', 'subgraph', 'profile', 'cap']);
 
-/** Visit every CHAIN at ANY depth — the chain itself, then each nested argument body (predicate
- *  operands included, the shape `descend` walks), `by()` modulators, and the folded `repeat()`/`choose()`
- *  clusters, each as a chain of its own. A body this scan cannot parse is skipped: the lowering parses
- *  the same body and declines it on its own. */
-export function eachChainDeep(chain: readonly Step[], params: Record<string, any>, visit: (chain: readonly Step[]) => void): void {
-  visit(chain);
-  const into = (value: any): void => {
-    if (isNested(value)) {
-      let body: Step[];
-      try { body = stepChain(value.nested, params); } catch { return; }
-      eachChainDeep(body, params, visit);
-      return;
-    }
-    if (value == null || typeof value !== 'object') return;
-    if (value instanceof Map) { for (const member of value.values()) into(member); return; }
-    if (Array.isArray(value)) { for (const v of value) into(v); return; }
-    if ('value' in value) into((value as any).value);
-    if ('operands' in value) into((value as any).operands);
-  };
-  for (const s of chain) {
-    const ir = s as IRStep;
-    for (const a of s.args ?? []) into(a.value);
-    for (const m of ir.modulators ?? []) for (const v of m) into(v);
-    if (ir.repeatRegion) eachChainDeep(ir.repeatRegion, params, visit);
-    if (ir.optionArms) eachChainDeep(ir.optionArms, params, visit);
-  }
-}
-
-/** Visit every step at ANY depth — `eachChainDeep`, a step at a time. */
-function eachStepDeep(chain: readonly Step[], params: Record<string, any>, visit: (s: Step) => void): void {
-  eachChainDeep(chain, params, (c) => { for (const s of c) visit(s); });
-}
-
 /**
  * A PATH LABEL A SIDE EFFECT SHADOWS — a name the traversal binds with `as()` (or a `match()` pattern)
  * AND names as a side effect (`withSideEffect`, or a keyed `aggregate`/`group`/… writer) — or `null`
@@ -351,7 +254,7 @@ export function sideEffectShadowedLabel(
 ): string | null {
   const named = new Set(declared);
   const bound = new Set<string>();
-  eachStepDeep(steps, params, (s) => {
+  eachStepDeep(steps, rawBodies(params), (s) => {
     for (const l of asLabelsOf(s)) bound.add(l);
     for (const l of matchLabelsOf(s, params)) bound.add(l);
     if (SIDE_EFFECT_KEYED.has(s.name))
@@ -400,7 +303,7 @@ const passesTraverser = (s: Step): boolean =>
  */
 export function unlocatableSubPath(steps: readonly Step[], params: Record<string, any>): string | null {
   let found: string | null = null;
-  eachChainDeep(steps, params, (chain) => {
+  eachChainDeep(steps, rawBodies(params), (chain) => {
     for (let i = 0; i < chain.length && found === null; i++) {
       if (!PATH_FAMILY.has(chain[i]!.name)) continue;
       // A passed chain carries the modulators folded onto the host (`absorbModulators`); a nested body
@@ -426,7 +329,7 @@ export function unlocatableSubPath(steps: readonly Step[], params: Record<string
       if (found !== null || from === undefined || to === undefined) continue;
       const fromLabel = from;
       let later = false;
-      eachStepDeep(chain.slice(last.get(to)! + 1, i), params, (s) => {
+      eachStepDeep(chain.slice(last.get(to)! + 1, i), rawBodies(params), (s) => {
         if (asLabelsOf(s).includes(fromLabel) || matchLabelsOf(s, params).includes(fromLabel)) later = true;
       });
       if (later) found = fromLabel;

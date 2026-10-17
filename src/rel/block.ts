@@ -1,4 +1,6 @@
+import type { Expr } from './expr.ts';
 import type { Rel, RelKind } from './rel.ts';
+import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
 
 /**
  * WHERE A NODE LANDS IN THE ASSEMBLED SELECT — the emitter's fusion rules, stated once, as facts
@@ -45,6 +47,40 @@ export const grouped = (b: Slots): boolean => b.groupBy !== undefined;
 /** A side of a join may be spliced into the join's own FROM only when it fills nothing else. */
 export const spliceable = (b: Slots): boolean => !grouped(b) && b.having === undefined && !tailUsed(b) && !b.windowed;
 
+/** The columns of `r` whose value is an AGGREGATE's — an `Aggregate`'s own `aggs`, carried through the
+ *  nodes that keep their input's columns, and a `Project` column computed from one. A group KEY is not
+ *  one: it is a plain value of the group, legal anywhere. */
+const aggregateCols = (r: Rel): ReadonlySet<string> => {
+  switch (r.kind) {
+    case 'aggregate': return new Set(r.aggs.map(([name]) => name));
+    case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return aggregateCols(r.input);
+    case 'project': {
+      const inner = aggregateCols(r.input);
+      if (!inner.size) return inner;
+      return new Set(r.exprs.filter(([, e]) => readsCols(e, r.input.id, inner)).map(([name]) => name));
+    }
+    default: return new Set();
+  }
+};
+
+/** Does `e` itself (not a subquery of it) read one of `names` off relation `id`? */
+const readsCols = (e: Expr, id: string, names: ReadonlySet<string>): boolean => {
+  let reads = false;
+  forEachExpr(e, (node) => { if (node.kind === 'col' && node.rel === id && names.has(node.name)) reads = true; });
+  return reads;
+};
+
+/** Does a SUBQUERY hanging anywhere off `e` read one of `input`'s aggregate-valued columns? */
+const subqueryReadsAggregate = (e: Expr, input: Rel): boolean => {
+  const names = aggregateCols(input);
+  if (!names.size) return false;
+  let reads = false;
+  forEachExpr(e, (node) => exprRels(node).forEach((plan) => forEachRel(plan, (r) => {
+    if (relExprs(r).some((x) => readsCols(x, input.id, names))) reads = true;
+  })));
+  return reads;
+};
+
 /**
  * No alias this side would lift collides with one the other side already took. Splicing lifts a
  * side's own FROM items into the join's own FROM, so two sides reading the SAME shared relation lift
@@ -79,14 +115,24 @@ const fusesNothing = (): boolean => false;
  * `ORDER BY`/`LIMIT` — those belong to the compound as a whole. `DISTINCT` is legal in an arm, which
  * is why this is not `tailUsed`.
  */
-export const NEEDS_SUBQUERY: { readonly [K in RelKind]: (input: Slots) => boolean } = {
+export const NEEDS_SUBQUERY: { readonly [K in RelKind]: (input: Slots, node: Rel) => boolean } = {
   scan: fusesNothing, values: fusesNothing, 'self-ref': fusesNothing, ref: fusesNothing,
   join: fusesNothing, recursive: fusesNothing,
   // A projection may overwrite the select list except over DISTINCT, or over a whole-relation
   // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
   project: (b) => b.distinct || (grouped(b) && b.groupBy?.length === 0),
   // Over an aggregate a Filter IS `HAVING` — one of §3's declared collapses, not a second node.
-  filter: (b) => b.windowed || tailUsed(b) || b.having !== undefined,
+  //
+  // …EXCEPT when the predicate reads an AGGREGATE-VALUED column from INSIDE a subquery. Fusing re-inlines
+  // the read as the expression that computes it — the aggregate itself — and an
+  // aggregate spelled inside a correlated subquery of `HAVING` (a `json_each(<json_group_array(…)>)`
+  // source, the shape a `select(key)` over a `group()` map takes) belongs to no query SQLite can
+  // evaluate it in: `misuse of aggregate function json_group_array()`. A derived table turns the
+  // aggregate into a plain column the subquery may read; Calcite makes the same move for an aggregate
+  // referenced by a nested query (`SqlImplementor.needNewSubQuery`,
+  // `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`).
+  filter: (b, node) => b.windowed || tailUsed(b) || b.having !== undefined
+    || (grouped(b) && node.kind === 'filter' && subqueryReadsAggregate(node.pred, node.input)),
   aggregate: (b) => b.windowed || grouped(b) || tailUsed(b),
   // An `ORDER BY` cannot name a select alias, so fusing re-inlines the expression that computes its
   // subject — and over a windowed input that expression is a whole window function.
@@ -167,9 +213,9 @@ export function shapeOf(r: Rel): Shape {
 }
 
 /** The input of a unary node, as the block that node fills a slot in. */
-const inputShape = (input: Rel, kind: RelKind): BlockShape => {
-  const shape = shapeOf(input);
-  return shape === 'closed' || NEEDS_SUBQUERY[kind](shape.slots) ? derived(input) : shape;
+const inputShape = (node: Rel & { readonly input: Rel }): BlockShape => {
+  const shape = shapeOf(node.input);
+  return shape === 'closed' || NEEDS_SUBQUERY[node.kind](shape.slots, node) ? derived(node.input) : shape;
 };
 
 /**
@@ -186,38 +232,38 @@ const sideShape = (r: Rel, mayFuse: boolean, taken: ReadonlySet<string>): BlockS
 function compute(r: Rel): Shape {
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return leaf(r);
-    case 'project': case 'materialize': return over(r, inputShape(r.input, r.kind));
+    case 'project': case 'materialize': return over(r, inputShape(r));
     case 'filter': {
-      const b = inputShape(r.input, 'filter');
+      const b = inputShape(r);
       // Over a grouped block the predicate is a HAVING; otherwise it is a WHERE, which occupies no
       // slot this analysis tracks (nothing is ever blocked by one).
       return over(r, b, grouped(b.slots) ? { ...b.slots, having: r.pred } : b.slots);
     }
     case 'aggregate': {
-      const b = inputShape(r.input, 'aggregate');
+      const b = inputShape(r);
       return over(r, b, { ...b.slots, groupBy: r.groupBy, having: r.having });
     }
     case 'sort': {
-      const b = inputShape(r.input, 'sort');
+      const b = inputShape(r);
       return over(r, b, { ...b.slots, orderBy: r.terms });
     }
     case 'limit': {
-      const b = inputShape(r.input, 'limit');
+      const b = inputShape(r);
       return over(r, b, { ...b.slots, limit: r.count, offset: r.offset });
     }
     case 'distinct': {
-      const b = inputShape(r.input, 'distinct');
+      const b = inputShape(r);
       return over(r, b, { ...b.slots, distinct: true });
     }
     case 'window': {
-      const b = inputShape(r.input, 'window');
+      const b = inputShape(r);
       return over(r, b, { ...b.slots, windowed: true });
     }
     case 'explode': {
       // `json_each(…)` is a table-valued FROM item, never a relation of the algebra — so it takes an
       // alias and contributes no source. Source-less, it IS the whole FROM (the correlated form).
       if (!r.input) return { slots: EMPTY, aliases: [r.id], sources: [], fused: [r] };
-      const b = inputShape(r.input, 'explode');
+      const b = inputShape({ ...r, input: r.input });
       return { ...over(r, b), aliases: [...b.aliases, r.id] };
     }
     case 'join': {

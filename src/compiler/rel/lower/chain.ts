@@ -195,6 +195,17 @@ export interface ChainCtx extends FilterCtx {
    */
   readonly originDomain?: Rel;
   /**
+   * THE PATH LABELS AN ENCLOSING SCOPE BOUND that this body may have been handed NO alias channel for —
+   * set where a correlated child is rooted afresh (`scalarChild`: a self row or an adjacency hop under
+   * `local(…count())`, `by(…)`, …), which re-enters the fold with an empty alias map. TinkerPop's child
+   * traverser keeps its parent's whole path (`Scoping.getScopeValue` reads `traverser.path()`,
+   * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+   * so a scope read of one of these that the alias map cannot resolve is a DECLINE, never the empty
+   * answer an unbound key earns (`selectScope`, `lower.ts`). Inherited by every nested body, because a
+   * body nested in such a scope cannot see the labels either.
+   */
+  readonly enclosingLabels?: ReadonlySet<string>;
+  /**
    * THE TRAVERSAL THIS SCOPE'S `steps` BEGIN — set only where the step list a tail is handed is known
    * to be the reference's whole traversal from its first step: a rooted chain lowered from its source
    * (`rooted`), or a per-traverser child body (`by()`), which TinkerPop runs as its own traversal with

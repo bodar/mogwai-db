@@ -421,14 +421,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
         // This deliberately takes Calcite's safe superset instead of recursively proving which input
         // fields an arbitrary Expr reads; see SqlImplementor.java:2223-2241 (`fieldsUsed.isEmpty()`).
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.project);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.project(b, r));
         const select = r.exprs.map(([name, e]) => [name, expr(e, b.scope)] as const);
         return { ...b, select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'filter': {
         // Over an aggregate this IS `HAVING` — one of §3's declared collapses, not a second node.
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.filter);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.filter(b, r));
         const pred = expr(r.pred, b.scope);
         const placed = grouped(b) ? { having: conjoin(b.having, pred) } : { where: conjoin(b.where, pred) };
         return { ...b, ...placed, scope: withRel(b.scope, r.id, outMap(b)) };
@@ -441,7 +441,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // (`unanchoredAggregate`), so a fold meant per host collapses the whole host stream into one row.
         // Closing the input as a derived table makes every input column a column of THIS block's FROM,
         // which anchors the aggregate here — the one spelling with the algebra's meaning.
-        let b = inputBlock(r.input, outer, NEEDS_SUBQUERY.aggregate);
+        let b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.aggregate(b, r));
         if (unanchoredAggregate(r.aggs, b, outer)) {
           b = inputBlock(r.input, outer, () => true);
           if (unanchoredAggregate(r.aggs, b, outer))
@@ -464,12 +464,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // `g.V().order().by("age").range(1,3).values("name")`: the key spelled THREE times and 30
         // binds, so a second `order()` in one chain would approach the DO cap and fail closed.
         // Naming the column costs one nested SELECT.
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.sort);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.sort(b, r));
         return { ...b, orderBy: r.terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
       case 'limit': {
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.limit);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.limit(b, r));
         return {
           ...b,
           limit: r.count ? expr(r.count, b.scope) : undefined,
@@ -479,7 +479,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'distinct': {
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.distinct);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.distinct(b, r));
         return { ...b, distinct: true, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -491,7 +491,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // produces whenever a step MINTS an emission order and a later window ranks by it
         // (`dedup().by(k)` after `order()`, the cumulative-bulk slice). Refusing here is total; the
         // alternative was a `Materialize` fence at each such site, i.e. remembering the rule N times.
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.window);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.window(b, r));
         const select = [...b.select, ...r.specs.map(([name, spec]) => [name, expr(spec, b.scope)] as const)];
         return { ...b, select, windowed: true, scope: withRel(b.scope, r.id, new Map(select)) };
       }
@@ -509,14 +509,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           const select = explodeColumns(r.as).map(memberCol);
           return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
         }
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.explode);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.explode(b, r));
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
         const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'materialize': {
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.materialize);
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.materialize(b, r));
         return { ...b, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -553,7 +553,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       case 'union': return {
         kind: 'closed',
         body: list(
-          r.inputs.map((input) => renderBlock(inputBlock(input, outer, NEEDS_SUBQUERY.union))),
+          r.inputs.map((input) => renderBlock(inputBlock(input, outer, (b) => NEEDS_SUBQUERY.union(b, r)))),
           r.all ? ' UNION ALL ' : ' UNION ',
         ),
       };

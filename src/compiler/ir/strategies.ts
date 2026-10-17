@@ -4,6 +4,7 @@ import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, m
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
+import { eachChildChain, rawBodies, someStepDeep, valueNodes } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
@@ -250,16 +251,6 @@ const synth = (name: string, args: any[], ctx: StrategySpec['ctx']): Step => ({ 
  *  idempotent on a Step[], so the synthetic body flows through every consumer verbatim). */
 const nestedArg = (steps: Step[]): any => ({ nested: steps });
 
-/** Does any step in the tree (at ANY nesting depth) satisfy `pred`? Recurses through every
- *  {nested} arg — the generalization of the old nestedProducesElements walk, now used to
- *  scan for movement/otherV/writes across sub-traversal bodies too. */
-/** Does any step at ANY nesting depth satisfy `pred`? Exported because a child-seam guard has to
- *  ask about the whole body, nested arms included, not just its top level. */
-export function someStepDeep(steps: Step[], params: Record<string, any>, pred: (s: Step) => boolean): boolean {
-  return steps.some((s) =>
-    pred(s) || s.args.some((a) => isNested(a.value) && someStepDeep(stepChain(a.value.nested, params), params, pred)));
-}
-
 /** Apply a per-chain injection rule at EVERY nesting depth. Postorder: each step's nested
  *  bodies are rewritten first (recursing, re-wrapped as `{nested: Step[]}`), THEN the rule
  *  runs on the current chain. This mirrors TinkerPop's strategy model — apply() runs once
@@ -299,7 +290,7 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
     throw new Error('SubgraphStrategy requires an edges criterion traversal');
   if (vArg === undefined && eArg === undefined)
     throw new Error('SubgraphStrategy requires a vertices or edges criterion');
-  if (someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name)))
+  if (someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name), true))
     throw new Error('SubgraphStrategy over a mutating traversal (addV/addE/mergeV/mergeE/property/drop) is not yet supported');
   // Resolve criterion bodies ONCE; reused by reference at every injection site and never
   // fed back through recurseInject (the strategy never subgraph-filters its own criteria).
@@ -353,7 +344,7 @@ export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Re
     throw new Error('PartitionStrategy requires a string partitionKey');
   if (spec.config.includeMetaProperties === true)
     throw new Error('PartitionStrategy(includeMetaProperties) not yet supported');
-  if (someStepDeep(steps, params, (s) => s.name === 'mergeV' || s.name === 'mergeE'))
+  if (someStepDeep(steps, params, (s) => s.name === 'mergeV' || s.name === 'mergeE', true))
     throw new Error('PartitionStrategy with mergeV()/mergeE() not yet supported (partition-aware upsert)');
   // readPartitions defaults to EMPTY, and the read filter is injected UNCONDITIONALLY
   // (matching TinkerPop's PartitionStrategy.Builder default + apply()): an omitted
@@ -796,16 +787,8 @@ function valueArgTraversals(s: Step): any[] {
   (s.args ?? []).forEach((arg, i) => {
     const a = arg.value;
     if (slots.includes(i) && isNested(a)) out.push(a.nested);
-    // …and operands wrapped in a predicate: has("name", P.eq(__.addV(…))).
-    const preds: any[] = a && typeof a === 'object' && 'op' in a && Array.isArray(a.operands) ? [a] : [];
-    while (preds.length) {
-      const pr = preds.pop();
-      for (const o of pr.operands) {
-        const v = o.value;
-        if (isNested(v)) out.push(v.nested);
-        else if (v && typeof v === 'object' && 'op' in v && Array.isArray(v.operands)) preds.push(v);
-      }
-    }
+    // …and operands wrapped in a predicate, at any depth: has("name", P.eq(__.addV(…))).
+    if (isPred(a)) for (const n of valueNodes(a)) if (isNested(n)) out.push(n.nested);
   });
   return out;
 }
@@ -836,15 +819,15 @@ function valueArgTraversals(s: Step): any[] {
  * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
  */
 export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
-  const scan = (chain: Step[], underRepeat: boolean) => {
+  const scan = (chain: readonly Step[], underRepeat: boolean) => {
     for (const s of chain) {
       if (underRepeat && s.name === 'inject')
         throw new Error('The parent of inject()-step can not be repeat()-step');
       for (const nested of valueArgTraversals(s)) {
-        let body: Step[];
-        try { body = stepChain(nested, params); } catch { continue; }
+        const body = read(nested);
+        if (body === null) continue;
         const m = body.find((x) => MUTATING_STEPS.has(x.name))
-          ?? (someStepDeep(body, params, (x) => MUTATING_STEPS.has(x.name)) ? { name: 'a nested write' } as Step : undefined);
+          ?? (someStepDeep(body, read, (x) => MUTATING_STEPS.has(x.name)) ? { name: 'a nested write' } as Step : undefined);
         if (m) throw new Error(`The child traversal of ${s.name}() contains a mutating step (${m.name}) and thus is not read only: a mutating step is not allowed in a value-argument child traversal`);
       }
       // recurse into every OTHER nested body so a bad operand nested deep still trips. The flag is
@@ -852,21 +835,13 @@ export function verifyStandard(steps: IRStep[], params: Record<string, any>): vo
       // inside it. `until`/`emit` bodies count as well — the reference reaches them by the same
       // parent walk, and they are arguments of the same cluster here.
       const repeatHost = underRepeat || REPEAT_CLUSTER.has(s.name);
-      for (const { value: a } of s.args ?? []) {
-        if (!isNested(a)) continue;
-        try { scan(stepChain(a.nested, params), repeatHost); } catch (e) { if (isVerificationFailure(e)) throw e; /* unparseable without params — skip */ }
-      }
+      // Every child position (`eachChildChain`); a body unparseable without params is skipped.
+      eachChildChain(s, read, (body) => scan(body, repeatHost));
     }
   };
+  const read = rawBodies(params);
   scan(steps as Step[], false);
 }
-
-/** The `catch` around a speculative `stepChain` exists to skip a body that cannot be PARSED without
- *  its bound params — it must not also swallow a verdict thrown from inside the recursion. Keyed on
- *  the messages this file owns, so a parse failure still falls through silently and a real
- *  violation still propagates. (Before this, a violation nested two levels deep vanished.) */
-const isVerificationFailure = (e: unknown): boolean =>
-  e instanceof Error && (e.message.startsWith('The parent of inject()-step') || e.message.startsWith('The child traversal of '));
 
 /**
  * How many `by()` modulators each host ACCEPTS, and the reference's wording when it is handed one
@@ -1589,6 +1564,54 @@ export function absorbModulators(steps: IRStep[]): IRStep[] {
     i = j - 1;
   }
   return out;
+}
+
+/** The steps that hand on the very traverser they were given — a FILTER, the identity, a reordering or
+ *  passing barrier, a side effect — so a label one of them carries lands on the CURRENT path entry rather
+ *  than a new one: `AbstractStep.prepareTraversalForNextStep` calls `traverser.addLabels(labels)`, and
+ *  `ImmutablePath.extend(Set<String>)` UNIONS them into the last entry's label set
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/AbstractStep.java:224-229`,
+ *  `.../step/util/ImmutablePath.java:93-102`). Only a step that SPLITS the traverser onto a new object
+ *  opens a new entry. An ALLOWLIST, because a step missing here only keeps two binds apart (the old
+ *  answer), where a wrongly-listed one would merge two entries the reference keeps. The local-scope
+ *  forms of the slice/order/dedup family are map steps over a collection and are excluded by scope. */
+const KEEPS_PATH_ENTRY: ReadonlySet<string> = new Set([
+  'identity', 'barrier', 'has', 'hasLabel', 'hasId', 'hasKey', 'hasValue', 'hasNot', 'is', 'where', 'not', 'filter', 'and', 'or',
+  'dedup', 'limit', 'range', 'skip', 'tail', 'coin', 'sample', 'simplePath', 'cyclicPath', 'order', 'aggregate', 'store', 'sideEffect', 'timeLimit',
+]);
+
+/**
+ * THE LABELS OF ONE PATH ENTRY ARE A SET — fold every `as()` bind that lands on the same entry into one.
+ *
+ * A step's labels are a `Set<String>` in the reference, and `IdentityRemovalStrategy` COPIES an
+ * `identity()`'s labels onto the previous step (`TraversalHelper.copyLabels`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/IdentityRemovalStrategy.java:61-80`),
+ * so `g.V(1).as('a').identity().as('a').select(Pop.all,'a')` is `[v1]`: ONE entry labelled `a`. The same
+ * holds across any step that does not open a new entry (`KEEPS_PATH_ENTRY`), and inside one `as('a','a')`.
+ * Our `as()` is its own step and each bind of a label was its own history entry, so `Pop.all` answered
+ * `[v1, v1]`. This pass drops a label already bound to the current entry (and an `as()` left with none);
+ * a label bound again after a step that opens a new entry is a real second bind and stays.
+ */
+export function mergeStepLabels(steps: IRStep[]): IRStep[] {
+  let entry = new Set<string>();
+  let changed = false;
+  const out: IRStep[] = [];
+  for (const s of steps) {
+    if (s.name === 'as') {
+      const args = s.args.filter((a) => {
+        if (typeof a.value !== 'string') return true;
+        if (entry.has(a.value)) return false;
+        entry.add(a.value);
+        return true;
+      });
+      if (args.length === s.args.length) out.push(s);
+      else { changed = true; if (args.length) out.push({ ...s, args }); }
+      continue;
+    }
+    if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s)) entry = new Set();
+    out.push(s);
+  }
+  return changed ? out : steps;
 }
 
 /** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`
