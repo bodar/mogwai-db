@@ -691,6 +691,11 @@ authorities.
   non-distinct input when order is read, and a `partitionedSlice` whose host is not unbulked — NOT plain
   flat-map chains before `fold()` (measured: loses most of L3). Size: L, ~400–600 LOC + a census run; the
   window needs an L4 scenario.
+  ✅ **Stopgap LANDED (`9b1e80e9`):** one authority `referenceMergeObservableAt` (`ir/bulk.ts`), consulted by
+  `rowOp` and every inline `barrier()` site, declines an explicit `barrier()` / tie-everything `order()` over a
+  possibly-non-distinct stream when an order reader is downstream; pinned in
+  `test/L4-addendum/traverser-set-merge.feature`. L3 unchanged (1863). The full `bulkingPositions` /
+  `regroupFirstOccurrence` authority above is still open.
 - 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`
@@ -702,6 +707,10 @@ authorities.
   `withFanoutOrder`, `branchOrder`/`mintOrdered`, `branchMajor` and the `sliceDownstream` marks. Stopgap:
   `branchResult` returns `null` when sliced and not sliceable; decline an arm that carries an encounter in
   `tagArm`'s callers. Size: L, ~300–500 LOC. Depends on A (first-occurrence key).
+  ✅ **Stopgap LANDED (`9b1e80e9`):** `tagArmPositioned` keeps the arm's own encounter as a third key (an arm
+  with no position declines); any step list holding a positional slice raises `sliced` (`chainDemandsSlice`),
+  and `branchResult` declines a sliced merge before its positionless case. The `EmissionKey` stack above is
+  still open.
 - 🚧 **C — the number/type channel.** Authority: `util/GremlinValueComparator.java` (Number is one rung,
   compared by `NumberHelper.compare`), `util/NumberHelper.java` `performConversion` (throws on an infinite or
   out-of-range double), `SumGlobalStep` / `MaxGlobalStep` / `MeanGlobalStep`, `Max.feature`'s `d[1.0].d`.
