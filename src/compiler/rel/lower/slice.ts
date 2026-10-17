@@ -22,6 +22,7 @@ import type { ChildHost } from '../child.ts';
 import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
 import { pathCarried } from '../path.ts';
+import { mayRaise } from '../../../rel/raise.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
 import { dropPath, mergeObservableAt, orderRows } from '../lower.ts';
@@ -118,6 +119,7 @@ function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Re
   // It NEEDS a carried position, and that is not a limitation to work around — "last" is a question
   // ABOUT emission order, so a relation carrying none has no last, and the traversal declines.
   if (step.name === 'tail') {
+    if (countArg(step) === 0 && evaluationMayRaise(input)) return null;
     if (!encounter) return null;
     const last = { offset: 0, limit: countArg(step) };
     if (bulked && bulk) return bulkSlice(input, last, encounter, bulk, 'desc', fresh);
@@ -133,6 +135,7 @@ function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Re
   // shows up at all.
   let window;
   try { window = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
+  if (window.limit === 0 && evaluationMayRaise(input)) return null;
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
   // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
   // slice must count traversers — which needs a position to accumulate along, so a bulked relation
@@ -142,6 +145,21 @@ function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Re
   if (bulked && bulk) return encounter ? bulkSlice(input, window, encounter, bulk, 'asc', fresh) : null;
   return slice(input, { ...window, ...paramOf(step) }, encounter, 'asc', fresh);
 }
+
+/**
+ * A ZERO-WIDTH SLICE OVER AN INPUT WHOSE EVALUATION MAY RAISE — declines.
+ *
+ * The reference still PULLS a zero-width slice's input: `RangeGlobalStep.filter` runs only after
+ * `FilterStep.processNextStart` has pulled a start, so `limit(0)`/`range(k,k)` meet `low + 1` traversers
+ * before the bound throws, and `TailGlobalStep` drains every start
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/FilterStep.java`,
+ * `…/step/filter/RangeGlobalStep.java`, `…/step/filter/TailGlobalStep.java`; no strategy short-circuits
+ * `high == 0`). So `g.inject(1).toUpper().limit(0)` RAISES. SQLite never evaluates anything beneath a
+ * `LIMIT 0` — neither a pending raise's settle nor an in-statement raise arm — so the plan would answer
+ * `[]`. Fail closed: a zero-width slice over anything that may raise declines (a pending raise channel,
+ * or a `raiseExpr` arm anywhere below, correlated subplans included).
+ */
+const evaluationMayRaise = (input: Rel): boolean => pendingRaise(input) !== undefined || mayRaise(input);
 
 /** Which slice bound, if any, carries a user PARAMETER that binds untouched. Only `limit` (its count)
  *  and `skip` (its offset) qualify — a single value SQL takes as a plain `?`. `range` reduces (its

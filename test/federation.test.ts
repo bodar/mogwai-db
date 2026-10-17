@@ -378,6 +378,20 @@ describe('federation fails closed', () => {
       .rejects.toThrow(/source-rooted/);
   });
 
+  // An invalid federate call is a query failure — `UnsupportedTraversal` — never a bare internal Error:
+  // a missing/ill-typed param, an unrooted sub-traversal, and a pushed TAIL that does not start from
+  // V()/E() (which leaves no `traversal` param at all).
+  test('every invalid federate call fails as UnsupportedTraversal', async () => {
+    for (const q of [
+      'g.call("federate").with("traversal", __.V())',
+      'g.call("federate").with("graph", 1).with("traversal", __.V())',
+      'g.call("federate").with("graph","crew")',
+      'g.call("federate").with("graph","crew").out()',
+      'g.call("federate").with("graph","crew").with("traversal", __.inject(1))',
+      'g.V().call("federate",["graph":"crew","traversal":__.values("name")])',
+    ]) await expect(mgr.executor('home').framedAsync(q, {})).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
+  });
+
   test('an EXPLICIT scalar/value sub-traversal frames end-to-end (== direct on crew)', async () => {
     // The explicit `traversal` form now shares the pushed-terminal output framing: a sub-traversal that ends
     // in a VALUE (a reducer scalar or a `values(k)` stream) crosses back on the typed-node transport and

@@ -7,6 +7,7 @@ import { type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -878,6 +879,46 @@ function valueArgTraversals(s: Step): any[] {
  * ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
  * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
  */
+/**
+ * The class name the reference's `Mutating` step for each of our write steps carries WHEN THE CHILD IS
+ * VALIDATED — the `%s` `ReadOnlyChildValidator` prints. `has(k, <traversal>)`/`P.eq(<traversal>)`/
+ * `V(<traversal>)` validate at CONSTRUCTION (`GraphTraversal.has`/`V`, `P.java`), and a `property()`'s
+ * child at `StandardVerificationStrategy`, before strategies reach the child — so in both cases the
+ * write is still its `GValueHolder` PLACEHOLDER (`GraphTraversal.addV` adds `AddVertexStepPlaceholder`,
+ * reduced only by `GValueReductionStrategy`, an optimization applied to the child after its parent's
+ * verification).
+ */
+const MUTATING_STEP_CLASS: Readonly<Record<string, string>> = {
+  addV: 'AddVertexStepPlaceholder', addE: 'AddEdgeStepPlaceholder', property: 'AddPropertyStepPlaceholder',
+  mergeV: 'MergeVertexStepPlaceholder', mergeE: 'MergeEdgeStepPlaceholder', drop: 'DropStep',
+  addLabel: 'AddLabelStep', dropLabel: 'DropLabelsStep', dropLabels: 'DropLabelsStep',
+};
+
+/** The FIRST mutating step in `chain` at any depth, in the reference's order — a step before its own
+ *  children, the children before the next step (`TraversalHelper.getStepsOfAssignableClassRecursively`).
+ *  An unreadable body is skipped, as the caller always has. */
+function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | undefined {
+  for (const s of chain) {
+    if (MUTATING_STEPS.has(s.name)) return s;
+    let found: Step | undefined;
+    eachChildChain(s, read, (c) => { found ??= firstMutatingStep(c, read); });
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** `ReadOnlyChildValidator.validate`'s `IllegalArgumentException`, verbatim in its fixed text
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ReadOnlyChildValidator.java:47`).
+ *  A `ValueParseError` because it is the traversal's ANSWER, not a deferral. The child is printed as its
+ *  Gremlin source — the reference prints its `StringFactory.traversalString`, a Java step-object
+ *  rendering this compiler has no counterpart of. */
+function readOnlyChildViolation(step: Step, nested: unknown): ValueParseError {
+  const text = typeof (nested as { getText?: unknown })?.getText === 'function' ? (nested as { getText(): string }).getText() : '';
+  return new ValueParseError(
+    `Child traversal contains a mutating step '${MUTATING_STEP_CLASS[step.name] ?? step.name}' in '${text}'. `
+    + 'Mutating steps are not allowed in child traversals.');
+}
+
 export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
   const scan = (chain: readonly Step[], underRepeat: boolean) => {
     for (const s of chain) {
@@ -886,9 +927,8 @@ export function verifyStandard(steps: IRStep[], params: Record<string, any>): vo
       for (const nested of valueArgTraversals(s)) {
         const body = read(nested);
         if (body === null) continue;
-        const m = body.find((x) => MUTATING_STEPS.has(x.name))
-          ?? (someStepDeep(body, read, (x) => MUTATING_STEPS.has(x.name)) ? { name: 'a nested write' } as Step : undefined);
-        if (m) throw new Error(`The child traversal of ${s.name}() contains a mutating step (${m.name}) and thus is not read only: a mutating step is not allowed in a value-argument child traversal`);
+        const m = firstMutatingStep(body, read);
+        if (m) throw readOnlyChildViolation(m, nested);
       }
       // recurse into every OTHER nested body so a bad operand nested deep still trips. The flag is
       // STICKY once set, mirroring the ancestor walk: a body two branches inside a repeat is still

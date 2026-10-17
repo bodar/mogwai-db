@@ -707,3 +707,58 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "encountered String"
+
+  # A ZERO-WIDTH slice still PULLS: RangeGlobalStep.filter runs only after FilterStep.processNextStart has
+  # pulled a start, and no strategy short-circuits high == 0, so limit(0)/range(k,k) meet low + 1
+  # traversers. SQLite evaluates nothing beneath a LIMIT 0, so a zero-width slice over anything that may
+  # raise declines (src/compiler/rel/lower/slice.ts, evaluationMayRaise) — at every depth the slice is
+  # lowered by the one sliceRows.
+  @Unsupported
+  Scenario: g_injectX1X_toUpper_limitX0X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1).toUpper().limit(0)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  @Unsupported
+  Scenario: g_injectXa_1X_toUpper_rangeX1_1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("a", 1).toUpper().range(1, 1)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  @Unsupported
+  Scenario: g_V_valuesXageX_toUpper_limitX0X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().values("age").toUpper().limit(0).count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  @Unsupported
+  Scenario: g_injectXxX_mathX_plus_1X_limitX0X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("x").math("_+1").limit(0)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+
+  # Nothing below the zero-width slice can raise: it still answers.
+  Scenario: g_V_valuesXnameX_limitX0X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().values("name").limit(0)
+      """
+    When iterated to list
+    Then the result should be empty

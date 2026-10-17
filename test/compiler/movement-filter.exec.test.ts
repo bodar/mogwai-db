@@ -89,6 +89,21 @@ test('a mutating step in a VALUE-argument child traversal is rejected (StandardV
   bad('g.E(__.addV("x").id())');
   bad('g.V().property(__.addV("temp").project("k").by("name"))');
 
+  // The reference's own IllegalArgumentException text (ReadOnlyChildValidator.java:47), naming the
+  // FIRST mutating step in pre-order by its (still placeholder) class, as a value-error ANSWER — not
+  // our own wording, and not a bare Error.
+  const exact = (q: string, cls: string, child: string) => {
+    let err: any;
+    try { compile(q, {}); } catch (e) { err = e; }
+    expect(err?.name).toBe('ValueParseError');
+    expect(err?.message).toBe(`Child traversal contains a mutating step '${cls}' in '${child}'. Mutating steps are not allowed in child traversals.`);
+  };
+  exact('g.V().property("k", __.addV().count())', 'AddVertexStepPlaceholder', '__.addV().count()');
+  exact('g.V().has("k", __.addV().count())', 'AddVertexStepPlaceholder', '__.addV().count()');
+  exact('g.V().values("age").is(P.gt(__.addV().count()))', 'AddVertexStepPlaceholder', '__.addV().count()');
+  exact('g.V().has("name", __.V().drop().constant("x"))', 'DropStep', '__.V().drop().constant("x")');
+  exact('g.V().has("name", __.V().map(__.addE("x").to(__.V())).values("name"))', 'AddEdgeStepPlaceholder', '__.V().map(__.addE("x").to(__.V())).values("name")');
+
   // Scoped to VALUE arguments, NOT "every child traversal": a write is legal in a branch or
   // side-effect body, and rejecting those would break working write traversals. These must fail
   // (or not) for their own reasons — never with a mutating-step rejection.

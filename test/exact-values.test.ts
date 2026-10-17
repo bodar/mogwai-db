@@ -24,6 +24,21 @@ async function values(gremlin: string, writes: string[]): Promise<any[]> {
   return parsed.result.data;
 }
 
+// A Double overflow is ±Infinity, which SQLite REAL holds (`9e999`) and GraphBinary frames as an IEEE
+// double — never null. Pinned through the full response read, because a JSON probe of the raw rows
+// (`JSON.stringify(Infinity)` is `null`) has already misreported this once.
+describe('Double Infinity frames exactly', () => {
+  test.each([
+    ['g.inject(Infinity)', Infinity],
+    ['g.inject(-Infinity)', -Infinity],
+    ['g.withSack(1.0).inject(Infinity).sack(sum).sack()', Infinity],
+    ["g.inject(1.0).math('_ * 1e308 * 10')", Infinity],
+    ["g.inject(1.0).math('_ * -1e308 * 10')", -Infinity],
+  ])('%s', async (q, want) => {
+    expect(await values(q, [])).toEqual([want]);
+  });
+});
+
 describe('exact BigDecimal round-trip', () => {
   test('a 30-digit decimal f64 cannot hold survives write→read', async () => {
     const exact = '3.141592653589793238462643383279';

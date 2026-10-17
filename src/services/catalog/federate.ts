@@ -37,7 +37,7 @@ const mapValuesGremlin = (gremlin: string, label: string, param: string, reducer
 function graphOf(params: CallParams): string {
   const g = params.graph;
   if (typeof g !== 'string' || g.length === 0)
-    throw new Error('federate: a "graph" param (the sibling graph id) is required');
+    throw new UnsupportedTraversal('federate: a "graph" param (the sibling graph id) is required');
   return g;
 }
 
@@ -51,10 +51,10 @@ function graphOf(params: CallParams): string {
 function traversalOf(params: CallParams): string {
   const t = params.traversal;
   if (!isTraversalParam(t))
-    throw new Error('federate: a "traversal" param (a nested __.V()… sub-traversal) is required');
+    throw new UnsupportedTraversal('federate: a "traversal" param (a nested __.V()… sub-traversal) is required');
   const gremlin = subTraversalToGremlin(t.steps);
   if (!gremlin.startsWith('g.V(') && !gremlin.startsWith('g.E('))
-    throw new Error(`federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
+    throw new UnsupportedTraversal(`federate: the "traversal" must be source-rooted (start with V() or E()), got: ${gremlin.replace(/^g\./, '')}`);
   return gremlin;
 }
 
