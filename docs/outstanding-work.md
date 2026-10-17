@@ -64,7 +64,9 @@ lowered.
   (1) **data-dependent ties** — an `order().by(key)` whose key ties only SOME unequal traversers:
   `g.V().out().order().by(label).limit(5).values('name').groupCount()` gives `{josh:1,lop:2,ripple:1,vadas:1}`
   (ref `{vadas:1,josh:1,lop:3}`), `g.inject('a','b','a').order().by(length()).fold()` gives `[a,b,a]` (ref
-  `[a,a,b]`); declining every tie-capable key cost ~36–39 correct L3 scenarios. (2) **plain flat-map chains**
+  `[a,a,b]`); declining every tie-capable key cost ~36–39 correct L3 scenarios. A `math()` key that reads
+  a variable yet is constant-VALUED (`order().by(math('_ * 0')).fold()` gives `[1,2,1,3]`, ref `[1,1,2,3]`)
+  is the same residue: tying is a property of the values, not the syntax. (2) **plain flat-map chains**
   — `LazyBarrierStrategy`'s implicit `NoOpBarrierStep(2500)` after a second flat-map
   (`LazyBarrierStrategy.java:86-135`): `g.V().both().both().limit(4).id()` gives `[1,1,4,6]` (ref
   `[1,1,1,1]`). (3) an unread root `inject(1,2,1,3).barrier()` emits `[1,2,1,3]`. The fix is

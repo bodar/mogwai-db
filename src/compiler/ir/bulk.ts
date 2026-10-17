@@ -1,5 +1,5 @@
 import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
-import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { isNested, isScopeArg, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import { mathVars } from '../../gremlin/math.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
@@ -409,8 +409,20 @@ export function referenceDistinctAt(steps: readonly IRStep[], at: number, rooted
 }
 
 /** The steps after which no ORDER of the stream survives — each consumes the whole stream into one
- *  order-free value (a count, a numeric reduction, a count map), so an upstream reorder is invisible. */
+ *  order-free value (a count, a numeric reduction, a count map), so an upstream reorder is invisible.
+ *  A NAME is not enough: only the GLOBAL REDUCING form erases (`erasesOrder`). */
 const ORDER_ERASING: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', 'mean', 'groupCount']);
+
+/** Does `s` ERASE the order of the stream reaching it — is it an `ORDER_ERASING` step in its global
+ *  REDUCING form? A local-scope reducer (`count(local)`) maps each traverser on its own, and a
+ *  side-effect-keyed `groupCount('x')` is a `GroupCountSideEffectStep`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/GroupCountSideEffectStep.java`),
+ *  a `SideEffectStep` that passes every traverser through unchanged — merged bulk and all — so a slice
+ *  or a collector after it still reads the order. Only an argument list holding nothing but a GLOBAL
+ *  scope token is the reducing form; any other argument (a side-effect key) is not an eraser. */
+function erasesOrder(s: IRStep): boolean {
+  return ORDER_ERASING.has(s.name) && !isLocalScope(s) && (s.args ?? []).every((a) => isScopeArg(a.value));
+}
 
 /** Steps that keep a pairwise-distinct stream distinct ON TOP of `DISTINCT_PRESERVING`: a reorder (a
  *  merge point over distinct traversers merges nothing). */
@@ -468,13 +480,14 @@ function byTiesEveryTraverser(step: IRStep): boolean {
  *  slice, a collecting consumer, or a step holding a body that holds one, at any depth) makes the merge
  *  observable: `limit(2)` over the merged `1(bulk 2),2,3` keeps `1,1`, since `RangeGlobalStep` trims a
  *  traverser's BULK (`…/process/traversal/step/filter/RangeGlobalStep.java`), where the unmerged
- *  `1,2,1,3` keeps `1,2` — so a `sum()` after the slice reads the merge too. A GLOBAL eraser
- *  (`ORDER_ERASING`) reached first makes it unobservable. Reaching the end unread, the order is the
+ *  `1,2,1,3` keeps `1,2` — so a `sum()` after the slice reads the merge too. A GLOBAL REDUCING eraser
+ *  (`erasesOrder` — never a pass-through side-effect form like `groupCount('x')`) reached first makes
+ *  it unobservable. Reaching the end unread, the order is the
  *  answer. */
 function orderReadBeforeErased(after: readonly IRStep[]): boolean {
   for (const s of after) {
     if (readsOrder([s])) return true;
-    if (ORDER_ERASING.has(s.name) && !isLocalScope(s)) return false;
+    if (erasesOrder(s)) return false;
   }
   return true;
 }

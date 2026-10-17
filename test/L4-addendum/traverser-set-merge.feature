@@ -252,7 +252,72 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
-  # A GLOBAL eraser reached before any reader still hides the merge, so these keep answering.
+  # An eraser is a STEP FORM, not a name: the side-effect `groupCount('x')` is a
+  # GroupCountSideEffectStep, a SideEffectStep that passes every traverser through (merged bulk and all),
+  # so the slice or collector after it still reads the merge (`erasesOrder`). Flat, under a modulator,
+  # with a collector, and inside a union arm.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).groupCount("x").limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_byXconstantX0XX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).groupCount("x").by(__.constant(0)).limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).groupCount("x").fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_unionXorder_byXconstantX0XX_groupCountXxX_limitX2XX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).union(__.order().by(__.constant(0)).groupCount("x").limit(2)).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  # A GLOBAL eraser reached before any reader still hides the merge, so these keep answering — and a
+  # pass-through side effect before it does not change that.
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).groupCount("x").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
   @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_sum
     Given the empty graph
