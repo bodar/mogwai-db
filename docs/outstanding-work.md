@@ -236,3 +236,9 @@ lowered.
   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java:1300`)
   and `Operator.addAll` mutates it in place, so every parent folds into ONE aliased collection; only a
   root-chain fold is admitted. Exact aliasing semantics are not worth a lowering.
+- **Heterogeneous-layout branch arms + per-traverser arm slices** — decline (`56fcc8b4`): a union arm
+  set failing the ONE column law `unionColumnsViolation` (`src/rel/structure.ts`, shared by check.ts and
+  `mergeArms`/`variantMerge`) declines instead of an internal error, and a non-reducing coalesce/optional
+  arm holding a slice declines because TinkerPop resets the arm per start
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-60`,
+  `.../step/branch/OptionalStep.java:47-57`); pinned in `test/L4-addendum/branch-arm-decline.feature`.
