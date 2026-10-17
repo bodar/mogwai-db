@@ -1,5 +1,6 @@
 import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { mathVars } from '../../gremlin/math.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
 //
@@ -431,19 +432,51 @@ function distinctAt(steps: readonly IRStep[], at: number, start: { readonly root
   return !!start && !start.rooted;
 }
 
-/** Does an `order()` TIE EVERY TRAVERSER — a `by()` whose key is a bare `constant(…)`? Then the stable
- *  sort leaves the merged set in arrival order, so the merge is the whole answer. A key that ties only
- *  SOME unequal traversers (two vertices sharing a `name`) shows the merge only on data where it ties;
- *  that data-dependent residue is the regroup mint's (Cluster A), declining it here would lose dozens of
- *  correct L3 scenarios (measured), and it stays tracked in `docs/outstanding-work.md`. */
+/** Does a key step DISCARD the traverser for a value computed without it? A `constant()` maps every
+ *  traverser to one value, and so does a `math()` whose expression references NO variable — neither
+ *  `_` nor a label (`math('0')`; `mathVars`, `src/gremlin/math.ts`, is the variable set `MathStep`
+ *  binds). A `math()` that reads a variable (`math('a / b')`, `math('_ * 10')`) keys on data, so it is
+ *  the data-dependent residue below; an unreadable expression counts as discarding (fail closed). */
+function discardsTraverser(c: IRStep): boolean {
+  if (c.name === 'constant') return true;
+  if (c.name !== 'math') return false;
+  const formula = c.args?.[0]?.value;
+  if (typeof formula !== 'string') return true;
+  try { return mathVars(formula).length === 0; } catch { return true; }
+}
+
+/** May an `order()` TIE EVERY TRAVERSER — a `by()` key whose chain, anywhere at its top level, discards
+ *  the traverser (`discardsTraverser`): `constant(0)`, `constant(0).is(0)`,
+ *  `constant('a').concat('b')`, `math('0')`? Then the stable sort
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:78`)
+ *  leaves the merged set in arrival order, so the merge is the whole answer. `true` only ever ADDS a
+ *  decline, so an unnormalizable key counts as tying (fail closed).
+ *
+ *  A key that ties only SOME unequal traversers on some data (two vertices sharing a `name`, two strings
+ *  of one `length()`) shows the merge only where the data ties; that data-dependent residue is the
+ *  regroup mint's (Cluster A, `docs/2026-08-01-relir-build-plan.md` §10, indexed in
+ *  `docs/outstanding-work.md`). Declining it here would lose dozens of correct L3 scenarios (measured). */
 function byTiesEveryTraverser(step: IRStep): boolean {
   return (step.modulators ?? []).some((by: readonly unknown[]) => by.some((arg) => {
     if (!isNested(arg)) return false;
-    let chain: readonly IRStep[];
-    try { chain = stepChain(arg.nested, {}); } catch { return true; }
-    const real = chain.filter((c) => !NOT_A_REFERENCE_STEP.has(c.name));
-    return real.length === 1 && real[0]!.name === 'constant';
+    try { return stepChain(arg.nested, {}).some(discardsTraverser); } catch { return true; }
   }));
+}
+
+/** Does the stream an `order()` emits reach a step that READS its order before one that ERASES it?
+ *  Walking `after` in stream order, the FIRST order-relevant step decides. A reader (`readsOrder`: a
+ *  slice, a collecting consumer, or a step holding a body that holds one, at any depth) makes the merge
+ *  observable: `limit(2)` over the merged `1(bulk 2),2,3` keeps `1,1`, since `RangeGlobalStep` trims a
+ *  traverser's BULK (`…/process/traversal/step/filter/RangeGlobalStep.java`), where the unmerged
+ *  `1,2,1,3` keeps `1,2` — so a `sum()` after the slice reads the merge too. A GLOBAL eraser
+ *  (`ORDER_ERASING`) reached first makes it unobservable. Reaching the end unread, the order is the
+ *  answer. */
+function orderReadBeforeErased(after: readonly IRStep[]): boolean {
+  for (const s of after) {
+    if (readsOrder([s])) return true;
+    if (ORDER_ERASING.has(s.name) && !isLocalScope(s)) return false;
+  }
+  return true;
 }
 
 /**
@@ -464,7 +497,8 @@ function byTiesEveryTraverser(step: IRStep): boolean {
  * pairwise distinct (`distinctAt`), and for an `order()` whose keys do not tie every traverser
  * (`byTiesEveryTraverser`). A `barrier()` changes only ORDER, so it declines only where a reader demands
  * one (`ordered`, `ChainFacts.demandsEncounter`); an `order()`'s output order is its answer, so it
- * declines unless a later step erases order (`ORDER_ERASING`). Everywhere else this is a decline, until
+ * declines unless the stream reaches a global step that erases order (`ORDER_ERASING`) BEFORE any step
+ * that reads it (`orderReadBeforeErased`) — a slice in between reads the merged bulk. Everywhere else this is a decline, until
  * a first-occurrence regroup mint lowers the merge itself.
  *
  * Deliberately NOT applied to the implicit `NoOpBarrierStep`s `LazyBarrierStrategy` places after a
@@ -479,7 +513,7 @@ export function referenceMergeObservableAt(
   if (step.name === 'order' && !byTiesEveryTraverser(step)) return false;
   if (distinctAt(steps, at, start)) return false;
   const after = steps.slice(at + 1);
-  if (step.name === 'order') return !after.some((s) => ORDER_ERASING.has(s.name));
+  if (step.name === 'order') return orderReadBeforeErased(after);
   // A ROOT chain's downstream is `after` itself; a body's continues into whatever encloses it, which
   // only the inherited chain-global `ordered` speaks for.
   return readsOrder(after) || (!start?.rooted && ordered);

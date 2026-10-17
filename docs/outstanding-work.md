@@ -57,6 +57,18 @@ lowered.
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
   (Graph capabilities, below).
+- **TraverserSet merge — the regroup mint (Cluster A, RelIR plan §10).** The reference merges equal
+  traversers into the first arrival's slot at every bulking barrier (`TraverserSet.java:88-96`); this spine
+  never merges. A STOPGAP declines where the merge is observable at an explicit `barrier()`/tie-every
+  `order()` (`referenceMergeObservableAt`, `src/compiler/ir/bulk.ts`). Still WRONG, knowingly:
+  (1) **data-dependent ties** — an `order().by(key)` whose key ties only SOME unequal traversers:
+  `g.V().out().order().by(label).limit(5).values('name').groupCount()` gives `{josh:1,lop:2,ripple:1,vadas:1}`
+  (ref `{vadas:1,josh:1,lop:3}`), `g.inject('a','b','a').order().by(length()).fold()` gives `[a,b,a]` (ref
+  `[a,a,b]`); declining every tie-capable key cost ~36–39 correct L3 scenarios. (2) **plain flat-map chains**
+  — `LazyBarrierStrategy`'s implicit `NoOpBarrierStep(2500)` after a second flat-map
+  (`LazyBarrierStrategy.java:86-135`): `g.V().both().both().limit(4).id()` gives `[1,1,4,6]` (ref
+  `[1,1,1,1]`). (3) an unread root `inject(1,2,1,3).barrier()` emits `[1,2,1,3]`. The fix is
+  `bulkingPositions` + a `regroupFirstOccurrence` mint, after which the stopgap goes.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

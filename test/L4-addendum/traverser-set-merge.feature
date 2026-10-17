@@ -85,3 +85,194 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
     Then the result should be ordered
       | result |
       | d[4].l |
+
+  # A SLICE between an `order()` and an order-erasing reducer reads the merge: `RangeGlobalStep` trims the
+  # merged `1(bulk 2)`'s BULK, so `limit(2)` keeps `1,1` (sum 2), where the unmerged `1,2,1,3` keeps `1,2`
+  # (sum 3). The FIRST order-relevant step after the `order()` decides (`orderReadBeforeErased`), not
+  # whether any eraser follows somewhere.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_tailX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).tail(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_groupCount
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).groupCount()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"d[1].i":"d[2].l"}] |
+
+  # The slice decides at every depth after it — through a per-traverser body, a filter body, a branch,
+  # a bounded repeat and an as()/select() pair — and before it (two stacked tie-every orders).
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_localXidentityX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).local(__.identity()).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_whereXisXgtX0XXX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).where(__.is(P.gt(0))).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_chooseXisX1X_identity_identityX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).choose(__.is(1), __.identity(), __.identity()).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_repeatXidentityX_timesX1X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).repeat(__.identity()).times(1).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_asXaX_limitX2X_selectXaX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).as("a").limit(2).select("a").sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_order_byXconstantX1XX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).order().by(__.constant(1)).limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  # The rule is the step's own, so it holds where the order/slice/sum chain is itself a child body.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_VX1X_localXconstantXl1_2_1_3X_unfold_order_byXconstantX0XX_limitX2X_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.constant([1, 2, 1, 3]).unfold().order().by(__.constant(0)).limit(2).sum())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  # A key that ties every traverser need not be a BARE constant: any key that discards the traverser's
+  # value for a computed one (`constant(…)` followed by more steps, a `math()` expression) may tie them
+  # all, so the stable sort again leaves the merged set's slot order.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0X_isX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0).is(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXconstantXaX_concatXbXX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant("a").concat("b")).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX1_2_1_3X_order_byXmathX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.math("0")).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  # A GLOBAL eraser reached before any reader still hides the merge, so these keep answering.
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.constant(0)).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_3X_order_byXconstantX0XX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 3).order().by(__.constant(0)).limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
