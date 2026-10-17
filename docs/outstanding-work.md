@@ -23,6 +23,23 @@ lowered.
   **map shape** (9 — `group*`), **list shape** (9 — `fold`/`unfold`), **row ops** (9 — `order`/`dedup`/`range`),
   **side effects** (8 — `group`/`aggregate`/`cap`). Start with
   [the RelIR build plan](./2026-08-01-relir-build-plan.md) (§10 is the live-gap home).
+- **A READ in the main chain of a write that ran over several traversers — still answered from one
+  statement per step (WRONG today, pre-existing).** The lazy pipeline hands traverser 1 through every later
+  step before traverser 2 reaches the write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`),
+  so a later read sees only EARLIER traversers' writes: `g.inject(1,2).addV('x').V().hasLabel('x').count()`
+  is 3 in the reference (we say 4), `g.V(1,2).addE('k').to(V(3)).V(3).inE('k').count()` 3 (we say 4),
+  `g.inject(1,2).as('a').V(1).property(single,'w',select('a')).values('w')` [1,2] (we say [2,2]),
+  `g.inject(1,2).as('a').addV('x').filter(select('a').is(1)).V().hasLabel('x').count()` 1 (we say 2); an EARLIER read interleaves the same
+  way from the other side. What is guarded today is only a value BODY that reads (`sequentialGuard`, with
+  the upstream stream count from `afterWrite`), a write over what an upstream write wrote
+  (`writeAfterWrite`), and a merge's per-driver re-writes (`guardMergeInterleaving`). The generic rule is
+  `afterWrite` refusing when the PROGRAM's reach (`ProgramWrites.reads`, a `BodyReach`) observes the writer's
+  effect over >1 traverser — measured as the coarse form (no per-element exemption): it costs 12 L3
+  scenarios and ~96 other tests, because a read of the traverser's OWN element after an idempotent constant
+  write (`g.V().property('x',1).values('x')`) is exact and must stay answered, and a `NoOpBarrierStep`
+  between write and read (a second flat-map, `g.V().property('w',1).out().property('w',2)`) orders every
+  write first. So it needs `sequentialGuard`'s per-element/per-stream split applied to the chain's own
+  reads, and the barrier positions `ir/bulk.ts` already models (`bulkingPositions`).
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
   the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's

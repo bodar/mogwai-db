@@ -20,6 +20,9 @@ import { bare, run, seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 
 const SEQUENTIAL = /may read what another traverser writes/;
+// A site whose KEY is only known at run time may also OVERWRITE the upstream key, which the write-after-write
+// guard (`writeAfterWrite`, write.ts) refuses first — either refusal is the reference's ordering problem.
+const SEQUENTIAL_OR_OVERWRITE = /may read what another traverser writes|may land on what an earlier write step wrote/;
 
 describe('property(k, <traversal>) refuses when an upstream write ran over more traversers than the site sees', () => {
   // [traversal, the reference's answer it used to get wrong]
@@ -59,7 +62,7 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     `g.V().sample(1).property('a',1).has('name').property('n', __.V().values('a').count())`,
   ];
   for (const traversal of refused) test(traversal, () => {
-    expect(() => run(seededStore(), traversal)).toThrow(SEQUENTIAL);
+    expect(() => run(seededStore(), traversal)).toThrow(/property\(__\./.test(traversal) ? SEQUENTIAL_OR_OVERWRITE : SEQUENTIAL);
   });
 
   // A SLICE between the upstream write and the site. Where `EarlyLimitStrategy` moves it before the write

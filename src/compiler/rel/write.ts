@@ -1431,12 +1431,77 @@ export function afterWrite<T extends { readonly effects?: readonly Binding[] }>(
   params: Record<string, any>, fresh: Minter, tail: () => T | null,
 ): T | null {
   const entry: UpstreamWrite = { effect: programWrites(writer, params), count: input && !writes.draws ? fresh('wn') : null, used: false };
+  const ordered = writeAfterWrite(writes, entry.effect, fresh);
   writes.upstream.push(entry);
   let lowered: T | null;
   try { lowered = tail(); } finally { writes.upstream.splice(writes.upstream.indexOf(entry), 1); }
   if (!lowered) return null;
   const counted = input && entry.count !== null && entry.used ? [streamCount(input, entry.count, fresh)] : [];
-  return { ...lowered, effects: [...counted, ...bindings, ...(lowered.effects ?? [])] };
+  return { ...lowered, effects: [...counted, ...ordered, ...bindings, ...(lowered.effects ?? [])] };
+}
+
+/**
+ * **WRITE AFTER WRITE — THE GUARDS A WRITER OWES EVERY UPSTREAM WRITE IT OVERWRITES** (`overwrites`): each
+ * raises unless ONE traverser ran through that upstream write, and runs BEFORE the writer's own
+ * statements. Every write site asks it — `afterWrite` for a writer with a tail, and a TERMINAL writer
+ * (`drop()`, which composes no continuation) directly, with its own step.
+ */
+export function writeAfterWrite(writes: ProgramWrites, writer: ProgramWrites, fresh: Minter): Binding[] {
+  return writes.upstream.filter((upstream) => overwrites(upstream.effect, writer))
+    .map((upstream): Binding => ({ name: fresh('gw'), ...upstreamManyGuard(upstream, undefined, SEQUENTIAL_WRITE, fresh) }));
+}
+
+/** `writeAfterWrite` for a TERMINAL write step, which composes no continuation (`drop()`): its guards
+ *  ahead of its own statements. */
+export function terminalWrite(writes: ProgramWrites, step: IRStep, bindings: readonly Binding[], params: Record<string, any>, fresh: Minter): Binding[] {
+  return [...writeAfterWrite(writes, programWrites([step], params), fresh), ...bindings];
+}
+
+/**
+ * **DOES `later` WRITE WHAT `earlier` WROTE — so that which of the two lands last on a shared element is
+ * the reference's per-traverser order, not the plan's per-step order?** The lazy pipeline hands traverser 1
+ * through EVERY later step before traverser 2 reaches the earlier one (no barrier after a short id source or
+ * a first flat-map, none at all on a labelled path,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`;
+ * `AddPropertyStep` mutates per traverser, `…/step/sideEffect/AddPropertyStep.java:94`). So
+ * `g.inject(1,2).as('a').V(1).property(single,'w',5).filter(select('a').is(1)).property(single,'w',9)` leaves
+ * `w=5` there — traverser 2's 5 lands after traverser 1's 9 — where one statement per step leaves 9. Read
+ * off the two writes' SITES (`writeSiteOf`), over-approximating by key and never by element:
+ *  - two `property()` writes whose keys meet; a `drop()` (any key, any element) against a property, a label
+ *    or another drop's element; two label mutations.
+ *  - a merge or a creation is NOT read here: a merge's own `onMatch`/tail re-writes against every other
+ *    write are its own guard's (`mergeRewritesOverwritten`, `mergeObservesOtherWrites`), and a creation
+ *    writes a new element per traverser.
+ * `afterWrite` asks it of every upstream write still being lowered; the guard is that write's stream count.
+ */
+function overwrites(earlier: ProgramWrites, later: ProgramWrites): boolean {
+  const { sites: before } = earlier, { sites: after } = later;
+  if (before === 'unknown' || after === 'unknown') return true;
+  const clash = (a: WriteSite, b: WriteSite): boolean =>
+    (a.op === 'property' && b.op === 'property' && meets(a.keys, b.keys))
+    || (a.op === 'label' && b.op === 'label')
+    || (a.op === 'drop' && (b.op === 'property' || b.op === 'label' || b.op === 'drop'))
+    || (b.op === 'drop' && (a.op === 'property' || a.op === 'label'));
+  return before.some((a) => after.some((b) => clash(a, b)));
+}
+
+/** A GUARD raising `message` when more than one traverser ran through `upstream` — its retained stream
+ *  count (`afterWrite`), or, where nothing counts that stream, always — and (`also`) only while that
+ *  relation holds a row. Marks the count used. */
+function upstreamManyGuard(upstream: UpstreamWrite, also: Rel | undefined, message: string, fresh: Minter): { readonly node: Rel; readonly guard: Guard } {
+  upstream.used = true;
+  const counted = upstream.count === null
+    ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
+    : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
+  const more: Expr = { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) };
+  const many = make.filter({
+    id: fresh('rf'), input: counted, channels: [], type: counted.type,
+    pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
+  });
+  return {
+    guard: { message, raiseWhen: 'rows' },
+    node: make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
+  };
 }
 
 /** How many TRAVERSERS `input` holds — its rows, each weighted by its bulk where it carries one — as a
@@ -1583,18 +1648,9 @@ function sequentialGuard(
     // Seen only through literal vertex ids: only when one of them named no vertex at the program's start.
     const ids = new Set<number | string>();
     if (!seen.includes(true)) reaches.forEach((reach, at) => { if (seen[at]) for (const id of reach.vertexIds) ids.add(id); });
-    const also = ids.size ? freshIdsAtStart(program, ids, fresh) : undefined;
     // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises.
-    const counted = upstream.count === null
-      ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
-      : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
-    const more: Expr = { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) };
-    const many = make.filter({
-      id: fresh('rf'), input: counted, channels: [], type: counted.type,
-      pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
-    });
-    guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
-      { message, raiseWhen: 'rows' });
+    const { node, guard: spec } = upstreamManyGuard(upstream, ids.size ? freshIdsAtStart(program, ids, fresh) : undefined, message, fresh);
+    guard(node, spec);
   }
   if (!perElement && !perStream) return;
   const counts = make.aggregate({
@@ -1655,6 +1711,7 @@ function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
 }
 
 const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
+const SEQUENTIAL_WRITE = 'this traversal is not supported yet: a write here may land on what an earlier write step wrote for another traverser, and TinkerPop runs each traverser through every mutating step before the next one reaches the earlier step';
 const SEQUENTIAL_ENDPOINT = 'this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
 const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
@@ -3337,11 +3394,12 @@ function writeSnapshot(input: Rel, fresh: Minter): { readonly bindings: readonly
  * bindings in order), each raising in one runtime situation:
  *
  *  - **(1) two drivers land on ONE pre-existing element** while the `onMatch`/tail `repeats` (a `list`
- *    append, a per-traverser value — each driver writes its own) or `mutatesSearch` (it writes a key the
- *    search reads, so the later driver's search no longer finds the element).
+ *    append, a per-traverser value — each driver writes its own), `mutatesSearch` (it writes a key the
+ *    search reads, so the later driver's search no longer finds the element) or is `overwritten` (another
+ *    write sets one of its keys, and the loop orders that write between the two drivers' re-writes).
  *  - **(2) a later driver would MATCH what an earlier one CREATED** — two drivers that both missed, whose
  *    searches `couldMatch` the earlier one's creation, where the later one would then have run `onMatch`
- *    on it (`acts`), repeated a write on it (`repeats`), or not have shared it with the earlier one here
+ *    on it (`acts`), repeated a write on it (`repeats`, `overwritten`), or not have shared it with the earlier one here
  *    (`createKey` differs — two creations where the loop makes one). Two misses with the SAME create key
  *    and an inert `onMatch` are what `Distinct` already answers correctly — one creation, carried by both
  *    — so that common case still runs.
@@ -3404,8 +3462,8 @@ function guardMergeInterleaving(
   }
   // (1) — one pre-existing element reached by two drivers. An input-independent search (`matched` with no
   // `ord`) reaches every match from every driver.
-  if (facts.repeats || facts.mutatesSearch) {
-    const why = 'reaching one element with an onMatch or property() write the next traverser observes (a searched key, a list append, or a per-traverser value)';
+  if (facts.repeats || facts.mutatesSearch || facts.overwritten) {
+    const why = 'reaching one element with an onMatch or property() write the next traverser observes (a searched key, a list append, a per-traverser value, or a key another write sets)';
     if (matched.type.cols.some((column) => column.name === ORD) && matched.kind === 'ref') {
       const other = make.ref({ id: fresh('r'), name: matched.name, channels: [], type: matched.type });
       raiseOnRows(selfJoin(matched, other, and(eq(col(matched.id, 'id'), col(other.id, 'id')), lt(col(matched.id, ORD), col(other.id, ORD)))), why);
@@ -3421,14 +3479,14 @@ function guardMergeInterleaving(
   // would NOT share the creation (`createKey` differs) or a write that repeats or redirects the search.
   if (!unmatched) return;
   const acts = facts.acts && !(unmatched.sharesOnMatch && facts.onMatchShareable);
-  if (!acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null) return;
+  if (!acts && !facts.repeats && !facts.mutatesSearch && !facts.overwritten && unmatched.createKey === null) return;
   const u = unmatched.rel;
   const earlier = bind(make.project({
     id: fresh('p'), input: u, channels: [], type: u.type, exprs: u.type.cols.map((column) => [column.name, col(u.id, column.name)] as const),
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
   const { createKey, couldMatch } = unmatched;
-  const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
+  const observable: Expr = acts || facts.repeats || facts.mutatesSearch || facts.overwritten || !createKey ? always
     : isNot(createKey(earlier.id), createKey(later.id));
   raiseOnRows(selfJoin(earlier, later, and(and(lt(col(earlier.id, ORD), col(later.id, ORD)),
     couldMatch ? couldMatch(earlier.id, later.id) : always), observable)),
@@ -3493,6 +3551,9 @@ interface MergeWriteFacts {
   readonly mutatesSearch: boolean;
   /** A write OUTSIDE this merge's own cluster could change what the search finds (`mergeObservesOtherWrites`). */
   readonly othersObserved: boolean;
+  /** A write OUTSIDE this merge's own cluster writes a key the `onMatch` or the tail writes
+   *  (`mergeRewritesOverwritten`) — so an element two drivers share shows which of the two ran last. */
+  readonly overwritten: boolean;
   /**
    * **The `onMatch` may run ONCE per shared creation where the loop runs it once per LATER driver.**
    * `MergeVertexStep.flatMap`/`MergeEdgeStep.flatMap` hand driver 1 the creation and every later driver
@@ -3501,7 +3562,8 @@ interface MergeWriteFacts {
    * final state exactly when
    *  - every `onMatch` write is IDEMPOTENT per element — a constant `single` (any edge write; a vertex
    *    write with a stated `single`/`set`) or a removal; no appended label, no per-traverser value;
-   *  - it neither redirects a search (`mutatesSearch`) nor meets another write (`othersObserved`); and
+   *  - it neither redirects a search (`mutatesSearch`) nor meets another write (`othersObserved`,
+   *    `overwritten` — a later write driver 1 reaches lands BEFORE driver 2's `onMatch` there); and
    *  - NO STEP OF THE PROGRAM READS A KEY IT WRITES (`ProgramWrites.reads`) — the one observation that would
    *    tell driver 1 (which passes every later step before driver 2 merges: no `NoOpBarrierStep` follows a
    *    first flat-map, `LazyBarrierStrategy.java:73,112-114`) from the plan, which wrote it already.
@@ -3541,11 +3603,16 @@ function mergeWriteFacts(
   const repeats = onMatch.some(perTraverser) || tail.some(perTraverser);
   const mutatesSearch = onMatch.some(writesSearched) || tail.some(writesSearched);
   const othersObserved = mergeObservesOtherWrites(element, propertySteps, searched, program);
-  const written: KeySet = new Set(onMatch.map((write) => (write.kind === 'set' || write.kind === 'remove' ? write.key : '')));
+  const keyOf = (write: PropertyWrite): string | null => (write.kind === 'set' || write.kind === 'remove' ? write.key
+    : write.kind === 'runtime' && typeof write.key === 'string' ? write.key : null);
+  const keysOf = (writes: readonly PropertyWrite[]): KeySet =>
+    writes.some((write) => keyOf(write) === null) ? 'all' : new Set(writes.map((write) => keyOf(write)!));
+  const rewritten = keysOf([...onMatch, ...tail]);
+  const overwritten = (onMatch.length > 0 || tail.length > 0) && mergeRewritesOverwritten(propertySteps, rewritten, program);
   return {
-    acts: onMatch.length > 0 || appended.length > 0, repeats, mutatesSearch, othersObserved,
-    onMatchShareable: !appended.length && !repeats && !mutatesSearch && !othersObserved
-      && onMatch.every((write) => write.kind === 'set' || write.kind === 'remove') && !meets(program.reads.keys, written),
+    acts: onMatch.length > 0 || appended.length > 0, repeats, mutatesSearch, othersObserved, overwritten,
+    onMatchShareable: !appended.length && !repeats && !mutatesSearch && !othersObserved && !overwritten
+      && onMatch.every((write) => write.kind === 'set' || write.kind === 'remove') && !meets(program.reads.keys, keysOf(onMatch)),
   };
 }
 
@@ -3579,7 +3646,6 @@ function mergeWriteFacts(
 function mergeObservesOtherWrites(
   element: 'vertex' | 'edge', propertySteps: readonly IRStep[], searched: ReadonlySet<string> | null, program: ProgramWrites,
 ): boolean {
-  if (program.sites === 'unknown') return true;
   const observes = (site: WriteSite): boolean => {
     switch (site.op) {
       case 'drop': case 'addV': case 'mergeV': return true;
@@ -3588,8 +3654,43 @@ function mergeObservesOtherWrites(
       case 'property': return site.keys === 'all' || searched === null || [...site.keys].some((key) => searched.has(key));
     }
   };
-  const own = 1 + propertySteps.map(writeSiteOf).filter((site): site is WriteSite => site !== null && observes(site)).length;
-  return program.sites.filter(observes).length !== own;
+  return othersWrite(propertySteps, program, observes, 1);
+}
+
+/**
+ * **ANY OF THE PROGRAM'S WRITE SITES `picks` SELECTS, BEYOND THIS MERGE'S OWN CLUSTER?** The one counting
+ * subtraction both merge questions make (`mergeObservesOtherWrites` for what the SEARCH reads,
+ * `mergeRewritesOverwritten` for what each driver re-writes): the program's picked sites, minus `self` (the
+ * merge step itself, when `picks` selects it) and each of its `property()` tail steps `picks` selects,
+ * must be none. Counted, not matched by identity — a nested body is normalized afresh, so this merge's own
+ * step need not be the one the program walk saw. An `'unknown'` program (an unreadable body) always has one.
+ */
+function othersWrite(propertySteps: readonly IRStep[], program: ProgramWrites, picks: (site: WriteSite) => boolean, self: 0 | 1): boolean {
+  if (program.sites === 'unknown') return true;
+  const own = self + propertySteps.map(writeSiteOf).filter((site): site is WriteSite => site !== null && picks(site)).length;
+  return program.sites.filter(picks).length !== own;
+}
+
+/**
+ * **DOES A WRITE OUTSIDE THIS MERGE'S OWN CLUSTER WRITE A KEY EACH DRIVER RE-WRITES ON AN ELEMENT IT
+ * SHARES?** Every driver reaching an element runs `onMatch` (a match) and the `property()` tail (always)
+ * on it when IT reaches the merge — and driver 1 has by then passed every LATER step, while every EARLIER
+ * step for driver 2 runs after driver 1's merge (no `NoOpBarrierStep` after a first flat-map,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:112-130`;
+ * the per-traverser loop, `MergeVertexStep.java:78-116`, `MergeEdgeStep.java:255-292`,
+ * `AddPropertyStep.java:94`). Every merge host writes `onMatch` and the tail ONCE per element, before any
+ * later step. So `g.inject(1,2).as('a').mergeV([name:'x']).option(onMatch,[w:single(1)]).filter(select('a')
+ * .is(1)).property(single,'w',9)` leaves `w=1` in the reference — driver 1 writes 9, driver 2's `onMatch`
+ * then writes 1 — and `….mergeV([name:'x']).property(single,'w',5).filter(select('a').is(1))
+ * .property(single,'w',9)` leaves `w=5`, where the plan leaves 9 for both. Any OTHER write of a re-written
+ * key, at any depth or position, may land either side of a later driver's re-write, so it is observable
+ * (`guardMergeInterleaving`). The one write ordered exactly is the merge's own tail, which every driver runs
+ * straight after its own merge. Another merge, a creation or a `drop()` that the search could see is
+ * already `othersObserved`; only `property()` sites count here — over-approximated by key, never by
+ * element.
+ */
+function mergeRewritesOverwritten(propertySteps: readonly IRStep[], rewritten: KeySet, program: ProgramWrites): boolean {
+  return othersWrite(propertySteps, program, (site) => site.op === 'property' && meets(site.keys, rewritten), 0);
 }
 
 /**

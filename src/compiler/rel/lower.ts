@@ -48,7 +48,7 @@ import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOf
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { deferralExpr, raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { promotedExtremum, resultIsDecimal, widensDoubleToDecimal } from './float.ts';
-import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
+import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, terminalWrite, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
@@ -5415,7 +5415,7 @@ function elementTail(
       // have rejected is to decline it, not to lower the prefix and forget the rest.
       if (at !== steps.length - 1 || step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
       const dropped = elementDrop(rel, elem, fresh);
-      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
+      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, step, dropped.bindings, ctx.params, fresh), bulked: false };
     }
     // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the bound alias tuple, on the ELEMENT stream
     // BEFORE any `select`. The traverser stays the current element; only the first per-tuple survives.
@@ -5683,7 +5683,7 @@ function propertyTail(
   if (step.name === 'drop') {
     if (from !== steps.length - 1) return null;
     const dropped = propertyDrop(rel, elem, fresh);
-    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
+    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, step, dropped.bindings, ctx.params, fresh), bulked: false };
   }
   // A bound VertexProperty NOW carries its landed identity: the detached compile lands `vpid`, which
   // `boundPropertyRelation` reads into `p_id`, so `properties().id()` over a bound vertex frames the

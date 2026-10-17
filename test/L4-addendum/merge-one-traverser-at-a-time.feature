@@ -722,3 +722,152 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | result |
       | d[3].l |
     And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",1)"
+
+  # ANOTHER WRITE OF A KEY EACH DRIVER RE-WRITES (`mergeRewritesOverwritten`, write.ts). Driver 1 runs every
+  # LATER step before driver 2 reaches the merge (no NoOpBarrierStep on a labelled path or after a first
+  # flat-map, vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130),
+  # so a later write only driver 1 reaches lands BEFORE driver 2's onMatch / tail — which therefore wins. The
+  # set-based merge writes onMatch and the tail once, before that later write, and would leave the later
+  # value. Reference: d1 creates (or matches) and passes the later write; d2 matches and re-writes.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeEXzz_1_2X_optionXonMatch_w_2X_filterXselectXaX_isX1XX_propertyXw_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onMatch,[w:2]).filter(__.select("a").is(1)).property("w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",2)"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeVXname_xX_optionXonMatch_w_single_1X_filterXselectXaX_isX1XX_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeV([name:"x"]).option(Merge.onMatch,[w:Cardinality.single(1)]).filter(__.select("a").is(1)).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").has(\"w\",1)"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeVXname_xX_optionXonMatch_w_single_1X_filterXselectXaX_isX1XX_propertyXw_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeV([name:"x"]).option(Merge.onMatch,[w:Cardinality.single(1)]).filter(__.select("a").is(1)).property("w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").has(\"w\",1)"
+
+  # A removal onMatch: driver 2's onMatch removes the w driver 1's later write set.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeVXname_xX_optionXonMatch_w_nullX_filterXselectXaX_isX1XX_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeV([name:"x"]).option(Merge.onMatch,[w:null]).filter(__.select("a").is(1)).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 0 for count of "g.V().has(\"name\",\"x\").has(\"w\")"
+
+  # The merge's own property() TAIL is re-written per driver exactly like onMatch: no onMatch at all.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeVXname_xX_propertyXsingle_w_5X_filterXselectXaX_isX1XX_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeV([name:"x"]).property(Cardinality.single,"w",5).filter(__.select("a").is(1)).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").has(\"w\",5)"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_asXaX_mergeEXzz_1_2X_propertyXw_5X_filterXselectXaX_isX1XX_propertyXw_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).property("w",5).filter(__.select("a").is(1)).property("w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",5)"
+
+  # A PRE-EXISTING element both drivers match: the same race, no creation involved.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_VX1_2X_asXaX_mergeVXname_markoX_optionXonMatch_w_single_1X_filterXselectXaX_hasIdX1XX_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).as("a").mergeV([name:"marko"]).option(Merge.onMatch,[w:Cardinality.single(1)]).filter(__.select("a").hasId(1)).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"w\",1)"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_VX1_2X_asXaX_mergeVXname_markoX_propertyXsingle_w_1X_filterXselectXaX_hasIdX1XX_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).as("a").mergeV([name:"marko"]).property(Cardinality.single,"w",1).filter(__.select("a").hasId(1)).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"w\",1)"
+
+  # What still answers: the merge's OWN tail rewriting the onMatch key (every driver runs it straight after
+  # its own merge, so it lands last for each), and a later write of a key no driver re-writes.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2X_mergeVXname_xX_optionXonMatch_w_single_1X_propertyXsingle_w_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).mergeV([name:"x"]).option(Merge.onMatch,[w:Cardinality.single(1)]).property(Cardinality.single,"w",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").has(\"w\",9)"
+
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2X_asXaX_mergeVXname_xX_optionXonMatch_w_single_1X_filterXselectXaX_isX1XX_propertyXsingle_z_9X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).as("a").mergeV([name:"x"]).option(Merge.onMatch,[w:Cardinality.single(1)]).filter(__.select("a").is(1)).property(Cardinality.single,"z",9).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").has(\"w\",1).has(\"z\",9)"
