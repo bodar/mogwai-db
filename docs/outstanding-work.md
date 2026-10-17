@@ -73,6 +73,10 @@ lowered.
   (3) **writes after a merge**: `AddVertexStep` creates ONE element for a merged slot of k
   (`g.V().both().addV('x')` makes 6 vertices in the reference, 12 here) — the write lowering has no bulk notion.
   (4) the 2500-slot drain is reproduced only for ONE drain; a merging stream past it raises a deferral.
+  (5) **a merge over a BRANCH's emission order** refuses (`readsBranchOrder`, `lower.ts`) until the branch
+  emission key (cluster B) lands; the reads that bypass a merge stay B's residue on trunk: an order() over a
+  pairwise-DISTINCT branch stream (`g.V().union(out(),in()).dedup().order().by(constant(0))` answers id order,
+  not the arms' order) and a keyed `dedup().by(label)` after a branch (keeps the first by id, not by arm).
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

@@ -507,3 +507,95 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
     Then the result should be unordered
       | result |
       | d[6].l |
+
+  # A BRANCH emits its arms IN ORDER (BranchStep.java:123-158), and the set keeps the FIRST arrival's slot:
+  # one start through `union(9, 5, 9)` arrives 9, 5, 9 and the barrier drains 9(2), 5. This spine does not
+  # yet emit a branch in the reference's order (RelIR plan §10, cluster B), so every merge that would read
+  # it refuses — behind the branch, inside a child that streams it, or where a merged order leaves through one.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_VX1X_unionXconstantX9X_constantX5X_constantX9XX_barrier_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[9].i,d[9].i,d[5].i] |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_VX1X_unionXconstantX9X_constantX5X_constantX9XX_order_byXconstantX0XX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).order().by(__.constant(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[9].i,d[9].i,d[5].i] |
+
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_VX1X_localXunionXconstantX9X_constantX5X_constantX9XX_barrier_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold())
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[9].i,d[9].i,d[5].i] |
+
+  # No two traversers are equal, but every one ties on the key: the stable sort keeps the arm order.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_VX1X_unionXconstantX9X_constantX5XX_order_byXconstantX0XX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant(9), __.constant(5)).order().by(__.constant(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[9].i,d[5].i] |
+
+  # The order leaves THROUGH a branch: `union(identity())` re-emits the sorted stream one start at a time.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX3_2_3_1X_order_byXconstantX0XX_unionXidentityX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(3, 2, 3, 1).order().by(__.constant(0)).union(__.identity()).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[3].i,d[3].i,d[2].i,d[1].i] |
+
+  # An arm holding a barrier runs ARM-major over its merged starts (BranchStep.java:87-88): 9(2), 5.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectX9_5_9X_unionXidentity_barrierX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(9, 5, 9).union(__.identity().barrier()).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[9].i,d[9].i,d[5].i] |
+
+  # Where no two DIFFERENT traversers tie, the sort alone decides the order, whatever the arrival: answered.
+  @gap:traverser-set-merge
+  Scenario: g_V_unionXout_inX_order_byXnameX_valuesXnameX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.out(), __.in()).order().by('name').values('name').fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[josh,josh,josh,lop,lop,lop,marko,marko,marko,peter,ripple,vadas] |

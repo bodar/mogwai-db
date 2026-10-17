@@ -7,7 +7,7 @@ import type { Binding } from '../../../rel/plan.ts';
 import { unionColumnsViolation } from '../../../rel/structure.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
 import { armBatches, isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
-import { isReferenceBarrier, referenceDistinctAt } from '../../ir/bulk.ts';
+import { branchOrderedAt, isReferenceBarrier, orderReadAfter, referenceDistinctAt } from '../../ir/bulk.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
@@ -27,7 +27,7 @@ import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './fil
 import { dedupOn, sliceOp } from './slice.ts';
 import { pullAt } from '../raise-channel.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
-import { armStartMerge, augmentParent, BORD_ARM, BORD_PARENT, branchResult, bulkForwardingDiverges, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
+import { armStartMerge, type Arrival, augmentParent, BORD_ARM, BORD_PARENT, branchResult, bulkForwardingDiverges, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
 // the arm builders (unionArms/mergeArms/chooseArms/coalesceMerge/optionalArms) and their variant/scalar
@@ -56,7 +56,7 @@ export type BranchRel = FramedRel & { readonly aliases: AliasMap; readonly effec
  *  builder is a compile error rather than a silent decline. */
 export function branchArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels, position)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels, position)
@@ -202,22 +202,28 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
   return batchedBranch(normalized, input, graph, fresh, labels);
 }
 
-/** Where a branch step sits — the step list it belongs to and its index — for an arm that needs to know
- *  what the reference handed it (`armScope`). */
-export type BranchPosition = { readonly steps: readonly IRStep[]; readonly at: number };
-
 /**
  * THE SCOPE A `union()` ARM LOWERS IN. Every arm is `inArmBody`; an arm additionally BEGINS a traversal
  * (`ChainCtx.traversal`) only when the reference provably hands it a stream of distinct, unbulked
  * traversers — `BranchStep` drains every start into the arm's ONE `TraverserSet`, which merges equal ones
  * (`referenceDistinctAt`). Only then may a bulk-sensitive consumer in the arm (a seeded fold reducing the
  * whole input) read its rows as the reference's traversers; anywhere else it declines.
+ *
+ * An arm is HANDED its host's stream at the branch, so where that stream arrives in a branch's order
+ * (`branchOrderedAt`) — or where the branch's position is unknown — the arm inherits it
+ * (`ChainCtx.branchOrderedInput`), and a merge inside the arm reading that order declines (`mergeEqual`). Its
+ * OUTPUT is re-ordered by the branch, which matters only where the branch's output is read in any order
+ * (`orderReadAfter` — an order-free reduction after the branch reads none): `ChainCtx.branchOrderedOutput`.
  */
-const armScope = (ctx: ChainCtx, position: BranchPosition | undefined) => {
+const armScope = (ctx: ChainCtx, position: Arrival | undefined) => {
   const distinct = !!position && ctx.traversal?.steps === position.steps
     && referenceDistinctAt(position.steps, position.at, ctx.traversal.rooted);
-  return (body: readonly IRStep[]): ChainCtx =>
-    (distinct ? { ...inArmBody(ctx), traversal: { steps: body, rooted: false } } : inArmBody(ctx));
+  const branchOrderedInput = !position || branchOrderedAt(position.steps, position.at, ctx.branchOrderedInput);
+  const branchOrderedOutput = !position || orderReadAfter(position.steps, position.at + 1, ctx.branchOrderedOutput ?? true);
+  return (body: readonly IRStep[]): ChainCtx => {
+    const scoped = { ...inArmBody(ctx), branchOrderedOutput, ...(branchOrderedInput ? { branchOrderedInput } : {}) };
+    return distinct ? { ...scoped, traversal: { steps: body, rooted: false } } : scoped;
+  };
 };
 
 /** Does any arm hold a `Barrier` at ANY depth — `BranchStep.hasBarrier`, which the reference sets by
@@ -228,7 +234,7 @@ const branchHasBarrier = (bodies: readonly (readonly IRStep[] | null | undefined
 
 export function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   const armCtx = armScope(ctx, position);
   if (step.modulators?.length || step.optionArms) return null;
@@ -266,7 +272,7 @@ export function unionArms(
   // whole input — is not built, so a SLICE-demanded union with a batched arm declines rather than
   // present a traverser-major subset the reference does not. (`armBatches`, `ir/step.ts`.)
   if (slice && bodies.some((body) => armBatches(body!))) return null;
-  const merged = branchHasBarrier(bodies, ctx) ? armStartMerge(input, framing, ctx, fresh) : input;
+  const merged = branchHasBarrier(bodies, ctx) ? armStartMerge(input, framing, ctx, fresh, position) : input;
   if (!merged) return null;
   const source = slice ? augmentParent(merged, fresh) : merged;
   const arms: Tail[] = [];
@@ -859,7 +865,7 @@ export function coalesceArms(
  */
 export function optionalArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const nested = step.args[0]?.value, extra = step.args[1]?.value;
@@ -971,7 +977,7 @@ function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>
 
 export function chooseArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
@@ -997,7 +1003,7 @@ export function chooseArms(
 
   const slice = sliceableBranch(ctx, input);
   if (slice && [then, otherwise ?? []].some((body) => armBatches(body!))) return null;
-  const merged = branchHasBarrier([then, otherwise ?? []], ctx) ? armStartMerge(input, framing, ctx, fresh) : input;
+  const merged = branchHasBarrier([then, otherwise ?? []], ctx) ? armStartMerge(input, framing, ctx, fresh, position) : input;
   if (!merged) return null;
   const source = slice ? augmentParent(merged, fresh) : merged;
   const subject = branchSubject(source, framing);

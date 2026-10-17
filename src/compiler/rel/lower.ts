@@ -12,7 +12,7 @@ import { isRel, type Rel } from '../../rel/rel.ts';
 import { rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { beginsWithSource, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
+import { beginsWithSource, branchOrderedAfter, branchOrderedAt, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -33,7 +33,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffCo
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
-    payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
+    guardTies, payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
@@ -336,15 +336,51 @@ export const MERGE_WINDOW_EXCEEDED = mergeWindowExceeded(MAX_BARRIER_SIZE, false
  * named a merge operator (`B_O_S_SE_SL_Traverser.carriesUnmergeableSack`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java:140-156`):
  * unmergeable, the set merges nothing; mergeable, it COMBINES sacks, which this cannot state — a decline.
+ *
+ * The merge keeps the FIRST arrival's slot, so it reads the ARRIVAL order (`arrival`, where the merge stands).
+ * A branch's emission order is not the reference's yet (RelIR plan §10, cluster B), so the merge is exact
+ * only away from one. Behind a branch (`branchOrderedAt`, `ir/bulk.ts`) an implicit merge is exact where it
+ * moves nothing: every row that would join an earlier slot RAISES a deferral when its position is read
+ * (`regroupFirstOccurrence`'s window 0), and a stream holding no equal traversers passes through as the
+ * branch emitted it. The two steps whose whole answer IS an order also look AHEAD (`branchOrderedAfter`):
+ * past a branch their order is replaced by the branch's before any reader sees it. An EXPLICIT `barrier()`
+ * (`explicit`) emits its set in arrival order, so on either side of a branch it declines. A STABLE SORT
+ * (`ties`, its sort keys) reads the arrival order only among rows its keys tie, and its own order survives
+ * a branch only where nothing ties, so there equal traversers merge freely and a key group holding two
+ * DIFFERENT traversers raises instead (`guardTies`, `OrderGlobalStep.java:78`).
  */
 export function mergeEqual(
-  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter, explicit = false,
+  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter, arrival: Arrival,
+  opts: { readonly explicit?: boolean; readonly ties?: readonly Expr[] } = {},
 ): Rel | null {
   if (!encounterOf(rel.channels)) return rel;
   if (ctx.sack || rel.channels.some((channel) => channel.role === 'sack')) return ctx.sack?.operator ? null : rel;
-  const deferral = mergeWindowExceeded(window, explicit);
-  return regroupFirstOccurrence(rel, key, window, (dependsOn) => deferralExpr(deferral, dependsOn), fresh);
+  const deferral = (message: string) => (dependsOn: Expr): Expr => deferralExpr(message, dependsOn);
+  const exceeded = deferral(mergeWindowExceeded(window, !!opts.explicit));
+  if (!readsBranchOrder(ctx, arrival, !!(opts.explicit || opts.ties))) return regroupFirstOccurrence(rel, key, window, exceeded, fresh);
+  if (opts.explicit) return null;
+  if (!opts.ties) return regroupFirstOccurrence(rel, key, 0, deferral(BRANCH_ORDER_READ), fresh);
+  const merged = regroupFirstOccurrence(rel, key, window, exceeded, fresh);
+  const readdress = (expr: Expr): Expr => rewriteExpr(expr, (node) => (node.kind === 'col' && node.rel === rel.id ? col(merged.id, node.name) : node));
+  return guardTies(merged, opts.ties.map(readdress), key.map(readdress), deferral(BRANCH_ORDER_READ), fresh);
 }
+
+/** Does the step at `arrival` read a BRANCH's emission order (`mergeEqual`) — arriving behind a branch
+ *  (`branchOrderedAt`), or, for a step whose answer IS an order (`ordersStream`: `barrier()`, a stable
+ *  `order()`), leaving through one to a reader (`branchOrderedAfter`)? At any depth: the scope's own
+ *  `branchOrderedInput`/`branchOrderedOutput` answer past either end of its list. */
+const readsBranchOrder = (ctx: ChainCtx, arrival: Arrival, ordersStream: boolean): boolean =>
+  branchOrderedAt(arrival.steps, arrival.at, ctx.branchOrderedInput)
+  || (ordersStream && branchOrderedAfter(arrival.steps, arrival.at + 1, ctx.branchOrderedOutput));
+
+/** The deferral a merge or a stable sort raises where it would read a BRANCH's emission order
+ *  (`mergeEqual`) — the arm order is not yet the reference's (RelIR plan §10, cluster B). */
+const BRANCH_ORDER_READ =
+  'merging equal traversers, or breaking an order() tie, by the emission order of a union/choose/coalesce/optional is not supported';
+
+/** WHERE a merge stands: the step list the lowering is folding and the index of the step the merged stream
+ *  reaches — what `mergeEqual` asks `branchOrderedAt` whether the arrival order it reads is the reference's. */
+export interface Arrival { readonly steps: readonly IRStep[]; readonly at: number }
 
 /** The merge key of a shape whose identity IS its payload (a value, a list, a map, a record, a path). */
 const payloadKey = (rel: Rel): readonly Expr[] => payloadCols(rel).map((column) => col(rel.id, column.name));
@@ -365,10 +401,13 @@ export const framingMergeKey = (framing: RelFraming): ((rel: Rel) => readonly Ex
  * so an arm sees the merged slots in first-arrival order. Reproduced on the arms' shared input where it
  * carries an emission order (`mergeEqual`); a framing whose merge cannot be stated declines.
  */
-export function armStartMerge(input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter): Rel | null {
+export function armStartMerge(
+  input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, arrival: Arrival | undefined,
+): Rel | null {
   if (!encounterOf(input.channels)) return input;
   const key = framingMergeKey(framing);
-  return key ? mergeEqual(input, key(input), Infinity, ctx, fresh) : null;
+  // A branch lowered without its position cannot say what order its input arrives in.
+  return key && arrival ? mergeEqual(input, key(input), Infinity, ctx, fresh, arrival) : null;
 }
 
 /**
@@ -424,7 +463,7 @@ export function mergedAt(
   // under a root that tracks PATHS, `equals` compares the whole path (`B_LP_O_S_SE_SL_Traverser.java:113-125`),
   // which a child stream not carrying it cannot state — decline rather than merge two different walks.
   if (!rooted && ctx.tracksPath && !pathCarried(rel)) return null;
-  return mergeEqual(rel, key(rel), merge.window, ctx, fresh);
+  return mergeEqual(rel, key(rel), merge.window, ctx, fresh, { steps, at });
 }
 const IMPLICIT_MERGES: ReadonlySet<BulkingKind> = new Set<BulkingKind>(['start', 'lazy', 'retraction', 'side-effect']);
 
@@ -442,7 +481,7 @@ export function barrierRows(
   const n = args[0]?.value;
   const window = !args.length ? Infinity : typeof n === 'number' && Number.isInteger(n) && n > 0 && args.length === 1 ? n : undefined;
   if (window === undefined) return null;
-  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh, true);
+  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh, { steps, at }, { explicit: true });
   return unorderedBarrierMergeObservable(steps, at, ctx.traversal?.steps === steps ? ctx.traversal : undefined, ctx.ordered) ? null : rel;
 }
 
@@ -1188,20 +1227,23 @@ export function orderRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
   opts: {
     readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[];
-    readonly merge?: boolean; readonly mergeKey?: (input: Rel) => readonly Expr[] | null;
+    /** Where the step stands, when its `TraverserSet` may merge — what that merge asks of the arrival order
+     *  (`mergeEqual`). */
+    readonly merge?: Arrival; readonly mergeKey?: (input: Rel) => readonly Expr[] | null;
   } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
   // No SQL comparator (a LIST/MAP/PATH key): the ranked-order barrier's two statements answer it, where
   // this step is one they rank; everywhere else it declines as before.
-  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie, opts.merge ? opts.mergeKey ?? (() => null) : undefined);
+  const merging = opts.merge && { key: opts.mergeKey ?? (() => null), arrival: opts.merge };
+  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie, merging);
   // `OrderGlobalStep` is a `CollectingBarrierStep`: it adds every start to ONE `TraverserSet` — merging an
   // equal traverser into its first arrival's slot — and STABLE-sorts that set
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/CollectingBarrierStep.java:42-90`,
   // `…/step/map/OrderGlobalStep.java:78`). So the tie-break is the MERGED position, whatever the key: the
   // keys are projected as columns first, the merge re-positions the copies (`mergeEqual`), and the sort
   // ranks them DENSELY so one merged traverser keeps one position after the sort as well.
-  if (opts.merge && encounterOf(rel.channels)) return mergedOrder(rel, sort, opts.mergeKey, ctx, fresh);
+  if (merging && encounterOf(rel.channels)) return mergedOrder(rel, sort, merging.key, ctx, fresh, merging.arrival);
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
     : rel;
@@ -1233,7 +1275,7 @@ export function orderRows(
  */
 function rankedRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter, tieOf?: (input: Rel) => readonly Expr[],
-  mergeKey?: (input: Rel) => readonly Expr[] | null,
+  merging?: { readonly key: (input: Rel) => readonly Expr[] | null; readonly arrival: Arrival },
 ): Rel | null {
   const ranked = ctx.rankedOrders?.get(step);
   if (!ranked || isLocalScope(step) || (step.args ?? []).length) return null;
@@ -1260,9 +1302,9 @@ function rankedRows(
   }
   const joined = rankJoin(keyed, ranked, fresh);
   // The same `TraverserSet` merge the SQL sort makes (`mergedOrder`): the rank is a column here already.
-  const key = mergeKey && encounterOf(joined.channels) ? mergeKey(joined) : undefined;
+  const key = merging && encounterOf(joined.channels) ? merging.key(joined) : undefined;
   if (key === null) return null;
-  const withRank = key ? mergeEqual(joined, key, Infinity, ctx, fresh) : joined;
+  const withRank = key && merging ? mergeEqual(joined, key, Infinity, ctx, fresh, merging.arrival, { ties: [col(joined.id, ORDER_RANK)] }) : joined;
   if (!withRank) return null;
   const carried = encounterOf(withRank.channels);
   const channels = carried ? withRank.channels : withChannel(withRank.channels, ENCOUNTER);
@@ -1285,7 +1327,7 @@ function rankedRows(
  */
 function mergedOrder(
   rel: Rel, sort: { readonly terms: readonly SortTerm[]; readonly drop?: Expr },
-  mergeKey: ((input: Rel) => readonly Expr[] | null) | undefined, ctx: ChainCtx, fresh: Minter,
+  mergeKey: ((input: Rel) => readonly Expr[] | null) | undefined, ctx: ChainCtx, fresh: Minter, arrival: Arrival,
 ): Rel | null {
   const { terms, drop } = sort;
   const name = (i: number): string => `ok${i}`;
@@ -1311,7 +1353,7 @@ function mergedOrder(
   if (!identity) return null;
   const key = identity.map((expr) => rewriteExpr(expr, (node) =>
     (node.kind === 'col' && node.rel === rel.id ? col(keyed.id, node.name) : node)));
-  const merged = mergeEqual(keyed, key, Infinity, ctx, fresh);
+  const merged = mergeEqual(keyed, key, Infinity, ctx, fresh, arrival, { ties: terms.map((_, i) => col(keyed.id, name(i))) });
   const encounter = merged && encounterOf(merged.channels);
   if (!merged || !encounter) return null;
   return renumber(

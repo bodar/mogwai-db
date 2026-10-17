@@ -433,7 +433,7 @@ export function rowOp(
     if (distinct) return (step.args ?? []).length > 1 ? null : input;
     return barrierRows(step, input, shape.mergeKey, ctx, position.steps, position.at, fresh);
   }
-  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, merge: !distinct && !isLocalScope(step) });
+  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, ...(!distinct && !isLocalScope(step) ? { merge: position } : {}) });
   const sliced = sliceOp(step, input, bulked, fresh, ctx.pull);
   if (sliced) return sliced;
   // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks

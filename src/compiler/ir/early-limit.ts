@@ -106,7 +106,10 @@ function inCluster(chain: readonly IRStep[], at: number): boolean {
  *  always bound (`getOutputArityBehaviorForTraversalMapStep`)? An unlisted step is `MULTI`. */
 function definitelySingular(step: Step, reducing: boolean): boolean {
   if (isLocalScope(step as IRStep)) return ONE_TO_ONE_LOCAL.has(step.name);
-  if (reducing && REDUCING.has(step.name)) return true;
+  // A KEYED form (`groupCount('a')`, `group('a')`, `tree('a')`) is a `SideEffectStep`, not a
+  // `ReducingBarrierStep`, so the predictor counts it MULTI
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/util/StepOutputArityPredictor.java:263-270`).
+  if (reducing && REDUCING.has(step.name)) return !(step.args ?? []).some((a) => typeof a.value === 'string');
   if (step.name === 'constant') return !(step.args ?? []).some((a) => isNested(a.value));
   if (step.name === 'sack') return !(step.args ?? []).length;
   if (step.name === 'map') return mapBodyAlwaysBound(step);

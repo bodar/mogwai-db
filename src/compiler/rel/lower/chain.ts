@@ -241,6 +241,13 @@ export interface ChainCtx extends FilterCtx {
   /** This chain is a REWRITTEN list — a seeded resume or a re-sourced chain (`lowerChainOf`) — whose
    *  positions are not the reference traversal's, so no merge can be placed in it by scanning it. */
   readonly rewritten?: boolean;
+  /** The stream this scope's step list is HANDED arrives in a branch's order (`branchOrderedAt`,
+   *  `ir/bulk.ts`) — a branch ARM, whose input is its host's stream at the branch. Inherited by every body
+   *  nested under it, which only ever adds a decline (`mergeEqual`). */
+  readonly branchOrderedInput?: boolean;
+  /** The stream this scope's step list EMITS leaves in a branch's order (`branchOrderedAfter`) — set for every
+   *  branch arm (`inArmBody`), whose output its branch re-orders, and inherited below it. */
+  readonly branchOrderedOutput?: boolean;
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;
@@ -278,9 +285,10 @@ export const inBody = (ctx: ChainCtx): ChainCtx =>
  *  so each arm's tail edge hop mints its entering vertex. Every arm mints it UNIFORMLY (same column), so
  *  the peer merge carries it as a shared rigid channel (`mergeArms`); an arm that does not (a non-edge
  *  shape) makes the arms disagree and the merge declines. The value host `flatMapRejoin` uses `childRows`'s
- *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. */
+ *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. An arm's
+ *  output is re-ordered by its branch, so it is `branchOrderedOutput` (`mergeEqual`). */
 export const inArmBody = (ctx: ChainCtx): ChainCtx =>
-  (ctx.needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx));
+  ({ ...inBody(ctx), ...(ctx.needsFromV ? { needsFromV: true } : {}), branchOrderedOutput: true });
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */

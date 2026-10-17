@@ -808,7 +808,9 @@ export function renumber(
  * `…/step/map/NoOpBarrierStep.java:70-76`): an implicit `NoOpBarrierStep(2500)` drains after 2500
  * distinct traversers and merges the next ones in a fresh set. One drain is reproduced exactly; a stream
  * that would need a second RAISES a deferral when its position is read (`raise`), never a merge across
- * the boundary the reference does not make.
+ * the boundary the reference does not make. `window` 0 is a set whose slots cannot be vouched for at all
+ * (the arrival order it would merge in is not the reference's): EVERY row that would join an earlier slot
+ * raises, and a stream with no equal rows passes through unmoved.
  *
  * Calcite has no merge-into-first operator; the nearest is the windowed aggregate it rewrites a
  * `DISTINCT ON` to (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`),
@@ -828,7 +830,10 @@ export function regroupFirstOccurrence(
   });
   let input: Rel = first;
   let position: Expr = col(first.id, FIRST);
-  if (Number.isFinite(window)) {
+  if (window === 0) {
+    const joins: Expr = { kind: 'binary', op: '!=', left: col(first.id, encounter.col), right: col(first.id, FIRST) };
+    position = { kind: 'case', whens: [[joins, raise(col(first.id, FIRST))]], else: col(first.id, FIRST) };
+  } else if (Number.isFinite(window)) {
     // The DISTINCT slots one drain would hold, per set: a row opens a slot iff it is its slot's first
     // arrival. A per-parent child traversal runs its own set per parent, so the count is per origin. Past
     // the window the drains split — which changes nothing where no two rows are equal — so it is a row that
@@ -852,6 +857,47 @@ export function regroupFirstOccurrence(
   return make.project({
     id: fresh('rp'), input, channels: rel.channels, type: rel.type,
     exprs: rel.type.cols.map((column) => [column.name, column.name === encounter.col ? position : col(input.id, column.name)] as const),
+  });
+}
+
+/**
+ * THE TIE GUARD — a stable sort's tie-break reads the ARRIVAL position only among rows whose sort keys are
+ * EQUAL (`…/step/map/OrderGlobalStep.java:78`), so where that position cannot be vouched for (`mergeEqual`)
+ * the sort is still exact wherever no two DIFFERENT traversers tie: equal traversers sit together whatever
+ * their arrival. This re-projects the encounter so a row whose key group (`ties`, the sort keys as columns
+ * of `rel`) holds more than one traverser `identity` RAISES (`raise`) when the position is read, and every
+ * other row keeps its own. "More than one" is per identity column: two values differ iff some column's
+ * `MIN` and `MAX` over the group differ, or the column is NULL in some rows and not in others.
+ */
+export function guardTies(
+  rel: Rel, ties: readonly Expr[], identity: readonly Expr[], raise: (dependsOn: Expr) => Expr, fresh: Minter,
+): Rel {
+  const encounter = rel.channels.find((channel) => channel.role === 'encounter');
+  if (!encounter) throw new Error('RelIR lowering: guardTies() needs an encounter channel to guard');
+  const spec: WindowSpec = { partitionBy: ties, orderBy: [] };
+  const name = (kind: string, i: number): string => `tg_${kind}${i}`;
+  const specs = identity.flatMap((expr, i) => [
+    [name('lo', i), { kind: 'window-expr', fn: 'min', args: [expr], spec }],
+    [name('hi', i), { kind: 'window-expr', fn: 'max', args: [expr], spec }],
+    [name('nn', i), { kind: 'window-expr', fn: 'count', args: [expr], spec }],
+  ] as const);
+  const ALL = 'tg_all';
+  const windowed = make.window({
+    id: fresh('tg'), input: rel, channels: rel.channels,
+    type: typeOf(...rel.type.cols, ...specs.map(([n]) => meta(n, 'any', true)), meta(ALL, 'int')),
+    specs: [...specs, [ALL, { kind: 'window-expr', fn: 'count', args: [compilerInt(1)], spec }]],
+  });
+  const at = (n: string): Expr => col(windowed.id, n);
+  const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
+  const tied = identity.map((_, i): Expr => or(
+    { kind: 'binary', op: 'is not', left: at(name('lo', i)), right: at(name('hi', i)) },
+    { kind: 'binary', op: 'and', left: { kind: 'binary', op: '>', left: at(name('nn', i)), right: compilerInt(0) }, right: { kind: 'binary', op: '<', left: at(name('nn', i)), right: at(ALL) } },
+  )).reduce(or);
+  return make.project({
+    id: fresh('tp'), input: windowed, channels: rel.channels, type: rel.type,
+    exprs: rel.type.cols.map((column) => [column.name, column.name === encounter.col
+      ? { kind: 'case', whens: [[tied, raise(at(column.name))]], else: at(column.name) }
+      : at(column.name)] as const),
   });
 }
 

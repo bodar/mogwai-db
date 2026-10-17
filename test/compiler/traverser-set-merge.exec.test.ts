@@ -6,7 +6,7 @@
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, extractStrategies } from '../../src/gremlin/frontend.ts';
 import { runPasses } from '../../src/compiler/ir/passes.ts';
-import { bulkingPositions, MAX_BARRIER_SIZE, referenceUnbulkedAt } from '../../src/compiler/ir/bulk.ts';
+import { branchOrderedAfter, branchOrderedAt, bulkingPositions, MAX_BARRIER_SIZE, referenceUnbulkedAt } from '../../src/compiler/ir/bulk.ts';
 import { MERGE_WINDOW_EXCEEDED, mergeWindowExceeded } from '../../src/compiler/rel/lower.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { seededStore } from '../support/harness.ts';
@@ -145,6 +145,11 @@ describe('the slice EarlyLimitStrategy moves decides where the merge is', () => 
     expect(names('g.V().both().map(__.values("name")).limit(2)')).toBe('V.both.map.limit');
     // `tail()` is a `TailGlobalStepContract`, never moved.
     expect(names('g.V().both().id().tail(2)')).toBe('V.both.id.tail');
+    // A `map()` body's reduction is a `ReducingBarrierStep` (DEFINITELY_SINGULAR); its KEYED form is a
+    // `SideEffectStep`, which StepOutputArityPredictor counts MULTI — not crossed.
+    expect(names('g.V().both().map(__.groupCount().count()).limit(1)')).toBe('V.both.limit.map');
+    for (const keyed of ['groupCount("a")', 'group("a")', 'tree("a")'])
+      expect(names(`g.V().both().map(__.${keyed}.count()).limit(1)`)).toBe('V.both.map.limit');
   });
 
   test('so the scan places no merge before a moved slice', () => {
@@ -193,5 +198,63 @@ describe('a child traversal merges where its own strategies put the barriers', (
     // The retraction barrier after `select('a')` holds a single traverser per `local()` run.
     const rows = await run("g.V().as('a').out('knows').local(__.union(__.select('a').values('name'), __.values('name')).fold())");
     expect(rows).toHaveLength(2);
+  });
+});
+
+// A branch's emission order is not the reference's yet (`BranchStep.java:123-158` walks its arms in order;
+// RelIR plan §10 cluster B), so a merge or an order() tie that would READ it — on either side of the branch,
+// at any depth — refuses rather than answer from the wrong order (`branchOrderedAt`/`branchOrderedAfter`,
+// `mergeEqual`). Each witness below declined on trunk; the comment is the reference answer.
+describe('a merge never reads a branch emission order', () => {
+  test('branchOrderedAt — behind a branch, at this level or in a child that streams it, until an order-free reduction', () => {
+    expect(branchOrderedAt(ir('g.V(1).union(__.constant(9), __.constant(5)).barrier().fold()'), 2)).toBe(true);
+    expect(branchOrderedAt(ir('g.V(1).out().flatMap(__.union(__.out(), __.identity())).order().fold()'), 3)).toBe(true);
+    expect(branchOrderedAt(ir('g.V(1).union(__.constant(9), __.constant(5)).count().barrier()'), 3)).toBe(false);
+    expect(branchOrderedAt(ir('g.inject(1, 2, 1, 3).barrier().fold()'), 1)).toBe(false);
+    // A list handed a branch's stream (an arm) inherits it.
+    expect(branchOrderedAt(ir('g.inject(1).barrier()'), 1, true)).toBe(true);
+  });
+
+  test('branchOrderedAfter — an order that reaches its reader only through a branch', () => {
+    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().union(__.identity()).fold()'), 2)).toBe(true);
+    // An order-free reduction after the branch reads no order; a slice BEFORE it read the right one.
+    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().union(__.identity()).count()'), 2)).toBe(false);
+    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().limit(2).union(__.identity()).sum()'), 2)).toBe(false);
+    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().fold()'), 2)).toBe(false);
+    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier()'), 2, true)).toBe(true);
+  });
+
+  test('every witness refuses', async () => {
+    for (const q of [
+      'g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', // [9,9,5]
+      'g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).order().by(__.constant(0)).fold()', // [9,9,5]
+      'g.V(1).local(__.union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold())', // [9,9,5]
+      'g.inject(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', // [9,9,5]
+      'g.V(1).union(__.constant(9), __.constant(5)).order().by(__.constant(0)).fold()', // [9,5]
+      'g.V(1).out().union(__.out(), __.identity()).order().by(__.constant(0)).id().fold()',
+      'g.V(1).out().union(__.out(), __.identity()).barrier().id().fold()',
+      'g.V(1).out().union(__.out(), __.identity()).id().barrier().fold()',
+      'g.V(1).out().flatMap(__.union(__.out(), __.identity())).order().by(__.constant(0)).id().fold()',
+      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).id().fold()',
+      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(1).id()',
+      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(4).id()',
+      // the order leaves through a branch: its ties never reach the reader as sorted
+      'g.inject(3, 2, 3, 1).order().by(__.constant(0)).union(__.identity()).fold()', // [3,3,2,1]
+      'g.inject(9, 5, 9).union(__.identity().barrier()).fold()', // [9,9,5]
+      // an implicit merge behind a branch that would move a row
+      'g.V().union(__.out(), __.in()).out().out().id().fold()',
+    ]) await expect(run(q), q).rejects.toThrow();
+  });
+
+  test('…and answer where the arrival order is never read', async () => {
+    // No two different traversers tie on `name`: the sort alone decides, whatever the arrival.
+    expect(await run("g.V().union(__.out(), __.in()).order().by('name').values('name').fold()")).toEqual([
+      ['josh', 'josh', 'josh', 'lop', 'lop', 'lop', 'marko', 'marko', 'marko', 'peter', 'ripple', 'vadas'],
+    ]);
+    // An order-free reduction reads no order.
+    expect(await run('g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().sum()')).toEqual([23]);
+    expect(await run('g.V().union(__.out(), __.in()).out().out().id().count()')).toEqual([6]);
+    // A slice before the branch read the merged order; the sum after it reads none.
+    expect(await run('g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).union(__.identity(), __.identity()).sum()')).toEqual([4]);
   });
 });

@@ -728,6 +728,21 @@ authorities.
   positions (`DefaultTraversal.java:144-148`) with a single-traverser start tracked through the scan; a
   slice over a child stream with no emission order declines; the merge window's raise is a DEFERRAL
   (`deferralExpr`), which an unread side-effect drain does not force.
+  ✅ **r3 (wf7/substrate-bulking-positions-r3):** a merge never reads a BRANCH's emission order, which is not
+  the reference's until B lands. ONE authority, `branchOrderedAt`/`branchOrderedAfter` (`ir/bulk.ts` — a
+  `union`/`choose`/`coalesce`/`optional`/`branch` at this level or in a child that streams it, at any depth;
+  an arm inherits its host's side through `ChainCtx.branchOrderedInput`/`branchOrderedOutput`), asked in ONE
+  place, `mergeEqual` (`readsBranchOrder`). Behind a branch: an implicit merge raises a deferral on every row it
+  would MOVE (`regroupFirstOccurrence` window 0) and leaves a stream with no equal traversers as the branch
+  emitted it; an explicit `barrier()` declines on either side of a branch; a stable `order()` merges equal
+  traversers freely and raises only where a key group holds two DIFFERENT traversers (`guardTies`, build.ts) —
+  so `union(out(),in()).order().by('name')` still answers. Witnesses (reviewer, all declining on trunk):
+  `V(1).union(constant(9),constant(5),constant(9)).barrier().fold()` and its `order().by(constant(0))`,
+  `local(…)`, `inject(1)`, `out().union(out(),identity())`, `flatMap(union(…))`, `union(out().out(),out())`
+  forms, `inject(3,2,3,1).order().by(constant(0)).union(identity()).fold()`,
+  `inject(9,5,9).union(identity().barrier()).fold()`. Residue, B's and pre-existing on trunk: an order() over
+  a DISTINCT branch stream (`union(…).dedup().order().by(constant(0))`) and a keyed `dedup().by(x)` still read
+  the branch order.
 - 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`
