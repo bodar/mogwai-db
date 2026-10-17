@@ -46,6 +46,20 @@ describe('a map-literal key is the literal it spells, or the traversal declines'
   ])('%s declines', async (q) => {
     expect(await failure(q)).toBeInstanceOf(UnsupportedTraversal);
   });
+  // An enum (`T`/`Direction`) key or member has no faithful STORED spelling yet: it was written as the
+  // front-end tag and framed back as the map key `{"token":"id"}`. Every depth meets the one encoder
+  // (`types.ts` `valueNodeOf`), so every depth declines; the top-level literal stays exact.
+  test.each([
+    "g.V(1).property('m',[(T.id):'a']).values('m')", "g.V(1).property('m',[(OUT):'a']).values('m')",
+    "g.V(1).property('m',[(T.key):'a'])", "g.V(1).property('m',['x':[(T.label):'a']])",
+    "g.V(1).property('m',[T.id])", "g.V(1).property('m',[[(T.id):'a']])", "g.inject(['x':[(T.id):'a']])",
+    "g.addV('p').property('m',[(T.id):'a'])", "g.V(1).union(__.property('m',[(T.id):'a'])).values('m')",
+  ])('%s declines', async (q) => {
+    expect(await failure(q)).toBeInstanceOf(UnsupportedTraversal);
+  });
+  test('a top-level T-keyed literal is the enum key', async () => {
+    expect(await run("g.inject([(T.id):'a'])")).toEqual(['{T.id:"a"}']);
+  });
 });
 
 describe('±Infinity survives every collection carrier', () => {
@@ -281,6 +295,10 @@ describe("regex() reads its pattern as Java's Pattern does, or declines", () => 
   test.each([
     ['(?<n>a)', ['"marko"', '"vadas"']], ['(?:mar)ko', ['"marko"']], ['(?!mar)ko', ['"marko"']],
     ['(mar)?ko$', ['"marko"']], ['\\\\s', []], ['jo.*h', ['"josh"']],
+    // A hex escape is ONE character to Pattern; the trigram prefilter read its digits as a literal run
+    // (`containing("61rko")`) and dropped every true match.
+    ['ma\\\\u0072ko', ['"marko"']], ['m\\\\x61rko', ['"marko"']], ['[m]\\\\x61rko', ['"marko"']],
+    ['\\\\u0061', ['"marko"', '"vadas"']], ['\\\\x6aosh', ['"josh"']],
   ] as const)('regex(%s)', async (pattern, want) => {
     expect(await run(`g.V().has('name', regex('${pattern}')).values('name')`)).toEqual([...want]);
   });

@@ -192,43 +192,74 @@ function javaEscape(pattern: string, at: number, inClass: boolean): { js: string
   return null;
 }
 
-/** The regex metacharacters an escape turns into a literal: `\.` is a literal `.`. */
-const METACHARS = new Set(['.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '^', '$', '\\', '/']);
+/** The ONE character a Java escape at `pattern[at] === '\\'` certainly denotes, or `null` when it denotes
+ *  a class, an anchor, a control character, or anything else this prefilter will not vouch for — with
+ *  the index of the escape's LAST character either way. The escape's extent comes from `javaEscape`, the
+ *  same tokenizer `javaPatternAsJs` reads the pattern with, so the two can never disagree about where an
+ *  escape ends: `\x61` is ONE atom (`a`), never `\x` followed by the literal run `61`. Decoded, all from
+ *  `Pattern`'s escape table: an escaped non-alphanumeric is itself (`\.` → `.`), `\xhh` and `\uhhhh` are
+ *  the code unit they spell — except a SURROGATE, which Java pairs across escapes and this code-point run
+ *  could split, so it ends the run. Every other escape `javaEscape` admits (`\d`, `\s`, `\t`, …) ends the
+ *  run; the forms it declines (`\x{h..h}`, `\0ooo`, `\cX`, `\Q..\E`, `\p{..}`, …) never get here, because
+ *  `extractMandatoryLiteral` extracts nothing from a pattern `javaPatternAsJs` declines. */
+function escapedLiteral(pattern: string, at: number, inClass: boolean): { char: string | null; end: number } | null {
+  const escape = javaEscape(pattern, at, inClass);
+  if (!escape) return null;
+  const n = pattern[at + 1]!;
+  let code: number | null = null;
+  if (n === 'x' || n === 'u') code = parseInt(pattern.slice(at + 2, escape.end + 1), 16);
+  else if (!/[A-Za-z0-9]/.test(n)) code = n.charCodeAt(0);
+  const certain = code != null && !(code >= 0xd800 && code <= 0xdfff);
+  return { char: certain ? String.fromCharCode(code!) : null, end: escape.end };
+}
 
 /**
- * The longest LITERAL RUN a match must contain (>= 3 chars), or `null`. Used to PREFILTER the barrier's
- * head with `has(key, containing(L))` so the trigram index narrows candidates before the JS regex — the
- * standard trigram-indexed-regex technique (Cox, *Regular Expression Matching with a Trigram Index* /
- * Google Code Search).
+ * The longest LITERAL RUN a match must contain (>= 3 code points), or `null`. Used to PREFILTER the
+ * barrier's head with `has(key, containing(L))` so the trigram index narrows candidates before the JS
+ * regex — the standard trigram-indexed-regex technique (Cox, *Regular Expression Matching with a Trigram
+ * Index* / Google Code Search).
  *
  * It NARROWS, never decides: over-selecting is corrected by the exact regex in the barrier, but MISSING
  * a true match would be a WRONG ANSWER — so extraction is CONSERVATIVE. It emits a run only when every
- * match provably contains it, and emits nothing (an honest full scan) whenever unsure. A run is a
- * maximal sequence of EXACTLY-ONCE literal characters; a quantifier, a metacharacter (`.`/class/anchor/
- * group), or a class ENDS it, alternation (`|`) BAILS the whole pattern, and an escaped metacharacter
- * (`\.`) contributes its literal char while any other escape (`\d`, `\uXXXX`, …) ends the run. `*`/`?`
- * make the PRECEDING char optional (drop it); `+` keeps it (>= 1) but ends the run; `{…}` is treated as
- * optional (dropped) — safe under-extraction rather than counting the guaranteed minimum.
+ * match provably contains it, and emits nothing (an honest full scan) whenever unsure — in particular for
+ * every pattern `javaPatternAsJs` declines, so the extractor only ever reads the dialect subset whose
+ * tokens it shares (`escapedLiteral`). A run is a maximal sequence of EXACTLY-ONCE literal CODE POINTS
+ * (an astral character is one atom, so a quantifier after it drops all of it, never half a surrogate
+ * pair); a quantifier, a metacharacter (`.`/anchor), a class or a group ENDS it, alternation (`|`) BAILS
+ * the whole pattern, and an escape contributes the one character it certainly spells or ends the run.
+ * `*`/`?` make the PRECEDING atom optional (drop it); `+` keeps it (>= 1) but ends the run; `{…}` is
+ * treated as optional (dropped) — safe under-extraction rather than counting the guaranteed minimum.
  */
 export function extractMandatoryLiteral(pattern: string): string | null {
-  let best = '';
-  let cur = '';
+  if (javaPatternAsJs(pattern) == null) return null;
+  let best: string[] = [];
+  let cur: string[] = [];
   let inClass = false;
   // A GROUP contributes no mandatory literal: it may be optional (`(abc)?`), a lookaround (`(?!abc)`), or
   // open with `?:`/`?<n>` syntax that is no literal at all — reading its text as a run made `(?<n>a)`
   // prefilter on `<n>a` and drop every true match.
   let depth = 0;
-  const flush = () => { if (cur.length > best.length) best = cur; cur = ''; };
+  const flush = () => { if (cur.length > best.length) best = cur; cur = []; };
   for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
+    const c = String.fromCodePoint(pattern.codePointAt(i)!);
+    if (c === '\\') {
+      // Every escape, in a class, a group or the top level, is consumed WHOLE — its extent is the
+      // tokenizer's, never one character.
+      const escape = escapedLiteral(pattern, i, inClass);
+      if (!escape) return null;
+      i = escape.end;
+      if (inClass || depth > 0) continue;
+      if (escape.char == null) flush();
+      else cur.push(escape.char);
+      continue;
+    }
+    i += c.length - 1;
     if (inClass) {
-      if (c === '\\') i++;                 // skip an escaped char inside the class
-      else if (c === ']') inClass = false;
+      if (c === ']') inClass = false;
       continue;                            // a class contributes no mandatory literal
     }
     if (depth > 0) {
-      if (c === '\\') i++;
-      else if (c === '[') inClass = true;
+      if (c === '[') inClass = true;
       else if (c === '(') depth++;
       else if (c === ')') depth--;
       continue;
@@ -238,21 +269,14 @@ export function extractMandatoryLiteral(pattern: string): string | null {
       case '[': flush(); inClass = true; break;
       case '(': flush(); depth++; break;
       case ')': case '.': case '^': case '$': flush(); break;
-      case '*': case '?': cur = cur.slice(0, -1); flush(); break;  // preceding char optional
-      case '+': flush(); break;                               // preceding char mandatory, run ends
-      case '{': cur = cur.slice(0, -1); flush(); while (i < pattern.length && pattern[i] !== '}') i++; break;
-      case '\\': {
-        const next = pattern[i + 1];
-        i++;
-        if (next !== undefined && METACHARS.has(next)) cur += next;   // `\.` → literal `.`
-        else flush();                                                 // `\d`/`\uXXXX`/… → run-breaker
-        break;
-      }
-      default: cur += c;                                      // a literal character
+      case '*': case '?': cur.pop(); flush(); break;          // preceding atom optional
+      case '+': flush(); break;                               // preceding atom mandatory, run ends
+      case '{': cur.pop(); flush(); while (i < pattern.length && pattern[i] !== '}') i++; break;
+      default: cur.push(c);                                   // a literal character
     }
   }
   flush();
-  return best.length >= 3 ? best : null;
+  return best.length >= 3 ? best.join('') : null;
 }
 
 /**

@@ -541,5 +541,16 @@ export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
     };
   }
   const t = gremlinTypeOf(val, tn);
+  // A front-end ENUM tag (`{token:'id'}` from `T.id`, `{direction:'out'}` from `OUT`, `Merge`/`DT`/… —
+  // `frontend.ts` `TaggedArg`) is a plain object no canonical type names. As a leaf it used to be stored
+  // as the tag object itself, so `property('m',[(T.id):'a'])` framed the key `{"token":"id"}` — a String-
+  // ish map key, never `T.id` (the reference keeps the enum, `GenericLiteralVisitor.visitGenericMapLiteral`
+  // / `visitTraversalToken`). The stored tree has no faithful spelling for an enum member yet (the
+  // `{t:'T'}`/`{t:'D'}` frame nodes are READ-side, produced by `valueMap(true)`/`elementMap()`), so ANY
+  // enum leaf — a map key or a member, at any depth, through every caller (property write, map/list
+  // literal blob, FTS rows) — declines here, at the one encoder, rather than store a different value.
+  if (t == null && val !== null && typeof val === 'object' && Object.getPrototypeOf(val) === Object.prototype) {
+    throw UnsupportedTraversal.because(`an enum value (${JSON.stringify(val)}) inside a collection cannot be stored faithfully yet`);
+  }
   return { t, v: leafStore(val, t) };
 }
