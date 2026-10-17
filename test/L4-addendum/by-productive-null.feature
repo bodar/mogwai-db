@@ -202,3 +202,170 @@ Feature: mogwai addendum — every by() consumer keeps a PRODUCTIVE null and dro
       """
     When iterated to list
     Then the result should be empty
+
+  # An all-null `mean()` is a productive null too: MeanGlobalStep skips nulls and seeds nothing, and
+  # `generateFinalResult` returns null when the whole stream was null
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84).
+  # Unlike sum/min/max its null carries a binary64 TAG, and the one JSON entry for a scalar
+  # (`jsonMember` -> `asExactReal`, src/compiler/rel/build.ts) printed a NULL real as `0.0` — so every
+  # container a by() feeds (project, select-many, aggregate, a group member, a map entry) answered 0.0.
+  Scenario: g_VX1X_projectXxX_byXconstantXlist_nullX_unfold_meanX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("x").by(__.constant([null]).unfold().mean())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":null}] |
+
+  Scenario: g_VX1X_projectXxX_byXconstantXlist_null_nullX_unfold_meanX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("x").by(__.constant([null,null]).unfold().mean())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":null}] |
+
+  # A non-null mean still takes the 17-digit repair (a 15-digit JSON number cannot round-trip 4/3).
+  Scenario: g_VX1X_projectXxX_byXconstantXlist_1_1_2_nullX_unfold_meanX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("x").by(__.constant([1,1,2,null]).unfold().mean())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[1.3333333333333333].d"}] |
+
+  Scenario: g_VX1X_asXaX_out_asXbX_selectXa_bX_byXconstantXlist_nullX_unfold_meanX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).as("a").out().as("b").select("a","b").by(__.constant([null]).unfold().mean())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":null,"b":null}] |
+      | m[{"a":null,"b":null}] |
+      | m[{"a":null,"b":null}] |
+
+  Scenario: g_VX1X_out_aggregateXxX_byXconstantXlist_nullX_unfold_meanX_capXxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().aggregate("x").by(__.constant([null]).unfold().mean()).cap("x")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[null,null,null] |
+
+  Scenario: g_VX1X_out_groupXbyXlabelX_byXprojectXxX_byXconstantXlist_nullX_unfold_meanX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().group().by(T.label).by(__.project("x").by(__.constant([null]).unfold().mean()).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":[{"x":null},{"x":null}],"software":[{"x":null}]}] |
+
+  Scenario: g_VX1X_unionXprojectXxX_byXconstantXlist_nullX_unfold_meanXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.project("x").by(__.constant([null]).unfold().mean()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":null}] |
+
+  Scenario: g_VX1X_projectXx_yX_byXconstantXlist_nullX_unfold_meanX_byXconstantX1XX_selectXx_yX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("x","y").by(__.constant([null]).unfold().mean()).by(__.constant(1)).select("x","y")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":null,"y":"d[1].i"}] |
+
+  Scenario: g_VX1X_projectXaX_byXprojectXxX_byXconstantXlist_nullX_unfold_meanXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("a").by(__.project("x").by(__.constant([null]).unfold().mean()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":{"x":null}}] |
+
+  Scenario: g_VX1X_out_mapXconstantXlist_nullX_unfold_meanX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().map(__.constant([null]).unfold().mean()).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[null,null,null] |
+
+  Scenario: g_withSackX1X_VX1X_sackXassignX_byXconstantXlist_nullX_unfold_meanX_sack_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V(1).sack(Operator.assign).by(__.constant([null]).unfold().mean()).sack().fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[null] |
+
+  # The group VALUE reducer pools per key and keeps the same null seed (Grouping.doFinalReduction).
+  Scenario: g_VX1X_out_groupXbyXlabelX_byXconstantXlist_nullX_unfold_meanXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().group().by(T.label).by(__.constant([null]).unfold().mean())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":null,"software":null}] |
+
+  # Every reducer's all-null seed reaches a container as null — min alongside the mean above.
+  Scenario: g_VX1X_asXaX_out_asXbX_selectXa_bX_byXconstantXlist_nullX_unfold_minX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).as("a").out().as("b").select("a","b").by(__.constant([null]).unfold().min())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":null,"b":null}] |
+      | m[{"a":null,"b":null}] |
+      | m[{"a":null,"b":null}] |
+
+  Scenario: g_VX1X_out_aggregateXxX_byXconstantXlist_nullX_unfold_maxX_capXxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().aggregate("x").by(__.constant([null]).unfold().max()).cap("x")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[null,null,null] |

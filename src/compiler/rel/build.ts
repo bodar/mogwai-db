@@ -470,11 +470,18 @@ const jsonCall = (value: Expr): Expr => ({ kind: 'call', fn: 'json', args: [valu
 const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf', args: [compilerText(fmt), value] });
 /** A binary64 as a 17-digit JSON NUMBER — 17 digits round-trip binary64 exactly, and the reader parses
  *  it straight back. Lossy-ONLY: a value already exact at 15 (`0.2`) stays itself rather than becoming
- *  `0.20000000000000001`. `json(...)` keeps the printed text a JSON number rather than a string. */
+ *  `0.20000000000000001`. `json(...)` keeps the printed text a JSON number rather than a string.
+ *
+ *  A NULL PASSES THROUGH, and the test is the INEQUALITY to make that so without spelling the value again: a
+ *  NULL makes the comparison NULL, which a CASE reads as "no arm", so the ELSE must be the value itself —
+ *  with the repair as the ELSE, `printf('%!.17g', NULL)` printed `0.0`, and every productive null tagged
+ *  as a binary64 (a `mean()` over an all-null stream: `MeanGlobalStep` seeds null and `getFinal` keeps it,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84`)
+ *  entered a map or list as `0.0`. */
 const asExactReal = (value: Expr): Expr => ({
   kind: 'case',
-  whens: [[{ kind: 'binary', op: '=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, value]],
-  else: jsonCall(printf('%!.17g', value)),
+  whens: [[{ kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, jsonCall(printf('%!.17g', value))]],
+  else: value,
 });
 /** A wide integer as decimal TEXT past 2^53, reconstructed via `BigInt` at the wire; smaller values
  *  stay numbers. The same `SAFE_INT` boundary `sumTower` uses, so the two cannot disagree. */

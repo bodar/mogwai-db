@@ -408,7 +408,11 @@ function pathGroupedBuffers(rows: any[], elem: ElemShape, byKey?: boolean): Buff
 // typeof(): 'real' → Double even when whole, e.g. 1.0; 'integer' → Int/Long by
 // magnitude via NumberSerializationStrategy). Mirrors TinkerPop sum() typing —
 // int props sum to Int/Long (d[123].i), double props to Double (d[1.0].d).
-function sumBuffer(v: number | string, storageClass: string): Buffer {
+// A NULL is null whatever the class, by `frameValue`'s rule: a reducer's null — an all-null `mean()`,
+// which `MeanGlobalStep` emits as null (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:80-84`)
+// and which keeps its `real` tag inside a `{t,v}` node — was `Number(null)`, a Double 0.0.
+function sumBuffer(v: number | string | null, storageClass: string): Buffer {
+  if (v === null || v === undefined) return ioc.anySerializer.serialize(null);
   if (storageClass === 'real') return ioc.doubleSerializer.serialize(Number(v), true);
   // An INTEGER past 2^53 rides as decimal TEXT (`build.ts` `asExactWideInt` — a JS number would round it);
   // SQLite's INTEGER is an int64, so it is a `Long`, reconstructed exactly. `anySerializer` would frame
