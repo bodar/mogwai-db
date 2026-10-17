@@ -190,6 +190,37 @@ export const landedCols = (kind: Elem): readonly ColMeta[] =>
   [...foreignPayloadCols(kind), meta(FOREIGN_ORD, 'int')];
 
 /**
+ * THE LANDED STREAM keeps the sibling's MULTIPLICITY. A landed binding holds each element ONCE — it is
+ * the per-element payload lookup every read joins (`landForeignRows`) — but the stream that came back is
+ * a MULTISET: `V(9).union(identity(), identity())` on the sibling is two traversers on one vertex, and
+ * traversers are never collapsed by anything but `dedup()` (root CLAUDE.md). Reading the stream off the
+ * deduplicated binding answered one (measured: `….with("traversal", __.V().hasId(9).union(__.identity(),
+ * __.identity())).count()` was `[1]`). So when the rows repeat an element, the stream is the emitted id
+ * list — one row per traverser, in emission order — joined to the binding for its payload. A stream with
+ * no repeat references the binding unchanged, so the common plan is untouched.
+ */
+export function landedStream(rows: readonly ForeignRow[], elem: Elem, landed: Rel, fresh: Minter): Rel {
+  const ids = rows.filter((r) => r.kind === elem).map((r) => r.id);
+  if (new Set(ids).size === ids.length) return landed;
+  const emitted = make.explode({
+    id: fresh('fsx'), channels: [], expr: lit(JSON.stringify(ids), 'text'), as: { value: 'fsid', ord: 'fsord' },
+    type: typeOf(meta('fsid', 'any', true), meta('fsord', 'int')),
+  });
+  const joined = make.join({
+    id: fresh('fsj'), left: emitted, right: landed, channels: [], join: 'inner',
+    type: typeOf(...emitted.type.cols, ...landed.type.cols),
+    on: { kind: 'binary', op: '=', left: col(emitted.id, 'fsid'), right: col(landed.id, 'id') },
+  });
+  return make.project({
+    id: fresh('fsp'), input: joined, channels: [], type: typeOf(...landedCols(elem)),
+    exprs: [
+      ...foreignPayloadCols(elem).map((column) => [column.name, col(joined.id, column.name)] as const),
+      [FOREIGN_ORD, col(joined.id, 'fsord')],
+    ],
+  });
+}
+
+/**
  * LAND a barrier's awaited rows as one or two `fenced` (`AS MATERIALIZED`) CTE bindings — the physical
  * substrate a `boundGraph` reads through.
  *

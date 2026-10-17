@@ -228,8 +228,7 @@ const asElement = (n: FrameNode): { t: 'vertex' | 'edge'; v: any } | null =>
  *   - ALL elements → `elements` (detached rows);
  *   - `terminal === 'reduce'` → a collapsed `scalar` (the sole value, or a null scalar for a reducer
  *     that emitted nothing over empty input — e.g. `sum()`, matching the store's `{t:null,v:null}`);
- *   - exactly one MAP and not a reducer → the `map` arm (federate's mapValues-injection transport, and
- *     a source-form map terminal);
+ *   - `terminal === 'keyedMap'` → the `map` arm (federate's mapValues-injection transport);
  *   - otherwise a `values` STREAM. */
 function assemble(nodes: FrameNode[], terminal?: ForeignTerminal): ForeignResult {
   const elems = nodes.map(asElement);
@@ -241,8 +240,14 @@ function assemble(nodes: FrameNode[], terminal?: ForeignTerminal): ForeignResult
     return { kind: 'scalar', value: first ?? { t: null, v: null } };
   }
 
-  if (nodes.length === 1 && (nodes[0] as any)?.t === 'map')
-    return { kind: 'map', value: nodes[0] as Extract<ValueNode, { t: 'map' }> };
+  // Only the injection's own keyed map (`ForeignTerminal` 'keyedMap'): a user's single-map result is a
+  // one-member STREAM, and a group over nothing still answers its one (empty) map.
+  if (terminal === 'keyedMap') {
+    const first = nodes[0] as any;
+    if (nodes.length > 1 || (first !== undefined && first?.t !== 'map'))
+      throw new Error('federate(http): expected one keyed map from the mapValues injection');
+    return { kind: 'map', value: (first ?? { t: 'map', v: [] }) as Extract<ValueNode, { t: 'map' }> };
+  }
 
   return { kind: 'values', values: nodes };
 }

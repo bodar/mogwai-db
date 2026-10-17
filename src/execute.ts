@@ -1128,10 +1128,13 @@ export class Executor implements ExecutorApi {
         return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
       throw new Error(`federate: expected a reduced scalar or keyed map from the pushed reducer, got a ${plan.shape.kind} result`);
     }
-    // A standard map-producing sibling (the mapValues injection query) crosses as the existing
-    // typed map tree. Its parent keys remain ordinary Gremlin map keys for the caller-side resume.
-    if (plan.shape.kind === 'mapValue')
+    // The mapValues injection query (`'keyedMap'`, `ForeignTerminal`) crosses as ONE typed map tree. Its
+    // parent keys remain ordinary Gremlin map keys for the caller-side resume. Any OTHER `mapValue` result
+    // is a stream of maps and frames below, one node per row.
+    if (terminal === 'keyedMap') {
+      if (plan.shape.kind !== 'mapValue') throw new Error(`federate: expected a keyed map from the mapValues injection, got a ${plan.shape.kind} result`);
       return { kind: 'map', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
+    }
     // A pushed-down VALUE-PRODUCING terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, …): the whole
     // tail ran on the sibling and returned a STREAM of N values, each re-framed by its own Gremlin type. It
     // rides the SAME `{t,v}` envelope the scalar arm uses — one node per member — so the resume unfolds each

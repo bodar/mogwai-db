@@ -9,6 +9,10 @@ import { ENDPOINT_IDS_KEY } from '../src/compiler/ir/injection.ts';
 import { decode } from './support/decode.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { pushableTailPrefix } from '../src/compiler/ir/content-demand.ts';
+import fc from 'fast-check';
+import { traversal } from './L5-properties/generate.ts';
+import { L5_SEED } from './L5-properties/seed.ts';
+import { describeThrow, failsClosed } from './support/fail-closed.ts';
 
 // A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
 // IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
@@ -1072,4 +1076,92 @@ describe('federate — nested in union arms (multi-graph merge)', () => {
   test('post-merge out() refuses (needs live cross-graph adjacency)', async () => {
     expect(mgr.executor('home').framedAsync(`${merged2}.out().count()`, {})).rejects.toThrow(/not supported/);
   });
+});
+
+// FAIL CLOSED AT EVERY FEDERATE SEAM. A traversal through federate answers what the same traversal
+// answers on the sibling, declines with `UnsupportedTraversal`, or raises the reference's own error —
+// never a bare internal `Error`, and never a different answer. Each case below was one or the other.
+describe('federate — fails closed, never a different answer', () => {
+  const MID = 'g.V().hasLabel("person").values("name").as("e").call("federate", ["graph":"crew"])';
+  const ARGLESS = 'g.call("federate").with("graph","crew")';
+  const canon = (v: unknown): string => JSON.stringify(v, (_, x) => x instanceof Map ? [...x] : x instanceof Set ? [...x] : typeof x === 'bigint' ? `${x}n` : x);
+  const outcome = async (graph: string, g: string): Promise<{ rows: string[] } | { error: unknown }> => {
+    try { return { rows: (await Promise.all((await mgr.executor(graph).framedAsync(g, {})).map(dec))).map(canon) }; }
+    catch (error) { return { error }; }
+  };
+  const declines = async (g: string) => {
+    const out = await outcome('home', g);
+    expect('error' in out ? describeThrow(out.error) : 'answered').toMatch(/^UnsupportedTraversal: /);
+  };
+
+  // A `select()` the injection rewrite cannot reach — a by()/with()/cluster folded onto the step, which
+  // the step's own source text does not carry — is a cross-boundary label READ, so the step stays local
+  // (where it declines) rather than becoming an injection the rewrite then fails on with a bare Error.
+  test.each([
+    '.V().order().by(select("e")).values("name")',
+    '.V().group().by(select("e")).by(count())',
+    '.V().hasLabel("software").project("x","y").by(select("e")).by("name")',
+    '.V().dedup().by(select("e")).count()',
+    '.V().hasLabel("person").order().by(select("e"))',
+    '.V().group().by(values("name")).by(select("e")).count()',
+    '.V().has("name", select("e")).by("name").count()',
+  ])('an unrewritable injection declines: %s', (tail) => declines(MID + tail));
+
+  test('an injection in an ARGUMENT position still pushes and answers', async () => {
+    expect(await outcome('home', `${MID}.V().has("name", select("e")).values("name")`)).toEqual({ rows: ['"marko"'] });
+    expect(await outcome('home', `${MID}.V().where(values("name").is(select("e"))).count()`)).toEqual({ rows: ['1'] });
+  });
+
+  // A pushed step crosses as its OWN source text, and a canonicalized `order().by('name', desc)` is one
+  // `order` step whose text is `order()`: the sibling ran a different query (insertion order, ascending,
+  // a group by vertex). Such a step now stays local, and declines there.
+  test.each([
+    '.V().hasLabel("person").order().by("name", desc).values("name")',
+    '.V().hasLabel("person").values("name").order().by(desc)',
+    '.V().group().by(label).by(count())',
+  ])('a step whose text does not say what it does is not pushed: %s', (tail) => declines(ARGLESS + tail));
+
+  // A VALUE result is framed, never continued — the local suffix used to be dropped silently.
+  test.each([
+    '.with("traversal", __.V().hasLabel("person").values("name")).limit(1)',
+    '.with("traversal", __.V().hasLabel("person").values("name")).order()',
+    '.with("traversal", __.V().hasLabel("person").count()).is(0)',
+  ])('a local suffix over a value result declines: %s', (tail) => declines(ARGLESS + tail));
+
+  test('a pushed map terminal is a STREAM of maps — not its first row, not an invented {} for none', async () => {
+    const many = await outcome('home', `${ARGLESS}.V().hasLabel("person").elementMap("name")`);
+    expect('rows' in many && many.rows.length).toBe(4);
+    expect(await outcome('home', `${ARGLESS}.V(6).inE("knows").elementMap()`)).toEqual({ rows: [] });
+  });
+
+  test('a landed element stream keeps its multiplicity', async () => {
+    const twice = `${ARGLESS}.with("traversal", __.V().hasId(9).union(__.identity(), __.identity()))`;
+    expect(await outcome('home', `${twice}.count()`)).toEqual({ rows: ['2'] });
+    expect(await outcome('home', `${twice}.values("name")`)).toEqual({ rows: ['"daniel"', '"daniel"'] });
+    // A branch arm re-enters as a scan of distinct landed elements, so there it declines.
+    await declines('g.union(__.call("federate").with("graph","crew").with("traversal", __.V().hasId(9).union(__.identity(), __.identity())), __.V(1)).id()');
+  });
+
+  // THE SWEEP: L5's generated traversals as federate tails, arg-less and as a per-parent injection (each
+  // body's first `identity()` swapped for `select("e")`, so the injection lands at any depth). Every
+  // failure must PASS `failsClosed`, and an arg-less answer must be the multiset the sibling answers
+  // directly. The one exclusion is a direct `[null]` — a numeric reducer over non-numbers, whose
+  // reference answer is an error neither side raises yet (`MeanGlobalStep`), not a federate question.
+  test('generated federate tails fail closed and answer what the sibling answers', async () => {
+    const tails = fc.sample(traversal({ steps: 6, depth: 2 }), { seed: L5_SEED, numRuns: 60 }).map((t) => t.query.slice(1));
+    const problems: string[] = [];
+    for (const tail of tails) {
+      const injected = tail.replace('__.identity()', '__.select("e")');
+      for (const g of [`${ARGLESS}${tail}`, `${MID}${tail}`, `${MID}${injected}`]) {
+        const out = await outcome('home', g);
+        if ('error' in out && !failsClosed(out.error)) problems.push(`${g}\n    ${describeThrow(out.error)}`);
+      }
+      const fed = await outcome('home', `${ARGLESS}${tail}`);
+      const direct = await outcome('crew', `g${tail}`);
+      if ('rows' in fed && 'rows' in direct && canon(direct.rows) !== '["null"]'
+        && canon([...fed.rows].sort()) !== canon([...direct.rows].sort()))
+        problems.push(`${ARGLESS}${tail}\n    federated ${fed.rows.slice(0, 3).join(' | ').slice(0, 200)}\n    direct    ${direct.rows.slice(0, 3).join(' | ').slice(0, 200)}`);
+    }
+    expect(problems).toEqual([]);
+  }, 120_000);
 });

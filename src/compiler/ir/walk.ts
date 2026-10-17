@@ -41,12 +41,27 @@ export function* valueNodes(value: unknown): Generator<unknown> {
   if ('operands' in value) yield* valueNodes((value as { operands: unknown }).operands);
 }
 
-/** Every argument-shaped VALUE a step holds: its arguments, its folded `by()` modulators, its folded
- *  `with()` options. (`from`/`to` are label strings, never values that hold a child.) */
-export function stepValues(s: Step): unknown[] {
+/**
+ * WHICH child positions a walk enters — the caller's choice, never the walker's. `'all'` (the default,
+ * and the only right answer for a whole-tree question: does anything anywhere write, draw, barrier,
+ * read a label) is every position below. `'arguments'` is a step's own ARGUMENT values only — no folded
+ * `by()`/`with()`, no folded repeat/choose cluster — for a caller whose CONSUMER can act only on what a
+ * step's own source text carries: federate's injection rewrite edits the sibling query's TEXT, and a
+ * pushed step's text is its own `ctx` (`segment.ts` `inferredPushdown`), which a folded modulator is not
+ * part of. Consulting a position that consumer cannot reach is how `order().by(select('e'))` after a
+ * federate barrier became an injection the rewrite then could not perform.
+ */
+export type ChildPositions = 'all' | 'arguments';
+
+/** Every argument-shaped VALUE a step holds: its arguments, then (`positions: 'all'`) its folded `by()`
+ *  modulators and its folded `with()` options. (`from`/`to` are label strings, never values that hold a
+ *  child.) */
+export function stepValues(s: Step, positions: ChildPositions = 'all'): unknown[] {
   const ir = s as IRStep;
+  const args = (s.args ?? []).map((a) => a.value);
+  if (positions === 'arguments') return args;
   return [
-    ...(s.args ?? []).map((a) => a.value),
+    ...args,
     ...(ir.modulators ?? []).flat(),
     ...(ir.withArgs ?? []).map(([, v]) => v),
   ];
@@ -63,23 +78,27 @@ export const someValueNode = (s: Step, pred: (node: unknown) => boolean): boolea
  *  walker's. */
 export function eachChildChain(
   s: Step, read: BodyReader, visit: (chain: readonly Step[]) => void, unreadable: () => void = () => {},
+  positions: ChildPositions = 'all',
 ): void {
-  for (const v of stepValues(s)) for (const n of valueNodes(v)) {
+  for (const v of stepValues(s, positions)) for (const n of valueNodes(v)) {
     if (!isNested(n)) continue;
     const body = read(n.nested);
     if (body === null) unreadable(); else visit(body);
   }
+  if (positions === 'arguments') return;
   const ir = s as IRStep;
   if (ir.repeatRegion) visit(ir.repeatRegion);
   if (ir.optionArms) visit(ir.optionArms);
 }
 
-/** Visit every CHAIN at ANY depth — `chain` itself first, then each child chain, recursively. */
+/** Visit every CHAIN at ANY depth — `chain` itself first, then each child chain (through `positions`),
+ *  recursively. */
 export function eachChainDeep(
   chain: readonly Step[], read: BodyReader, visit: (chain: readonly Step[]) => void, unreadable: () => void = () => {},
+  positions: ChildPositions = 'all',
 ): void {
   visit(chain);
-  for (const s of chain) eachChildChain(s, read, (c) => eachChainDeep(c, read, visit, unreadable), unreadable);
+  for (const s of chain) eachChildChain(s, read, (c) => eachChainDeep(c, read, visit, unreadable, positions), unreadable, positions);
 }
 
 /** Visit every STEP at ANY depth — `eachChainDeep`, a step at a time. */

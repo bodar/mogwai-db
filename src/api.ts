@@ -191,8 +191,15 @@ export type ForeignResult =
  *  STREAM both compile to `value`/`scalar` shapes but carry different empty/cardinality semantics
  *  (count over empty → 0; values over empty → []), which the shape cannot express. The terminal step is
  *  the one fact that disambiguates them (`pushableTailPrefix.reduces`), so it is passed as an intent hint
- *  rather than re-derived from the shape. Absent → the shape is authoritative (elements vs a value stream). */
-export type ForeignTerminal = 'reduce';
+ *  rather than re-derived from the shape. Absent → the shape is authoritative (elements vs a value stream).
+ *
+ *  `'keyedMap'` is the same disambiguation for MAPS: federate's mapValues injection sibling ends in ONE
+ *  `group()` map it reads as `(parentKey → results)`, while a user's pushed `elementMap()`/`valueMap()`/
+ *  `project()` is a STREAM of maps, one per traverser. Both are the `mapValue` shape; reading the stream
+ *  as one keyed map kept its first row and invented `{}` for an empty one (measured:
+ *  `g.call("federate").with("graph","crew").V().hasLabel("person").elementMap("name")` answered one map
+ *  of four). Only the injection, which built the query, asks for the keyed map. */
+export type ForeignTerminal = 'reduce' | 'keyedMap';
 
 // ---- execution ----
 

@@ -6,6 +6,7 @@ import { isTraversalParam } from '../params/call-params.ts';
 import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY } from '../../compiler/ir/injection.ts';
+import { UnsupportedTraversal } from '../../compiler/compiler.ts';
 
 const mapValuesGremlin = (gremlin: string, label: string, param: string, reducer?: string): string | null => {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -158,7 +159,9 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
         if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
         if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
-        if (out.kind === 'map') return { kind: 'barrier-scalar', value: out.value };
+        // A user's map terminal is a `values` stream (one map per traverser); only the injection, which
+        // asks for it, gets the keyed `map` (`ForeignTerminal`).
+        if (out.kind === 'map') throw new Error('federate: source form returned an internal mapValues result');
         return wantEndpoints ? withEndpoints(ex, out.rows, depth) : out.rows;
       }
 
@@ -170,9 +173,12 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`).
       if (mapValues) {
         const sibling = mapValuesGremlin(gremlin, mapValues.label, mapValues.param, mapValues.reduce?.partial);
-        if (!sibling) throw new Error(`federate: could not rewrite select("${mapValues.label}") for mapValues injection`);
+        // A decline, not a crash: the injection names a `select(label)` the sibling text does not spell
+        // (`preBarrierSelectRead` consults only the positions this text rewrite can reach, so this is a
+        // backstop that must never surface as an internal error).
+        if (!sibling) throw new UnsupportedTraversal(`federate: a per-parent injection of select("${mapValues.label}") the sibling query ${gremlin} does not spell`);
         const values = new Map(rows.map((row, ordinal) => [String(ordinal), row.injectedValue]));
-        const out = await ex.runForeign(sibling, { ...siblingBinds, [mapValues.param]: values }, depth + 1);
+        const out = await ex.runForeign(sibling, { ...siblingBinds, [mapValues.param]: values }, depth + 1, {}, 'keyedMap');
         if (out.kind !== 'map') throw new Error(`federate: expected a keyed map from mapValues injection, got ${out.kind}`);
         // A bare reducer is the group's value traversal, so the ordinary map is already
         // `(parentId -> partial)`. Count supplies its 0 identity while sum/min/max emit nothing on

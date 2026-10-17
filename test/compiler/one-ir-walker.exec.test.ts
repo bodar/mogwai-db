@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test';
 import { compilePlan, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { arg, type Step } from '../../src/gremlin/frontend.ts';
 import type { IRStep } from '../../src/compiler/ir/step.ts';
-import { someStepDeep } from '../../src/compiler/ir/walk.ts';
+import { eachChainDeep, someStepDeep } from '../../src/compiler/ir/walk.ts';
 import { seededStore } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
@@ -43,6 +43,22 @@ describe('someStepDeep is TOTAL over every child position', () => {
     expect(someStepDeep(unreadable, () => null, () => false, true)).toBe(true);
     expect(someStepDeep(unreadable, () => null, () => false, false)).toBe(false);
   });
+
+  // Which positions a walk enters is the CALLER's choice: federate's injection rewrite edits a pushed
+  // step's own source text, which no folded by()/with()/cluster is part of, so that question walks
+  // `'arguments'` only (and a `select()` anywhere else stays a label READ, so the step stays local).
+  test('`arguments` positions see the arguments and nothing folded onto the step', () => {
+    const seen = (s: IRStep[]) => {
+      let n = 0;
+      eachChainDeep(s, (b) => b as readonly Step[], (c) => { if (c.some((x) => x.name === 'addV')) n++; }, () => {}, 'arguments');
+      return n > 0;
+    };
+    expect(seen(host({ args: [arg({ op: 'eq', operands: [arg(nested)] } as any)] }))).toBe(true);
+    expect(seen(host({ name: 'order', modulators: [[nested]] }))).toBe(false);
+    expect(seen(host({ name: 'call', withArgs: [['k', nested]] }))).toBe(false);
+    expect(seen(host({ name: 'repeat', repeatRegion: [write] }))).toBe(false);
+    expect(seen(host({ name: 'choose', optionArms: [write] }))).toBe(false);
+  });
 });
 
 describe('the defects the walker closed, and their neighbours', () => {
@@ -71,6 +87,12 @@ describe('the defects the walker closed, and their neighbours', () => {
     expect(await framed("g.V().select('zz').count()")).toEqual([0]);
   });
 
+  // The drop is a CONJUNCTION over the keys (SelectStep.java:74-84): one key bound by NO scope empties
+  // the select whatever a hidden key holds, so that answer needs no channel and stays answered.
+  test('a hidden key beside a key no scope binds is the empty select, not a decline', async () => {
+    expect(await framed("g.V().as('a').out('created').local(union(select('a','b'), identity()).count())")).toEqual([1, 1, 1, 1]);
+  });
+
   // A path entry's labels are a SET: IdentityRemovalStrategy copies an identity()'s labels onto the
   // previous step, and a filter's labels extend the current entry (AbstractStep.prepareTraversalForNextStep,
   // ImmutablePath.extend(Set)).
@@ -83,6 +105,23 @@ describe('the defects the walker closed, and their neighbours', () => {
 
   test('…but a step that opens a new entry keeps both binds', async () => {
     expect(await ids("g.V(1).as('a').out().as('a').select(Pop.all, 'a')")).toEqual([[1, 2], [1, 3], [1, 4]]);
+  });
+
+  // A child traversal starts on its parent's traverser — the same last path entry — so a branch body's
+  // leading bind of a label already there merges too (`LocalStep`/`BranchStep` hand the child's own
+  // traverser outward).
+  test.each([
+    ["g.V(1).as('a').local(identity().as('a')).select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').optional(identity().as('a')).select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').union(identity().as('a'), out().as('a')).select(Pop.all, 'a')", [[1], [1, 2], [1, 3], [1, 4]]],
+    ["g.V(1).as('a').local(out().as('a')).select(Pop.all, 'a')", [[1, 2], [1, 3], [1, 4]]],
+  ])('a branch body continues its host\'s path entry: %s', async (q, expected) => {
+    const got = (await ids(q)) as number[][];
+    expect(got.map((l) => l.join(',')).sort()).toEqual((expected as number[][]).map((l) => l.join(',')).sort());
+  });
+
+  test('a where() body\'s leading as() is a start-label reference and is left alone', async () => {
+    expect(await ids("g.V(1).as('a').where(__.as('a').out().as('b')).select('a')")).toEqual([1]);
   });
 
   test('a movement over a stream with no bulk channel does not collapse into an ill-formed Aggregate', async () => {

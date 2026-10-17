@@ -71,13 +71,23 @@ describe('decodeForeignResult — typed peer response decode', () => {
     expect(r.values.every((n: any) => n.t === 'string')).toBe(true);
   });
 
-  test('a map terminal decodes to the map arm', async () => {
-    const r = await decodeForeignResult(await peerBytes('g.V().group().by(T.label).by(__.count())'));
+  test('the injection keyed map decodes to the map arm under the keyedMap hint', async () => {
+    const r = await decodeForeignResult(await peerBytes('g.V().group().by(T.label).by(__.count())'), 'keyedMap');
     expect(r.kind).toBe('map');
     if (r.kind !== 'map') throw new Error('unreachable');
     expect(r.value.t).toBe('map');
     const entries = Object.fromEntries((r.value.v as any[]).map(([k, v]) => [k.v, v.v]));
     expect(entries).toEqual({ person: 2 });
+  });
+
+  test('a user map terminal is a STREAM of maps — one per traverser, none for an empty stream', async () => {
+    // Read as one keyed map, a stream kept its first row and an empty one invented `{}`.
+    const many = await decodeForeignResult(await peerBytes('g.V().hasLabel("person").project("n").by("name")'));
+    expect(many.kind).toBe('values');
+    if (many.kind !== 'values') throw new Error('unreachable');
+    expect(many.values.map((n: any) => n.t)).toEqual(['map', 'map']);
+    const none = await decodeForeignResult(await peerBytes('g.V().hasLabel("nope").project("n").by("name")'));
+    expect(none).toEqual({ kind: 'values', values: [] });
   });
 
   test('nested elements: fold() of vertices keeps typed props at depth', async () => {

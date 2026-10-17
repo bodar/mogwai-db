@@ -1,6 +1,7 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isLocalScope, REDUCERS } from './step.ts';
 import { labelReads, labelsBoundBefore, preBarrierSelectRead } from './labels.ts';
+import { isNested, parseGremlin, stepChain, type Step } from '../../gremlin/frontend.ts';
 
 // ---------- content demand: what a POST-BARRIER tail consumes from the fetched result ----------
 //
@@ -151,6 +152,8 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
 //      A SELF-CONTAINED `aggregate('a')…cap('a')` inside the prefix pushes fine: `a` is written within the
 //      prefix, so its `cap` read is satisfied there (the "written within" set), exactly as a contained
 //      `as()` backtrack does.
+//   6. its own source text no longer DENOTES it (`textDenotes`) — a Pass folded a `by()`/`with()` onto
+//      it, rewrote its arguments, or synthesized it — because the sibling receives that text, not the step.
 
 /** Steps that WRITE a named collection under a string key (arg 0): `aggregate('a')`/`group('a')`/
  *  `groupCount('a')` retain a relation under that name (`src/compiler/rel/collection.ts`). A bare
@@ -168,6 +171,76 @@ const collectionKeyOf = (step: IRStep): string | null => {
   const first = step.args[0]?.value;
   return typeof first === 'string' ? first : null;
 };
+
+/** The IR fields a step's source text never carries: what a canonicalize Pass FOLDED onto it from a
+ *  neighbouring step (`by()`/`with()`/`option()`/the repeat cluster/`from`/`to`) or ANNOTATED it with
+ *  (`productiveBy`, the spliced-host `perTraverser`, `unrollSuppressed`, the federate segment's own
+ *  `landedSource`/`graphTag`). `loopName` is absent on purpose: the front end splits it off the
+ *  step's OWN text, so a re-parse reproduces it. */
+const TEXTLESS_FIELDS = [
+  'modulators', 'withArgs', 'optionArms', 'repeatRegion', 'from', 'to',
+  'productiveBy', 'perTraverser', 'unrollSuppressed', 'landedSource', 'graphTag',
+] as const;
+
+/** Does an IR step denote the same thing as `parsed`, the step its source text parses to? Same name,
+ *  `loopName` and arguments, and nothing folded onto it (`TEXTLESS_FIELDS`). */
+function sameStep(ir: Step, parsed: Step, params: Record<string, any>): boolean {
+  const fields = ir as unknown as Record<string, unknown>;
+  return !TEXTLESS_FIELDS.some((f) => fields[f] !== undefined)
+    && ir.name === parsed.name && ir.loopName === parsed.loopName && ir.args.length === parsed.args.length
+    && ir.args.every((a, i) => sameValue(a.value, parsed.args[i]!.value, params));
+}
+
+/** Do an IR argument value and its parsed counterpart denote the same thing? A nested traversal compares
+ *  as a CHAIN, step by step (`sameStep`): a Pass may have rewritten a body into a `Step[]` payload, which
+ *  still denotes its text exactly when every step does. */
+function sameValue(a: unknown, b: unknown, params: Record<string, any>): boolean {
+  if (a === b) return true;
+  if (isNested(a) || isNested(b)) {
+    if (!isNested(a) || !isNested(b)) return false;
+    let ia: readonly Step[], pb: readonly Step[];
+    try { ia = stepChain(a.nested, params); pb = stepChain(b.nested, params); } catch { return false; }
+    return ia.length === pb.length && ia.every((s, i) => sameStep(s, pb[i]!, params));
+  }
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return Object.is(a, b);
+  if (a instanceof Map || b instanceof Map) {
+    if (!(a instanceof Map) || !(b instanceof Map) || a.size !== b.size) return false;
+    const be = [...b];
+    return [...a].every(([k, v], i) => sameValue(k, be[i]![0], params) && sameValue(v, be[i]![1], params));
+  }
+  if (a instanceof Set || b instanceof Set) {
+    if (!(a instanceof Set) || !(b instanceof Set)) return false;
+    return sameValue([...a], [...b], params);
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => sameValue(v, b[i], params));
+  }
+  const ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length
+    && ka.every((k) => sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], params));
+}
+
+/**
+ * Does this step's OWN SOURCE TEXT still denote it? A pushed step crosses to the sibling as
+ * `ctx.getText()` (`segment.ts` `inferredPushdown`) — but `step` is the CANONICALIZED node, and a Pass
+ * may have folded a neighbour onto it (`order().by('name', desc)` is ONE `order` step whose text is
+ * `order()`), rewritten its arguments, or reused another step's `ctx` for a step it synthesized. Pushing
+ * any of those sends the sibling a DIFFERENT query: measured on trunk, `….V().hasLabel('person')
+ * .order().by('name', desc).values('name')` came back in insertion order, `values('name').order()
+ * .by(desc)` ascending, and `group().by(label).by(count())` grouped by vertex. So the text must
+ * round-trip: re-parse it and require the same step — same name, same `loopName`, the same arguments —
+ * with no field the text cannot carry (`TEXTLESS_FIELDS`). Anything else stays LOCAL, the fail-closed
+ * side of the boundary.
+ */
+function textDenotes(step: IRStep, params: Record<string, any>): boolean {
+  let reparsed: Step | undefined;
+  try {
+    // `inject(0)` roots a step that is not a source step (`out()`); a mid-traversal `V()` is also legal.
+    reparsed = stepChain(parseGremlin(`g.inject(0).${step.ctx.getText()}`), params).at(-1);
+  } catch { return false; }
+  return reparsed !== undefined && sameStep(step, reparsed, params);
+}
 
 /** The reducing steps whose presence as the LAST pushed step means the sibling returns a SCALAR (so the
  *  resume frames a value, not elements). `REDUCERS` = count + the numeric reducers. */
@@ -200,6 +273,7 @@ export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, pa
     const step = steps[i]!;
     if (MUTATING_STEPS.has(step.name)) break;      // (2) writes stay local
     if (step.name === 'call') break;               // (3) a nested/second barrier — conservative boundary
+    if (!textDenotes(step, params)) break;         // (6) its source text no longer says what it does
     const reads = labelReads([step], params);
     if (reads.all) break;                          // (4) path-family / unparseable — observes all labels
     const crossBoundary = [...reads.labels].filter((l) => preBarrier.has(l));

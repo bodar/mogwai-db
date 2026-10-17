@@ -160,7 +160,11 @@ export function preBarrierSelectRead(
       else found = label;
     }
   };
-  for (const step of steps) eachChildChain(step, read, (c) => eachChainDeep(c, read, visit, unreadable), unreadable);
+  // ARGUMENT positions only (`ChildPositions`, `walk.ts`): the injection is performed by rewriting the
+  // pushed steps' own source text, which carries no folded `by()`/`with()`/cluster. A `select(label)` in
+  // one of those positions is still a cross-boundary label READ (`labelReads` walks every position), so
+  // `pushableTailPrefix` keeps that step local rather than naming an injection it cannot perform.
+  for (const step of steps) eachChildChain(step, read, (c) => eachChainDeep(c, read, visit, unreadable, 'arguments'), unreadable, 'arguments');
   return ambiguous ? null : found;
 }
 

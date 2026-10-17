@@ -142,7 +142,7 @@ const FOLD: Pass[] = group('canonicalize', [
   { name: 'absorbModulators', run: (steps) => absorbModulators(steps) },
   { name: 'absorbOptionArms', run: (steps) => absorbOptionArms(steps) },
   // AFTER absorbModulators, so a `by()` is no longer a step between two binds of one path entry.
-  { name: 'mergeStepLabels', applies: (steps) => steps.some((s) => s.name === 'as'), run: (steps) => mergeStepLabels(steps) },
+  { name: 'mergeStepLabels', applies: (steps) => steps.some((s) => s.name === 'as'), run: (steps, ctx) => mergeStepLabels(steps, ctx.params) },
   // BEFORE absorbCallWith: desugarIo re-emits io()'s with() steps after the call it mints, for
   // absorbCallWith to fold exactly as it folds a hand-written call()'s.
   { name: 'desugarIo', run: (steps) => desugarIo(steps) },

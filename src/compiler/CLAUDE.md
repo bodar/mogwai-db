@@ -51,7 +51,10 @@ while what they operate on keeps TinkerPop's.
   modulators, `with()` options and the folded `repeatRegion`/`optionArms`; `eachChildChain` enumerates
   them once, and `someStepDeep`/`eachChainDeep`/`eachStepDeep` are built on it. Every private copy
   missed a different position (a write inside `order().by(…)` leaked an internal error). What an
-  UNREADABLE body means — skip, or fail closed — is the caller's argument, never the walker's choice.
+  UNREADABLE body means — skip, or fail closed — is the caller's argument, never the walker's choice;
+  so is WHICH positions a walk enters (`ChildPositions`): `'all'` for every whole-tree question,
+  `'arguments'` only for a consumer that can act on nothing but a step's own source text (federate's
+  injection rewrite — consulting a folded `by()` there turned a decline into a bare `Error`).
 - **Fast paths are opt-in, never the semantic authority.** Two survive the single-spine cut and both
   are switches the lowering READS rather than a second lowering: `movementCollapse` (the grouped
   `SUM(bulk)` movement) and `propertySeek` (`src/rel/passes/semijoin.ts`, a physical rewrite over the

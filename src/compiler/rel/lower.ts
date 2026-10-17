@@ -46,7 +46,7 @@ import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, ele
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
-import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols } from './foreign.ts';
+import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
@@ -3530,7 +3530,10 @@ export function lowerForeignResume(
   // The initial stream references the landed relation (the edges for a subgraph, else the one matching
   // `elem`) by name, exactly as every downstream read does.
   const streamBinding = isSubgraph || streamElem === 'edge' ? edgeBinding! : vertexBinding!;
-  const landed: Rel = make.ref({ id: fresh('bref'), name: streamBinding, channels: [], type: typeOf(...landedCols(streamElem)) });
+  const bound: Rel = make.ref({ id: fresh('bref'), name: streamBinding, channels: [], type: typeOf(...landedCols(streamElem)) });
+  // The stream keeps the sibling's multiplicity (`landedStream`); a SUBGRAPH is a graph, a set of
+  // elements, so its edge stream is the binding itself.
+  const landed: Rel = isSubgraph || mapValues ? bound : landedStream(rows, streamElem, bound, fresh);
   // A MID-traversal barrier's pool is per-CALL, not per-parent: the sibling ran once over the distinct
   // injected values, so the rows have to be scattered back over the parents that asked before anything
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the

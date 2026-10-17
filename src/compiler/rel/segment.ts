@@ -25,6 +25,7 @@ import { buildOrderDedupSegment, buildOrderGlobalSegment, buildRankedOrderSegmen
 import { asStringBarrierIn, buildAsStringSegment } from './asstring-barrier.ts';
 import { buildCastSegment, castBarrierIn } from './cast-barrier.ts';
 import type { Elem } from '../elem.ts';
+import { UnsupportedTraversal } from '../compiler.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
@@ -348,9 +349,15 @@ function nestedBranchSegment(
     residency: barrier.residency,
     resume: (out: BarrierOutput): Plan => {
       if (!Array.isArray(out))
-        throw new Error(`federate inside a ${branchStep.name} arm produced a non-element result — only an element sub-traversal is supported in an arm yet; move a reducer/value terminal to the top-level tail`);
+        throw new UnsupportedTraversal(`federate inside a ${branchStep.name} arm produced a non-element result — only an element sub-traversal is supported in an arm yet; move a reducer/value terminal to the top-level tail`);
       const foreign = out as ForeignRow[];
       const elem: Elem = foreign[0]?.kind ?? 'vertex';
+      // The arm re-enters as a `V()`/`E()` SCAN of the landed binding, which holds each element once —
+      // so a homogeneous stream that REPEATS an element (two traversers on one vertex) cannot keep its
+      // multiplicity here (the top-level resume can: `landedStream`). Decline rather than collapse it.
+      const kinds = new Set(foreign.map((r) => r.kind));
+      if (kinds.size === 1 && new Set(foreign.map((r) => r.id)).size < foreign.length)
+        throw new UnsupportedTraversal(`federate inside a ${branchStep.name} arm returned the same element more than once — an arm re-enters as a scan of distinct landed elements, so its multiplicity would be lost`);
       const fresh = minter();
       const { vertexBinding, edgeBinding, streamElem, bindings } = landForeignRows(foreign, elem, fresh, null, salt);
       // The arm becomes a marker `V()`/`E()` reading the landed relation, followed by whatever LOCAL
@@ -707,6 +714,7 @@ function resumed(
     if (barrier.site.mapValues?.reduce && rejoin)
       return { kind: 'sql', compiled: finishLowering(lowerReduceCombine(out.value, rejoin.parentCount, barrier.site.mapValues.reduce, steps, barrier.suffixFrom, request.lowering)) };
     // A source-form scalar (a pushed prefix ending in a reducer): frame the value directly, no tail.
+    noLocalSuffix(steps, barrier);
     return { kind: 'sql', compiled: finishLowering(lowerScalarResume(out.value)) };
   }
   // A pushed-down VALUE STREAM (a prefix ending in `values(k)`/`unfold()`/`fold()`/`cap('a')`): the whole
@@ -717,14 +725,16 @@ function resumed(
   // value-stream analogue of the element rejoin's no-injection cross. A mid form only reaches here when the
   // sub-traversal is CONSTANT: an injected value terminal caps the pushable prefix AT the marker, so
   // anything after it (a `values`) is LOCAL and comes back through the element rejoin instead.
-  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values')
+  if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-values') {
+    noLocalSuffix(steps, barrier);
     return { kind: 'sql', compiled: finishLowering(lowerTypedNodeStream(out.values, rejoin?.parentCount)) };
+  }
   if (!Array.isArray(out) && 'kind' in out && out.kind === 'barrier-map') {
     const elem = mapValueElem(out.value);
     const lowered = lowerForeignResume([], elem, steps, barrier.suffixFrom, request.lowering, {
       parentCount: rejoin?.parentCount ?? 0, mapValues: out.value,
     });
-    if (!lowered) throw new Error('federate: mapValues result cannot resume the local traversal');
+    if (!lowered) throw new UnsupportedTraversal(`${afterBarrierText(steps, barrier)} over a per-parent federate injection`);
     return { kind: 'sql', compiled: finishLowering(lowered) };
   }
   const foreign = out as ForeignRow[];
@@ -741,7 +751,7 @@ function resumed(
   // into the sub-traversal the barrier runs on the far side.
   if (!lowered) {
     const next = steps[barrier.suffixFrom];
-    throw new Error(
+    throw new UnsupportedTraversal(
       next
         ? `${next.name}() is not supported after a barrier call() — its results are DETACHED references `
           + '(id/label/values read the landed snapshot; movement and property steps need live adjacency), '
@@ -750,6 +760,25 @@ function resumed(
     );
   }
   return { kind: 'sql', compiled: finishLowering(lowered) };
+}
+
+/** The local steps after a barrier, as text — what a resume decline names. A step a Pass synthesized
+ *  may carry no parse tree, so it is named by its step name. */
+const afterBarrierText = (steps: readonly IRStep[], barrier: Barrier): string =>
+  steps.slice(barrier.suffixFrom).map((s) => (s.ctx as IRStep['ctx'] | undefined)?.getText() ?? `${s.name}(…)`).join('.') || 'the traversal';
+
+/**
+ * A VALUE result (`barrier-scalar`/`barrier-values`) is FRAMED, never continued: its resumes
+ * (`lowerScalarResume`/`lowerTypedNodeStream`) hold no tail. That was sound only while every such result
+ * came from a MAXIMAL pushdown, and it is not one: the pushable prefix stops at a local-dependent step
+ * (`pushableTailPrefix`), and an explicit `traversal` arg pushes nothing of the tail at all. Framing then
+ * silently dropped the local suffix — measured on trunk, `….with("traversal", __.V().hasLabel("person")
+ * .values("name")).limit(1)` answered all four names and `….count()).is(0)` answered `[4]`. A local
+ * suffix over a value result therefore DECLINES; continuing one is a lowering this route does not have.
+ */
+function noLocalSuffix(steps: readonly IRStep[], barrier: Barrier): void {
+  if (barrier.suffixFrom < steps.length)
+    throw new UnsupportedTraversal(`${afterBarrierText(steps, barrier)} after a barrier call() that produced VALUES — a value result is framed, never continued, so push the step into the sub-traversal`);
 }
 
 /** Validate the existing typed map transport while retaining its data for relational landing. */

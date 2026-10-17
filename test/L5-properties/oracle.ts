@@ -38,7 +38,7 @@ export const onlyDisabled = (name: keyof FastPathConfig): FastPathConfig =>
  *  the two configs AGREE on throwing is itself part of the equivalence. */
 export type Outcome =
   | { readonly kind: 'rows'; readonly weighed: ReadonlyMap<string, bigint>; readonly ordered: readonly string[] }
-  | { readonly kind: 'threw'; readonly message: string };
+  | { readonly kind: 'threw'; readonly message: string; /** The thrown value itself, for a caller that classifies it (`failsClosed`). */ readonly error?: unknown };
 
 // `weigh` moved to `test/support/multiset.ts` — the census needs the same answer, and its own copy
 // was subtly different in the one way that matters (see that module's header).
@@ -62,7 +62,7 @@ export function outcomeOf(store: GraphStore, q: string, fastPaths: FastPathConfi
     const framed = exec(store, undefined, fastPaths).framed(q, {});
     return { kind: 'rows', weighed: weigh(framed), ordered: framed.map((f) => f.buf.toString('hex')) };
   } catch (e) {
-    return { kind: 'threw', message: e instanceof Error ? e.message : String(e) };
+    return { kind: 'threw', message: e instanceof Error ? e.message : String(e), error: e };
   }
 }
 

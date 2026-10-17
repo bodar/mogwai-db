@@ -465,8 +465,10 @@ export function selectKeys(
   if (host && spec.labels.some((label) => host.named(label))) return null;
   const missing = spec.labels.filter((label) => !liveAliases(aliases, rel).has(label));
   // A key this alias map lacks but an ENCLOSING scope binds is on the path all the same — this body was
-  // lowered without the channel that holds it — so it is not the empty answer below: decline.
-  if (host && missing.some((label) => host.hidden(label))) return null;
+  // lowered without the channel that holds it — so it is not the empty answer below: decline. Unless
+  // ANOTHER missing key is bound by no scope at all: the drop is a conjunction, so that key alone empties
+  // the stream whatever the hidden one holds (`select('a','b')` with `b` unbound anywhere is empty).
+  if (host && missing.length && missing.every((label) => host.hidden(label))) return null;
   if (host && missing.length)
     return {
       // §3.3's spelling of the empty relation: `Values` refuses to express one, so it is a false

@@ -9,6 +9,7 @@ import { outcomeOf, ALL_GENERIC, INTERNAL_ERROR } from './oracle.ts';
 import { transitionWitnesses, traversal } from './generate.ts';
 import { KNOWN_RAW_WITNESSES } from './capability-baseline.ts';
 import { L5_SEED } from './seed.ts';
+import { describeThrow, failsClosed } from '../support/fail-closed.ts';
 
 
 describe('L5 capability ratchet', () => {
@@ -47,9 +48,11 @@ describe('L5 capability ratchet', () => {
 
   /**
    * NO INTERNAL ERROR ESCAPES — deeper compositions than the ratchet above draws, plus the internal
-   * errors reviewers reached by hand, each run as a fixed witness. A throw must be `UnsupportedTraversal`
-   * or the reference's own error; one matching `INTERNAL_ERROR` is a plan we built ill-formed or SQL we
-   * emitted wrong, and it fails here with no baseline to absorb it.
+   * errors reviewers reached by hand, each run as a fixed witness. Every throw must PASS `failsClosed`
+   * (`test/support/fail-closed.ts`): an `UnsupportedTraversal`, a data-raised reference error, or a
+   * message the reference corpus itself asserts. Positive, not a list of known-bad shapes, so an internal
+   * error nobody has seen yet fails here too, with no baseline to absorb it. (The federate seams, which
+   * this single-graph generator cannot reach, have the same sweep in `test/federation.test.ts`.)
    */
   test('no generated composition surfaces an internal error', () => {
     const witnesses = [
@@ -63,8 +66,8 @@ describe('L5 capability ratchet', () => {
     const internal: string[] = [];
     for (const query of [...witnesses, ...deep]) {
       const outcome = outcomeOf(seeded(MODERN_SEED), query, ALL_GENERIC);
-      if (outcome.kind === 'threw' && !outcome.message.startsWith('this traversal is not supported yet') && INTERNAL_ERROR.test(outcome.message))
-        internal.push(`${query}\n    ${outcome.message}`);
+      if (outcome.kind === 'threw' && !failsClosed(outcome.error))
+        internal.push(`${query}\n    ${describeThrow(outcome.error)}`);
     }
     expect(internal).toEqual([]);
   }, 120_000);

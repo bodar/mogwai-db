@@ -1591,9 +1591,25 @@ const KEEPS_PATH_ENTRY: ReadonlySet<string> = new Set([
  * Our `as()` is its own step and each bind of a label was its own history entry, so `Pop.all` answered
  * `[v1, v1]`. This pass drops a label already bound to the current entry (and an `as()` left with none);
  * a label bound again after a step that opens a new entry is a real second bind and stays.
+ *
+ * A CHILD traversal starts on its parent's traverser — the same path, the same last entry — so the entry
+ * CONTINUES into a branch body (`ENTRY_SHARING_HOSTS`): `g.V(1).as('a').local(identity().as('a'))
+ * .select(Pop.all,'a')` is `[v1]` too. Those bodies are entered seeded with the host's entry; every other
+ * child position starts empty, which only keeps two binds apart (the old answer): a `where()`/`match()`
+ * body's leading `as()` is a start-label REFERENCE, not a bind, and a repeat body's later iterations do
+ * not start on the entry its first one did.
  */
-export function mergeStepLabels(steps: IRStep[]): IRStep[] {
-  let entry = new Set<string>();
+export function mergeStepLabels(steps: IRStep[], params: Record<string, any> = {}): IRStep[] {
+  return mergeLabelsFrom(steps, new Set(), rawBodies(params));
+}
+
+/** The hosts whose bodies hand their traverser OUTWARD and start on the host's own path entry — the
+ *  branch family plus `local`, the per-traverser scope (`LocalStep`/`BranchStep` emit the child's own
+ *  traverser). A body under any other host is entered with an empty entry. */
+const ENTRY_SHARING_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'coalesce', 'optional', 'choose', 'branch']);
+
+function mergeLabelsFrom(steps: IRStep[], seed: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null): IRStep[] {
+  let entry = new Set(seed);
   let changed = false;
   const out: IRStep[] = [];
   for (const s of steps) {
@@ -1608,10 +1624,33 @@ export function mergeStepLabels(steps: IRStep[]): IRStep[] {
       else { changed = true; if (args.length) out.push({ ...s, args }); }
       continue;
     }
+    const seeded = entry.size && ENTRY_SHARING_HOSTS.has(s.name) ? seedBodies(s, entry, read) : s;
+    if (seeded !== s) changed = true;
     if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s)) entry = new Set();
-    out.push(s);
+    out.push(seeded);
   }
   return changed ? out : steps;
+}
+
+/** `host` with each direct body argument (and each folded `option()` arm) label-merged from `entry`. */
+function seedBodies(host: IRStep, entry: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null): IRStep {
+  const mergeArgs = (s: Step): Step => {
+    let changed = false;
+    const args = s.args.map((a) => {
+      if (!isNested(a.value)) return a;
+      const body = read(a.value.nested);
+      if (body === null) return a;
+      const merged = mergeLabelsFrom(body as IRStep[], entry, read);
+      if (merged === body) return a;
+      changed = true;
+      return { ...a, value: { nested: merged } };
+    });
+    return changed ? { ...s, args } : s;
+  };
+  const self = mergeArgs(host) as IRStep;
+  const arms = host.optionArms?.map(mergeArgs);
+  const armsChanged = !!arms && arms.some((arm, i) => arm !== host.optionArms![i]);
+  return armsChanged ? { ...self, optionArms: arms } : self;
 }
 
 /** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`
