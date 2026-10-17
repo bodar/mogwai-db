@@ -698,6 +698,13 @@ authorities.
   non-distinct input when order is read, and a `partitionedSlice` whose host is not unbulked — NOT plain
   flat-map chains before `fold()` (measured: loses most of L3). Size: L, ~400–600 LOC + a census run; the
   window needs an L4 scenario.
+  ✅ **Stopgap fail-open holes closed 2026-10-17 (`4841b638`, `998f37f8`):** `referenceMergeObservableAt`
+  asks which comes FIRST after a tie-every `order()` — a reader or an eraser (`orderReadBeforeErased`, readers
+  at any depth via `readsOrder`) — so a slice between the order and an eraser declines; a tie-every key is any
+  key chain that discards the traverser (a `constant()` step or a variable-free `math()`); ONE `erasesOrder`
+  authority (global reducing form only — a side-effect `groupCount('x')` passes through, not an eraser).
+  Pinned in `test/L4-addendum/traverser-set-merge.feature`. The regroup mint itself and the data-dependent-tie
+  / LazyBarrier residue (indexed in `docs/outstanding-work.md`) remain.
   ✅ **Stopgap LANDED (`9b1e80e9`):** one authority `referenceMergeObservableAt` (`ir/bulk.ts`), consulted by
   `rowOp` and every inline `barrier()` site, declines an explicit `barrier()` / tie-everything `order()` over a
   possibly-non-distinct stream when an order reader is downstream; pinned in
