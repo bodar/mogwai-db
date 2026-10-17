@@ -16,7 +16,7 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { ioc } from '../src/io.ts';
+import { Edge, ioc, Property, Vertex, VertexProperty } from '../src/io.ts';
 import type { Http } from '../src/api.ts';
 
 const GRAPHBINARY_MT = 'application/vnd.graphbinary-v4.0';
@@ -168,5 +168,121 @@ describe('the GET data plane negotiates the same way', () => {
   test('GET ?gremlin= with an explicit GraphBinary Accept → GraphBinary', async () => {
     const data = await binaryResults(await get('g.V().count()', GRAPHBINARY_MT));
     expect(data.map(Number)).toEqual([6]);
+  });
+});
+
+// THE SAME ANSWER IN BOTH RESPONSE FORMATS, at every depth a map KEY reaches. A JSON object key is a
+// string, so the untyped tail spells each key the way the reference does (`GraphSONKeySerializer.ser`,
+// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/io/graphson/
+// GraphSONSerializersV4.java:371-376: an Element by `id().toString()`, anything else by `toString()`), and
+// a key it cannot spell exactly — a list, a map, an edge Property — DECLINES to GraphBinary rather than
+// print `[object Object]`, under which distinct groups merged into ONE entry. Each query runs through
+// both formats: a JSON answer must equal the GraphBinary one; a declined one must BE the GraphBinary one.
+describe('every map key reads the same through untyped JSON and GraphBinary', () => {
+  const isElement = (v: any): boolean => v instanceof Vertex || v instanceof Edge || v instanceof VertexProperty;
+  /** A key's spelling up to number layout (`1.0` and `1` are one Double key; the GraphBinary client decodes it as `1`). */
+  const keyOf = (k: string): string => (/^-?\d+(\.\d+)?(E-?\d+)?$/.test(k) ? String(Number(k)) : k);
+  /** A decoded GraphBinary key as the reference spells it — an Element by its id, a `T`/`Direction` token
+   *  by its name; any other object (a collection: the declined keys) by its structure, so distinct keys stay distinct. */
+  const binaryKey = (k: any): string =>
+    isElement(k) ? String(k.id)
+      : k !== null && typeof k === 'object' && 'elementName' in k ? String(k.elementName)
+      : k !== null && typeof k === 'object' ? `#${JSON.stringify(fromBinary(k))}`
+      : keyOf(String(k));
+  /** A GraphBinary-decoded result → the untyped-JSON shape, keyed the way the reference keys a map. */
+  const fromBinary = (v: any): any => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'bigint') return Number(v);
+    if (Array.isArray(v) || v instanceof Set) return [...v].map(fromBinary);
+    if (v instanceof Map) {
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of v) {
+        let key = binaryKey(k);
+        while (key in out) key += "'"; // two keys that print alike (Int 1, String "1") stay two — JSON declines them
+        out[key] = fromBinary(x);
+      }
+      return out;
+    }
+    if (v instanceof Vertex || v instanceof Edge) {
+      const props: Record<string, unknown[]> = {};
+      for (const p of (v as any).properties ?? []) (props[p.key ?? p.label] ??= []).push(fromBinary(p.value));
+      return { id: v.id, label: v.label, props };
+    }
+    if (v instanceof VertexProperty || v instanceof Property) return { key: v.key, value: fromBinary(v.value) };
+    return v;
+  };
+  const fromJson = (v: any): any => {
+    if (Array.isArray(v)) return v.map(fromJson);
+    if (v !== null && typeof v === 'object' && 'properties' in v && 'label' in v) {
+      const props: Record<string, unknown[]> = {};
+      for (const [k, xs] of Object.entries(v.properties as Record<string, any[]>))
+        props[k] = xs.map((x) => fromJson(x !== null && typeof x === 'object' && 'value' in x ? x.value : x));
+      return { id: v.id, label: v.label[0], props };
+    }
+    if (v !== null && typeof v === 'object' && 'key' in v && 'value' in v) return { key: v.key, value: fromJson(v.value) };
+    if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [keyOf(k), fromJson(x)]));
+    return v;
+  };
+
+  /** Run `q` both ways; `'json'` when the JSON tail answered (and agreed), `'declined'` when it fell back. */
+  async function bothFormats(q: string): Promise<'json' | 'declined'> {
+    const binary = await binaryResults(await post(q, GRAPHBINARY_MT));
+    const res = await post(q, JSON_MT);
+    if (res.headers.get('Content-Type') === GRAPHBINARY_MT) {
+      const parsed = await ioc.graphBinaryReader.readResponse(Buffer.from(await res.arrayBuffer()));
+      expect(fromBinary(parsed.result.data)).toEqual(fromBinary(binary));
+      return 'declined';
+    }
+    expect(fromJson(await jsonResults(res))).toEqual(fromBinary(binary));
+    return 'json';
+  }
+
+  // Keys the JSON tail spells exactly — an element at any depth a map reaches, a scalar, a token.
+  for (const q of [
+    'g.V().groupCount()', 'g.E().groupCount()', 'g.V().properties().groupCount()', 'g.V().properties("name").group().by(identity()).by(count())',
+    'g.V().groupCount().by("age")', 'g.V().group().by(label).by(fold())', 'g.V().group().by(out().count()).by(values("name").fold())',
+    'g.V().local(groupCount())', 'g.V().local(out().groupCount())', 'g.V().union(out(), in()).groupCount()',
+    'g.V().local(union(out(), in()).groupCount())', 'g.V().choose(has("age"), local(out().groupCount()), local(in().groupCount()))',
+    'g.V().coalesce(out().groupCount(), groupCount())', 'g.V().as("x").out().groupCount().by(select("x"))',
+    'g.V().as("x").groupCount().by(select("x"))', 'g.V().where(out().count().is(gt(0))).groupCount()', 'g.V().repeat(out()).times(1).groupCount()',
+    'g.V().valueMap()', 'g.V().elementMap()', 'g.E().elementMap()', 'g.V().valueMap(true)',
+    'g.inject(1.0d, 2.5d, 1e21d, 1e-5d).groupCount()', 'g.V().values("age").groupCount()',
+  ]) test(`${q} → JSON, the same answer`, async () => expect(await bothFormats(q)).toBe('json'));
+
+  // Keys no untyped spelling carries exactly (Java's `toString()` of a collection or an edge Property) —
+  // each DECLINES, and the fallback is the GraphBinary answer, every group intact.
+  for (const [q, groups] of [
+    ['g.V().group().by(out().limit(1).fold()).by(count())', 3],
+    ['g.V().groupCount().by(outE().limit(1).fold())', 4],
+    ['g.E().properties().groupCount()', 6],
+    ['g.V().group().by(project("a").by(identity())).by(count())', 6],
+    ['g.E().properties().group().by(identity()).by(count())', 6],
+    ['g.V().where(out()).groupCount().by(out().fold())', 3],
+    ['g.V().groupCount().by(valueMap())', 6],
+    ['g.inject(1, "1").groupCount()', 2],
+  ] as const) test(`${q} → declined to GraphBinary, ${groups} groups`, async () => {
+    expect(await bothFormats(q)).toBe('declined');
+    const [first] = await binaryResults(await post(q, GRAPHBINARY_MT));
+    expect((first as Map<unknown, unknown>).size).toBe(groups);
+  });
+  test('a key declines at depth too: inside local()', async () =>
+    expect(await bothFormats('g.V().local(out().groupCount().by(outE().limit(1).fold()))')).toBe('declined'));
+
+  // A WRITE whose result declines is rolled back with the decline, so the GraphBinary fallback performs it
+  // exactly once.
+  test('a write whose JSON result declines runs exactly once', async () => {
+    const count = async () => Number((await binaryResults(await post('g.V().count()', GRAPHBINARY_MT)))[0]);
+    const before = await count();
+    const res = await post("g.addV('w').property('k', 1).groupCount().by(valueMap())", JSON_MT);
+    expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
+    expect(await count()).toBe(before + 1);
+    await post("g.V().hasLabel('w').drop()", GRAPHBINARY_MT);
+  });
+
+  // A NUMBER renders exactly: a Long past 2^53 as its digits (not `"9223372036854775807"` the string, nor
+  // the rounded `9223372036854775808`), a negative zero with its sign.
+  test('a wide Long and a negative zero render as the numbers they are', async () => {
+    expect(await (await post('g.inject(9223372036854775807L).fold()', JSON_MT)).text()).toBe('[[9223372036854775807]]');
+    expect(await (await post('g.inject(-0.0d)', JSON_MT)).text()).toBe('[-0.0]');
   });
 });

@@ -27,22 +27,70 @@
 // (`src/formats/graphson.ts`) is the io/adjacency form and is deliberately NOT reused here; this is a
 // different, response-shaped rendering.
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
-import { valueNodeFromStored } from './gremlin/types.ts';
-import { parseElementJson } from './json-exact.ts';
+import { numberClassOf, valueNodeFromStored } from './gremlin/types.ts';
+import { exactNumberOf, isExactNumber, parseElementJson, type ExactNumber } from './json-exact.ts';
+
+/**
+ * A result this readable rendering cannot SPELL as the value it is — a map key with no exact JSON spelling
+ * (a list, a map, an edge property: Java's `toString()` of one prints nested element strings and
+ * abbreviations this rendering does not reproduce), a non-finite Double (JSON has no number for it), two
+ * keys that print alike, or a wide number on a runtime without `JSON.rawJSON`. `resolveJson` catches it
+ * and answers `null`, so the router falls back to the GraphBinary response, which carries every one of
+ * them exactly — never a stringified object (`"[object Object]"`, which also merged distinct keys into
+ * ONE entry) or a rounded number.
+ */
+export class UnspellableJson extends Error {
+  constructor(what: string) {
+    super(`untyped JSON cannot spell ${what}`);
+    this.name = 'UnspellableJson';
+  }
+}
+
+const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown };
+
+/** An exact JSON number for `text` (a decimal spelling already known exact), or a decline. */
+function rawNumber(text: string): unknown {
+  if (!rawJson.rawJSON) throw new UnspellableJson(`the number ${text} on this runtime`);
+  return rawJson.rawJSON(text);
+}
+
+/** The integral tags — a Gremlin Byte/Short/Int/Long/BigInteger, and the `integer` storage class a numeric
+ *  reducer tags its sum with. A value under one may ride as its exact decimal TEXT (a Long past 2^53). */
+const INTEGRAL_TAGS: ReadonlySet<unknown> = new Set(['byte', 'short', 'int', 'long', 'bigint', 'integer']);
+const DECIMAL_INTEGER = /^-?\d+$/;
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A JS number as JSON, exactly: a negative zero keeps its sign (`JSON.stringify(-0)` is `0`), and a NaN
+ *  or an infinity — which `JSON.stringify` writes as `null` — declines. */
+function untypedNumber(x: number): unknown {
+  if (!Number.isFinite(x)) throw new UnspellableJson(`the Double ${x}`);
+  return Object.is(x, -0) ? rawNumber('-0.0') : x;
+}
+
+/** A Long/BigInteger as JSON: a JS number within ±2^53, else its exact digits (a JSON number has no
+ *  width; `Number(9223372036854775807n)` is `…808`). */
+const untypedInteger = (x: bigint): unknown => (Number.isSafeInteger(Number(x)) ? Number(x) : rawNumber(String(x)));
+
+/** A scalar leaf's bare value as JSON: a number exactly (`untypedNumber`/`untypedInteger`), and an
+ *  INTEGRAL tag's decimal text (a Long past 2^53) as the number it is rather than a string. A raw exact
+ *  number (`parseExactJson`) re-stringifies as its own source text, so it passes through. */
+function untypedLeaf(tag: string | null, v: unknown): unknown {
+  if (typeof v === 'number') return untypedNumber(v);
+  if (typeof v === 'bigint') return untypedInteger(v);
+  if (typeof v === 'string' && INTEGRAL_TAGS.has(tag) && DECIMAL_INTEGER.test(v)) return untypedInteger(BigInt(v));
+  return v;
+}
 
 /**
  * One `FrameNode` → plain JS (a `JSON.stringify`-able value). Total over the FrameNode union: a
  * container recurses, an element renders to its untyped GraphSON object, a token renders to its name,
- * and a scalar leaf renders to its bare value.
- *
- * A `bigint` (a Long — a `count()`, an int64 id) renders as a JS number, because JSON has no bigint;
- * a value beyond ±2^53 loses precision, which is out of this readable-view's scope (the GraphBinary
- * path carries it exactly).
+ * and a scalar leaf renders to its bare value — EXACTLY, or not at all (`UnspellableJson`): a Long past
+ * 2^53 as its exact digits (`JSON.rawJSON`), a negative zero as `-0.0`.
  */
 export function untyped(node: FrameNode): unknown {
   if (node === null || node === undefined) return null;
-  if (typeof node === 'bigint') return Number(node);
-  if (typeof node !== 'object') return node; // a bare string / number / boolean leaf
+  if (typeof node !== 'object') return untypedLeaf(null, node); // a bare string / number / boolean leaf
+  if (isExactNumber(node)) return node;
   if (Array.isArray(node)) return node.map(untyped); // a bare array (the untyped list substrate)
   switch (node.t) {
     case 'list':
@@ -65,30 +113,121 @@ export function untyped(node: FrameNode): unknown {
     // untyped form, so the bare value is the whole rendering (a datetime rides as its stored epoch
     // millis; a uuid/bigdecimal/duration as its stored canonical string).
     default:
-      return typeof node.v === 'bigint' ? Number(node.v) : node.v;
+      return untypedLeaf(node.t, node.v);
   }
 }
 
-/** A `{t:'map'}` node → a JS object. JSON object keys are strings, so a token/element/scalar key is
- *  stringified (`untypedMapKey`); the value recurses. */
+/** A `{t:'map'}` node → a JS object. JSON object keys are strings, so each key is spelled the way the
+ *  reference spells it (`untypedMapKey`); the value recurses. */
 function untypedMap(pairs: [FrameNode, FrameNode][]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of pairs) out[untypedMapKey(k)] = untyped(v);
+  for (const [k, v] of pairs) {
+    const key = untypedMapKey(k);
+    // Two distinct keys that print alike (the Int `1` and the String `"1"`) would MERGE into one JSON
+    // entry — a different map — so a collision declines too.
+    if (Object.prototype.hasOwnProperty.call(out, key)) throw new UnspellableJson(`two map keys that both print as ${JSON.stringify(key)}`);
+    out[key] = untyped(v);
+  }
   return out;
 }
 
-/** A map KEY as a string — a `T`/`Direction` token by its name, an ELEMENT by its id (a vertex, an edge,
- *  a vertex property — `GraphSONKeySerializer.ser`, vendor/tinkerpop/gremlin-core/src/main/java/org/
- *  apache/tinkerpop/gremlin/structure/io/graphson/GraphSONSerializersV4.java:371-376, writes
- *  `element.id().toString()`; stringifying the rendered object printed `[object Object]`), anything else
- *  by its rendered value. */
+/**
+ * A map KEY as the string the reference writes for it — TOTAL, or a decline (`UnspellableJson`).
+ * `GraphSONKeySerializer.ser` (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/
+ * structure/io/graphson/GraphSONSerializersV4.java:371-376) writes an ELEMENT (a vertex, an edge, a
+ * VertexProperty — `VertexProperty extends Element`) as `element.id().toString()` and anything else as
+ * Jackson's `StdKeySerializer` does, i.e. its `toString()`. Spelled exactly here: a String/Character as
+ * itself, a Boolean, an integral number in decimal, a Double/Float as `Double.toString`/`Float.toString`
+ * (`javaDecimal`), a uuid in its canonical lower-case form, a `T`/`Direction` token by its name. Every
+ * other key DECLINES rather than print a near miss: a list/set/map (`AbstractCollection.toString` prints
+ * each member's `toString` — `v[1]`, `e[7][1-knows->2]`, `[]` — not what a member renders as here), an
+ * edge `Property` (not an Element: `p[weight->0.4]`, abbreviated by `StringFactory`), a null, a
+ * datetime/bigdecimal/duration.
+ */
 function untypedMapKey(k: FrameNode): string {
-  if (k !== null && typeof k === 'object' && !Array.isArray(k)) {
-    if (k.t === 'T' || k.t === 'D') return String(k.v);
-    if (k.t === 'vertex' || k.t === 'edge') return String(untyped((k.v as Record<string, FrameNode>).id));
-    if (k.t === 'property' && (k.v as Record<string, unknown>).vpid != null) return String((k.v as Record<string, unknown>).vpid);
+  if (k === null || k === undefined) throw new UnspellableJson('a null map key');
+  if (typeof k !== 'object' || isExactNumber(k)) return scalarKey(null, k);
+  if (Array.isArray(k)) throw new UnspellableJson('a list map key');
+  switch (k.t) {
+    case 'T':
+    case 'D':
+      return String(k.v);
+    case 'vertex':
+    case 'edge':
+      return elementIdKey((k.v as Record<string, unknown>).id);
+    case 'property': {
+      // A VertexProperty is an Element and keys by its id; an edge `Property` (no `vpid`) is not one.
+      const vpid = (k.v as Record<string, unknown>).vpid;
+      if (vpid == null) throw new UnspellableJson('an edge property map key');
+      return elementIdKey(vpid);
+    }
+    case 'list':
+    case 'set':
+    case 'map':
+      throw new UnspellableJson(`a ${k.t} map key`);
+    default:
+      return scalarKey(k.t, k.v);
   }
-  return String(untyped(k));
+}
+
+/** An element id as a key: our ids are integers or (a `uid`) strings, each of which prints as itself. */
+function elementIdKey(id: unknown): string {
+  if (typeof id === 'string' || typeof id === 'bigint' || (typeof id === 'number' && Number.isSafeInteger(id))) return String(id);
+  throw new UnspellableJson('an element id map key');
+}
+
+/** A scalar key by its tag; a null tag infers the class the framer would (`numberClassOf` for a bare
+ *  number, an int64 for a raw integral exact number — `exactNumberBuffer`). */
+function scalarKey(tag: string | null, v: unknown): string {
+  if (isExactNumber(v)) {
+    const { integral, text } = exactNumberOf(v as ExactNumber);
+    if (integral && (tag === null || INTEGRAL_TAGS.has(tag))) return text;
+    return scalarKey(tag ?? 'double', Number(text));
+  }
+  if (tag === null) {
+    if (typeof v === 'string' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
+    if (typeof v === 'number') return numberClassOf(v) === 'double' ? javaDecimal(v, 'double') : String(v);
+  } else if (tag === 'string' || tag === 'char') {
+    if (typeof v === 'string') return v;
+  } else if (tag === 'boolean') {
+    if (typeof v === 'boolean') return String(v);
+  } else if (INTEGRAL_TAGS.has(tag)) {
+    if (typeof v === 'bigint' || (typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0))) return String(v);
+    if (typeof v === 'string' && DECIMAL_INTEGER.test(v)) return String(BigInt(v));
+  } else if (tag === 'double' || tag === 'real' || tag === 'float') {
+    if (typeof v === 'number') return javaDecimal(v, tag === 'float' ? 'float' : 'double');
+  } else if (tag === 'uuid') {
+    if (typeof v === 'string' && CANONICAL_UUID.test(v)) return v;
+  }
+  throw new UnspellableJson(`a ${tag ?? typeof v} map key`);
+}
+
+/**
+ * `Double.toString` / `Float.toString` (`java.lang.Double#toString(double)`, JDK 19+): the SHORTEST decimal
+ * that reads back as the value (for a Float, back through `float` rounding — `Math.fround`), laid out
+ * plainly with at least one fraction digit when 10^-3 <= |x| < 10^7 (`1.0`, `0.001`), otherwise as
+ * `<d.ddd>E<n>` (`1.5E300`, `1.0E-5`); `NaN`, `Infinity`, `-0.0` by name. JS's `Number#toString` picks the
+ * same shortest digits for a double; only the layout differs.
+ */
+function javaDecimal(x: number, cls: 'double' | 'float'): string {
+  if (Number.isNaN(x)) return 'NaN';
+  if (!Number.isFinite(x)) return x > 0 ? 'Infinity' : '-Infinity';
+  if (x === 0) return Object.is(x, -0) ? '-0.0' : '0.0';
+  let d = x;
+  if (cls === 'float') {
+    if (Math.fround(x) !== x) throw new UnspellableJson(`the Float ${x}`);
+    for (let p = 1; p <= 9; p++) {
+      const candidate = Number(x.toPrecision(p));
+      if (Math.fround(candidate) === x) { d = candidate; break; }
+    }
+  }
+  const magnitude = Math.abs(d);
+  if (magnitude >= 1e-3 && magnitude < 1e7) {
+    const plain = String(d);
+    return plain.includes('.') ? plain : `${plain}.0`;
+  }
+  const [mantissa, exponent] = d.toExponential().split('e') as [string, string];
+  return `${mantissa.includes('.') ? mantissa : `${mantissa}.0`}E${Number(exponent)}`;
 }
 
 /** A vertex payload (`{ id, label, props }`, as `foreignElementNode` builds it — `label` already the

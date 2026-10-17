@@ -10,7 +10,7 @@ import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runSteps } from './program.ts';
-import { untyped } from './untyped.ts';
+import { untyped, UnspellableJson } from './untyped.ts';
 import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
@@ -877,7 +877,7 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
 // ---- result → NODE TREE: the untyped-JSON tail (content-negotiated, `Accept: application/json`) ----
 //
 // A PARALLEL projection to `frameResolved`: where that turns a plan's rows into GraphBinary value
-// BUFFERS, `resolveResultNodes` turns the SAME rows into the DECODED NODE TREE (`FrameNode`, which keeps
+// BUFFERS, `runResultNodes` turns the SAME rows into the DECODED NODE TREE (`FrameNode`, which keeps
 // element properties) that `src/untyped.ts` renders to readable JSON. It exists BESIDE the framers and
 // reuses their private producers so the two cannot diverge; the GraphBinary framing path is byte-for-byte
 // untouched (which is why L2/L3/L5 and the census, all of which exercise that path, cannot move).
@@ -887,10 +887,10 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
 // `jsonbPath`) returns `{ unsupported: true }` so the router falls back to the (unreadable-but-correct)
 // GraphBinary response — never a wrong JSON. Adding a shape is a new `COVERED` entry + a node twin.
 
-/** The result shapes `resolveResultNodes` can render as untyped JSON. Kept as ONE set because it is the
+/** The result shapes `resolveJson` can render as untyped JSON. Kept as ONE set because it is the
  *  PRE-RUN gate: the decision is made from `plan.shape.kind` BEFORE the plan executes, so a write whose
  *  shape is not covered never fires its effects here (the router then runs it for real on the GraphBinary
- *  fallback — see `resolveResultNodes`). vertex/edge/valueMap/elementMap/map/mapEntry have node twins
+ *  fallback — see `resolveJson`). vertex/edge/valueMap/elementMap/map/mapEntry have node twins
  *  below; the rest reuse `foreignValueNodes`, the framer's own per-row producer twin. */
 const JSON_COVERED = new Set<Shape['kind']>([
   'vertex', 'edge', 'valueMap', 'elementMap', 'map', 'mapEntry',
@@ -968,63 +968,71 @@ const mapEntryNode = (r: any, keyOf: MapOf, valOf: MapOf): FrameNode =>
   ({ t: 'map', v: [[mapSideNode(r.mk, keyOf), mapSideNode(r.mv, valOf)]] });
 
 /**
- * Run `plan` and project its rows to `(node, bulk)` pairs — the untyped-JSON twin of `frameResolved`,
- * or `{ unsupported: true }` when the result shape is not yet covered (the router then falls back to the
- * GraphBinary response). Runs the plan the SAME way `frameResolved` does (a `program` write through
- * `runSteps` + `refreshElements`, a read through `store.query`, with `plan.cleanup` in a `finally`).
+ * Run `plan` and project its rows to `(node, bulk)` pairs — the untyped-JSON twin of `frameResolved`.
+ * Runs the plan the SAME way `frameResolved` does (a `program` write through `runSteps` +
+ * `refreshElements`, a read through `store.query`); the caller (`resolveJson`) owns the shape check and
+ * `plan.cleanup`.
  *
- * The support decision is made from `plan.shape.kind` BEFORE running: a write whose shape falls back
- * must not fire its effects here, because the GraphBinary fallback runs the plan for real — otherwise a
- * write would execute TWICE. Compiling/driving a program is side-effect-free (effects run only in
- * `runSteps`, which is gated behind the shape check), so exactly one of `resolveResultNodes` /
- * `frameResolved` ever EXECUTES a given plan.
+ * The support decision is made from `plan.shape.kind` BEFORE running (`JSON_COVERED`): a write whose
+ * shape falls back must not fire its effects here, because the GraphBinary fallback runs the plan for
+ * real — otherwise a write would execute TWICE. Compiling/driving a program is side-effect-free (effects
+ * run only in `runSteps`, which is gated behind the shape check).
  *
  * `bulk` carries the multiset multiplicity exactly as `frameResolved` does — only the element leaves
  * read a `bulk` column (`bulkOf`); every other shape is single-multiplicity. `resolveJson` expands it.
  */
-export function resolveResultNodes(store: GraphStore, plan: Executable): { nodes: { node: FrameNode | null; bulk: bigint }[] } | { unsupported: true } {
+function runResultNodes(store: GraphStore, plan: Executable): { node: FrameNode | null; bulk: bigint }[] {
   const shape = plan.shape;
-  if (!JSON_COVERED.has(shape.kind)) return { unsupported: true };
-  try {
-    const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
-    if (plan.kind === 'program') refreshElements(store); // §6·1 post-write refresh, exactly as frameResolved
-    const nodes: { node: FrameNode | null; bulk: bigint }[] = [];
-    switch (shape.kind) {
-      // Element leaves carry a per-row bulk (movementCollapse); every other shape is bulk 1.
-      case 'vertex': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'vertex'), bulk: bulkOf(r) }); break;
-      case 'edge': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'edge'), bulk: bulkOf(r) }); break;
-      case 'valueMap': for (const r of rows) nodes.push({ node: valueMapNode(r, shape.keys, shape.tokens, shape.labelSet), bulk: 1n }); break;
-      case 'elementMap': for (const r of rows) nodes.push({ node: elementMapNode(r, shape.keys, shape.labelSet), bulk: 1n }); break;
-      case 'map': for (const r of rows) nodes.push({ node: mapNode(r, shape.entries), bulk: 1n }); break;
-      case 'mapEntry': for (const r of rows) nodes.push({ node: mapEntryNode(r, shape.keyOf, shape.valOf), bulk: 1n }); break;
-      default: {
-        // value/scalar/jsonbList/jsonbSet/list/jsonbElementList/typedNode/mapValue reuse the framer's own
-        // producer twin. A numeric-reducer `scalar` over an empty stream is SQL NULL and yields NOTHING
-        // (matching `frameValues`' `if (r.v !== null || productiveNull)` filter), never a spurious null.
-        const src = shape.kind === 'scalar' ? rows.filter((r) => r.v !== null || shape.productiveNull) : rows;
-        const produced = foreignValueNodes(shape, src);
-        // Unreachable — `JSON_COVERED` admits only shapes `foreignValueNodes` handles; a null here is a
-        // coverage-drift bug in one of the two lists, surfaced rather than silently emptied.
-        if (produced === null) throw new Error(`resolveResultNodes: covered shape '${shape.kind}' has no node producer`);
-        for (const node of produced) nodes.push({ node, bulk: 1n });
-      }
+  const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
+  if (plan.kind === 'program') refreshElements(store); // §6·1 post-write refresh, exactly as frameResolved
+  const nodes: { node: FrameNode | null; bulk: bigint }[] = [];
+  switch (shape.kind) {
+    // Element leaves carry a per-row bulk (movementCollapse); every other shape is bulk 1.
+    case 'vertex': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'vertex'), bulk: bulkOf(r) }); break;
+    case 'edge': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'edge'), bulk: bulkOf(r) }); break;
+    case 'valueMap': for (const r of rows) nodes.push({ node: valueMapNode(r, shape.keys, shape.tokens, shape.labelSet), bulk: 1n }); break;
+    case 'elementMap': for (const r of rows) nodes.push({ node: elementMapNode(r, shape.keys, shape.labelSet), bulk: 1n }); break;
+    case 'map': for (const r of rows) nodes.push({ node: mapNode(r, shape.entries), bulk: 1n }); break;
+    case 'mapEntry': for (const r of rows) nodes.push({ node: mapEntryNode(r, shape.keyOf, shape.valOf), bulk: 1n }); break;
+    default: {
+      // value/scalar/jsonbList/jsonbSet/list/jsonbElementList/typedNode/mapValue reuse the framer's own
+      // producer twin. A numeric-reducer `scalar` over an empty stream is SQL NULL and yields NOTHING
+      // (matching `frameValues`' `if (r.v !== null || productiveNull)` filter), never a spurious null.
+      const src = shape.kind === 'scalar' ? rows.filter((r) => r.v !== null || shape.productiveNull) : rows;
+      const produced = foreignValueNodes(shape, src);
+      // Unreachable — `JSON_COVERED` admits only shapes `foreignValueNodes` handles; a null here is a
+      // coverage-drift bug in one of the two lists, surfaced rather than silently emptied.
+      if (produced === null) throw new Error(`runResultNodes: covered shape '${shape.kind}' has no node producer`);
+      for (const node of produced) nodes.push({ node, bulk: 1n });
     }
-    return { nodes };
-  } finally {
-    if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
   }
+  return nodes;
 }
 
 /** Render a plan's result as an untyped-JSON ARRAY string (the negotiated `application/json` response),
  *  or `null` when the shape is not covered (the router falls back to GraphBinary). The bulk-N multiplicity
  *  is EXPANDED — a collapsed `(value, N)` row emits N copies — so the array matches what a client sees when
- *  it expands the bulked GraphBinary response. */
+ *  it expands the bulked GraphBinary response.
+ *
+ *  `null` too when a VALUE in the result has no exact untyped spelling (`UnspellableJson` — a list-keyed
+ *  map, a NaN, …), which is only known once the plan has run. A read is simply run again by the
+ *  GraphBinary fallback. A WRITE must not be: its run and its rendering are ONE atomic unit
+ *  (`GraphStore.atomically`), so a decline rolls the write back and the fallback performs it exactly once. */
 export function resolveJson(store: GraphStore, plan: Executable): string | null {
-  const res = resolveResultNodes(store, plan);
-  if ('unsupported' in res) return null;
-  const out: unknown[] = [];
-  for (const { node, bulk } of res.nodes) for (let k = bulk; k > 0n; k--) out.push(untyped(node));
-  return JSON.stringify(out);
+  if (!JSON_COVERED.has(plan.shape.kind)) return null;
+  const render = (): string => {
+    const out: unknown[] = [];
+    for (const { node, bulk } of runResultNodes(store, plan)) for (let k = bulk; k > 0n; k--) out.push(untyped(node));
+    return JSON.stringify(out);
+  };
+  try {
+    return plan.kind === 'program' ? store.atomically(render) : render();
+  } catch (e) {
+    if (e instanceof UnspellableJson) return null;
+    throw e;
+  } finally {
+    if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
+  }
 }
 
 /**

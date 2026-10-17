@@ -155,7 +155,7 @@ test('executeFramed frames a carried property', () => {
 });
 
 // THE SAME ANSWER IN BOTH RESPONSE FORMATS. The untyped-JSON tail (`Accept: application/json`,
-// `resolveResultNodes` → `untyped.ts`) reads the element payload by its own route — a list column parsed
+// `resolveJson` → `untyped.ts`) reads the element payload by its own route — a list column parsed
 // whole — and once printed the raw wire carrier (`"3.28…e+107p640"`) where the GraphBinary path decoded
 // it. Every carrier now decodes in the ONE element-payload reader (`parseElementJson`, which also walks an
 // already-parsed tree), so each query below must read the same in both formats, at every depth an element
