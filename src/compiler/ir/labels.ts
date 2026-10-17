@@ -300,7 +300,7 @@ const SIDE_EFFECT_KEYED: ReadonlySet<string> = new Set(['aggregate', 'store', 'g
  *  operands included, the shape `descend` walks), `by()` modulators, and the folded `repeat()`/`choose()`
  *  clusters, each as a chain of its own. A body this scan cannot parse is skipped: the lowering parses
  *  the same body and declines it on its own. */
-function eachChainDeep(chain: readonly Step[], params: Record<string, any>, visit: (chain: readonly Step[]) => void): void {
+export function eachChainDeep(chain: readonly Step[], params: Record<string, any>, visit: (chain: readonly Step[]) => void): void {
   visit(chain);
   const into = (value: any): void => {
     if (isNested(value)) {

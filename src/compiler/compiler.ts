@@ -2,6 +2,7 @@ import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEff
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { sideEffectShadowedLabel, unlocatableSubPath } from './ir/labels.ts';
+import { perTraverserMutableFold } from './ir/fold-seed.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { labelRegime } from '../api.ts';
@@ -63,6 +64,10 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // once, for every path-family host (`unlocatableSubPath`) — the lowering's sub-path would answer an
   // empty path instead.
   if (unlocatableSubPath(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
+  // A `fold(<list/map seed>, Operator)` that may run once PER PARENT TRAVERSER declines here, once, for
+  // every host at every depth (`perTraverserMutableFold`) — the reference aliases that one seed object
+  // across parents and `addAll` mutates it, where every lowering folds into a fresh accumulator.
+  if (perTraverserMutableFold(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
   // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,

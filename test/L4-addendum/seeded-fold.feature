@@ -18,7 +18,12 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
   #   * a `union()` arm, whose barrier reduces over the WHOLE input (`BranchStep`), not per traverser;
   #   * a NON-EMPTY map seed: `putAll` keeps the LAST value put for a key at the FIRST key's position
   #     (`LinkedHashMap`), and an empty stream answers the seed map;
-  #   * `fold([], Operator.addAll)` — the no-argument constructor's own seed and function, so `fold()`.
+  #   * `fold([], Operator.addAll)` — the no-argument constructor's own seed and function, so `fold()`
+  #     — but ONLY where the fold runs once. `fold(seed, f)` wraps the ONE parsed literal in a
+  #     `ConstantSupplier` (.../dsl/graph/GraphTraversal.java:1300), the no-arg form an
+  #     `ArrayListSupplier` (a fresh list per get); a per-traverser child re-fetches the same seed after
+  #     each reset and `Operator.addAll` mutates it (.../Operator.java:187-194), so every parent's fold
+  #     ALIASES one accumulating collection. A list or map seed per traverser is @Unsupported below.
   #
   # @gap:seeded-fold marks the family for a possible gremlin-test PR.
 
@@ -201,11 +206,80 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       g.V().values("age").order().fold([], Operator.addAll)
       """
     # The no-argument `FoldStep` constructor IS `(ArrayListSupplier, Operator.addAll)`
-    # (.../step/map/FoldStep.java:46-48), so this is `fold()`.
+    # (.../step/map/FoldStep.java:46-48), so this is `fold()` — at the ROOT, where the fold runs once.
     When iterated to list
     Then the result should be unordered
       | result                             |
       | l[d[27].i,d[29].i,d[32].i,d[35].i] |
+
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_whereXout_valuesXnameX_foldXlist_addAllX_countXlocalX_isXgtX2XXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").where(__.out().values("name").fold([], Operator.addAll).count(Scope.local).is(P.gt(2))).values("name")
+      """
+    # The where() body runs once PER PERSON, and every run folds into the SAME seed list — the
+    # `ConstantSupplier` (.../dsl/graph/GraphTraversal.java:1300) hands back one object after each
+    # `ReducingBarrierStep.reset()` (.../step/util/ReducingBarrierStep.java:88-111), and `addAll` mutates
+    # it (.../Operator.java:187-194). marko sees 3, vadas still 3, josh 5, peter 6: all four pass. A fresh
+    # list per person (the plain `fold()`) answers only marko, so it declines rather than answer that.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko  |
+      | vadas  |
+      | josh   |
+      | peter  |
+
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_localXout_valuesXnameX_foldXlist_addAllX_countXlocalXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").local(__.out().values("name").fold([], Operator.addAll).count(Scope.local))
+      """
+    # The same aliasing under local(): the one seed list grows 3 → 3 → 5 → 6 across the four persons.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+      | d[3].l |
+      | d[5].l |
+      | d[6].l |
+
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_projectXnX_byXout_valuesXnameX_foldXlist_addAllX_countXlocalXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").project("n").by(__.out().values("name").fold([], Operator.addAll).count(Scope.local))
+      """
+    # A by() body is a per-traverser child too, so the one seed list is shared across the persons.
+    When iterated to list
+    Then the result should be unordered
+      | result          |
+      | m[{"n":"d[3].l"}] |
+      | m[{"n":"d[3].l"}] |
+      | m[{"n":"d[5].l"}] |
+      | m[{"n":"d[6].l"}] |
+
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_localXout_groupXbyXnameXX_foldXmap_addAllX_countXlocalXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").local(__.out().group().by("name").fold([:], Operator.addAll).count(Scope.local))
+      """
+    # A MAP seed aliases the same way (`Map.putAll`, .../Operator.java:187-194): marko's {lop,vadas,josh}
+    # stays 3 keys for vadas (whose group is `{}`), josh adds ripple (4), peter adds nothing new (4).
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+      | d[3].l |
+      | d[4].l |
+      | d[4].l |
 
   @Unsupported
   Scenario: g_V_groupXlabelX_byXvaluesXageX_foldX0_sumXX
