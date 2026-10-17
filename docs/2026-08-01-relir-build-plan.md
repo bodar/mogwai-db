@@ -812,6 +812,15 @@ authorities.
   defers (`src/rel/exact-decimal.ts`); a 16-17-digit literal crosses JSON exactly at `jsonEntry` (`rel/emit.ts`).
   Pinned in `test/compiler/number-class-authority.exec.test.ts`, `number-class-type-space.exec.test.ts`,
   `test/L4-addendum/number-carrier.feature`. Residue: `docs/outstanding-work.md` (Value carriage).
+  ✅ **Rebound-label + variant scalar class LANDED ON TRUNK 2026-10-17 (`bdacf917`..`7d8ce995`,
+  ff-alias-rebind-class).** A rebound label keeps every entry's own class: `joinAliasEntry`
+  (`src/compiler/alias.ts`) is the ONE join for rebind and branch merge (a disagreeing scalar class →
+  PER_ROW_ENVELOPE, each entry framed by its own `t`; a disagreeing list/map descriptor goes absent and
+  readers decline; `binds`/`pathPos` kept only where arms agree). A shape-mixed branch's variant carries each
+  scalar arm's own class in one per-row `vkt` column (`variantArm`/`variantScalarType`, framed through ONE
+  `typedValueBuffer`) instead of value inference; an envelope-carried per-row scalar declines. Reference:
+  `Scoping.getScopeValue`/`Path.get(Pop, label)`, `step/branch/BranchStep.java`. Pinned in
+  `test/compiler/alias-rebind-class.exec.test.ts`, `variant-scalar-class.exec.test.ts`. No baseline moved.
 - ✅ **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
