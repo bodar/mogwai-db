@@ -658,6 +658,150 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
 - **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
   distinguishable no other way, and a body that cannot report it DECLINES.
 
+### Substrate worklist (root-cause synthesis, 2026-10-17)
+
+🚧 **Why per-item fix rounds did not converge.** Six parked items were each fixed round after round by
+adding a predicate to ONE host (`tiesProjectAlike`, `sliceDownstream`, `branchMajor`, `stringReceiverGuard`,
+`sequentialGuard`'s `site.host`, an advisory math guard); the next review found the same fact at a depth that
+host does not reach. Every recurring fact is a reference behaviour this repo RECOMPUTES PER HOST or does not
+model at all: where equal traversers merge, the order a branch emits, whether a body was productive, whether
+a row's evaluation raised, a value's number class, and which traversers have already written when a body
+reads. §3.5 already holds the cure for one such fact (`CHANNEL_GROUP_POLICY`, `obligations.ts`) — make the fact
+a CHANNEL or a TOTAL TABLE every node declares — and the clusters below apply that move again. Every cluster
+has a confirmed wrong answer on TRUNK, not only on a branch. Two branches also built competing raise
+substrates (`branch-residue`'s separate-statement `raiseGuard`/`rowGuard`, racy under `sample`/`shuffle`;
+`fanout-by-first`'s in-statement fence in `src/rel/raise.ts`) — merging either as-is leaves two raise
+authorities.
+
+- 🚧 **A — bulking positions (where equal traversers merge).** Authority:
+  `vendor/tinkerpop/gremlin-core/.../traverser/util/TraverserSet.java` (a LinkedHashMap; `add` merges into the
+  FIRST arrival's slot), `AbstractTraverser.java` / `B_LP_O_S_SE_SL_Traverser.java` (equality per traverser
+  class), `strategy/optimization/LazyBarrierStrategy.java` + `step/map/NoOpBarrierStep.java` (the windowed
+  barrier after each flat-map after the first), `step/util/CollectingBarrierStep.java` + `OrderGlobalStep`
+  (stable sort over the merged set), `step/branch/BranchStep.java` (with a barrier, equal starts merge at the
+  arm), `RangeGlobalStep` (a slice trims BULK, so the merge changes counts, not just order). Seam:
+  `src/compiler/ir/bulk.ts` `referenceUnbulkedAt`/`referenceDistinctAt` answer a boolean that each consumer
+  asks separately; nothing lowers the merge. Design: ONE authority `bulkingPositions(steps, rooted)` (noop /
+  collecting / armStart, with the window) encoding LazyBarrier + PathRetraction/InlineFilter as a table, the
+  boolean callers derived from it; ONE mint `regroupFirstOccurrence(rel, eqKey, window)` beside
+  `renumber`/`rowNumberWindow` — `eqKey` per traverser class (payload + `vtype`, so `1`≠`1.0`; + path/alias/loops
+  when tracked), declining on a carried `sack`/`origin` and inside a recursive term (P1); applied at each
+  position under `ctx.ordered` and at a per-origin slice. Deletes `tiesProjectAlike` and `mintOrdered`'s
+  input-position key. Stopgap: decline an explicit `barrier()` / CollectingBarrier `order()` over a
+  non-distinct input when order is read, and a `partitionedSlice` whose host is not unbulked — NOT plain
+  flat-map chains before `fold()` (measured: loses most of L3). Size: L, ~400–600 LOC + a census run; the
+  window needs an L4 scenario.
+- 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
+  without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
+  (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`
+  (positionless fallback when `!ctx.ordered`), `sliceableBranch` (no key stack), `tagArm` (DROPS the arm's own
+  encounter), `mintTraverserMajor`. Design: ONE `EmissionKey` stack as `origin`-role channels
+  `[parent_1…parent_k, arm, armEncounter]` — `augmentParent` pushes a level, `tagArm` keeps the arm encounter,
+  arm-major is only a different key order inside the innermost per-traverser scope, a slice demand forces
+  `ordered`, and a branch that cannot mint DECLINES rather than taking the positionless fallback. Replaces
+  `withFanoutOrder`, `branchOrder`/`mintOrdered`, `branchMajor` and the `sliceDownstream` marks. Stopgap:
+  `branchResult` returns `null` when sliced and not sliceable; decline an arm that carries an encounter in
+  `tagArm`'s callers. Size: L, ~300–500 LOC. Depends on A (first-occurrence key).
+- 🚧 **C — the number/type channel.** Authority: `util/GremlinValueComparator.java` (Number is one rung,
+  compared by `NumberHelper.compare`), `util/NumberHelper.java` `performConversion` (throws on an infinite or
+  out-of-range double), `SumGlobalStep` / `MaxGlobalStep` / `MeanGlobalStep`, `Max.feature`'s `d[1.0].d`.
+  Seams (each fails OPEN today): `rel/orderability.ts` `kindOf` (a `{t:null}` node → `unknown` → silent tie —
+  fix: `t == null` means `kindOf(v)`, and `unknown` throws `CoercionDeferral`); `rel/reducer.ts` `eligible()`
+  (by storage class, so a wide long held as TEXT is dropped — route through `storedCompareOn(vtype)` or
+  decline); `asNumberOverflowGuard` (integers only — decline a floating source or guard per `NumberHelper`'s
+  messages); `write.ts`'s runtime property insert writing `NULL AS vt` (carry the source vtype, §6·7); the
+  coalesce/flatMap arm-type merge stamping one arm's static tag onto another (apply the §6·7 lattice). Design:
+  ONE total `numericClassOf(vtypeExpr, valueExpr)` for reducer eligibility, reducer result type, orderability
+  and casts. 🔴 Gated on a policy decision recorded in §6·7 first: §11 closed promotion as unobservable, but
+  `d[1.0].d` and Python's int/float split make Int-vs-Double observable for some GLVs. Size: stopgaps S
+  (~60 LOC); full authority M (~300 LOC).
+- 🚧 **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
+  `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
+  `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
+  `ChildValue.present` is OPTIONAL ("absent means cannot say") — exactly the optional-field defect generator
+  §6·7 names. Design: `present: Expr | 'unknown'`, REQUIRED; a consumer needing presence declines on
+  `'unknown'`, so `correlatedFirst`, `reductionTail` and `pooledRegroup` stop at a type error until they carry
+  presence apart from the payload; fold/group pools aggregate `{t,v}` nodes and never filter `v IS NULL`.
+  Stopgap: decline a fold/pool over a body whose members may be null (null constant, collection literal with a
+  null, null-literal `coalesce`/`union` arms). Size: M, ~200 LOC, mostly typing churn.
+- 🚧 **E — per-row runtime raises and evaluation extent.** Authority: `step/map/MathStep.java`,
+  `ToUpperGlobalStep` / `ConcatStep` (`IllegalArgumentException`), `RangeGlobalStep` (stops pulling at high)
+  vs `CollectingBarrierStep` (drains everything), `NumberHelper` (`/ by zero`, overflow). Seam: THREE
+  competing mechanisms — `Binding.guard` (`src/rel/plan.ts`; right for §6·5 graph-dependent refusals, wrong
+  for per-row value errors: blind to correlated scopes, re-evaluates randomness), `raiseExpr`
+  (`src/rel/raise.ts`; extent is whatever SQLite evaluates), and per-host guards (`asNumberOverflowGuard`, the
+  asString guard, `localStringMemberGuard`). Design: a `raise` CHANNEL ROLE declared in `CHANNEL_GROUP_POLICY`
+  + `obligations.ts` — streaming nodes PRESERVE it per row (a Filter reading a raising value keeps the row,
+  raised), barrier nodes ESCALATE it (`MAX(raise)`/window), `ChildValue` carries `raise` beside
+  `value`/`present`, and the executor's framing loop (`src/execute.ts`, before `frameValue`) throws
+  `RaisedByQuery` on the first framed raised row — so a root `limit(1)` never frames it and an `order()`
+  escalates, exact by construction. `raiseExpr` remains only for a recursive-term accumulator, `Binding.guard`
+  only for §6·5; `raiseGuard`/`rowGuard` and the advisory flag are deleted. Stopgap: ONE `receiverProvably(kind)`
+  at the step→Rel dispatch for `math`/`toUpper`/`toLower`/`trim`/`concat`/`asString`/`asNumber` (vtype meet +
+  `ChainCtx` nesting), measured against L3 first (declining math over a numeric property regressed L3/L4 —
+  if so, decline only a known-non-numeric or `unknown` tag). Size: M–L, ~400 LOC.
+- 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
+  `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
+  `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
+  barrier, so writes stay interleaved). Seam: `src/compiler/rel/write.ts` `elementMergeV` binds `matched` once
+  BEFORE any create; `sequentialGuard` counts `site.host` rows, not the stream at the upstream writer. Design
+  (set-based, inside P5): partition drivers by match key, rank by `ord` — rank one with no pre-existing match
+  creates, every other driver MATCHES (including the rank-one creation), a constant onMatch is idempotent per
+  key, a runtime onMatch declines until last-writer-by-`ord` exists; `ProgramWrites` records each writer's
+  INPUT STREAM and the guard counts traversers at every writer the body can observe, so "a truncating step
+  between writer and site" becomes a property of that count. Stopgap: decline a multi-row creating merge with
+  an onMatch arm or match-dependent tail; `sequentialGuard` refuses a non-single-row upstream writer via ONE
+  `isOneRowSeed` shared with `writeSnapshot` (unifying the duplicated checks). Size: stopgap S; full M, ~300 LOC.
+- 🚧 **G — label scope into nested arms; internal errors past the decline contract.** Authority:
+  `step/util/Scoping.java` + `TraversalSelectStep` (a local child keeps the parent path),
+  `strategy/optimization/IdentityRemovalStrategy.java` (copyLabels). Seams: the union arm merge (`mergeArms`
+  via `lower/branch.ts`) must compare arm column/channel sets and return `null` instead of leaving
+  `src/rel/check.ts`'s invariant to throw an internal error; a scope read (`select`, `where(as)`, `path`) in an
+  arm lacking the parent's alias channel declines (full fix: thread alias channels through `childSeam`); ONE IR
+  walker — `someStepDeep` (`ir/strategies.ts`) walks only `args`, and `nondeterministic` (`ranked-order.ts`),
+  `lowerRankHead`'s `MUTATING_STEPS`, the `write.ts` arg walkers and the `labels.ts` walkers each re-implement
+  it; make it total over every IR child position (args, modulators, `repeatRegion`, `optionArms`) and route
+  all of them through it (fixes the `order().by(addV…)` leak); `mergeStepLabels` (`ir/passes.ts`) folds labels
+  as IdentityRemovalStrategy does. Size: S–M, ~200 LOC. Do this FIRST — cheap, and every later branch re-trips it.
+- 🚧 **H — reference strategy/step facts copied by hand.** emit-first `times(n)` unroll drops the last level
+  (`step/branch/RepeatStep.java` RepeatEndStep emits on `doUntil`; seam `tryUnroll` in `ir/strategies.ts` —
+  emit it or decline emit-first; check `l3-state.json` for `g_V_emit_repeatXoutX_timesX2X_path`);
+  `fold([], addAll)` treated as `fold()` (`dsl/graph/GraphTraversal.java` / `util/function/ConstantSupplier.java`
+  / `ReducingBarrierStep.java` — the seed is shared, so the identity holds only where the fold runs once;
+  seam `PLAIN_FOLD` in `rel/operator.ts`; decline a mutable seed in a per-traverser child); keyed
+  `groupCount('a')` treated as a movable side effect (`SideEffectBarrierStep.java`, `EarlyLimitStrategy.java`;
+  branch-only `ir/early-limit.ts` — drop KEYED from `movable`). Design: one table per reference strategy in
+  `ir/` (the `bulk.ts` pattern), each row citing its vendor line, so review checks a table not a code path.
+
+**Ordering.**
+
+| Step | Substrate | Size | Why here |
+|---|---|---|---|
+| 0 | Trunk stopgap declines: A slice/barrier, B `branchResult`+`tagArm`, C `kindOf`/eligibility/asNumber-fp/`vt` carry, D null-pool, E `receiverProvably`, F merge/guard single-row, G arm-column decline + total `someStepDeep`, H unroll + `PLAIN_FOLD` | S–M total | removes every confirmed trunk wrong answer; L3 only moves DOWN where a wrong pass declines |
+| 1 | G — one IR walker, arm column decline, alias into arms | S–M | cheapest; every later branch re-trips it |
+| 2 | C — number-class authority (after the §6·7 decision) | M | `asNumber`, orderability, reducers are all consumers |
+| 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
+| 4 | D — required `present` | M | small once E adds the third `ChildValue` field in the same pass |
+| 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
+| 6 | B — the `EmissionKey` stack | L | needs A |
+| 7 | F — set-based merge interleave + writer-stream guard | M | independent; can run alongside 3–6 |
+
+**Per parked branch — resume or rebuild** (all tips fork from `2c3000b2`).
+
+| Item (tip) | Clusters | Verdict |
+|---|---|---|
+| `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
+| `alias-select-residue` (`70fc8270`) | G, C, E, A | **RESUME after G + C** — the open major is one predicate (decline `asNumber` over an fp/math source, or raise per `NumberHelper`); its `select(Traversal)` lowering is safe once G declines nested-arm scope reads; drop its advisory math guard once E lands |
+| `fanout-by-first` (`0e613e5b`) | A, E, D | **RESUME after A**, deleting `tiesProjectAlike`; PROMOTE its `src/rel/raise.ts` fence + `holdsLazyRaise` into E; `pooledRegroup` adopts D's required presence |
+| `seeded-fold-aliasing` (`1133e148`) | A, B, E, H | **SPLIT** — land the ConstantSupplier aliasing decline (H) now; REBUILD `branchOrder`/`mintOrdered` on A+B; `stringReceiverGuard` folds into E |
+| `branch-residue` (`2f93b271`) | B, E, H | **REBUILD** the slice/branch parts on B (`sliceDownstream`/`tagArm` are what B replaces); DISCARD `raiseGuard`/`rowGuard` (a second raise substrate that evaluates random input twice); salvage the EarlyLimit/identity math-liveness pieces as E consumers |
+| `union-columns-deferral` (`26dc3cac`) | B, A | **REBUILD on B** — its content is a branch-order policy (`branchMajor`) carrying regressions against trunk; keep only its recursive barrier-in-arm DETECTION as an input to `bulkingPositions` |
+
+Trunk-landed items with open audit wrong answers fall into the same clusters and are fixed through step 0, not
+through branches: mergeE/mergeV onMatch (`55a47cd8`) → F; ranked-order `{t:null}` keys and wide-long union sum
+(`2c3000b2`) → C; the `order().by(addV)` internal error (`2c3000b2`) → G; `PLAIN_FOLD` aliasing (`314bbb86`) → H;
+`sequentialGuard` upstream writer and the max/mean stored type (`7a18f7ca`–`423e4b84`) → F, C.
+
 ---
 
 ## §11. Open design decisions
