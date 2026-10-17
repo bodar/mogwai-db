@@ -136,3 +136,41 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
     Then the result should be unordered
       | result |
       | v[lop] |
+
+  # A label-keyed dedup keys on each label's OBJECT (DedupGlobalStep.java:74-88 — a HashSet over a
+  # List<Object>), and Integer.equals(Long) and Float.equals(Double) are both false.
+  Scenario: g_injectX3_3LX_asXaX_dedupXaX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(3, 3L).as("a").dedup("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+      | d[3].l |
+
+  Scenario: g_injectX3_3LX_asXaX_dedup_byXselectXaXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(3, 3L).as("a").dedup().by(__.select("a"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+      | d[3].l |
+
+  Scenario: g_injectX3f_3dX_asXaX_dedupXaX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(3.0f, 3.0d).as("a").dedup("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3.0].f |
+      | d[3.0].d |

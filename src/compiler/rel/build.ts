@@ -1027,6 +1027,18 @@ export const typedKey = (term: Expr): Expr[] => typedKeyAs(term, { kind: 'call',
  *  member's own Gremlin tag, which tells a `{t:'int'}` from a `{t:'long'}` that share an INTEGER. */
 export const typedKeyAs = (term: Expr, cls: Expr): Expr[] => [term, cls, signOfZero(term)];
 
+/**
+ * `typedEquality`'s key for ONE value OUTSIDE a relation's own columns — a `by()` projection, a label's
+ * history entry — where what is known of its class is handed in rather than read off a sibling column:
+ * a STATIC Gremlin type, a PER-ROW tag (normalized by `valueClass`, so a NULL "infer" tag and a named one
+ * of one class key together), or nothing (the storage class, `typedKey`). The SAME three terms a merge
+ * partitions on, so a `dedup('a')` and a `group().by(select('a'))` key one value one way.
+ */
+export const classedKey = (term: Expr, known: { readonly static: string } | { readonly tag: Expr } | undefined): Expr[] =>
+  !known ? typedKey(term)
+    : 'static' in known ? typedKeyAs(term, compilerText(known.static))
+      : typedKeyAs(term, valueClass(known.tag, term));
+
 /** `a` and `b` are the same value by the reference's TYPED equality (`typedKey`), null-safe (`IS`). */
 export const typedSame = (a: Expr, b: Expr): Expr => {
   const right = typedKey(b);

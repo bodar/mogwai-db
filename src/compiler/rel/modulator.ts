@@ -7,7 +7,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, classedKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
@@ -418,6 +418,29 @@ export function byTyped(
   const typed = typedArm(modulation, projected.value, host, fresh);
   return typed && { ...typed, present: projected.present };
 }
+
+/**
+ * A `by()` projection as a `HashSet` KEY — the object it produced, compared by `Objects.equals`
+ * (`DedupGlobalStep.java:77-88`: `duplicateSet.add(product.get())`, or a `List` of one per label), so
+ * `Integer(3)` is not `Long(3)` and `Float(3.0)` is not `Double(3.0)`. SQLite's `PARTITION BY` equates each
+ * pair, and a projection is a bare value whose storage class cannot tell them apart; what CAN is what
+ * `byTyped` knows of its type — a static tag, a per-row tag (a label's history `t`, a stored `vtype`), or
+ * nothing, the storage class — and `classedKey` (build.ts) turns that into the same terms a merge keys
+ * on. Where `byTyped` has no answer the projection is an element's rowid or the value of a host
+ * `typedArm` does not describe, and keys as itself under the storage class.
+ */
+export function byEqualityKey(
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
+): { readonly terms: readonly Expr[]; readonly present: Presence } | null {
+  const typed = byTyped(modulation, host, source, fresh, child);
+  if (typed) return { terms: classedKey(typed.value, knownClass(typed.evidence)), present: typed.present };
+  const projected = byProjection(modulation, host, source, fresh, false, child);
+  return projected && { terms: classedKey(projected.value, undefined), present: projected.present };
+}
+
+/** What `classedKey` is told of a value's class, from the evidence `byTyped` gathered. */
+export const knownClass = (evidence: ValueEvidence): { readonly static: string } | { readonly tag: Expr } | undefined =>
+  evidence.kind === 'static' ? { static: evidence.tag } : evidence.kind === 'tag' ? { tag: evidence.tag } : undefined;
 
 function typedArm(modulation: Modulation, value: Expr, host: ChildHost, fresh: Minter): Omit<TypedBy, 'present'> | null {
   const { key } = modulation;

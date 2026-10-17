@@ -213,3 +213,55 @@ describe('a child inject WITH injections answers only where the first result is 
     ]) expect(() => typed(q), q).toThrow(/not supported/);
   });
 });
+
+// A dedup KEY is the projected OBJECT under `Objects.equals` — a label's object, a `by()`'s product, or a
+// `List` of one per label (DedupGlobalStep.java:74-88, a HashSet). The label's history entry `v` and a
+// bare projected value are one number for `Integer(3)`/`Long(3)` and `Float(3.0)`/`Double(3.0)`, so every
+// such key carries the CLASS beside the value — the entry's `t` (`aliasKeyAt`, alias.ts) or what `byTyped`
+// knows of the projection (`byEqualityKey`, modulator.ts) — through `classedKey` (build.ts), the same
+// terms a merge keys on.
+describe('a label- or by()-keyed dedup keeps Integer/Long and Float/Double apart', () => {
+  const classes = seededStore();
+  for (const q of [
+    "g.addV('n').property('f', 3.0f).property('d', 3.0d).property('i', 3).property('l', 3L)",
+    "g.addV('m').property('p', 3).property('q', 3.0f)",
+    "g.addV('m').property('p', 3L).property('q', 3.0d)",
+  ]) executeQuery(classes, q, {});
+  const at = (q: string) => typedAll(executeQuery(classes, q, {}));
+
+  test('dedup(label) and dedup().by(select(label))', () => {
+    expect(at("g.inject(3, 3L).as('a').dedup('a').fold()")).toEqual(['[3i,3L]']);
+    expect(at("g.inject(3, 3L, 3).as('a').dedup('a').fold()")).toEqual(['[3i,3L]']);
+    expect(at("g.inject(3.0f, 3.0d).as('a').dedup('a').fold()")).toEqual(['[3f,3d]']);
+    expect(at("g.inject(3, 3L).as('a').dedup().by(select('a')).fold()")).toEqual(['[3i,3L]']);
+    expect(at("g.inject(3, 3L).as('a').union(identity(), constant(1)).as('b').dedup('a', 'b').count()")).toEqual(['4L']);
+    expect(at("g.V().hasLabel('n').values('f', 'd', 'i', 'l').as('a').dedup('a').fold()")).toEqual(['[3f,3d,3i,3L]']);
+    expect(at("g.V().hasLabel('m').values('p').as('a').dedup('a').count()")).toEqual(['2L']);
+  });
+
+  test('at depth — a union arm', () => {
+    expect(at("g.inject(3, 3L).as('a').union(dedup('a')).count()")).toEqual(['2L']);
+  });
+
+  test('dedup().by(<projection>) over a stored property, a child, a property value', () => {
+    expect(at("g.V().hasLabel('m').dedup().by('p').count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').dedup().by('q').count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').dedup().by(values('p')).count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').dedup().by(values('q')).count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').properties('p').dedup().by(value).count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').as('x').dedup('x').by('p').count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').as('x').dedup('x').by(values('q')).count()")).toEqual(['2L']);
+  });
+
+  test('equal objects still collapse', () => {
+    expect(at("g.V().hasLabel('m', 'n').dedup().by(label).count()")).toEqual(['2L']);
+    expect(at("g.inject(3, 3L).dedup().by(constant(1)).count()")).toEqual(['1L']);
+    expect(at("g.V().hasLabel('m').values('p').as('a').union(identity(), identity()).dedup('a').count()")).toEqual(['2L']);
+  });
+
+  test('dedup().by(keys/values) over a map-entry stream keys on the entry side, not an internal error', () => {
+    expect(at("g.inject(3, 3L).groupCount().unfold().dedup().by(keys)")).toEqual(['{3i:1L}', '{3L:1L}']);
+    expect(at("g.inject(3, 3L, 3).groupCount().unfold().dedup().by(values)")).toEqual(['{3i:2L}', '{3L:1L}']);
+    expect(at("g.V().hasLabel('m', 'n').group().by(label).unfold().dedup().by(keys).count()")).toEqual(['2L']);
+  });
+});

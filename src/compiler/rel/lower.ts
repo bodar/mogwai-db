@@ -32,8 +32,8 @@ import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSu
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
-    jsonMemberByTypeof, labelSetArgs, meta, minter,
-    guardTies, payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
+    labelSetArgs, meta, minter,
+    payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, BRANCH_KEY_PREFIX,
     type Minter
 } from './build.ts';
@@ -3494,10 +3494,13 @@ function mapEntryTail(
     }
 
     // GLOBAL order/dedup/slice over the STREAM of Map.Entry traversers route through `rowOp`. An entry is
-    // a scalar-shaped host (`entryHost`), so `scalarRowShape` carries it; `order().by(Column.values)` reads
-    // the value side off the entry (`byExpr`'s `column` arm), `order().by(Column.keys)` the key. A bare
-    // `order()` declines (no comparator), a local-scope op declines back to the slice below.
-    const row = rowOp(step, rel, scalarRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh, { steps, at });
+    // a scalar-shaped host (`entryHost`); `order().by(Column.values)` reads the value side off the entry
+    // (`byExpr`'s `column` arm), `order().by(Column.keys)` the key. A bare `order()` declines (no
+    // comparator), a local-scope op declines back to the slice below. Its ROW is the `(mk, mv)` pair, not
+    // a scalar's `v`, so its identity AND its tie are that whole payload (`payloadRowShape`) — the scalar
+    // shape's `v` tie named a column the entry relation does not have, and `dedup().by(keys)` reached the
+    // emitter as an internal error.
+    const row = rowOp(step, rel, payloadRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh, { steps, at });
     if (row) { rel = row; continue; }
     const sliced = sliceOp(step, rel, false, fresh, ctx.pull);
     if (!sliced) return null;

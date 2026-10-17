@@ -3,7 +3,7 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
+import { and, carriedCols, classedKey, eq, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
@@ -11,9 +11,9 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
 import { countLit, sliceBound } from '../const.ts';
-import { byProjection, modulations, productivityFilter, type Modulation } from '../modulator.ts';
+import { byEqualityKey, modulations, productivityFilter, type Modulation } from '../modulator.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasIdAt, aliasListAt, aliasProjection, aliasValueAt } from '../alias.ts';
+import { aliasIdAt, aliasKeyAt, aliasListAt, aliasProjection } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
 import { payloadCols } from '../build.ts';
 import { exprChildren, freeRelIds } from '../../../rel/walk.ts';
@@ -637,7 +637,9 @@ function dedupBy(
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byProjection(modulation, shape.host, ctx.source, fresh, false, childSeam(ctx, fresh));
+  // The key is the projected OBJECT under `Objects.equals` (`byEqualityKey`) — its value AND its class, so
+  // `dedup().by('p')` keeps a vertex whose `p` is `3` apart from one whose `p` is `3L`.
+  const key = byEqualityKey(modulation, shape.host, ctx.source, fresh, childSeam(ctx, fresh));
   if (!key) return null;
   // By PRESENCE: a productive null is a dedup key like any other (`DedupGlobalStep.java:77-78` adds it to
   // the duplicate set), and every NULL key partitions together, which is `null.equals(null)`.
@@ -646,7 +648,7 @@ function dedupBy(
   const domain = productive.keep
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive.keep })
     : input;
-  return dedupOn([key.value], domain, shape.tie(domain), fresh);
+  return dedupOnTyped(key.terms, domain, shape.tie(domain), fresh);
 }
 
 /**
@@ -682,6 +684,17 @@ function dedupBy(
 export function dedupOn(
   keys: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
 ): Rel | null {
+  // The keys partition by the reference's TYPED equality (`typedEquality`, build.ts) — the traverser's
+  // own columns are `HashSet` members like the traverser itself (`DedupGlobalStep.java:78`).
+  return dedupOnTyped(typedEquality(domain, keys), domain, tie, fresh);
+}
+
+/** `dedupOn` over a key ALREADY spelled as typed-equality terms — a `by()` projection or a label's
+ *  value, whose class the caller knows better than `typedEquality` can read off a bare expression
+ *  (`byEqualityKey`, `aliasKeyAt`). */
+function dedupOnTyped(
+  typedKeysOf: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
+): Rel | null {
   // The PAYLOAD survives whole, which is what makes this form serve a traverser that is more than its
   // identity: only `bulk` is rewritten.
   const cols = [...payloadCols(domain), ...carriedCols(domain.channels)];
@@ -691,9 +704,6 @@ export function dedupOn(
   // FIRST partition key. This is the fold-mode rule (a barrier consults the ambient `origin`): at the top
   // level there is no `origin`, so the dedup stays global exactly as before.
   const origin = originOf(domain.channels);
-  // The keys partition by the reference's TYPED equality (`typedEquality`, build.ts) — a `by()` key and a
-  // label tuple are `HashSet` members like the traverser itself (`DedupGlobalStep.java:78,88`).
-  const typedKeysOf = typedEquality(domain, keys);
   const partitionBy = origin ? [col(domain.id, origin.col), ...typedKeysOf] : typedKeysOf;
   // A `Window` may only EXTEND its input (§3.5), so `rowNumberWindow` declares the INPUT's columns IN
   // THE INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
@@ -734,7 +744,9 @@ export function dedupByLabels(
   by: Modulation | undefined, ctx: ChainCtx, fresh: Minter,
 ): Rel | null {
   const seam = childSeam(ctx, fresh);
-  const keyExprs: Expr[] = [];
+  // Each label's OBJECT keys by `Objects.equals` (`DedupGlobalStep.java:80-88`): an element by its rowid,
+  // a value by its `v` AND its recorded class (`aliasKeyAt`), a `by()` by `byEqualityKey`.
+  const keyTerms: Expr[] = [];
   const productive: Expr[] = [];
   for (const k of keys) {
     const proj = aliasProjection(rel, labels, k, 'last', fresh);
@@ -745,24 +757,24 @@ export function dedupByLabels(
       // is a later phase.
       if (proj.read.kind !== 'element') return null;
       const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
-      const key = byProjection(by, host, ctx.source, fresh, false, seam);
+      const key = byEqualityKey(by, host, ctx.source, fresh, seam);
       if (!key) return null;
-      keyExprs.push(key.value);
+      keyTerms.push(...key.terms);
       const prod = productivityFilter(step, key.present);
       if (!prod) return null;
       if (prod.keep) productive.push(prod.keep);
-    } else if (proj.read.kind === 'element') keyExprs.push(aliasIdAt(column, 'last'));
-    else if (proj.read.kind === 'value') keyExprs.push(aliasValueAt(column, 'last'));
+    } else if (proj.read.kind === 'element') keyTerms.push(aliasIdAt(column, 'last'));
+    else if (proj.read.kind === 'value') keyTerms.push(...aliasKeyAt(column, 'last'));
     // A LIST label keys on its canonical JSON (`json(v)`): `DedupGlobalStep` compares each label's
     // scope value with `java.util.List` content-equality (`DedupGlobalStep.java:80-88`), and SQLite's
     // canonical `json()` text of two identical arrays compares equal under `=`/GROUP BY — the faithful
     // lowering. A MAP label stays declined: `json()` object text is key-ORDER sensitive, but a Java
     // `LinkedHashMap` compares by ENTRY set regardless of order, so text equality is not faithful.
-    else if (proj.read.kind === 'list') keyExprs.push(aliasListAt(column, 'last'));
+    else if (proj.read.kind === 'list') keyTerms.push(...classedKey(aliasListAt(column, 'last'), undefined));
     else return null; // a MAP-valued alias key — order-sensitive JSON text vs entry-equality, a later phase.
   }
   const domain = productive.length
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: productive.reduce((a, b) => and(a, b)) })
     : rel;
-  return dedupOn(keyExprs, domain, domain.type.cols.map((c) => col(domain.id, c.name)), fresh);
+  return dedupOnTyped(keyTerms, domain, domain.type.cols.map((c) => col(domain.id, c.name)), fresh);
 }
