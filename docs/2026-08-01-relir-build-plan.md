@@ -905,6 +905,13 @@ authorities.
   group/groupCount/tree, subgraph) as a side effect at every depth, and `ir/early-limit.ts` no longer moves a
   slice past a spliced step (`step/branch/LocalStep.java`, `step/filter/RangeGlobalStep.java:72-82`). Declines
   pinned in `test/L4-addendum/early-limit-side-effect.feature`.
+  ✅ **Lazy read of a collection still filling + correlated collector LANDED 2026-10-17 (`103d6cbe`,
+  ff-collector-reads):** `programWrites` (`rel/write.ts`) tracks keys still FILLING per traverser (a
+  per-traverser host body, a spliced collector over >1 traverser, what a global child leaves pending; a drain
+  clears them) and a Scoping read of one at any depth (`step/Scoping.java:120-135`) sets `truncated` and
+  declines; `rel/collection.ts` declines a collector registration whose site has a free relation id (was the
+  internal "no relation 'src0' is in scope"). Decline-only; pinned in
+  `test/L4-addendum/side-effect-lazy-read.feature`.
 - ✅ **G — label scope into nested arms; internal errors past the decline contract.** Authority:
   `step/util/Scoping.java` + `TraversalSelectStep` (a local child keeps the parent path),
   `strategy/optimization/IdentityRemovalStrategy.java` (copyLabels). Seams: the union arm merge (`mergeArms`
