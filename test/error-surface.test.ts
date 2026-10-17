@@ -305,6 +305,16 @@ describe("regex() reads its pattern as Java's Pattern does, or declines", () => 
   test.each(['(?<=m)a', '\\\\Qa\\\\E', '\\\\p{L}+', '[\\\\w&&[^a]]', 'a{2', '\\\\bm', '['])('regex(%s) declines', async (pattern) => {
     expect(await failure(`g.V().has('name', regex('${pattern}')).values('name')`)).toBeInstanceOf(UnsupportedTraversal);
   });
+  // `Pattern` reads its pattern as CODE POINTS: `\😀` is the one character U+1F600. Escaping its high
+  // surrogate alone (`\ud83d`, then a raw low surrogate) never pairs under the `u` flag — every true match
+  // was dropped and `notRegex` kept the row; the prefilter then read the orphaned low surrogate as a run.
+  test.each([
+    ["regex('\\\\😀')", ['"😀abc"']], ["regex('x?\\\\😀')", ['"😀abc"']], ["regex('\\\\😀abc')", ['"😀abc"']],
+    ["regex('[\\\\😀]a')", ['"😀abc"']], ["regex('\\\\😀?abc')", ['"😀abc"']], ["regex('a\\\\😀')", []],
+    ["notRegex('\\\\😀')", []], ["notRegex('a\\\\😀')", ['"😀abc"']],
+  ] as const)('an escaped astral character is ONE code point: %s', async (predicate, want) => {
+    expect(await run(`g.V().has('t', ${predicate}).values('t')`, ["g.V(1).property('t','😀abc')"])).toEqual([...want]);
+  });
   test("Java's `$` matches before a final line terminator", async () => {
     expect(await run("g.V().has('t', regex('a$')).values('name')", ["g.V(1).property('t','a\\n')"])).toEqual(['"marko"']);
   });

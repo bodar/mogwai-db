@@ -100,6 +100,11 @@ describe('regex barrier — trigram prefilter', () => {
     expect(extractMandatoryLiteral('abc\\tdef')).toBe('abc');          // a control escape ends the run
     expect(extractMandatoryLiteral('\\uD83D\\uDE00abc')).toBe('abc');  // a surrogate escape is not vouched for
     expect(extractMandatoryLiteral('ab😀?cd')).toBeNull();              // an astral char is ONE optional atom
+    // An ESCAPED astral char is one code point too — never a lone low surrogate left behind as a run.
+    expect(extractMandatoryLiteral('\\😀abc')).toBe('😀abc');
+    expect(extractMandatoryLiteral('ab\\😀?cd')).toBeNull();
+    expect(javaPatternAsJs('\\😀')).toBe('\\u{1f600}');
+    expect(javaPatternAsJs('[\\😀-\\😃]')).toBe('[\\u{1f600}-\\u{1f603}]');
     expect(extractMandatoryLiteral('[\\x5d]abc')).toBe('abc');        // a class's escapes are consumed whole
     expect(extractMandatoryLiteral('(\\x29)abc')).toBe('abc');        // so are a group's
     // Every form Java reads and this dialect subset declines extracts NOTHING — never its body as text.
@@ -126,6 +131,8 @@ describe('regex barrier — trigram prefilter', () => {
       ['a', ['a']], ['b', ['b']], ['c', ['c']], ['m', ['m']], ['a', ['a']], ['b', ['b']], ['😀', ['😀']], ['.', ['a', '😀', '-']],
       ['\\x61', ['a']], ['\\x62', ['b']], ['\\u0063', ['c']], ['\\u006d', ['m']], ['\\.', ['.']], ['\\-', ['-']],
       ['\\d', ['1']], ['\\s', [' ', '\t']], ['\\t', ['\t']], ['\\uD83D\\uDE00', ['😀']],
+      // An ESCAPED astral character — one code point, both halves consumed by the escape.
+      ['\\😀', ['😀']], ['\\🙂', ['🙂']], ['[\\😀b]', ['😀', 'b']], ['[😀-🙂]', ['😀', '🙂']],
       ['[ab]', ['a', 'b']], ['[^a]', ['b', 'm']], ['[\\x61c]', ['a', 'c']], ['(ab)', ['ab']], ['(?:a\\x62)', ['ab']],
       ['(?=a)', ['']], ['(?!b)', ['']], ['(?<n>c)', ['c']], ['^', ['']], ['$', ['']],
     ];
@@ -137,20 +144,41 @@ describe('regex barrier — trigram prefilter', () => {
     const quantifiers: readonly (readonly [string, readonly number[]])[] = [
       ['*', [0, 1, 2]], ['+', [1, 2]], ['?', [0, 1]], ['{2}', [2]], ['{0,1}', [0, 1]], ['+?', [1, 2]], ['*+', [0, 1]], ['??', [0, 1]],
     ];
-    const noise = ['a', 'b', 'c', 'm', '.', '-', '1', ' ', '\t', '😀', 'A'];
+    const noise = ['a', 'b', 'c', 'm', '.', '-', '1', ' ', '\t', '😀', '🙂', '\ud83d', '\ude00', 'A'];
     const randomNoise = () => { let s = ''; for (let k = rand(5); k > 0; k--) s += pick(noise); return s; };
     let extracted = 0;
     let matched = 0;
+    let translatedSamples = 0;
+    // An atom that consumes nothing (anchor, lookaround) constrains WHERE its sample may sit, so only a
+    // pattern of consuming atoms is certain to match the sample built from its own atoms.
+    const zeroWidth = new Set(['(?=a)', '(?!b)', '^', '$', '\\b']);
     for (let n = 0; n < 20000; n++) {
       let pattern = '';
       let sample = '';
+      let consuming = true;
       for (let k = 1 + rand(8); k > 0; k--) {
         const [atom, spells] = rand(20) === 0 ? pick(declined) : pick(atoms);
         const [quantifier, counts] = rand(3) === 0 ? pick(quantifiers) : ['', [1]] as const;
         pattern += atom + quantifier;
+        if (zeroWidth.has(atom)) consuming = false;
+        // A LAZY quantifier never changes WHETHER a pattern matches, only where — but Bun's engine (JSC,
+        // 1.3.11) misses a true match for `c🙂??[😀-🙂]{2}[^a]m` on "c🙂😀🙂bm" (V8, the DO runtime,
+        // finds it). An engine defect on raw astral text, not a translation one, so it is kept out of this oracle.
+        if (quantifier.endsWith('?') && quantifier !== '?') consuming = false;
         for (let r = pick(counts); r > 0; r--) sample += pick(spells);
       }
       if (rand(12) === 0) pattern += '|' + pick(atoms)[0];
+      // The TRANSLATION's half of the oracle: the JS spelling must find the sample the Java pattern's own
+      // atoms spell — an escaped astral char spelt as a lone high-surrogate escape matched nothing.
+      const spelt = consuming ? javaPatternAsJs(pattern) : null;
+      if (spelt != null) {
+        let sampleRe: RegExp | null = null;
+        try { sampleRe = new RegExp(spelt, 'u'); } catch { /* invalid in JS (possessive, duplicate group) — the barrier declines */ }
+        if (sampleRe) {
+          translatedSamples++;
+          expect({ pattern, spelt, sample, found: sampleRe.test(sample) }).toEqual({ pattern, spelt, sample, found: true });
+        }
+      }
       const literal = extractMandatoryLiteral(pattern);
       if (literal == null) continue;
       extracted++;
@@ -168,6 +196,7 @@ describe('regex barrier — trigram prefilter', () => {
     }
     expect(extracted).toBeGreaterThan(500);
     expect(matched).toBeGreaterThan(500);
+    expect(translatedSamples).toBeGreaterThan(500);
   });
 
   test('answer-invariant under the trigram toggle (containing() falls back to LIKE)', async () => {

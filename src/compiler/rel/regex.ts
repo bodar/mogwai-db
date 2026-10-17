@@ -104,9 +104,14 @@ function reinject(steps: readonly Step[], at: number, key: string, survivors: re
   return steps.map((s, i) => (i === at ? has : s));
 }
 
-/** A code unit as a `\uXXXX` escape — valid in a `u`-flag pattern wherever it sits, so a Java literal
- *  (an escaped punctuator, a stray `}`/`]`) never meets the `u` flag's stricter identity-escape rules. */
-const unit = (c: string): string => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
+/** A CODE POINT as a `\u{…}` escape — valid in a `u`-flag pattern wherever it sits, so a Java literal
+ *  (an escaped punctuator, a stray `}`/`]`) never meets the `u` flag's stricter identity-escape rules. A whole
+ *  code point, never a code unit: Java's `Pattern` reads its pattern as code points, so `\😀` is the ONE
+ *  character U+1F600, while a `\ud83d` escape followed by a raw low surrogate never pairs under `u` and
+ *  matches nothing. */
+const unit = (c: string): string => `\\u{${c.codePointAt(0)!.toString(16)}}`;
+/** The whole code point starting at `pattern[at]` — both halves of a surrogate pair, as `Pattern` reads it. */
+const codePointAt = (pattern: string, at: number): string => String.fromCodePoint(pattern.codePointAt(at)!);
 /** Java's `\s` WITHOUT `UNICODE_CHARACTER_CLASS`: `[ \t\n\x0B\f\r]` — JS's `\s` adds every Unicode space. */
 const JAVA_SPACE = ' \\t\\n\\x0B\\f\\r';
 /** Java's line terminators — what `.` excludes and what `$` may precede (`Pattern` "Line terminators"). */
@@ -150,7 +155,8 @@ export function javaPatternAsJs(pattern: string): string | null {
           if (!escape) return null;
           cls += escape.js;
           j = escape.end;
-        } else cls += k === '-' ? '-' : /[A-Za-z0-9 ]/.test(k) ? k : unit(k);
+        } else if (k === '-' || /[A-Za-z0-9 ]/.test(k)) cls += k;
+        else { const point = codePointAt(pattern, j); cls += unit(point); j += point.length - 1; }
       }
       if (j >= pattern.length) return null;
       out += `${cls}]`;
@@ -172,7 +178,7 @@ export function javaPatternAsJs(pattern: string): string | null {
     } else if (c === '.') out += `[^${JAVA_LINE_END}]`;
     else if (c === '$') out += JAVA_DOLLAR;
     else if (c === '}' || c === ']') out += unit(c);
-    else out += c;
+    else { const point = codePointAt(pattern, i); out += point; i += point.length - 1; }
   }
   return out;
 }
@@ -180,15 +186,16 @@ export function javaPatternAsJs(pattern: string): string | null {
 /** One Java escape at `pattern[at] === '\\'`, as its JS spelling (a class MEMBER spelling when `inClass`)
  *  and the index of its last character — or `null` for an escape the dialects read differently. */
 function javaEscape(pattern: string, at: number, inClass: boolean): { js: string; end: number } | null {
-  const n = pattern[at + 1];
-  if (n === undefined) return null;
+  if (at + 1 >= pattern.length) return null;
+  const n = codePointAt(pattern, at + 1);   // a CODE POINT: `\😀` escapes the whole astral character
   if ('dDwW'.includes(n) || 'tnrf'.includes(n)) return { js: `\\${n}`, end: at + 1 };
   if (n === 's') return { js: inClass ? JAVA_SPACE : `[${JAVA_SPACE}]`, end: at + 1 };
   if (n === 'S') return inClass ? null : { js: `[^${JAVA_SPACE}]`, end: at + 1 };
   if (n === 'u') return /^[0-9a-fA-F]{4}$/.test(pattern.slice(at + 2, at + 6)) ? { js: pattern.slice(at, at + 6), end: at + 5 } : null;
   if (n === 'x') return /^[0-9a-fA-F]{2}$/.test(pattern.slice(at + 2, at + 4)) ? { js: pattern.slice(at, at + 4), end: at + 3 } : null;
-  // A non-alphanumeric escape is that character, literally, in both dialects.
-  if (!/[A-Za-z0-9]/.test(n)) return { js: unit(n), end: at + 1 };
+  // A non-alphanumeric escape is that character, literally, in both dialects — the WHOLE code point, so an
+  // escaped astral character ends at its low surrogate (`Pattern` reads its pattern as code points).
+  if (!/[A-Za-z0-9]/.test(n)) return { js: unit(n), end: at + n.length };
   return null;
 }
 
@@ -197,20 +204,21 @@ function javaEscape(pattern: string, at: number, inClass: boolean): { js: string
  *  the index of the escape's LAST character either way. The escape's extent comes from `javaEscape`, the
  *  same tokenizer `javaPatternAsJs` reads the pattern with, so the two can never disagree about where an
  *  escape ends: `\x61` is ONE atom (`a`), never `\x` followed by the literal run `61`. Decoded, all from
- *  `Pattern`'s escape table: an escaped non-alphanumeric is itself (`\.` → `.`), `\xhh` and `\uhhhh` are
- *  the code unit they spell — except a SURROGATE, which Java pairs across escapes and this code-point run
- *  could split, so it ends the run. Every other escape `javaEscape` admits (`\d`, `\s`, `\t`, …) ends the
+ *  `Pattern`'s escape table: an escaped non-alphanumeric is itself, a whole CODE POINT (`\.` → `.`, `\😀` →
+ *  `😀`, never a lone low surrogate left behind as a run), `\xhh` and `\uhhhh` are the code unit they
+ *  spell — except a SURROGATE, which Java pairs across escapes and this code-point run could split, so it
+ *  ends the run. Every other escape `javaEscape` admits (`\d`, `\s`, `\t`, …) ends the
  *  run; the forms it declines (`\x{h..h}`, `\0ooo`, `\cX`, `\Q..\E`, `\p{..}`, …) never get here, because
  *  `extractMandatoryLiteral` extracts nothing from a pattern `javaPatternAsJs` declines. */
 function escapedLiteral(pattern: string, at: number, inClass: boolean): { char: string | null; end: number } | null {
   const escape = javaEscape(pattern, at, inClass);
   if (!escape) return null;
-  const n = pattern[at + 1]!;
+  const n = codePointAt(pattern, at + 1);
   let code: number | null = null;
   if (n === 'x' || n === 'u') code = parseInt(pattern.slice(at + 2, escape.end + 1), 16);
-  else if (!/[A-Za-z0-9]/.test(n)) code = n.charCodeAt(0);
+  else if (!/[A-Za-z0-9]/.test(n)) code = n.codePointAt(0)!;   // the whole code point, astral included
   const certain = code != null && !(code >= 0xd800 && code <= 0xdfff);
-  return { char: certain ? String.fromCharCode(code!) : null, end: escape.end };
+  return { char: certain ? String.fromCodePoint(code!) : null, end: escape.end };
 }
 
 /**
