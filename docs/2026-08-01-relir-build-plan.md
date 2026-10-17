@@ -1062,6 +1062,18 @@ authorities.
 
 **Per parked branch — resume or rebuild** (all tips fork from `2c3000b2`).
 
+✅ **Parked-branch salvage LANDED ON TRUNK 2026-10-17 (`792b9816`).** Every parked branch's own L4 scenarios and
+exec tests (`fanout-by-first`, `alias-select-residue`, `seeded-fold-aliasing`, `branch-residue`,
+`union-columns-deferral`, `narrow-row-ops`) were replayed against trunk; whatever the landed substrates already
+answer was dropped, and each remaining wrong answer / internal error was fixed at its one authority (unproductive
+`choose` pass-through, map/flatMap path entry, `select(Column.values)` assignment, construction-time
+`hasBarrier`, first-SURVIVOR `values(k).is(P)`, `where` Pop, wide integral sum as decimal text, `log(0)` =
+-Infinity; fail-closed declines for fresh-traverser scope `by()`, repeated select key, filter-body select past a
+hop). Pinned in `test/L4-addendum/parked-branch-salvage.feature` and
+`test/compiler/parked-branch-salvage.exec.test.ts`. The resume/rebuild verdicts below are HISTORICAL for those six
+branches; `write-property-guard` was not part of this salvage. Baseline moved: sql-hygiene (wide-sum text
+carrier, `exactWideTotal`); L4 `nested-branch-arms` map(choose) and `receiver-type-raise` where(...is()) now @Unsupported.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
