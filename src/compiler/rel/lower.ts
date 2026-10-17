@@ -12,7 +12,8 @@ import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
 import { isRel, type Rel } from '../../rel/rel.ts';
 import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
+import { assertsGType, BATCHING_BRANCHES, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
+import { eachChildChain, rawBodies } from '../ir/walk.ts';
 import { beginsWithSource, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -264,7 +265,26 @@ export const branchKeys = (input: Rel): BranchKeys => {
 export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): boolean => {
   if (position && !orderReadAfter(position.steps, position.at + 1, true)) return false;
   if (position && position.steps.slice(position.at + 1).some((s) => ORDER_READERS.has(s.name) && !isLocalScope(s))) return true;
+  // An arm that SORTS states an order the result stream itself carries: its `order()` is a `Barrier`, so
+  // the `BranchStep` feeds every start in and drains the sorted arm whole
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88,123-153`)
+  // — `choose(p, values('name').order().by(desc), …)` emits `[vadas, peter, marko, josh]`, and a merge
+  // left positionless emitted the names in start order. The client reads that order as surely as a
+  // `fold()` would, so the merge owes it wherever nothing order-free consumes the branch (above).
+  if (position && armSorts(position.steps[position.at])) return true;
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
+};
+
+/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among the body's own steps? One
+ *  nested in a per-traverser host (`local(out().order())`) sorts one start's output, not the arm's. An
+ *  unreadable body answers yes: owing an order costs a numbering, never an answer. */
+const armSorts = (step: IRStep | undefined): boolean => {
+  if (!step || !BATCHING_BRANCHES.has(step.name)) return false;
+  let sorts = false;
+  eachChildChain(step, rawBodies({}), (body) => {
+    if (body.some((s) => s.name === 'order' && !isLocalScope(s as IRStep))) sorts = true;
+  }, () => { sorts = true; });
+  return sorts;
 };
 
 /** Does a positional SLICE read the order this branch emits — one after it in its own list, or (unless the

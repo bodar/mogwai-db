@@ -1372,6 +1372,30 @@ export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, a
 }
 
 /**
+ * `withoutStrategies(IdentityRemovalStrategy)` — DECLINE where a kept `identity()` could change the answer.
+ *
+ * This compiler treats `identity()` as absent everywhere (`early-limit.ts`' `ONE_TO_ONE`, `bulk.ts`'
+ * `NOT_A_REFERENCE_STEP`, `raise-channel.ts`), which is the reference only while the strategy runs. A kept
+ * `IdentityStep` is neither a `MapStep` nor a `SideEffectStep`, so `EarlyLimitStrategy` stops at it
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java:68-98`)
+ * and the slice then pulls one more row through a raising step before it can stop
+ * (`g.withoutStrategies(IdentityRemovalStrategy).inject(1,'a').math('_+1').identity().limit(1)` raises
+ * where this answered `[2.0]`); and it is a non-`Barrier` step after a flat-map, so `LazyBarrierStrategy`
+ * places a merge the removal would not. Both are observable only to a SLICE or a reader of stream order, so
+ * a traversal holding an `identity()` and one of those, at any depth, declines; any other traversal answers
+ * the same with or without the step and keeps the no-op (`g_withoutStrategiesXIdentityRemovalStrategyX_V_identity_out`).
+ */
+export function verifyIdentityRemovalSuppressed(steps: readonly Step[], params: Record<string, any>): void {
+  if (!someStepDeep(steps, params, (s) => s.name === 'identity', true)) return;
+  if (!someStepDeep(steps, params, (s) => KEPT_IDENTITY_OBSERVERS.has(s.name), true)) return;
+  throw UnsupportedTraversal.because(
+    'withoutStrategies(IdentityRemovalStrategy) over a traversal whose identity() a slice or an ordered read could observe is not supported yet');
+}
+const KEPT_IDENTITY_OBSERVERS: ReadonlySet<string> = new Set([
+  'limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'store', 'cap', 'group', 'groupCount', 'tree', 'sample', 'order', 'dedup', 'barrier',
+]);
+
+/**
  * `BranchStep.hasBarrier` IS A CONSTRUCTION-TIME FACT — set in `addChildOption` from
  * `getStepsOfAssignableClassRecursively(Barrier.class, option)`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88`),

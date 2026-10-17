@@ -1,5 +1,6 @@
 import type { Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { deferralExpr } from '../../rel/raise.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumnOf, TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
@@ -55,15 +56,49 @@ function positionNode(
   return whens.length === 0 ? elseArm : { kind: 'case', whens, else: elseArm };
 }
 
-/** The kinds a `by()` should ATTEMPT: the PROVEN set where `pathPositionKinds` had one, else the
- *  fail-closed default. An IDENTITY `by()` attempts all three because its value arm (`valueNode`) never
- *  declines, so framing a value position it might hold costs nothing; a MODULATED `by()` keeps today's
- *  edge+vertex, because its value host's child CAN decline and attempting it speculatively would refuse a
- *  property `by()` over a path whose positions were not proven. */
-const attemptKinds = (
-  kinds: ReadonlySet<PathPositionKind> | undefined, identity: boolean,
-): ReadonlySet<PathPositionKind> =>
-  kinds ?? new Set<PathPositionKind>(identity ? ['vertex', 'edge', 'value'] : ['vertex', 'edge']);
+/** The kinds a `by()` should ATTEMPT: the PROVEN set where `pathPositionKinds` had one, else ALL THREE.
+ *  An unproven path never defaults a position to an element: the entry's own tag dispatches, and a value
+ *  position meets `valueByArm` rather than the vertex arm's rowid join — which read `map(constant(5))`'s 5
+ *  as vertex 5 (`g.V(1).map(constant(5)).path().by('name')` answered `[[marko, ripple]]`). */
+const attemptKinds = (kinds: ReadonlySet<PathPositionKind> | undefined): ReadonlySet<PathPositionKind> =>
+  kinds ?? new Set<PathPositionKind>(['vertex', 'edge', 'value']);
+
+/** The steps whose FIRST read is an element's (or a property's): a `by()` body opening with one has
+ *  nothing to read over a VALUE position — `by(values(k))` IS `by(k)`'s `ValueTraversal` once
+ *  `ByModulatorOptimizationStrategy` has run. */
+const ELEMENT_READS: ReadonlySet<string> = new Set([
+  'values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'id', 'label', 'key', 'value',
+  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
+  'has', 'hasLabel', 'hasId', 'hasKey', 'hasValue', 'hasNot',
+]);
+
+/** The deferral a modulated path `by()` raises on REACHING a value position it cannot project. */
+export const VALUE_POSITION_BY = 'a path by() modulator over a non-element path position is not supported yet';
+
+/**
+ * THE VALUE-POSITION ARM of a modulated path `by()` — ONE authority for `path()` and `simplePath()`/
+ * `cyclicPath()`, so the dispatch is on the entry's KIND at every depth that mints a value position
+ * (`values()`, `map`/`flatMap`/`coalesce` of a scalar, a `union`/`local` arm ending in one).
+ *
+ * A `by(key)` / `by(T)` / element-reading body over a VALUE raises in the reference —
+ * `ValueTraversal.addStart` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/lambda/ValueTraversal.java:113-116`)
+ * and `TokenTraversal.addStart` (`…/lambda/TokenTraversal.java:59-60`), each spelling the value and its
+ * Java class, which the entry does not carry faithfully enough to reproduce. So: where the path is PROVEN
+ * to hold a value position the whole `by()` declines (`null`); where its kinds are unknown the arm is a
+ * DEFERRAL raised only when a value entry is actually reached — a path of elements answers as before, and
+ * a value can never again be rejoined as a vertex rowid. Every other projection (a scalar body, an alias
+ * read) runs on the value's own `{v,t}` host.
+ */
+function valueByArm(
+  modulation: Modulation, proven: boolean, host: Parameters<typeof byNode>[1],
+  source: GraphSource, fresh: Minter, child: ChildSeam,
+): Expr | null {
+  const { key } = modulation;
+  const refused = key.kind === 'property' || key.kind === 'token'
+    || (key.kind === 'child' && ELEMENT_READS.has(key.body[0]?.name ?? ''));
+  if (!refused) return byNode(modulation, host, source, fresh, child);
+  return proven ? null : deferralExpr(VALUE_POSITION_BY, { kind: 'call', fn: 'random', args: [] });
+}
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -318,7 +353,7 @@ export function pathPositions(
   // The IDENTITY projection over one position — an element rejoined by rowid, a value reshaped in place.
   // Every arm is total, so `positionNode` never declines here (the `!`), and a proven single-kind path
   // collapses it to that arm with no CASE.
-  const element = positionNode(attemptKinds(kinds, true), tag, (kind) =>
+  const element = positionNode(attemptKinds(kinds), tag, (kind) =>
     kind === 'value' ? valueNode : source.elementNode(kind, rowid, fresh))!;
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;
@@ -327,9 +362,9 @@ export function pathPositions(
     // SCALAR host for a value position (its stored `{v,t}`). Only the kinds the path can hold are built,
     // so a vertex-only path attempts neither an edge nor a value host, and a wanted host whose child
     // cannot be expressed declines the whole `by()`.
-    return positionNode(attemptKinds(kinds, false), tag, (kind) =>
+    return positionNode(attemptKinds(kinds), tag, (kind) =>
       kind === 'value'
-        ? byNode(modulation, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
+        ? valueByArm(modulation, kinds !== undefined, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
         : byNode(modulation, { kind: 'element', id: rowid, elem: kind, ...row }, source, fresh, child));
   };
   const projected = parsed.map(projectedNode);
@@ -462,9 +497,9 @@ export function pathSimpleByPredicate(
     // The projected form is the SAME per-kind dispatch `pathPositions` builds — hosts only for the kinds
     // the path can hold — so `simplePath().by(<vertex-movement>)` gains the vertex-only inference too.
     const row = { row: { rel: members, aliases: PATH_BY_ALIASES } };
-    return positionNode(attemptKinds(kinds, false), tag, (kind) =>
+    return positionNode(attemptKinds(kinds), tag, (kind) =>
       kind === 'value'
-        ? byNode(modulation, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
+        ? valueByArm(modulation, kinds !== undefined, { kind: 'scalar', value: jsonField(entry, 'v'), vtype: jsonField(entry, 't'), ...row }, source, fresh, child)
         : byNode(modulation, { kind: 'element', id: rowid, elem: kind, ...row }, source, fresh, child));
   };
   const projected = parsed.map(perModulation);

@@ -6,7 +6,7 @@ import {
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
-    inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
+    inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias, verifyIdentityRemovalSuppressed,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
@@ -137,6 +137,14 @@ const FOLD: Pass[] = group('canonicalize', [
     name: 'markEarlyLimitSuppressed',
     applies: (_steps, ctx) => ctx.strategies.without.includes('EarlyLimitStrategy'),
     run: (steps, ctx) => markEarlyLimitSuppressed(steps, ctx.params),
+  },
+  // `withoutStrategies(IdentityRemovalStrategy)` keeps every `identity()`, which this compiler otherwise
+  // reads as absent: declined wherever that is observable (`verifyIdentityRemovalSuppressed`). On the RAW
+  // chain for the same reason as the two marks above — a nested body holds its `identity()` there.
+  {
+    name: 'verifyIdentityRemovalSuppressed',
+    applies: (_steps, ctx) => ctx.strategies.without.includes('IdentityRemovalStrategy'),
+    run: (steps, ctx) => { verifyIdentityRemovalSuppressed(steps, ctx.params); return steps; },
   },
   // `withoutStrategies(LazyBarrierStrategy)` / `(PathRetractionStrategy)` remove the implicit barriers at
   // which the reference merges equal traversers, so the chain says so for `bulkingPositions`

@@ -55,13 +55,13 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 7456,
+    "bytes": 7521,
     "compiler": 201,
     "bound": 0
   },
   "asString": {
     "binds": 0,
-    "bytes": 10069,
+    "bytes": 10134,
     "compiler": 215,
     "bound": 0
   },
@@ -103,13 +103,13 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 11076,
+    "bytes": 11206,
     "compiler": 158,
     "bound": 0
   },
   "conjoin": {
     "binds": 0,
-    "bytes": 10867,
+    "bytes": 10932,
     "compiler": 221,
     "bound": 0
   },
@@ -295,7 +295,7 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 9504,
+    "bytes": 9569,
     "compiler": 274,
     "bound": 0
   },
@@ -451,7 +451,7 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 11573,
+    "bytes": 11638,
     "compiler": 315,
     "bound": 0
   },
@@ -505,8 +505,8 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 32260,
-    "compiler": 331,
+    "bytes": 35029,
+    "compiler": 342,
     "bound": 0
   },
   "skip": {
@@ -523,7 +523,7 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 12342,
+    "bytes": 12407,
     "compiler": 319,
     "bound": 0
   },

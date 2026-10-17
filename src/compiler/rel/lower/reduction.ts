@@ -1063,9 +1063,10 @@ export function correlatedReduce(
       // A winner tied with a value of another representation refuses rather than pick by an arrival order
       // the rows do not carry (`reducer.ts` `tieRepresentation`). Over the compare order, the FIRST peer group
       // is the rows of `rank()` 1, and the default window frame at any of them is exactly that group — so a
-      // row of rank 1 whose representation is not its group's least is the observable tie. The test rides
-      // each row (SQLite projects before it sorts and limits), but only a rank-1 row can meet it. The
-      // representation is spelled over whichever relation reads it, the tag re-read off ITS columns.
+      // rank-1 row whose group holds two representations (its least and greatest differ) is the observable
+      // tie. The test is a property of the GROUP, so it holds on whichever peer the pick lands on: a raising
+      // projection over a sorted slice is evaluated on the picked row alone (`NEEDS_SUBQUERY.project`,
+      // `src/rel/block.ts`). The representation is spelled over the relation that reads it.
       const reprOn = (id: RelId): Expr | null => {
         const tag = streamRowTag(values.rel, values.framing);
         return tieRepresentation(col(id, 'v'), tag && tag.kind === 'col' ? col(id, tag.name) : tag);
@@ -1088,12 +1089,13 @@ export function correlatedReduce(
       ] as const;
       const rows = !tieTerm && !classSpecs.length ? values.rel : make.window({
         id: fresh('mw'), input: values.rel, channels: values.rel.channels,
-        type: typeOf(...values.rel.type.cols, ...(tieTerm ? [meta('trk', 'int'), meta('tlo', 'any', true)] : []),
+        type: typeOf(...values.rel.type.cols, ...(tieTerm ? [meta('trk', 'int'), meta('tlo', 'any', true), meta('thi', 'any', true)] : []),
           ...classSpecs.map(([name]) => meta(name, 'int', true))),
         specs: [
           ...(tieTerm ? [
             ['trk', { kind: 'window-expr', fn: 'rank', args: [], spec: peers }],
             ['tlo', { kind: 'window-expr', fn: 'min', args: [tieTerm], spec: peers }],
+            ['thi', { kind: 'window-expr', fn: 'max', args: [tieTerm], spec: peers }],
           ] as const : []),
           ...classSpecs,
         ],
@@ -1103,7 +1105,7 @@ export function correlatedReduce(
       const cls = comparableClass(values.rel, values.framing);
       const tied: Expr = { kind: 'binary', op: 'and',
         left: { kind: 'binary', op: '=', left: col(winner.id, 'trk'), right: compilerInt(1) },
-        right: { kind: 'binary', op: 'is not', left: col(winner.id, 'tlo'), right: reprOn(winner.id) ?? compilerNull() } };
+        right: { kind: 'binary', op: 'is not', left: col(winner.id, 'tlo'), right: col(winner.id, 'thi') } };
       // THE RESULT'S CLASS — the stream's highest common number class over EVERY row (`NumberHelper.max`
       // promotes both sides, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:639-655`),
       // else (no Number at all — a String's `max`) the winner's own; read off the pick's class windows. The

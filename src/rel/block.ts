@@ -1,6 +1,7 @@
 import type { Expr } from './expr.ts';
 import type { Rel, RelKind } from './rel.ts';
 import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
+import { exprMayRaise } from './raise.ts';
 
 /**
  * WHERE A NODE LANDS IN THE ASSEMBLED SELECT — the emitter's fusion rules, stated once, as facts
@@ -120,7 +121,16 @@ export const NEEDS_SUBQUERY: { readonly [K in RelKind]: (input: Slots, node: Rel
   join: fusesNothing, recursive: fusesNothing,
   // A projection may overwrite the select list except over DISTINCT, or over a whole-relation
   // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
-  project: (b) => b.distinct || (grouped(b) && b.groupBy?.length === 0),
+  //
+  // …and over a SORTED SLICE (`ORDER BY … LIMIT`) when an expression RAISES: SQLite computes the select
+  // list of every row into the sorter before the `LIMIT` cuts it, so a raise arm fused there fires on rows
+  // the slice drops — `g.inject(1,0,1).limit(1).math('1/_')` raised `Division by zero!` for the `0` the
+  // reference never pulls (its start merge `1×2, 0` hands the slice `1` first,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ExpandableStepIterator.java:60-62`).
+  // A derived table evaluates the projection over the sliced rows alone.
+  project: (b, node) => b.distinct || (grouped(b) && b.groupBy?.length === 0)
+    || (b.orderBy !== undefined && (b.limit !== undefined || b.offset !== undefined)
+      && node.kind === 'project' && node.exprs.some(([, e]) => exprMayRaise(e))),
   // Over an aggregate a Filter IS `HAVING` — one of §3's declared collapses, not a second node.
   //
   // …EXCEPT when the predicate reads an AGGREGATE-VALUED column from INSIDE a subquery. Fusing re-inlines

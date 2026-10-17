@@ -294,14 +294,15 @@ describe('group / properties SQL', () => {
 
 
 
-  // `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key
-  // (`Grouping.determineBarrierStep` finds the barrier; `TailGlobalStep(1)` keeps the last to arrive,
-  // which is the members' own encounter order). It is the collecting arm plus one `$[#-1]`, which is
-  // why it declares `mapValue` like every other map and needs no shape of its own.
-  test('group().by(key).by(__.tail()) is the LAST member, through the collecting arm', () => {
+  // `by(__.tail())` — the group's value is the FIRST TRAVERSER routed to the key: `TailGlobalStep(1)` is the
+  // group's barrier, and its reducer `RangeBiOperator(1)` stops adding once the key holds one traverser
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:220-238`).
+  // It is the collecting arm plus one `$[0]`, which is why it declares `mapValue` like every other map and
+  // needs no shape of its own.
+  test('group().by(key).by(__.tail()) is the FIRST member, through the collecting arm', () => {
     const p = read('g.V().group().by("name").by(__.tail())');
     expect(p.shape).toEqual({ kind: 'mapValue' });
-    expect(p.sql).toContain("'$[#-1]'");
+    expect(p.sql).toContain("'$[0]'");
   });
 
 

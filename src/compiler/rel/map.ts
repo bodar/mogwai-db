@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
-import { countOf, isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
+import { countOf, isLocalScope, SLICE_STEPS, sliceOf, type IRStep } from '../ir/step.ts';
 import { isReferenceBarrier, placedMergeBefore } from '../ir/bulk.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
@@ -18,10 +18,10 @@ import { propertyNode } from './property.ts';
 import { byExpr, byNode, memberNodeOf, modulations, nodeProductivityFilter, producedMemberNode, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
-import { ALWAYS_PRODUCTIVE, relHostTag, type ChildHost, type ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, relHostTag, type ChildHost, type ChildRows, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
-import { raiseInRow } from '../../rel/raise.ts';
+import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -110,6 +110,8 @@ const MEMBER_COL = 'gt';
  *  otherwise — total either way, and a SEPARATE column from the member because a projected VALUE is not
  *  an order (two traversers can share one). */
 export const ORD_COL = 'go';
+/** A pooled member's value's FIRST arrival in its key — the merged `TraverserSet`'s order (`poolMergeGuard`). */
+const FIRST_ARRIVAL_COL = 'gfa';
 
 /**
  * `group()`/`groupCount()` with NO side-effect label — the barrier, as a map value, or `null` to
@@ -196,6 +198,9 @@ export interface GroupRecipe {
   /** `by(__.tail())` / an anonymous child value: the group's value is ONE member, extracted from the
    *  collected array's end, rather than the array itself. */
   readonly single: boolean;
+  /** `by(__.tail())`: the single member is the FIRST arrival (`RangeBiOperator(1)` stops adding once the key
+   *  holds one), not the last an anonymous child's `Operator.assign` keeps. */
+  readonly firstOnly?: boolean;
   /** The SHAPE of that single value — `{kind:'map', of}` for a MAP-producing child (`by(__.project())`,
    *  a nested `by(__.group())`), `{kind:'scalar'}` otherwise. What makes a `Map<K,Map>`'s `valOf` carry
    *  the inner map instead of collapsing to an opaque scalar. Unused when `single` is false. */
@@ -235,7 +240,7 @@ const elementMembers = (recipe: GroupRecipe): Elem | undefined =>
 /** May two sites' rows be grouped together? Structural over everything the aggregation reads, and it
  *  deliberately does NOT compare `step` — that is the strategy carrier, and one traversal has one. */
 export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
-  a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single
+  a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single && !!a.firstOnly === !!b.firstOnly
   && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
   && JSON.stringify(a.singleOf) === JSON.stringify(b.singleOf)
   && JSON.stringify(a.memberOf) === JSON.stringify(b.memberOf)
@@ -295,6 +300,130 @@ const dedupBeforeFold = (pre: readonly IRStep[]): boolean => {
   return at >= 0 && pre.slice(at + 1).every((bodyStep) => bodyStep.name === 'order' && !isLocalScope(bodyStep));
 };
 
+/**
+ * DOES THE POOL'S TRAVERSER-SET MERGE LEAVE THIS POOL-CUTTING BARRIER'S ANSWER UNCHANGED?
+ *
+ * A `FilteringBarrier` cut (`range`/`limit`/`skip`/`tail`) does not see the key's traversers in arrival
+ * order: `nextBarrier` gathers them into a `TraverserSet` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStepContract.java:95-103`,
+ * `…/filter/TailGlobalStepContract.java:56-64`), which MERGES equal traversers at the first one's
+ * position and sums their bulk, and members combine through `RangeBiOperator.addAll`
+ * (`…/filter/RangeGlobalStep.java:220-238`) — so equal values become ADJACENT before the slice reads
+ * them (`constant([1,2,1,3]).unfold().limit(3)` is `[1,1,2]`, not `[1,2,1]`). The pool here is the
+ * un-merged stream. A window that reads the FIRST traverser alone (`limit(1)`/`range(0,1)`: the merge never
+ * moves the first object) or keeps NOTHING is the same over both; every other slice cut is guarded at run
+ * time (`poolMergeGuard`). A reducing/collecting/dedup cut reads the pool as a multiset or a set and
+ * is not this question.
+ */
+const mergeInvariantPoolCut = (cut: IRStep): boolean => {
+  // A window that keeps NOTHING is empty however the pool is merged.
+  if (cut.name === 'tail') return countOf(cut) === 0;
+  if (!SLICE_STEPS.has(cut.name)) return true;
+  const window = sliceOf(cut);
+  return window.limit === 0 || (window.offset === 0 && window.limit === 1);
+};
+
+/** The deferral a pooled group value raises where its slice would read a merged `TraverserSet` that the
+ *  arrival-order pool does not state (`poolMergeGuard`). */
+export const POOL_MERGE_DEFERRAL = 'a group value whose slice reads repeated traversers out of arrival order is not supported yet';
+
+/** What `poolMergeGuard` asks of the pool: a predicate over its rows (`true` — none needed), and whether
+ *  the collected members must be re-read in MERGED order (`firstArrival`). */
+interface PoolMerge { readonly guard: Expr | true; readonly firstArrival: boolean }
+
+/**
+ * THE MERGE GUARD of a pooled value body cut by a slice — what makes the arrival-order pool answer as the
+ * reference's merged `TraverserSet`, or DEFER at run time where it cannot; `null` to decline.
+ *
+ * The pool slices each member's ARRIVAL stream (`child.rows`, one origin per member element). The reference
+ * slices the member's MERGED set — equal traversers collapsed into the first one's slot, bulk summed
+ * (`mergeInvariantPoolCut`) — and across several traversers of one key adds a later set only while the key
+ * holds fewer than `high` distinct ones (`RangeBiOperator`). Three facts make the pool's answer exact:
+ *  - where one origin's equal values arrive ADJACENT, its merged set is its arrival stream run-for-run, so a
+ *    slice by units is a slice by rows;
+ *  - where the cut keeps EVERY pre-cut row and ends the pre-body, the merge moves only ORDER, which the
+ *    collecting arm restates by first arrival (`firstArrival`) — `out().label().tail(10).fold()` is
+ *    `[person, person, software]`;
+ *  - a key holds one traverser where no input element repeats and no row stands for several.
+ * The guard reads the PRE-cut pool and defers where none of these holds. A label in the body joins a
+ * traverser's equality (`B_LP_O_S_SE_SL_Traverser.equals`), which a value test cannot see, so it declines.
+ */
+function poolMergeGuard(
+  pre: readonly IRStep[], input: Rel, host: Extract<ChildHost, { kind: 'element' }>, child: ChildSeam, fresh: Minter,
+  post: ChildRows,
+): PoolMerge | null {
+  const cut = pre.findIndex((bodyStep) => isReferenceBarrier(bodyStep));
+  if (cut < 0 || mergeInvariantPoolCut(pre[cut]!) || !(SLICE_STEPS.has(pre[cut]!.name) || pre[cut]!.name === 'tail')) return { guard: true, firstArrival: false };
+  if (pre.some((bodyStep) => bodyStep.name === 'as')) return null;
+  const pooled = child.rows(pre.slice(0, cut), input, host.elem, host.row?.aliases ?? NO_LABELS);
+  const identity = pooled && framingCols(pooled.framing);
+  const enc = pooled?.rel.channels.find((channel) => channel.role === 'encounter');
+  if (!pooled || !identity || !enc || !identity.every((column) => pooled.rel.type.cols.some((c) => c.name === column.name))) return null;
+  // The origin, the value's identity and its arrival — as plain columns, the pool's channels shed.
+  const named = make.project({
+    id: fresh('pgn'), input: pooled.rel, channels: [],
+    type: typeOf(meta('o', 'int', true), ...identity.map((column) => meta(column.name, 'any', true)), meta('pge', 'int', true)),
+    exprs: [
+      ['o', col(pooled.rel.id, pooled.origin)],
+      ...identity.map((column) => [column.name, col(pooled.rel.id, column.name)] as const),
+      ['pge', col(pooled.rel.id, enc.col)],
+    ],
+  });
+  const ranked = rowNumberWindow(named, 'pgr', [], {
+    partitionBy: [col(named.id, 'o')], orderBy: [{ expr: col(named.id, 'pge'), dir: 'asc' }],
+  }, fresh);
+  const runs = make.aggregate({
+    id: fresh('pga'), input: ranked, channels: [],
+    type: typeOf(meta('o', 'int', true), ...identity.map((column) => meta(`k_${column.name}`, 'any', true)),
+      meta('n', 'int'), meta('lo', 'int', true), meta('hi', 'int', true)),
+    groupBy: [col(ranked.id, 'o'), ...identity.map((column) => col(ranked.id, column.name))],
+    aggs: [
+      ['n', { kind: 'agg', fn: 'count', args: [] }],
+      ['lo', { kind: 'agg', fn: 'min', args: [col(ranked.id, 'pgr')] }],
+      ['hi', { kind: 'agg', fn: 'max', args: [col(ranked.id, 'pgr')] }],
+    ],
+  });
+  // A value of one origin that recurs after a different one: its arrival ranks are not one run.
+  const scatteredRuns = make.filter({
+    id: fresh('pgs'), input: runs, channels: [], type: runs.type,
+    pred: { kind: 'binary', op: '!=', left: { kind: 'binary', op: '+', left: { kind: 'binary', op: '-', left: col(runs.id, 'hi'), right: col(runs.id, 'lo') }, right: compilerInt(1) }, right: col(runs.id, 'n') },
+  });
+  // Where the cut ENDS the pre-body, an origin whose cut kept every pre-cut row is re-read in first-arrival
+  // order instead (`firstArrival`); anywhere else a scattered origin defers outright.
+  const firstArrival = cut === pre.length - 1;
+  const scattered = firstArrival ? (() => {
+    const origins = make.aggregate({
+      id: fresh('pgo'), input: scatteredRuns, channels: [], type: typeOf(meta('o', 'int', true)), groupBy: [col(scatteredRuns.id, 'o')], aggs: [],
+    });
+    const countOf = (rel: Rel, origin: Expr): Expr => {
+      const mine = make.filter({ id: fresh('pgf'), input: rel, channels: rel.channels, type: rel.type, pred: { kind: 'binary', op: '=', left: origin, right: col(origins.id, 'o') } });
+      return { kind: 'scalar', plan: make.aggregate({ id: fresh('pgc'), input: mine, channels: [], type: typeOf(meta('n', 'int')), groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]] }) };
+    };
+    return make.filter({
+      id: fresh('pgd'), input: origins, channels: [], type: origins.type,
+      pred: { kind: 'binary', op: '!=', left: countOf(named, col(named.id, 'o')), right: countOf(post.rel, col(post.rel.id, post.origin)) },
+    });
+  })() : scatteredRuns;
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  const members = make.aggregate({
+    id: fresh('pgm'), input, channels: [], type: typeOf(meta('i', 'int', true), meta('n', 'int', true)),
+    groupBy: [col(input.id, 'id')],
+    aggs: [['n', bulk ? { kind: 'agg', fn: 'sum', args: [col(input.id, bulk.col)] } : { kind: 'agg', fn: 'count', args: [] }]],
+  });
+  const repeated = make.filter({
+    id: fresh('pgp'), input: members, channels: [], type: members.type,
+    pred: { kind: 'binary', op: '>', left: col(members.id, 'n'), right: compilerInt(1) },
+  });
+  const merges: Expr = {
+    kind: 'binary', op: 'or',
+    left: { kind: 'exists', negated: false, plan: scattered },
+    right: { kind: 'exists', negated: false, plan: repeated },
+  };
+  return {
+    guard: { kind: 'case', whens: [[merges, deferralExpr(POOL_MERGE_DEFERRAL, { kind: 'call', fn: 'random', args: [] })]], else: compilerInt(1) },
+    firstArrival,
+  };
+}
+
 /** Is this value-body step a non-local `Barrier` — what `Grouping.determineBarrierStep` stops at? */
 const isValueBarrier = (step: IRStep): boolean =>
   reducesPool(step) || (NON_REDUCING_BARRIERS.has(step.name) && !isLocalScope(step));
@@ -348,14 +477,18 @@ export function groupRows(
   // `groupCollected`, whose pool exists for a NON-empty pre-fold body.
   const valueBy = bareFold(named(bys[1]));
   /**
-   * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
+   * `by(__.tail())` — the group's value is the FIRST TRAVERSER routed to the key, which is the collecting
    * arm with one extraction rather than a value projection.
    *
-   * `Grouping.determineBarrierStep` finds the value traversal's barrier and makes it the group's
-   * reducer, and `TailGlobalStep(1)` keeps the last traverser to arrive — the members' own encounter
-   * order, which is the order the collecting aggregate already states. So this is `member: undefined`
-   * (collect the ELEMENTS) plus the `$[#-1]` the child-assign arm below already spells; nothing about
-   * the pooling, the ordering or the framing is new.
+   * `Grouping.determineBarrierStep` makes the value traversal's `TailGlobalStep(1)` the group's barrier, and
+   * its reducer is `RangeBiOperator(1)` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/TailGlobalStep.java:129-131`),
+   * which adds a later traverser's set to the key's ONLY while the key holds fewer than one distinct
+   * traverser (`…/filter/RangeGlobalStep.java:220-238`; `GroupStep.GroupBiOperator`,
+   * `…/step/map/GroupStep.java:205-216`). So the key keeps its first arrival and `doFinalReduction`'s
+   * `tail(1)` reads that one — `g.V().both().group().by(label).by(tail())` is `person: v[2]`, where reading
+   * the LAST arrival answered `v[4]`. It is the members' own encounter order, which the collecting
+   * aggregate already states, plus a `$[0]` (`GroupRecipe.firstOnly`); nothing about the pooling, the
+   * ordering or the framing is new.
    *
    * A `tail(n>1)` keeps n and is therefore a LIST value — a different shape, and one nothing produces
    * yet, so it declines rather than silently answering the one-member case.
@@ -610,6 +743,7 @@ export function groupRows(
       keyElem: elementKey?.elem,
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
       single: lastOnly || valueBy?.key.kind === 'child',
+      ...(lastOnly ? { firstOnly: true } : {}),
       singleOf,
       ...(memberOf ? { memberOf } : {}),
       // A by()-less entry re-group (`memberOf` set) has no value `by()` to be unproductive, and its member
@@ -794,9 +928,10 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   };
   const groupedValue: Expr = single
     // ONE aggregate pass over the grouped block: order the typed `{t,v}` nodes by encounter, collect
-    // them as JSON (so the envelope is embedded rather than stringified), then select the last one.
+    // them as JSON (so the envelope is embedded rather than stringified), then select the last one — or
+    // the first, for `by(tail())` (`firstOnly`).
     // The child expression itself already yields only its first value for one parent traverser.
-    ? { kind: 'call', fn: 'json_extract', args: [memberAggregate, compilerText('$[#-1]')] }
+    ? { kind: 'call', fn: 'json_extract', args: [memberAggregate, compilerText(recipe.firstOnly ? '$[0]' : '$[#-1]')] }
     : {
         kind: 'json-object',
         entries: [['t', compilerText('list')], ['v', memberAggregate]],
@@ -930,9 +1065,13 @@ function groupReduced(
     : projected;
   const keyed = make.materialize({ id: fresh('rm'), input: arms, channels: [], type: arms.type });
   const drop = nodeProductivityFilter(step, col(keyed.id, KEY_COL));
-  const rowsIn = drop
+  const unguarded = drop
     ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
     : keyed;
+  // An order-free reducer reads the pool as a multiset, so only the guard applies (`firstArrival` is moot).
+  const merge = poolMergeGuard(pre, input, host, child, fresh, rows);
+  if (!merge) return null;
+  const rowsIn = merge.guard === true ? unguarded : make.filter({ id: fresh('rg'), input: unguarded, channels: [], type: unguarded.type, pred: merge.guard });
   // A REDUCER reads the pooled VALUES with no bulk weighting — the child rows are the pool, one
   // traverser each, and re-applying a collapsed parent's multiplicity would count every walk twice. A
   // COUNT sums the weight column the projection above built, `COALESCE`d for the reason `countExpr`
@@ -1110,7 +1249,18 @@ function groupCollected(
   // `ProductiveByStrategy` exception) the barrier's own key obeys — asked here because the seed can
   // introduce a null key a real member never would.
   const drop = nodeProductivityFilter(step, col(keyed.id, KEY_COL));
-  const rowsIn = drop ? make.filter({ id: fresh('cf'), input: keyed, channels: [], type: cols, pred: drop }) : keyed;
+  const unguarded = drop ? make.filter({ id: fresh('cf'), input: keyed, channels: [], type: cols, pred: drop }) : keyed;
+  const merge = poolMergeGuard(pre, input, host, child, fresh, pooledRows);
+  if (!merge) return null;
+  const guarded = merge.guard === true ? unguarded : make.filter({ id: fresh('cg'), input: unguarded, channels: [], type: cols, pred: merge.guard });
+  // MERGED ORDER: each member at its value's FIRST arrival in the key (`poolMergeGuard`'s `firstArrival`) —
+  // the arrival order itself wherever equal values were already adjacent.
+  const rowsIn = merge.firstArrival
+    ? make.window({
+      id: fresh('cw'), input: guarded, channels: [], type: typeOf(...cols.cols, meta(FIRST_ARRIVAL_COL, 'int', true)),
+      specs: [[FIRST_ARRIVAL_COL, { kind: 'window-expr', fn: 'min', args: [col(guarded.id, ORD_COL)], spec: { partitionBy: [col(guarded.id, KEY_COL), col(guarded.id, MEMBER_COL)], orderBy: [] } }]],
+    })
+    : guarded;
   // The COLLECTING arm frames the list, drops the seed (`memberDrop`), orders by encounter and wraps the
   // members in a `{t:'list', v}` node — a `by(<pre>.fold())` is that arm over a pooled row set.
   const recipe: GroupRecipe = {
@@ -1118,7 +1268,7 @@ function groupCollected(
     member: rows.framing.kind === 'elements' ? { kind: 'rowid', host: { kind: 'element', id: valueCol, elem: rows.framing.elem } } : { kind: 'node' },
     single: false, memberDrop: true, bulkCol: undefined, step, ...(mapMember ? { memberOf: mapMember } : {}),
   };
-  const grouped = groupMap(rowsIn, recipe, source, fresh);
+  const grouped = groupMap(rowsIn, recipe, source, fresh, merge.firstArrival ? [FIRST_ARRIVAL_COL, ORD_COL] : [ORD_COL]);
   return grouped;
 }
 
