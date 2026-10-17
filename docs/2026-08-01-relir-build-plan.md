@@ -778,6 +778,11 @@ authorities.
   argument-less count renders `count(1)` over any derived table (`countArgument`, `src/rel/emit.ts`) — SQLite's
   countOfViewOptimization miscounts a correlated nested UNION ALL; a correlated merged sort goes unfenced.
   L3 1871 -> 1873. Residue: cap() BulkSet member grouping (outstanding-work.md, collection substrate).
+  ✅ **Arm fold order LANDED ON TRUNK 2026-10-17 (`44039caa`, ff-union-arm-fold).** A fold inside a branch arm
+  reads the branch INPUT's order, never its own content sort (`BranchStep.java:143-153`, `FoldStep` keeps arrival
+  order): ONE predicate `armCollectsInOrder` (`ir/analyze.ts`) seeds the source encounter in
+  `computeDemandsEncounter` and makes `emissionSource` (union/choose/option) require a positioned input or
+  DECLINE. Pinned in `test/L4-addendum/branch-arm-collect-order.feature`; no baseline moved.
 - 🚧 **C — the number/type channel.** Authority: `util/GremlinValueComparator.java` (Number is one rung,
   compared by `NumberHelper.compare`), `util/NumberHelper.java` `performConversion` (throws on an infinite or
   out-of-range double), `SumGlobalStep` / `MaxGlobalStep` / `MeanGlobalStep`, `Max.feature`'s `d[1.0].d`.
