@@ -1003,6 +1003,13 @@ authorities.
   endpoint runs the `property(k, <traversal>)` race guard, a literal-id source gets a program-start existence
   pre-check (`ProgramWrites.preChecks`); `sum` keeps the reference number class. The per-traverser write driver
   (full design above) is still open.
+  ✅ **Set-based merge interleave + write-after-write LANDED 2026-10-17 (`80b140d5`, `92e696d3`, `f65fc061`,
+  `5c65b9d7`):** a shared creation runs later drivers' onMatch set-based (rank one creates, the rest match); a
+  BranchStep arm holding a barrier is fed every start (`unbulkedAt`); ONE authority `writeAfterWrite`/`overwrites`
+  (`src/compiler/rel/write.ts`) treats every writer — property run, label mutation, addV/addE, merge (onMatch keys
+  + search reads via `mergeSiteOf`), drop (kind- and key-scoped) — as a site, refusing a clash over >1 traverser.
+  LEFT: the READ-after-write class (a later read of an EARLIER traverser's write, incl. another traverser's
+  creation) — `docs/outstanding-work.md`; needs `sequentialGuard`'s per-element split + `bulk.ts` barrier positions.
   ✅ **Keyed side effect run per traverser behind a slice LANDED 2026-10-17 (`ffca8f77`):** `local`/`map`/`flatMap`
   (`__.aggregate('a')`) spliced by `inlineIdentityHostBody`, then sliced, answered the full collection;
   `ProgramWrites.truncated` now counts a KEYED side-effect collector (`collectsSideEffect`: aggregate, keyed
@@ -1064,7 +1071,7 @@ authorities.
 | 4 | ✅ D — required `present` (landed `2b0b1e27`; fix-forward `da957253`..`3275d454`) | M | small once E adds the third `ChildValue` field in the same pass |
 | 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
 | 6 | ✅ B — the `EmissionKey` stack (landed `55a175a6`; fix-forward `2e917115`) | L | needs A |
-| 7 | F — set-based merge interleave + writer-stream guard | M | independent; can run alongside 3–6 |
+| 7 | ✅ F — set-based merge interleave + writer-stream guard (landed `80b140d5`..`5c65b9d7`; read-after-write residue open) | M | independent; can run alongside 3–6 |
 
 **Per parked branch — resume or rebuild** (all tips fork from `2c3000b2`).
 
