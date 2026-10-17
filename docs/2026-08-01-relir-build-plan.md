@@ -881,6 +881,11 @@ authorities.
   the host still DECLINES: carrying it out of the host's merge is the next increment. `LazyBarrierStrategy`'s
   `NoOpBarrierStep`s are deliberately not drains (a barrier holds at most 2500 traversers, so what it pulls
   ahead depends on the data), which is why `sack(sum).by('age').out().limit(1)` declines.
+  ✅ **Rounds 1–2 + per-start extent LANDED ON TRUNK 2026-10-17 (`af39d584`..`0d20446d`).** Last increment:
+  `union` is NOT a lazy per-start body host (`LAZY_BODY_HOSTS`, `raise-channel.ts`) — `BranchStep` never
+  resets its child, so a body slice's pull count is data-dependent (`step/branch/BranchStep.java`); a raise
+  before a `union()`-body slice now declines (pinned in `test/L4-addendum/raise-extent.feature`). Census and
+  L3 unchanged. Open: carrying a raise out of a branch arm / `optional()` / `local()` merge under a later slice.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
