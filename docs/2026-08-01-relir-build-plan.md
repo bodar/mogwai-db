@@ -941,6 +941,15 @@ authorities.
   behind `order()` now @Unsupported). property() mutating children raise `VerificationException`
   (`StandardVerificationStrategy.java:87-101`); no bare Error on a user path (services, federate); ±Infinity in
   collections spelled `9.0e+999`. Baseline moved: sql-hygiene bytes (the fence itself).
+  ✅ **Error-surface residue LANDED ON TRUNK 2026-10-17 (`b55a5de8`..`609ffe12`, ff-error-surface).** Every
+  user-reachable failure is `UnsupportedTraversal` / the reference's own text / a data-decided raise, never a
+  raw JS/SQLite/bare Error: a NaN element id honours `constLit`'s decline at its one site (`source.ts`);
+  `asNumber()` parses via the `isCreatable`/`createNumber` port and a non-finite → BIGDECIMAL declines
+  (`coerce.ts`, `transform.ts`); ±Infinity prints `Infinity` at the one `floatingText` authority; `regex()` is
+  read in Java's `Pattern` dialect (`regex.ts` `javaPatternAsJs`; a construct the dialects read differently
+  declines; an escape reads a whole code point) and the trigram prefilter never reads a group or half an
+  escape as a mandatory run. Pinned in `test/error-surface.test.ts` + the randomized differential in
+  `test/regex.test.ts`. Baseline moved: sql-hygiene bytes (run-time NaN/infinity guard, Infinity arms).
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
