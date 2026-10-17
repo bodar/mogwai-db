@@ -15,7 +15,7 @@ import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -210,6 +210,9 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
   const dropping = present !== ALWAYS_PRODUCTIVE;
   const PRESENT = 'mp';
   const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
+  // A body whose value may RAISE never reaches here as always-productive (`raisingPresence`), so the
+  // presence filter below EVALUATES the value even where the tail never reads it —
+  // `local(__.values('age').toUpper().fold()).count()` answered the count before.
   const projected = make.project({
     id: fresh('mc'), input: rel, channels,
     type: typeOf(...cols, ...(dropping ? [meta(PRESENT, 'int', true)] : [])),
@@ -257,9 +260,12 @@ export function reductionArm(
   const terminal = body.at(-1);
   if (body.length < 2 || !terminal || !selfCollapses(terminal.name)) return null;
   if (framing.kind !== 'elements' && framing.kind !== 'scalar') return null;
-  const produced = scalarChild(body, reductionHost(domain, framing, labels), ctx, fresh);
+  // The gate asks whether the body ALWAYS PRODUCES — the IR's `alwaysProduces` claim the coalesce
+  // exhaustion rests on — so it reads the value BEFORE its raise joins the productivity claim: a body that
+  // produces or raises still exhausts the coalesce, and the tail's presence filter then evaluates the raise.
+  const produced = scalarChildValue(body, reductionHost(domain, framing, labels), ctx, fresh);
   if (!produced || produced.yields !== 'one' || produced.present !== ALWAYS_PRODUCTIVE) return null;
-  return reductionTail(domain, produced, fresh, labels, bulked);
+  return reductionTail(domain, raisingPresence(produced), fresh, labels, bulked);
 }
 
 export function perTraverserChild(
@@ -1362,7 +1368,15 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
 }
 
+/** A child body's ONE value per host row — `scalarChildValue`'s answer with a raising body's raise made
+ *  part of its productivity claim (`raisingPresence`), so every host that asks only whether the body
+ *  produced still meets the raise. */
 export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
+  const produced = scalarChildValue(body, host, outer, fresh);
+  return produced && raisingPresence(produced);
+}
+
+function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   // A child VALUE is a correlated per-row read; a write anywhere in it (an arm of a `choose`/`coalesce`,
   // a `by()` of a `by()`) is a statement it has nowhere to declare (`writesAnywhere`).

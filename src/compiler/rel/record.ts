@@ -10,6 +10,7 @@ import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
+import { raisingColumns } from './receiver.ts';
 import type { GraphSource } from './source.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
@@ -189,14 +190,14 @@ export function recordOf(
     if (!expr) throw new Error(`RelIR lowering: record field column ${column.name} has no expression`);
     return [column.name, expr] as const;
   });
-  return {
-    rel: make.project({
-      id: fresh('rc'), input, channels: input.channels,
-      type: typeOf(...cols, ...carriedCols(input.channels)),
-      exprs: [...payload, ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-    }),
-    fields,
-  };
+  const record = make.project({
+    id: fresh('rc'), input, channels: input.channels,
+    type: typeOf(...cols, ...carriedCols(input.channels)),
+    exprs: [...payload, ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+  });
+  // A field whose by() may RAISE is evaluated on every row whether or not a consumer reads it
+  // (`raisingColumns`): `project('x').by(__.values('age').toUpper()).count()` answered the count.
+  return { rel: raisingColumns(record, payload, fresh), fields };
 }
 
 /**

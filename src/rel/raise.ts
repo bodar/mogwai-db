@@ -1,6 +1,6 @@
 import { compilerText, type Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
-import { forEachExpr, forEachRel, relExprs } from './walk.ts';
+import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
 
 /**
  * A ROW-LEVEL RAISE — an expression that aborts the statement with a message of our choosing, for the
@@ -79,6 +79,16 @@ export function mayRaise(plan: Rel): boolean {
   let found = false;
   forEachRel(plan, (r) => {
     if (!found) relExprs(r).forEach((e) => forEachExpr(e, (node) => { if (isRaise(node)) found = true; }));
+  });
+  return found;
+}
+
+/** CAN EVALUATING THIS EXPRESSION RAISE — a `raiseExpr` arm in it, or in a correlated subplan it reads
+ *  (`mayRaise`'s question asked of one value rather than of a relation). */
+export function exprMayRaise(e: Expr): boolean {
+  let found = false;
+  forEachExpr(e, (node) => {
+    if (!found && (isRaise(node) || exprRels(node).some(mayRaise))) found = true;
   });
   return found;
 }

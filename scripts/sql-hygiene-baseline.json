@@ -55,14 +55,14 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 2358,
+    "bytes": 2495,
     "compiler": 80,
     "bound": 0
   },
   "asString": {
     "binds": 0,
-    "bytes": 4076,
-    "compiler": 91,
+    "bytes": 4522,
+    "compiler": 107,
     "bound": 0
   },
   "both": {
@@ -103,8 +103,8 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 2658,
-    "compiler": 39,
+    "bytes": 3092,
+    "compiler": 49,
     "bound": 0
   },
   "conjoin": {
@@ -451,8 +451,8 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 2487,
-    "compiler": 57,
+    "bytes": 2648,
+    "compiler": 58,
     "bound": 0
   },
   "properties": {
@@ -463,7 +463,7 @@
   },
   "property": {
     "binds": 20,
-    "bytes": 8153,
+    "bytes": 10014,
     "compiler": 301,
     "bound": 0
   },
@@ -493,8 +493,8 @@
   },
   "sack": {
     "binds": 0,
-    "bytes": 701,
-    "compiler": 8,
+    "bytes": 728,
+    "compiler": 9,
     "bound": 0
   },
   "sample": {
@@ -505,7 +505,7 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 19741,
+    "bytes": 11539,
     "compiler": 150,
     "bound": 0
   },

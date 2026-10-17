@@ -1,5 +1,9 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
-import { raiseInRow as raise } from '../../rel/raise.ts';
+import * as make from '../../rel/factory.ts';
+import { exprMayRaise, raiseInRow as raise } from '../../rel/raise.ts';
+import type { Rel } from '../../rel/rel.ts';
+import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
+import type { Minter } from './build.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
@@ -151,6 +155,52 @@ export function receiverOffence(
 export const raisingWhen = (offences: readonly (readonly [Expr, string])[], value: Expr): Expr =>
   offences.length ? { kind: 'case', whens: offences.map(([test, message]) => [test, raise(message)] as const), else: value } : value;
 
+/**
+ * THE ONE RUNTIME VALUE RAISE OVER A STREAM — a `Filter` over `rel` that raises an offence's message on
+ * an offending row and keeps every other row (and applies a raising `asNumber` fence where one is passed).
+ *
+ * A WHERE rather than part of the value, because a position that consumes only EXISTENCE (`count()`, a
+ * `where`/`not` body, a `choose` condition, a `fold()`/`path()` that never reads a carried channel) never
+ * reads the value, and SQLite PRUNES an unread select-list expression together with the raise inside it,
+ * while the reference raises there all the same. IN-STATEMENT rather than a separate guard statement
+ * (`Binding.guard`): the guard re-ran the whole upstream as a second statement — a second, independent
+ * draw of any `coin()`/`sample()` above it. `Binding.guard` is kept for what only a statement can decide
+ * (§6·5's graph-dependent refusals); every per-row VALUE error of a stream lands here — the scalar fold's
+ * receiver offences (asString/asNumber/concat/dateDiff/the string family) and the sack's operator
+ * offences (`sack.ts`) alike.
+ */
+export function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr): Rel {
+  if (!offences.length && !fence) return rel;
+  return make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type, pred: raisingWhen(offences, fence ?? compilerInt(1)) });
+}
+
+/**
+ * `raisingRows` FOR A VALUE BUILT ELSEWHERE — a host that projects a child body's value as a column
+ * (`project().by(…)`'s field, a `local()`/`map()` body's result) cannot see the body's offences, only
+ * the value that carries them. Where that value MAY RAISE (`exprMayRaise`: a raise arm in it or in a
+ * correlated subplan it reads), the column is EVALUATED by a row predicate as well, for the reason a
+ * receiver offence is a WHERE: a consumer that never reads the column (`count()`, `select()` of a sibling
+ * field) prunes it, raise and all, where the reference evaluates the by()/body for every traverser
+ * (`ProjectStep.map`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:63-69`;
+ * a `LocalStep`/`TraversalMapStep` body likewise). The predicate is always true — `typeof()` is never
+ * `'raise'` — but it cannot be decided without evaluating the column. A value that cannot raise costs
+ * nothing: no filter is added.
+ */
+export function raisingColumns(rel: Rel, columns: readonly (readonly [string, Expr])[], fresh: Minter): Rel {
+  const raising = columns.filter(([, expr]) => exprMayRaise(expr));
+  if (!raising.length) return rel;
+  // FENCED where the relation is self-contained, so the test reads a computed column rather than
+  // re-inlining the value (often a correlated aggregate) beside every reader of it — the same gate
+  // `recordToMap`'s fence uses (`freeRelIds`; a walk's own reference may not be hoisted either).
+  const base = freeRelIds(rel).size === 0 && !containsSelfRef(rel)
+    ? make.materialize({ id: fresh('txm'), input: rel, channels: rel.channels, type: rel.type })
+    : rel;
+  const evaluated = raising.map(([name]): Expr =>
+    ({ kind: 'binary', op: 'is not', left: { kind: 'call', fn: 'typeof', args: [{ kind: 'col', rel: base.id, name }] }, right: text('raise') }));
+  const pred = evaluated.reduce((left, right) => and(left, right));
+  return make.filter({ id: fresh('txe'), input: base, channels: base.channels, type: base.type, pred });
+}
+
 /** The reference's message for a string-family step over a non-String receiver — the corpus-checked
  *  prefix (`ToUpper.feature`/`Concat.feature`: "message containing text of"). The offending class is
  *  not interpolated: an in-statement raise carries a literal, and the class is per row. */
@@ -223,7 +273,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
     if (tag === 'string') return value;
     if (INTEGRAL_TAGS.includes(tag)) return cast;
     if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double') return nullable(doubleText(value));
+    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float' ? FLOAT_DIGITS : undefined));
     return null;
   }
   // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
@@ -234,19 +284,39 @@ export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
   return { kind: 'case', whens: [
     [inList(type, ['null', 'text', 'integer', ...(tagged ? ['string', ...INTEGRAL_TAGS] : [])]), cast],
     ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
-    [inList(type, ['real', ...(tagged ? ['double'] : [])]), doubleText(value)],
+    // ONE floating arm for a Double and a Float: they differ only in the digit cap, which is per row.
+    [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]),
+      floatingText(value, tagged ? { kind: 'case', whens: [[inList(type, ['float']), FLOAT_DIGITS]], else: DOUBLE_DIGITS } : undefined)],
   ], else: raise(deferral('asString(): rendering this value at run time')) };
 }
 
-/** A non-null Double's `Double.toString`, where SQLite's 15-digit text is that string — else the
- *  deferral. Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`). */
-function doubleText(value: Expr): Expr {
+/**
+ * A non-null floating Number's `toString` where SQLite's 15-digit text is that string — else the deferral.
+ * Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`).
+ *
+ * A DOUBLE's `Double.toString` is the shortest decimal that round-trips, and inside the plain range a
+ * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT's `Float.toString` is the shortest
+ * decimal that rounds to the FLOAT; it is held as the double of its 32-bit value, so its exact decimal is
+ * SQLite's text only where that text round-trips, and that decimal is the float's SHORTEST one only where
+ * it has at most 7 significant digits (`digits`): a shorter or nearer decimal would have to lie within
+ * half a float ulp (≤ 2^-24 relative) of a ≤7-digit decimal, whose own last-place unit is ≥ 10^-7
+ * relative. So `1.5f` and `254.0f` render, and `1.00390625f` (Java: `1.0039062`) raises the deferral
+ * rather than print a different string.
+ */
+function floatingText(value: Expr, digits: Expr | undefined): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
   const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
   const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
-  const roundTrips: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
+  const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
+  // The significant digits of the shown text: drop the sign and the point, then the leading and trailing
+  // zeros (`254.0` → `2540` → `254`, `0.125` → `0125` → `125`).
+  const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
+  const significant = call('length', call('rtrim', call('ltrim',
+    call('replace', call('replace', shown, text('-'), text('')), text('.'), text('')), text('0')), text('0')));
+  const roundTrips: Expr = digits === undefined ? exact
+    : and(exact, { kind: 'binary', op: '<=', left: significant, right: digits });
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
   // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
   // renders `0.0`, and `-0.0 < 0` is false). `atan2(±0, -1)` is ±π, the one comparison that reads the
@@ -254,8 +324,12 @@ function doubleText(value: Expr): Expr {
   const negative: Expr = { kind: 'binary', op: '<', left: { kind: 'call', fn: 'atan2', args: [real, compilerReal(-1)] }, right: int(0) };
   const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
   return { kind: 'case', whens: [[zero, signedZero], [and(plain, roundTrips), shown]],
-    else: raise(deferral('asString(): a Double outside the plain shortest form')) };
+    else: raise(deferral('asString(): a floating-point Number outside the plain shortest form')) };
 }
+
+/** A Float's significant-digit cap (`floatingText`), and a Double's — any 15-digit text satisfies it. */
+const FLOAT_DIGITS: Expr = compilerInt(7);
+const DOUBLE_DIGITS: Expr = compilerInt(17);
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to
  *  the per-row type and value it goes on to name. */
@@ -290,7 +364,7 @@ function castableDigits(value: Expr): Expr {
 
 /** A run-time deferral raised from inside a statement — the same convention `operator.ts` uses for an
  *  answer this compiler cannot reproduce (`… is not supported`), never a plausible value. */
-const deferral = (what: string): string => `${what} is not supported yet`;
+export const deferral = (what: string): string => `${what} is not supported yet`;
 
 /**
  * THE STEP-TO-REL DISPATCH'S ONE RECEIVER CHECK — what a scalar transform's receiver owes for that step:

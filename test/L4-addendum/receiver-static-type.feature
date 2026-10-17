@@ -412,3 +412,143 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
     Then the result should be unordered
       | result |
       | str[-0.0] |
+
+  # The sack operator's raise is a ROW PREDICATE (`raisingRows`, src/compiler/rel/receiver.ts), not a CASE
+  # inside the folded value: a sack nobody reads afterwards is a select-list column SQLite prunes, and the
+  # raise went with it — so whether the query failed depended on the step that came next. The reference
+  # raises on every traverser whatever follows (`Operator.sum`'s `(Number)` cast,
+  # vendor/tinkerpop/gremlin-core/.../process/traversal/Operator.java).
+  Scenario: g_withSackX1X_V_sackXsumX_byXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by("name")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  Scenario: g_withSackX1X_V_sackXsumX_byXnameX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by("name").count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  Scenario: g_withSackX1X_V_sackXsumX_byXnameX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by("name").fold()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  Scenario: g_withSackX1X_V_sackXsumX_byXnameX_path
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by("name").path()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  Scenario: g_withSackXtrueX_V_sackXsumX_byXageX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().sack(Operator.sum).by("age").count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  # The same raise inside a correlated child body, where the sack cannot be fenced and an existence-only
+  # consumer (count) never reads it.
+  Scenario: g_V_localXsackXassignX_byXageX_sackXsumX_byXnameX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.sack(Operator.assign).by("age").sack(Operator.sum).by("name").count())
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an operand that is not a Number"
+
+  # min/max compare two Numbers through their common class and anything else with `compareTo`
+  # (NumberHelper.min(Comparable, Comparable), vendor/tinkerpop/gremlin-core/.../util/NumberHelper.java:582-598),
+  # a ClassCastException for an Integer against a String or a Boolean. SQLite's MIN answered 1.
+  Scenario: g_withSackX1X_V_sackXminX_byXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.min).by("name")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "not mutually Comparable"
+
+  Scenario: g_withSackX1X_V_sackXminX_byXconstantXtrueXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.min).by(__.constant(true)).count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "not mutually Comparable"
+
+  Scenario: g_withSackXzX_V_hasLabelXsoftwareX_sackXminX_byXnameX_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack("m").V().hasLabel("software").sack(Operator.min).by("name").sack()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | m |
+
+  # An integral `div` by zero is the integral helper's ArithmeticException (NumberHelper.java:138-142); SQLite
+  # answered NULL.
+  Scenario: g_withSackX1X_injectX1X_sackXdivX_byXconstantX0XX_sack
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSack(1).inject(1).sack(Operator.div).by(__.constant(0)).sack()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "/ by zero"
+
+  Scenario: g_withSackX1X_injectX1X_sackXdivX_byXconstantX0XX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSack(1).inject(1).sack(Operator.div).by(__.constant(0)).count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "/ by zero"
+
+  # A by()-less fold of a NULL traverser folds the null — SackValueStep drops only for an unproductive by()
+  # (vendor/tinkerpop/gremlin-core/.../step/sideEffect/SackValueStep.java:73-80) — and a null operand
+  # leaves the sack (NumberHelper.java:402). The traverser was dropped.
+  Scenario: g_withSackX1X_injectXnullX_sackXsumX_sack
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSack(1).inject(null).sack(Operator.sum).sack()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+
+  Scenario: g_withSackX1_5fX_V_sack_asString
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1.5f).V().hasLabel("software").sack().asString()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | str[1.5] |
+      | str[1.5] |

@@ -317,18 +317,19 @@ describe('group / properties SQL', () => {
   test('a sack is an ordinary carried CHANNEL — RelIR', () => {
     const store = seededStore();
     const rel = {} as const;
-    // THE WHOLE RUN FUSES: the seed, the fold and the read are three `Project`s over one relation, and
-    // the block assembler puts them in one SELECT. So the assertion worth making is that the SEED is a
-    // compile-time constant inlined into the fold, not that a named relation carries it.
+    // The seed is a compile-time constant inlined where the fold names its operands; a self-contained fold
+    // is FENCED (`sack.ts`), so the fold reads the sack and its by() value as plain columns rather than
+    // re-inlining them at every one of its spellings (the value, the tag, the raise test).
     const p = read('g.withSack(0.0d).V().sack(sum).by("age").sack()', rel);
     expect(p.kind).toBe('read');
     // The sack carries its own per-row TYPE TAG (`sackt`), so its read frames by it rather than inferring.
     expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    expect(p.sql).toContain('(0.0 + (SELECT');
+    expect(p.sql).toContain('0.0 AS sack');
+    expect(p.sql).toMatch(/\(skz\d+\.sack \+ skz\d+\.skv\) AS v/);
     expect(p.binds).toEqual([]);
-    // `div` is REAL division where either operand's TAG is floating, and integer division otherwise —
-    // `NumberHelper`'s integral helpers truncate, so `withSack(1).sack(div).by(constant(2))` is 0.
-    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', rel).sql).toContain('CAST(2 AS REAL) / 4.0');
+    // `div` is REAL division where the operands' COMMON class is floating, and integer division otherwise
+    // — `NumberHelper`'s integral helpers truncate, so `withSack(1).sack(div).by(constant(2))` is 0.
+    expect(runWith(store, 'g.withSack(2).V(1).sack(div).by(__.constant(4.0d)).sack()', rel).map((r) => r.v)).toEqual([0.5]);
     expect(runWith(store, 'g.withSack(1).V(1).sack(div).by(__.constant(2)).sack()', rel).map((r) => r.v)).toEqual([0]);
     // `assign` needs no prior value, so it MINTS the channel where no `withSack()` seeded one.
     expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v)).toEqual([29, 27, 32, 35]);

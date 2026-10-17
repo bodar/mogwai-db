@@ -42,7 +42,7 @@ import { byExpr, modulations, orderProductivity, productivityFilter, type Modula
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
-import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
+import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { CLASS_MASK, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
 import { raiseExpr } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
@@ -1168,22 +1168,6 @@ function naturalSort(
  * scope — is READ OFF `rel` rather than tracked beside it. Two accumulator variables used to shadow
  * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
-/**
- * THE SCALAR FOLD'S ONE RUNTIME VALUE RAISE — a `Filter` over `rel` that raises an offence's message on
- * an offending row and keeps every other row (and applies a raising `asNumber` fence where one is passed).
- *
- * A WHERE rather than part of the value, because a position that consumes only EXISTENCE (`count()`, a
- * `where`/`not` body, a `choose` condition) never reads the value, and the reference raises there all
- * the same. IN-STATEMENT rather than a separate guard statement (`Binding.guard`): the guard re-ran the
- * whole upstream as a second statement — a second, independent draw of any `coin()`/`sample()` above
- * it. `Binding.guard` is kept for what only a statement can decide (§6·5's graph-dependent refusals);
- * every per-row VALUE error of this fold lands here, through the receiver authority's offences
- * (`receiver.ts`), so one rule covers asString/asNumber/concat/dateDiff/the string family alike.
- */
-function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr): Rel {
-  if (!offences.length && !fence) return rel;
-  return make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type, pred: raisingWhen(offences, fence ?? compilerInt(1)) });
-}
 
 /** The column a `projectRaising` projection carries its raise test in, read once by the filter above it. */
 const RAISE_COL = 'rz';
