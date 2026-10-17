@@ -29,7 +29,7 @@ lowered.
   reducer **type** (`produced.vtype`) and **productivity** (empty-child NULL-ness) as two carried facts,
   so `by(sum/mean/…)` lands uniformly across `project`/`aggregate`/`store`/`where` (`group().by(k).by(__.…sum())`
   already works; the sibling hosts drop the fact). Rules RelIR §6·7; live gaps §10.
-  **Numeric RESULT CLASS** — the class is exact (§6·7, decided 2026-10-17), named by ONE authority
+  **Numeric RESULT CLASS** — ✅ authority LANDED 2026-10-17 (`6415964a`); only the "Still open" residue below remains. The class is exact (§6·7, decided 2026-10-17), named by ONE authority
   (`reducer.ts` `numberWidth`/`numberFloating` → `commonNumberClass`, `NumberHelper.getHighestCommonNumberInfo`
   + `determineNumberClass`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390,861-874`)
   that every `sum`, every `min`/`max` (top-level, `local`, correlated, grouped), and the sack's folds read;

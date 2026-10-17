@@ -805,6 +805,13 @@ authorities.
   WHERE fence (`transform.ts` `asNumberFilter`) so it raises at every existence depth, and its constant
   fold is `NumberHelper.performConversion` (`coerce.ts`). Pinned in
   `test/compiler/number-class-fail-closed.exec.test.ts`. The FULL one-`numericClassOf` authority is still open (policy now decided: exact).
+  ✅ **Full authority LANDED ON TRUNK 2026-10-17 (`6415964a`, substrate-number-class).** One class authority
+  (`reducer.ts` `numberWidth`/`numberFloating` → `commonNumberClass`) at every depth; a Float rides as its exact
+  value (`src/gremlin/float.ts`, `src/compiler/rel/float.ts`); one BigDecimal carrier (`bigDecimalOfCarrier`);
+  an uncarriable literal declines (`ir/uncarried-literal.ts`); a Double outside SQLite's correctly-rounded range
+  defers (`src/rel/exact-decimal.ts`); a 16-17-digit literal crosses JSON exactly at `jsonEntry` (`rel/emit.ts`).
+  Pinned in `test/compiler/number-class-authority.exec.test.ts`, `number-class-type-space.exec.test.ts`,
+  `test/L4-addendum/number-carrier.feature`. Residue: `docs/outstanding-work.md` (Value carriage).
 - ✅ **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
@@ -1008,7 +1015,7 @@ authorities.
 |---|---|---|---|
 | 0 | Trunk stopgap declines: A slice/barrier, B `branchResult`+`tagArm`, C `kindOf`/eligibility/asNumber-fp/`vt` carry, D null-pool, E `receiverProvably`, F merge/guard single-row, G arm-column decline + total `someStepDeep`, H unroll + `PLAIN_FOLD` | S–M total | removes every confirmed trunk wrong answer; L3 only moves DOWN where a wrong pass declines |
 | 1 | ✅ G — one IR walker, arm column decline, alias into arms (landed `1ad88ccf`/`fec9e97c`; alias-channel threading open) | S–M | cheapest; every later branch re-trips it |
-| 2 | C — number-class authority (after the §6·7 decision) | M | `asNumber`, orderability, reducers are all consumers |
+| 2 | ✅ C — number-class authority (landed `6415964a`) | M | `asNumber`, orderability, reducers are all consumers |
 | 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
 | 4 | ✅ D — required `present` (landed `2b0b1e27`; fix-forward `da957253`..`3275d454`) | M | small once E adds the third `ChildValue` field in the same pass |
 | 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
