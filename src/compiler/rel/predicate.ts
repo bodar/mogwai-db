@@ -1,5 +1,5 @@
 import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+import { inferredVtype, jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { raiseExpr } from '../../rel/raise.ts';
 import { MIXED_COMPARABLES } from './reducer.ts';
@@ -148,32 +148,6 @@ export type SubjectType =
   | { readonly kind: 'unknown' };
 
 export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
-
-const typeofIs = (value: Expr, storageClass: string): Expr =>
-  ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
-
-/**
- * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
- * inference the wire would apply to an untagged value,
- * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
- * bare, which is exactly what `typed` means) hand every member a type without a second channel.
- */
-export const inferredVtype = (value: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [typeofIs(value, 'text'), compilerText('string')],
-    [typeofIs(value, 'real'), compilerText('double')],
-    [typeofIs(value, 'null'), compilerNull()],
-    [typeofIs(value, 'integer'), {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
-        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
-      else: compilerText('long'),
-    }],
-  ],
-  else: compilerText('string'),
-});
 
 /**
  * A PER-ROW subject: the row's own tag where it names a Gremlin type, and the value's own inference

@@ -1,4 +1,4 @@
-import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { exprMayRaise } from '../../rel/raise.ts';
 import type { Elem } from '../elem.ts';
@@ -8,7 +8,8 @@ import type { PullPosition } from './raise-channel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
-import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
+import { perRowColumnOf, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { reducedVtype } from './build.ts';
 import type { ProgramWrites } from './write.ts';
 
 /**
@@ -310,6 +311,21 @@ export type BodyScope = 'child' | 'rooted';
  */
 export const hostTag = (type: ScalarType | undefined, vtype: Expr | undefined): Expr | undefined =>
   vtype ?? (type?.kind === 'static' ? compilerText(type.type) : undefined);
+
+/**
+ * `hostTag` for a scalar host that IS a relation's own row: its `vtype` column, else the per-row column
+ * its type names (`perRowColumnOf` — a mixed `inject(1, 1.0)`'s `vt`, a min/max winner's), read through
+ * `reducedVtype` because that column may speak the storage-class vocabulary (`real`/`integer`), else the
+ * static tag. Reading `vtype` alone dropped the per-row tag every other column carries, so
+ * `inject(1, 1.0).groupCount()` keyed the Double as an untagged `1.0` and framed it an Int
+ * (`{1:1, 1:1}` where `GroupCountStep` keys `Integer(1)` and `Double(1.0)` apart).
+ */
+export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undefined => {
+  const carries = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
+  if (carries('vtype')) return col(rel.id, 'vtype');
+  const column = perRowColumnOf(type);
+  return column && carries(column) ? reducedVtype(col(rel.id, column)) : hostTag(type, undefined);
+};
 
 /**
  * The traverser a child body is rooted AT — a union rather than a bag of optional fields, because the

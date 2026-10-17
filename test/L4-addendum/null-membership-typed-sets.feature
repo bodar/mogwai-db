@@ -84,3 +84,55 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
   # merge/disjunct/dedup(local) keeping `1` and `1.0` apart is pinned TYPED in
   # test/compiler/typed-equality-sites.exec.test.ts: the JS client decodes an Int and a Double to one number,
   # so a set holding both reads back here as one member.
+
+  # A per-row tag is not a key of its own: an untagged identity() 1 and a constant(1) tagged int are ONE
+  # Integer, so dedup()/dedup().by()/groupCount() collapse them (DedupGlobalStep.java:59,78 is a HashSet;
+  # GroupCountStep keys a HashMap). Keying the raw tag split them into two.
+  Scenario: g_injectX1_2_1X_unionXidentity_constantX1XX_dedup_byXidentityX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1).union(__.identity(), __.constant(1)).dedup().by(__.identity())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[2].i |
+
+  Scenario: g_injectX1_2_1X_unionXidentity_constantX1XX_dedup
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1).union(__.identity(), __.constant(1)).dedup()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[2].i |
+
+  Scenario: g_injectX1_2_1X_unionXidentity_constantX1XX_groupCount
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1).union(__.identity(), __.constant(1)).groupCount()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"d[1].i":"d[5].l","d[2].i":"d[1].l"}] |
+
+  # A child inject's injections surface for the FIRST host only (StartStep latches `first`), so an
+  # all-results consumer is an arrival-order answer a per-row value cannot give — it refuses.
+  @Unsupported
+  Scenario: g_VX1X_out_localXinjectX1_2XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().local(__.inject(1, 2))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | v[lop] |

@@ -2,6 +2,7 @@ import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { ListOf, MapOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../alias.ts';
+import { exactRealEntry } from './build.ts';
 
 /**
  * ONE TRAVERSER-OBJECT HISTORY ENCODING, shared by the LABEL channel and the PATH channel.
@@ -66,9 +67,12 @@ export const objectEntry = (object: TraverserObject, withLabels = false): Expr =
   // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
   // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.
   const tag = object.type.kind === 'static' ? compilerText(object.type.type) : object.vtype;
+  // The value crosses SQLite's JSON writer, which spells a negative zero `0.0` and a binary64 at 15
+  // digits, so `inject(-0.0, 0.0).as('a').select('a')` read back two `0.0`s and `dedup('a')` kept one
+  // (`Double.equals(-0.0, 0.0)` is false — `DedupGlobalStep.java:80-88` keys on the label's value).
   return {
     kind: 'json-object', binary: true,
-    entries: [['k', k], ['v', object.value], ...(tag ? [['t', tag] as const] : []), ...labels],
+    entries: [['k', k], ['v', exactRealEntry(object.value, tag)], ...(tag ? [['t', tag] as const] : []), ...labels],
   };
 };
 

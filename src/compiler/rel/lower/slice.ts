@@ -483,7 +483,13 @@ export function rowOp(
   // `graph` (a multi-graph merge) is part of the identity KEY, not a passenger: it is spliced into the
   // partition (`dedupOn` via the keys, the `Distinct`/group-by below directly) so A's id 5 and B's id 5
   // stay distinct, and its `undefined` group policy must not veto the dedup.
-  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
+  //
+  // A payload whose per-row TAG its typed key subsumes (`typedKeys`) takes the window arm too: a collapse
+  // keys on its payload COLUMNS, so on the raw tag, which split a tagged `constant(1)` from an untagged
+  // `identity()` 1 — one Integer. `dedupOn` keys on `typedEquality`'s normalized class instead and keeps
+  // the first arrival whole, tag and all.
+  if (typedKeys(input).subsumed
+    || !groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
     const g = graphOf(input.channels);
     const keys = g ? [...shape.identity(input), col(input.id, g.col)] : shape.identity(input);
     return dedupOn(keys, input, shape.tie(input), fresh);
@@ -603,11 +609,18 @@ export function rowOp(
  * dedup keys on the merges' ONE authority rather than a rule of its own. An element's `id` (an `int`)
  * needs nothing, and costs nothing.
  */
-function typedKeys(input: Rel): { readonly cols: readonly ColMeta[]; readonly exprs: readonly (readonly [string, Expr])[] } {
+function typedKeys(input: Rel): {
+  readonly cols: readonly ColMeta[]; readonly exprs: readonly (readonly [string, Expr])[]; readonly subsumed: boolean;
+} {
   const own = payloadCols(input).map((column) => col(input.id, column.name));
-  const extra = typedEquality(input, own).filter((term) => !own.includes(term as typeof own[number]));
+  const typed = typedEquality(input, own);
+  const extra = typed.filter((term) => !own.includes(term as typeof own[number]));
   const names = extra.map((_, i) => `dq${i}`);
-  return { cols: names.map((name) => meta(name, 'any', true)), exprs: extra.map((term, i) => [names[i]!, term] as const) };
+  return {
+    cols: names.map((name) => meta(name, 'any', true)), exprs: extra.map((term, i) => [names[i]!, term] as const),
+    // A payload column the typed key does not hold — a per-row tag its value's class subsumes — is no key.
+    subsumed: own.some((term) => !typed.includes(term)),
+  };
 }
 
 /**

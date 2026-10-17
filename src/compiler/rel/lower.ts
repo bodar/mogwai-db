@@ -40,7 +40,7 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence, relHostTag, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -1985,7 +1985,7 @@ function scalarTail(
     // off was not neutral: `byNode` tags an untagged value NULL, and NULL means "infer from the JS
     // value", which cannot tell a BigInt from an Int, a BigDecimal from an Int, or a datetime from a
     // long. §6·7's rule at one more carrier — what is KNOWN is carried, never re-guessed downstream.
-    const hostVtype = hostTag(out.kind === 'scalar' ? out.type : undefined, carries('vtype') ? col(rel.id, 'vtype') : undefined);
+    const hostVtype = relHostTag(rel, out.kind === 'scalar' ? out.type : undefined);
     const host: ChildHost = {
       kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
       ...(hostVtype ? { vtype: hostVtype } : {}),

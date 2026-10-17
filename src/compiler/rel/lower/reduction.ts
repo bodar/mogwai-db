@@ -15,7 +15,7 @@ import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, boundBeyondMap, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, relHostTag, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -169,7 +169,7 @@ export function reductionHost(
   rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, labels: AliasMap,
 ): ChildHost {
   if (framing.kind === 'elements') return elementHost(rel, framing.elem, labels);
-  const vtype = hostTag(framing.type, rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined);
+  const vtype = relHostTag(rel, framing.type);
   return { kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels }, ...(vtype ? { vtype } : {}) };
 }
 
@@ -1464,8 +1464,18 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // host and never reads "c" (`Concat.feature:60-93`). Every consumer of this seam (a `by()`, a concat /
   // dateDiff operand, a choose/coalesce arm) applies its child the same way, so the fact lives HERE once:
   // a trailing body continues against the SAME host; a bare inject IS the host, framed as itself.
+  //
+  // THAT IS A FIRST-RESULT FACT ONLY. The latch is set by the FIRST application, and that application
+  // does add the injections — behind the host (`StartStep.processNextStart` appends them to `starts` after
+  // the `addStart(host)`), so a first-result consumer reads the host either way, but a consumer that sees
+  // EVERY result (`local`/`flatMap`) or a barrier after the inject (`local(__.inject(-0.0, 0.0).dedup()
+  // .fold())`) sees the injections for the first host and not for the rest — an arrival-order answer
+  // this per-row value cannot give. So an inject WITH injections answers only bare and only as
+  // `yields: 'first'` (every all-results consumer refuses that), and declines with a body after it;
+  // an empty `__.inject()` adds nothing and is the identity at every position.
   if (first.name === 'inject') {
-    if (body.length > 1) return scalarChild(body.slice(1), host, ctx, fresh);
+    const injects = first.args.length > 0;
+    if (body.length > 1) return injects ? null : scalarChild(body.slice(1), host, ctx, fresh);
     const self = hostSelf(host);
     const cols = self && framingCols(self.framing);
     const payload = cols?.[0];
@@ -1473,7 +1483,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     const typeCol = cols.find((column) => column.name !== payload.name);
     return {
       expr: self.col(payload.name), framing: self.framing,
-      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one',
+      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: ALWAYS_PRODUCTIVE, yields: injects ? 'first' : 'one',
     };
   }
 

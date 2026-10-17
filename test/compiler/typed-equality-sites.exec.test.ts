@@ -121,3 +121,67 @@ describe('dedup and the set ops key on typed equality — HashSet is Objects.equ
     expect(() => typed('g.inject([1, 2]).intersect([1L])')).toThrow(/not supported/);
   });
 });
+
+// A per-row tag is NOT a key of its own: a NULL tag means "infer from the value", so a tagged `constant(1)`
+// and an untagged `identity()` 1 are ONE Integer. Every typed-equality site keys on the NORMALIZED class
+// (`valueClass`, build.ts — the tag in the Gremlin vocabulary, else the value's inference), never on the raw
+// tag column (`typedEquality` subsumes it) and never on NULL-means-tagged.
+describe('a tagged and an untagged row of one class are one value at every typed-equality site', () => {
+  const MERGED = 'union(identity(), constant(1))';
+  test('dedup().by(identity()) — the window arm keys the by() key on the normalized class', () => {
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.dedup().by(identity()).fold()`)).toEqual(['[1i,2i]']);
+    expect(typed(`g.inject(1).${MERGED}.dedup().by(identity()).fold()`)).toEqual(['[1i]']);
+    expect(typed(`g.inject(1, 2).${MERGED}.dedup().by(identity()).count()`)).toEqual(['2L']);
+    expect(typed("g.inject('a', 'b').union(identity(), constant('a')).dedup().by(identity()).count()")).toEqual(['2L']);
+    expect(typed('g.inject(1.5).union(identity(), constant(1.5)).dedup().by(identity()).count()')).toEqual(['1L']);
+  });
+
+  test('plain dedup() — a payload whose tag is subsumed takes the window arm', () => {
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.dedup()`)).toEqual(['1i', '2i']);
+    expect(typed('g.inject(1.5).union(identity(), constant(1.5)).dedup().count()')).toEqual(['1L']);
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.as('a').dedup('a').fold()`)).toEqual(['[1i,2i]']);
+    // a record's field pairs `f0_v`/`f0_vtype` the same way
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.project('a').by(identity()).dedup().count()`)).toEqual(['2L']);
+    // ...while an Integer and a Double stay two
+    expect(typed('g.inject(1, 1.0).union(identity(), constant(1)).dedup().fold()')).toEqual(['[1i,1d]']);
+  });
+
+  test('groupCount()/group() keys — the key node is written with the normalized class', () => {
+    // inject(1,2,1) → 1,2,1 and three constant(1)s: five Integer 1s and one 2.
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.groupCount()`)).toEqual(['{1i:5L,2i:1L}']);
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.group().by(identity()).by(count())`)).toEqual(['{1i:5L,2i:1L}']);
+    expect(typed(`g.inject(1, 2, 1).${MERGED}.as('a').groupCount().by(select('a'))`)).toEqual(['{1i:5L,2i:1L}']);
+  });
+
+  test('a mixed inject keys a Double apart from an Integer, framed as itself', () => {
+    // The host's tag is the inject's own per-row `vt` (`relHostTag`), not "infer" — `GroupCountStep`
+    // keys `Integer(1)` and `Double(1.0)` apart.
+    expect(typed('g.inject(1, 1.0).groupCount()')).toEqual(['{1d:1L,1i:1L}']);
+    expect(typed('g.inject(1, 1.0).group().by(identity()).by(count())')).toEqual(['{1d:1L,1i:1L}']);
+  });
+});
+
+describe('a label keeps a negative zero — the history entry is the JSON writer\'s, repaired', () => {
+  test('select/dedup(label) read the signed zero back', () => {
+    expect(typed("g.inject(-0.0, 0.0).as('a').select('a').fold()")).toEqual(['[-0d,0d]']);
+    expect(typed("g.inject(-0.0, 0.0).as('a').dedup('a').fold()")).toEqual(['[-0d,0d]']);
+    expect(typed("g.inject(-0.0, 0.0).as('a', 'b').dedup('a', 'b').fold()")).toEqual(['[-0d,0d]']);
+    expect(typed("g.inject(1, 1.0).as('a').select('a').fold()")).toEqual(['[1i,1d]']);
+  });
+});
+
+describe('a child inject WITH injections answers only where the first result is read', () => {
+  test('a first-result consumer reads the host', () => {
+    expect(typed("g.inject('a', 'b').concat(__.inject('c'))")).toEqual(['"aa"', '"bb"']);
+  });
+
+  test('an all-results consumer, or a body after the inject, declines', () => {
+    // The first application adds the injections behind the host (`StartStep.processNextStart`) and the
+    // latch hides them from every later one — an arrival-order answer a per-row value cannot give.
+    for (const q of [
+      'g.V(1).out().local(__.inject(-0.0, 0.0).dedup().fold())',
+      'g.V(1).out().local(__.inject(1, 2))',
+      'g.V(1).out().flatMap(__.inject(1))',
+    ]) expect(() => typed(q), q).toThrow(/not supported/);
+  });
+});

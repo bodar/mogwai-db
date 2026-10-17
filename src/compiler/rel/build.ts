@@ -556,6 +556,22 @@ export const jsonMemberByTypeof = (value: Expr): Expr => ({
 });
 
 /**
+ * A SCALAR's binary64 repair alone, for a JSON entry whose other members stay as they were (a history
+ * entry's `v`, read back by `json_extract`, which keeps a wide integer exact and must not see it as TEXT).
+ * Gated on the TAG where there is one — a compile-time tag folds to one arm, a per-row one is read as
+ * floating or not, and a NULL per-row tag ("infer") falls back to the storage class — and on the storage
+ * class alone (`jsonMemberByTypeof`) for an untagged COLUMN, the one place `typeof` cannot splice a
+ * subquery (§12 trap 2). An untagged expression is left as it was.
+ */
+export const exactRealEntry = (value: Expr, tag: Expr | undefined): Expr => {
+  if (!tag) return value.kind === 'col' ? jsonMemberByTypeof(value) : value;
+  if (tag.kind === 'lit') return tag.source === 'compiler-text' && FLOATING_VTYPES.includes(tag.value) ? asExactReal(value) : value;
+  const floating: Expr = { kind: 'call', fn: 'coalesce', args: [inList(tag, FLOATING_VTYPES), {
+    kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }] };
+  return { kind: 'case', whens: [[floating, asExactReal(value)]], else: value };
+};
+
+/**
  * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <lossless value>)`.
  *
  * The `{t,v}` encoding, expressed in the algebra's own vocabulary because it is EMISSION rather than
@@ -566,6 +582,17 @@ export const jsonMemberByTypeof = (value: Expr): Expr => ({
 export const typedNode = (value: Expr, vtype: Expr): Expr => ({
   kind: 'json-object',
   entries: [['t', vtype], ['v', jsonMember(value, vtype)]],
+  binary: false,
+});
+
+/**
+ * `typedNode` under a PER-ROW tag that may be NULL ("infer"), for a node compared by its JSON TEXT — a
+ * map key. Its `t` is the NORMALIZED class (`valueClass`), so a tagged and an untagged row of one class
+ * write one key; its `v` is gated on the raw tag exactly as `typedNode`'s, spelling the class once.
+ */
+export const classedNode = (value: Expr, vtype: Expr): Expr => ({
+  kind: 'json-object',
+  entries: [['t', valueClass(vtype, value)], ['v', jsonMember(value, vtype)]],
   binary: false,
 });
 
@@ -886,6 +913,32 @@ export function regroupFirstOccurrence(
   });
 }
 
+const typeofIs = (value: Expr, storageClass: string): Expr =>
+  ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
+
+/**
+ * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
+ * inference the wire would apply to an untagged value,
+ * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
+ * bare, which is exactly what `typed` means) hand every member a type without a second channel.
+ */
+export const inferredVtype = (value: Expr): Expr => ({
+  kind: 'case',
+  whens: [
+    [typeofIs(value, 'text'), compilerText('string')],
+    [typeofIs(value, 'real'), compilerText('double')],
+    [typeofIs(value, 'null'), compilerNull()],
+    [typeofIs(value, 'integer'), {
+      kind: 'case',
+      whens: [[{ kind: 'binary', op: 'and',
+        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
+        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
+      else: compilerText('long'),
+    }],
+  ],
+  else: compilerText('string'),
+});
+
 /**
  * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
@@ -893,7 +946,7 @@ export function regroupFirstOccurrence(
  * `doubleToLongBits`) are both false. SQLite's `PARTITION BY` compares by VALUE across storage classes
  * (INTEGER 1 = REAL 1.0) and cannot see a zero's sign, so every key term a value can sit in is widened
  * here, ONCE, for every merge and tie guard: by its storage class (`typeof`, which tells an Integer from
- * a Double where no type tag does — a tag, where carried, is already a key column of its own) and, for a
+ * a Double where no type tag does — a per-row tag, where carried, is normalized into that class below) and, for a
  * zero, by its sign (`atan2(±0, -1)` is ±π, the comparison `receiver.ts`'s `floatingText` reads the sign
  * bit with). A term declared `text`/`int`/`json`/`blob` has one storage class and no signed zero, so it
  * keys as itself: a JSONB collection compares by its BYTES, which carry each member's numeric form
@@ -905,23 +958,52 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
     term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any'
       // A one-column scalar subquery (a map's order-free form, `mapIdentity`) is that column's type.
       : term.kind === 'scalar' && term.plan.type.cols.length === 1 ? term.plan.type.cols[0]!.type : 'any';
-  // A PER-ROW TAG, where the relation carries one, already names a tagged row's class — and names it
-  // better than the storage class does: a stored Double may sit as INTEGER `1` beside a computed REAL
-  // `1.0` under one `double` tag, and `typeof` would split the one Double in two. So the storage class
-  // keys only a row whose tag is NULL ("infer from the value", as every per-row reader takes it). The tag
-  // column itself is `text`, which keys as itself below.
-  const tag = rel.type.cols.some((column) => column.name === MERGED_VTYPE) ? col(rel.id, MERGED_VTYPE) : null;
+  // A PER-ROW TAG, where the relation carries one beside its value column, names that value's class —
+  // and names it better than the storage class does: a stored Double may sit as INTEGER `1` beside a
+  // computed REAL `1.0` under one `double` tag. But a NULL tag means "read the value" (`perRowSubject`,
+  // predicate.ts — the framer's own reading), so neither the raw tag nor `typeof` is the class: a
+  // `constant(1)` tagged `int` and an `identity()` arm's untagged INTEGER 1 are ONE Integer. The class
+  // term is therefore NORMALIZED — the tag in the Gremlin vocabulary (`reducedVtype`: a reducer's
+  // storage-class `real` is a Double, `integer`/`text`/`null` say nothing), else the value's own
+  // inference — the reading `memberClass` (list.ts) gives a list member. The tag column itself is then
+  // NOT a key: it is subsumed by that class, and keying it raw split a tagged row from an untagged one.
+  // A record carries one such pair per field (`f0_v`/`f0_vtype`), so the pairing is by NAME, not one column.
+  const names = new Set(rel.type.cols.map((column) => column.name));
+  const tagOf = new Map<string, string>();
+  for (const name of names) {
+    const suffix = TAG_SUFFIXES.find((s) => name.endsWith(s));
+    const value = suffix && name.slice(0, -suffix.length) + 'v';
+    // Only a value of UNKNOWN storage (`any`) keys by a class term at all; a declared one keeps its tag
+    // as a key of its own (a `text` value under `string` and under `uuid` are two classes).
+    if (value && names.has(value) && !tagOf.has(value) && declared(col(rel.id, value)) === 'any') tagOf.set(value, name);
+  }
+  const ownName = (term: Expr): string | undefined => term.kind === 'col' && term.rel === rel.id ? term.name : undefined;
+  const keyedValues = new Set(terms.map(ownName).filter((name): name is string => !!name && tagOf.has(name)));
+  const subsumedTags = new Set([...keyedValues].map((value) => tagOf.get(value)!));
   return terms.flatMap((term): Expr[] => {
+    const name = ownName(term);
+    if (name && subsumedTags.has(name)) return [];
     const type = declared(term);
     if (type !== 'any' && type !== 'real') return [term];
     if (type === 'real') return [term, signOfZero(term)];
-    // Only a column OF this relation is described by its tag; a computed term (a `by()` key) keys by its own class.
-    if (!tag || term.kind !== 'col' || term.rel !== rel.id) return typedKey(term);
-    return typedKeyAs(term, {
-      kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: tag, right: compilerNull() }, { kind: 'call', fn: 'typeof', args: [term] }]], else: compilerNull(),
-    });
+    // Only the value column a tag rides beside is described by it; any other term keys by its own class.
+    const tag = name && tagOf.get(name);
+    return tag ? typedKeyAs(term, valueClass(col(rel.id, tag), term)) : typedKey(term);
   });
 }
+
+/** A per-row tag column is `<p>vtype` (`MERGED_VTYPE`, a stored or merged tag) or `<p>vt` (a mixed
+ *  inject's, a reducer's), and it describes the value column `<p>v` beside it. */
+const TAG_SUFFIXES: readonly string[] = [MERGED_VTYPE, 'vt'];
+
+/**
+ * A VALUE'S GREMLIN CLASS from its per-row tag — the tag where it names a Gremlin type (a reducer's
+ * storage-class `real` named `double`, by `reducedVtype`), else the value's own inference
+ * (`inferredVtype`, the framer's). Equal for a tagged and an untagged row of one class, which is what
+ * makes it a KEY: NULL never stands for "tagged".
+ */
+export const valueClass = (tag: Expr, value: Expr): Expr =>
+  ({ kind: 'call', fn: 'coalesce', args: [reducedVtype(tag), inferredVtype(value)] });
 
 /** A zero's sign as a key term — `atan2(±0, -1)` is ±π — and NULL for every other value. */
 const signOfZero = (term: Expr): Expr => ({

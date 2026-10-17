@@ -7,7 +7,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
@@ -672,14 +672,21 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     if (scoped.framing.kind !== 'scalar') return null;
     // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
     // `vtype` COLUMN survives becoming JSON.
-    return gatedOn(scoped.present, typedNode(scoped.payload[0]![1], scoped.payload[1]?.[1] ?? compilerNull('text')));
+    // The recorded `t` may be absent on one entry and named on another for one class (a merged arm), so
+    // it is written NORMALIZED (`valueClass`), as the identity arm below writes a per-row tag.
+    const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
+    return gatedOn(scoped.present, !tag ? typedNode(value, compilerNull('text')) : tag.kind === 'lit' ? typedNode(value, tag) : classedNode(value, tag));
   }
 
   if (host.kind === 'scalar') {
     if (key.kind !== 'identity') return null;
-    // A scalar stream carries its own tag where the value came from a stored property; without one the
-    // framer infers from the JS value, which is what an untagged node means.
-    return host.vtype ? typedNode(host.value, host.vtype) : typedNode(host.value, compilerNull('text'));
+    // A scalar stream carries its own tag where it has one; without one the framer infers from the JS
+    // value, which is what an untagged node means. A PER-ROW tag is written as its NORMALIZED class
+    // (`valueClass`, the one `typedEquality` keys on): this node is a map KEY, compared by its JSON text,
+    // so a NULL tag ("infer") beside an `int` tag split one Integer into two keys —
+    // `inject(1,2,1).union(identity(), constant(1)).groupCount()` answered `{1:3, 1:2, 2:1}`.
+    if (!host.vtype) return typedNode(host.value, compilerNull('text'));
+    return host.vtype.kind === 'lit' ? typedNode(host.value, host.vtype) : classedNode(host.value, host.vtype);
   }
 
   // A RECORD as a `{t:'map', v:[…]}` node is `recordValue`'s (`record.ts`) and reachable only through
