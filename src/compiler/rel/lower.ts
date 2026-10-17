@@ -7,6 +7,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
+import { mayRaise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
@@ -41,6 +42,7 @@ import { byExpr, modulations, orderProductivity, productivityFilter, type Modula
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
+import { evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
@@ -1239,6 +1241,33 @@ function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, 
   return { name: `${fresh('no')}`, node, guard: { message: `Can't convert number of type Long to ${disp} due to overflow.`, raiseWhen: 'rows' } };
 }
 
+/**
+ * A SIDE-EFFECT SITE WHOSE PROJECTION CAN RAISE IS EVALUATED, read or not.
+ *
+ * `aggregate("x")` and a keyed `group("x")` are `CollectingBarrierStep`s: the reference drains EVERY
+ * traverser through the site's `by()` before anything downstream runs
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/CollectingBarrierStep.java:66-76`),
+ * so a `by(math('1/_'))` that divides by zero raises whether or not a `cap("x")` ever reads the
+ * collection. A collection here is a relation that is only EVALUATED where it is read, so an unread
+ * site silently skipped the raise — `inject(2,1,0).aggregate('x').by(math('1/_')).order().limit(1)`
+ * answered `[0]`. Where the site can raise (`mayRaise`), a guard binding that READS every payload column
+ * of every member row is its own execution step, so the raise fires; its predicate is never true, so it
+ * never raises anything of its own.
+ */
+function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter): Binding | undefined {
+  const label = step.args[0]?.value;
+  const site = typeof label === 'string' ? collections.get(label)?.sites.at(-1) : undefined;
+  if (!site || !mayRaise(site.rel)) return undefined;
+  const rel = site.rel;
+  const never: Expr = rel.type.cols
+    .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') }))
+    .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
+  const read = make.filter({ id: fresh('drf'), input: rel, channels: rel.channels, type: rel.type, pred: never });
+  const one = make.project({ id: fresh('drp'), input: read, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const node = make.limit({ id: fresh('drl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
+  return { name: `${fresh('dr')}`, node, guard: { message: 'internal: a side-effect drain matched a row', raiseWhen: 'rows' } };
+}
+
 /** The outcome of `collectionArm`: `'pass'` — not one of its step names, the caller keeps looking;
  *  `'continue'` — a side-effect step handled, the caller's loop continues with its relation unchanged;
  *  `{tail}` — the step re-rooted the stream, return this. */
@@ -1317,7 +1346,10 @@ function collectionArm(
       // that. Projecting `json(gk)` at the binding is the remaining step.
       if (ctx.mutating) return { tail: null };
       if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
-      return 'continue';
+      const drained = drainRaisingSite(step, ctx.collections, fresh);
+      if (!drained) return 'continue';
+      const tail = reenter(at + 1);
+      return { tail: tail && { ...tail, effects: [drained, ...(tail.effects ?? [])] } };
     }
     const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh, undefined, origin ? ctx.originDomain : undefined);
     return { tail: continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
@@ -1330,12 +1362,14 @@ function collectionArm(
     const snapshot = registerCollection(step, rel, hostOf(rel), framing,
       ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
     if (!snapshot) return { tail: null };
+    const drained = drainRaisingSite(step, ctx.collections, fresh);
+    const effects = [...(drained ? [drained] : []), ...snapshot];
     // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the rest
     // of the chain writes, which is the whole point of taking it. The recursion returns the tail from
     // after this position, in the caller's OWN fold.
-    if (snapshot.length) {
+    if (effects.length) {
       const tail = reenter(at + 1);
-      return { tail: tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] } };
+      return { tail: tail && { ...tail, effects: [...effects, ...(tail.effects ?? [])] } };
     }
     return 'continue';
   }
@@ -1509,6 +1543,9 @@ function scalarTail(
   /** This stream's traverser as a filter SUBJECT — the value, the type column where there is one, and
    *  the row the clause is correlated to. Read off `rel` at the moment it is asked for, like every
    *  other fact here, so a step that reshaped the relation cannot leave it stale. */
+  /** The same fact as `subjectType`, in the receiver authority's vocabulary (`receiver.ts`). */
+  const receiverEvidence = (): ValueEvidence =>
+    evidenceOf(out.kind === 'scalar' ? out.type : undefined, carries('vtype') ? col(rel.id, 'vtype') : undefined);
   const scalarSubject = (): Subject => ({
     kind: 'scalar', value: col(rel.id, 'v'), rel, type: subjectType(),
     ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
@@ -1701,13 +1738,16 @@ function scalarTail(
       // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
       // literal to force it, an all-null concatenation must be NULL rather than `''`, so the guard tests
       // every part (the traverser's own value included) IS NULL. Mirrors `VALUE_TX.concat`.
+      // The traverser itself must be a String or null (`ConcatStep.java:71-76`) — the receiver authority.
+      const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
+      if (!offences) return null;
       const all = [col(rel.id, 'v'), ...parts];
-      const value: Expr = {
+      const value: Expr = raisingWhen(offences, {
         kind: 'case',
         whens: [[all.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
           .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],
         else: { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] },
-      };
+      });
       const carried = rel.channels;
       const projected = make.project({
         id: fresh('cc'), input: rel, channels: carried,
@@ -1825,9 +1865,15 @@ function scalarTail(
       // `out.type` is the framing type of the stream AS IT ENTERS this transform — a preceding
       // `asDate()`/`count()`/cast leaves a known static tag there, which is what lets a bare
       // `asNumber()` answer identity over a numeric/datetime stream (§6·7; `transformExpr`).
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values',
+      // THE RECEIVER first (`receiver.ts`): a string transform over a non-String, an `asNumber(GType)`
+      // over a non-Number, is the reference's raise — refuted statically it declines, and per row it
+      // raises in-statement, rather than SQLite's coercion answering `upper(29)` = `'29'`.
+      const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
+      if (!offences) return null;
+      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values',
         out.kind === 'scalar' ? out.type : undefined);
-      if (!tx) return null;
+      if (!transformed) return null;
+      const tx = { ...transformed, expr: raisingWhen(offences, transformed.expr) };
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
       // carrying the column would reframe the RESULT as the INPUT's type. The framing type becomes

@@ -2,6 +2,7 @@ import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
+import { mayYieldNull } from '../ir/strategies.ts';
 import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
@@ -322,6 +323,14 @@ export function groupRows(
   // (`gremlin-core/.../step/Grouping.java`). So it collapses to that arm rather than reaching
   // `groupCollected`, whose pool exists for a NON-empty pre-fold body.
   const valueBy = bareFold(named(bys[1]));
+  // A VALUE BODY THAT MAY YIELD A NULL declines (`mayYieldNull`). Every value arm below reads a NULL
+  // member as an UNPRODUCTIVE one — the pooled `fold()` drops it with the seed, the per-member child
+  // drops it as an absent value — where the reference pools a productive null like any other value
+  // (`Grouping.doFinalReduction`; `util/TraversalProduct.java`): `group().by().by(__.constant([1,null,2])
+  // .unfold().fold())` answered `[1,2]` for `[1,null,2]`. A terminal `count()` counts the null and
+  // stays exact, so it is the one form kept.
+  if (valueBy?.key.kind === 'child' && valueBy.key.body.at(-1)?.name !== 'count'
+    && mayYieldNull(valueBy.key.body, child.params)) return null;
   /**
    * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
    * arm with one extraction rather than a value projection.

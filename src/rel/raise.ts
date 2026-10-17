@@ -1,4 +1,6 @@
 import { compilerText, type Expr } from './expr.ts';
+import type { Rel } from './rel.ts';
+import { forEachExpr, forEachRel, relExprs } from './walk.ts';
 
 /**
  * A ROW-LEVEL RAISE — an expression that aborts the statement with a message of our choosing, for the
@@ -18,25 +20,35 @@ import { compilerText, type Expr } from './expr.ts';
  * the call is never a CONSTANT expression: SQLite may factor a constant out of a conditional and run it
  * once up front, which would raise on every row rather than on the one that took the arm.
  *
- * `message` must not contain the closing sentinel or a quote; every caller passes a literal.
+ * `message` must not contain the closing sentinel (`!$`); every caller passes a literal. A QUOTE is
+ * representable: SQLite quotes the path back with `%Q`, doubling it, and `raisedMessage` undoes that —
+ * which is what lets the reference's own `Can't parse null as String.` and exp4j's `Division by zero!`
+ * travel verbatim.
  */
 export function raiseExpr(message: string, dependsOn: Expr): Expr {
-  if (message.includes(CLOSE) || message.includes("'")) throw new Error(`raiseExpr: unrepresentable message ${JSON.stringify(message)}`);
+  if (message.includes(CLOSE)) throw new Error(`raiseExpr: unrepresentable message ${JSON.stringify(message)}`);
   return {
     kind: 'call', fn: 'json_extract',
     args: [{ kind: 'call', fn: 'json_quote', args: [dependsOn] }, compilerText(`${OPEN}${message}${CLOSE}`)],
   };
 }
 
+/**
+ * A raise that depends on NOTHING of the row's data — for a caller that already guards the arm with a
+ * test of the value and would otherwise spell the value (often a correlated read) once more just to
+ * satisfy `dependsOn`. `random()` is never a constant, so SQLite cannot hoist the arm out of its CASE.
+ */
+export const raiseInRow = (message: string): Expr => raiseExpr(message, { kind: 'call', fn: 'random', args: [] });
+
 const OPEN = '$!raise:';
-const CLOSE = '!';
-const RAISED = /\$!raise:([^!']*)!/;
+const CLOSE = '!$';
+const RAISED = /\$!raise:(.*?)!\$/;
 
 /** The message a `raiseExpr` arm aborted a statement with, or `null` for any other failure. */
 export function raisedMessage(error: unknown): string | null {
   const text = error instanceof Error ? error.message : typeof error === 'string' ? error : null;
   const match = text === null ? null : RAISED.exec(text);
-  return match ? match[1]! : null;
+  return match ? match[1]!.replaceAll("''", "'") : null;
 }
 
 /** A query whose answer is an error the DATA decided — the reference's own message, raised mid-statement
@@ -46,4 +58,24 @@ export class RaisedByQuery extends Error {
     super(message);
     this.name = 'RaisedByQuery';
   }
+}
+
+/** Is `e` a `raiseExpr` arm — the sentinel path is a compiler literal, so this is a syntactic test. */
+const isRaise = (e: Expr): boolean =>
+  e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
+  && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN);
+
+/**
+ * CAN EVALUATING THIS RELATION RAISE — does any expression in it, correlated subplans included, hold a
+ * `raiseExpr` arm. A consumer that might otherwise never EVALUATE the relation (an unread side-effect
+ * collection) asks this to decide whether it owes the evaluation anyway: a reference `CollectingBarrier`
+ * drains every traverser, so a raise its `by()` would hit is the answer whether or not the collection is
+ * ever read.
+ */
+export function mayRaise(plan: Rel): boolean {
+  let found = false;
+  forEachRel(plan, (r) => {
+    if (!found) relExprs(r).forEach((e) => forEachExpr(e, (node) => { if (isRaise(node)) found = true; }));
+  });
+  return found;
 }

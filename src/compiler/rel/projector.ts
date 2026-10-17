@@ -10,7 +10,9 @@ import type { SqlType } from '../../rel/types.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { byExpr, modulations, scopedHost, type Modulation } from './modulator.ts';
+import { byExpr, byTyped, modulations, scopedHost, type Modulation } from './modulator.ts';
+import { mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
+import { raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
@@ -65,12 +67,32 @@ import { correlatedMapKey } from './map.ts';
 const relMathOps = (resolve: (name: string) => Expr): MathOps<Expr> => ({
   variable: (name) => ({ kind: 'cast', arg: resolve(name), to: 'real' }),
   real: (text) => compilerReal(Number(text)),
-  binary: (op, left, right) => ({ kind: 'binary', op, left, right }),
+  binary: (op, left, right) => op === '/'
+    ? nonZeroDivisor(right, { kind: 'binary', op, left, right })
+    : { kind: 'binary', op, left, right },
   negate: (a) => ({ kind: 'unary', op: 'neg', arg: a }),
-  call: (fn, args) => ({ kind: 'call', fn, args }),
+  call: (fn, args) => fn === 'MOD' && args.length === 2
+    ? nonZeroDivisor(args[1]!, { kind: 'call', fn, args })
+    : { kind: 'call', fn, args },
   conditional: (whens, otherwise) => ({ kind: 'case', whens, else: otherwise }),
   compare: (op, left, right) => ({ kind: 'binary', op, left, right }),
   nul: () => compilerNull('real'),
+});
+
+/**
+ * A DIVISION BY ZERO RAISES — exp4j's `/` and `%` operators throw `ArithmeticException("Division by
+ * zero!")` on a zero divisor (`MathStep` evaluates its formula through exp4j's `Expression`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:68,89`),
+ * where SQLite answers NULL and the projector's productivity filter then dropped the traverser as if
+ * the formula had produced nothing. In-statement, because a formula can sit in a correlated `by()`.
+ */
+const nonZeroDivisor = (divisor: Expr, quotient: Expr): Expr =>
+  // A non-zero LITERAL divisor (`_ / 2`) cannot raise, and saying so keeps the formula raise-free —
+  // which is what spares an unread side-effect site the drain `mayRaise` would otherwise owe it.
+  divisor.kind === 'lit' && typeof divisor.value === 'number' && divisor.value !== 0 ? quotient : ({
+  kind: 'case',
+  whens: [[{ kind: 'binary', op: '=', left: divisor, right: compilerReal(0) }, raiseInRow('Division by zero!')]],
+  else: quotient,
 });
 
 /** TinkerPop's name for the current traverser inside a formula (`MathStep.CURRENT`). */
@@ -104,6 +126,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;
   const resolved = new Map<string, Expr>();
+  const offences: (readonly [Expr, string])[] = [];
   const vars = mathVars(formula);
   for (const [at, name] of vars.entries()) {
     // The ring advances ONCE PER VARIABLE, in first-seen order, and wraps — so one `by()` feeds every
@@ -116,18 +139,30 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
       // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).
       const se = name === CURRENT ? null : sideEffectConst(name, child);
       if (!se) return null;
+      // A side-effect constant is a compile-time value, so its Number-ness is decided here: anything
+      // else is the reference's raise, and declining is the fail-closed half of it.
+      const seeded = child.sideEffects.get(name);
+      if (typeof seeded !== 'number' && typeof seeded !== 'bigint') return null;
       resolved.set(name, se);
       continue;
     }
     // An identity projection over an ELEMENT or a RECORD is the traverser itself, which is not a
     // Number — the reference raises rather than coercing, so decline instead of projecting a rowid.
     if (varHost.kind !== 'scalar' && modulation.key.kind === 'identity') return null;
-    const value = byExpr(modulation, varHost, source, fresh, false, child);
-    if (!value) return null;
-    resolved.set(name, value);
+    // EVERY VARIABLE MUST RESOLVE TO A NUMBER (`MathStep.java:80-87`), a productive null included — the
+    // receiver authority decides it (`receiver.ts`): a refuted static type declines, a per-row one raises
+    // the reference's message in-statement, so `math('_ + 1').by('name')` no longer answers `1.0`.
+    // Each variable is TESTED ONCE ahead of the formula, in first-seen order (the order `MathStep`
+    // resolves and raises in), because the formula spells a variable once per use.
+    const typed = byTyped(modulation, varHost, source, fresh, child);
+    if (!typed) return null;
+    const offends = receiverOffence('number', typed.value, typed.evidence, typed.productiveNull);
+    if (offends === false) return null;
+    if (offends) offences.push([offends, mathVariableMessage(name)]);
+    resolved.set(name, typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
-  return compileMath(formula, relMathOps((name) => resolved.get(name)!));
+  return raisingWhen(offences, compileMath(formula, relMathOps((name) => resolved.get(name)!)));
 }
 
 

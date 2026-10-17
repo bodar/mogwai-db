@@ -13,6 +13,7 @@ import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
+import { evidenceOf, type ValueEvidence } from './receiver.ts';
 
 /**
  * `by()` AS ONE VOCABULARY — the modulator seam.
@@ -310,6 +311,65 @@ export function byExpr(
   // `group().by(k)`/`order().by(k)` compose over either graph. INSERTION ORDER names the first value
   // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare.
   return key.kind === 'property' ? source.propertyScalar(host.elem, host.id, key.key, ordering, fresh) : null;
+}
+
+/**
+ * A `by()` projection's VALUE together with WHAT IS KNOWN OF ITS TYPE and WHEN A NULL IS A VALUE — the
+ * three facts a type-demanding consumer (`math()`'s variables, `receiver.ts`) needs and `byExpr`
+ * discards.
+ *
+ * `productiveNull` is `TraversalProduct`'s distinction (`util/TraversalProduct.java`): `true` where the
+ * projection always produces, so a NULL is a productive null; `false` where a NULL means the projection
+ * produced NOTHING (an absent property, an unbound label) or the arm cannot say; an `Expr` where a child
+ * body reports its own productivity per row. The value is `byExpr`'s own answer for every arm, so the two
+ * cannot disagree about WHICH value is meant.
+ */
+export interface TypedBy {
+  readonly value: Expr;
+  readonly evidence: ValueEvidence;
+  readonly productiveNull: boolean | Expr;
+}
+
+export function byTyped(
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
+): TypedBy | null {
+  const { key } = modulation;
+  if (key.kind === 'child') {
+    // Lowered ONCE here rather than through `byExpr`, which would lower the same body a second time.
+    if (!child) return null;
+    const produced = child.scalar(key.body, host);
+    if (!produced || produced.framing.kind !== 'scalar') return null;
+    return {
+      value: produced.expr,
+      evidence: evidenceOf(produced.framing.type, produced.vtype),
+      productiveNull: produced.present === ALWAYS_PRODUCTIVE ? true : produced.present ?? false,
+    };
+  }
+  const value = byExpr(modulation, host, source, fresh, false, child);
+  if (!value) return null;
+  if (key.kind === 'column' && host.kind === 'scalar' && host.entry) {
+    const node = key.column === 'keys' ? host.entry.key : host.entry.val;
+    return { value, evidence: { kind: 'tag', tag: jsonField(node, 't') }, productiveNull: true };
+  }
+  if (key.kind === 'alias') {
+    const scoped = scopeValue(key, host);
+    if (!scoped || scoped.framing.kind !== 'scalar') return null;
+    return { value, evidence: evidenceOf(scoped.framing.type, scoped.payload[1]?.[1]), productiveNull: !scoped.optional };
+  }
+  if (host.kind === 'scalar') return { value, evidence: evidenceOf(undefined, host.vtype), productiveNull: true };
+  if (host.kind === 'property' && key.kind === 'token')
+    return key.token === 'key'
+      ? { value, evidence: { kind: 'static', tag: 'string' }, productiveNull: true }
+      : { value, evidence: { kind: 'tag', tag: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh) }, productiveNull: true };
+  if (host.kind === 'element' && key.kind === 'token')
+    return key.token === 'label'
+      ? { value, evidence: { kind: 'static', tag: 'string' }, productiveNull: true }
+      : { value, evidence: { kind: 'storage' }, productiveNull: true };
+  // A stored property: the tag is the same first row's `vtype`, and a NULL is an ABSENT property —
+  // TinkerPop has no null-valued property, so absent is the only way the read comes back NULL.
+  if (host.kind === 'element' && key.kind === 'property')
+    return { value, evidence: { kind: 'tag', tag: propertyVtype(key.key, host, fresh), nullOnlyForNull: true }, productiveNull: false };
+  return null;
 }
 
 /**

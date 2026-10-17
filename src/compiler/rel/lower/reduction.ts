@@ -21,6 +21,7 @@ import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
+import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
 import { isReducer } from '../reducer.ts';
 import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
@@ -1831,9 +1832,15 @@ export function valueRun(
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;
+    // THE RECEIVER first — the same authority the root scalar fold asks (`receiver.ts`), so a body at
+    // any depth (`map`/`local`/`by()`/`where`/a branch arm) gets the reference's raise, not SQLite's
+    // coercion. A NULL here is a productive null exactly where the seed says the body produced.
+    const offences = transformOffences(step, value, evidenceOf(type, vtype),
+      present === ALWAYS_PRODUCTIVE ? true : present);
+    if (!offences) return null;
     const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
-    value = transformed.expr;
+    value = raisingWhen(offences, transformed.expr);
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
