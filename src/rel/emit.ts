@@ -1,14 +1,14 @@
 import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
 import { NEEDS_SUBQUERY, aliasOf, free, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
-import type { Expr } from './expr.ts';
+import { compilerInt, type Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, forEachExpr } from './walk.ts';
+import { exprChildren, forEachExpr, rewriteExpr } from './walk.ts';
 import { blockRaiseTest, RAISE_SENTINEL } from './raise.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
@@ -123,7 +123,9 @@ function qualifiers(sql: string): readonly string[] {
 const qualified = (alias: string, name: string): Expression => q`${ident(alias)}.${ident(name)}`;
 
 /** A FROM item: a table, a CTE name, a derived SELECT or a table-valued function, plus its alias. */
-interface FromItem { readonly text: Expression; readonly alias: string; }
+/** `table` marks a BASE TABLE (a `Scan`) — the one FROM item SQLite's own `count(*)` fast path reads,
+ * and the only one an argument-less `count` is spelled `count(*)` over (see `countArgument`). */
+interface FromItem { readonly text: Expression; readonly alias: string; readonly table?: true; }
 interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: FromItem; readonly on?: Expression; readonly ordered?: boolean; }
 
 /** How a relation in scope spells each of its columns IN THE BLOCK BEING ASSEMBLED. Fusing a node
@@ -308,7 +310,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const directSource = (r: Rel, outer: Scope): { item: FromItem; cols: Cols } | undefined => {
     switch (r.kind) {
       case 'ref': return refSource(r);
-      case 'scan': return { item: { text: ident(r.table), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
+      case 'scan': return { item: { text: ident(r.table), alias: aliasOf(r), table: true }, cols: colsOf(aliasOf(r), r) };
       // A recursive reference is a table source, never a derived relation: SQLite requires it exactly
       // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
       case 'self-ref': return { item: { text: ident(r.name), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
@@ -408,6 +410,27 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   };
   const sideAliases = (s: Side): readonly string[] => [s.from.alias, ...s.joins.map((join) => join.item.alias)];
 
+  /**
+   * How an argument-less `count` is spelled over this block's FROM — `count(*)` over a lone BASE TABLE,
+   * `count(1)` over anything else. Both mean a row count; the spelling is chosen against SQLite, which
+   * treats a literal `count(*)` specially in two optimizer rewrites (`select.c`):
+   *
+   *  - `isSimpleCount`: `SELECT count(*) FROM tbl` reads b-tree cell counts (`OP_Count`) instead of
+   *    stepping rows. Only a lone base table qualifies, so that is the one place `count(*)` stays.
+   *  - `countOfViewOptimization`: `SELECT count(*) FROM (a UNION ALL b)` becomes
+   *    `(SELECT count(*) FROM a) + (SELECT count(*) FROM b)`. MEASURED WRONG on SQLite 3.51.2 (Bun) for a
+   *    CORRELATED NESTED union: `SELECT (SELECT count(*) FROM (SELECT 0 v UNION ALL SELECT u.v FROM (SELECT 9 v
+   *    UNION ALL SELECT e.src FROM edges e WHERE e.tgt = rn.id) u)) FROM nodes rn` answers 2 on every row
+   *    where the counts are 2,3,4, and `count(1)` answers 2,3,4. That is a nested branch counted per start
+   *    (`local(union(constant(0), union(constant(9), in())).count())`), so it reached users as a wrong number
+   *    at every depth a count sits — local/map/project().by()/where() gate alike. The rewrite fires ONLY
+   *    for the argument-less form (it returns early on `pExpr->x.pList!=0`), so spelling it here, at the one
+   *    place every `Aggregate` renders, keeps every count off it rather than guessing which FROM is a compound.
+   */
+  const countArgument = (b: Block) => (e: Expr): Expr =>
+    b.from.table && !b.joins.length ? e
+      : rewriteExpr(e, (node) => node.kind === 'agg' && node.fn === 'count' && !node.args.length ? { ...node, args: [compilerInt(1)] } : node);
+
   // ---------- the per-kind arms ----------
 
   /**
@@ -470,11 +493,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         }
         const groupBy = r.groupBy.map((e) => expr(e, b.scope));
         const keys = r.type.cols.slice(0, groupBy.length).map((column) => column.name);
+        const counted = countArgument(b);
         const select = [
           ...keys.map((name, i) => [name, groupBy[i]!] as const),
-          ...r.aggs.map(([name, e]) => [name, expr(e, b.scope)] as const),
+          ...r.aggs.map(([name, e]) => [name, expr(counted(e), b.scope)] as const),
         ];
-        return { ...b, select, groupBy, having: r.having ? expr(r.having, b.scope) : undefined, scope: withRel(b.scope, r.id, new Map(select)) };
+        return { ...b, select, groupBy, having: r.having ? expr(counted(r.having), b.scope) : undefined, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'sort': {

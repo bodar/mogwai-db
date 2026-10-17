@@ -73,10 +73,9 @@ lowered.
   (3) **writes after a merge**: `AddVertexStep` creates ONE element for a merged slot of k
   (`g.V().both().addV('x')` makes 6 vertices in the reference, 12 here) — the write lowering has no bulk notion.
   (4) the 2500-slot drain is reproduced only for ONE drain; a merging stream past it raises a deferral.
-  (5) **a merge over a BRANCH's emission order** refuses (`readsBranchOrder`, `lower.ts`) until the branch
-  emission key (cluster B) lands; the reads that bypass a merge stay B's residue on trunk: an order() over a
-  pairwise-DISTINCT branch stream (`g.V().union(out(),in()).dedup().order().by(constant(0))` answers id order,
-  not the arms' order) and a keyed `dedup().by(label)` after a branch (keeps the first by id, not by arm).
+  (5) a merge over a BRANCH's emission order is no longer refused: the branch emission key (cluster B,
+  `BranchKeys`/`mintBranchOrder`, `lower.ts`) presents the reference's order wherever a reader owes it, and
+  declines only where the branch input's own order is unknown under a slice (`positioned`).
   (6) **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
   on its entries in no order (`mapIdentity`, map.ts; a NESTED map raises at a merge). Siblings that read their
   own key and still equate what `equals` keeps apart: `dedup()` collapses `-0.0` into `0.0`
@@ -125,6 +124,17 @@ lowered.
   `GroupBiOperator` per-key merge + a mixed group-VALUE list, fail-closed today
   (`src/compiler/rel/collection.ts` `registerGrouping`). Its downstream gaps
   (path/`simplePath`/`sample`/`within` operand) are owned by their respective substrates.
+  **`cap()` does not group its members by BulkSet.** `AggregateStep` adds each traverser to a `BulkSet`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AggregateStep.java:125-148`;
+  `BulkSet` is a `LinkedHashMap` keyed by value, `…/step/util/BulkSet.java:43`), so `cap('a')` iterates each DISTINCT
+  member once, in first-arrival order, repeated by its count: `g.inject([2,9,1,9]).unfold().aggregate('a').cap('a')`
+  is `[2,9,9,1]` in the reference and `[2,9,1,9]` here; `g.V().out().aggregate('a').by('name').cap('a')`
+  interleaves `lop` likewise. The pass-through `aggregate('a').fold()` is already right (it is a fold of the
+  stream, not of the set). A list consumer that reads the order (`cap('a').unfold().limit(n)`, a `limit(local)`)
+  sees a different answer; the multiset is right. The fix belongs in `readCollection`'s member order
+  (`accumulated`, `collection.ts`): rank each member by the first arrival of an equal one (`typedEquality`,
+  build.ts — Java `equals`, so `1` and `1L` are distinct keys), then by its own arrival, across every site
+  (`Operator.addAll` merges one site's BulkSet into the running one by the same key).
 
 ## Product capabilities
 

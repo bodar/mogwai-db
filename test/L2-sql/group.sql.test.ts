@@ -40,7 +40,8 @@ describe('group / properties SQL', () => {
     // gremlin-core `step/map/GroupStep.java:51`). The lowering counts the map traversers.
     const c = read('g.V().group().by(T.label).count()');
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(c.sql).toContain('count(*)');
+    // An argument-less count over a derived table is spelled `count(1)` (`countArgument`, src/rel/emit.ts).
+    expect(c.sql).toContain('count(1)');
     expect(run(seededStore(), 'g.V().group().by(T.label).count()')).toEqual([{ v: 1 }]);
     // count(Scope.local) on a Map = its size, same value
     expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });

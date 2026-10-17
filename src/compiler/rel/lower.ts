@@ -9,7 +9,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
 import { isRel, type Rel } from '../../rel/rel.ts';
-import { rewriteExpr, stmtChildren } from '../../rel/walk.ts';
+import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { beginsWithSource, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
@@ -1371,10 +1371,15 @@ function mergedOrder(
   });
   // An unproductive key DROPS its traverser (`orderProductivity`) before the set ever sees it. The keyed
   // rows are FENCED: the merge's window and the sort's window then read the keys and the identity as
-  // columns, where a fused projection would re-spell every correlated key read in each of them.
-  const keyed = fenced(drop
+  // columns, where a fused projection would re-spell every correlated key read in each of them. The fence
+  // is a SPELLING economy, never a meaning, so a stream correlated to an enclosing row (a per-start body's
+  // rows, `freeRelIds`) goes unfenced: a fence is a named CTE, which cannot reference that row, and a
+  // correlated child declines on any Materialize below it (`correlatedReduce`) — `local(union(out().order(),
+  // identity()).fold())` would lose its answer to a re-spelling it never needed.
+  const filtered = drop
     ? make.filter({ id: fresh('f'), input: projected, channels: projected.channels, type: projected.type, pred: col(projected.id, DROP) })
-    : projected, fresh);
+    : projected;
+  const keyed = freeRelIds(filtered).size ? filtered : fenced(filtered, fresh);
   // The traverser's identity is the INPUT's, re-addressed to the keyed relation that carries the input's
   // columns under their own names — never the projected sort keys, which a fused window would re-spell.
   const identity = mergeKey?.(rel);

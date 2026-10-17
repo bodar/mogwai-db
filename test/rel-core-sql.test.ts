@@ -288,6 +288,28 @@ describe('RelIR relational-core SQL', () => {
     db.close();
   });
 
+  /**
+   * An argument-less count is `count(*)` over a lone base table ONLY — SQLite's `isSimpleCount` fast path —
+   * and `count(1)` over anything else, which SQLite's `countOfViewOptimization` (select.c) never matches.
+   * That rewrite turns `count(*)` over a `UNION ALL` derived table into a sum of per-arm counts, and on
+   * SQLite 3.51.2 it answers WRONG for a correlated nested union (`countArgument`, src/rel/emit.ts;
+   * the traversal witnesses are test/L4-addendum/count-over-nested-branch.feature).
+   */
+  test('an argument-less count is count(*) over a base table and count(1) over a derived one', () => {
+    const n = scan('n'), m = scan('m');
+    const u = union({ id: relId('u'), inputs: [n, m], all: true, channels, type: { cols } });
+    const countOf = (input: Rel, id: string) => aggregate({
+      id: relId(id), input, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
+    });
+    expect(emitQuery(planOf(countOf(scan('t'), 'a1'))).sql).toBe('SELECT count(*) AS n FROM nodes t');
+    expect(emitQuery(planOf(countOf(u, 'a2'))).sql).toBe(
+      'SELECT count(1) AS n FROM (SELECT n.id AS id, n.name AS name FROM nodes n UNION ALL SELECT m.id AS id, m.name AS name FROM nodes m) u');
+    const filtered = filter({ id: relId('ff'), input: scan('t'), channels, type: { cols }, pred: eq(col(relId('t'), 'name'), lit('marko', 'text')) });
+    // A fused WHERE keeps the base table as the FROM, so the count stays `count(*)`.
+    expect(emitQuery(planOf(countOf(filtered, 'a3'))).sql).toBe('SELECT count(*) AS n FROM nodes t WHERE (t.name = ?)');
+  });
+
   test('a Filter over an Aggregate is HAVING, not a wrapping SELECT', () => {
     const n = scan('n');
     const byName = aggregate({
