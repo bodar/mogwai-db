@@ -117,6 +117,52 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[6].l |
 
+  # (2b) A GLOBAL REDUCTION IN A PER-TRAVERSER ARM, the slice's sibling: over one traverser the reference
+  # counts ONE. The per-traverser `reductionArm` route covers `out().count()` over elements; a body it cannot
+  # take (a bare `count()`, a scalar stream) fell to the ordinary route and reduced over EVERY traverser's
+  # rows — `inject(1,2,3).optional(count())` answered `3`, `optional(is(2).count())` answered `1`.
+  @Unsupported
+  Scenario: g_injectX1_2_3X_optionalXcountX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1,2,3).optional(__.count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+
+  @Unsupported
+  Scenario: g_injectX1_2_3X_optionalXisX2X_countX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1,2,3).optional(__.is(2).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+      | d[1].l |
+      | d[0].l |
+
+  @Unsupported
+  Scenario: g_injectX1_2_3X_coalesceXcount__constantX0XX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1,2,3).coalesce(__.count(), __.constant(0))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+
   Scenario: g_V_localXcoalesceXconstantXxX__out_countXX
     Given the modern graph
     And the traversal of

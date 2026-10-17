@@ -224,13 +224,21 @@ const armBody = (ctx: ChainCtx, owed: boolean): ChainCtx => ({ ...inArmBody(ctx)
  * traversers — `BranchStep` drains every start into the arm's ONE `TraverserSet`, which merges equal ones
  * (`referenceDistinctAt`). Only then may a bulk-sensitive consumer in the arm (a seeded fold reducing the
  * whole input) read its rows as the reference's traversers; anywhere else it declines.
+ *
+ * HOW the arm is fed decides what it may conclude from that: a TRAVERSER-major branch runs an arm once per
+ * start (`applyCurrentTraverser` then drain), a child fed one traverser like a `by()` body; an ARM-major one
+ * (`major`, a barrier in some arm) pushes EVERY start into the arm before reading any back
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:143-148`),
+ * so a map in the arm may make equal traversers of distinct starts and a barrier in it merges them —
+ * `inject(1,2,3).union(constant(1).barrier().mergeV(…))` merges ONE traverser of bulk 3 (`allStarts`).
  */
-const armScope = (ctx: ChainCtx, position: Arrival | undefined, owed: boolean) => {
+const armScope = (ctx: ChainCtx, position: Arrival | undefined, owed: boolean, major: 'traverser' | 'arm') => {
   const distinct = !!position && ctx.traversal?.steps === position.steps
     && referenceDistinctAt(position.steps, position.at, ctx.traversal.rooted);
   return (body: readonly IRStep[]): ChainCtx => {
     const scoped = armBody(ctx, owed);
-    return distinct ? { ...scoped, traversal: { steps: body, rooted: false } } : scoped;
+    if (!distinct) return scoped;
+    return { ...scoped, traversal: major === 'arm' ? { steps: body, rooted: false, allStarts: true } : { steps: body, rooted: false } };
   };
 };
 
@@ -299,7 +307,6 @@ export function unionArms(
   // carried or an arm minted inside itself does not survive, which is what lets an ordered or limited arm
   // merge beside one that has none) or presents the reference's order, numbered by its keys.
   const owed = branchOrderOwed(ctx, position);
-  const armCtx = armScope(ctx, position, owed);
   const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
@@ -308,6 +315,11 @@ export function unionArms(
   // An option's own end merges equal traversers (`armEndMerges`) where a root or a local child would not:
   // where the merge's order or membership is read, that merge is not reproduced here, so decline.
   if (endMergeObservable(ctx, position) && bodies.some((body) => armEndMerges(body!))) return null;
+  // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects one
+  // start), an arm holding a barrier at any depth makes it ARM-major over the whole input (`branchMajor`) —
+  // a single arm included — and that is how each arm is FED (`armScope`).
+  const major = branchMajor(step, bodies, ctx);
+  const armCtx = armScope(ctx, position, owed, major);
 
   // A SINGLE-ARM `union(t)` IS `t`: `UnionStep extends BranchStep` with `Pick.any`, so the one branch
   // receives every traverser and its output is the whole result (`gremlin-core/.../branch/UnionStep`).
@@ -329,11 +341,9 @@ export function unionArms(
     };
   }
 
-  // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects one
-  // start), an arm holding a barrier at any depth makes it ARM-major over the whole input, every start first
-  // merged into each arm's set (`armStartMerge`). Every arm here is lowered over the whole input either way,
-  // so the two orders differ only in the KEY the merge is numbered by (`branchMajor`, `emissionSource`).
-  const major = branchMajor(step, bodies, ctx);
+  // ARM-major, every start is first merged into each arm's set (`armStartMerge`). Every arm here is lowered
+  // over the whole input either way, so the two orders differ only in the KEY the merge is numbered by
+  // (`branchMajor`, `emissionSource`).
   const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!merged) return null;
   const keys = branchKeys(merged);
@@ -1070,10 +1080,14 @@ const SUBSET_SLICES: ReadonlySet<string> = new Set([...SLICE_BARRIERS].filter((n
 const STREAM_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'repeat']);
 
 /**
- * Does a PER-TRAVERSER arm body hold a step that would select ACROSS the traversers it is lowered over?
- * A global-scope `SUBSET_SLICES` step at the top level, or one nested under a `STREAM_CHILD_HOSTS` child
- * (which is global relative to the arm's input, so equally per-traverser in the reference). An
- * unparseable nested body answers `true` — the conservative answer is a decline.
+ * Does a PER-TRAVERSER arm body hold a step that would select or REDUCE ACROSS the traversers it is
+ * lowered over? A global-scope `SUBSET_SLICES` step or a global reduction (`selfCollapses` — `count`, a
+ * numeric reducer, `fold`) at the top level, or one nested under a `STREAM_CHILD_HOSTS` child (which is
+ * global relative to the arm's input, so equally per-traverser in the reference). A reduction the
+ * per-traverser `reductionArm` route could not take lands here: over one traverser's rows the reference
+ * counts ONE (`inject(1,2,3).coalesce(__.count(), …)` is `1,1,1`), where the ordinary route over every
+ * traverser's rows answers `3`. An unparseable nested body answers `true` — the conservative answer is a
+ * decline.
  */
 function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>): boolean {
   const nestedSlices = (value: unknown): boolean => {
@@ -1082,7 +1096,7 @@ function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>
     return !inner || slicesAcrossStarts(inner, params);
   };
   return body.some((step) =>
-    (SUBSET_SLICES.has(step.name) && !isLocalScope(step))
+    ((SUBSET_SLICES.has(step.name) || selfCollapses(step.name)) && !isLocalScope(step))
     || (!!step.repeatRegion && slicesAcrossStarts(step.repeatRegion, params))
     || (STREAM_CHILD_HOSTS.has(step.name) && (
       (step.args ?? []).some((arg) => nestedSlices(arg.value))
@@ -1162,7 +1176,7 @@ export function chooseArms(
   if (!from) return null;
   const source = from.source;
   const subject = branchSubject(source, framing);
-  const armCtx = armScope(ctx, position, owed);
+  const armCtx = armScope(ctx, position, owed, major);
   if (!subject) return null;
 
   // The condition is a child of THIS chain, rooted afresh at the subject row with no alias channel, so

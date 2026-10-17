@@ -478,9 +478,14 @@ type Mode = 'exact' | 'superset';
 
 /**
  * THE SCAN. Walks `steps` — a whole traversal: `rooted` when `steps[0]` is the root's start step, else a
- * child traversal handed one parent traverser at a time — through the two strategies' insertion rules,
- * recording every merge. `upTo` stops the walk (the consumer at `upTo` is still read as a next step).
- * `'unknown'` where the mode cannot answer.
+ * child traversal — through the two strategies' insertion rules, recording every merge. `upTo` stops the
+ * walk (the consumer at `upTo` is still read as a next step). `'unknown'` where the mode cannot answer.
+ *
+ * `singleStart` says how a CHILD is fed: one parent traverser at a time (the default — `TraversalUtil.apply`,
+ * `LocalStep`, a traverser-major `BranchStep` option), or EVERY start at once — an option of a `BranchStep`
+ * whose options hold a `Barrier` (`hasBarrier`), which pushes all its starts into the option before reading
+ * any back (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,143-148`).
+ * There a map of two distinct starts may make two equal traversers, and a barrier in the option merges them.
  */
 function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = steps.length, singleStart = !rooted): readonly BulkingPosition[] | 'unknown' {
   const exact = mode === 'exact';
@@ -679,8 +684,8 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
  * where the scan cannot be exact. A lowering that reproduces the merges reads this; one that cannot
  * reproduce them asks `referenceUnbulkedAt` instead.
  */
-export function bulkingPositions(steps: readonly IRStep[], rooted: boolean, upTo = steps.length): readonly BulkingPosition[] | 'unknown' {
-  return scan(steps, rooted, 'exact', upTo);
+export function bulkingPositions(steps: readonly IRStep[], rooted: boolean, upTo = steps.length, singleStart = !rooted): readonly BulkingPosition[] | 'unknown' {
+  return scan(steps, rooted, 'exact', upTo, singleStart);
 }
 
 /**
@@ -738,8 +743,8 @@ export function placedMergeBefore(steps: readonly IRStep[], at: number): boolean
  * merge before `at` over a stream that may hold equal traversers. Conservative: `false` wherever the scan
  * cannot see.
  */
-export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted: boolean): boolean {
-  const positions = scan(steps, rooted, 'superset', at);
+export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted: boolean, singleStart = !rooted): boolean {
+  const positions = scan(steps, rooted, 'superset', at, singleStart);
   return positions !== 'unknown' && positions.every((p) => p.after >= at || p.distinct);
 }
 
@@ -754,9 +759,9 @@ export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted
  * start step naming repeated literals merges them. (An explicit `barrier()`/`order()` merges in its own
  * step, `barrierRows`/`orderRows`.)
  */
-export function mayMergeAt(steps: readonly IRStep[], at: number, rooted = true, enclosingReads = false): boolean {
+export function mayMergeAt(steps: readonly IRStep[], at: number, rooted = true, enclosingReads = false, singleStart = !rooted): boolean {
   if (at <= 0 || !(enclosingReads || readsStreamOrder(steps.slice(at)))) return false;
-  const positions = scan(steps, rooted, 'superset', at);
+  const positions = scan(steps, rooted, 'superset', at, singleStart);
   if (positions !== 'unknown') return positions.some((p) => p.after === at - 1 && !p.distinct && IMPLICIT.has(p.kind));
   const before = steps[at - 1]!;
   if (at - 1 === 0 && rooted) return knownStartStep(before) && !distinctLiterals(before);

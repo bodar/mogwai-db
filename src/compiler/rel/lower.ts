@@ -444,7 +444,12 @@ const withBranchEffects = (
  *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
  *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
 export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
-  mergesNothing(ctx) || (ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted));
+  mergesNothing(ctx) || (ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted, startsSingle(ctx.traversal)));
+
+/** Is a CHILD traversal fed one parent traverser at a time — not the root, and not a `BranchStep` arm
+ *  handed every start at once (`ChainCtx.traversal.allStarts`)? The scan's `singleStart` (`ir/bulk.ts`). */
+const startsSingle = (traversal: { readonly rooted: boolean; readonly allStarts?: true }): boolean =>
+  !traversal.rooted && !traversal.allStarts;
 
 /** Does the reference merge NO two traversers anywhere in this traversal? A `withSack(seed)` with a
  *  non-null seed and no merge operator puts a sack on every traverser from the start, and a traverser
@@ -591,8 +596,9 @@ export function mergedAt(
     if (!slicedAfter(steps, at)) return rel;
     const scope = placedIn(ctx, steps);
     if (!scope) return ctx.rewritten || !mayMergeUnplaced(steps, at) ? rel : null;
-    const placed = bulkingPositions(scope.steps, scope.rooted, at);
-    if (placed === 'unknown') return referenceUnbulkedAt(scope.steps, at, scope.rooted) || !mayMergeAt(scope.steps, at, scope.rooted) ? rel : null;
+    const single = startsSingle(scope);
+    const placed = bulkingPositions(scope.steps, scope.rooted, at, single);
+    if (placed === 'unknown') return referenceUnbulkedAt(scope.steps, at, scope.rooted, single) || !mayMergeAt(scope.steps, at, scope.rooted, false, single) ? rel : null;
     return placed.some((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind) && !p.distinct) ? null : rel;
   }
   // A step list this scope does not KNOW begins a traversal (a resumed or rewritten chain, an arm handed
@@ -610,12 +616,13 @@ export function mergedAt(
   // (`rooted: false`) is scanned from its own first step — the strategy runs per traversal, and a
   // per-traverser child's set is per parent, which the merge key's carried `origin` (or the correlated
   // subquery the body lowers in) scopes.
-  const positions = bulkingPositions(traversal.steps, rooted, at);
+  const single = startsSingle(traversal);
+  const positions = bulkingPositions(traversal.steps, rooted, at, single);
   // Where the exact scan cannot place the merges (a label, a body unrolled past the strategy, a merge
   // step…), the SUPERSET scan still says whether one MAY land here; if it may and a reader observes the
   // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
   // answer the unmerged order.
-  if (positions === 'unknown') return referenceUnbulkedAt(traversal.steps, at, rooted) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered) ? rel : null;
+  if (positions === 'unknown') return referenceUnbulkedAt(traversal.steps, at, rooted, single) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered, single) ? rel : null;
   const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));
   if (!merge || merge.distinct) return rel;
   // A child's traversers are the ROOT's class (`DefaultTraversal.getTraverserGenerator`, `…/util/DefaultTraversal.java:130-136`):

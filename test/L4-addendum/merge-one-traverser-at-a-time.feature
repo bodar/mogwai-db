@@ -628,3 +628,97 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
     Then the result should be unordered
       | result |
       | d[2].l |
+
+  # A BARRIER INSIDE A BRANCH ARM merges what came from DIFFERENT starts. With a Barrier in any arm the
+  # BranchStep sets hasBarrier and pushes EVERY start into the arm before reading anything back
+  # (BranchStep.java:87-88, 143-148), so constant(1) makes three equal traversers and barrier()/order()/
+  # aggregate() collects them through a TraverserSet into ONE of bulk 3. The merge's flatMap then runs once:
+  # it creates c:1 and never runs onMatch — the vertex has no m. An arm-major arm is a child fed all its
+  # starts at once (ChainCtx.traversal.allStarts), not one parent traverser, so unbulkedAt says bulked here
+  # and the shared onMatch is refused, never applied.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXconstantX1X_barrier_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.constant(1).barrier().mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"c\",1)"
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXconstantX1X_order_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.constant(1).order().mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXconstantX1X_aggregateXaX_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.constant(1).aggregate("a").mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  # Two depths down: the outer union holds the inner one's barrier recursively, so it too is arm-major.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXunionXconstantX1X_barrier_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.union(__.constant(1).barrier().mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)]))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  # An element-valued start stream, and a sample() as the collecting barrier.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_VX1_2_4X_unionXconstantX1X_sampleX5X_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2,4).union(__.constant(1).sample(5).mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXconstantX1X_barrier_mergeEXzz_1_2X_optionXonCreate_w_1X_optionXonMatch_w_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.constant(1).barrier().mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onCreate,[w:1]).option(Merge.onMatch,[w:2])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",1)"

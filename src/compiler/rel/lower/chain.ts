@@ -214,8 +214,12 @@ export interface ChainCtx extends FilterCtx {
    * (`referenceUnbulkedAt`, `ir/bulk.ts`) compares the `steps` it holds against this BY IDENTITY, so a
    * resumed tail, a rewritten chain or an inherited parent scope cannot be mistaken for one — each is a
    * different array, and the consumer declines.
+   *
+   * `allStarts`: a CHILD handed EVERY start at once rather than one parent traverser at a time — an arm of a
+   * `BranchStep` whose arms hold a barrier (`BranchStep.hasBarrier`). Its first step sees a pairwise-distinct
+   * STREAM, so a map in it may make equal traversers that a barrier in it then merges (`startsSingle`).
    */
-  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean; readonly allStarts?: true };
   /**
    * THE CHILD BODY WHOSE RAISE ITS HOST TAKES AS DATA — set by `correlatedReduce` when the host asked for
    * the child value's `raise` (`ChildValue.raise`), so a raise born just before the body's terminal reducing
