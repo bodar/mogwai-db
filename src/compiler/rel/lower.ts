@@ -275,15 +275,27 @@ export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): b
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
 };
 
-/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among the body's own steps? One
- *  nested in a per-traverser host (`local(out().order())`) sorts one start's output, not the arm's. An
- *  unreadable body answers yes: owing an order costs a numbering, never an answer. */
+/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among one ARM's own steps, or a
+ *  nested `union`/`choose` there whose own arm sorts (the inner branch drains its sorted arm whole, and the
+ *  outer one — arm-major too, `hasBarrier` being RECURSIVE — drains that inner stream whole)? The arms are
+ *  every child chain of the step and, for an option-map `choose`, the `option()` BODIES, one level below
+ *  the folded `optionArms` cluster — `Pick.none`/`Pick.unproductive` among them, which `getGlobalChildren`
+ *  drains FIRST (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:108-114`).
+ *  Reading only the cluster chain saw `option` steps, never their `order()`, so a sorted `Pick.none` arm
+ *  was emitted positionless. One nested in a per-traverser host (`local(out().order())`) sorts one start's
+ *  output, not the arm's. An unreadable body answers yes: owing an order costs a numbering, never an answer. */
 const armSorts = (step: IRStep | undefined): boolean => {
   if (!step || !BATCHING_BRANCHES.has(step.name)) return false;
+  const read = rawBodies({});
   let sorts = false;
-  eachChildChain(step, rawBodies({}), (body) => {
-    if (body.some((s) => s.name === 'order' && !isLocalScope(s as IRStep))) sorts = true;
-  }, () => { sorts = true; });
+  const unreadable = (): void => { sorts = true; };
+  const arm = (body: readonly IRStep[]): void => {
+    if (body.some((s) => (s.name === 'order' && !isLocalScope(s)) || armSorts(s))) sorts = true;
+  };
+  eachChildChain(step, read, (chain) => {
+    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
+    else arm(chain as IRStep[]);
+  }, unreadable);
   return sorts;
 };
 

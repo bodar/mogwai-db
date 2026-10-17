@@ -96,8 +96,11 @@ function valueByArm(
   const { key } = modulation;
   const refused = key.kind === 'property' || key.kind === 'token'
     || (key.kind === 'child' && ELEMENT_READS.has(key.body[0]?.name ?? ''));
-  if (!refused) return byNode(modulation, host, source, fresh, child);
-  return proven ? null : deferralExpr(VALUE_POSITION_BY, { kind: 'call', fn: 'random', args: [] });
+  // A body the value host cannot lower declines a PROVEN value position, and on an unproven path DEFERS to the
+  // value entry it would have read — so a path that turns out to hold only elements still answers.
+  const projected = refused ? null : byNode(modulation, host, source, fresh, child);
+  if (projected || proven) return projected;
+  return deferralExpr(VALUE_POSITION_BY, { kind: 'call', fn: 'random', args: [] });
 }
 
 /**

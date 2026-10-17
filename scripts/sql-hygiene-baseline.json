@@ -331,7 +331,7 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 5427,
+    "bytes": 5625,
     "compiler": 66,
     "bound": 0
   },
@@ -577,7 +577,7 @@
   },
   "value": {
     "binds": 0,
-    "bytes": 2472,
+    "bytes": 2640,
     "compiler": 38,
     "bound": 0
   },

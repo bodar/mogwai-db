@@ -95,3 +95,34 @@ Feature: mogwai addendum — a group value's FilteringBarrier reads a merged Tra
     Then the result should be unordered
       | result |
       | m[{"person":"v[marko]"}] |
+
+  # The merge is on the traverser the CUT reads, and `EarlyLimitStrategy` runs on the value traversal too:
+  # it moves the `RangeGlobalStep` ahead of the always-bound `label()` map
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java:68-98,
+  # .../strategy/util/StepOutputArityPredictor.java — `LabelStep` is DEFINITELY_SINGULAR), and
+  # `resetBarrierFromValueTraversal` re-finds the barrier after strategies
+  # (.../traversal/util/DefaultTraversal.java:155). So `out().label().limit(2)` cuts the three DISTINCT
+  # vertices, not the labels, and nothing merges: marko keeps his first two out-neighbours' labels.
+  Scenario: g_V_hasXname_markoX_group_by_byXout_label_limitX2X_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").group().by().by(__.out().label().limit(2).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v[marko]":"l[person,software]"}] |
+
+  # Without the strategy the cut reads the LABELS, merged — `[person, person]`, which the pool cannot state.
+  @Unsupported
+  Scenario: g_withoutStrategiesXEarlyLimitStrategyX_V_hasXname_markoX_group_by_byXout_label_limitX2X_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withoutStrategies(EarlyLimitStrategy).V().has("name","marko").group().by().by(__.out().label().limit(2).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v[marko]":"l[person,person]"}] |

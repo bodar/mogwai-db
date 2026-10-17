@@ -2,14 +2,15 @@ import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
 import type { RelId } from '../../../rel/types.ts';
 import { raiseExpr } from '../../../rel/raise.ts';
-import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, exprRels, forEachExpr, forEachRel } from '../../../rel/walk.ts';
 import type { Elem } from '../../elem.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
-import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
+import { someStepDeep } from '../../ir/walk.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
@@ -415,7 +416,7 @@ export function flatMapRejoin(
       exprs: elementCols(outChannels).map((column) => [column.name, col(joined.id, column.name)] as const),
     });
     const extended = extendPath(withEnteringPath, { kind: 'element', elem: rows.framing.elem, id: col(withEnteringPath.id, 'id') }, fresh, ctx.demandsPathLabels);
-    const rejoined = shedBodyAliases(dropOrigin(extended, fresh), labels, fresh);
+    const rejoined = shedBodyAliases(dropOrigin(originMajor(extended, body, ctx.params, fresh), fresh), labels, fresh);
     return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
   // A LABEL BOUND INSIDE THE BODY escapes to parent scope for `local` (the full-traverser forward above,
@@ -440,7 +441,7 @@ export function flatMapRejoin(
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const shed = dropOrigin(rows.rel, fresh);
+  const shed = dropOrigin(originMajor(rows.rel, body, ctx.params, fresh), fresh);
   // `local` carries the body's outbound labels to parent scope (the full-traverser forward); plain
   // `flatMap` sheds the body-bound alias CHANNELS (`shedBodyAliases`) and continues with the pre-body map
   // only — so the channel never rides into a downstream `dedup`/merge as a spurious distinguishing column,
@@ -525,12 +526,37 @@ export function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly So
 export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
   if (originOf(rel.channels)) return rel;
   const channels = withChannel(rel.channels, ORIGIN);
-  const numbered = rowNumberWindow(rel, ORIGIN.col, rel.channels, { partitionBy: [], orderBy: [] }, fresh);
+  // Numbered in ARRIVAL order where the stream carries one, so the origin is also the entering
+  // traverser's position — what `originMajor` re-reads after a per-traverser body.
+  const enc = encounterOf(rel.channels);
+  const numbered = rowNumberWindow(rel, ORIGIN.col, rel.channels, {
+    partitionBy: [], orderBy: enc ? [{ expr: col(rel.id, enc.col), dir: 'asc' }] : [],
+  }, fresh);
   const cols = [...payloadCols(rel), ...carriedCols(channels)];
   return make.project({
     id: fresh('om'), input: numbered, channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(numbered.id, column.name)] as const),
   });
+}
+
+/**
+ * A PER-TRAVERSER BODY'S RESULTS IN THE HOST'S ORDER — start-major, then the body's own order within one
+ * start. `FlatMapStep`/`LocalStep` take ONE start, emit every result of its body, then take the next
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`,
+ * `…/step/branch/LocalStep.java:80-88`), so a global `order()` in the body sorts ONE start's results. Inside
+ * the body that order is minted over every origin at once — exact WITHIN an origin, but it interleaves the
+ * starts, and `g.V().flatMap(out().order().by('name')).values('name').fold()` answered the six names sorted
+ * where the reference keeps marko's three ahead of josh's two. The origin is numbered in arrival order
+ * (`mintRowOrigin`), so re-ranking by `(origin, encounter)` restores the host's order. Only a body holding a
+ * step that re-mints the position over the whole stream (a global `order()`, a branch merge) can interleave
+ * starts; any other body keeps the origin-major position its movements already numbered.
+ */
+function originMajor(rel: Rel, body: readonly IRStep[], params: Record<string, any>, fresh: Minter): Rel {
+  const origin = originOf(rel.channels), enc = encounterOf(rel.channels);
+  if (!origin || !enc) return rel;
+  if (!someStepDeep(body, params, (s) => (s.name === 'order' && !isLocalScope(s as IRStep)) || BATCHING_BRANCHES.has(s.name), true)) return rel;
+  return renumber(rel, [{ expr: col(rel.id, origin.col), dir: 'asc' }, { expr: col(rel.id, enc.col), dir: 'asc' }],
+    [...payloadCols(rel), ...carriedCols(rel.channels)], rel.channels, fresh, 'dense_rank');
 }
 
 /** DROP the `origin` channel and its column — the counterpart of `mintRowOrigin`/`childRows`' mint,
