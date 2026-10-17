@@ -3,7 +3,8 @@ import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { mayYieldNull } from '../ir/strategies.ts';
-import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
+import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
+import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
@@ -17,7 +18,7 @@ import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, ty
 import type { GraphSource } from './source.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
-import { isReducer, reducerAggregate } from './reducer.ts';
+import { CLASS_MASK, isReducer, numberClass, numberClassMask, reducerAggregate } from './reducer.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -92,6 +93,8 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
  *  member rows without folding them into a map first. */
 export const KEY_COL = 'gk';
 const VAL_COL = 'gv';
+/** A grouped reduction's per-row Gremlin type tag (`groupReduced`). */
+const TAG_COL = 'gy';
 /** The MEMBER a collecting group puts in its list — the traverser's rowid where the members are the
  *  elements, the projected value where a value `by()` names one. Named once because the aggregate reads
  *  it either way and the difference is what the column HOLDS, never how it is collected.
@@ -837,7 +840,18 @@ function groupReduced(
     (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, source, fresh, child));
   const key = keyOf(col(rows.rel.id, rows.origin));
   if (!key) return null;
-  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true));
+  // THE ROWS' OWN GREMLIN TYPE, where they carry one (a stored value's per-row tag, or the stream's static
+  // one): a `sum`/`min`/`max` result's class is the rows' COMMON number class (`reducer.ts` `numberClass`),
+  // which the result's storage class alone gets wrong — a Double stored integral (the modern graph's
+  // ripple `weight` 1.0) reduced to an INTEGER and framed as the Int 1, where `Sum.feature`
+  // `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX` answers `d[1.0].d`. A `mean` is a Double
+  // whatever it reduces (`MeanGlobalStep`), so it needs none.
+  const tagCol = framingCols(rows.framing)?.find((column) => column.name !== 'v')?.name;
+  const staticTag = rows.framing.kind === 'scalar' ? staticTypeOf(rows.framing.type) : undefined;
+  const tag = counting || reducer === 'mean' ? null
+    : tagCol && rows.rel.type.cols.some((column) => column.name === tagCol) ? col(rows.rel.id, tagCol)
+    : staticTag ? compilerText(staticTag) : null;
+  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), ...(tag ? [meta(TAG_COL, 'text', true)] : []));
   // THE KEY IS A COLUMN FIRST, for the reason the barrier's own key is: a `by()` key is a correlated
   // subquery and SQL needs it in the SELECT list AND the GROUP BY, so naming it once is what stops the
   // whole subquery being inlined at every position it appears.
@@ -847,7 +861,7 @@ function groupReduced(
   const bulk = rows.rel.channels.find((channel) => channel.role === 'bulk');
   const projected = make.project({
     id: fresh('rk'), input: rows.rel, channels: [], type: keyCols,
-    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : col(rows.rel.id, 'v')]],
+    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : col(rows.rel.id, 'v')], ...(tag ? [[TAG_COL, tag] as const] : [])],
   });
   /**
    * A COUNT KEEPS ITS KEY WHERE EVERY OTHER REDUCER LOSES IT, and that is a SEED ROW rather than an
@@ -886,12 +900,26 @@ function groupReduced(
     : reducerAggregate(col(rowsIn.id, VAL_COL), reducer);
   const productive = make.aggregate({
     id: fresh('rb'), input: rowsIn, channels: [],
-    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true)),
+    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true),
+      ...(tag ? [meta(CLASS_MASK, 'int', true)] : [])),
     groupBy: [col(rowsIn.id, KEY_COL)],
-    aggs: [[VAL_COL, reduced.value]],
+    aggs: [[VAL_COL, reduced.value], ...(tag ? [[CLASS_MASK, numberClassMask(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL))] as const] : [])],
   });
+  // The class is NAMED ONCE, as a column FENCED on both sides: `typedNode` reads its tag at every arm of
+  // its value encoding, and the assembler fuses an unfenced projection into its neighbour — into the
+  // aggregate (re-spelling `numberClassMask` per class test) or into the map fold (`numberClass` per arm).
+  const reducedRows = tag ? fenced(productive, fresh) : productive;
+  const groups = tag
+    ? fenced(make.project({
+      id: fresh('rt'), input: reducedRows, channels: [],
+      type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), meta(TAG_COL, 'text', true)),
+      exprs: [[KEY_COL, col(reducedRows.id, KEY_COL)], [VAL_COL, col(reducedRows.id, VAL_COL)],
+        [TAG_COL, numberClass(col(reducedRows.id, CLASS_MASK), col(reducedRows.id, VAL_COL), inferredVtype(col(reducedRows.id, VAL_COL)))]],
+    }), fresh)
+    : productive;
+  const value = col(groups.id, VAL_COL);
   const entry: Entry = {
-    key: elementKey ? source.elementNode(host.elem, col(productive.id, KEY_COL), fresh) : col(productive.id, KEY_COL),
+    key: elementKey ? source.elementNode(host.elem, col(groups.id, KEY_COL), fresh) : col(groups.id, KEY_COL),
     // THE TAG IS A CANONICAL TYPE, NOT A STORAGE CLASS. `reducerAggregate` reports `typeof(<the
     // aggregate>)` — `'integer'`/`'real'` — which is what `scalarPayload`'s `result: 'number'` arm
     // reads, and the typed tree speaks the OTHER vocabulary (`'long'`/`'double'`). Handing it a storage
@@ -901,12 +929,14 @@ function groupReduced(
     // A COUNT is a Gremlin `long` by declaration, which is what makes the wire emit an explicit Int64
     // rather than letting magnitude inference pick Int for a small count. Every other
     // reducer's result class is DYNAMIC, so its tag is inferred from the value's storage class.
-    val: typedNode(col(productive.id, VAL_COL), counting ? compilerText('long') : inferredVtype(col(productive.id, VAL_COL))),
+    val: typedNode(value, counting ? compilerText('long')
+      : tag ? col(groups.id, TAG_COL)
+      : inferredVtype(value)),
     keyOf: elementKey ? { kind: 'elem', elem: host.elem } : { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };
   return {
-    rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
+    rel: mapOfGroups(groups, entry, col(groups.id, KEY_COL), fresh),
     keyOf: entry.keyOf,
     valOf: entry.valOf,
   };

@@ -1737,12 +1737,14 @@ describe('the RelIR spine', () => {
     // (that is the bulk weighting), which is why the absence of a multiplier is not the thing to check.
     expect(mean.sql).toMatch(/CAST\(sum\([^]*AS REAL\) \//);
 
-    // …and the result's storage class rides out as the `vt` column, because a sum of integers is an
-    // integer and of reals a real — there is no compile-time tag to give.
+    // …and the result's class rides out as the `vt` column, because a sum of integers is an integer and
+    // of reals a real — the rows' COMMON number class where they carry their own tag (`numberClass`:
+    // stored ages are untagged Ints, so an `int`, `Sum.feature` `g_V_age_sum` `d[123].i`), else the
+    // aggregate's storage class.
     const sum = read("g.V().values('age').sum()");
-    expect(store.query(sum.sql, sum.binds)).toEqual([{ v: 123, vt: 'integer' }]);
+    expect(store.query(sum.sql, sum.binds)).toEqual([{ v: 123, vt: 'int' }]);
     const real = read("g.V().values('age').asNumber(GType.DOUBLE).sum()");
-    expect(store.query(real.sql, real.binds)).toEqual([{ v: 123, vt: 'real' }]);
+    expect(store.query(real.sql, real.binds)).toEqual([{ v: 123, vt: 'double' }]);
   });
 
   test('min/max compare in type space and frame the winner\'s own vtype', () => {

@@ -9,7 +9,8 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { arg, isNested, isTokenArg } from '../../gremlin/frontend.ts';
+import { arg, isMergeArg, isNested, isTokenArg } from '../../gremlin/frontend.ts';
+import { childSteps } from '../ir/passes.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
@@ -27,10 +28,10 @@ import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type RelFraming } from './framing.ts';
-import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, OTHER_V, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
+import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
-import { eachChildChain, rawBodies, valueNodes, type BodyReader } from '../ir/walk.ts';
+import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -811,8 +812,25 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
  *    or a label/path read (an alias names whatever element the traverser passed earlier).
  *  - `sources` — the body re-sources the graph (`V()`/`E()`/`call()`), the only way to reach an element
  *    with no edges, which is what a vertex an `addV` just made is.
+ *  - `vertexSources` — a graph source that can reach ANY vertex the program creates: a `V()` source naming
+ *    no literal ids, an `E()` source unless it names only literal ids (an `E(7)` yields only edges, which a
+ *    new vertex is not; reaching an edge the program creates is `edges`' to answer), an opaque step.
+ *  - `vertexIds` — the literal ids a `V(…)` source names. Such a source is NOT blind to a vertex the
+ *    program creates: an id is a sequential integer rowid, so a new vertex's id is predictable
+ *    (`g.inject(1,2).addV('x').property('n', __.V(8).count())` on the modern graph: traverser 1 makes 7
+ *    and sees no 8, traverser 2 makes 8 and sees it — `[0,1]`), and a creation may supply its id outright.
+ *    What it IS blind to is decided at run time: an id that named a vertex BEFORE the program ran cannot
+ *    name a new one (`ProgramWrites.preChecks`) — so `g.inject(1,2,3).mergeV([name:'zz']).addE('k').to(__.V(1))`
+ *    still answers, and a literal-id source is always blind to a creation of the OTHER element kind
+ *    (`g.V(1,2).addE('e').to(__.V(4))`, whose program creates no vertex).
+ *  - `edges` — the body can reach an EDGE, the only way to see one an `addE` just made: every way
+ *    `leaves` is set but a `V()` source (which reaches vertices alone) — an `E()` source, any movement
+ *    (`out()` crosses an edge), a label/path read, an opaque step.
  */
-interface BodyReach { readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean; readonly labels: boolean }
+interface BodyReach {
+  readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean; readonly vertexSources: boolean; readonly vertexIds: ReadonlySet<number | string>;
+  readonly labels: boolean; readonly edges: boolean;
+}
 
 const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
 const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
@@ -858,37 +876,44 @@ const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'at
 
 function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
   const keys = new Set<string>();
-  let all = false, leaves = false, sources = false, labels = false;
+  const vertexIds = new Set<number | string>();
+  let all = false, leaves = false, sources = false, vertexSources = false, labels = false, edges = false;
   const strings = (value: unknown, into: (s: string) => void): void => {
     for (const n of valueNodes(value)) if (typeof n === 'string') into(n);
   };
   const read: BodyReader = (nested) => child.body(nested, 'child');
-  const opaque = (): void => { all = true; leaves = true; sources = true; labels = true; };
+  const opaque = (): void => { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edges = true; };
   const walk = (body: readonly IRStep[]): void => {
     for (const step of body) {
       const args = step.args.map((a) => a.value);
-      if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) { all = true; leaves = true; sources = true; labels = true; }
-      if (GRAPH_SOURCES.has(step.name)) { sources = true; leaves = true; }
-      if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) leaves = true;
+      if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edges = true; }
+      if (GRAPH_SOURCES.has(step.name)) {
+        sources = true; leaves = true;
+        if (!VERTEX_SOURCE.has(step.name)) edges = true;
+        const literal = args.length > 0 && args.every((a) => typeof a === 'number' || typeof a === 'string');
+        if (!literal) vertexSources = true;
+        else if (VERTEX_SOURCE.has(step.name)) for (const id of args as (number | string)[]) vertexIds.add(id);
+      }
+      if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) { leaves = true; edges = true; }
       if (LABEL_READS.has(step.name) || (step.name === 'has' && args.length >= 3)
         || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
       // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
       // `math()`'s expression.
-      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) leaves = true;
-      if (step.name === 'math') strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) leaves = true; });
+      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) { leaves = true; edges = true; }
+      if (step.name === 'math') strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) { leaves = true; edges = true; } });
       if (KEY_READING_STEPS.has(step.name)) {
         let named = false;
         strings(args, (s) => { keys.add(s); named = true; });
         if (!named || step.name === 'hasKey' || step.name === 'hasValue') all = true;
       }
       // `format('%{name}')` reads a property OR a label by that name.
-      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; } });
+      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; edges = true; } });
       for (const modulator of step.modulators ?? []) for (const value of modulator) strings(value, (s) => keys.add(s));
       eachChildChain(step, read, (c) => walk(c as IRStep[]), opaque);
     }
   };
   walk(steps);
-  return { keys: all ? 'all' : keys, leaves, sources, labels };
+  return { keys: all ? 'all' : keys, leaves, sources, vertexSources, vertexIds, labels, edges };
 }
 
 /** Does a `T.label` token sit anywhere in these argument values (a predicate's operands, a collection)? */
@@ -943,8 +968,33 @@ export interface ProgramWrites {
   readonly drops: boolean;
   readonly draws: boolean;
   readonly upstream: UpstreamWrite[];
+  /**
+   * The literal vertex ids a guard asked about, each answered ONCE at the PROGRAM'S START (`withPreChecks`):
+   * does some id name no vertex before anything is written? Only such an id can name a vertex the program
+   * creates (`BodyReach.vertexIds`), so a guard whose refusal rests on literal ids alone raises only then.
+   * Filled while the program is lowered, taken by the chain that summarized it (`lowerChain`).
+   */
+  readonly preChecks: PreCheck[];
+  /**
+   * Does the reference STOP PULLING before some side effect has run for every traverser the plan runs it
+   * for? The plan performs a step's side effect for its whole stream, so it then answers a different
+   * question, and the lowering DECLINES (`lowerChain`). Two laziness the plan does not have:
+   *  - a SLICE (`limit`/`range`/`skip`, `timeLimit`) after a side effect with no drain between:
+   *    `RangeGlobalStep` stops pulling once past its high bound
+   *    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:72-82`),
+   *    so `g.V().property('x',1).out().limit(1)` writes one or two vertices, never six. Where
+   *    `EarlyLimitStrategy` moves the slice past the side effect it is already moved
+   *    (`ir/early-limit.ts`) and the answer is exact; what is flagged here is what it could not move;
+   *  - a side effect in a body read for its FIRST result (a filter's, a `map`'s, a `by()`'s, a merge
+   *    option's, a `choose` predicate's — `TraversalUtil.test`/`apply`,
+   *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`)
+   *    that the body reaches only after it has fanned out: the rest of the body is abandoned.
+   * A side effect over at most one traverser (per start of its chain) cannot be cut short and is exempt.
+   */
+  readonly truncated: boolean;
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
+interface PreCheck { readonly name: string; readonly ids: readonly (number | string)[] }
 
 /**
  * A MUTATING STEP UPSTREAM of whatever is being lowered: what it writes (its own steps summarized by
@@ -953,8 +1003,8 @@ interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> |
  */
 interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string | null; used: boolean }
 
-const everythingWritten = (): ProgramWrites =>
-  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [] });
+const everythingWritten = (truncated: boolean): ProgramWrites =>
+  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [], preChecks: [], truncated });
 
 /** One write step of the program — WHAT it writes, at the grain a merge's search can be observed by. */
 interface WriteSite {
@@ -985,22 +1035,48 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
   const writers: KeyWriter[] = [];
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
-  let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false;
-  const read = rawBodies(params);
-  const walk = (chain: readonly IRStep[], ownable: boolean): void => {
-    let fresh = false, run = -1;
-    for (const step of chain) {
+  let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false, truncated = false;
+  // What one nested body contributes to its step: whether it has a side effect at all, and whether one of
+  // them is `lazy` — made after the body's stream fanned out past one traverser, so a consumer that stops
+  // pulling early cuts it short. Every node of the value is enumerated by the one IR walker (`valueNodes`);
+  // only the PULL mode is this caller's, which is why it does not go through `eachChildChain`.
+  const nested = (value: unknown, pull: BodyPull, into: { effects: boolean; lazy: boolean }): void => {
+    for (const node of valueNodes(value)) {
+      if (!isNested(node)) continue;
+      let body: readonly IRStep[];
+      // The NORMALIZED body — the one the lowering reads (`bodyOf`), so a slice `EarlyLimitStrategy` moves inside it
+      // and a `choose`'s absorbed option arms are judged as they will run.
+      try { body = childSteps(node.nested, params); } catch { unreadable = true; continue; }
+      const inner = walk(body, false, pull === 'loop' ? false : true);
+      if (!inner.effects) continue;
+      into.effects = true;
+      // A body read for its first result abandons every write it would have made after that result.
+      if (pull === 'first' && inner.lazy) truncated = true;
+      // A body emitted lazily hands its results on as it makes them; one iterated out first does not.
+      if (pull !== 'drained') into.lazy ||= inner.lazy;
+    }
+  };
+  // `ownable` — the top-level chain, whose `property()` runs write their traverser's own element;
+  // `single` — the chain starts from ONE traverser (a nested body, per invocation; the top-level chain
+  // only from a one-traverser source). Answers whether the chain has a side effect, and whether one is lazy.
+  const walk = (chain: readonly IRStep[], ownable: boolean, single: boolean): { effects: boolean; lazy: boolean } => {
+    let fresh = false, run = -1, pending = false, effects = false, lazy = false;
+    if (ownable) single = singleSource(chain);
+    for (const [index, step] of chain.entries()) {
+      if (truncates(step) && pending) truncated = true;
       const args = step.args.map((a) => a.value);
       if (step.name !== 'property') run = -1;
       const site = writeSiteOf(step);
       if (site) sites.push(site);
       switch (step.name) {
         case 'addV': creates = true; break;
-        case 'addE': creates = true; edges = true; break;
+        // An `addE` creates an EDGE and no vertex: a body re-sourcing `V()` cannot see it, only one that
+        // reaches an edge (`BodyReach.edges`).
+        case 'addE': edges = true; break;
         // A merge's onMatch map APPENDS a `T.label` to the found vertex (`MergeVertexStep.java:106-113`,
         // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java`).
         case 'mergeV': creates = true; anyKey = true; labels = true; break;
-        case 'mergeE': creates = true; edges = true; anyKey = true; labels = true; break;
+        case 'mergeE': edges = true; anyKey = true; labels = true; break;
         case 'drop': drops = true; anyKey = true; break;
         case 'addLabel': case 'dropLabel': case 'dropLabels': labels = true; break;
         // `io()` survives as itself only in a nested body read afresh; the top-level chain has been
@@ -1017,11 +1093,118 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
         }
       }
       fresh = step.name === 'addV' || step.name === 'addE' || (fresh && KEEPS_FRESH.has(step.name));
-      eachChildChain(step, read, (c) => walk(c as IRStep[], false), () => { unreadable = true; });
+      const bodies = { effects: false, lazy: false };
+      args.forEach((value, at) => nested(value, bodyPull(step, at), bodies));
+      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value, 'first', bodies);
+      for (const [, value] of step.withArgs ?? []) nested(value, 'first', bodies);
+      if (step.repeatRegion) {
+        const inner = walk(step.repeatRegion as IRStep[], false, false);
+        bodies.effects ||= inner.effects;
+        bodies.lazy ||= inner.lazy;
+      }
+      // A `choose`'s arms: the selector is read for its first result, the arm emitted lazily.
+      for (const option of step.optionArms ?? []) option.args.forEach((a, at) => nested(a.value, at === 0 ? 'first' : 'lazy', bodies));
+      // A side effect HERE — this step's own, or one in a body it pulls — runs for every traverser that
+      // reaches this step, or (`bodies.lazy`) fans out inside the body; either way more than one write
+      // that a consumer stopping early cuts short. Over one traverser with an eager body it cannot be cut.
+      const own = writeSiteOf(step) !== null && !createsOnce(step, chain, index);
+      if (own || bodies.effects) {
+        effects = true;
+        if (!single || bodies.lazy) { pending = true; lazy = true; }
+      }
+      // A drain pulls everything before it emits; a `drop`/`none` emits nothing for anything to pull.
+      if (drains(step) || step.name === 'drop' || step.name === 'none') pending = false;
+      // (The top-level source is `singleSource`'s to judge.)
+      single &&= (ownable && index === 0) || KEEPS_ONE.has(step.name) || (REDUCERS.has(step.name) && !isLocalScope(step));
     }
+    return { effects, lazy };
   };
-  walk(steps, true);
-  return unreadable ? everythingWritten() : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [] };
+  walk(steps, true, false);
+  return unreadable ? everythingWritten(truncated)
+    : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated };
+}
+
+/**
+ * HOW a step pulls a nested body (`ProgramWrites.truncated`):
+ *  - `first` — one result, then abandoned: a filter's body (`where`/`not`/`and`/`or`/`has`), a
+ *    `map`'s, a `by()`'s, an `addE` endpoint's, a merge option's, a `choose`/`branch` selector
+ *    (`TraversalUtil.test`/`apply`);
+ *  - `lazy` — every result, handed on as it is made: `union`/`local`/`flatMap`/`coalesce`/`optional`
+ *    and a `choose` arm (`BranchStep`/`FlatMapStep` iterate their child as the consumer pulls);
+ *  - `drained` — iterated OUT per traverser before the traverser moves on: `sideEffect`
+ *    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/TraversalSideEffectStep.java:46-49`);
+ *  - `loop` — a `repeat` body, whose later iterations run over every traverser the earlier ones made.
+ */
+type BodyPull = 'first' | 'lazy' | 'drained' | 'loop';
+const LAZY_BODIES: ReadonlySet<string> = new Set(['union', 'local', 'flatMap', 'coalesce', 'optional']);
+const SELECTING_BODIES: ReadonlySet<string> = new Set(['choose', 'branch']);
+function bodyPull(step: IRStep, at: number): BodyPull {
+  if (step.name === 'sideEffect') return 'drained';
+  if (step.name === 'repeat') return 'loop';
+  if (LAZY_BODIES.has(step.name)) return 'lazy';
+  // `choose(pred, t, f)`: the predicate's first result picks an arm, which is then emitted lazily.
+  if (SELECTING_BODIES.has(step.name)) return at === 0 ? 'first' : 'lazy';
+  return 'first';
+}
+
+/** Does this step STOP PULLING from upstream before upstream is exhausted? `RangeGlobalStep` throws
+ *  `FastNoSuchElementException` once past a HIGH bound (`…/step/filter/RangeGlobalStep.java:72-82`) — a
+ *  `limit`, a bounded `range`; a `skip` (high `-1`) pulls everything — and `TimeLimitStep` once its time
+ *  is up. `tail` is no such step: `TailGlobalStep` pulls everything to keep the last `n` (`drains`). */
+function truncates(step: IRStep): boolean {
+  if (isLocalScope(step)) return false;
+  if (step.name === 'timeLimit') return true;
+  if (!SLICE_STEPS.has(step.name)) return false;
+  try { return sliceOf(step).limit !== null; } catch { return true; }
+}
+
+/** Does this step pull EVERY traverser from upstream before it emits one? An unsized `barrier()`
+ *  (`NoOpBarrierStep`'s `Integer.MAX_VALUE`, `…/step/map/NoOpBarrierStep.java`), a global `order()`/
+ *  `sample()` (`CollectingBarrierStep`), `aggregate()` (`…/step/sideEffect/AggregateStep.java`), a
+ *  `tail()` (`…/step/filter/TailGlobalStep.java`), every reducing barrier (`fold`, `count`, `sum`, …,
+ *  `group()`, `groupCount()`, `tree()` — `ReducingBarrierStep`), `cap()` (`SupplyingBarrierStep`),
+ *  and the keyed `groupCount('a')`/`group('a')`/`tree('a')`/`subgraph('a')` (`SideEffectBarrierStep`,
+ *  whose `processAllStarts` reads the whole input, `…/step/sideEffect/SideEffectBarrierStep.java`). */
+const DRAINS: ReadonlySet<string> = new Set(['order', 'sample', 'aggregate', 'tail', 'fold', 'group', 'groupCount', 'tree', 'subgraph', 'cap', ...REDUCERS]);
+const drains = (step: IRStep): boolean =>
+  !isLocalScope(step) && ((step.name === 'barrier' && !step.args.length) || DRAINS.has(step.name));
+
+/** Steps that map one traverser to AT MOST one — filters, labels, reorders, element-preserving side
+ *  effects, one-to-one maps, a mid-chain creation (one element per traverser) and its modulators. A step
+ *  missing here only costs a decline where a one-traverser chain could not have been cut short. */
+const KEEPS_ONE: ReadonlySet<string> = new Set([
+  'as', 'identity', 'barrier', 'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'where', 'filter', 'not', 'and', 'or', 'is',
+  'dedup', 'limit', 'range', 'skip', 'tail', 'coin', 'sample', 'simplePath', 'cyclicPath', 'timeLimit', 'order', 'none',
+  'property', 'addLabel', 'dropLabel', 'dropLabels', 'sideEffect', 'aggregate', 'fold', 'cap',
+  'id', 'label', 'constant', 'key', 'value', 'select', 'elementMap', 'valueMap', 'propertyMap', 'math', 'project',
+  'addV', 'addE', 'from', 'to', 'option', 'inV', 'outV', 'otherV',
+]);
+
+/** Does the TOP-LEVEL chain start from ONE traverser — a source creation, a one-value `inject`, a
+ *  `V`/`E` naming one literal id? A sufficient test; `false` only costs a decline. */
+function singleSource(chain: readonly IRStep[]): boolean {
+  const source = chain[0];
+  if (!source) return false;
+  const args = source.args.map((a) => a.value);
+  return source.name === 'addV' || source.name === 'addE'
+    || (source.name === 'inject' && args.length <= 1)
+    || ((source.name === 'V' || source.name === 'E') && args.length === 1 && (typeof args[0] === 'number' || typeof args[0] === 'string'));
+}
+
+/** A merge whose search is a CONSTANT map and that writes nothing onto what it finds (no
+ *  `option(Merge.onMatch, …)` among the steps after it) creates at most ONCE whatever stream reaches it —
+ *  the first traverser creates, every later one finds (`MergeVertexStep`/`MergeEdgeStep` search, then
+ *  create, per traverser) — and the reference always pulls that first traverser, so no slice can cut its
+ *  effect short. */
+function createsOnce(step: IRStep, chain: readonly IRStep[], at: number): boolean {
+  if (step.name !== 'mergeV' && step.name !== 'mergeE') return false;
+  const search = step.args[0]?.value;
+  if (!(search instanceof Map) || [...search.values()].some((v) => isNested(v))) return false;
+  for (let i = at + 1; i < chain.length && chain[i]!.name === 'option'; i++) {
+    const selector = chain[i]!.args[0]?.value;
+    if (!isMergeArg(selector) || selector.merge === 'onmatch') return false;
+  }
+  return true;
 }
 
 /**
@@ -1069,13 +1252,52 @@ function streamCount(input: Rel, name: string, fresh: Minter): Binding {
 }
 
 /** Can a body that reaches `reach` observe what `effect` writes — onto any element, since an upstream
- *  write's traversers are not the site's? */
-const observes = (reach: BodyReach, effect: ProgramWrites): boolean => {
+ *  write's traversers are not the site's? `'fresh-ids'`: only through a literal vertex id that may name
+ *  a vertex the write creates (`BodyReach.vertexIds`), which the program's start decides. */
+const observes = (reach: BodyReach, effect: ProgramWrites): boolean | 'fresh-ids' => {
   let keys: KeySet = effect.anyKey ? 'all' : new Set<string>();
   for (const writer of effect.writers) keys = unite(keys, writer.keys);
-  return meets(reach.keys, keys) || (effect.labels && reach.labels)
-    || (reach.sources && (effect.creates || effect.drops)) || (reach.leaves && (effect.edges || effect.drops));
+  if (meets(reach.keys, keys) || (effect.labels && reach.labels)
+    || (reach.sources && effect.drops) || (effect.creates && reach.vertexSources)
+    || (reach.edges && effect.edges) || (reach.leaves && effect.drops)) return true;
+  return effect.creates && reach.vertexIds.size > 0 ? 'fresh-ids' : false;
 };
+
+/**
+ * A RELATION THAT HOLDS A ROW iff one of `ids` named no vertex when the program STARTED — the one way a
+ * literal-id source can reach a vertex the program creates (`BodyReach.vertexIds`). Registered on the
+ * program (`ProgramWrites.preChecks`) and bound at its start by `withPreChecks`; this is a reference to it.
+ */
+function freshIdsAtStart(program: ProgramWrites, ids: ReadonlySet<number | string>, fresh: Minter): Rel {
+  const name = fresh('pre');
+  program.preChecks.push({ name, ids: [...ids] });
+  return make.ref({ id: fresh('r'), name, channels: [], type: typeOf(meta('n', 'int')) });
+}
+
+/**
+ * THE PROGRAM-START BINDINGS the lowered program's guards asked for (`ProgramWrites.preChecks`), ahead of
+ * every other statement — before any write, so a vertex the program creates is not yet there to be found.
+ */
+export function withPreChecks<T extends { readonly effects?: readonly Binding[] }>(writes: ProgramWrites, tail: T, fresh: Minter): T {
+  if (!writes.preChecks.length) return tail;
+  const checks: Binding[] = writes.preChecks.map(({ name, ids }) => {
+    const absent: Expr[] = ids.map((id) => {
+      const scan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('uid', 'text', true)) });
+      const found = make.filter({
+        id: fresh('f'), input: scan, channels: [], type: scan.type,
+        pred: typeof id === 'number' ? eq(col(scan.id, 'id'), compilerInt(id)) : eq(col(scan.id, 'uid'), text(id)),
+      });
+      return { kind: 'exists', plan: found, negated: true };
+    });
+    const row = make.values({ id: fresh('pv'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const node = make.filter({
+      id: fresh('pf'), input: row, channels: [], type: row.type,
+      pred: absent.reduce((left, right) => ({ kind: 'binary', op: 'or', left, right })),
+    });
+    return { name, node, snapshot: true };
+  });
+  return { ...tail, effects: [...checks, ...(tail.effects ?? [])] };
+}
 
 /**
  * THE REFERENCE RUNS ONE TRAVERSER AT A TIME; A WRITE HERE IS ONE STATEMENT — and the two only agree when
@@ -1108,11 +1330,11 @@ const observes = (reach: BodyReach, effect: ProgramWrites): boolean => {
  * `keys` is the write's own keys, `null` for a key only known at run time — then ANY key the body reads
  * may be the written one. `step` is the write's own `property()` step, which names its run; absent, or
  * not found (a nested body normalized afresh), no other write counts as its own run, which only refuses
- * more.
+ * more. `message` names the body's site in the refusal — a `property()` value by default.
  */
 function sequentialGuard(
   site: RuntimeSite, bodies: readonly (readonly IRStep[])[], keys: readonly string[] | null, step: IRStep | undefined,
-  child: ChildSeam, guard: Guarder, fresh: Minter,
+  child: ChildSeam, guard: Guarder, fresh: Minter, message: string = SEQUENTIAL_READ,
 ): void {
   const program = child.writes;
   const run = step === undefined ? undefined : program.runOf.get(step);
@@ -1129,24 +1351,51 @@ function sequentialGuard(
   const leaves = reaches.some((reach) => reach.leaves);
   const readsOwn = reaches.some((reach) => meets(reach.keys, own));
   const readsElsewhere = reaches.some((reach) => meets(reach.keys, elsewhere) || (program.labels && reach.labels));
-  const seesNew = reaches.some((reach) => (reach.sources && (program.creates || program.drops))
-    || (reach.leaves && (program.edges || program.drops))
-    || (meets(reach.keys, created) && (reach.sources || (program.edges && reach.leaves))));
+  const seesNew = reaches.some((reach) => (reach.sources && program.drops) || (program.creates && reach.vertexSources)
+    || (reach.edges && program.edges) || (reach.leaves && program.drops)
+    || (meets(reach.keys, created) && (reach.vertexSources || (program.edges && reach.edges))));
   const perStream = readsElsewhere || seesNew || (readsOwn && (leaves || site.resolve === 'first'));
   const perElement = !perStream && readsOwn;
+  // A literal vertex id sees a NEW vertex only if it named none at the program's start (`BodyReach.vertexIds`):
+  // then the stream must be one traverser, decided at run time.
+  const literalIds = new Set<number | string>();
+  if (program.creates) for (const reach of reaches) for (const id of reach.vertexIds) literalIds.add(id);
+  const many = (input: Rel, also?: Rel): void => {
+    const counts = make.aggregate({
+      id: fresh('rc'), input, channels: [], type: typeOf(meta('n', 'int')),
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+    });
+    const more: Expr = { kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) };
+    const repeated = make.filter({
+      id: fresh('rf'), input: counts, channels: [], type: counts.type,
+      pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
+    });
+    guard(make.project({ id: fresh('p'), input: repeated, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(repeated.id, 'n')]] }),
+      { message, raiseWhen: 'rows' });
+  };
+  if (!perStream && literalIds.size) many(site.host, freshIdsAtStart(program, literalIds, fresh));
   // An UPSTREAM write the body can observe is one statement only when ONE traverser ran through it — its
   // own stream's count, not the host's: a filter, a `limit`, a `select` between the two hides from the
   // host the traversers the reference has not yet pulled through the write (`afterWrite`).
   for (const upstream of program.upstream) {
-    if (!reaches.some((reach) => observes(reach, upstream.effect))) continue;
+    const seen = reaches.map((reach) => observes(reach, upstream.effect));
+    if (!seen.some(Boolean)) continue;
     upstream.used = true;
+    // Seen only through literal vertex ids: only when one of them named no vertex at the program's start.
+    const ids = new Set<number | string>();
+    if (!seen.includes(true)) reaches.forEach((reach, at) => { if (seen[at]) for (const id of reach.vertexIds) ids.add(id); });
+    const also = ids.size ? freshIdsAtStart(program, ids, fresh) : undefined;
     // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises.
     const counted = upstream.count === null
       ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
       : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
-    const many = make.filter({ id: fresh('rf'), input: counted, channels: [], type: counted.type, pred: { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) } });
+    const more: Expr = { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) };
+    const many = make.filter({
+      id: fresh('rf'), input: counted, channels: [], type: counted.type,
+      pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
+    });
     guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
-      { message: SEQUENTIAL_READ, raiseWhen: 'rows' });
+      { message, raiseWhen: 'rows' });
   }
   if (!perElement && !perStream) return;
   const counts = make.aggregate({
@@ -1155,7 +1404,19 @@ function sequentialGuard(
   });
   const repeated = make.filter({ id: fresh('rf'), input: counts, channels: [], type: counts.type, pred: { kind: 'binary', op: '>', left: col(counts.id, 'n'), right: compilerInt(1) } });
   guard(make.project({ id: fresh('p'), input: repeated, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(repeated.id, 'n')]] }),
-    { message: SEQUENTIAL_READ, raiseWhen: 'rows' });
+    { message, raiseWhen: 'rows' });
+}
+
+/**
+ * THE RACE GUARD FOR A BODY A WRITE RESOLVES PER TRAVERSER BEFORE IT MUTATES — an `addE` endpoint
+ * (`to(__.V()…)`). `sequentialGuard` over the step's traversers, with no key of its own and a folded
+ * parameter's footing (`resolve: 'first'`, `TraversalUtil.apply` takes the body's first result): the guard
+ * reads only the host's row count, so a body that can observe what the program writes refuses at run time,
+ * before anything is written, whenever more than one traverser resolves it.
+ */
+function resolvedBodyGuard(host: Rel, bodies: readonly (readonly IRStep[])[], child: ChildSeam, guard: Guarder, fresh: Minter): void {
+  if (!bodies.length) return;
+  sequentialGuard({ host, hostElem: 'vertex', origin: 'id', aliases: NO_ALIASES, resolve: 'first' }, bodies, [], undefined, child, guard, fresh, SEQUENTIAL_ENDPOINT);
 }
 
 /**
@@ -1195,6 +1456,7 @@ function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
 }
 
 const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
+const SEQUENTIAL_ENDPOINT = 'this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
 const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
 
@@ -3146,7 +3408,7 @@ type Endpoint =
   | { readonly kind: 'alias'; readonly label: string }
   /** A ROOTED sub-read (`to(__.V(2))`, `from(V().has(…))`) — a relation, read through a scalar
    *  subquery. `next()` takes the FIRST row, so this takes one row of the same relation. */
-  | { readonly kind: 'read'; readonly rel: Rel }
+  | { readonly kind: 'read'; readonly rel: Rel; readonly body: readonly IRStep[] }
   /** A PUBLIC ID naming an existing vertex — `mergeE`'s only extra form, because a merge map states
    *  its endpoints by id where `from()`/`to()` state them by label or traversal. Whether the vertex
    *  is THERE is the graph's answer, so it arrives with a guard (§6·5). */
@@ -3244,10 +3506,31 @@ export function elementAddE(
   const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
+  // An endpoint TRAVERSAL is resolved per traverser, after every earlier traverser has made its edge
+  // (`AddEdgeStep.processNextStart` resolves `from`/`to` through `TraversalUtil.apply` for the traverser in
+  // hand, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AddEdgeStep.java`),
+  // so `g.V(1,2).addE('e').to(__.V().where(__.inE('e').count().is(0)).limit(1))` gives vadas's edge a
+  // different end than marko's; the plan resolves every traverser's endpoint before any insert. The same
+  // race guard every `property(k, <traversal>)` site runs (`sequentialGuard`), over the endpoint bodies.
+  resolvedBodyGuard(incoming, [from, to].flatMap((end) => (end.kind === 'read' ? [end.body] : [])), child, guard, fresh);
 
   const src = endpointExpr(from, incoming, aliases, fresh);
   const tgt = endpointExpr(to, incoming, aliases, fresh);
   if (!src || !tgt) return null;
+  // An endpoint TRAVERSAL that yields nothing for a traverser is `TraversalUtil.apply`'s "does not map to a
+  // value", which `AddEdgeStepContract.getAdjacentVertex` rethrows naming the step and the side
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AddEdgeStepContract.java:88-105`).
+  // The scalar subquery reads that as a NULL end, which the insert would hand SQLite's NOT NULL constraint —
+  // an internal error, never the reference's sentence — so it is refused first, before anything is written.
+  const named = tokens.label ?? stepLabel;
+  for (const [end, expr, side] of [[from, src, 'from'], [to, tgt, 'to']] as const) {
+    if (end.kind !== 'read') continue;
+    const absent = make.filter({ id: fresh('f'), input: incoming, channels: incoming.channels, type: incoming.type, pred: { kind: 'binary', op: 'is', left: expr, right: compilerNull() } });
+    guard(make.project({ id: fresh('p'), input: absent, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), {
+      message: `${typeof named === 'string' ? `addE(${named}) ` : ''}failed because the ${side}() traversal (which should give a Vertex) failed with: ${ABSENT_LABEL}`,
+      raiseWhen: 'rows',
+    });
+  }
 
   // A SUPPLIED PUBLIC ID needs BOTH graph-dependent refusals, and `addV` only needs the first because it
   // can prove the second at compile time (its one-row case is a literal `Values`). An `addE` mid-chain
@@ -3367,7 +3650,7 @@ function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, ids = false
   if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0]?.value === 'string')
     return { kind: 'alias', label: inner[0]!.args[0].value as string };
   const read = rootedVertices(inner, child, fresh);
-  return read && { kind: 'read', rel: read };
+  return read && { kind: 'read', rel: read, body: inner };
 }
 
 /**

@@ -56,7 +56,7 @@
   "asNumber": {
     "binds": 0,
     "bytes": 2042,
-    "compiler": 46,
+    "compiler": 110,
     "bound": 0
   },
   "asString": {
@@ -80,7 +80,7 @@
   "cap": {
     "binds": 0,
     "bytes": 4621,
-    "compiler": 87,
+    "compiler": 86,
     "bound": 0
   },
   "choose": {
@@ -218,7 +218,7 @@
   "group": {
     "binds": 0,
     "bytes": 4534,
-    "compiler": 87,
+    "compiler": 86,
     "bound": 0
   },
   "groupCount": {
@@ -421,8 +421,8 @@
   },
   "order": {
     "binds": 0,
-    "bytes": 4273,
-    "compiler": 101,
+    "bytes": 4764,
+    "compiler": 112,
     "bound": 0
   },
   "out": {
@@ -463,7 +463,7 @@
   },
   "property": {
     "binds": 20,
-    "bytes": 4576,
+    "bytes": 5978,
     "compiler": 301,
     "bound": 0
   },
@@ -505,7 +505,7 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 10280,
+    "bytes": 14145,
     "compiler": 132,
     "bound": 0
   },
@@ -523,8 +523,8 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 6383,
-    "compiler": 45,
+    "bytes": 8632,
+    "compiler": 90,
     "bound": 0
   },
   "tail": {
@@ -536,7 +536,7 @@
   "to": {
     "binds": 13,
     "bytes": 1286,
-    "compiler": 256,
+    "compiler": 276,
     "bound": 0
   },
   "toLower": {

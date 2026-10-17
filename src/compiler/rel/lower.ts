@@ -43,8 +43,8 @@ import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
-import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
+import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
+import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
@@ -491,11 +491,14 @@ function countExpr(input: Rel): Expr {
  * min/max need no guard: their argmax window (above) already yields zero rows for an empty input by
  * construction and one for a non-empty one.
  */
-function nonEmptyReducer(input: Rel, aggs: readonly (readonly [string, Expr])[], fresh: Minter): Rel {
+function nonEmptyReducer(
+  input: Rel, aggs: readonly (readonly [string, Expr])[], fresh: Minter,
+  cols: readonly ColMeta[] = [meta('v', 'any', true), meta('vt', 'text', true)],
+): Rel {
   const N = 'red_n';
   const aggregated = make.aggregate({
     id: fresh('red'), input, channels: [],
-    type: typeOf(meta('v', 'any', true), meta('vt', 'text', true), meta(N, 'int')),
+    type: typeOf(...cols, meta(N, 'int')),
     groupBy: [], aggs: [...aggs, [N, { kind: 'agg', fn: 'count', args: [] }]],
   });
   return make.filter({
@@ -2091,6 +2094,23 @@ function scalarTail(
         continue;
       }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
+      // Where the rows carry their OWN Gremlin type — the per-row column, or the stream's static tag — a
+      // `sum`'s class is theirs (`numberClass`): the storage class alone frames a Double stored integral
+      // as an Int. Two more aggregate columns, and the class named over them AFTER the reduction, so the
+      // per-row reading is spelled once per part rather than once per class test.
+      const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+      const tag = tagCol && carries(tagCol) ? col(rel.id, tagCol) : staticSumVt ? compilerText(staticSumVt) : undefined;
+      if (step.name === 'sum' && tag) {
+        const summed = nonEmptyReducer(rel, [['v', reduced.value], [CLASS_MASK, numberClassMask(col(rel.id, 'v'), tag)]], fresh,
+          [meta('v', 'any', true), meta(CLASS_MASK, 'int', true)]);
+        const v = col(summed.id, 'v');
+        rel = make.project({
+          id: fresh('rc'), input: summed, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+          exprs: [['v', v], ['vt', numberClass(col(summed.id, CLASS_MASK), v, { kind: 'call', fn: 'typeof', args: [v] })]],
+        });
+        out = { ...numeric, productiveNull: true };
+        continue;
+      }
       rel = nonEmptyReducer(rel, [['v', reduced.value], ['vt', reduced.type]], fresh);
       // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
       // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
@@ -4033,6 +4053,21 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
 }
 
 export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter, root = false): Tail | null {
+  if (opts.writes) return lowerChainOf(steps, opts, fresh, root);
+  // THE CHAIN THAT SUMMARIZES THE PROGRAM'S WRITES (no inherited `writes`) owns what the summary asks of
+  // the program as a whole.
+  const writes = programWrites(steps, settle(opts).params);
+  // A side effect the reference stops pulling before it has run for every traverser — a slice behind it
+  // that `EarlyLimitStrategy` could not move, or a body read for its first result — is one the plan would
+  // perform for the whole stream: a different answer, so the whole traversal declines. `programWrites`
+  // walks every depth.
+  if (writes.truncated) return null;
+  const tail = lowerChainOf(steps, { ...opts, writes }, fresh, root);
+  // The program-start questions its guards asked (`ProgramWrites.preChecks`), ahead of every statement.
+  return tail && withPreChecks(writes, tail, fresh);
+}
+
+function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, root: boolean): Tail | null {
   const analysed = chainCtxOf(steps, opts);
   const { facts } = analysed;
   // Only the ROOT traversal, lowered from its own source over the base graph, is known to be the

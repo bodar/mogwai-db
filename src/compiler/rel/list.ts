@@ -17,7 +17,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
-import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
+import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 
 /**
@@ -802,10 +802,20 @@ export function listRetype(
     // that subject is a decode CASE, so writing the whole thing twice is what made this family's
     // statement grow when projected collections became typed. Same rule as the argmax above.
     const reduced = reducerAggregate(payload, step.name);
-    const held = fenced(withPayload(host, [['v', scalar(reduced.value, 'v', 'any')[1]]], [meta('v', 'any', true)], fresh), fresh);
+    // A `sum` over members that carry their OWN Gremlin type takes the members' common number class
+    // (`reducer.ts` `numberClass`) — the storage class alone frames a Double stored integral as an Int.
+    // Its class mask is one more correlated read, and the class is named over it and the held sum.
+    const tag = step.name !== 'sum' ? undefined : memberType?.kind === 'static' ? compilerText(memberType.type) : memberVtype(of, members);
+    const held = fenced(withPayload(host,
+      [['v', scalar(reduced.value, 'v', 'any')[1]], ...(tag ? [scalar(numberClassMask(payload, tag), CLASS_MASK, 'any')] : [])],
+      [meta('v', 'any', true), ...(tag ? [meta(CLASS_MASK, 'any', true)] : [])], fresh), fresh);
+    const v = col(held.id, 'v');
+    const storage: Expr = { kind: 'call', fn: 'typeof', args: [v] };
     return {
       rel: withPayload(held,
-        [['v', col(held.id, 'v')], ['vt', step.name === 'mean' ? compilerText('real') : { kind: 'call', fn: 'typeof', args: [col(held.id, 'v')] }]],
+        [['v', v], ['vt', step.name === 'mean' ? compilerText('real')
+          : tag ? numberClass(col(held.id, CLASS_MASK), v, storage)
+          : storage]],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
       type: UNKNOWN, result: 'number' as const, ...productive,
     };

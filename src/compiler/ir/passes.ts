@@ -1,7 +1,7 @@
 import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
@@ -11,7 +11,8 @@ import {
     type IRStep,
 } from './strategies.ts';
 import { verifyLabelMutationTarget, verifyWriteArgs } from './write-args.ts';
-import { LABEL_MUTATIONS } from './step.ts';
+import { LABEL_MUTATIONS, SLICE_STEPS } from './step.ts';
+import { earlyLimit } from './early-limit.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
 //
@@ -129,6 +130,13 @@ const FOLD: Pass[] = group('canonicalize', [
     applies: (_steps, ctx) => ctx.strategies.without.includes('RepeatUnrollStrategy'),
     run: (steps, ctx) => markUnrollSuppressed(steps, ctx.params),
   },
+  // The same mark for `withoutStrategies(EarlyLimitStrategy)`, on the same RAW chain and for the same
+  // reason: before `formRepeatRegions`/`absorbOptionArms` move a body out of the args it walks.
+  {
+    name: 'markEarlyLimitSuppressed',
+    applies: (_steps, ctx) => ctx.strategies.without.includes('EarlyLimitStrategy'),
+    run: (steps, ctx) => markEarlyLimitSuppressed(steps, ctx.params),
+  },
   // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
   // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
   // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's
@@ -147,6 +155,12 @@ const FOLD: Pass[] = group('canonicalize', [
   // absorbCallWith to fold exactly as it folds a hand-written call()'s.
   { name: 'desugarIo', run: (steps) => desugarIo(steps) },
   { name: 'absorbCallWith', run: (steps) => absorbCallWith(steps) },
+  // TinkerPop's `EarlyLimitStrategy`, where it decides what a side effect touches (`ir/early-limit.ts`).
+  // LAST in canonicalize: it moves a slice over steps whose clusters (a `by()` on a keyed `groupCount`,
+  // an `addE`'s endpoints) the folds above have already settled, and over a decoration's injected
+  // write stamp like any parsed one — the strategy itself is an optimization, run after decorations.
+  // `markEarlyLimitSuppressed` (above, on the raw chain) is what `withoutStrategies` turns it off with.
+  { name: 'EarlyLimitStrategy', applies: (steps) => steps.some((s) => SLICE_STEPS.has(s.name)), run: (steps) => earlyLimit(steps) },
 ]);
 
 // ---------- simplify (provable no-op removals) ----------

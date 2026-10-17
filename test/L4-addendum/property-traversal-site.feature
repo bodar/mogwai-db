@@ -433,10 +433,10 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
 
-  # The same through a `limit`: `RangeGlobalStep` rejects vadas only AFTER pulling it through
-  # `property('a',1)`, and that pull happens after marko's body has counted one `a`.
+  # …a `limit` after the upstream `property`: `EarlyLimitStrategy` (a default) moves it before the write
+  # (`V(1,2).limit(1).property("a",1)…`, `strategy/optimization/EarlyLimitStrategy.java` `apply`), so only
+  # marko is written and his body reads 1, not 2.
   @gap:property-traversal-site
-  @Unsupported
   Scenario: g_VX1_2X_propertyXa_1X_limitX1X_propertyXn_V_valuesXaX_countX
     Given the modern graph
     And the traversal of
@@ -489,3 +489,46 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
     When iterated to list
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
+
+  # A LITERAL id is no shield against a creation of the SAME kind: ids are sequential rowids, so on the
+  # modern graph the next vertices are 7 and 8 and `V(8)` is the SECOND traverser's creation. The reference
+  # runs traverser 1 to the site before traverser 2 creates: n = 0, then 1. One statement gave 1 to both.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_injectX1_2X_addVXxX_identity_propertyXn_VX8X_countX_valuesXnX
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).addV("x").identity().property("n", __.V(8).count()).values("n")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+      | d[1].l |
+
+  # An id that named a vertex BEFORE the program ran names no new one, so the same shape over `V(1)` answers.
+  @gap:property-traversal-site
+  Scenario: g_injectX1_2X_addVXxX_identity_propertyXn_VX1X_countX_valuesXnX
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).addV("x").identity().property("n", __.V(1).count()).values("n")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | d[1].l |
+
+  # An addE endpoint traversal that yields nothing is `TraversalUtil.apply`'s refusal, rethrown naming the
+  # side (`AddEdgeStepContract.getAdjacentVertex`) — not SQLite's NOT NULL constraint on the edge's end.
+  @gap:property-traversal-site
+  Scenario: g_VX1X_addEXeX_toXV_99X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).addE("e").to(__.V(99))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "addE(e) failed because the to() traversal (which should give a Vertex) failed with: The provided traverser does not map to a value"

@@ -33,13 +33,24 @@ lowered.
   reference answers the HIGHEST COMMON class over all inputs (`NumberHelper.getHighestCommonNumberInfo`,
   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390`;
   `max`/`min` at :613 widen too), we answer the winner's own type (`max`/`min`) or the aggregate's storage
-  class (`sum`/`mean`). Wrong today: `inject(2, 1.0d).max()` Int (ref Double), `inject(2, 1L).max()` Int
-  (ref Long), `inject(2f, 1f).sum()` Double (ref Float), byte/short `sum()` untyped, `mean()` of
-  BigInteger Double (ref BigDecimal), and a WHOLE-number `sum()` of Doubles Int — `g.V(1).outE().has('weight',1.0).values('weight').sum()`
-  answers Int 1 (ref Double 1.0) because `typeof(sum)` of an integral Double stored INTEGER is `integer`;
-  the input's stored `vtype` must vote (a floating term forces `real`). That one also moves the census
-  (`local(aggregate("a").by(__.inE("created").values("weight").sum()))…cap("a")` → `[…, 1.0, 1.0]`).
-  Needs a per-input class rank aggregated beside the value.
+  class (`mean`). `sum` now takes the rows' common class wherever they carry a tag (`reducer.ts`
+  `numberClassMask`/`numberClass` — the scalar `sum`, `sum(local)`, and grouped `sum`/`min`/`max`), so a
+  whole-number Double sum stays a Double and byte/short/float sums keep their class. Wrong today:
+  `inject(2, 1.0d).max()` Int (ref Double), `inject(2, 1L).max()` Int (ref Long), `inject(5i, 2.0d).max()`
+  Int 5 (ref Double 5.0), `inject(1b, 2s).max()` Int (ref Short) — the top-level and `local` argmax
+  `min`/`max` arms still frame the WINNER's tag (only a grouped `by()` `min`/`max` reads `numberClass`);
+  `inject([1b, 2s]).sum(local)` Int (ref Short — a bare list literal carries no member tags); `mean()` of
+  BigInteger Double (ref BigDecimal); an UNTAGGED stored integer counts as an Int whatever its size; and an
+  intermediate overflow the final total cannot show is not widened.
+  An EXACT-TAIL value held as decimal TEXT (a BigDecimal — `1.5m` is stored `'1.5'` — a BigInteger, or a
+  Long past 2^53) is left out of every SQL `sum` (the eligibility test admits `integer`/`real` only), so
+  `values('p').sum()` over `1.5m` and `2` is the Int 2 (ref BigDecimal 3.5), `10000000000000000000n` + `1`
+  the Int 1, `project('a').by(values('p').sum())` drops the `1.5m` vertex's key and
+  `local(values('p').sum())` answers null. Such a row no longer NAMES the total's class (`reducer.ts`
+  `exactTailText` reads it as no number class), but the total itself is wrong. A run-time decline was
+  tried and backed out: a guard binding at the scalar `sum` makes every tagged `sum` a program, which a
+  nested body (`local(values('age').sum())`) cannot carry, so it declined common traversals. Needs a
+  decline that rides inside one read (a guard channel out of a reducer), or exact decimal arithmetic.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
@@ -274,3 +285,22 @@ lowered.
   time (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`,
   `.../step/map/MergeVertexStep.java`). Pinned in `test/L4-addendum/merge-one-traverser-at-a-time.feature`
   and `test/merge-other-writes.test.ts`.
+- **A slice the reference stops pulling at, behind a side effect** — `EarlyLimitStrategy` is PERFORMED where
+  a slice crosses a `SideEffectStep`/always-bound map (`src/compiler/ir/early-limit.ts`;
+  `vendor/tinkerpop/gremlin-core/.../strategy/optimization/EarlyLimitStrategy.java`), so
+  `g.V().property('x',1).limit(1)` writes one vertex; the keyed `groupCount('a')`/`group('a')`/`tree('a')`/
+  `subgraph('a')` are `SideEffectBarrierStep`s at the pin and are NOT crossed. What it cannot move — a
+  movement between (`property().out().limit(1)`), `withoutStrategies(EarlyLimitStrategy)`, a slice that would
+  split a creation from its `property()`, a branch's lazily emitted arm writes, a write in a body read for
+  its first result (`where(__.out().property(…))`, formerly an internal "Ref 'pwN'" error) — DECLINES
+  (`ProgramWrites.truncated`, `src/compiler/rel/write.ts`). The real feature behind those is the
+  per-traverser write driver. An `addE` endpoint traversal now runs the same race guard as a
+  `property(k, <traversal>)` body; a literal-id source is not blind to a creation of its own kind (ids are sequential
+  rowids, so `V(8)` may be another traverser's new vertex) unless every id it names existed at the program's
+  start, which a program-start binding answers (`ProgramWrites.preChecks`). Two declines narrower than
+  the reference: `g.V().property('x',1).select('a').limit(1)` (an unbound `select` filters every
+  traverser, so the reference pulls all six), and `g.V(1,2).addE('e').to(__.out().limit(1))` (the endpoint's
+  movement could reach a new edge). A refusal raised at a `property()` run still comes after an EARLIER
+  creation step has written (`g.inject(1,2).addV('x').identity().property('n', __.V(8).count())` declines
+  with both vertices made). Pinned in `test/L4-addendum/early-limit-side-effect.feature`,
+  `test/compiler/writes.exec.test.ts`.

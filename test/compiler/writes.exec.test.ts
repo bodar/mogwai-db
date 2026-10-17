@@ -629,5 +629,125 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
   test('a key that is not a String, however it is stored', () => {
     refuses("g.V(1).property(__.constant(UUID('2c8e5c1e-0f1a-4d1a-9b7e-1a2b3c4d5e6f')).identity(), 'x')", /String or T on even array indices/, 'g.V(1).valueMap()');
   });
+
+  // An `addE` endpoint TRAVERSAL is resolved per traverser, after every earlier traverser has made its
+  // edge (`AddEdgeStep`, `TraversalUtil.apply`): the same race, the same guard (`resolvedBodyGuard`).
+  test('an addE endpoint whose body could see an earlier traverser’s edge', () => {
+    const seen = /read what another traverser writes/;
+    // The reference gives vadas's edge a different end than marko's ([1, 2]); one statement gave [1, 1].
+    refuses("g.V(1,2).addE('e').to(__.V().where(__.inE('e').count().is(0)).limit(1))", seen, 'g.E().count()');
+    refuses("g.V(1,2).addE('e').from(__.V(4).outE('e').inV())", seen, 'g.E().count()');
+    // The refusal names the ENDPOINT, not a property() the traversal does not have.
+    refuses("g.V(1,2).addE('e').to(__.V(4).outE('e').inV())", /an addE\(\) from\(\)\/to\(\) traversal/, 'g.E().count()');
+    // A literal id is no shield against a creation of the SAME kind: ids are sequential rowids, so vertex
+    // 8 is the second traverser's new vertex. The reference fails traverser 1 (no vertex 8 yet); one
+    // statement drew both edges 8→8.
+    refuses("g.inject(1,2).addV('x').addE('e').to(__.V(8))", seen, 'g.E().count()');
+    // An endpoint that yields NOTHING is the reference's sentence (`AddEdgeStepContract.getAdjacentVertex`
+    // over `TraversalUtil.apply`), not SQLite's NOT NULL constraint on `edges.tgt`.
+    refuses("g.V(1).addE('e').to(__.V(99))", /addE\(e\) failed because the to\(\) traversal \(which should give a Vertex\) failed with: The provided traverser does not map to a value/, 'g.E().count()');
+    refuses("g.addE('e').from(__.V(2).has('nope')).to(__.V(1))", /the from\(\) traversal .* does not map to a value/, 'g.E().count()');
+    // One traverser races nobody; an endpoint that reaches no edge cannot see a new one.
+    expect(run(seededStore(), "g.V(1).addE('e').to(__.V().where(__.inE('e').count().is(0)).limit(1)).inV().id()").map((r) => r.v)).toEqual([1]);
+    expect(run(seededStore(), "g.V(1,2).addE('e').to(__.V(4)).inV().id()").map((r) => r.v)).toEqual([4, 4]);
+  });
+});
+
+// A SLICE AFTER A SIDE EFFECT. `EarlyLimitStrategy`, a default, moves a `limit`/`range`/`skip` LEFT past every
+// `SideEffectStep` (`AddPropertyStep`, `AddLabelStep`) and always-bound map step (`AddVertexStep`, `IdentityStep`,
+// `EdgeVertexStep`…) to just after the last step that is neither
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java`
+// `apply`), so the reference writes for the sliced traversers ONLY — `ir/early-limit.ts` performs that move.
+// A slice it cannot move leaves the reference's LAZY pull (`RangeGlobalStep` stops pulling past its bound), and
+// that DECLINES before anything is written (`ProgramWrites.truncated`).
+describe('a slice after a side effect', () => {
+  const declined = /not supported yet/;
+  const refuses = (q: string, unchanged: string) => {
+    const store = seededStore();
+    const before = run(store, unchanged);
+    expect(() => run(store, q)).toThrow(declined);
+    expect(run(store, unchanged)).toEqual(before);
+  };
+  const answers = (q: string, expected: unknown[], written: string, count: number) => {
+    const store = seededStore();
+    expect(run(store, q).map((r) => r.v)).toEqual(expected);
+    expect(run(store, written).map((r) => r.v)).toEqual([count]);
+  };
+
+  test('EarlyLimitStrategy moves it before the side effect', () => {
+    answers("g.V().property('x',1).limit(1).values('x')", [1], "g.V().has('x').count()", 1);
+    answers("g.V().property('x',1).range(1,3).count()", [2], "g.V().has('x').count()", 2);
+    answers("g.V().property('x',1).identity().limit(1).count()", [1], "g.V().has('x').count()", 1);
+    answers("g.E().property('x',1).inV().limit(1).count()", [1], "g.E().has('x').count()", 1);
+    answers("g.V().addLabel('z').limit(2).count()", [2], "g.V().hasLabel('z').count()", 2);
+    answers("g.inject(1,2,3).addV('n').limit(1).count()", [1], "g.V().hasLabel('n').count()", 1);
+    // In a nested body too: the strategy applies to the child (`__.V()` is its `insertAfter`).
+    answers("g.V(1).union(__.V().property('x',1).limit(2)).count()", [2], "g.V().has('x').count()", 2);
+  });
+
+  test('a drain before the slice orders every write first', () => {
+    // `fold()` is a reducing barrier: it reads its whole input before the slice sees anything.
+    answers("g.V().property('x',1).fold().limit(1).count(local)", [6], "g.V().has('x').count()", 6);
+    // (A bare `barrier()` here declines on its own account: an observable TraverserSet merge.)
+    answers("g.V().property('x',1).aggregate('a').limit(2).count()", [2], "g.V().has('x').count()", 6);
+    answers("g.V().property('x',1).order().by('name').limit(2).values('name')", ['josh', 'lop'], "g.V().has('x').count()", 6);
+    // One traverser upstream: nothing to cut.
+    answers("g.V(1).property('x',1).out().limit(1).count()", [1], "g.V().has('x').count()", 1);
+    // A `skip` has no high bound, so it pulls everything — though the strategy still moves it where it can.
+    answers("g.V().property('x',1).out().skip(1).count()", [5], "g.V().has('x').count()", 6);
+    answers("g.V().property('x',1).skip(4).count()", [2], "g.V().has('x').count()", 2);
+  });
+
+  test('a keyed groupCount/group is a barrier the slice does not cross', () => {
+    // `GroupCountSideEffectStep`/`GroupSideEffectStep` are `SideEffectBarrierStep`s at the pin
+    // (`…/step/sideEffect/SideEffectBarrierStep.java`), not `SideEffectStep`s: the strategy stops at them
+    // and they count every traverser.
+    const counted = (q: string) => Object.fromEntries((JSON.parse(run(seededStore(), q)[0].map) as [{ v: string }, { v: number }][]).map(([k, v]) => [k.v, v.v]));
+    expect(counted("g.V().groupCount('a').by(label).limit(1).cap('a')")).toEqual({ person: 4, software: 2 });
+    expect(counted("g.V().groupCount('a').by(label).limit(1).select('a')")).toEqual({ person: 4, software: 2 });
+    expect(counted("g.V().group('a').by(label).by(count()).range(1,2).cap('a')")).toEqual({ person: 4, software: 2 });
+    expect(counted("g.V().groupCount('a').by(label).out().limit(1).cap('a')")).toEqual({ person: 4, software: 2 });
+  });
+
+  test('a slice it cannot move declines, writing nothing', () => {
+    // A movement between: marko is written, then his first neighbour fills the slice.
+    refuses("g.V().property('x',1).out().limit(1)", "g.V().has('x').count()");
+    // The user turned the strategy off: the lazy pull writes the slice plus one.
+    refuses("g.withoutStrategies(EarlyLimitStrategy).V().property('x',1).limit(1)", "g.V().has('x').count()");
+    // A nested writer whose body is emitted lazily, cut by a slice after it.
+    refuses("g.V(1).union(__.V().property('x',1)).limit(2)", "g.V().has('x').count()");
+  });
+
+  test('a side effect in a body read for its first result declines', () => {
+    refuses("g.V(1).map(__.V().property('x',1))", "g.V().has('x').count()");
+    // These used to reach the user as an internal plan error ("Ref 'pwN' is not a Plan binding").
+    refuses("g.V(1).where(__.out().property('x',1))", "g.V().has('x').count()");
+    refuses("g.V(1).choose(__.out().property('x',1), __.constant(1), __.constant(2))", "g.V().has('x').count()");
+  });
+});
+
+describe('a sum takes its values’ common number class', () => {
+  test('an integral Double sum stays a Double; a narrower class is kept', () => {
+    // ripple's one weight (1.0) is stored INTEGER under a `double` tag, so its sum is an INTEGER whose
+    // storage class alone framed an Int; `NumberHelper.add` keeps the Double (`Sum.feature`
+    // `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX`, `d[1.0].d`).
+    expect(run(seededStore(), "g.V(5).inE().values('weight').sum()")).toEqual([{ v: 1, vt: 'double' }]);
+    expect(run(seededStore(), "g.V(5).inE().values('weight').fold().sum(local)").map((r) => r.vt ?? r.vtype)).toEqual(['double']);
+    // `Sum.feature` `g_injectX1b_2b_3sX_sum` is `d[6].s`; `g_injectX127b_1bX_sum` widens to `d[128].s`.
+    expect(run(seededStore(), 'g.inject(1b,2b,3s).sum()')).toEqual([{ v: 6, vt: 'short' }]);
+    expect(run(seededStore(), 'g.inject(127b,1b).sum()')).toEqual([{ v: 128, vt: 'short' }]);
+  });
+
+  // An exact-tail value (a BigDecimal, a BigInteger or Long past 2^53) is held as decimal TEXT, which the
+  // SQL sum leaves out (an open wrong answer, docs/outstanding-work.md). Its class must not then be claimed
+  // for the total — `values('p').sum()` over `1.5m` and `2` answered the BigDecimal 2 — so such a row
+  // reads as no number class and the total keeps its storage class.
+  test('an exact-tail value held as text does not name the sum’s class', () => {
+    const vt = (q: string) => run(seededStore(), q).map((r) => r.vt ?? r.vtype);
+    expect(vt("g.addV('n').property('p',1.5m).addV('n').property('p',2).V().hasLabel('n').values('p').sum()")).toEqual(['integer']);
+    expect(vt("g.addV('n').property('p',10000000000000000000n).addV('n').property('p',1).V().hasLabel('n').values('p').sum()")).toEqual(['integer']);
+    // An exact class held as an INTEGER sums exactly, and keeps its class.
+    expect(run(seededStore(), "g.addV('n').property('p',5n).addV('n').property('p',1).V().hasLabel('n').values('p').sum()")).toEqual([{ v: 6, vt: 'bigint' }]);
+  });
 });
 });

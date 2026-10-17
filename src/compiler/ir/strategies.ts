@@ -6,7 +6,7 @@ import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
+import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -75,7 +75,12 @@ const PATH_MODULATOR_HOSTS = PATH_FAMILY;
 export const NO_OP_STRATEGIES = new Set([
   // Optimization strategies: SQLite's planner + our covering indexes do this work.
   'CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
-  'LazyBarrierStrategy', 'EarlyLimitStrategy', 'OrderLimitStrategy',
+  'LazyBarrierStrategy', 'OrderLimitStrategy',
+  // ⚠️ `EarlyLimitStrategy` is NOT result-preserving where a slice crosses a SIDE EFFECT — it decides how
+  // many traversers a write touches — so we PERFORM it there (`ir/early-limit.ts`), and
+  // `withoutStrategies` suppresses that move (`markEarlyLimitSuppressed`), leaving the lazy pull the
+  // lowering then declines (`ProgramWrites.truncated`). Over pure steps the move changes nothing.
+  'EarlyLimitStrategy',
   'AdjacentToIncidentStrategy', 'IncidentToAdjacentStrategy', 'InlineFilterStrategy',
   // ⚠️ `PathRetractionStrategy` is the SECOND entry whose "no-op" claim is about the RESULT and not
   // about the plan — same standing as `RepeatUnrollStrategy` below, and for the same reason: we now
@@ -1251,13 +1256,25 @@ const valuePreservingBodyStep = (s: Step): boolean =>
  * only a branch that genuinely marked something is rebuilt.
  */
 export function markUnrollSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
+  return markAtDepth(steps, params, (s) => s.name === 'repeat', (s) => { s.unrollSuppressed = true; });
+}
+
+/** `withoutStrategies(EarlyLimitStrategy)` — mark every slice at EVERY depth so `earlyLimit`
+ *  (`ir/early-limit.ts`) leaves it where the user wrote it, for `markUnrollSuppressed`'s reason: a nested
+ *  body is normalized later and in isolation, and `withoutStrategies` holds at every depth or not at all. */
+export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
+  return markAtDepth(steps, params, (s) => SLICE_STEPS.has(s.name), (s) => { s.earlyLimitSuppressed = true; });
+}
+
+/** Mark each step `matches` accepts, at every depth, preserving identity where nothing was marked. */
+function markAtDepth(steps: Step[], params: Record<string, any>, matches: (s: Step) => boolean, mark: (s: IRStep) => void): IRStep[] {
   let changed = false;
   const marked = steps.map((s) => {
-    const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markUnrollSuppressed(inner, params));
-    if (s.name !== 'repeat' && !argsChanged) return s;
+    const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markAtDepth(inner, params, matches, mark));
+    if (!matches(s) && !argsChanged) return s;
     changed = true;
     const next: IRStep = argsChanged ? { ...s, args } : { ...s };
-    if (s.name === 'repeat') next.unrollSuppressed = true;
+    if (matches(s)) mark(next);
     return next;
   });
   return (changed ? marked : steps) as IRStep[];

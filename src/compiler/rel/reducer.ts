@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerText, type AggFn, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerText, type AggFn, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import { REDUCER_CLASSES } from '../../gremlin/types.ts';
 
 /**
@@ -109,4 +109,90 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { 
     ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk })
     : agg(reducer, arg);
   return { value: reduced, type: call('typeof', reduced) };
+}
+
+const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+const outside = (e: Expr, lo: number, hi: number): Expr => bin('or', bin('<', e, compilerInt(lo)), bin('>', e, compilerInt(hi)));
+
+/**
+ * Each Gremlin number class as ONE BIT, in `NumberHelper`'s width order — integral `byte`…`bigint` in
+ * bits 0–4, floating `float`/`double`/`bigdecimal` in bits 5–7 — and anything that is not a number in
+ * bit 8. A storage-class name (`integer`/`real`: an untagged value, or a reducer's own `typeof` tag)
+ * reads as the class `inferredVtype` gives it (an Int, a Double). Spelled as one JSON object so a row's
+ * bit is ONE lookup on its tag, rather than a `CASE` that would spell the tag once per class.
+ */
+const CLASS_BITS = JSON.stringify({ byte: 1, short: 2, int: 4, long: 8, bigint: 16, float: 32, double: 64, bigdecimal: 128, integer: 4, real: 64 });
+const NOT_A_NUMBER = 256;
+
+/** The column a reduction carries its result's class mask in (`numberClassMask`). */
+export const CLASS_MASK = 'cls';
+
+/**
+ * THE STREAM'S NUMBER CLASSES, AS ONE AGGREGATE — the set of classes its non-null values carry, as a bit
+ * mask (`CLASS_BITS`): `SUM(DISTINCT <one-hot bit>)` is the bitwise OR of the rows' bits, which SQLite has
+ * no aggregate for. `tag` is the row's own Gremlin type, NULL for an untagged value, which is then read by
+ * its storage class (`typeof`). `numberClass` names the class the mask stands for. A value held as TEXT
+ * votes NO number class, whatever its tag: the reducer's eligibility test admits only an `integer`/`real`
+ * storage class, so an exact-tail value stored as decimal TEXT (a BigDecimal `'1.5'`, a BigInteger or a
+ * Long past 2^53) is LEFT OUT of the total (an open wrong answer, `docs/outstanding-work.md`), and naming
+ * the total's class after it would frame that wrong total as an exact one. It reads as `NOT_A_NUMBER`, so
+ * the class falls back to the caller's own storage-class answer.
+ */
+export function numberClassMask(value: Expr, tag: Expr): Expr {
+  const key: Expr = { kind: 'call', fn: 'coalesce', args: [tag, call('typeof', value)] };
+  const bit: Expr = {
+    kind: 'case',
+    whens: [[bin('=', call('typeof', value), compilerText('text')), compilerInt(NOT_A_NUMBER)], [bin('is not', value, compilerNull()), {
+      kind: 'call', fn: 'coalesce',
+      args: [{ kind: 'call', fn: 'json_extract', args: [compilerText(CLASS_BITS), bin('||', compilerText('$.'), key)] }, compilerInt(NOT_A_NUMBER)],
+    }]],
+  };
+  return { kind: 'agg', fn: 'sum', args: [bit], distinct: true };
+}
+
+/**
+ * THE CLASS OF A NUMERIC REDUCER'S RESULT — `NumberHelper`'s HIGHEST COMMON class of the stream
+ * (`getHighestCommonNumberInfo`: the widest width, floating point if any value is, so a `long` and a
+ * `float` make a `double`; `determineNumberClass`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390,861-874`),
+ * from its class `mask` (`numberClassMask`) — widened by OVERFLOW for an integral class, because
+ * `mathOperationWithPromote` retries an overflowing sum at the next width rather than wrap
+ * (`NumberHelper.java:401-430`; `add` is it, `:452-454`), so a sum of Integers past 2^31 is a Long. Its
+ * readers: every `sum` (scalar, `sum(local)`, a grouped `by()`), and the grouped `by()` `min`/`max`, where
+ * the widening never fires (the result is one of the values) and the class is the common one. The
+ * top-level and `local` `min`/`max` do NOT read it yet — they frame the winner's own class, so
+ * `inject(5i, 2.0d).max()` is the Int 5 where `NumberHelper.max` gives the Double 5.0, and
+ * `inject(1b, 2s).max()` an Int (recorded in `docs/outstanding-work.md`).
+ *
+ * `fallback` where the stream has no number class — no value at all (the result is null), or a value that
+ * is not a number (a string under `min`/`max`, a tag no number class names) — the caller's answer before.
+ *
+ * Why a storage class is not enough: a Double stored integral (the modern graph's `weight` 1.0 is INTEGER
+ * 1 under a `double` tag) sums to an INTEGER, so `g.V(5).inE().values('weight').sum()` framed as the Int 1
+ * where the reference answers the Double 1.0 (`Sum.feature`
+ * `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX`, `d[1.0].d`), and a `property()` write of
+ * that sum stored it untyped. Two residues, both of an UNTAGGED stream: an untagged integer is an Int
+ * whatever its magnitude (only the result's own magnitude widens it), and the reference promotes on an
+ * INTERMEDIATE overflow, so a sum whose running total passed a width and came back is wider there.
+ */
+export function numberClass(mask: Expr, result: Expr, fallback: Expr): Expr {
+  const atLeast = (bit: number): Expr => bin('>=', mask, compilerInt(bit));
+  const has = (bit: number): Expr => bin('=', bin('%', bin('/', mask, compilerInt(bit)), compilerInt(2)), compilerInt(1));
+  return {
+    kind: 'case',
+    whens: [
+      [bin('or', bin('is', mask, compilerNull()), atLeast(NOT_A_NUMBER)), fallback],
+      // Some floating class (bits 5–7, and nothing at or past bit 8): its width is the widest of all.
+      [atLeast(32), {
+        kind: 'case',
+        whens: [[bin('or', atLeast(128), has(16)), compilerText('bigdecimal')], [bin('or', atLeast(64), has(8)), compilerText('double')]],
+        else: compilerText('float'),
+      }],
+      [atLeast(16), compilerText('bigint')],
+      [bin('or', atLeast(8), outside(result, -2147483648, 2147483647)), compilerText('long')],
+      [bin('or', atLeast(4), outside(result, -32768, 32767)), compilerText('int')],
+      [bin('or', atLeast(2), outside(result, -128, 127)), compilerText('short')],
+    ],
+    else: compilerText('byte'),
+  };
 }

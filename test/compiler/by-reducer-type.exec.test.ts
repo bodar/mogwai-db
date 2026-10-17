@@ -18,10 +18,11 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
   test('project().by(sum()) frames the field by the reducer type, not inference', () => {
     const store = seededStore();
     const r = run(store, 'g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").sum())');
-    // lop's inbound created weights are 0.4 + 0.4 + 0.2 — a REAL sum, so the field's tag is `real`
-    // (routed to Double at the wire), never the Int magnitude inference would pick for a whole number.
+    // lop's inbound created weights are 0.4 + 0.4 + 0.2 — Doubles, so the field's tag is `double` (their
+    // common number class, `reducer.ts` `numberClass`), never the Int magnitude inference would pick for
+    // a whole number.
     expect(field(r, 'n')).toEqual({ t: 'string', v: 'lop' });
-    expect(field(r, 'w').t).toBe('real');
+    expect(field(r, 'w').t).toBe('double');
     expect(field(r, 'w').v).toBeCloseTo(1.0, 9);
   });
 
@@ -51,7 +52,10 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
     const members = JSON.parse(r[0].list) as { t: string; v: number }[];
     // lop and ripple are the only vertices with inbound created edges; each contributes one member.
     expect(members.length).toBe(2);
-    for (const m of members) { expect(m.v).toBeCloseTo(1.0, 9); expect(['real', 'integer']).toContain(m.t); }
+    // Both are Doubles — ripple's too, though its one weight (1.0) is stored INTEGER and so SUMS to an
+    // INTEGER: the class is the rows' `double` tag, not the sum's storage class (`Sum.feature`
+    // `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX`, `d[1.0].d`).
+    for (const m of members) { expect(m.v).toBeCloseTo(1.0, 9); expect(m.t).toBe('double'); }
   });
 
   test('project().by(min()/max()) argmax picks the extreme and keeps its type', () => {
