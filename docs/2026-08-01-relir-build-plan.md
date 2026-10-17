@@ -733,6 +733,9 @@ authorities.
   presence apart from the payload; fold/group pools aggregate `{t,v}` nodes and never filter `v IS NULL`.
   Stopgap: decline a fold/pool over a body whose members may be null (null constant, collection literal with a
   null, null-literal `coalesce`/`union` arms). Size: M, ~200 LOC, mostly typing churn.
+  ✅ **Stopgap LANDED 2026-10-17 (`888affc3`):** `mayYieldNull` (`ir/strategies.ts`, a predicate on the total
+  walker `ir/walk.ts`) — a group value by() whose body may yield a null (null-holding `constant`/`inject`
+  literal at any depth) declines. The required-`present` design is still open.
 - 🚧 **E — per-row runtime raises and evaluation extent.** Authority: `step/map/MathStep.java`,
   `ToUpperGlobalStep` / `ConcatStep` (`IllegalArgumentException`), `RangeGlobalStep` (stops pulling at high)
   vs `CollectingBarrierStep` (drains everything), `NumberHelper` (`/ by zero`, overflow). Seam: THREE
@@ -749,6 +752,12 @@ authorities.
   at the step→Rel dispatch for `math`/`toUpper`/`toLower`/`trim`/`concat`/`asString`/`asNumber` (vtype meet +
   `ChainCtx` nesting), measured against L3 first (declining math over a numeric property regressed L3/L4 —
   if so, decline only a known-non-numeric or `unknown` tag). Size: M–L, ~400 LOC.
+  ✅ **Stopgap LANDED 2026-10-17 (`888affc3`, `eeb0e667`):** ONE receiver authority `src/compiler/rel/receiver.ts`
+  (`receiverProvably` → proven/refuted/runtime): a refuted static receiver declines, a per-row one raises the
+  reference's message in-row (`raiseInRow`); asked at the scalar transform dispatch (root fold + child value run,
+  so every depth) and per math variable; math `/`,`%` raise "Division by zero!"; a filtered-out child value is
+  unproductive to the checks; concat's traversal operand is type-checked. L3 unchanged. The `raise` channel role
+  (full design) is still open.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
