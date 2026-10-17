@@ -5,7 +5,7 @@ import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldPresence, framingCols, PRESENT_COL, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
@@ -109,7 +109,11 @@ function recordFields(
     if (!built) return null;
     const prefix = prefixAt(index);
     for (const [name, expr] of built.exprs) exprs.set(fieldCol(prefix, name), expr);
-    fields.push({ key, prefix, framing: built.framing, optional: built.optional });
+    // A field whose value can be a PRODUCTIVE null carries its presence in a column of its own, so
+    // "omit the key" and "map the key to null" stay two answers (`ProjectStep.java:66`).
+    const presentCol = built.optional && !!built.present;
+    if (presentCol) exprs.set(fieldCol(prefix, PRESENT_COL), built.present!);
+    fields.push({ key, prefix, framing: carriesNull(built.framing, presentCol), optional: built.optional, presentCol });
   }
   return { fields, exprs };
 }
@@ -216,15 +220,16 @@ type FieldRead = (column: string) => Expr;
 /** A record RELATION's reader — the prefixed columns, at whatever nesting depth `at` names. */
 const readingRel = (rel: Rel, at: string): FieldRead => (column) => col(rel.id, qualify(at, column));
 
-/** Is this field PRESENT on this row? The first payload column answers it for every shape — a rowid
- *  for an element, `v` for a value, `list`/`map` for a collection — which is the same convention
- *  `aliasPresent` reads and the reason a field's columns are declared nullable. */
-function presence(read: FieldRead, field: RecordField): Expr | null {
-  const cols = framingCols(field.framing);
-  const first = cols?.[0];
-  if (!first) return null;
-  return { kind: 'binary', op: 'is not', left: read(fieldCol(field.prefix, first.name)), right: compilerNull() };
-}
+/** Is this field PRESENT on this row? `fieldPresence` — the field's presence column where its value can
+ *  be a productive null, else its first payload column (a rowid for an element, `v` for a value,
+ *  `list`/`map` for a collection), the same convention `aliasPresent` reads. */
+const presence = (read: FieldRead, field: RecordField): Expr | null => fieldPresence(field, read);
+
+/** A VALUE field that can hold a productive null says so on its framing, so the framer emits a NULL row
+ *  as a value once the field is re-entered as a stream (`select('x')`) rather than reading it as "no
+ *  result" — the presence filter has already removed every unproductive row. */
+const carriesNull = (framing: RelFraming, productiveNull: boolean): RelFraming =>
+  (productiveNull && framing.kind === 'scalar' ? { ...framing, productiveNull: true } : framing);
 
 /**
  * ONE FIELD as a self-describing `{t,v}` node — the map value's side, or `null` to decline.
@@ -485,6 +490,8 @@ export function selectKeys(
   const single: (readonly [ColMeta, Expr])[] = [];
   /** The columns whose NULL drops the traverser, named after the projection exists. */
   const required: string[] = [];
+  /** A productive-null-capable `by()`'s presence, as a column the drop reads (`ByField.present`). */
+  const presentCols: (readonly [ColMeta, Expr])[] = [];
   const bound: string[] = [];
 
   for (const [index, label] of spec.labels.entries()) {
@@ -507,10 +514,13 @@ export function selectKeys(
       const name = only ? column.name : fieldCol(prefix, column.name);
       if (only) single.push([column, expr]); else exprs.set(name, expr);
     }
-    // The by()'s own productivity is a DROP, not an omission — named by the field's FIRST column,
-    // which every shape has (a rowid, `v`, `list`, `map`).
-    if (built.optional) required.push(only ? cols[0]!.name : fieldCol(prefix, cols[0]!.name));
-    fields.push({ key: label, prefix, framing: built.framing, optional: false });
+    // The by()'s own productivity is a DROP, not an omission — by its PRESENCE, so a productive null is
+    // SELECTED (`SelectOneStep.java:64-65`, `SelectStep.java:72-74` read `isProductive`, not the value).
+    // Where the value can be a productive null the presence rides as a column of its own; otherwise
+    // the field's FIRST column says it, which every shape has (a rowid, `v`, `list`, `map`).
+    if (built.optional && built.present) presentCols.push([meta(`sp${index}`, 'int', true), built.present]);
+    else if (built.optional) required.push(only ? cols[0]!.name : fieldCol(prefix, cols[0]!.name));
+    fields.push({ key: label, prefix, framing: carriesNull(built.framing, built.optional && !!built.present), optional: false, presentCol: false });
   }
 
   // ONE key is not a record: `SelectOneStep` yields the value itself, so the payload lands under its
@@ -526,16 +536,26 @@ export function selectKeys(
       return [column, expr] as const;
     });
   }
-  const projected = readProjection(rel, payload, fresh);
+  // The presence columns ride the projection only as far as the drop that reads them.
+  const projected = readProjection(rel, [...payload, ...presentCols], fresh);
   const guards = [
     ...bound.map((column) => aliasPresent(col(projected.id, column))),
     ...required.map((column) => ({ kind: 'binary', op: 'is not', left: col(projected.id, column), right: compilerNull() }) as Expr),
+    ...presentCols.map(([column]) => col(projected.id, column.name)),
   ];
   const guard = guards.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+  const kept = guard
+    ? make.filter({ id: fresh('sf'), input: projected, channels: projected.channels, type: projected.type, pred: guard })
+    : projected;
   return {
-    rel: guard
-      ? make.filter({ id: fresh('sf'), input: projected, channels: projected.channels, type: projected.type, pred: guard })
-      : projected,
+    rel: presentCols.length
+      ? make.project({
+        id: fresh('sp'), input: kept, channels: kept.channels,
+        type: typeOf(...payload.map(([column]) => column), ...carriedCols(kept.channels)),
+        exprs: [...payload.map(([column]) => [column.name, col(kept.id, column.name)] as const),
+          ...kept.channels.map((channel) => [channel.col, col(kept.id, channel.col)] as const)],
+      })
+      : kept,
     framing,
   };
 }

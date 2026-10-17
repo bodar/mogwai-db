@@ -19,7 +19,6 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[35].i |
 
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXnameX_mapXtoUpperX
     Given the modern graph
     And the traversal of

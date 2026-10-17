@@ -27,7 +27,7 @@ import { knownPresence, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
-import { fieldCol, framingCols, type RelFraming } from './framing.ts';
+import { fieldCol, framingCols, PRESENT_COL, type RelFraming } from './framing.ts';
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
@@ -2087,27 +2087,33 @@ function mapFormStatements(
   for (const [index, field] of rows.framing.fields.entries()) {
     // A productive NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit. For a
     // REQUIRED field the row says whether one arrived, so `nullValueGuard` below refuses it at run time
-    // exactly as the step form does (`resolveValueRows`). An OPTIONAL field cannot say: its absence IS a
-    // null first column (`record.ts` `presence`), so a real null and a missing entry are one row — and
-    // they owe different answers (a removal vs. no mutation). That one is declined.
-    if (field.framing.kind !== 'scalar' || (field.optional && field.framing.productiveNull)) return false;
+    // exactly as the step form does (`resolveValueRows`). An OPTIONAL field whose value can be a
+    // productive null carries its presence in its own column (`RecordField.presentCol`), so an absent
+    // entry is no row and a present null is a row the same run-time guard refuses. One that could be a
+    // productive null WITHOUT that column cannot tell the two apart, and declines.
+    if (field.framing.kind !== 'scalar' || (field.optional && field.framing.productiveNull && !field.presentCol)) return false;
     try { validatePropertyKey(field.key); } catch { return false; }
     const cols = framingCols(field.framing);
     if (!cols) return false;
+    // A presence-column field is filtered on that column BEFORE the entry projection (it is not an entry
+    // column); its surviving NULL is a productive null the run-time guard refuses.
+    const source = field.optional && field.presentCol
+      ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: col(rel.id, fieldCol(field.prefix, PRESENT_COL)) })
+      : rel;
     const typeCol = cols.find((column) => column.name !== 'v');
-    const value = col(rel.id, fieldCol(field.prefix, 'v'));
-    const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype'))
-      : typeCol && typeCol.name === 'vt' ? reducedVtype(col(rel.id, fieldCol(field.prefix, 'vt'))) : scalarVtype(field.framing);
+    const value = col(source.id, fieldCol(field.prefix, 'v'));
+    const vt = typeCol && typeCol.name === 'vtype' ? col(source.id, fieldCol(field.prefix, 'vtype'))
+      : typeCol && typeCol.name === 'vt' ? reducedVtype(col(source.id, fieldCol(field.prefix, 'vt'))) : scalarVtype(field.framing);
     if (!vt) return false;
     const entry = make.project({
-      id: fresh('mf'), input: rel, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
-      exprs: [['o', col(rel.id, rows.origin)], ['v', value], ['vt', vt],
+      id: fresh('mf'), input: source, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
+      exprs: [['o', col(source.id, rows.origin)], ['v', value], ['vt', vt],
         ['sq', compilerInt(index)], ['k', text(field.key)]],
     });
     // An OPTIONAL field is an entry the map may not HAVE — `ProjectStep` omits an unproductive `by()`'s
-    // key (`ProjectStep.java:66`) — and its absence is the record's own presence test (`record.ts`
-    // `presence`: the field's first column is NULL), so the entry is simply not a row.
-    perField.push(field.optional
+    // key (`ProjectStep.java:66`) — and, without a presence column, its absence is the record's own
+    // presence test (`fieldPresence`: the field's first column is NULL), so the entry is simply not a row.
+    perField.push(field.optional && !field.presentCol
       ? make.filter({ id: fresh('f'), input: entry, channels: [], type: entry.type, pred: { kind: 'binary', op: 'is not', left: col(entry.id, 'v'), right: compilerNull() } })
       : entry);
   }

@@ -39,7 +39,7 @@ import {
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
-import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
+import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
@@ -984,11 +984,14 @@ function sortTerms(
   // several terms each KEY term owes one, conjoined over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
-    const key = byExpr(modulation, host, ctx.source, fresh, true, childSeam(ctx, fresh));
+    const key = byProjection(modulation, host, ctx.source, fresh, true, childSeam(ctx, fresh));
     if (!key) return null;
-    terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
-    const drop = orderProductivity(step, modulation, key);
-    if (drop) drops.push(drop);
+    terms.push({ expr: key.value, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
+    // "only add the traverser if the comparator traversal was productive" — a productive NULL sorts
+    // (`OrderGlobalStep.java:82-85,183-184`), so the drop reads PRESENCE, not the key's nullness.
+    const drop = productivityFilter(step, key.present);
+    if (!drop) return null;
+    if (drop.keep) drops.push(drop.keep);
   }
   const drop = drops.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
   return drop ? { terms, drop } : { terms };
@@ -5306,6 +5309,28 @@ function propertyTail(
 const ALIAS_CMP: Record<string, BinaryOp | undefined> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
 /**
+ * `left <op> right` for two `by()` VALUES, where either may be a PRODUCTIVE NULL (`valueMayBeNull`).
+ *
+ * SQL's comparison reads a NULL as unknown and drops the row; Gremlin's COMPARABILITY puts null in its
+ * own type: `comparable(null, null)` and they compare 0, a null and a non-null are not comparable
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:313-316`).
+ * So `eq`/`gte`/`lte` hold for two nulls, `gt`/`lt` never hold with a null, and `neq` is `!eq`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`).
+ * Where neither side can be null this is the plain binary, unchanged.
+ */
+function comparabilityCompare(op: string, left: Expr, right: Expr, nullable: boolean): Expr | null {
+  const sql = ALIAS_CMP[op];
+  if (!sql) return null;
+  const plain: Expr = { kind: 'binary', op: sql, left, right };
+  if (!nullable) return plain;
+  const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
+  const bothNull = and(isNull(left), isNull(right));
+  const nullArm: Expr = op === 'eq' || op === 'gte' || op === 'lte' ? bothNull
+    : op === 'neq' ? { kind: 'unary', op: 'not', arg: bothNull } : compilerInt(0);
+  return { kind: 'case', whens: [[{ kind: 'binary', op: 'or', left: isNull(left), right: isNull(right) }, nullArm]], else: plain };
+}
+
+/**
  * A COMPOUND alias-compare predicate over IDENTITIES — `where(k, P.not(P.eq('a').or(P.eq('d'))))` — as a
  * boolean expression, or `null` to decline.
  *
@@ -5355,11 +5380,17 @@ function aliasValueWhere(
   const seam = childSeam(ctx, fresh);
   const hostOf = (proj: NonNullable<ReturnType<typeof aliasProjection>>): ChildHost =>
     ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
-  const lhs = byExpr(ring[0]!, hostOf(startProj), ctx.source, fresh, true, seam);
-  if (!lhs) return 'decline';
-  const lhsProd = productivityFilter(step, lhs);
-  if (!lhsProd) return 'decline'; // keep-null (ProductiveByStrategy) not built
-  const prod: Expr[] = [lhsProd];
+  // Under `ProductiveByStrategy` an unproductive `by()` is KEPT as a null and compared; that keep-null
+  // compare is not built, so it declines (as the single-binary path does).
+  if (isProductiveBy(step)) return 'decline';
+  const startHost = hostOf(startProj);
+  const lhsBy = byProjection(ring[0]!, startHost, ctx.source, fresh, true, seam);
+  if (!lhsBy) return 'decline';
+  const lhs = lhsBy.value;
+  const lhsNullable = valueMayBeNull(ring[0]!, startHost);
+  const lhsProd = productivityFilter(step, lhsBy.present);
+  if (!lhsProd) return 'decline';
+  const prod: Expr[] = lhsProd.keep ? [lhsProd.keep] : [];
   let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
   const build = (p: unknown): Expr | null => {
     if (!isPred(p)) return null;
@@ -5372,16 +5403,18 @@ function aliasValueWhere(
     const proj = aliasProjection(rel, labels, p.operands[0]!.value, 'last', fresh);
     if (!proj || proj.read.kind !== 'element') return null;
     const by = ring[ringIdx % ring.length]!; ringIdx++;
-    const val = byExpr(by, hostOf(proj), ctx.source, fresh, true, seam);
+    const valHost = hostOf(proj);
+    const val = byProjection(by, valHost, ctx.source, fresh, true, seam);
     if (!val) return null;
-    const p2 = productivityFilter(step, val);
-    if (!p2) return null; // keep-null not built
-    prod.push(p2);
-    return { kind: 'binary', op: ALIAS_CMP[p.op]!, left: lhs, right: val };
+    const p2 = productivityFilter(step, val.present);
+    if (!p2) return null;
+    if (p2.keep) prod.push(p2.keep);
+    return comparabilityCompare(p.op, lhs, val.value, lhsNullable || valueMayBeNull(by, valHost));
   };
   const clause = build(pred);
   if (!clause) return 'decline';
-  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(prod.reduce((a, b) => and(a, b)), clause) });
+  const kept = prod.reduce<Expr | undefined>((a, b) => (a ? and(a, b) : b), undefined);
+  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: kept ? and(kept, clause) : clause });
 }
 
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
@@ -5444,16 +5477,22 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const hostOf = (proj: NonNullable<typeof projA>): ChildHost =>
           ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
         const seam = childSeam(ctx, fresh);
-        const [aVal, bVal] = [byExpr(bys[0]!, hostOf(projA), ctx.source, fresh, true, seam), byExpr(bys[0]!, hostOf(projB), ctx.source, fresh, true, seam)];
+        // Under `ProductiveByStrategy` a non-productive `by()` KEEPS the row as a real NULL, a
+        // null-keeping compare this does not build, so DECLINE.
+        if (isProductiveBy(step)) return 'decline';
+        const [hostA, hostB] = [hostOf(projA), hostOf(projB)];
+        const [aVal, bVal] = [byProjection(bys[0]!, hostA, ctx.source, fresh, true, seam), byProjection(bys[0]!, hostB, ctx.source, fresh, true, seam)];
         if (!aVal || !bVal) return 'decline';
-        // A non-productive `by()` DROPS the row (`productivityFilter` = each value `IS NOT NULL`), which
-        // is also what the NULL-propagating compare does — conjoined for belt-and-braces. Under
-        // `ProductiveByStrategy` the filter is undefined DESPITE a key: a non-productive `by()` then
-        // KEEPS the row as a real NULL, a null-keeping compare this does not build, so DECLINE.
-        const [prodA, prodB] = [productivityFilter(step, aVal), productivityFilter(step, bVal)];
+        // A non-productive `by()` DROPS the row — by its PRESENCE (`productivityFilter`), so a PRODUCTIVE
+        // null stays and is compared under Gremlin's comparability (`comparabilityCompare`), where two
+        // nulls are equal (`WherePredicateStep` tests `TraversalProduct.isProductive`, not the value).
+        const [prodA, prodB] = [productivityFilter(step, aVal.present), productivityFilter(step, bVal.present)];
         if (!prodA || !prodB) return 'decline';
-        const cmp: Expr = { kind: 'binary', op: ALIAS_CMP[pred.op]!, left: aVal, right: bVal };
-        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(and(prodA, prodB), cmp) });
+        const cmp = comparabilityCompare(pred.op, aVal.value, bVal.value, valueMayBeNull(bys[0]!, hostA) || valueMayBeNull(bys[0]!, hostB));
+        if (!cmp) return 'decline';
+        const kept = [prodA.keep, prodB.keep].filter((e): e is Expr => !!e);
+        const guard = kept.length ? and(kept.reduce((a, b) => and(a, b)), cmp) : cmp;
+        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: guard });
       }
       // A SCALAR-alias theta (`where('b', P.eq('c'))` over two VALUE aliases, no `by()`) — compare the
       // STORED values. `eq`/`neq` is value+type equality (`COMPARABILITY.equals`): SQLite's `=` over two

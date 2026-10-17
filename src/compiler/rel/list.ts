@@ -9,12 +9,12 @@ import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import { raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import type { ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { byExpr, modulations, orderProductivity } from './modulator.ts';
+import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
 import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
@@ -521,21 +521,23 @@ export function listMemberOp(
     // own INPUT, and the productivity filter puts a relation BETWEEN the explode and the aggregate. This
     // is `bulkSlice`'s rule (`lower.ts`) and the defect it prevents is a plan referencing an alias that is
     // out of scope where it is read.
-    const keyOn = (m: Rel): Expr | null => (elemOf
-      ? byExpr(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, source, fresh, true, child)
-      : only.key.kind === 'identity' ? memberCompareKey(of, m) : null);
+    // A scalar member IS the traverser, so its identity key is always present.
+    const keyOn = (m: Rel): ByProjection | null => (elemOf
+      ? byProjection(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, source, fresh, true, child)
+      : only.key.kind === 'identity' ? { value: memberCompareKey(of, m), present: ALWAYS_PRODUCTIVE } : null);
     const probe = keyOn(members);
     if (!probe) return null;
     // AN UNPRODUCTIVE `by()` DROPS THE MEMBER, and the reference pins it rather than us inferring it:
     // `g.V().fold().order(local).by('age')` answers FOUR vertices on the modern graph, not six — `lop`
-    // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER, which is the same
-    // predicate `orderProductivity` returns for a row and the reason it takes the step: with
-    // `ProductiveByStrategy` on, nothing is dropped at all.
-    const drop = orderProductivity(step, only, probe);
-    const kept = drop
-      ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop })
+    // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER on the projection's
+    // PRESENCE, which is the same predicate `productivityFilter` returns for a row and the reason it takes
+    // the step: with `ProductiveByStrategy` on, nothing is dropped at all.
+    const drop = productivityFilter(step, probe.present);
+    if (!drop) return null;
+    const kept = drop.keep
+      ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop.keep })
       : members;
-    const key = drop ? keyOn(kept) : probe;
+    const key = drop.keep ? keyOn(kept)?.value : probe.value;
     if (!key) return null;
     return {
       rel: withList(rel, listOfMembers(kept, memberNode(of, kept), [

@@ -10,7 +10,7 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
 import { countLit, sliceBound } from '../const.ts';
-import { byExpr, modulations, productivityFilter, type Modulation } from '../modulator.ts';
+import { byProjection, modulations, productivityFilter, type Modulation } from '../modulator.ts';
 import type { AliasMap } from '../../alias.ts';
 import { aliasIdAt, aliasListAt, aliasProjection, aliasValueAt } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
@@ -563,13 +563,16 @@ function dedupBy(
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, shape.host, ctx.source, fresh, false, childSeam(ctx, fresh));
+  const key = byProjection(modulation, shape.host, ctx.source, fresh, false, childSeam(ctx, fresh));
   if (!key) return null;
-  const productive = productivityFilter(step, key);
-  const domain = productive
-    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
+  // By PRESENCE: a productive null is a dedup key like any other (`DedupGlobalStep.java:77-78` adds it to
+  // the duplicate set), and every NULL key partitions together, which is `null.equals(null)`.
+  const productive = productivityFilter(step, key.present);
+  if (!productive) return null;
+  const domain = productive.keep
+    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive.keep })
     : input;
-  return dedupOn([key], domain, shape.tie(domain), fresh);
+  return dedupOn([key.value], domain, shape.tie(domain), fresh);
 }
 
 /**
@@ -665,11 +668,12 @@ export function dedupByLabels(
       // is a later phase.
       if (proj.read.kind !== 'element') return null;
       const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
-      const key = byExpr(by, host, ctx.source, fresh, false, seam);
+      const key = byProjection(by, host, ctx.source, fresh, false, seam);
       if (!key) return null;
-      keyExprs.push(key);
-      const prod = productivityFilter(step, key);
-      if (prod) productive.push(prod);
+      keyExprs.push(key.value);
+      const prod = productivityFilter(step, key.present);
+      if (!prod) return null;
+      if (prod.keep) productive.push(prod.keep);
     } else if (proj.read.kind === 'element') keyExprs.push(aliasIdAt(column, 'last'));
     else if (proj.read.kind === 'value') keyExprs.push(aliasValueAt(column, 'last'));
     // A LIST label keys on its canonical JSON (`json(v)`): `DedupGlobalStep` compares each label's

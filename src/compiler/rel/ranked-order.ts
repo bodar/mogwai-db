@@ -43,7 +43,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { jsonEachSet, jsonOf, listNode, mapNode, meta, typeOf, type Minter } from './build.ts';
 import { listNodeExpr } from './list.ts';
-import { byNode, orderProductivity, type Modulation } from './modulator.ts';
+import { byNode, isProductiveBy, type Modulation } from './modulator.ts';
 import { orderabilityCompare } from './orderability.ts';
 import { parseExactJson } from '../../json-exact.ts';
 import type { GraphSource } from './source.ts';
@@ -97,10 +97,13 @@ export function orderKeyTuple(
     if (!node) return;
     nodes.push(node);
     // The SAME productivity rule the SQL sort applies — `OrderGlobalStep.processAllStarts` keeps a
-    // traverser only where every comparator traversal was productive (`orderProductivity`'s citation).
-    // Reported as a POSITION in the tuple rather than a predicate over the host, so the caller tests
-    // the materialized key text instead of re-evaluating the key's correlated reads.
-    if (orderProductivity(step, modulation, node)) required.push(i);
+    // traverser only where every comparator traversal was productive (`OrderGlobalStep.java:82-85`).
+    // A `byNode` member is SQL NULL exactly where its `by()` produced nothing and a `{t,v:null}` node
+    // where it produced a null (`producedMemberNode`'s contract, presence-gated), so the node's own
+    // nullness IS the presence here. Reported as a POSITION in the tuple rather than a predicate over the
+    // host, so the caller tests the materialized key text instead of re-evaluating the key's correlated
+    // reads. `ProductiveByStrategy` drops nothing.
+    if (!isProductiveBy(step) && modulation.key.kind !== 'identity') required.push(i);
   });
   if (nodes.length !== parsed.length) return null;
   const key: Expr = { kind: 'call', fn: 'json_array', args: nodes.map((node) => jsonOf(node)) };

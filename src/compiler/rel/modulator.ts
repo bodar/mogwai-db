@@ -6,11 +6,11 @@ import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
-import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
-import { aliasProjection, readFraming, type Pop } from './alias.ts';
+import { aliasGuard, aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './receiver.ts';
@@ -197,17 +197,39 @@ function aliasKey(body: readonly IRStep[]): Extract<ByKey, { kind: 'alias' }> | 
 export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === true;
 
 /**
- * A `by()`'s projection as an expression over the host traverser, or `null` to decline.
+ * A `by()`'s projection over the host traverser — its VALUE and its PRESENCE — or `null` to decline.
+ *
+ * THE TWO ARE ANSWERED TOGETHER because only the arm that built the value knows which question its NULL
+ * answers. `TraversalUtil.produce` hands every `by()` consumer a `TraversalProduct`, and a PRODUCTIVE null
+ * is a value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalProduct.java`;
+ * `TraversalUtil.java:108-123`): `project()` keeps the key (`ProjectStep.java:66`), `select()` emits it
+ * (`SelectOneStep.java:64-65`, `SelectStep.java:72-74`), `order()`/`dedup()` keep the traverser
+ * (`OrderGlobalStep.java:183-184`, `DedupGlobalStep.java:77-78`), `sack()` assigns it
+ * (`SackValueStep.java:78-80`) and `aggregate()` collects it (`AggregateStep.java:139`). A consumer that
+ * read productivity off `value IS NOT NULL` dropped every productive null — the defect this pairing ends.
+ *
+ * `present` is a `Presence`: `ALWAYS_PRODUCTIVE` where the projection cannot be unproductive (a token, the
+ * traverser itself, a map entry's side), a per-row predicate where it can (a child body's own claim, an
+ * alias bound in a branch arm), and `'unknown'` where the producer cannot say — which a consumer that owes
+ * a productivity drop DECLINES on (`productivityFilter`). A stored PROPERTY's presence is its value's
+ * non-nullness, and that is exact rather than a shortcut: TinkerPop has no null-valued property, so an
+ * absent row is the only way the read comes back NULL.
  *
  * `ordering` asks for the value wrapped in the vtype-aware compare key — the same authority the range
  * predicates and scalar `order()` use, and for the same reason: a number too large for SQLite's
  * numeric storage classes is stored as TEXT, so a raw `<` orders it lexically and after every numeric
  * row. It goes INSIDE the scalar subquery, where the property row's own `vtype` is in scope.
  */
-export function byExpr(
+export interface ByProjection {
+  readonly value: Expr;
+  readonly present: Presence;
+}
+
+export function byProjection(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
-): Expr | null {
+): ByProjection | null {
   const { key } = modulation;
+  const always = (value: Expr | null): ByProjection | null => value && { value, present: ALWAYS_PRODUCTIVE };
 
   if (key.kind === 'column') {
     // `by(Column.keys)`/`by(Column.values)` over a Map.Entry host — the entry's key or value
@@ -216,13 +238,13 @@ export function byExpr(
     // as a `{t,v}` node, so the comparable value is `$.v` under the compare wrapper its own `$.t` names —
     // the same unwrap `sideOf` does for `select(Column.values)`, so `order().by(Column.values)` and
     // `select(Column.values)` cannot disagree about the value. A list/map value side has no single
-    // comparable value and declines.
+    // comparable value and declines. An entry always HAS both sides, so the side is always present.
     if (host.kind !== 'scalar' || !host.entry) return null;
     const node = key.column === 'keys' ? host.entry.key : host.entry.val;
     const of = key.column === 'keys' ? host.entry.keyOf : host.entry.valOf;
     if (of.kind !== 'scalar') return null;
     const value = jsonField(node, 'v');
-    return ordering ? storedCompareOn(jsonField(node, 't'))(value) : value;
+    return always(ordering ? storedCompareOn(jsonField(node, 't'))(value) : value);
   }
 
   if (key.kind === 'child') {
@@ -236,9 +258,9 @@ export function byExpr(
     // the full `RelFraming` and a consumer that can only use a VALUE narrows it itself. A body whose one
     // result is an ELEMENT hands back a rowid and one that is a RECORD hands back a map node — neither
     // is a comparable value, and ordering by either would be a plausible-looking answer to a traversal
-    // TinkerPop rejects.
+    // TinkerPop rejects. The body's own PRESENCE rides out — the seam's claim, never re-derived here.
     const produced = child.scalar(key.body, host);
-    return produced && produced.framing.kind === 'scalar' ? produced.expr : null;
+    return produced && produced.framing.kind === 'scalar' ? { value: produced.expr, present: produced.present } : null;
   }
 
   if (key.kind === 'alias') {
@@ -249,14 +271,18 @@ export function byExpr(
     const scoped = scopeValue(key, host);
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
     const [value, type] = [scoped.payload[0]![1], scoped.payload[1]?.[1]];
-    return ordering && type ? storedCompareOn(type)(value) : value;
+    return { value: ordering && type ? storedCompareOn(type)(value) : value, present: scoped.present };
   }
 
   if (host.kind === 'scalar') {
     // A value has no properties and no tokens, so `order().by(key/traversal)` over a scalar stream is
     // not supported (no properties); this declines rather than inventing an answer off the wrong row.
+    // The traverser IS the value, so it is present wherever the host is.
     if (key.kind !== 'identity') return null;
-    return ordering && host.vtype ? storedCompareOn(host.vtype)(host.value) : host.value;
+    return {
+      value: ordering && host.vtype ? storedCompareOn(host.vtype)(host.value) : host.value,
+      present: host.present ?? ALWAYS_PRODUCTIVE,
+    };
   }
 
   // A RECORD's only projections are its FIELDS, which the alias arm above answered. A bare `by()` over
@@ -278,9 +304,9 @@ export function byExpr(
     // lexically and after every numeric row.
     if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
       const read = propertyReadOf(host.id, host.ownerElem, key.token === 'key' ? 'key' : 'value', fresh);
-      return ordering && key.token === 'value'
+      return always(ordering && key.token === 'value'
         ? storedCompareOn(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh))(read)
-        : read;
+        : read);
     }
     // What is left is the vocabulary an ELEMENT has and a property does not: a bare `by()` over one is
     // the VertexProperty itself (not a comparable value), `by('x')` would be a meta-property read, and
@@ -289,7 +315,7 @@ export function byExpr(
     return null;
   }
 
-  if (key.kind === 'identity') return host.id;
+  if (key.kind === 'identity') return always(host.id);
 
   if (key.kind === 'token') {
     // `T.key`/`T.value` are a PROPERTY's tokens, not an element's — an element has no key and no value —
@@ -300,18 +326,56 @@ export function byExpr(
     // for a vertex, in label-interning order — our multi-label extension of TinkerPop's single-valued
     // `Element.label()`). Both are PHYSICAL reads, so they come from the GRAPH SOURCE — the SAME
     // `externalId`/`labelScalar` the `label()`/`id()` steps and a bound `by(T.label)` reach, which is
-    // what lets `group().by(T.label)` and friends compose over a bound graph.
-    return key.token === 'id'
+    // what lets `group().by(T.label)` and friends compose over a bound graph. Every element has both.
+    return always(key.token === 'id'
       ? source.externalId(host.elem, host.id, fresh)
-      : source.labelScalar(host.elem, host.id, fresh);
+      : source.labelScalar(host.elem, host.id, fresh));
   }
 
   // `by('key')` over an element — the FIRST value of the property, a PHYSICAL read through the GRAPH
   // SOURCE (the same `propertyScalar` the base tables and a bound `{t,v}` tree both answer), so
   // `group().by(k)`/`order().by(k)` compose over either graph. INSERTION ORDER names the first value
-  // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare.
-  return key.kind === 'property' ? source.propertyScalar(host.elem, host.id, key.key, ordering, fresh) : null;
+  // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare. Present iff the row exists,
+  // which is the value's non-nullness (no null-valued property — see above).
+  if (key.kind !== 'property') return null;
+  const value = source.propertyScalar(host.elem, host.id, key.key, ordering, fresh);
+  return value && { value, present: isNotNull(value) };
 }
+
+const isNotNull = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });
+
+/**
+ * The productivity drop RE-READ over the column a consumer NAMED the value into — or `undefined` where the
+ * presence is not the value's own non-nullness and so must ride as a column of its own.
+ *
+ * A consumer that projects the `by()` value once (so a correlated read is not spelled twice) and filters
+ * the projection afterwards can only name columns there. Where the presence IS `value IS NOT NULL` (a
+ * stored property — `byProjection`'s property arm, by reference), the named column says the same thing;
+ * anything else (a child's EXISTS, an alias guard) is a separate fact the consumer must project too.
+ */
+export const keepOnNamed = (keep: Expr, value: Expr, named: Expr): Expr | undefined =>
+  keep.kind === 'binary' && keep.op === 'is not' && keep.left === value && keep.right.kind === 'lit' && keep.right.value === null
+    ? isNotNull(named) : undefined;
+
+/**
+ * CAN THIS PROJECTION'S VALUE BE A PRODUCTIVE NULL — a NULL that survived `productivityFilter`?
+ *
+ * Not where it reads storage or identity: a stored property is never null (absent is the only NULL, and
+ * the drop removed it), a `T` token always has a value, an element is a rowid. A child body, a scope
+ * value (an alias, a record field, a sack) or a map entry's side CAN hold a null — and so can a scalar
+ * traverser itself. A consumer that COMPARES the value (`where().by()`) needs this, because SQL's
+ * three-valued `=` reads a null as unknown where Gremlin's comparability says `null == null`.
+ */
+export const valueMayBeNull = (modulation: Modulation, host: ChildHost): boolean =>
+  modulation.key.kind === 'child' || modulation.key.kind === 'alias' || modulation.key.kind === 'column'
+  || (modulation.key.kind === 'identity' && host.kind === 'scalar');
+
+/** `byProjection`'s VALUE alone — for a consumer that owes no productivity drop (a token read, a key whose
+ *  presence another column already answers). A consumer that DROPS on an unproductive `by()` takes
+ *  `byProjection` and hands its `present` to `productivityFilter`. */
+export const byExpr = (
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
+): Expr | null => byProjection(modulation, host, source, fresh, ordering, child)?.value ?? null;
 
 /**
  * A `by()` projection's VALUE together with WHAT IS KNOWN OF ITS TYPE and WHEN A NULL IS A VALUE — the
@@ -328,6 +392,9 @@ export interface TypedBy {
   readonly value: Expr;
   readonly evidence: ValueEvidence;
   readonly productiveNull: boolean | Expr;
+  /** WHETHER the projection produced — `byProjection`'s own answer (a child body's `present`), so a
+   *  consumer that both types the value and DROPS an unproductive `by()` reads one lowering for both. */
+  readonly present: Presence;
 }
 
 export function byTyped(
@@ -343,10 +410,17 @@ export function byTyped(
       value: produced.expr,
       evidence: evidenceOf(produced.framing.type, produced.vtype),
       productiveNull: produced.present === ALWAYS_PRODUCTIVE ? true : knownPresence(produced.present) ?? false,
+      present: produced.present,
     };
   }
-  const value = byExpr(modulation, host, source, fresh, false, child);
-  if (!value) return null;
+  const projected = byProjection(modulation, host, source, fresh, false, child);
+  if (!projected) return null;
+  const typed = typedArm(modulation, projected.value, host, fresh);
+  return typed && { ...typed, present: projected.present };
+}
+
+function typedArm(modulation: Modulation, value: Expr, host: ChildHost, fresh: Minter): Omit<TypedBy, 'present'> | null {
+  const { key } = modulation;
   if (key.kind === 'column' && host.kind === 'scalar' && host.entry) {
     const node = key.column === 'keys' ? host.entry.key : host.entry.val;
     return { value, evidence: { kind: 'tag', tag: jsonField(node, 't') }, productiveNull: true };
@@ -354,7 +428,7 @@ export function byTyped(
   if (key.kind === 'alias') {
     const scoped = scopeValue(key, host);
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
-    return { value, evidence: evidenceOf(scoped.framing.type, scoped.payload[1]?.[1]), productiveNull: !scoped.optional };
+    return { value, evidence: evidenceOf(scoped.framing.type, scoped.payload[1]?.[1]), productiveNull: scoped.present === ALWAYS_PRODUCTIVE ? true : scoped.present };
   }
   if (host.kind === 'scalar') return { value, evidence: evidenceOf(undefined, host.vtype), productiveNull: host.present ?? true };
   if (host.kind === 'property' && key.kind === 'token')
@@ -386,7 +460,7 @@ export function byTyped(
  */
 function scopeValue(
   key: Extract<ByKey, { kind: 'alias' }>, host: ChildHost,
-): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean } | null {
+): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean; readonly present: Expr } | null {
   const row = host.row;
   const field = host.kind === 'record' ? fieldNamed(host.fields, key.label) : undefined;
   if (field && row) {
@@ -395,10 +469,15 @@ function scopeValue(
     if (key.pop !== 'last') return null;
     const cols = framingCols(field.framing);
     if (!cols) return null;
+    // An optional field's presence is the record's own (`fieldPresence`) — its presence column where
+    // its payload can be a productive null, so a key that maps to null reads as THERE.
+    const present = field.optional ? fieldPresence(field, (name) => col(row.rel.id, name)) : ALWAYS_PRODUCTIVE;
+    if (!present) return null;
     return {
       payload: cols.map((column) => [column, col(row.rel.id, fieldCol(field.prefix, column.name))] as const),
       framing: field.framing,
       optional: field.optional,
+      present,
     };
   }
   if (!row) return null;
@@ -407,6 +486,9 @@ function scopeValue(
     payload: projected.payload,
     framing: readFraming(projected.read),
     optional: projected.entry.binds === undefined,
+    // A label bound in a branch arm is present where its history is non-empty — the one guard every
+    // alias reader shares (`aliasGuard`), so a bound NULL value is a value and an unbound label is not.
+    present: aliasGuard(row.rel, projected.entry) ?? ALWAYS_PRODUCTIVE,
   };
 }
 
@@ -489,11 +571,10 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * `[1,null,2]`, not `[1,2]`.
  *
  * `present` is `ChildValue.present`, or `ALWAYS_PRODUCTIVE` for a pooled STREAM row (a row exists ⟹ a
- * traverser was produced). Where the producer cannot say (`'unknown'`) the only reading left is the
- * value's nullness — every producer that can yield a productive null states its presence (the
- * `constant(null)` leading step declines in `scalarChild` until it does), so the unknown arm keeps the
- * NULL ⟹ unproductive reading those producers' values were built for. Only a SCALAR can be a productive
- * null; an element/map/list framing's NULL is always "no value".
+ * traverser was produced). Only a SCALAR can be a productive null; an element/map/list framing's NULL is
+ * always "no value", so its nullness IS its presence. A SCALAR whose producer cannot say (`'unknown'`)
+ * DECLINES: its NULL could be either, and reading it as "nothing" is the productive-null drop this seam
+ * exists to end.
  */
 /** A scalar's `{t,v}` node from its per-row tag where it has one — the full `typedNode` where value and
  *  tag are both plain columns/literals (cheap to repeat), else `typedNodeOnce`, which spells a
@@ -505,6 +586,7 @@ const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType): Exp
 };
 
 export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence, vtype?: Expr): Expr | null {
+  if (present === 'unknown' && framing.kind === 'scalar') return null;
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
       : framing.kind === 'list' ? (() => {
@@ -520,6 +602,12 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
   // gated on the presence otherwise.
   if (present === 'unknown' || framing.kind !== 'scalar')
     return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]], else: member };
+  return gatedOn(present, member);
+}
+
+/** A member node that EXISTS only where `present` holds — the SQL NULL outside it is "produced nothing"
+ *  (`producedMemberNode`'s contract), and an always-present projection needs no gate. */
+function gatedOn(present: Expr, member: Expr): Expr {
   return present === ALWAYS_PRODUCTIVE ? member : { kind: 'case', whens: [[present, member]], else: compilerNull() };
 }
 
@@ -555,14 +643,17 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     if (!scoped) return null;
     // An ELEMENT becomes a `{t:'vertex', v:{…}}` member, which is the encoding the typed tree already
     // frames at any depth — so a map keyed or valued by a labelled element needs nothing new.
+    // Gated on the scope's PRESENCE (an alias bound only in a branch arm, an optional field) so an unbound
+    // label is "produced nothing" — a SQL NULL — and never a `{t:null, v:null}` node that would read as a
+    // productive null.
     if (scoped.framing.kind === 'elements')
-      return source.elementNode(scoped.framing.elem, scoped.payload[0]![1], fresh);
+      return gatedOn(scoped.present, source.elementNode(scoped.framing.elem, scoped.payload[0]![1], fresh));
     // Anything else — a LIST, a nested RECORD — needs a member encoding a `{t,v}` node cannot carry
     // from here, so it declines and stays the FIELD vocabulary's business.
     if (scoped.framing.kind !== 'scalar') return null;
     // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
     // `vtype` COLUMN survives becoming JSON.
-    return typedNode(scoped.payload[0]![1], scoped.payload[1]?.[1] ?? compilerNull('text'));
+    return gatedOn(scoped.present, typedNode(scoped.payload[0]![1], scoped.payload[1]?.[1] ?? compilerNull('text')));
   }
 
   if (host.kind === 'scalar') {
@@ -641,7 +732,19 @@ export interface ByField {
   readonly framing: RelFraming;
   /** May this field be ABSENT from the map on some row (§ `RecordField.optional`)? */
   readonly optional: boolean;
+  /** An OPTIONAL field's PRESENCE, where its first payload column cannot say — a VALUE, which can be a
+   *  productive null (`TraversalProduct`), so "absent" and "maps to null" are different rows. Written in
+   *  the host's scope like `exprs`; the record carries it as the field's presence column
+   *  (`RecordField.presentCol`). Absent where the field is required or its first column's non-nullness IS
+   *  its presence (an element's rowid, a stored property — TinkerPop has no null-valued property). */
+  readonly present?: Expr;
 }
+
+/** A VALUE field can be a productive null, so its presence must ride beside it — unless the presence
+ *  merely restates the value's own non-nullness (a stored property, `keepOnNamed`), which the first column
+ *  already says. An element/collection field is never a null value, so its first column is its presence. */
+const valueFieldPresent = (framing: RelFraming, present: Expr, value: Expr): { readonly present?: Expr } =>
+  (framing.kind === 'scalar' && !keepOnNamed(present, value, value) ? { present } : {});
 
 /**
  * One `by()` slot as a record field, or `null` to decline.
@@ -682,13 +785,15 @@ export function byField(
     // stream — which a `{t,v}` node could not do.
     const scoped = scopeValue(key, host);
     if (!scoped) return null;
+    // A STATICALLY bound label (or a non-optional field) is present on every row that reached here;
+    // one first bound inside a branch arm or a repeat body may be missing, and then the key is
+    // absent from the map. Same distinction `aliasGuard` draws for a presence filter.
+    const optional = scoped.optional && droppable();
     return {
       exprs: scoped.payload.map(([column, expr]) => [column.name, expr] as const),
       framing: scoped.framing,
-      // A STATICALLY bound label (or a non-optional field) is present on every row that reached here;
-      // one first bound inside a branch arm or a repeat body may be missing, and then the key is
-      // absent from the map. Same distinction `aliasGuard` draws for a presence filter.
-      optional: scoped.optional && droppable(),
+      optional,
+      ...(optional ? valueFieldPresent(scoped.framing, scoped.present, scoped.payload[0]![1]) : {}),
     };
   }
 
@@ -727,7 +832,13 @@ export function byField(
     // shared object the seam fills `present` with, so this is the reference-equality test every other
     // productivity consumer uses.
     const alwaysProductive = produced.present === ALWAYS_PRODUCTIVE;
-    return { exprs, framing: produced.framing, optional: droppable() && !alwaysProductive };
+    const optional = droppable() && !alwaysProductive;
+    if (!optional) return { exprs, framing: produced.framing, optional };
+    // A field that MAY be absent needs the body's presence, and a body that cannot say DECLINES — reading
+    // its value's nullness instead would omit the key of a productive null (`ProjectStep.java:66`).
+    const present = knownPresence(produced.present);
+    if (!present) return null;
+    return { exprs, framing: produced.framing, optional, ...valueFieldPresent(produced.framing, present, produced.expr) };
   }
 
   if (host.kind === 'record') return null;
@@ -779,9 +890,9 @@ export function byField(
 }
 
 /** The `vertex_properties` / `edge_properties` rows at `key` for one host element — the scan filtered to
- *  `owner = host.id AND key = …`, stated ONCE. `byNode`'s `{t,v}` node, `propertyVtype` and
- *  `propertyExists` are the same rows read three ways (value+vtype, vtype, presence); each projects off
- *  this relation so the three cannot disagree about WHICH rows they describe — the drift a second
+ *  `owner = host.id AND key = …`, stated ONCE. `byNode`'s `{t,v}` node and `propertyVtype` are the same
+ *  rows read two ways (value+vtype, vtype); each projects off this relation so the two cannot disagree
+ *  about WHICH rows they describe — the drift a second
  *  spelling of the column contract would open (`propertyRow` in `property.ts` is the sibling keyed by
  *  ROWID rather than `(owner, key)`). */
 function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: string, fresh: Minter): Rel {
@@ -807,46 +918,34 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
 }
 
 /**
- * DOES A PROPERTY ROW EXIST at `key` for this host — the productivity of a property read, as a
- * predicate.
+ * TinkerPop's default `by()` productivity, as a predicate over the host — the ONE authority every `by()`
+ * consumer that DROPS an unproductive traverser asks: `order`, `dedup`, `sack`, `where`, `aggregate`,
+ * `group`/`groupCount`, `project`/`select` (through `byField`'s `present`).
  *
- * `propertyVtype`'s sibling and `byExpr`'s third read of the same rows, and it exists because a
- * property's PRESENCE is not the same question as its value's nullness: `TraversalProduct` calls a
- * productive null a value, so a consumer that tested `value IS NULL` would answer "unproductive" for
- * a property that is genuinely there. An `Exists` says exactly what is being asked.
+ * It takes the projection's PRESENCE, never its value: a traverser whose `by()` yielded nothing is
+ * dropped, and one whose `by()` yielded a NULL is kept — `TraversalProduct` calls a productive null a
+ * value (`TraversalUtil.java:108-123`), and every consumer reads `isProductive()`, not the value
+ * (`OrderGlobalStep.java:183-184`, `DedupGlobalStep.java:77-78`, `SackValueStep.java:78-80`,
+ * `AggregateStep.java:139`, `ProjectStep.java:66`, `SelectOneStep.java:64-65`). The old spelling,
+ * `key IS NOT NULL`, answered the different question for exactly the productive-null case.
+ *
+ * - `{}` — no drop owed: the projection is `ALWAYS_PRODUCTIVE` (a token, the traverser itself — which
+ *   is also why `order().by(T.label)` and a bare `by()` never filter), or `ProductiveByStrategy` asked
+ *   for the null-keeping behaviour, under which an unproductive `by()` is a null and nothing is dropped;
+ * - `{ keep }` — the predicate, in the HOST's scope (the scope the projection was built in);
+ * - `null` — DECLINE: the producer said `'unknown'`, and neither "always" nor "a NULL means nothing"
+ *   is an honest reading of that.
  */
-export function propertyExists(key: string, host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Expr {
-  return { kind: 'exists', plan: propertyRowFor(host, key, fresh), negated: false };
-}
-
-/** TinkerPop's default `by()` productivity, as a predicate: a traverser whose `by()` yielded nothing
- *  is dropped. `undefined` where no filter is owed — the host was handed no projection, or
- *  `ProductiveByStrategy` asked for the null-keeping behaviour. */
-export const productivityFilter = (step: IRStep, key: Expr | undefined): Expr | undefined =>
-  key && !isProductiveBy(step) ? { kind: 'binary', op: 'is not', left: key, right: compilerNull() } : undefined;
+export const productivityFilter = (step: IRStep, present: Presence): { readonly keep?: Expr } | null =>
+  (isProductiveBy(step) || present === ALWAYS_PRODUCTIVE ? {} : present === 'unknown' ? null : { keep: present });
 
 /**
- * `order()`'s productivity, which is NARROWER than `dedup()`'s — and the difference is the reference's,
- * not a simplification.
- *
- * **A property KEY or a CHILD can be unproductive; a token, a bare `by()` and `shuffle` cannot.** A `T`
- * token is always present, a bare `by()` is the element itself, and `shuffle` projects nothing at all.
- * `dedup()` deliberately drops for any `by()` at all (`modulators.length && !productiveBy`), so the two
- * hosts still differ — but they differ in the token/bare/shuffle cases, not in the child one.
- *
- * **The `child` arm was ADDED when the by()-traversal seam made it reachable, and the reference is what
- * says so rather than an inference.** `OrderGlobalStep.processAllStarts()` is
- * `this.createProjectedTraverser(this.starts.next()).ifPresent(traverserSet::add)` under TinkerPop's own
- * comment "only add the traverser if the comparator traversal was productive"
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:85`; `:82` is the method signature, `:84` the comment).
- * So a child that yields nothing drops the traverser exactly as a missing property does. Before the seam
- * this comment read "only a property KEY can be unproductive", which was TRUE only because no other
- * projection could yield nothing — the narrowing was accidental, and a reducing child body
- * (`by(__.outE().values('weight').sum())` over a vertex with no out-edges, which
- * `SumGlobalStep` emits NO traverser for) is exactly the case it left answering 6 rows where the
- * reference answers 3.
+ * `productivityFilter` for a `by()` projected as a MEMBER NODE (`byNode`, `producedMemberNode`) — a group
+ * key, a group member, an ordering tuple. Such a node already ENCODES presence: it is SQL NULL exactly
+ * where the `by()` produced nothing and a `{t, v:null}` node where it produced a null (presence-gated;
+ * a scalar whose producer cannot say declines at the node), so its own non-nullness IS the presence and
+ * this reads it off whatever column the consumer named the node into. `undefined` where no drop is owed
+ * (`ProductiveByStrategy`).
  */
-export const orderProductivity = (step: IRStep, modulation: Modulation, key: Expr): Expr | undefined =>
-  modulation.key.kind === 'property' || modulation.key.kind === 'child'
-    ? productivityFilter(step, key)
-    : undefined;
+export const nodeProductivityFilter = (step: IRStep, node: Expr): Expr | undefined =>
+  (isProductiveBy(step) ? undefined : isNotNull(node));

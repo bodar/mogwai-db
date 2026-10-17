@@ -106,7 +106,6 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
 
   # A constant() child is the simplest resolvable body, and it must NOT filter: every one of the six
   # vertices keeps its traverser (the LEFT JOIN), so this is a per-value suffix over the whole stream.
-  @Unsupported
   Scenario: g_V_valuesXnameX_concatXconstantXXXX
     Given the modern graph
     And the traversal of
@@ -125,7 +124,6 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
 
   # Multiple traversal arguments concatenate in ARGUMENT order (ConcatStep.map appends each child's
   # result in order), one resolved value each.
-  @Unsupported
   Scenario: g_V_valuesXnameX_concatXconstantXXX_constantXYXX
     Given the modern graph
     And the traversal of

@@ -12,7 +12,7 @@ import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit, declaredScalarType } from '../const.ts';
-import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
+import { byExpr, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
@@ -1652,9 +1652,6 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
   // WHETHER THIS BODY PRODUCES anything for the host row, where the leading step can say precisely.
   // `'unknown'` is "cannot say", which is not the same as "always" — see `ChildValue.present`.
   let present: Presence = 'unknown';
-  // What a NULL means to the RECEIVER checks alone (`valueRun`'s `productive`) where `present` stays
-  // withheld from the host — a leading projector, whose productivity no consumer was given.
-  let productive: Expr | undefined;
   // The value's type as the body computes it, not as the wire guesses it. `UNKNOWN` is the honest seed:
   // until a step below NAMES the projection, nothing has been read yet.
   let type: ScalarType = UNKNOWN;
@@ -1673,9 +1670,12 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
     if (!projected) return null;
     value = projected;
     vtype = propertyVtype(args[0], host, fresh);
-    // A property read is the one leading step whose productivity is EXACTLY decidable and not the
-    // same question as its value's nullness: the property row either exists or it does not.
-    present = propertyExists(args[0], host, fresh);
+    // A property read's productivity is whether the property row exists — which IS its value's
+    // non-nullness, because TinkerPop has no null-valued property. Read off the SAME value the source
+    // answered (`byExpr` → `source.propertyScalar`), never a second raw-table scan: a decorated source
+    // (`pageRank()`'s computed property) answers a value the base table does not hold, and an EXISTS over
+    // the table then read that present value as absent.
+    present = isNot(projected, compilerNull());
     // …and the one that may have had MORE to give: a vertex key is multi-valued and `byExpr` takes
     // the insertion-order first, which is `map()`'s answer and not `local()`/`flatMap()`'s.
     yields = 'first';
@@ -1690,8 +1690,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
     value = produced.expr;
     if (produced.framing.kind === 'scalar') type = produced.framing.type;
     // THE SERVICE'S OWN CLAIM rides out — it built the expression, so only it knows whether the
-    // contribution was one value or the first of several.
+    // contribution was one value or the first of several — and the same goes for WHETHER it produced.
     yields = produced.yields;
+    present = produced.present;
     at = 1;
   } else if (leading?.name === 'label' || leading?.name === 'id') {
     if ((leading.args ?? []).length) return null;
@@ -1714,7 +1715,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
     if (!projected) return null;
     value = projected.value;
     type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
-    productive = projected.drop ? droppedWhenNull(ALWAYS_PRODUCTIVE, value) : ALWAYS_PRODUCTIVE;
+    // A projector ALWAYS maps (a `MapStep`), except where its `drop` says a NULL is an unproductive
+    // `by()` it FILTERS (`MathStep.java:75-78`) — so that is its presence, stated rather than withheld.
+    present = projected.drop ? droppedWhenNull(ALWAYS_PRODUCTIVE, value) : ALWAYS_PRODUCTIVE;
     at = 1;
   } else if (CARRIED_READ[leading?.name ?? ''] !== undefined && !(leading!.args ?? []).length) {
     // A PER-TRAVERSER STATE READ — `sack()`, `loops()` — and it is ONE arm over a channel ROLE rather
@@ -1769,7 +1772,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present, ...(productive ? { productive } : {}), yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh, deferRaise);
+  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh, deferRaise);
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1889,7 +1892,7 @@ const droppedWhenNull = (present: Expr, value: Expr): Expr => {
  */
 export function valueRun(
   body: readonly IRStep[], from: number,
-  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present: Presence; readonly productive?: Expr; readonly yields: ChildValue['yields'] },
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present: Presence; readonly yields: ChildValue['yields'] },
   row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter, deferRaise = false,
 ): ChildValue | null {
   let value = seed.value;
@@ -1901,9 +1904,9 @@ export function valueRun(
   // so a NULL it made is UNPRODUCTIVE to every consumer — a later receiver check (`receiver.ts`:
   // `asString()`/`math()` raise on a PRODUCTIVE null only), a `map()` host, a `coalesce()` arm.
   let present = seed.present;
-  // The same fact for the RECEIVER checks alone: `present`, or where the seed withholds that from its
-  // host, what it can still say about a NULL (`seed.productive`). Narrowed in step with `present`.
-  let productive = knownPresence(seed.present) ?? seed.productive;
+  // The same fact as the RECEIVER checks read it — `undefined` where the seed cannot say (a service that
+  // states `'unknown'`). Narrowed in step with `present`.
+  let productive = knownPresence(seed.present) ?? undefined;
   // The raise the run hit, as DATA, where its host carries one (`deferRaise`).
   let raise: Expr | undefined;
   for (let at = from; at < body.length; at++) {
@@ -2029,10 +2032,12 @@ export function scalarHostChild(
   }
   // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
   // replaces it and every transform maps it, neither of which can produce a second.
-  // The value IS the traverser (or a constant replacing it), so a NULL is a productive null unless the
-  // host says otherwise — told to the receiver checks only (`productive`), since `present` was never
-  // claimed here and claiming it now would admit consumers that decline today.
-  return valueRun(body, at, { value, type, vtype, present: 'unknown', productive: host.present ?? ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, child, source, fresh);
+  // The value IS the traverser (or a constant replacing it), so the body produces exactly where the HOST
+  // did: always for a traverser, `host.present` for an intermediate value that can be an unproductive
+  // NULL. Stated as `present` — not withheld as `'unknown'` — because every `by()` consumer now decides
+  // productivity on presence and DECLINES on `'unknown'`; `valueRun` narrows it at an `is()`/`drop`.
+  const present = host.present ?? ALWAYS_PRODUCTIVE;
+  return valueRun(body, at, { value, type, vtype, present, yields: 'one' }, host.row, child, source, fresh);
 }
 
 /**

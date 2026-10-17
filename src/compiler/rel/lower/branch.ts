@@ -1158,5 +1158,5 @@ export const sameRecordFields = (left: readonly RecordField[], right: readonly R
   left.length === right.length && left.every((field, i) => {
     const other = right[i]!;
     return field.key === other.key && field.prefix === other.prefix
-      && field.optional === other.optional && sameFraming(field.framing, other.framing);
+      && field.optional === other.optional && field.presentCol === other.presentCol && sameFraming(field.framing, other.framing);
   });
