@@ -32,7 +32,9 @@ lowered.
   `g.inject(1,2).as('a').addV('x').filter(select('a').is(1)).V().hasLabel('x').count()` 1 (we say 2); an EARLIER read interleaves the same
   way from the other side. What is guarded today is only a value BODY that reads (`sequentialGuard`, with
   the upstream stream count from `afterWrite`), a write over what an upstream write wrote
-  (`writeAfterWrite`), and a merge's per-driver re-writes (`guardMergeInterleaving`). The generic rule is
+  (`writeAfterWrite` — every writer, a merge's onMatch and its search included; a later write that only
+  reaches ANOTHER traverser's creation is this read class), and a merge's per-driver re-writes
+  (`guardMergeInterleaving`). The generic rule is
   `afterWrite` refusing when the PROGRAM's reach (`ProgramWrites.reads`, a `BodyReach`) observes the writer's
   effect over >1 traverser — measured as the coarse form (no per-element exemption): it costs 12 L3
   scenarios and ~96 other tests, because a read of the traverser's OWN element after an idempotent constant
