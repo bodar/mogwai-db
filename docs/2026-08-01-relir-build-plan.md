@@ -903,6 +903,14 @@ authorities.
   pulls `low + 1` starts (`step/filter/RangeGlobalStep.java`, `FilterStep.processNextStart`), SQLite evaluates
   nothing under `LIMIT 0`; a mutating value-argument child raises `ReadOnlyChildValidator`'s text; federate's
   param validation throws `UnsupportedTraversal`. Double ±Infinity verified correct (pinned). No baseline moved.
+  ✅ **Raise-residue 2 LANDED ON TRUNK 2026-10-17 (`aeaba8bb`).** A filter after a raising step is met in
+  written order at ONE authority — the emitter fuses it as an ordered CASE term (`conjoinInOrder`, `src/rel/emit.ts`)
+  and fences a raising CTE `AS MATERIALIZED`; `raiseOrdered` (raise-channel.ts) declines what that cannot reach
+  (beneath an explode / in a union arm / a constant predicate). `filterRankingMoves` models
+  `FilterRankingStrategy.java` and declines a raising filter the strategy would move (24 raise-extent scenarios
+  behind `order()` now @Unsupported). property() mutating children raise `VerificationException`
+  (`StandardVerificationStrategy.java:87-101`); no bare Error on a user path (services, federate); ±Infinity in
+  collections spelled `9.0e+999`. Baseline moved: sql-hygiene bytes (the fence itself).
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
