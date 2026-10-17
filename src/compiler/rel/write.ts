@@ -28,7 +28,7 @@ import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type RelFraming } from './framing.ts';
-import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
+import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
@@ -1005,6 +1005,9 @@ export interface ProgramWrites {
    *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`)
    *    that the body reaches only after it has fanned out: the rest of the body is abandoned.
    * A side effect over at most one traverser (per start of its chain) cannot be cut short and is exempt.
+   * "Side effect" is a graph write AND a keyed side-effect collector (`collectsSideEffect`: `aggregate`,
+   * keyed `group`/`groupCount`/`tree`, `subgraph`) run per traverser — inside a `local`/`map`/`flatMap`/
+   * `by()` body, or spliced out of one (`ranPerTraverser`) — since a later `cap`/`select` observes it.
    */
   readonly truncated: boolean;
 }
@@ -1127,8 +1130,21 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
         effects = true;
         if (!single || bodies.lazy) { pending = true; lazy = true; }
       }
-      // A drain pulls everything before it emits; a `drop`/`none` emits nothing for anything to pull.
-      if (drains(step) || step.name === 'drop' || step.name === 'none') pending = false;
+      // A KEYED side-effect collector (`collectsSideEffect`) is a side effect too. Where it drains the
+      // stream it stands in, nothing after it in that chain can cut it short — it is neither pending nor
+      // lazy there; what it changes is its BODY's answer to a step that runs that body per traverser
+      // (`local(__.out().aggregate('a'))`, a `by()`): that step now has a side effect, so a slice after it
+      // cuts it. Where `inlineIdentityHostBody` SPLICED it out of such a host (`ranPerTraverser` —
+      // `local(__.aggregate('a'))` is `aggregate('a')` marked as having run per traverser) it is a
+      // LocalBarrier over ONE traverser and drains nothing of the stream: it is pending exactly like a write.
+      const perTraverserCollector = ranPerTraverser(step) && collectsSideEffect(step);
+      if (collectsSideEffect(step)) {
+        effects = true;
+        if (perTraverserCollector && !single) { pending = true; lazy = true; }
+      }
+      // A drain pulls everything before it emits; a `drop`/`none` emits nothing for anything to pull. A
+      // per-traverser collector pulls only its own traverser.
+      if ((drains(step) && !perTraverserCollector) || step.name === 'drop' || step.name === 'none') pending = false;
       // (The top-level source is `singleSource`'s to judge.)
       single &&= (ownable && index === 0) || KEEPS_ONE.has(step.name) || (REDUCERS.has(step.name) && !isLocalScope(step));
     }
@@ -1160,6 +1176,26 @@ function bodyPull(step: IRStep, at: number): BodyPull {
   // `choose(pred, t, f)`: the predicate's first result picks an arm, which is then emitted lazily.
   if (SELECTING_BODIES.has(step.name)) return at === 0 ? 'first' : 'lazy';
   return 'first';
+}
+
+/**
+ * Does this step write a TRAVERSAL SIDE EFFECT — a keyed collection a later `cap`/`select` reads — rather
+ * than the graph? `aggregate('a')` (`AggregateStep`, a `LocalBarrier`), and the keyed `group('a')`/
+ * `groupCount('a')`/`tree('a')`/`subgraph('a')` (`SideEffectBarrierStep`s), all under
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/`.
+ * Each drains its input per invocation, so at the top level it is no side effect a slice can cut (it is in
+ * `DRAINS`). Inside a body run once PER TRAVERSER it is: `LocalStep`/`FlatMapStep`/`MapStep` feed the
+ * body one start at a time (`…/step/branch/LocalStep.java` `processNextStart`), so a `limit(1)` after
+ * `local(__.aggregate('a'))` stops the outer stream after two starts (`RangeGlobalStep.java:72-82` pulls
+ * one past its bound) and `cap('a')` holds two members, where the plan aggregates all six. So the walk
+ * counts it as an effect, and the per-traverser parent's slice declines — the same rule as for a write.
+ * A bare `group()`/`groupCount()`/`tree()` is a REDUCER, not a side effect.
+ */
+const SIDE_EFFECT_COLLECTORS: ReadonlySet<string> = new Set(['aggregate', 'subgraph']);
+const KEYED_REDUCERS: ReadonlySet<string> = new Set(['group', 'groupCount', 'tree']);
+function collectsSideEffect(step: IRStep): boolean {
+  return SIDE_EFFECT_COLLECTORS.has(step.name)
+    || (KEYED_REDUCERS.has(step.name) && step.args.some((a) => typeof a.value === 'string'));
 }
 
 /** Does this step STOP PULLING from upstream before upstream is exhausted? `RangeGlobalStep` throws

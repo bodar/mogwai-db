@@ -93,6 +93,11 @@ function inCluster(chain: readonly IRStep[], at: number): boolean {
  *  `InjectStep` or `AddVertexStartStep`, none a `MapStep`), never a `to(Direction)` movement, and
  *  never a modulated `path()` (its `by()`s may be unproductive, so not always bound). */
 function movable(step: IRStep, index: number): boolean {
+  // A step `inlineIdentityHostBody` spliced out of a `local`/`map`/`flatMap` is, to the strategy, still
+  // its host — a `LocalStep` (an `AbstractStep`), a `TraversalMapStep`/`TraversalFlatMapStep` with no
+  // always-bound arity — none of which it crosses: `g.V().local(__.sideEffect(…)).limit(1)` runs the
+  // body for two starts in the reference, not one.
+  if (step.perTraverser) return false;
   if (index === 0 && (step.name === 'addV' || step.name === 'addE')) return false;
   if (step.name === 'to' || step.name === 'from') return step.args.length === 1 && !isDirectionArg(step.args[0]!.value);
   if (step.name === 'path') return !step.modulators?.length && step.from === undefined && step.to === undefined;

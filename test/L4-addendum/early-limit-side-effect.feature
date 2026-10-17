@@ -134,3 +134,155 @@ Feature: mogwai addendum — a SLICE after a SIDE EFFECT
     When iterated to list
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().has(\"x\")"
+
+  # A SIDE EFFECT INSIDE A PER-TRAVERSER BODY. `local`/`map`/`flatMap` feed their body ONE start at a time
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java
+  # `processNextStart`), and none of them is a step `EarlyLimitStrategy` crosses (`LocalStep` is an
+  # `AbstractStep`; `TraversalMapStep`/`TraversalFlatMapStep` have no always-bound arity). So `limit(1)`
+  # pulls two starts — the second only to find it is past the bound (RangeGlobalStep.java:72-82) — and the
+  # body's `aggregate("a")` holds two members, never six. The plan splices `local(__.aggregate("a"))` into
+  # the chain (`inlineIdentityHostBody`), where it would drain the whole stream, so these DECLINE.
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXaggregateXaXX_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.aggregate("a")).limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXaggregateXaXX_limitX2X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.aggregate("a")).limit(2).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_mapXaggregateXaXX_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.aggregate("a")).limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_flatMapXaggregateXaXX_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.aggregate("a")).limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  # Only marko and vadas enter the body.
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXgroupCountXaX_byXlabelXX_limitX1X_capXaX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.groupCount("a").by(T.label)).limit(1).cap("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"d[2].l"}] |
+
+  # `select` reads the side effect lazily, when only marko has been aggregated.
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXaggregateXaXX_limitX1X_selectXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.aggregate("a")).limit(1).select("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  # A collector DEEPER in the body is the same side effect, run per start: marko's three neighbours.
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXout_aggregateXaXX_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.out().aggregate("a")).limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  # A write spliced out of `local` is not crossed by the strategy either: two starts are written.
+  @gap:early-limit-side-effect
+  @Unsupported
+  Scenario: g_V_localXsideEffectXpropertyXx_1XXX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.sideEffect(__.property("x",1))).limit(1)
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 2 for count of "g.V().has(\"x\")"
+
+  # What stays exact: one start cannot be cut short, no slice cuts nothing, and a global barrier after
+  # the body pulls every start before the slice sees one.
+  @gap:early-limit-side-effect
+  Scenario: g_VX1X_localXaggregateXaXX_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.aggregate("a")).limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  @gap:early-limit-side-effect
+  Scenario: g_V_localXaggregateXaXX_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.aggregate("a")).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @gap:early-limit-side-effect
+  Scenario: g_V_localXaggregateXaXX_fold_unfold_limitX1X_capXaX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.aggregate("a")).fold().unfold().limit(1).cap("a").count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
