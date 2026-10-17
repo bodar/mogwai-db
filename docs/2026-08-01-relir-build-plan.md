@@ -724,6 +724,14 @@ authorities.
   and casts. 🔴 Gated on a policy decision recorded in §6·7 first: §11 closed promotion as unobservable, but
   `d[1.0].d` and Python's int/float split make Int-vs-Double observable for some GLVs. Size: stopgaps S
   (~60 LOC); full authority M (~300 LOC).
+  ✅ **Stopgap LANDED 2026-10-17 (`56473649`, `f7b964cb`, `a34c4df6`):** every seam above fails closed —
+  `kindOf` throws on `unknown`, reducer eligibility no longer drops a TEXT-held wide long, a write carries
+  the source vtype, and a reducer's known long class rides beside `result:'number'`. Predicates compare
+  in the reference common class (`predicate.ts` `numericPair`, per `NumberHelper.compare`); `asNumber` is a
+  WHERE fence (`transform.ts` `asNumberFilter`) so it raises at every existence depth, and its constant
+  fold is `NumberHelper.performConversion` (`coerce.ts`). Pinned in
+  `test/compiler/number-class-fail-closed.exec.test.ts`. The FULL one-`numericClassOf` authority and the
+  §6·7 promotion policy decision are still open.
 - 🚧 **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
