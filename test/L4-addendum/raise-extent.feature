@@ -420,6 +420,66 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  # A slice at the END of a union() body is NOT pulled n+1 times. union() is a BranchStep:
+  # BranchStep.standardAlgorithm (step/branch/BranchStep.java) addStart()s every new start into a child it
+  # never resets and re-asks option.hasNext() once per start, while the body's RangeGlobalStep keeps ONE
+  # counter. Once it fills, each later start drags one more upstream traverser through the body before
+  # the bound throws, so what the body evaluates depends on how many starts follow. Here the start 1 is
+  # pushed into the body after 'a' filled the limit, and toUpper(1) runs before the counter check: the
+  # reference raises. The raise cannot be settled at the body's slice, so the traversal declines.
+  @Unsupported
+  Scenario: g_injectXa_b_1_cX_unionXtoUpper_limitX1XX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("a", "b", 1, "c").union(__.toUpper().limit(1))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # marko's leftover age (29) is pulled when vadas is applied to the non-reset body: the reference raises.
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_unionXvaluesXname_ageX_toUpper_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).union(__.values("name", "age").toUpper().limit(1))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_unionXvaluesXname_ageX_toUpper_limitX1XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).union(__.values("name", "age").toUpper().limit(1)).count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_unionXvaluesXname_ageX_toUpper_limitX1X_constantX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).union(__.values("name", "age").toUpper().limit(1), __.constant(1))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # The same through a filter body: marko is applied to the non-reset child, so the where() body runs on
+  # him before the limit's counter check.
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_unionXwhereXvaluesXageX_toUpper_foldX_limitX1XX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).union(__.where(__.values("age").toUpper().fold()).limit(1)).values("name")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
   @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_optionalXvaluesXageX_toUpperX_limitX1X
     Given the modern graph

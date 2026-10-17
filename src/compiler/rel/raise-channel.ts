@@ -77,7 +77,7 @@ function globalSlice(step: IRStep | undefined): { readonly low: number; readonly
  * `limit()` stops pulling one traverser past its bound (`RangeGlobalStep.filter` throws
  * `FastNoSuchElementException` on the first traverser it is handed once it holds `high`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java`).
- * Inside a child body the same is true ONE LEVEL UP: an `optional()`/`local()`/`union()` iterates its body
+ * Inside a child body the same is true ONE LEVEL UP: an `optional()`/`local()` iterates its body
  * as its own consumer pulls (`OptionalStep.processNextStart`, `LocalStep.processNextStart`, both one start
  * per pull — `…/step/branch/OptionalStep.java`, `…/step/branch/LocalStep.java`), so a body under a host a
  * slice follows is pulled no further than that slice pulls the host. A body's own exactness is therefore
@@ -102,10 +102,20 @@ export interface PullPosition { readonly steps: readonly IRStep[]; readonly at: 
 /** The top-level traversal: driven to the end by the terminal, every row pulled. */
 const TOP: PullLevel = { reached: true, drained: true };
 
-/** Hosts that iterate a body to exhaustion for each start before asking for the next one — when their own
- *  output is fully pulled. A `choose`/`branch` is absent: its selector is read for its first result, and
- *  the position does not say which of its bodies is being lowered. */
-const LAZY_BODY_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'flatMap', 'optional', 'coalesce', 'sideEffect']);
+/** Hosts that RESET their body and iterate it to exhaustion for each start before asking for the next one
+ *  — when their own output is fully pulled: `LocalStep`/`OptionalStep`/`CoalesceStep` call
+ *  `traversal.reset()` per start, `flatMap()`/`sideEffect()` go through `TraversalUtil.applyAll`, which
+ *  `prepare`s (resets) it (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`).
+ *
+ *  Every `BranchStep` is ABSENT — `union()`, `choose()`, `branch()`. `BranchStep.standardAlgorithm`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java`)
+ *  only `addStart`s each new start into a child it NEVER resets and re-asks `option.hasNext()` once per
+ *  start; a body slice's `RangeGlobalStep` keeps ONE counter across all of them, so once it fills, every
+ *  later start drags one more upstream traverser through the body before the bound throws. A body slice's
+ *  pull count is then `n` + the number of later starts — a function of the DATA, not of the traversal — so
+ *  a raise riding to it cannot be settled exactly, and declines. (`choose`'s selector is also read for its
+ *  first result only.) */
+const LAZY_BODY_HOSTS: ReadonlySet<string> = new Set(['local', 'flatMap', 'optional', 'coalesce', 'sideEffect']);
 
 /** `ctx` at `steps[at]` — the ONE marker every tail sets per step, so a body lowered from that step knows
  *  its host. Within the same list the level is inherited; a new list is a body of the marked host. */
