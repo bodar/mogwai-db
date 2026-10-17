@@ -1143,9 +1143,9 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
  *  asks the same question.
  *
  *  That argument is not uniform across barriers, which is why this set is not
- *  `COLLAPSING_BARRIERS` or `GLOBAL_BARRIER_STEPS`. `dedup` is the case where it is airtight: a bare
- *  `dedup()` is a stateless collapse of the set it is handed, with nothing carried between
- *  invocations, so n phase-local collapses and n per-iteration collapses agree row for row.
+ *  `COLLAPSING_BARRIERS` or `GLOBAL_BARRIER_STEPS`. `dedup` was once argued airtight here ("a
+ *  stateless collapse of the set it is handed") — WRONG for n ≥ 2: its seen-set is carried across
+ *  iterations (see its entry below), so it is admitted only for a single-iteration body.
  *  `order`/`limit`/`range`/`tail`/`sample` all interact with an emission order the walk does not
  *  have (a recursive CTE cannot window across iterations), and the reducers change the stream's
  *  shape mid-body. **Each additional name needs its own argument and its own pin** — and note that
@@ -1154,8 +1154,12 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
  *  (especially barriers)". We go further than it deliberately, one name at a time.
  *  Boundary pinned in `test/compiler/repeat-unroll-boundary.exec.test.ts`. */
 const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
-  // A BARE `dedup()` — stateless in the set it is handed. `dedup('a','b')` dedups by LABELS bound
-  // earlier in the traversal, which is a different question and not this one's argument.
+  // A BARE `dedup()` — but ONLY for a body that runs once (`times(1)`): the reference's dedup is ONE
+  // step instance whose seen-set spans every iteration (`DedupGlobalStep.duplicateSet`, never reset by
+  // `RepeatStep`), so the "stateless in the set it is handed" argument the comment above makes for it
+  // is REFUTED for n ≥ 2 by `Dedup.feature` g_V_repeatXdedupX_timesX2X_count (= 0) — `tryUnroll`
+  // declines that case, except for a body of `VALUE_PRESERVING_FILTERS`, whose levels ≥ 2 are empty. `dedup('a','b')` dedups by LABELS bound earlier in the traversal, which is a
+  // different question and not this one's argument.
   dedup: (s) => !(s.args ?? []).length,
   // THE SLICE FAMILY, and one argument covers all of it: phase k's relation IS the frontier at
   // iteration k, so taking its first `k` rows takes exactly the traversers the interpreter's
@@ -1197,6 +1201,13 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   group: labelled,
   groupCount: labelled,
 };
+
+/** Body steps that never change a traverser's VALUE and write no side effect — filters and
+ *  reorderings. A dedup body made only of these yields nothing past its first iteration (`tryUnroll`):
+ *  iteration k+1's input is iteration k's output, all of whose values the shared dedup has already
+ *  seen. A movement, a side effect (`aggregate` would register a traverser before the dedup drops it)
+ *  or a `call` is outside it, so such a body at n ≥ 2 declines instead. */
+const VALUE_PRESERVING_FILTERS: ReadonlySet<string> = new Set(['dedup', 'has', 'hasLabel', 'hasId', 'identity', 'limit', 'range', 'order']);
 
 /**
  * `withoutStrategies(RepeatUnrollStrategy)` — mark every `repeat` at EVERY depth, so `tryUnroll`
@@ -1372,6 +1383,24 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // chaining this slice reuses — so decline it here, fail closed, rather than splice a `call` into an arm
   // the segment planner cannot descend into.
   if (emit && body.some((s) => s.name === 'call')) return null;
+  // A `dedup` in the body is ONE step instance whose `duplicateSet` lives for the whole traversal —
+  // `DedupGlobalStep` never resets it between iterations (vendor/tinkerpop/gremlin-core/src/main/java/
+  // org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:59,78; contrast
+  // `RangeGlobalStep`'s per-loop counters, :185-205 of its file). So iteration k's dedup also drops what
+  // iterations 1..k-1 already let through — `g.V().repeat(__.dedup()).times(2).count()` is 0
+  // (`Dedup.feature` g_V_repeatXdedupX_timesX2X_count) and `repeat(__.dedup().both()).times(2)` is empty
+  // (`Repeat.feature` g_V_repeatXdedup_bothX_timesX2X). n phase-LOCAL dedups cannot carry that set, so
+  // the unroll is exact only when the body runs ONCE (n = 1) — with ONE exception that is exact by
+  // construction: a body of VALUE-PRESERVING filters only (`VALUE_PRESERVING_FILTERS`). Its iteration-2
+  // input is iteration 1's output, every traverser of which already passed the dedup with the SAME value,
+  // so iteration 2's dedup rejects all of it and every level ≥ 2 is EMPTY (`Repeat.feature`
+  // g_V_emit_repeatXdedupX_timesX2X: each vertex twice, levels 0 and 1). Any other dedup body at n ≥ 2
+  // declines (fail closed) rather than answer with per-phase dedups.
+  let lastLevel = n;
+  if (n > 1 && body.some((s) => s.name === 'dedup')) {
+    if (!body.every((s) => VALUE_PRESERVING_FILTERS.has(s.name))) return null;
+    lastLevel = 1;
+  }
   // `withoutStrategies(RepeatUnrollStrategy)` — SCOPED TO THE TRANSFORMATION THAT STRATEGY PERFORMS,
   // which is the barrier-free half of this pass and not all of it. Read at the vendored pin:
   // `ALLOWED_STEP_CLASSES` is `VertexStepContract`/`EdgeVertexStep`/`EdgeOtherVertexStep`/`HasStep` +
@@ -1409,7 +1438,9 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // splice n copies of the body inline (each an ordinary phase that collapses).
   if (!emit) {
     const phases: Step[] = [];
-    for (let k = 0; k < n; k++) phases.push(...phase());
+    for (let k = 0; k < Math.min(n, lastLevel); k++) phases.push(...phase());
+    // Levels past `lastLevel` are EMPTY (the dedup argument above): `limit(0)` is the chain's empty.
+    if (lastLevel < n) phases.push({ name: 'limit', args: [arg(0)], ctx: rep.ctx });
     return phases;
   }
 
@@ -1419,15 +1450,33 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // body needs no special case: each arm applies the body-prefix INDEPENDENTLY, so a per-arm `dedup`
   // dedups that arm's own stream — exactly the per-iteration semantics `emit().repeat(__.dedup()).times(2)`
   // asks for (each vertex twice, `Repeat.feature:974`). The corpus is the authority on any body shape here.
-  //   - emit AFTER repeat (the common form, `repeat(b).emit().times(n)`): levels 1..n → union(b, b·b, …, b^n).
+  // WHICH levels, and how often, is read off the reference rather than reasoned — `RepeatStep.
+  // processTraverser` (the loop's entry, checks `untilFirst`/`emitFirst`) and `RepeatEndStep.
+  // standardAlgorithm` (after each body pass, checks the `false` side), vendor/tinkerpop/gremlin-core/
+  // src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/RepeatStep.java:265-278 and
+  // :334-353. `times(n)` is `until(loops() >= n)` (`LoopTraversal`), FIRST iff it precedes `repeat`
+  // (`GraphTraversal.times` → `addUntilToTraversal`). The traverser that satisfies the until at level n
+  // LEAVES the loop — it is output whatever the emit says — so level n is ALWAYS in the result:
+  //   - emit AFTER repeat (`repeat(b).emit().times(n)`): levels 1..n → union(b, b·b, …, b^n).
   //   - emit BEFORE repeat (`emit().repeat(b).times(n)`): the starting traverser is emitted too, so
-  //     levels 0..n-1 → union(identity, b, …, b^(n-1)) — level 0 is the origin itself (`identity`).
+  //     levels 0..n → union(identity, b, …, b^n) — level 0 is the origin itself (`identity`). Level n is
+  //     the until's exit, not an emit; dropping it was a wrong answer (`g.V(1).emit().repeat(out())
+  //     .times(2).count()` gave 4, the reference 6 — `Repeat.feature` g_V_emit_repeatXoutX_timesX2X_path).
+  //   - until FIRST, emit LAST (`times(n).repeat(b).emit()`): `RepeatEndStep` emits a SPLIT of the level-n
+  //     traverser (`doEmit(start, false)`) AND hands the original back to `RepeatStep`, whose entry check
+  //     (`doUntil(start, true)`, loops == n) then outputs it again — level n TWICE: union(b, …, b^n, b^n).
+  //     With emit FIRST the end step's `doEmit(…, false)` is false, so no such double.
   // A UNION ALL of independently-unrolled prefixes is multiset-exact and self-loop-safe: each arm is
   // materialised on its own, so a self-loop's extra traverser is preserved (the §6 disjunctive-join trap
   // is about the RECURSIVE walk's compound arms, not a flat union of prefixes). `union` lowers already.
   const emitFirst = region.indexOf(emit) < region.indexOf(rep);
+  const untilFirst = region.indexOf(times) < region.indexOf(rep);
+  const levels: number[] = [];
+  // Levels past `lastLevel` are empty (the dedup argument above), so they contribute no arm.
+  for (let level = emitFirst ? 0 : 1; level <= Math.min(n, lastLevel); level++) levels.push(level);
+  if (untilFirst && !emitFirst && n <= lastLevel) levels.push(n);
   const arms: Step[][] = [];
-  for (let level = emitFirst ? 0 : 1; level <= (emitFirst ? n - 1 : n); level++) {
+  for (const level of levels) {
     const arm: Step[] = [];
     for (let k = 0; k < level; k++) arm.push(...phase());
     // Level 0 is the origin unchanged — `identity()` so the arm is a legal non-empty traversal.

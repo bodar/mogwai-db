@@ -27,11 +27,14 @@
 // relation IS — which is the very property fact 1 shows the interpreter had to special-case to get.
 // But the equivalence has to be argued per barrier and pinned, not assumed from the corpus count.
 //
-// What this file pins is the BOUNDARY, which has since MOVED once: `dedup` is now unrolled
-// (`UNROLLABLE_BARRIERS`, ir/strategies.ts) because its argument is airtight — a bare `dedup()` is a
-// stateless collapse of the set it is handed, so n phase-local collapses and n per-iteration
-// collapses agree row for row. Every other barrier is still on the far side, and the file's job is to
-// keep the line visible rather than to bless a direction.
+// What this file pins is the BOUNDARY, which has since MOVED twice. `dedup` was unrolled
+// (`UNROLLABLE_BARRIERS`, ir/strategies.ts) on the argument that a bare `dedup()` is a stateless
+// collapse of the set it is handed — and the corpus REFUTES that for n ≥ 2: the reference's dedup is
+// one step instance whose seen-set spans every iteration (`DedupGlobalStep.duplicateSet`), so
+// `g.V().repeat(__.dedup()).times(2).count()` is 0 (Dedup.feature g_V_repeatXdedupX_timesX2X_count),
+// not the 6 that `V.dedup.dedup` gives. So a dedup body unrolls only at n = 1 and declines beyond it —
+// unless every body step is a value-preserving filter, whose levels ≥ 2 are then provably empty.
+// The file's job is to keep the line visible rather than to bless a direction.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
@@ -67,11 +70,9 @@ describe('the repeat() unroll boundary', () => {
     // n times. If a future name joins `UNROLLABLE_BARRIERS`, add its pair here — that is the pin the
     // set's comment demands.
     const pairs: readonly [string, string][] = [
-      ['g.V().repeat(__.dedup()).times(2).count()', 'g.V().dedup().dedup().count()'],
-      ['g.V().repeat(__.dedup().both()).times(2).count()', 'g.V().dedup().both().dedup().both().count()'],
-      ['g.V().repeat(__.both().dedup()).times(2).count()', 'g.V().both().dedup().both().dedup().count()'],
-      ['g.V().repeat(__.dedup().both()).times(3).count()', 'g.V().dedup().both().dedup().both().dedup().both().count()'],
+      // DEDUP only at n = 1 — a single iteration has no earlier iteration's seen-set to inherit.
       ["g.V().repeat(__.both().dedup()).times(1).values('name')", "g.V().both().dedup().values('name')"],
+      ['g.V().repeat(__.dedup().both()).times(1).count()', 'g.V().dedup().both().count()'],
       // THE SLICE FAMILY. Asserted as an identity precisely because an unpinned slice is arbitrary:
       // both spellings must take the same arbitrary rows, which is what "phase k's relation IS the
       // frontier at iteration k" claims and what a value-expectation could not distinguish.
@@ -89,12 +90,40 @@ describe('the repeat() unroll boundary', () => {
     for (const [rolled, written] of pairs) expect(vals(rolled)).toEqual(vals(written));
   });
 
+  test('a dedup body past one iteration DECLINES — the seen-set spans iterations, a phase cannot carry it', () => {
+    // `DedupGlobalStep.duplicateSet` (vendor/tinkerpop/gremlin-core/.../step/filter/DedupGlobalStep.java:59)
+    // is never reset between iterations, unlike `RangeGlobalStep`'s per-loop counters — so iteration
+    // k's dedup also drops what iterations 1..k-1 let through. The corpus answers are 0
+    // (Dedup.feature g_V_repeatXdedupX_timesX2X_count) and empty (Repeat.feature
+    // g_V_repeatXdedup_bothX_timesX2X); n phase-local dedups gave 6 and 6. Fail closed at every
+    // regime and depth the unroll serves.
+    for (const q of [
+      'g.V().repeat(__.dedup().both()).times(2)',
+      'g.V().repeat(__.both().dedup()).times(3).count()',
+      'g.V().emit().repeat(__.out().dedup()).times(2)',
+      'g.V().repeat(__.both().dedup()).emit().times(2)',
+      'g.V().local(__.emit().repeat(__.both().dedup()).times(2)).count()',
+      'g.V().union(__.repeat(__.dedup().both()).times(2), __.out()).count()',
+    ]) expect(() => compile(q, {})).toThrow(/not supported/);
+    // …EXCEPT a body of value-preserving filters only: iteration 2's input is iteration 1's output, all
+    // of it already seen, so every level ≥ 2 is EMPTY — exact by construction, not by phase-local dedup.
+    const count = (q: string) => vals(`${q}.count()`)[0];
+    expect(count('g.V().repeat(__.dedup()).times(2)')).toBe(0);                        // Dedup.feature
+    expect(count("g.V().repeat(__.hasLabel('person').dedup()).times(3)")).toBe(0);
+    expect(count('g.V().emit().repeat(__.dedup()).times(2)')).toBe(12);               // Repeat.feature
+    expect(count('g.V().emit().repeat(__.dedup()).times(3)')).toBe(12);
+    expect(count('g.V().repeat(__.dedup()).emit().times(3)')).toBe(6);                // level 1 only
+    expect(count('g.V().times(3).repeat(__.dedup()).emit()')).toBe(6);                // no level-n double: empty
+    expect(count('g.V().times(1).repeat(__.dedup()).emit()')).toBe(12);               // level 1, doubled
+    expect(count('g.V().local(__.emit().repeat(__.dedup()).times(2))')).toBe(12);
+  });
+
   /**
    * THE STEP CEILING IS GONE, AND `times(51)` IS THE WITNESS.
    *
    * The pass used to refuse past 100 spliced steps — a step count standing in for the DO's 100 KB of
-   * statement text, charging every body the worst measured per-step cost. A `both().dedup()` body is
-   * two steps, so `times(51)` was 102 and fell to a route that cannot express a per-iteration barrier
+   * statement text, charging every body the worst measured per-step cost. A two-step barrier body
+   * (then `both().dedup()`, now `both().limit(5)` since dedup unrolls only at n = 1) is two steps, so `times(51)` was 102 and fell to a route that cannot express a per-iteration barrier
    * at all, which is the one thing the unroll exists for (§1). Both sides of that old boundary now
    * unroll, and so does a body far past it.
    *
@@ -105,11 +134,11 @@ describe('the repeat() unroll boundary', () => {
    */
   test('the unroll has no step ceiling — the platform owns its own limits', () => {
     for (const n of [49, 51, 200]) {
-      expect(() => compile(`g.V().repeat(__.both().dedup()).times(${n}).count()`, {})).not.toThrow();
+      expect(() => compile(`g.V().repeat(__.both().limit(5)).times(${n}).count()`, {})).not.toThrow();
     }
     // …and the multiplication is still LINEAR in n, so the text a body costs stays predictable.
     const bytes = (n: number): number => {
-      const plan = compile(`g.V().repeat(__.both().dedup()).times(${n}).count()`, {});
+      const plan = compile(`g.V().repeat(__.both().limit(5)).times(${n}).count()`, {});
       if (!('sql' in plan)) throw new Error('expected a read plan');
       return plan.sql.length;
     };
@@ -159,10 +188,35 @@ describe('the repeat() unroll boundary', () => {
       'g.V().repeat(__.out()).times(2).emit()',
       'g.V().emit().repeat(__.out()).times(2)',
       "g.V().hasLabel('person').repeat(__.out('knows')).emit().times(2)",
-      'g.V().emit().repeat(__.dedup()).times(2)',
+      // n = 1: a dedup seen-set spans iterations, so n ≥ 2 declines (see the decline test above).
+      'g.V().emit().repeat(__.dedup()).times(1)',
     ]) expect(() => compile(q, {})).not.toThrow();
     // emit(pred) — a predicate emit — is NOT a union of prefixes; it declines to the walk / a refusal.
     expect(() => compile('g.V().repeat(__.out()).emit(__.has("name","x")).times(2)', {})).toThrow();
+  });
+
+  test('bare emit() emits EXACTLY the reference levels — level n always, doubled when until is first', () => {
+    // Read off RepeatStep.java (vendor/tinkerpop/gremlin-core/.../step/branch/RepeatStep.java:265-278
+    // `processTraverser`, :334-353 `RepeatEndStep`): the traverser satisfying `times(n)` at level n
+    // LEAVES the loop and is output whatever the emit says; with until FIRST and emit LAST the end step
+    // also emits a split of it, so level n appears twice. From marko (modern): level 0 = 1 vertex,
+    // level 1 = 3, level 2 = 2. Trunk gave 4 for the first (level 2 dropped) and 5 for the third.
+    const count = (q: string) => vals(`${q}.count()`)[0];
+    expect(count('g.V(1).emit().repeat(__.out()).times(2)')).toBe(6);       // levels 0,1,2
+    expect(count('g.V(1).emit().repeat(__.out()).times(1)')).toBe(4);       // levels 0,1
+    expect(count('g.V(1).emit().times(2).repeat(__.out())')).toBe(6);       // emit first, until first
+    expect(count('g.V(1).times(2).emit().repeat(__.out())')).toBe(6);
+    expect(count('g.V(1).repeat(__.out()).times(2).emit()')).toBe(5);       // levels 1,2
+    expect(count('g.V(1).repeat(__.out()).emit().times(2)')).toBe(5);
+    expect(count('g.V(1).times(2).repeat(__.out()).emit()')).toBe(7);       // levels 1,2,2
+    // Every depth the unroll serves — the corpus's own 14-path answer
+    // (Repeat.feature g_V_emit_repeatXoutX_timesX2X_path / g_V_emit_timesX2X_repeatXoutX_path).
+    expect(count('g.V().emit().repeat(__.out()).times(2).path()')).toBe(14);
+    expect(count('g.V().emit().times(2).repeat(__.out()).path()')).toBe(14);
+    expect(count('g.V().local(__.emit().repeat(__.out()).times(2))')).toBe(14);
+    expect(count('g.V(1).union(__.emit().repeat(__.out()).times(2), __.identity())')).toBe(7);
+    // n = 1 with a dedup body: each vertex twice (Repeat.feature g_V_emit_repeatXdedupX_timesX1X).
+    expect(count('g.V().emit().repeat(__.dedup()).times(1)')).toBe(12);
   });
 
   test('a NAMED repeat is not unrolled — the identity has nowhere to go', () => {
@@ -179,9 +233,9 @@ describe('the repeat() unroll boundary', () => {
     // comment: every `src/` caller holds a body, so that is the safe default).
     const rolled = (g: string) =>
       normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
-    expect(rolled('g.V().repeat("a", __.out().dedup()).times(2)')).toContain('repeat');
+    expect(rolled('g.V().repeat("a", __.out().limit(2)).times(2)')).toContain('repeat');
     // …and the unnamed form still unrolls, so the guard is about the NAME and nothing else.
-    expect(rolled('g.V().repeat(__.out().dedup()).times(2)')).not.toContain('repeat');
+    expect(rolled('g.V().repeat(__.out().limit(2)).times(2)')).not.toContain('repeat');
   });
 
 
