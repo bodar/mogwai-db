@@ -42,7 +42,7 @@ import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
+import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
@@ -243,9 +243,11 @@ export function branchResult<T extends FramedRel>(merged: T | null, ctx: ChainCt
 }
 
 /** Fold a branch's own effects (a write in one of its arms) into the tail lowered over its result — the
- *  arm's write bindings run BEFORE the tail, exactly as a top-level write's precede their tail. */
-const withBranchEffects = (tail: Tail | null, merged: BranchRel): Tail | null =>
-  tail && (merged.effects?.length ? { ...tail, effects: [...merged.effects, ...(tail.effects ?? [])] } : tail);
+ *  arm's write bindings run BEFORE the tail, exactly as a top-level write's precede their tail, and the
+ *  branch is UPSTREAM of that tail as any write is (`afterWrite`): `input` is the stream it ran over. */
+const withBranchEffects = (
+  merged: BranchRel, step: IRStep, input: Rel, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
+): Tail | null => (merged.effects?.length ? afterWrite(ctx.writes, input, [step], merged.effects, ctx.params, fresh, tail) : tail());
 
 /**
  * THE FAN-OUT SORT KEY, carried past the merge as two `origin` channels (the role the channel core
@@ -1550,7 +1552,7 @@ function scalarTail(
     if (BRANCH_HOSTS.has(step.name)) {
       const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels, { steps, at });
       if (!merged) return null;
-      return withBranchEffects(continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases), merged);
+      return withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
 
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
@@ -2052,11 +2054,10 @@ function scalarTail(
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
           : mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!written) return null;
-      const tail = elementTail(
+      return afterWrite(ctx.writes, rel, steps.slice(at, written.at), written.effects.bindings, ctx.params, fresh, () => elementTail(
         written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
         steps, written.at, false, ctx, fresh, labels,
-      );
-      return tail && { ...tail, effects: [...written.effects.bindings, ...(tail.effects ?? [])] };
+      ));
     }
 
     return null;
@@ -2649,9 +2650,8 @@ function mapTail(
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
       if (!merged) return null;
-      const tail = elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels);
-      if (!tail) return null;
-      return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
+      return afterWrite(ctx.writes, rel, steps.slice(at, merged.at), merged.effects.bindings, ctx.params, fresh,
+        () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
     }
 
     if (step.name === 'is') {
@@ -3940,7 +3940,8 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     if (!merged) return null;
     // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — a
     // source union's single start makes arm-major order correct, so this composes like any other write.
-    return withBranchEffects(continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES), merged);
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    return withBranchEffects(merged, first, one, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
   }
 
   if (first.name === 'inject') {
@@ -4021,16 +4022,16 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
     if (!added) return null;
-    const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
-    return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+    return afterWrite(ctx.writes, one, steps.slice(0, added.at), added.effects.bindings, ctx.params, fresh,
+      () => elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES));
   }
 
   if (first.name === 'addV') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedVertices(one, steps, 0, ctx, fresh);
     if (!added) return null;
-    const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES);
-    return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+    return afterWrite(ctx.writes, one, steps.slice(0, added.at), added.effects.bindings, ctx.params, fresh,
+      () => elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES));
   }
 
   // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
@@ -4039,8 +4040,8 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;
-    const tail = elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
-    return tail && { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
+    return afterWrite(ctx.writes, one, steps.slice(0, merged.at), merged.effects.bindings, ctx.params, fresh,
+      () => elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES));
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -4438,7 +4439,7 @@ function elementTail(
       // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
       // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
       // heavier slice form — it trips `framed`'s backstop and declines the traversal.
-      return withBranchEffects(continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases), merged);
+      return withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
     if (step.name === 'repeat') {
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
@@ -4478,9 +4479,8 @@ function elementTail(
       // to the incoming row that made them. Re-entering with `NO_ALIASES` is what made a SECOND `addE`
       // decline: the relation still carried the alias columns, so the next `from("a")` was looking for
       // a label the fold had just forgotten it had.
-      const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, labels);
-      if (!tail) return null;
-      return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+      return afterWrite(ctx.writes, rel, steps.slice(at, added.at), added.effects.bindings, ctx.params, fresh,
+        () => elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, labels));
     }
     // THE PROJECTORS — a RETYPE from an element traverser to a value, exactly as `values()`/`count()`
     // are, so they hand the relation to `continueAs` and the scalar tail takes the rest of the chain.
@@ -4528,9 +4528,8 @@ function elementTail(
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
       // row produced any of them.
-      const tail = elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels);
-      if (!tail) return null;
-      return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
+      return afterWrite(ctx.writes, rel, steps.slice(at, merged.at), merged.effects.bindings, ctx.params, fresh,
+        () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
     }
     if (step.name === 'addV') {
       if (pathCarried(rel)) return null;
@@ -4540,9 +4539,8 @@ function elementTail(
       // back to the input row that made them, so a label bound before the creation is still bound
       // after it. Re-entering with `NO_ALIASES` here made the next `as()` mint a column the relation
       // already carried — a THROW from the lowering, which `rel-sweep`'s contract forbids.
-      const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, labels);
-      if (!tail) return null;
-      return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+      return afterWrite(ctx.writes, rel, steps.slice(at, added.at), added.effects.bindings, ctx.params, fresh,
+        () => elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, labels));
     }
     if (step.name === 'property') {
       if (pathCarried(rel)) return null;
@@ -4559,11 +4557,10 @@ function elementTail(
       // resolves correlated to the owner and can read an aliased traverser.
       const written = elementProperty(rel, elem, writes, seam, labels, fresh);
       if (!written) return null;
-      const tail = elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels);
-      if (!tail) return null;
       // Effects run BEFORE anything the tail computes, and a tail of its own (a nested write) lands
-      // after them — one flat list, in the order the fold produced it.
-      return { ...tail, effects: [...written.bindings, ...(tail.effects ?? [])] };
+      // after them — one flat list, in the order the fold produced it (`afterWrite`).
+      return afterWrite(ctx.writes, rel, steps.slice(at, end), written.bindings, ctx.params, fresh,
+        () => elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels));
     }
     if (step.name === 'addLabel' || step.name === 'dropLabel' || step.name === 'dropLabels') {
       if (pathCarried(rel)) return null;
@@ -4575,9 +4572,8 @@ function elementTail(
         ? elementAddLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh)
         : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
       if (!mutated) return null;
-      const tail = elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels);
-      if (!tail) return null;
-      return { ...tail, effects: [...mutated.bindings, ...(tail.effects ?? [])] };
+      return afterWrite(ctx.writes, rel, [step], mutated.bindings, ctx.params, fresh,
+        () => elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels));
     }
     if (step.name === 'drop') {
       if (pathCarried(rel)) return null;
@@ -4822,7 +4818,7 @@ function propertyTail(
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels, { steps, at: from });
-    return merged && withBranchEffects(continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases), merged);
+    return merged && withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases));
   }
 
   // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with

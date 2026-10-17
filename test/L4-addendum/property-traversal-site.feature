@@ -417,3 +417,45 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
     Then the result should have a count of 2
     And the graph should return 1 for count of "g.V().has(\"n\",0)"
     And the graph should return 1 for count of "g.V().has(\"n\",1)"
+
+  # An UPSTREAM write behind a FILTER: the reference pulls vadas through `addLabel` only after marko has
+  # gone through the site (lazy pull — no barrier for a short id source, `LazyBarrierStrategy.java:93-125`),
+  # so marko counts ONE `z` vertex. The site's host is one row; the upstream write's stream is two.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_addLabelXzX_hasXname_markoX_propertyXn_V_hasLabelXzX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).addLabel("z").has("name","marko").property("n", __.V().hasLabel("z").count())
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
+
+  # The same through a `limit`: `RangeGlobalStep` rejects vadas only AFTER pulling it through
+  # `property('a',1)`, and that pull happens after marko's body has counted one `a`.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_propertyXa_1X_limitX1X_propertyXn_V_valuesXaX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).property("a",1).limit(1).property("n", __.V().values("a").count())
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
+
+  # A CREATION upstream, the traverser re-selected behind it: marko's body sees only marko's new vertex.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_VX1_2X_asXsX_addVXxX_selectXsX_hasXname_markoX_propertyXn_V_hasLabelXxX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).as("s").addV("x").select("s").has("name","marko").property("n", __.V().hasLabel("x").count())
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"

@@ -780,6 +780,32 @@ const scalarVtype = (framing: RelFraming): Expr =>
   framing.kind === 'scalar' && framing.type.kind === 'static' && !framing.type.text && STATED_VTYPES.has(framing.type.type)
     ? compilerText(framing.type.type) : compilerNull('text');
 
+/** SQLite storage classes — what `typeof(…)` answers, never a Gremlin type a reader frames by. */
+const STORAGE_CLASSES: readonly string[] = ['integer', 'text', 'blob', 'null'];
+/**
+ * THE STORED TYPE OF A NUMERIC REDUCER'S RESULT — its `vt` (`framingCols`), which is ONE of two
+ * vocabularies, decided per row: `min()`/`max()` hand on the WINNING row's own Gremlin `vtype`
+ * (`minMaxWinnerVt`), while `sum()`/`mean()` carry the aggregate's storage class (`typeof(…)`, or the
+ * literal `'real'` that `mean` always is). Stored untyped, the value frames by its storage class, and an
+ * integral Double the store keeps as INTEGER (`1.0`) comes back an Int — where the reference keeps the
+ * input's type for `max`/`min` (`MaxGlobalStep`/`MinGlobalStep` return the winning `Number` itself; `Max.feature`
+ * pins `d[1.0].d`) and always answers a floating point for `mean` (`MeanNumber.getFinal` is
+ * `div(sum, count, true)`, forced floating point —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`;
+ * `Mean.feature:70` pins `d[1.0].d`).
+ * So: a Gremlin name is kept, `real` IS a Double, and any other storage class stays untyped, which is
+ * what it framed as before.
+ *
+ * Spelled as ONE evaluation of `vt` — `nullif(…nullif(replace(vt, 'real', 'double'), 'integer')…)` —
+ * rather than a `CASE` that names it three times, because `vt` is the reducer's own correlated subquery
+ * and a fused projection would run it once per mention. `replace` is exact here: no Gremlin type name
+ * contains `real`, so only the storage class itself is rewritten.
+ */
+const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
+  (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, text(storageClass)] }),
+  { kind: 'call', fn: 'replace', args: [vt, text('real'), text('double')] },
+);
+
 /** The site of an ORDINARY `property()` step over `owners` — the body reads the element it writes. The
  *  traverser is the snapshot's position where the owners carry one, else the element id itself. */
 function ownerSite(owners: Rel, elem: Elem, aliases: AliasMap, fresh: Minter): { readonly site: RuntimeSite; readonly targets: Rel } {
@@ -944,7 +970,12 @@ const readsLabelToken = (values: readonly unknown[]): boolean => values.some(fun
  *  - `labels` — a label mutation; `creates`/`edges` — a new vertex or edge (an edge is reachable by
  *    movement, a vertex only by re-sourcing the graph); `drops` — an element or property removal.
  *
- * A nested body the walk cannot read, or an `io()` (a read loads a whole graph), is `EVERYTHING_WRITTEN`.
+ * A nested body the walk cannot read, or an `io()` (a read loads a whole graph), is `everythingWritten`.
+ *
+ *  - `upstream` — the one LOWERING-TIME part: the mutating steps whose tail is being lowered right now,
+ *    innermost last (`afterWrite`). Every other field says WHAT the program writes; this says which of
+ *    those writes run UPSTREAM of the step being lowered, and over which stream — the fact
+ *    `sequentialGuard` needs and the site's own host cannot give (see there).
  */
 export interface ProgramWrites {
   readonly writers: readonly KeyWriter[];
@@ -954,10 +985,19 @@ export interface ProgramWrites {
   readonly creates: boolean;
   readonly edges: boolean;
   readonly drops: boolean;
+  readonly upstream: UpstreamWrite[];
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
 
-export const EVERYTHING_WRITTEN: ProgramWrites = { writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true };
+/**
+ * A MUTATING STEP UPSTREAM of whatever is being lowered: what it writes (its own steps summarized by
+ * `programWrites`), and the name of the binding that will hold how many traversers it runs over — taken
+ * only if a guard asks for it (`used`), so a program with no observing body pays no statement.
+ */
+interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string; used: boolean }
+
+const everythingWritten = (): ProgramWrites =>
+  ({ writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, upstream: [] });
 
 /** Steps after which the traverser is still the element an `addV`/`addE` just made. */
 const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
@@ -1015,8 +1055,56 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     }
   };
   walk(steps, true);
-  return unreadable ? EVERYTHING_WRITTEN : { writers, runOf, anyKey, labels, creates, edges, drops };
+  return unreadable ? everythingWritten() : { writers, runOf, anyKey, labels, creates, edges, drops, upstream: [] };
 }
+
+/**
+ * LOWER A WRITE'S TAIL WITH THE WRITE KNOWN TO BE UPSTREAM of it — the one place every mutating step's
+ * continuation is composed (`writer` is the step(s) it lowered, `bindings` their statements, `input` the
+ * stream they ran over), so a `property(k, <traversal>)` site anywhere in that tail, at any depth that
+ * inherits this program's `ProgramWrites`, can ask how many traversers the write ran over.
+ *
+ * That count is what the site's own host cannot say. The reference pulls traverser 2 through the
+ * upstream write only after traverser 1 has gone all the way through the site, whatever FILTER sits in
+ * between: `RangeGlobalStep` and every `FilterStep` pull their next start lazily, and no barrier is
+ * inserted for a short id source (`strategy/optimization/LazyBarrierStrategy.java:93-125`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`).
+ * So `g.V(1,2).addLabel('z').has('name','marko').property('n', __.V().hasLabel('z').count())` meets ONE
+ * host row and owes `n=1` — vadas is not labelled yet — while one statement per step labels both first.
+ *
+ * The count is a binding of its own, run BEFORE the write's statements, and only when a site used it.
+ */
+export function afterWrite<T extends { readonly effects?: readonly Binding[] }>(
+  writes: ProgramWrites, input: Rel, writer: readonly IRStep[], bindings: readonly Binding[],
+  params: Record<string, any>, fresh: Minter, tail: () => T | null,
+): T | null {
+  const entry: UpstreamWrite = { effect: programWrites(writer, params), count: fresh('wn'), used: false };
+  writes.upstream.push(entry);
+  let lowered: T | null;
+  try { lowered = tail(); } finally { writes.upstream.splice(writes.upstream.indexOf(entry), 1); }
+  if (!lowered) return null;
+  return { ...lowered, effects: [...(entry.used ? [streamCount(input, entry.count, fresh)] : []), ...bindings, ...(lowered.effects ?? [])] };
+}
+
+/** How many TRAVERSERS `input` holds — its rows, each weighted by its bulk where it carries one — as a
+ *  retained `(n)` binding, so the count is the one taken before the write and not a re-read after it. */
+function streamCount(input: Rel, name: string, fresh: Minter): Binding {
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  const node = make.aggregate({
+    id: fresh('wc'), input, channels: [], type: typeOf(meta('n', 'int')), groupBy: [],
+    aggs: [['n', bulk ? { kind: 'agg', fn: 'sum', args: [col(input.id, bulk.col)] } : { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+  });
+  return { name, node, snapshot: true };
+}
+
+/** Can a body that reaches `reach` observe what `effect` writes — onto any element, since an upstream
+ *  write's traversers are not the site's? */
+const observes = (reach: BodyReach, effect: ProgramWrites): boolean => {
+  let keys: KeySet = effect.anyKey ? 'all' : new Set<string>();
+  for (const writer of effect.writers) keys = unite(keys, writer.keys);
+  return meets(reach.keys, keys) || (effect.labels && reach.labels)
+    || (reach.sources && (effect.creates || effect.drops)) || (reach.leaves && (effect.edges || effect.drops));
+};
 
 /**
  * THE REFERENCE RUNS ONE TRAVERSER AT A TIME; A WRITE HERE IS ONE STATEMENT — and the two only agree when
@@ -1075,6 +1163,17 @@ function sequentialGuard(
     || (meets(reach.keys, created) && (reach.sources || (program.edges && reach.leaves))));
   const perStream = readsElsewhere || seesNew || (readsOwn && (leaves || site.resolve === 'first'));
   const perElement = !perStream && readsOwn;
+  // An UPSTREAM write the body can observe is one statement only when ONE traverser ran through it — its
+  // own stream's count, not the host's: a filter, a `limit`, a `select` between the two hides from the
+  // host the traversers the reference has not yet pulled through the write (`afterWrite`).
+  for (const upstream of program.upstream) {
+    if (!reaches.some((reach) => observes(reach, upstream.effect))) continue;
+    upstream.used = true;
+    const counted = make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
+    const many = make.filter({ id: fresh('rf'), input: counted, channels: [], type: counted.type, pred: { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) } });
+    guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
+      { message: SEQUENTIAL_READ, raiseWhen: 'rows' });
+  }
   if (!perElement && !perStream) return;
   const counts = make.aggregate({
     id: fresh('rc'), input: site.host, channels: [], type: typeOf(...(perElement ? [meta('id', 'int')] : []), meta('n', 'int')),
@@ -1154,12 +1253,13 @@ function resolveValueRows(
   const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
   if (rows && rows.framing.kind === 'scalar') {
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
+    const reduced = rows.framing.result === 'number' && rows.rel.type.cols.some((column) => column.name === 'vt');
     const encounter = rows.rel.channels.find((channel) => channel.role === 'encounter');
     return {
       rel: make.project({
         id: fresh('rv'), input: rows.rel, channels: [], type: typeOf(...VALUE_ROW_COLS),
         exprs: [['o', col(rows.rel.id, rows.origin)], ['v', col(rows.rel.id, 'v')],
-          ['vt', typed ? col(rows.rel.id, 'vtype') : scalarVtype(rows.framing)],
+          ['vt', typed ? col(rows.rel.id, 'vtype') : reduced ? reducedVtype(col(rows.rel.id, 'vt')) : scalarVtype(rows.framing)],
           ['sq', encounter ? col(rows.rel.id, encounter.col) : compilerInt(0)]],
       }),
       mayBeMulti: true,
@@ -1169,10 +1269,8 @@ function resolveValueRows(
   const host: ChildHost = { kind: 'element', id: col(site.host.id, 'id'), elem: site.hostElem, row: { rel: site.host, aliases: site.aliases } };
   const produced = child.scalar(body, host);
   if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !produced.present) return null;
-  // A NUMERIC reducer's per-row type is the aggregate's SQLite storage class (`typeof(…)` — `integer`/
-  // `real`, `framing.ts` `framingCols`), not a Gremlin type: stored as one it would name a type no reader
-  // knows. Untyped, the stored value frames by its storage class — the very rule that column encodes.
-  const vt = produced.framing.result === 'number' ? undefined : produced.vtype;
+  // A NUMERIC reducer's `vt` is either a Gremlin type or a storage class (`reducedVtype` says which).
+  const vt = produced.framing.result === 'number' ? (produced.vtype && reducedVtype(produced.vtype)) : produced.vtype;
   const valued = make.project({
     id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('present', 'int', true)),
     exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt ?? scalarVtype(produced.framing)],
@@ -1583,7 +1681,8 @@ function mapFormStatements(
     if (!cols) return false;
     const typeCol = cols.find((column) => column.name !== 'v');
     const value = col(rel.id, fieldCol(field.prefix, 'v'));
-    const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype')) : scalarVtype(field.framing);
+    const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype'))
+      : typeCol && typeCol.name === 'vt' ? reducedVtype(col(rel.id, fieldCol(field.prefix, 'vt'))) : scalarVtype(field.framing);
     const entry = make.project({
       id: fresh('mf'), input: rel, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
       exprs: [['o', col(rel.id, rows.origin)], ['v', value], ['vt', vt],
