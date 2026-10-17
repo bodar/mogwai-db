@@ -21,7 +21,7 @@ import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
-import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inArmBody, type ChainCtx, type Tail } from './chain.ts';
+import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
@@ -986,7 +986,9 @@ export function chooseArms(
   const subject = branchSubject(source, framing);
   if (!subject) return null;
 
-  const pred = bodyPredicate(condition, subject, fresh, ctx);
+  // The condition is a child of THIS chain, rooted afresh at the subject row with no alias channel, so
+  // the chain's labels ride in as enclosing (`withEnclosing`).
+  const pred = bodyPredicate(condition, subject, fresh, withEnclosing(ctx, labels));
   if (!pred) return null;
   // A `choose` routes on the condition's PRODUCTIVITY, not a two-valued boolean: `ChooseStep` takes the
   // TRUE arm iff the condition traversal PRODUCED for this traverser, and the FALSE arm otherwise

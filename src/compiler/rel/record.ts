@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, carriedCols, eq, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
@@ -268,7 +268,7 @@ function fieldNode(read: FieldRead, field: RecordField, source: GraphSource, fre
     // A MAP field is a record that has ALREADY spent its fields — `by(__.project(…))` inside a
     // `project()` slot, or a map-valued child. Its column holds the pairs array, so the member is that
     // array under the same envelope the record arm above adds. One encoding, two producers.
-    case 'map': return mapNode(own('map'));
+    case 'map': return mapNode(jsonOf(own('map')));
     // A LIST field — `project('ks').by(__.out().fold())`, the GraphQL to-many object field. The `by()`
     // body now ends in a `fold()` (the map/scalar/element fold), so this arm is reachable where its
     // comment used to say no producer existed. `ProjectStep.map` puts whatever `TraversalUtil.produce`

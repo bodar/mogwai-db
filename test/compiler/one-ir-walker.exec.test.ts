@@ -133,3 +133,116 @@ describe('the defects the walker closed, and their neighbours', () => {
     expect((await framed("g.E().filter(__.inV().group().by('lang').select('java'))")).map((e: any) => e.id).sort((x: number, y: number) => x - y)).toEqual([9, 10, 11, 12]);
   });
 });
+
+// THE FIX-FORWARD of the walker landing: where a path entry opens, a write in any child value, a scope
+// read under every child re-root, and a map-valued member framed as JSON.
+describe('path entries follow the reference\'s split, at every host', () => {
+  // `MapStep`/`FlatMapStep` emit `traverser.split(result, this)`, which EXTENDS a path-tracking traverser's
+  // path (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:66-71),
+  // so splicing a `map(identity())` must not erase the entry it opened. `coalesce` is a FlatMapStep too.
+  test.each([
+    "g.V(1).as('a').map(identity()).as('a').select(Pop.all, 'a')",
+    "g.V(1).as('a').flatMap(identity()).as('a').select(Pop.all, 'a')",
+    "g.V(1).as('a').local(map(identity())).as('a').select(Pop.all, 'a')",
+    "g.V(1).as('a').coalesce(has('age'), out()).as('a').select(Pop.all, 'a')",
+  ])('an entry-opening host keeps both binds: %s', async (q) => expect(await ids(q)).toEqual([[1, 1]]));
+
+  // `BranchStep` (union/choose), `OptionalStep` and `LocalStep` hand back the child's own traverser
+  // (.../step/branch/BranchStep.java:165-199, OptionalStep.java:53, LocalStep.java:85-88): no new entry.
+  test.each([
+    ["g.V(1).as('a').union(identity()).as('a').select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').union(identity(), identity()).as('a').select(Pop.all, 'a')", [[1], [1]]],
+    ["g.V(1).as('a').optional(identity()).as('a').select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').choose(has('age'), identity()).as('a').select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').choose(has('age'), identity(), has('name')).as('a').select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).as('a').local(has('age')).as('a').select(Pop.all, 'a')", [[1]]],
+    ["g.V(1).union(identity().as('x')).as('x').select(Pop.all, 'x')", [[1]]],
+  ])('a pass-through host continues the entry its arm ended on: %s', async (q, expected) =>
+    expect(await ids(q)).toEqual(expected));
+
+  test('…and path() agrees with the label merge', async () => {
+    expect((await framed("g.V(1).as('a').union(identity()).as('a').path()")).map((p: any) => p.objects.length)).toEqual([1]);
+  });
+
+  // A label on the entry for SOME traversers (the identity arm) and not others (the moving arm) is bound
+  // once for the first and twice for the second; no rewrite says both.
+  test.each([
+    "g.V(1).as('a').choose(has('age'), identity(), out()).as('a').select(Pop.all, 'a')",
+    "g.V().as('a').optional(out()).as('a').select(Pop.all, 'a')",
+  ])('a re-bind of a label only some arms leave on the entry declines: %s', (q) => declines(q));
+
+  // The splice cannot shorten a path that something reads.
+  test.each([
+    "g.V(1).map(identity()).path()",
+    "g.V(1).flatMap(identity()).path()",
+    "g.V(1).map(identity()).simplePath()",
+    "g.V(1).union(map(identity())).path()",
+    "g.V(1).local(flatMap(identity())).path()",
+  ])('a path read over a spliced map/flatMap identity host declines: %s', (q) => declines(q));
+});
+
+describe('a write in any correlated child value declines — never `RelIR: Ref …`', () => {
+  test.each([
+    "g.V().hasLabel('person').order().by(choose(has('age'), addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').order().by(choose(has('age'), addV('y').count(), constant(1))).limit(1)",
+    "g.V().hasLabel('person').order().by(choose(has('age'), constant(1), addV('y').count()))",
+    "g.V().hasLabel('person').order().by(choose(values('age')).option(29, addV('y').count()).option(none, constant(1)))",
+    "g.V().hasLabel('person').order().by(coalesce(addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').project('a').by(choose(has('age'), addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').map(choose(has('age'), addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').group().by(choose(has('age'), addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').dedup().by(choose(has('age'), addV('y').count(), constant(1)))",
+    "g.V().hasLabel('person').map(addV('y').count())",
+    "g.V().hasLabel('person').local(addV('y').count())",
+    "g.V().hasLabel('person').coalesce(addV('y').count(), constant(1))",
+    "g.V().hasLabel('person').project('a').by(addV('y').count())",
+  ])('%s', (q) => declines(q));
+});
+
+describe('every child re-root hands its host labels in as enclosing', () => {
+  // A choose() condition and a repeat() until()/emit() predicate re-root at the subject row with no alias
+  // channel, exactly as a correlated value does; a scope read of the chain's label declines there too.
+  test.each([
+    "g.V().as('a').out('knows').choose(union(select('a'), identity()).count().is(2), constant('y'), constant('n'))",
+    "g.V().as('a').out('knows').choose(local(select('a')).count().is(1), constant('y'), constant('n'))",
+    "g.V().as('a').out('knows').choose(flatMap(select('a')).count().is(1), constant('y'), constant('n'))",
+    "g.V().as('a').out('knows').repeat(out()).until(union(select('a'), identity()).count().is(2))",
+    "g.V().as('a').out('knows').repeat(out()).until(local(select('a')).count().is(1))",
+    "g.V().as('a').out('knows').until(union(select('a'), identity()).count().is(2)).repeat(out())",
+    "g.V().as('a').out('knows').repeat(out()).emit(union(select('a'), identity()).count().is(2))",
+  ])('%s', (q) => declines(q));
+
+  test('a condition that reads no label still answers', async () => {
+    expect(await framed("g.V().as('a').out('knows').choose(has('age'), constant('y'), constant('n'))")).toEqual(['y', 'y']);
+  });
+});
+
+describe('a map-valued member of a map frames as a map', () => {
+  // The map column holds the pairs array as JSON TEXT; without `json()` the envelope embedded it as a
+  // string and the framer met `pairs.flatMap is not a function`.
+  test.each([
+    ["g.V(1).project('x').by(project('y').by(constant(1)))", [new Map([['x', new Map([['y', 1]])]])]],
+    ["g.V(1).project('x').by(valueMap('name'))", [new Map([['x', new Map([['name', ['marko']]])]])]],
+  ])('%s', async (q, expected) => expect(await framed(q)).toEqual(expected));
+
+  test('an edge stream projecting a valueMap() member', async () => {
+    const rows = (await framed("g.E().identity().project('a','b').by(__.identity()).by(__.valueMap()).fold()")) as any[][];
+    expect(rows[0]!.map((m: Map<string, any>) => m.get('b').get('weight')).sort()).toEqual([0.2, 0.4, 0.4, 0.5, 1, 1]);
+  });
+});
+
+// `Grouping.determineBarrierStep` pools every member of a key into ONE value traversal
+// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125);
+// a `by(<pre>.fold())` the pool cannot build must not fall through to a per-member fold.
+describe('a group value fold the pool cannot build declines', () => {
+  test.each([
+    "g.V().as('a').out().group().by(select('a').values('name')).by(values('name').fold())",
+    "g.V().as('a').out().group().by(select('a')).by(values('name').fold())",
+    "g.V().as('a').out().group('m').by(select('a')).by(values('name').fold()).cap('m')",
+  ])('%s', (q) => declines(q));
+
+  test('…while a bare by(fold()) still collects the traversers', async () => {
+    const [m] = (await framed("g.V().as('a').out().group().by(select('a').values('name')).by(fold())")) as Map<string, any[]>[];
+    expect(m!.get('marko')!.length).toBe(3);
+  });
+});

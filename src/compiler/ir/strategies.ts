@@ -4,7 +4,7 @@ import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, m
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
-import { eachChildChain, rawBodies, someStepDeep, valueNodes } from './walk.ts';
+import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 
@@ -245,6 +245,14 @@ const EDGE_TRAVERSAL_STEPS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE
  *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
 export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
 
+/** Does any step at ANY depth WRITE — every child position, through the one walker (`someStepDeep`)?
+ *  An unreadable body answers `true`: the question's `true` is a refusal, so it fails closed. The ONE
+ *  query every consumer that cannot host a write asks — a ranked-order head, and a correlated child VALUE
+ *  (`scalarChild`): a write is a `Plan` binding (§3.0), which a per-row subquery has nowhere to declare,
+ *  so lowering one there leaves a `Ref` to a statement that never runs. */
+export const writesAnywhere = (steps: readonly Step[], params: Record<string, any> | BodyReader): boolean =>
+  someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name), true);
+
 export const rejectMsg = (name: string) =>
   `withStrategies(...) is not supported: '${name}' is a semantic or unknown strategy that would change results if ignored ` +
   `(e.g. PartitionStrategy/SubgraphStrategy filtering, ProductiveByStrategy null semantics). Rejected to fail closed.`;
@@ -295,7 +303,7 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
     throw new Error('SubgraphStrategy requires an edges criterion traversal');
   if (vArg === undefined && eArg === undefined)
     throw new Error('SubgraphStrategy requires a vertices or edges criterion');
-  if (someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name), true))
+  if (writesAnywhere(steps, params))
     throw new Error('SubgraphStrategy over a mutating traversal (addV/addE/mergeV/mergeE/property/drop) is not yet supported');
   // Resolve criterion bodies ONCE; reused by reference at every injection site and never
   // fed back through recurseInject (the strategy never subgraph-filters its own criteria).
@@ -700,9 +708,56 @@ export function inlineIdentityHostBody(steps: Step[], params: Record<string, any
     // RECURSE INTO THE SPLICED BODY, because a body that is itself an identity host
     // (`local(__.local(__.aggregate("a")))`) splices to another one — and this pass has already
     // walked past the position it lands in. A single pass would unwrap exactly one layer.
-    if (body) out.push(...inlineIdentityHostBody(body, params).map(perTraverser)); else out.push(s);
+    if (!body) { out.push(s); continue; }
+    const spliced = inlineIdentityHostBody(body, params).map(perTraverser);
+    out.push(...(OPENS_ENTRY_HOSTS.has(s.name) ? markOpensEntry(spliced) : spliced));
   }
   return out;
+}
+
+/**
+ * The per-traverser hosts whose OUTPUT is a new path entry. `TraversalMapStep` is a `MapStep` and
+ * `TraversalFlatMapStep` a `FlatMapStep`; both emit `traverser.split(result, this)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MapStep.java`,
+ * `.../step/map/FlatMapStep.java:45`), and a path-tracking traverser's two-argument `split` EXTENDS its
+ * path (`.../traverser/B_LP_O_S_SE_SL_Traverser.java:66-71`). So `g.V(1).map(identity()).path()` is
+ * `[v1,v1]` and `as('a').map(identity()).as('a')` binds `a` TWICE. `LocalStep` hands back the child's
+ * own traverser (`.../step/branch/LocalStep.java:85-88`) and opens nothing.
+ *
+ * The splice erases the host, so the entry it opened travels as a mark on the spliced body
+ * (`Step.opensPathEntry`): `mergeStepLabels` reads it as an entry boundary, and `erasedPathEntry`
+ * declines a traversal that reads the path the splice shortened.
+ */
+const OPENS_ENTRY_HOSTS: ReadonlySet<string> = new Set(['map', 'flatMap']);
+
+/** `spliced` with its last STREAM step marked as opening a new path entry (a trailing `by()` is folded
+ *  onto its host later, so it cannot carry the mark). */
+function markOpensEntry(spliced: Step[]): Step[] {
+  let last = spliced.length - 1;
+  while (last >= 0 && spliced[last]!.name === 'by') last--;
+  if (last < 0) return spliced;
+  return spliced.map((s, i) => i === last ? { ...s, opensPathEntry: true } : s);
+}
+
+/** Does this step (as the IR holds it, or as a raw nested body still holds it) stand for a path entry the
+ *  identity-host splice erases? A spliced step carries the mark; a body not yet normalized still holds
+ *  the unspliced `map`/`flatMap` host that its own compile will splice. */
+const erasesPathEntry = (s: Step, params: Record<string, any>): boolean =>
+  s.opensPathEntry === true || (OPENS_ENTRY_HOSTS.has(s.name) && identityHostBody(s, params) !== null);
+
+/**
+ * A traversal that READS THE PATH (`PATH_FAMILY`, at any depth) and contains a spliced `map`/`flatMap`
+ * identity host (at any depth), or `null`. The splice removed the path entry the host opened
+ * (`OPENS_ENTRY_HOSTS`), so the path such a traversal reads is one entry short: `map(identity()).path()`
+ * would answer `[v1]` where the reference answers `[v1,v1]`, and `simplePath()` would keep what the
+ * reference filters. Whole-traversal and coarse on purpose — the path is a property of the whole
+ * traverser, so a reader anywhere may observe an entry erased anywhere upstream of it; over-approximating
+ * costs a decline, never an answer.
+ */
+export function erasedPathEntry(steps: readonly Step[], params: Record<string, any>): Step | null {
+  let eraser: Step | null = null;
+  if (!someStepDeep(steps, params, (s) => { if (erasesPathEntry(s, params)) { eraser = s; return true; } return false; })) return null;
+  return someStepDeep(steps, params, (s) => PATH_FAMILY.has(s.name)) ? eraser : null;
 }
 
 /** A step marked as having run inside a PER-TRAVERSER host. A modulator is not a step of the stream at
@@ -1615,18 +1670,51 @@ const KEEPS_PATH_ENTRY: ReadonlySet<string> = new Set([
  * child position starts empty, which only keeps two binds apart (the old answer): a `where()`/`match()`
  * body's leading `as()` is a start-label REFERENCE, not a bind, and a repeat body's later iterations do
  * not start on the entry its first one did.
+ *
+ * And the entry continues OUT of a host that hands back its child's own traverser (`ENTRY_PASSING_HOSTS`):
+ * after `union(identity())` the current entry is whatever the arm left it as, so
+ * `as('a').union(identity()).as('a')` binds `a` ONCE. Per traverser that is the entry of the ARM it took,
+ * so the label set after the host is the INTERSECTION over its arms (a label every arm leaves on the entry
+ * is certainly there) and the rest of the union is `maybe` — on the entry for some traversers and not for
+ * others. A re-bind of a `maybe` label is one bind for some traversers and two for others, which no single
+ * rewrite of the chain says; it is reported (`ambiguous`) and the traversal declines
+ * (`ambiguousEntryBind`).
  */
 export function mergeStepLabels(steps: IRStep[], params: Record<string, any> = {}): IRStep[] {
-  return mergeLabelsFrom(steps, new Set(), rawBodies(params));
+  return mergeLabelsFrom(steps, new Set(), new Set(), rawBodies(params)).steps;
 }
 
-/** The hosts whose bodies hand their traverser OUTWARD and start on the host's own path entry — the
- *  branch family plus `local`, the per-traverser scope (`LocalStep`/`BranchStep` emit the child's own
- *  traverser). A body under any other host is entered with an empty entry. */
+/** The hosts whose bodies START on the host's own path entry — the branch family, `local`, and
+ *  `coalesce`, whose arms each start on `innerTraverser.split()` (no extension). A body under any other
+ *  host is entered with an empty entry. */
 const ENTRY_SHARING_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'coalesce', 'optional', 'choose', 'branch']);
 
-function mergeLabelsFrom(steps: IRStep[], seed: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null): IRStep[] {
+/**
+ * The hosts that hand back their CHILD's own traverser, so the entry a body ends on is the host's output
+ * entry: `BranchStep` (`union`/`choose`/`branch`) seeds each option with `start.split()` and emits its
+ * ends (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:165-199`),
+ * `OptionalStep` its optional traversal's end or the start itself (`.../step/branch/OptionalStep.java:53`),
+ * `LocalStep` the child's end (`.../step/branch/LocalStep.java:85-88`). `coalesce` is NOT here although its
+ * arms share the entry: `CoalesceStep` is a `FlatMapStep` and emits `head.split(end, this)`, a NEW entry
+ * (`.../step/map/CoalesceStep.java`, `.../step/map/FlatMapStep.java:45`).
+ */
+const ENTRY_PASSING_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'optional', 'choose', 'branch']);
+
+/** What walking one chain's entries found: the chain rewritten, the labels CERTAINLY on its last entry,
+ *  those on it for only SOME traversers (`maybe`), and whether a `maybe` label was bound again. */
+interface EntryWalk {
+  readonly steps: IRStep[];
+  readonly entry: ReadonlySet<string>;
+  readonly maybe: ReadonlySet<string>;
+  readonly ambiguous: boolean;
+}
+
+function mergeLabelsFrom(
+  steps: IRStep[], seed: ReadonlySet<string>, seedMaybe: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null,
+): EntryWalk {
   let entry = new Set(seed);
+  let maybe = new Set(seedMaybe);
+  let ambiguous = false;
   let changed = false;
   const out: IRStep[] = [];
   for (const s of steps) {
@@ -1634,6 +1722,7 @@ function mergeLabelsFrom(steps: IRStep[], seed: ReadonlySet<string>, read: (nest
       const args = s.args.filter((a) => {
         if (typeof a.value !== 'string') return true;
         if (entry.has(a.value)) return false;
+        if (maybe.has(a.value)) { ambiguous = true; maybe.delete(a.value); }
         entry.add(a.value);
         return true;
       });
@@ -1641,33 +1730,99 @@ function mergeLabelsFrom(steps: IRStep[], seed: ReadonlySet<string>, read: (nest
       else { changed = true; if (args.length) out.push({ ...s, args }); }
       continue;
     }
-    const seeded = entry.size && ENTRY_SHARING_HOSTS.has(s.name) ? seedBodies(s, entry, read) : s;
-    if (seeded !== s) changed = true;
-    if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s)) entry = new Set();
-    out.push(seeded);
+    const seeded = ENTRY_SHARING_HOSTS.has(s.name) ? seedBodies(s, entry, maybe, read) : { host: s, arms: null };
+    if (seeded.host !== s) changed = true;
+    out.push(seeded.host);
+    if (seeded.arms?.some((arm) => arm !== 'identity' && arm !== 'unreadable' && arm.ambiguous)) ambiguous = true;
+    if (ENTRY_PASSING_HOSTS.has(s.name) && !s.opensPathEntry && seeded.arms) {
+      // The entry after the host is the entry its traverser's ARM ended on.
+      const ends = seeded.arms.map((arm) => arm === 'identity' ? { entry, maybe } : arm === 'unreadable' ? null : arm);
+      if (ends.some((e) => e === null) || !ends.length) {
+        // An arm we cannot read may have left anything on the entry: every label is now `maybe`.
+        maybe = new Set([...entry, ...maybe]);
+        entry = new Set();
+        continue;
+      }
+      const known = ends as { entry: ReadonlySet<string>; maybe: ReadonlySet<string> }[];
+      const certain = new Set([...known[0]!.entry].filter((l) => known.every((e) => e.entry.has(l))));
+      const any = new Set(known.flatMap((e) => [...e.entry, ...e.maybe]));
+      entry = certain;
+      maybe = new Set([...any].filter((l) => !certain.has(l)));
+      continue;
+    }
+    if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s) || s.opensPathEntry) { entry = new Set(); maybe = new Set(); }
   }
-  return changed ? out : steps;
+  return { steps: changed ? out : steps, entry, maybe, ambiguous };
 }
 
-/** `host` with each direct body argument (and each folded `option()` arm) label-merged from `entry`. */
-function seedBodies(host: IRStep, entry: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null): IRStep {
+/** A host's STREAM arms — the bodies one of which a traverser leaves the host through — or `null` when
+ *  the host has no such list we know. `'identity'` is the pass-through arm `optional()` and an unmatched
+ *  `choose()` have (`OptionalStep`; `ChooseStep` with no matching option passes the traverser through —
+ *  listing it where it may not exist only shrinks the certain set, never grows it). A `choose()`
+ *  predicate/selector (its first argument) is a body the traverser does NOT leave through. */
+function streamArmValues(host: IRStep): (unknown | 'identity')[] | null {
+  const nested = (args: readonly { value: unknown }[]) => args.map((a) => a.value).filter((v) => isNested(v));
+  const optionBodies = (host.optionArms ?? []).map((o) => {
+    const last = o.args[o.args.length - 1]?.value;
+    return isNested(last) ? last : undefined;
+  });
+  if (optionBodies.some((b) => b === undefined)) return null;
+  switch (host.name) {
+    case 'local': case 'union': return nested(host.args);
+    case 'optional': return [...nested(host.args), 'identity'];
+    case 'branch': return optionBodies;
+    case 'choose': {
+      if (host.optionArms) return [...optionBodies, 'identity'];
+      const arms = nested(host.args.slice(1));
+      return arms.length === 1 ? [...arms, 'identity'] : arms;
+    }
+    default: return null;
+  }
+}
+
+/** `host` with each direct body argument (and each folded `option()` arm) label-merged from `entry`, and
+ *  the walk each STREAM arm (`streamArmValues`) ended on. */
+function seedBodies(
+  host: IRStep, entry: ReadonlySet<string>, maybe: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null,
+): { host: IRStep; arms: (EntryWalk | 'identity' | 'unreadable')[] | null } {
+  const walks = new Map<unknown, EntryWalk | 'unreadable'>();
   const mergeArgs = (s: Step): Step => {
     let changed = false;
     const args = s.args.map((a) => {
       if (!isNested(a.value)) return a;
       const body = read(a.value.nested);
-      if (body === null) return a;
-      const merged = mergeLabelsFrom(body as IRStep[], entry, read);
-      if (merged === body) return a;
+      if (body === null) { walks.set(a.value, 'unreadable'); return a; }
+      const walk = mergeLabelsFrom(body as IRStep[], entry, maybe, read);
+      walks.set(a.value, walk);
+      if (walk.steps === body) return a;
       changed = true;
-      return { ...a, value: { nested: merged } };
+      return { ...a, value: { nested: walk.steps } };
     });
     return changed ? { ...s, args } : s;
   };
   const self = mergeArgs(host) as IRStep;
   const arms = host.optionArms?.map(mergeArgs);
   const armsChanged = !!arms && arms.some((arm, i) => arm !== host.optionArms![i]);
-  return armsChanged ? { ...self, optionArms: arms } : self;
+  const values = streamArmValues(host);
+  return {
+    host: armsChanged ? { ...self, optionArms: arms } : self,
+    arms: values && values.map((v) => v === 'identity' ? 'identity' : walks.get(v) ?? 'unreadable'),
+  };
+}
+
+/**
+ * A traversal that binds a label again on a path entry only SOME of its traversers already hold it on
+ * (`EntryWalk.maybe`): `as('a').choose(has('age'), identity(), out()).as('a')` binds `a` once for a traverser that took the identity arm and twice for one that moved.
+ * No rewrite of the chain says both, so the traversal declines. Every chain at every depth, through THE
+ * walker (`eachChainDeep`).
+ */
+export function ambiguousEntryBind(steps: readonly Step[], params: Record<string, any>): boolean {
+  const read = rawBodies(params);
+  let hit = false;
+  eachChainDeep(steps, read, (chain) => {
+    if (!hit && mergeLabelsFrom(chain as IRStep[], new Set(), new Set(), read).ambiguous) hit = true;
+  });
+  return hit;
 }
 
 /** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`

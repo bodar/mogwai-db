@@ -63,9 +63,8 @@ import { keyProductive, nondeterministic, ORDER_KEY, ORDER_RANK, orderKeyTuple, 
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
-import { MUTATING_STEPS } from '../ir/strategies.ts';
-import { someStepDeep } from '../ir/walk.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, type ChainCtx, type Tail } from './lower/chain.ts';
+import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
@@ -1144,7 +1143,7 @@ export function lowerRankHead(
 ): { readonly head: RelLowering; readonly dirs: readonly ('asc' | 'desc')[] } | null {
   // At ANY depth — a write inside the order's own `by()` (`order().by(addV('x').fold())`) re-runs in the
   // resume exactly as one in the prefix does.
-  if (someStepDeep(steps, settle(opts).params, (s) => MUTATING_STEPS.has(s.name), true)) return null;
+  if (writesAnywhere(steps, settle(opts).params)) return null;
   if (nondeterministic(steps, settle(opts).params)) return null;
   const fresh = minter();
   const sink: RankSink = {};
@@ -4759,7 +4758,9 @@ function elementTail(
       // so every side-effect writer at every nesting depth of the body is covered, and the map is put
       // back so the decline leaves no half-registered site behind.
       const before = new Map(ctx.collections);
-      const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
+      // `until()`/`emit()` predicates re-root at the walk row with no alias channel: the chain's labels
+      // ride in as enclosing (`withEnclosing`).
+      const walked = repeatWalk(step, rel, elem, childSeam(withEnclosing(ctx, labels), fresh), fresh, labels);
       const touched = ctx.collections.size !== before.size
         || [...ctx.collections].some(([name, collection]) => before.get(name) !== collection);
       if (touched) {

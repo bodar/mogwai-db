@@ -234,6 +234,17 @@ export interface ChainCtx extends FilterCtx {
 // merge, and a recursive term cannot mint one either. So `inBody` CLEARS `needsFromV`, and the ONE value
 // host that CAN honour it — `flatMapRejoin`, no peer merge — re-injects it through `childRows`'s explicit
 // parameter instead of through here.
+/**
+ * `ctx` for a child body of a host whose chain has bound `labels` — those labels join
+ * `enclosingLabels`, so a body that re-roots WITHOUT their alias channels declines a scope read of one
+ * instead of answering the unbound key's empty result. THE ONE spelling every child re-root uses (a
+ * correlated value `scalarChild`, a `choose` condition, a `repeat` `until()`/`emit()` predicate): a
+ * body handed the alias map still resolves the label there first, so widening the set only ever turns a
+ * wrong empty read into a decline.
+ */
+export const withEnclosing = (ctx: ChainCtx, labels: AliasMap | undefined): ChainCtx =>
+  labels?.size ? { ...ctx, enclosingLabels: new Set([...(ctx.enclosingLabels ?? []), ...labels.keys()]) } : ctx;
+
 export const inBody = (ctx: ChainCtx): ChainCtx =>
   (ctx.collapse || ctx.needsFromV ? { ...ctx, collapse: false, needsFromV: false } : ctx);
 

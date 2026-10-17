@@ -375,10 +375,14 @@ export function groupRows(
     if (terminal === 'fold') {
       const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, source, fresh);
       if (pooled) return { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
-      // A value-body `dedup()` must never fall through to `scalar`, whose whole-child DISTINCT has
-      // no outer key in scope.  `groupCollected` serves the bare form below; an unsupported keyed or
-      // repeated form remains an honest deferral rather than a globally deduplicated map value.
-      if (valueBy.key.body.slice(0, -1).some((bodyStep) => bodyStep.name === 'dedup')) return null;
+      // A NON-BARE `by(<pre>.fold())` the pool could not build must never fall through to `scalar`: that
+      // folds each member's body ALONE (a one-member list per traverser) where the reference pools every
+      // member of the key into ONE list (`Grouping.java:74-125` above) — measured
+      // `group().by(select('a').values('name')).by(values('name').fold())` answering `{marko:[josh]}` for
+      // `{marko:[vadas,lop,josh]}`. A value-body `dedup()` was the first instance found (its whole-child
+      // DISTINCT has no outer key in scope); every `<pre>` is the same fall-through. Only the bare
+      // `by(__.fold())` continues, to the traverser-collect arm that builds it.
+      if (valueBy.key.body.length > 1) return null;
     }
     if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
       const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, source, fresh);

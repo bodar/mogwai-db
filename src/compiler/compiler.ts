@@ -3,6 +3,7 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { sideEffectShadowedLabel, unlocatableSubPath } from './ir/labels.ts';
 import { perTraverserMutableFold } from './ir/fold-seed.ts';
+import { ambiguousEntryBind, erasedPathEntry } from './ir/strategies.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { labelRegime } from '../api.ts';
@@ -68,6 +69,11 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // every host at every depth (`perTraverserMutableFold`) — the reference aliases that one seed object
   // across parents and `addAll` mutates it, where every lowering folds into a fresh accumulator.
   if (perTraverserMutableFold(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
+  // A path reader over a spliced `map`/`flatMap` identity host, whose erased path entry the read would miss
+  // (`erasedPathEntry`), and a re-bind of a label only SOME traversers' current entry holds
+  // (`ambiguousEntryBind`) decline here, once, at every depth — both are path-entry facts no single
+  // lowering position owns.
+  if (erasedPathEntry(steps, params) !== null || ambiguousEntryBind(steps, params)) throw new UnsupportedTraversal(gremlin);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
   // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,

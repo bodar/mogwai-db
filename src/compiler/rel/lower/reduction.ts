@@ -6,7 +6,7 @@ import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprChildren, forEachRel } from '../../../rel/walk.ts';
 import type { Elem } from '../../elem.ts';
-import type { IRStep } from '../../ir/strategies.ts';
+import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
@@ -28,7 +28,7 @@ import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
-import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { mixedClassesRefused, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
@@ -1367,13 +1367,13 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
 
 export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
+  // A child VALUE is a correlated per-row read; a write anywhere in it (an arm of a `choose`/`coalesce`,
+  // a `by()` of a `by()`) is a statement it has nowhere to declare (`writesAnywhere`).
+  if (writesAnywhere(body, outer.params)) return null;
   // The host's labels are on the child's path; the roots below re-enter the fold WITHOUT their alias
   // channels, so they ride in as `enclosingLabels` — a scope read of one declines instead of answering
   // the unbound key's empty result.
-  const hostLabels = host.row?.aliases;
-  const ctx: ChainCtx = hostLabels?.size
-    ? { ...outer, enclosingLabels: new Set([...(outer.enclosingLabels ?? []), ...hostLabels.keys()]) }
-    : outer;
+  const ctx = withEnclosing(outer, host.row?.aliases);
   const first = body[0]!;
 
   // An unfolded map entry is a real child host, not a special `select(Column.values)` pattern. Seed a
