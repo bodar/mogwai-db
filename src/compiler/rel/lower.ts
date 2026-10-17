@@ -5558,17 +5558,18 @@ function recordTail(
       // a later `select(label).select(k)` resolves `k` against them (the map-key-vs-alias precedence).
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
-      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels,
+      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels,
         fields.map((f) => f.key));
     }
 
     if (step.name === 'select') {
-      const args = step.args.map((a) => a.value);
       // MAP SCOPE BEATS PATH SCOPE (`Scoping.getScopeValue`), so a key that names a FIELD re-enters
-      // that field and only a miss falls through to the alias channel. A modulated or multi-key
-      // select over a record is `selectKeys`' business either way.
-      const field = args.length === 1 && typeof args[0] === 'string' && !step.modulators?.length
-        ? fieldNamed(fields, args[0])
+      // that field and only a miss falls through to the alias channel. The map read ignores a `Pop`
+      // (a map key has no history), so `select(all, 'y')` is the field too. A modulated or multi-key
+      // select over a record is `selectKeys`' business, and it consults the fields first the same way.
+      const spec = selectSpec(step);
+      const field = spec && spec.labels.length === 1 && !step.modulators?.length
+        ? fieldNamed(fields, spec.labels[0]!)
         : undefined;
       if (field) {
         const entered = recordField(rel, field, fresh);
@@ -5596,7 +5597,7 @@ function recordTail(
     if ((step.name === 'count' && isLocalScope(step)) || (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step))) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
-      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
+      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels);
     }
 
     if (step.name === 'count') {
@@ -5613,7 +5614,7 @@ function recordTail(
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       const encounter = encounterOf(rel.channels);
-      const folded = foldMaps(mapped, MAP_COL, { kind: 'scalar' }, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      const folded = foldMaps(mapped.rel, MAP_COL, mapped.valOf, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
@@ -5659,7 +5660,7 @@ function recordTail(
     if (step.name === 'unfold' && !step.args.length) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
-      return mapTail(mapped, { kind: 'scalar' }, { kind: 'scalar' }, steps, at, ctx, fresh, labels);
+      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels);
     }
 
     // Everything else DECLINES. A record is an ordinary per-row traverser, so a bare `dedup()` and a
@@ -5848,8 +5849,8 @@ function mergeFromTraversal(
     if (!resolved.framing.fields.every((field) => field.framing.kind === 'scalar')) return null;
     const mapped = recordToMap(resolved.rel, resolved.framing.fields, ctx.source, fresh);
     if (!mapped) return null;
-    mapRel = mapped;
-    valOf = { kind: 'scalar' };
+    mapRel = mapped.rel;
+    valOf = mapped.valOf;
   } else if (resolved.framing.kind === 'map') {
     mapRel = resolved.rel;
     valOf = resolved.framing.valOf;

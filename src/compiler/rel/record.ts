@@ -1,18 +1,19 @@
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
+import { perRowColumn, type MapOf, type MixedArm, type Shape } from '../../sql/kernel/render.ts';
+import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { fieldCol, fieldPresence, framingCols, PRESENT_COL, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, PRESENT_COL, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
-import { byField, modulations } from './modulator.ts';
+import { byField, modulations, type ByField } from './modulator.ts';
 import { raisingColumns } from './receiver.ts';
 import type { GraphSource } from './source.ts';
-import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
+import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 
@@ -149,16 +150,17 @@ function recordFields(
 export function recordNode(
   step: IRStep, host: ChildHost, hostFraming: RelFraming, hostCol: (name: string) => Expr,
   child: ChildSeam, source: GraphSource, fresh: Minter,
-): Expr | null {
+): { readonly node: Expr; readonly valOf: MapOf } | null {
   const built = recordFields(step, host, hostFraming, hostCol, child, source, fresh);
   if (!built) return null;
-  return recordPairs((column) => {
+  const node = recordPairs((column) => {
     const expr = built.exprs.get(column);
     // A field column with no expression is a `framingCols`/`byField` disagreement inside this module,
     // not a traversal this route cannot express — the same invariant `recordOf` throws on.
     if (!expr) throw new Error(`RelIR lowering: record field column ${column} has no expression`);
     return expr;
   }, built.fields, source, fresh);
+  return node && { node, valOf: recordValOf(built.fields) };
 }
 
 /**
@@ -339,9 +341,37 @@ function recordPairs(read: FieldRead, fields: readonly RecordField[], source: Gr
   return acc;
 }
 
+/**
+ * WHAT A RECORD'S MAP HOLDS ON ITS VALUE SIDE — the ONE authority every record→map collapse reads.
+ *
+ * `fieldNode` writes every field as a self-describing node, and every shape but an ELEMENT decodes
+ * through the `scalar` side's `{t,v}` unwrap (a list/map node re-frames by its own tag). An element node
+ * does not: decoded as a scalar it is a per-row value tagged `vertex`, which the wire framed as a JSON
+ * string (`project('a','b').by().by().fold().unfold().select('b')`) or failed to parse at all (an
+ * internal error L5 surfaced). So a record with element fields says so — `elem` where every field is one
+ * element kind (the in-map element-node encoding `group()`'s element key already uses), `mixed` where
+ * elements sit beside other values — and every DECODING reader, which recognizes only the arms it can
+ * decode, declines rather than mis-reading the node.
+ */
+export function recordValOf(fields: readonly RecordField[]): MapOf {
+  const elems = new Set<Elem>();
+  let other = false;
+  for (const field of fields) {
+    if (field.framing.kind === 'elements') elems.add(field.framing.elem);
+    else other = true;
+  }
+  if (!elems.size) return { kind: 'scalar' };
+  if (!other && elems.size === 1) return { kind: 'elem', elem: [...elems][0]! };
+  const arms: MixedArm[] = [...elems].map((elem) => ({ kind: 'elem', elem }));
+  return { kind: 'mixed', arms: other ? [...arms, { kind: 'scalar' }] : arms };
+}
+
 /** The record relation with its fields COLLAPSED into the one `map` column the map vocabulary reads —
- *  channels intact, because the caller still has to sort by the emission order. */
-export function recordToMap(rel: Rel, fields: readonly RecordField[], source: GraphSource, fresh: Minter): Rel | null {
+ *  channels intact, because the caller still has to sort by the emission order — and the map's value
+ *  side as `recordValOf` states it, so no caller can re-claim `scalar` for an element-bearing record. */
+export function recordToMap(
+  rel: Rel, fields: readonly RecordField[], source: GraphSource, fresh: Minter,
+): { readonly rel: Rel; readonly valOf: MapOf } | null {
   // FENCE the record relation when it is SELF-CONTAINED — the collapse below reads each field column
   // through `jsonMember`'s `CASE`, which spells `v`/`vtype` ~6× per field, and the emitter INLINES a
   // `Project`'s column definition at every reference. A field whose value is a `firstOf` subquery (a
@@ -359,14 +389,17 @@ export function recordToMap(rel: Rel, fields: readonly RecordField[], source: Gr
     ? make.materialize({ id: fresh('rmf'), input: rel, channels: rel.channels, type: rel.type })
     : rel;
   const value = recordPairs(readingRel(base, ''), fields, source, fresh);
-  return value && make.project({
-    id: fresh('rm'), input: base, channels: base.channels,
-    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(base.channels)),
-    // `jsonb()` for `mapOfGroups`' reason: the column is the relational JSONB form and `mapPayload`'s
-    // `json()` is what turns it back into the text the framer parses.
-    exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [value] }],
-      ...base.channels.map((channel) => [channel.col, col(base.id, channel.col)] as const)],
-  });
+  return value && {
+    valOf: recordValOf(fields),
+    rel: make.project({
+      id: fresh('rm'), input: base, channels: base.channels,
+      type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(base.channels)),
+      // `jsonb()` for `mapOfGroups`' reason: the column is the relational JSONB form and `mapPayload`'s
+      // `json()` is what turns it back into the text the framer parses.
+      exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [value] }],
+        ...base.channels.map((channel) => [channel.col, col(base.id, channel.col)] as const)],
+    }),
+  };
 }
 
 /** THE RECORD PAYLOAD — the record collapsed to a map value and framed as one. It reaches the wire
@@ -379,7 +412,7 @@ export function recordPayload(
   // The fence that de-duplicates the field-column reads lives in `recordToMap` (gated on
   // self-containment), so both the wire payload and the top-level fold get it.
   const mapped = recordToMap(rel, fields, source, fresh);
-  return mapped && mapPayload(mapped, { kind: 'scalar' }, source, fresh);
+  return mapped && mapPayload(mapped.rel, mapped.valOf, source, fresh);
 }
 
 /**
@@ -450,6 +483,19 @@ export function selectKeys(
   if (!bys) return null;
 
   /**
+   * THE TRAVERSER'S OWN MAP IS THE FIRST SCOPE — `Scoping.getScopeValue` returns `map.get(key)` for a key
+   * the traverser's Map contains BEFORE it asks the side effects or the path, and it ignores the `Pop`
+   * there (a map key has no history)
+   * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-122`).
+   * A RECORD host is that Map, so a key naming one of its FIELDS reads the field and never reaches the
+   * alias vocabulary below — every arity, modulated or not. Without this a `project('x','y')…select('x','y')`
+   * looked for path labels `x`/`y`, found none, and answered the EMPTY result.
+   */
+  const hostFields = host?.framing.kind === 'record' ? host.framing.fields : [];
+  const fieldOf = (label: string): RecordField | undefined => fieldNamed(hostFields, label);
+  const pathLabels = spec.labels.filter((label) => !fieldOf(label));
+
+  /**
    * AN UNRESOLVABLE KEY IS THE EMPTY RESULT, NOT A DECLINE — `Select.feature:578-596` pins
    * `g.V().select("a")` as empty and its `count()` as `0`. It follows from the same rule the header
    * states: `getScopeValue` throws `KeyNotFoundException` for a key that is in no scope, `SelectStep`
@@ -468,13 +514,19 @@ export function selectKeys(
    * .select('a')` is `1` per traverser, not the vertex. This builder reads only the alias payload, so a
    * named key DECLINES here — answering the alias would be the wrong scope.
    */
-  if (host && spec.labels.some((label) => host.named(label))) return null;
-  const missing = spec.labels.filter((label) => !liveAliases(aliases, rel).has(label));
+  if (host && pathLabels.some((label) => host.named(label))) return null;
+  const missing = pathLabels.filter((label) => !liveAliases(aliases, rel).has(label));
   // A key this alias map lacks but an ENCLOSING scope binds is on the path all the same — this body was
   // lowered without the channel that holds it — so it is not the empty answer below: decline. Unless
   // ANOTHER missing key is bound by no scope at all: the drop is a conjunction, so that key alone empties
   // the stream whatever the hidden one holds (`select('a','b')` with `b` unbound anywhere is empty).
   if (host && missing.length && missing.every((label) => host.hidden(label))) return null;
+  // The EMPTY answer is "no scope holds this key" — and a traverser whose value may be a Map AT RUN TIME
+  // (a per-row-typed scalar decoded out of a self-describing node: a group member, a map value, a stored
+  // property) is itself the first scope (`Scoping.java:121-122`). The alias map cannot see into it, so
+  // the empty answer is unproven there and the read declines; `project('a').by(__.project('b')…).fold()
+  // .unfold().select('a').select('b')` answered `[]`.
+  if (host && missing.length && mayHoldMap(host.framing)) return null;
   if (host && missing.length)
     return {
       // §3.3's spelling of the empty relation: `Values` refuses to express one, so it is a false
@@ -495,17 +547,25 @@ export function selectKeys(
   const bound: string[] = [];
 
   for (const [index, label] of spec.labels.entries()) {
-    const projected = aliasProjection(rel, aliases, label, spec.pop, fresh);
-    if (!projected) return null;
-    const payload = new Map(projected.payload.map(([column, expr]) => [column.name, expr] as const));
-    if (aliasGuard(rel, projected.entry)) bound.push(projected.entry.col);
-    const framing = readFraming(projected.read);
+    const read = scopeRead(label, fieldOf(label), spec.pop, rel, aliases, fresh);
+    if (!read) return null;
+    const { payload, framing } = read;
+    if (read.bound) bound.push(read.bound);
+    // An optional field's PRESENCE is a drop (`SelectStep`'s `KeyNotFoundException`), riding as a column
+    // of its own for the reason a by()'s presence does: the guard reads the projection, not `rel`.
+    if (read.present) presentCols.push([meta(`sk${index}`, 'int', true), read.present]);
     const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
-    const built = byField(step, by, selectedHost(projected.read, payload, rel, aliases), framing,
-      (name) => payload.get(name) ?? compilerNull(), source, fresh, child);
+    const only = spec.labels.length === 1;
+    // A FIELD can hold a productive NULL, and the two arities treat one differently: `SelectOneStep`
+    // emits the null WITHOUT applying its `by()` (`SelectOneStep.java:64`), while `SelectStep` hands the
+    // null to the `by()` (`SelectStep.java:71-72`, `TraversalUtil.produce(null, …)`) — a projection over
+    // a null start this vocabulary has no lowering for, so that arity declines.
+    const passesNull = read.value !== undefined && by.key.kind !== 'identity';
+    if (passesNull && !only) return null;
+    const projectedBy = byField(step, by, read.host, framing, (name) => payload.get(name) ?? compilerNull(), source, fresh, child);
+    const built = projectedBy && passesNull ? nullPassing(projectedBy, read.value!) : projectedBy;
     if (!built) return null;
     const prefix = prefixAt(index);
-    const only = spec.labels.length === 1;
     const cols = framingCols(built.framing);
     if (!cols) return null;
     for (const column of cols) {
@@ -557,6 +617,81 @@ export function selectKeys(
       })
       : kept,
     framing,
+  };
+}
+
+/** Can this stream's traverser be a `Map` at run time — the shape `Scoping.getScopeValue` reads FIRST?
+ *  A static scalar type never is (`ValueType` excludes the collections); a per-row or unknown one, a
+ *  typed node and a variant can be. Element, list, path and entry streams are not Maps; a MAP or RECORD
+ *  stream is, but its own tail reads its keys before it ever asks the alias vocabulary. */
+function mayHoldMap(framing: RelFraming): boolean {
+  switch (framing.kind) {
+    case 'scalar': return framing.type.kind !== 'static';
+    case 'typedNode': case 'variant': return true;
+    default: return false;
+  }
+}
+
+/** ONE `select()` key resolved in the scope that owns it — the host record's FIELD where it names one,
+ *  else the path label's history (`aliasProjection`). `present` is an optional field's presence (a
+ *  drop), `bound` an alias column whose guard is the drop, and `value` a VALUE field's payload — the one
+ *  shape that can be a productive null. `null` declines. */
+function scopeRead(
+  label: string, field: RecordField | undefined, pop: Pop, rel: Rel, aliases: AliasMap, fresh: Minter,
+): {
+  readonly payload: ReadonlyMap<string, Expr>; readonly framing: RelFraming; readonly host: ChildHost | null;
+  readonly present?: Expr; readonly bound?: string; readonly value?: Expr;
+} | null {
+  if (field) {
+    const cols = framingCols(field.framing);
+    if (!cols) return null;
+    const read = readingRel(rel, '');
+    const payload = new Map(cols.map((column) => [column.name, read(fieldCol(field.prefix, column.name))] as const));
+    const present = field.optional ? presence(read, field) : undefined;
+    if (present === null) return null;
+    const framing = field.framing;
+    const row = { rel, aliases };
+    const vtype = payload.get('vtype');
+    const host: ChildHost | null = framing.kind === 'elements' ? { kind: 'element', id: payload.get('id')!, elem: framing.elem, row }
+      : framing.kind === 'scalar' ? { kind: 'scalar', value: payload.get('v')!, row, ...(vtype ? { vtype } : {}) }
+        : framing.kind === 'list' ? { kind: 'list', list: payload.get('list')!, of: framing.of, row }
+          : null;
+    // A VALUE field may be a productive null — unless its presence IS its value's non-nullness (an
+    // optional field with no presence column: `fieldPresence` reads `v IS NOT NULL`), in which case the
+    // presence drop above has already removed every null. Anything else is in doubt and says so.
+    const value = framing.kind === 'scalar' && !(field.optional && !field.presentCol) ? payload.get('v') : undefined;
+    return { payload, framing, host, ...(present ? { present } : {}), ...(value ? { value } : {}) };
+  }
+  const projected = aliasProjection(rel, aliases, label, pop, fresh);
+  if (!projected) return null;
+  const payload = new Map(projected.payload.map(([column, expr]) => [column.name, expr] as const));
+  const bound = aliasGuard(rel, projected.entry) ? projected.entry.col : undefined;
+  return {
+    payload, framing: readFraming(projected.read), host: selectedHost(projected.read, payload, rel, aliases),
+    ...(bound ? { bound } : {}),
+  };
+}
+
+/**
+ * `SelectOneStep`'s NULL SHORT-CIRCUIT applied to a modulated read — `if (null == o) return
+ * traverser.split(null, this)` BEFORE `produce(o, by)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectOneStep.java:63-64`).
+ * Where the selected value is null the result is that null, PRESENT whatever the `by()` would have
+ * said; elsewhere it is the `by()`'s own answer and presence. Only a VALUE result can hold the null
+ * beside the `by()`'s answer in one column set, so any other projection declines.
+ */
+function nullPassing(built: ByField, value: Expr): ByField | null {
+  if (built.framing.kind !== 'scalar') return null;
+  const first = built.exprs[0]?.[1];
+  if (!first) return null;
+  const isNull: Expr = { kind: 'binary', op: 'is', left: value, right: compilerNull() };
+  const produced: Expr = built.present
+    ?? (built.optional ? { kind: 'binary', op: 'is not', left: first, right: compilerNull() } : compilerInt(1));
+  return {
+    exprs: built.exprs.map(([name, expr]) => [name, { kind: 'case', whens: [[isNull, compilerNull()]], else: expr }] as const),
+    framing: { ...built.framing, productiveNull: true },
+    optional: true,
+    present: { kind: 'binary', op: 'or', left: isNull, right: produced },
   };
 }
 

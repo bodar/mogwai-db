@@ -10,7 +10,7 @@ import { armBatches, isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
 import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
+import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
 import { ALWAYS_PRODUCTIVE, knownPresence } from '../child.ts';
 import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
@@ -1127,18 +1127,41 @@ export function mapDemotedArms(arms: readonly Tail[], source: GraphSource, fresh
   // consumer-facing `valOf` widens. So EVERY map arm is re-framed to `MAP_OF_NODES` here, not just the
   // record-demoted ones — a list `valOf` is precise for a STANDALONE `valueMap`, but a merge that also
   // carries scalar values cannot promise every value is a list.
+  //
+  // An ELEMENT-bearing record (`project('a').by(identity())`) is the exception the widening cannot absorb:
+  // its value nodes are element nodes, which the scalar side would decode into a per-row value the wire
+  // frames as a JSON string. Its side is `recordValOf`'s `elem`/`mixed`, and the merged side is then the
+  // MIXED union of every arm's (`mergedSide`) — still self-describing, but no longer claiming `scalar`.
   const demotable = (arm: Tail): boolean => arm.framing.kind === 'record'
-    || (arm.framing.kind === 'map' && arm.framing.keyOf.kind === 'scalar' && arm.framing.valOf.kind !== 'elem');
+    || (arm.framing.kind === 'map' && arm.framing.keyOf.kind === 'scalar' && arm.framing.valOf.kind !== 'elem' && arm.framing.valOf.kind !== 'mixed');
   if (!arms.every(demotable)) return null;
-  const out: Tail[] = [];
+  const demoted: { readonly arm: Tail; readonly rel: Rel; readonly valOf: MapOf }[] = [];
   for (const [at, arm] of arms.entries()) {
     const fields = records[at];
-    if (!fields) { out.push({ ...arm, framing: MAP_OF_NODES }); continue; }
+    if (!fields) { demoted.push({ arm, rel: arm.rel, valOf: { kind: 'scalar' } }); continue; }
     const mapped = recordToMap(arm.rel, fields, source, fresh);
     if (!mapped) return null;
-    out.push({ ...arm, rel: mapped, framing: MAP_OF_NODES });
+    demoted.push({ arm, rel: mapped.rel, valOf: mapped.valOf });
   }
-  return out;
+  const valOf = mergedSide(demoted.map((entry) => entry.valOf));
+  const framing: RelFraming = valOf.kind === 'scalar' ? MAP_OF_NODES : { kind: 'map', keyOf: { kind: 'scalar' }, valOf };
+  return demoted.map(({ arm, rel }) => ({ ...arm, rel, framing }));
+}
+
+/** The value side of a MERGE of demoted map arms: `scalar` while every arm's nodes decode as one, else the
+ *  MIXED union of their element and scalar arms — the `mixed` `MapOf` arm's own meaning. */
+function mergedSide(sides: readonly MapOf[]): MapOf {
+  if (sides.every((side) => side.kind !== 'elem' && side.kind !== 'mixed')) return { kind: 'scalar' };
+  const arms: MixedArm[] = [];
+  const add = (arm: MixedArm): void => {
+    if (!arms.some((seen) => seen.kind === arm.kind && (seen.kind !== 'elem' || (arm.kind === 'elem' && seen.elem === arm.elem)))) arms.push(arm);
+  };
+  for (const side of sides) {
+    if (side.kind === 'elem') add({ kind: 'elem', elem: side.elem });
+    else if (side.kind === 'mixed') side.arms.forEach(add);
+    else add({ kind: 'scalar' });
+  }
+  return { kind: 'mixed', arms };
 }
 
 /**

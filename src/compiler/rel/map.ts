@@ -1043,7 +1043,7 @@ function groupCollected(
   const rows = pooledRows.framing.kind === 'record'
     ? (() => {
       const mapped = recordToMap(pooledRows.rel, pooledRows.framing.fields, source, fresh);
-      return mapped && { ...pooledRows, rel: mapped, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } } as const };
+      return mapped && { ...pooledRows, rel: mapped.rel, framing: { kind: 'map' as const, keyOf: { kind: 'scalar' as const }, valOf: mapped.valOf } };
     })()
     : pooledRows;
   if (!rows) return null;
@@ -1056,9 +1056,16 @@ function groupCollected(
   const valueCol = col(rows.rel.id, payload.name);
   // A MAP column is the relational JSONB form; `json()` turns it back into JSON TEXT carrying the JSON
   // subtype, so the member node embeds the pairs rather than a blob or a quoted string.
-  const member = rows.framing.kind === 'elements'
+  //
+  // A MAP member (a `project()` record, a `valueMap()`) is collected at the ROOT encoding instead — its raw
+  // pairs, described by `memberOf: {kind:'map', of: valOf}` — the encoding the entry re-group above uses
+  // and the one a `{kind:'map'}` list member means. Wrapped as a `{t:'map'}` node under the default
+  // `TYPED_MEMBERS` descriptor it framed correctly but re-entered as a per-row SCALAR, so
+  // `select('software').unfold().select('a')` read no key at all and answered `[]`.
+  const mapMember = rows.framing.kind === 'map' ? { kind: 'map', of: rows.framing.valOf } as const : undefined;
+  const member = rows.framing.kind === 'elements' || mapMember
     ? valueCol
-    : producedMemberNode(rows.framing.kind === 'map' ? jsonOf(valueCol) : valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE);
+    : producedMemberNode(valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE);
   if (!member) return null;
 
   const elementKey = !keyBy;
@@ -1098,7 +1105,7 @@ function groupCollected(
   const recipe: GroupRecipe = {
     counting: false, keyElem: elementKey ? host.elem : undefined,
     member: rows.framing.kind === 'elements' ? { kind: 'rowid', host: { kind: 'element', id: valueCol, elem: rows.framing.elem } } : { kind: 'node' },
-    single: false, memberDrop: true, bulkCol: undefined, step,
+    single: false, memberDrop: true, bulkCol: undefined, step, ...(mapMember ? { memberOf: mapMember } : {}),
   };
   const grouped = groupMap(rowsIn, recipe, source, fresh);
   return grouped;
@@ -1514,7 +1521,9 @@ function sideList(of: MapOf): ListOf | null {
     // scalar list framer decodes them lossily).
     : of.kind === 'list' || of.kind === 'map' ? of
       : of.kind === 'elem' ? { kind: 'mixed', arms: [{ kind: 'elem', elem: of.elem }] }
-        : null;
+        // A MIXED side's nodes are a mixed list's members exactly — the same arms, one container across.
+        : of.kind === 'mixed' ? { kind: 'mixed', arms: of.arms }
+          : null;
 }
 
 /**

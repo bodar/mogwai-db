@@ -78,7 +78,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ META-properties (`properties().properties()`, `has(k,v)` over a VertexProperty) |
 | `propertyMap()` | ❌ | |
 | `project(k…).by(…)` | ✅ | |
-| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed` |
+| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed`; reading an ELEMENT value back out of a `project()` map once it has collapsed (`fold().unfold().select(k)`, an element field's entry value, a union-demoted record) declines; a multi-key `select(k…).by(…)` over a record field that may hold a productive null declines |
 | `constant(v)` | ✅ | |
 
 ## 4. Aggregation & barriers

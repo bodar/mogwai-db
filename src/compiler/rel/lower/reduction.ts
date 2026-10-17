@@ -1500,7 +1500,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
     const self = hostSelf(host);
     const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     // `project()` is a `ScalarMapStep` — one map per traverser, never several.
-    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    return node && { expr: node.node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: node.valOf }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
   }
 
   // `valueMap()`/`elementMap()` are the other per-traverser map producers. Reuse the ordinary map

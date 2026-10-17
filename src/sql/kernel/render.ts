@@ -82,7 +82,16 @@ export type MapOf =
   // this arm the value framed correct-but-opaque as `{kind:'scalar'}`, and `select(values).unfold()`
   // silently mis-shaped it as a scalar — `[{}]` instead of the inner map
   // (`docs/archive/2026-08-21-map-value-shape-plan.md`).
-  | { kind: 'map'; of: MapOf };
+  | { kind: 'map'; of: MapOf }
+  // A side whose values are self-describing `{t,v}` nodes of SEVERAL kinds — an element node beside a
+  // scalar one: a `project('a','b').by(identity()).by('name')` record collapsed to its map. The
+  // `ListOf` `mixed` arm one container across, with the same arms, so collecting the side
+  // (`select(Column.values)`) is the identity translation. The framer reads every node by its own tag
+  // (the scalar arm of `mapSideBuffer`); a reader that would DECODE a value into one stream shape
+  // (`select(k)`, an entry's value) has no single shape to decode into and declines, which is the whole
+  // reason this is not `scalar` — claiming `scalar` decoded an element node into a per-row scalar the
+  // wire framed as a JSON string.
+  | { kind: 'mixed'; arms: readonly MixedArm[] };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its typed payload.
