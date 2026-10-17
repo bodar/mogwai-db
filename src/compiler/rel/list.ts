@@ -7,7 +7,7 @@ import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
-import { raisingWhen, type ValueEvidence } from './receiver.ts';
+import { raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
@@ -771,7 +771,8 @@ export function listRetype(
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
       // fenced, for the same plan).
-      const held = fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
+      // A mixed-class refusal rides inside the pick, so the pick is EVALUATED as well (`raisingColumns`).
+      const held = raisingColumns(fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh), [['w', picked]], fresh);
       return {
         rel: withPayload(held,
           [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
@@ -813,9 +814,13 @@ export function listRetype(
     // (`reducer.ts` `numberClass`) — the storage class alone frames a Double stored integral as an Int.
     // Its class mask is one more correlated read, and the class is named over it and the held sum.
     const tag = step.name !== 'sum' ? undefined : memberType?.kind === 'static' ? compilerText(memberType.type) : memberVtype(of, members);
-    const held = fenced(withPayload(host,
-      [['v', scalar(reduced.value, 'v', 'any')[1]], ...(tag ? [scalar(numberClassMask(payload, tag), CLASS_MASK, 'any')] : [])],
-      [meta('v', 'any', true), ...(tag ? [meta(CLASS_MASK, 'any', true)] : [])], fresh), fresh);
+    // The reducer's own deferral (a text operand) rides INSIDE the value, so the value is EVALUATED by a
+    // row predicate (`raisingColumns`) as well: a consumer that never reads it (`count()`) would prune it
+    // with the raise, where `sum(local)` raises on every traverser it reaches.
+    const sumValue = scalar(reduced.value, 'v', 'any')[1];
+    const held = raisingColumns(fenced(withPayload(host,
+      [['v', sumValue], ...(tag ? [scalar(numberClassMask(payload, tag), CLASS_MASK, 'any')] : [])],
+      [meta('v', 'any', true), ...(tag ? [meta(CLASS_MASK, 'any', true)] : [])], fresh), fresh), [['v', sumValue]], fresh);
     const v = col(held.id, 'v');
     const storage: Expr = { kind: 'call', fn: 'typeof', args: [v] };
     return {

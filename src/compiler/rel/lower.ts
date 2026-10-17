@@ -7,8 +7,9 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
-import { mayRaise } from '../../rel/raise.ts';
-import type { Rel } from '../../rel/rel.ts';
+import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
+import { isRel, type Rel } from '../../rel/rel.ts';
+import { stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom, referenceMergeObservableAt, referenceUnbulkedAt } from '../ir/bulk.ts';
@@ -67,9 +68,10 @@ import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
-import { childHostOf, sourceFilter } from './lower/filter.ts';
-import { childRows, childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
+import { childHostOf, sourceFilter, type RaiseSink } from './lower/filter.ts';
+import { childRows, childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild, selfCollapses } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
+import { defersRaise, keepingRaise, pendingRaise, raiseContained, RAISE, settlesExactly } from './raise-channel.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -1172,6 +1174,58 @@ function naturalSort(
 /** The column a `projectRaising` projection carries its raise test in, read once by the filter above it. */
 const RAISE_COL = 'rz';
 
+/** May a raise born at `steps[at - 1]` ride to `steps[at]` (`raise-channel.ts`'s `defersRaise`) — the one
+ *  question every raise source in the fold asks, with this scope's escalation request and the reducers
+ *  that end a correlated body (`selfCollapses`). */
+const raiseDefersTo = (steps: readonly IRStep[], at: number, ctx: ChainCtx): boolean =>
+  defersRaise(steps, at, ctx.raiseEscalates, selfCollapses);
+
+/** Where a sack fold's raise goes (`sackMutate`): carried to the step consuming it, or settled where it is
+ *  born — and whether that settle is exact. */
+const sackRaiseAt = (steps: readonly IRStep[], at: number, ctx: ChainCtx): { readonly defer: boolean; readonly exact: boolean } =>
+  ({ defer: raiseDefersTo(steps, at, ctx), exact: settlesExactly(steps, at) });
+
+/**
+ * THE FILTER HOSTS' ONE LOWERING — `sourceFilter`'s clause over `rel`, at every tail that hosts one.
+ *
+ * Where the next step consumes a pending raise (`raiseDefersTo`), a body whose raise the child seam can
+ * escalate (`ChildValue.raise`) hands it here through `sink`, and the filter KEEPS a raising row with the
+ * message on it: `FilterStep` runs the body on the traverser it is handed, so the raise belongs to exactly
+ * the rows the head slice after it takes. A clause that still raises eagerly there would be evaluated on
+ * every row SQL scans, which the reference does not, so it DECLINES (`'decline'`) rather than over-raise; `null` is
+ * "not a filter step".
+ */
+function hostFilter(
+  rel: Rel, step: IRStep, subject: Subject, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Rel | 'decline' | null {
+  const sink: RaiseSink | undefined = raiseDefersTo(steps, at + 1, ctx) ? {} : undefined;
+  const clause = sourceFilter(step, subject, fresh, ctx, labels, sink);
+  if (!clause) return null;
+  // A clause that raises IN-STATEMENT is evaluated on every row SQL scans: exact only where the reference
+  // pulls every row too (`settlesExactly`), and never where a slice the raise could have ridden to follows.
+  if (exprMayRaise(clause) && (sink || !settlesExactly(steps, at + 1))) return 'decline';
+  const prior = pendingRaise(rel);
+  if (!sink?.raise && !prior) return make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+  // A raising row — one this body raised on, or one a raise earlier in the run already rides (the
+  // reference raised there before this filter ever saw it) — PASSES whatever the clause says; a clean one
+  // only where the clause holds. The clause and the message are both read off `rel`'s row, so both are
+  // NAMED beside it and the filter reads the names.
+  const HELD = 'fc';
+  const channels = prior ? rel.channels : withChannel(rel.channels, RAISE);
+  const cols = prior ? rel.type.cols : [...rel.type.cols, meta(RAISE.col, 'text', true)];
+  const raise: Expr = !sink?.raise ? col(rel.id, prior!.col)
+    : prior ? { kind: 'call', fn: 'COALESCE', args: [col(rel.id, prior.col), sink.raise] } : sink.raise;
+  const held = make.project({
+    id: fresh('fh'), input: rel, channels, type: typeOf(...cols, meta(HELD, 'any', true)),
+    exprs: [...cols.map((column) => [column.name, column.name === RAISE.col ? raise : col(rel.id, column.name)] as const), [HELD, clause]],
+  });
+  const kept = keepingRaise(held, col(held.id, HELD), fresh('fk'));
+  return make.project({
+    id: fresh('fs'), input: kept, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
+}
+
 /**
  * A scalar projection `v := value` whose offences read the SAME correlated operands the value does — a
  * `concat(__.t)`/`dateDiff(__.t)` operand is a correlated read of `rel`'s row, so the test cannot be a
@@ -1693,7 +1747,7 @@ function scalarTail(
         out = read.framing;
         continue;
       }
-      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh);
+      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh, sackRaiseAt(steps, at + 1, ctx));
       if (!folded) return null;
       rel = folded;
       continue;
@@ -1864,13 +1918,18 @@ function scalarTail(
       // Dropping it also removes the vtype from `subjectType()`, so a following `is(P.gt(…))`
       // stops asking for an ordering key the value no longer has one for, which is correct: the
       // transformed value is a native SQLite value and compares directly.
-      const carried = rel.channels;
       // Every RAISE the transform owes — the receiver's offences and a runtime `asNumber(GType.X)`'s fence
       // — is a WHERE, not part of the value: a position that consumes only existence (`where`/`not`/
       // `filter`, a `choose` condition, `count()`) never reads the value, and the reference raises there
       // all the same (`asNumberFilter`). The value is then the plain conversion over the filter's rows.
+      // DEFERRED instead — the row kept with its message — where the next step consumes a pending raise
+      // (`raiseDefersTo`) and the value itself raises nothing eagerly.
+      // An eager raise where the reference does not pull every row DECLINES (`settlesExactly`).
       const raises = offences.length > 0 || transformed.fenced !== undefined;
-      const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter) : rel;
+      const defer = raises && !transformed.fenced && raiseDefersTo(steps, at + 1, ctx) && !exprMayRaise(transformed.expr);
+      if (raises && !defer && !settlesExactly(steps, at + 1)) return null;
+      const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter, defer) : rel;
+      const carried = source.channels;
       const plain = raises
         ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence(source))
         : transformed;
@@ -1971,9 +2030,9 @@ function scalarTail(
     }
 
     if (SCALAR_FILTER_HOSTS.has(step.name)) {
-      const clause = sourceFilter(step, scalarSubject(), fresh, ctx, labels);
-      if (!clause) return null;
-      rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      const filtered = hostFilter(rel, step, scalarSubject(), steps, at, ctx, fresh, labels);
+      if (!filtered || filtered === 'decline') return null;
+      rel = filtered;
       continue;
     }
 
@@ -3511,6 +3570,10 @@ const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSub
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
   if (!wire) return null;
+  // EVERY PENDING RAISE ANSWERED FOR (`raise-channel.ts`): a raising relation read by anything but a vetted
+  // carrier or a consumer would have dropped the raise and answered, so the plan declines instead.
+  const effectRoots = (chain.effects ?? []).flatMap((binding) => (isRel(binding.node) ? [binding.node] : stmtChildren(binding.node)));
+  if (![wire.rel, ...effectRoots].every(raiseContained)) return null;
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
   // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
@@ -4296,8 +4359,11 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   let at = 1;
   let elem = elem0;
   for (; at < steps.length; at++) {
-    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
-    if (!clause) break;
+    // A filter whose raise a head slice after it may consume is the fold's (`hostFilter`), not a fused
+    // clause of the scan's one `WHERE`, where its raise could only be evaluated on every row.
+    const sink: RaiseSink | undefined = raiseDefersTo(steps, at + 1, readCtx) ? {} : undefined;
+    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx, NO_ALIASES, sink);
+    if (!clause || sink?.raise || (exprMayRaise(clause) && (sink || !settlesExactly(steps, at + 1)))) break;
     pred = and(pred, clause);
   }
 
@@ -4604,7 +4670,7 @@ function elementTail(
     const aliased = aliasWhere(step, rel, labels, ctx, fresh);
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }
-    const clause = sourceFilter(step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, fresh, ctx, labels);
+    const filtered = hostFilter(rel, step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, steps, at, ctx, fresh, labels);
     // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
     // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
@@ -4612,7 +4678,8 @@ function elementTail(
     // channels`), which made a fail-closed VIOLATION rather than a wrong answer: the lowering threw
     // where the traversal must answer. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no
     // corpus traversal has that prefix, so the corpus sweep could not reach it.
-    if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
+    if (filtered === 'decline') return null;
+    if (filtered) { rel = filtered; continue; }
     // `as()` is SHAPE-PRESERVING at every position, which is why it sits in the ordinary loop rather
     // than at a boundary: the payload passes through and only the alias channels change.
     if (step.name === 'as') {
@@ -4765,7 +4832,7 @@ function elementTail(
     // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
     // to `terminal()`, which is where every element→value boundary lives.
     if (step.name === 'sack' && sackOperator(step) !== undefined) {
-      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
+      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, sackRaiseAt(steps, at + 1, ctx));
       if (!folded) return null;
       rel = folded;
       continue;
@@ -5060,10 +5127,8 @@ function propertyTail(
   // compare, so a value predicate declines rather than answering off the wrong column.
   if (SCALAR_FILTER_HOSTS.has(step.name)) {
     const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
-    const clause = sourceFilter(step, subject, fresh, ctx, labels);
-    return clause && propertyTail(
-      make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }),
-      elem, steps, from + 1, bulked, ctx, fresh, labels);
+    const filtered = hostFilter(rel, step, subject, steps, from, ctx, fresh, labels);
+    return filtered && filtered !== 'decline' ? propertyTail(filtered, elem, steps, from + 1, bulked, ctx, fresh, labels) : null;
   }
 
   // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,

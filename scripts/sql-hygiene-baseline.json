@@ -361,14 +361,14 @@
   },
   "max": {
     "binds": 0,
-    "bytes": 4059,
-    "compiler": 115,
+    "bytes": 4097,
+    "compiler": 116,
     "bound": 0
   },
   "mean": {
     "binds": 0,
-    "bytes": 2284,
-    "compiler": 42,
+    "bytes": 2322,
+    "compiler": 43,
     "bound": 0
   },
   "merge": {
@@ -391,8 +391,8 @@
   },
   "min": {
     "binds": 0,
-    "bytes": 4057,
-    "compiler": 115,
+    "bytes": 4095,
+    "compiler": 116,
     "bound": 0
   },
   "none": {
@@ -421,8 +421,8 @@
   },
   "order": {
     "binds": 0,
-    "bytes": 5070,
-    "compiler": 118,
+    "bytes": 5108,
+    "compiler": 119,
     "bound": 0
   },
   "out": {
@@ -524,7 +524,7 @@
   "sum": {
     "binds": 0,
     "bytes": 4284,
-    "compiler": 96,
+    "compiler": 97,
     "bound": 0
   },
   "tail": {

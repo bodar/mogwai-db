@@ -2,7 +2,7 @@ import type { Channel } from '../../channels.ts';
 import { withChannel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerReal, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { INTEGER_OVERFLOW } from '../../rel/raise.ts';
+import { exprMayRaise, INTEGER_OVERFLOW } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -160,6 +160,7 @@ export function seedSack(rel: Rel, spec: MergePolicy, fresh: Minter): Rel | null
  */
 export function sackMutate(
   step: IRStep, rel: Rel, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+  raiseAt: { readonly defer: boolean; readonly exact: boolean } = { defer: false, exact: true },
 ): Rel | null {
   const operator = sackOperator(step);
   if (!operator || !SACK_OPS.has(operator)) return null;
@@ -239,9 +240,19 @@ export function sackMutate(
   // six vertices where `Operator.sum`'s `(Number)` cast raises on every one.
   const offences = foldOffences(operator, facts(kept), evidence);
   if (!offences) return null;
-  const guarded = raisingRows(kept, offences, fresh);
+  // DEFERRED (`raiseAt.defer`, the fold's `raiseDefersTo`) where a head slice follows: `SackValueStep` folds
+  // the traverser it is handed, so the raise belongs to the rows that slice keeps — the offending row rides
+  // with its message rather than raising over every row before the slice decides
+  // (`raise-channel.ts`). Only where the fold's own value raises nothing eagerly.
+  const combinedOver = (over: Rel): Expr | null => combine(operator, facts(over));
+  const eager = combinedOver(kept);
+  const defer = raiseAt.defer && eager !== null && !exprMayRaise(eager) && !exprMayRaise(foldedTag(operator, facts(kept), eager));
+  // Settled where it is born, the raise meets every row SQL scans — exact only where the reference pulls
+  // every row too (`settlesExactly`); otherwise the fold declines rather than raise where it answers.
+  if (offences.length && !defer && !raiseAt.exact) return null;
+  const guarded = raisingRows(kept, offences, fresh, undefined, defer);
   const at = facts(guarded);
-  const combined = combine(operator, at);
+  const combined = combinedOver(guarded);
   if (!combined) return null;
   return make.project({
     id: fresh('skm'), input: guarded, channels: guarded.channels, type: typeOf(...payload, ...carriedCols(guarded.channels)),

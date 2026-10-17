@@ -64,9 +64,29 @@ export class RaisedByQuery extends Error {
 }
 
 /** Is `e` a `raiseExpr` arm — the sentinel path is a compiler literal, so this is a syntactic test. */
-const isRaise = (e: Expr): boolean =>
-  e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
-  && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN);
+const isRaise = (e: Expr): boolean => {
+  if (e.kind !== 'call' || e.fn !== 'json_extract') return false;
+  const path = e.args[1];
+  if (path?.kind === 'lit') return typeof path.value === 'string' && path.value.startsWith(OPEN);
+  // A RAISE OF A CARRIED MESSAGE (`raiseCarried`): the path is `OPEN || message || CLOSE`.
+  let head: Expr | undefined = path;
+  while (head?.kind === 'binary' && head.op === '||') head = head.left;
+  return head?.kind === 'lit' && head.value === OPEN;
+};
+
+/**
+ * `raiseExpr` FOR A MESSAGE THE DATA CARRIES — a pending raise's column (`src/compiler/rel/raise-channel.ts`)
+ * holds the reference's message as TEXT, NULL on a clean row, and the step that settles it raises THAT
+ * message. The path is built from the message, so the arm is never a constant expression either; a caller
+ * guards it with the message's own non-nullness, since a NULL path is no error at all.
+ */
+export function raiseCarried(message: Expr): Expr {
+  const concat = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '||', left, right });
+  return {
+    kind: 'call', fn: 'json_extract',
+    args: [{ kind: 'call', fn: 'json_quote', args: [message] }, concat(concat(compilerText(OPEN), message), compilerText(CLOSE))],
+  };
+}
 
 /**
  * CAN EVALUATING THIS RELATION RAISE — does any expression in it, correlated subplans included, hold a

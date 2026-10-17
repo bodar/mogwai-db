@@ -26,8 +26,27 @@ import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts'
 import { withChannel } from '../../../channels.ts';
 import { dropPath, mergeObservableAt, orderRows } from '../lower.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
+import { headSliceStep, pendingRaise, pulledBy, settledSlice, settleRaise, trustSlice } from '../raise-channel.ts';
 
+/**
+ * THE SLICE — and the consumer of a PENDING RAISE (`raise-channel.ts`) the step before it deferred.
+ *
+ * A head slice settles the raise over exactly the rows the reference PULLS — its bound plus the one more
+ * traverser `RangeGlobalStep` drags through before it learns the bound is met (`pulledBy`) — and then
+ * takes its own rows from those, so a raising row past them is never met. Any other slice pulls rows it
+ * does not keep, so the raise is settled over its whole input first — the eager answer, and
+ * `defersRaise` never hands it one.
+ */
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
+  if (!pendingRaise(input)) return sliceRows(step, input, bulked, fresh);
+  if (!headSliceStep(step)) return sliceRows(step, settleRaise(input, fresh), bulked, fresh);
+  const pulled = sliceRows(pulledBy(step), input, bulked, fresh);
+  if (pulled) trustSlice(pulled, input);
+  const settled = pulled && settledSlice(pulled, fresh);
+  return settled && sliceRows(step, settled, bulked, fresh);
+}
+
+function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
   if (!SLICE_STEPS.has(step.name)) return null;
   const encounter = encounterOf(input.channels);

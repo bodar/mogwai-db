@@ -215,6 +215,14 @@ export interface ChainCtx extends FilterCtx {
    * different array, and the consumer declines.
    */
   readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  /**
+   * THE CHILD BODY WHOSE RAISE ITS HOST TAKES AS DATA — set by `correlatedReduce` when the host asked for
+   * the child value's `raise` (`ChildValue.raise`), so a raise born just before the body's terminal reducing
+   * barrier defers into it and is escalated (`raise-channel.ts`'s `defersRaise`/`escalatedRaise`) rather
+   * than settled inside the correlated subquery, where SQL would evaluate it for every host row. Compared
+   * BY IDENTITY against the step list a source holds, as `traversal` is, so nothing nested inherits it.
+   */
+  readonly raiseEscalates?: readonly IRStep[];
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;

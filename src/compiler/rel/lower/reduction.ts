@@ -4,7 +4,7 @@ import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, met
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
-import { exprChildren, forEachRel } from '../../../rel/walk.ts';
+import { exprChildren, exprRels, forEachExpr, forEachRel } from '../../../rel/walk.ts';
 import type { Elem } from '../../elem.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
@@ -37,6 +37,7 @@ import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
+import { escalatedRaise, pendingRaise, raiseMessage } from '../raise-channel.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -962,10 +963,41 @@ function existsAny(rel: Rel, fresh: Minter): Expr | null {
   return { kind: 'exists', plan: probe, negated: false };
 }
 
+/**
+ * A child value with the pending raise its plans read ESCALATED into `raise` (`escalatedRaise`), its value
+ * and type tag answered only where that raise is NULL — `null` where the raise cannot be escalated exactly.
+ * A value whose plans carry no pending raise is returned unchanged.
+ */
+function escalatedValue(produced: ChildValue, fresh: Minter): ChildValue | null {
+  const exprs = [produced.expr, ...(produced.vtype ? [produced.vtype] : []), ...(produced.present === 'unknown' ? [] : [produced.present])];
+  const readers: Rel[] = [];
+  for (const e of exprs) forEachExpr(e, (node) => readers.push(...exprRels(node)));
+  if (!readers.some((plan) => { let poisoned = false; forEachRel(plan, (r) => { if (pendingRaise(r)) poisoned = true; }); return poisoned; })) return produced;
+  const raise = escalatedRaise(readers[0]!, readers.slice(1), fresh);
+  if (!raise) return null;
+  if (raise.kind === 'lit' && raise.value === null) return produced;
+  const clean: Expr = { kind: 'binary', op: 'is', left: raise, right: compilerNull() };
+  const guarded = (e: Expr): Expr => ({ kind: 'case', whens: [[clean, e]], else: compilerNull() });
+  return {
+    ...produced,
+    expr: guarded(produced.expr),
+    ...(produced.vtype ? { vtype: guarded(produced.vtype) } : {}),
+    raise,
+  };
+}
+
 export function correlatedReduce(
   root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' } | { readonly kind: 'list' } | { readonly kind: 'map' }>,
-  body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+  body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter, deferRaise = false,
 ): ChildValue | null {
+  // A HOST THAT TAKES THE RAISE AS DATA (`scalarChildDeferred`) has a raise born just before the terminal
+  // reducer DEFERRED into it (`ChainCtx.raiseEscalates`) and ESCALATED here into the value's `raise`, rather
+  // than settled inside this correlated subquery — which SQL evaluates for every host row, where the
+  // reference evaluates the body only for the host traversers that are pulled.
+  if (deferRaise) {
+    const reduced = correlatedReduce(root, rootAs, body, from, { ...ctx, raiseEscalates: body }, fresh);
+    return reduced && escalatedValue(reduced, fresh);
+  }
   // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
   // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer row,
   // so the numeric arm below declines it. The correlated pick is the SAME element as a `sort`+`limit(1)`
@@ -1111,10 +1143,10 @@ export const selfCollapses = (name: string): boolean => isReducer(name) || name 
  * arm and the collapsing-barrier arm built it identically — two copies of a source shape is two chances
  * to disagree about what a self root IS.
  */
-export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter, deferRaise = false): ChildValue | null {
   const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
   const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-  return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
+  return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh, deferRaise);
 }
 
 /** A ChildHost as a filter/branch `Subject` — the inverse of `childHostOf` (`filter.ts`), so a
@@ -1376,7 +1408,18 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
   return produced && raisingPresence(produced);
 }
 
-function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
+/**
+ * `scalarChild` FOR A HOST THAT CARRIES THE RAISE AS DATA — the body's raise escalated into
+ * `ChildValue.raise` where the producing arm can (`correlatedReduce`'s terminal reducer), and NOT folded
+ * into the productivity claim: the host keeps a raising row with the message on it, so a later head slice
+ * decides whether the reference ever met it (`raise-channel.ts`). A raise an arm could not escalate still
+ * rides inside `expr`/`present`, and a host that cannot settle it exactly must decline (`exprMayRaise`).
+ */
+export function scalarChildDeferred(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
+  return scalarChildValue(body, host, outer, fresh, true);
+}
+
+function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter, deferRaise = false): ChildValue | null {
   if (!body.length) return null;
   // A child VALUE is a correlated per-row read; a write anywhere in it (an arm of a `choose`/`coalesce`,
   // a `by()` of a `by()`) is a statement it has nowhere to declare (`writesAnywhere`).
@@ -1567,7 +1610,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
   // A movement is not required — what is required is that the body END in a reducer; a bare
   // `__.count()`/`__.values(k)` with no reduction falls through to the expression arm below.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, ctx.source, fresh);
-  if (child) return correlatedReduce(child.rel, { kind: 'elements', elem: child.elem }, body, 1, ctx, fresh);
+  if (child) return correlatedReduce(child.rel, { kind: 'elements', elem: child.elem }, body, 1, ctx, fresh, deferRaise);
   // A BRANCH-headed body (`by(__.union(a,b)….fold())`) — the union fans the host out over its arms, then
   // the tail reduces. `continueAs` already lowers a `union`/`choose`/`coalesce` over an INPUT relation
   // (the chain-position branch), so rooting it at the one-row SELF relation carrying the host id and
@@ -1588,7 +1631,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
     if (chosen) return chosen;
   }
   if (BRANCH_HOSTS.has(body[0]!.name)) {
-    const reduced = selfRootedReduce(body, host, ctx, fresh);
+    const reduced = selfRootedReduce(body, host, ctx, fresh, deferRaise);
     if (reduced) return reduced;
   }
   // The SELF root: no leading hop, so the barrier aggregates/argmaxes/COLLECTS the host's OWN rows
@@ -1598,7 +1641,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
   // `yields: 'first'`), and that is the whole job of this gate.
   const terminal = body.at(-1);
   if (body.length >= 2 && terminal && selfCollapses(terminal.name)) {
-    const reduced = selfRootedReduce(body, host, ctx, fresh);
+    const reduced = selfRootedReduce(body, host, ctx, fresh, deferRaise);
     if (reduced) return reduced;
   }
 
@@ -1723,7 +1766,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: Chain
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present, ...(productive ? { productive } : {}), yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
+  return valueRun(body, at, { value, type, vtype, present, ...(productive ? { productive } : {}), yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh, deferRaise);
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1844,7 +1887,7 @@ const droppedWhenNull = (present: Expr, value: Expr): Expr => {
 export function valueRun(
   body: readonly IRStep[], from: number,
   seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present: Presence; readonly productive?: Expr; readonly yields: ChildValue['yields'] },
-  row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter,
+  row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter, deferRaise = false,
 ): ChildValue | null {
   let value = seed.value;
   let type = seed.type;
@@ -1858,6 +1901,8 @@ export function valueRun(
   // The same fact for the RECEIVER checks alone: `present`, or where the seed withholds that from its
   // host, what it can still say about a NULL (`seed.productive`). Narrowed in step with `present`.
   let productive = knownPresence(seed.present) ?? seed.productive;
+  // The raise the run hit, as DATA, where its host carries one (`deferRaise`).
+  let raise: Expr | undefined;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     if (REL_PROJECTORS.has(step.name)) {
@@ -1915,6 +1960,17 @@ export function valueRun(
     // that asks only WHETHER the run produced (`where`/`not`/`choose`) never reads the fenced value, so
     // the fence rides on the productivity claim too, where SQLite must evaluate it (`asNumberFilter`).
     // The receiver's offences are the same kind of raise, so they ride there as well.
+    // A HOST THAT CARRIES THE RAISE (`deferRaise`) takes the offences as DATA instead — the first
+    // offending step's message, an earlier one winning (the reference raised there first) — and keeps the
+    // plain value and claim. A fence filters as well as raises, so it stays an in-statement arm.
+    if (deferRaise && offences.length && !transformed.fenced) {
+      const message = raiseMessage(offences);
+      raise = raise ? { kind: 'call', fn: 'COALESCE', args: [raise, message] } : message;
+      value = transformed.expr;
+      type = transformed.type ?? UNKNOWN;
+      vtype = undefined;
+      continue;
+    }
     if ((transformed.fenced || offences.length) && present !== 'unknown') {
       const raises = raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1));
       present = present === ALWAYS_PRODUCTIVE ? raises : and(present, raises);
@@ -1923,7 +1979,7 @@ export function valueRun(
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
-  const produced = { present };
+  const produced = { present, ...(raise ? { raise } : {}) };
   // A TRANSFORM RUN PRESERVES CARDINALITY — one value in, one value out at every member — so the
   // seed's claim rides to the end unchanged. What decided it is the LEADING step: `values(k)` picks
   // the first of a possibly multi-valued property, everything else names exactly one.

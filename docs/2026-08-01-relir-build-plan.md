@@ -788,6 +788,25 @@ authorities.
   in-statement WHERE already gets wherever the chain is ordered (the `ORDER BY` evaluates every row). A
   physical `raise` column through ~900 node-construction sites is therefore not the next step; an
   unordered-chain slice over a raising input evaluating n+1 is.
+  ✅ **The `raise` channel LANDED 2026-10-17 (`wf7/substrate-raise-channel-r1`), SPAN-SCOPED, not plan-wide:**
+  the eager row predicate over-raised under a slice — `g.V().order().by(label,desc).where(__.values('age')
+  .toUpper().fold()).limit(1)` raised on marko where the reference answers `[lop]` (the `ORDER BY` evaluates
+  every row's `WHERE`, but the reference pulls only n+1). `src/compiler/rel/raise-channel.ts` is the one
+  authority: a raise source (`raisingRows`'s transforms, the sack fold, a filter host's child value) DEFERS
+  only where `defersRaise` proves the span — through a run of filters (`hostFilter` keeps a raising row) to a
+  HEAD slice, which settles the message over exactly the n+1 rows the reference pulls (`pulledBy`) and then
+  takes its n; or, in a child body whose host takes the raise as data, to the terminal reducing barrier,
+  which ESCALATES it into `ChildValue.raise` (`correlatedReduce`, `valueRun`, the `and`/`or` arms gated by
+  the arms before them). Everywhere else the source settles eagerly as before — but only where that is exact
+  (`settlesExactly`: a draining barrier, or no bounded slice, after it); a raise that would be settled eagerly
+  ahead of a bounded slice behind a streaming non-filter step (`dedup()`, a movement) DECLINES. The sack's
+  always-present overflow offences make that rule decline `sack(op).by(…).out().limit(n)`; the census and L3
+  are unchanged by it. The channel never reaches framing, so the executor needs no throw;
+  `raiseContained` refuses (declines) any plan in which a raising relation is read by anything but a vetted
+  carrier or a consumer, so a dropped raise cannot become an answer. A filter host whose clause still raises
+  eagerly before a head slice (a movement-headed `where(__.out()…toUpper().fold())`) DECLINES. Also: a NaN
+  literal the sack may fold declines (`ir/sack-nan.ts`), and a list-local reducer's own deferral is evaluated
+  under an existence-only tail (`values('name').fold().sum(local).count()` raises).
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no

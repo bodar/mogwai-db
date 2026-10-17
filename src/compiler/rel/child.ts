@@ -224,6 +224,14 @@ export interface ChildValue {
    * `ProjectStep.java:66` reads `TraversalProduct.isProductive`, not the value's nullness).
    */
   readonly present: Presence;
+  /**
+   * THE RAISE THIS BODY'S EVALUATION HIT, as DATA — the reference's message, NULL where the body raised
+   * nothing (`raise-channel.ts`). Present only where the HOST asked for it (`scalarChildDeferred`) and the
+   * producing arm could escalate it; `expr`/`present` are then the body's answer only where it is NULL,
+   * and the host carries it on its row so a later head slice decides whether the reference ever met it.
+   * Absent, every raise rides inside `expr`/`present` as an in-statement arm, as it always has.
+   */
+  readonly raise?: Expr;
 }
 
 /** A child body's PRODUCTIVITY — a per-row boolean expression (`ALWAYS_PRODUCTIVE` for "always"), or

@@ -8,6 +8,7 @@ import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, type IRStep } from '../ir/step.ts';
+import { poisonRows, raiseMessage } from './raise-channel.ts';
 
 /**
  * THE RECEIVER-TYPE AUTHORITY — is the value a type-demanding step receives PROVABLY of the type the
@@ -169,8 +170,13 @@ export const raisingWhen = (offences: readonly (readonly [Expr, string])[], valu
  * receiver offences (asString/asNumber/concat/dateDiff/the string family) and the sack's operator
  * offences (`sack.ts`) alike.
  */
-export function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr): Rel {
+export function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr, defer = false): Rel {
   if (!offences.length && !fence) return rel;
+  // DEFERRED where the next step consumes a pending raise (`raise-channel.ts`'s `defersRaise`): the
+  // offending row is KEPT with the message on it rather than raised here, over every row, before the
+  // slice above it decides which rows the reference ever pulls. A fence filters as well as raises, so it
+  // cannot ride a row and keeps the eager form.
+  if (defer && !fence) return poisonRows(rel, raiseMessage(offences), fresh);
   return make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type, pred: raisingWhen(offences, fence ?? compilerInt(1)) });
 }
 
@@ -192,7 +198,7 @@ export function raisingColumns(rel: Rel, columns: readonly (readonly [string, Ex
   // FENCED where the relation is self-contained, so the test reads a computed column rather than
   // re-inlining the value (often a correlated aggregate) beside every reader of it — the same gate
   // `recordToMap`'s fence uses (`freeRelIds`; a walk's own reference may not be hoisted either).
-  const base = freeRelIds(rel).size === 0 && !containsSelfRef(rel)
+  const base = rel.kind === 'materialize' ? rel : freeRelIds(rel).size === 0 && !containsSelfRef(rel)
     ? make.materialize({ id: fresh('txm'), input: rel, channels: rel.channels, type: rel.type })
     : rel;
   const evaluated = raising.map(([name]): Expr =>
