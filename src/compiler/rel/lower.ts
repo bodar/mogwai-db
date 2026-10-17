@@ -1232,13 +1232,21 @@ function asStringNullGuard(rel: Rel, value: Expr, fresh: Minter): Binding {
  *  outside `[min, max]`. Only the bounded GTypes (byte/short/int) carry a range; long/bigint/real never
  *  overflow a 64-bit SQLite integer/real, so their callers pass no guard. */
 function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, disp: string, fresh: Minter): Binding {
-  // INTEGER rows only: a REAL one truncates before its range test, which `asNumberCast` fences inline
-  // (`2147483647.5` is the Integer `2147483647`, not an overflow — `NumberHelper.java:724-800`).
-  const outOfRange: Expr = { kind: 'binary', op: 'and',
-    left: { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('integer') },
+  // INTEGER rows only — a native one, or an exact integer carried as decimal TEXT (a `sumTower` result
+  // past 2^53, which round-trips through `CAST AS INTEGER`). A REAL one truncates before its range test,
+  // which `asNumberCast` fences inline (`2147483647.5` is the Integer `2147483647`, not an overflow —
+  // `NumberHelper.java:724-800`), and so is any other text.
+  const asInt: Expr = { kind: 'cast', arg: value, to: 'int' };
+  const storage: Expr = { kind: 'call', fn: 'typeof', args: [value] };
+  const integral: Expr = { kind: 'binary', op: 'or',
+    left: { kind: 'binary', op: '=', left: storage, right: compilerText('integer') },
+    right: { kind: 'binary', op: 'and',
+      left: { kind: 'binary', op: '=', left: storage, right: compilerText('text') },
+      right: { kind: 'binary', op: '=', left: { kind: 'cast', arg: asInt, to: 'text' }, right: value } } };
+  const outOfRange: Expr = { kind: 'binary', op: 'and', left: integral,
     right: { kind: 'binary', op: 'or',
-      left: { kind: 'binary', op: '<', left: value, right: compilerInt(min) },
-      right: { kind: 'binary', op: '>', left: value, right: compilerInt(max) } } };
+      left: { kind: 'binary', op: '<', left: asInt, right: compilerInt(min) },
+      right: { kind: 'binary', op: '>', left: asInt, right: compilerInt(max) } } };
   const offenders = make.filter({ id: fresh('nof'), input: rel, channels: rel.channels, type: rel.type, pred: outOfRange });
   const one = make.project({ id: fresh('nop'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   const node = make.limit({ id: fresh('nol'), input: one, channels: [], type: one.type, count: compilerInt(1) });
@@ -1839,7 +1847,8 @@ function scalarTail(
       const value = col(rel.id, 'v');
       // The overflow guard below raises the reference's message for an INTEGER result; a REAL one (a
       // `mean`, a sum of doubles) is fenced inline, as every runtime `asNumber` is (`asNumberCast`).
-      const cast = asNumberCast(value, spec, true, true);
+      // Not `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT.
+      const cast = asNumberCast(value, spec, true);
       const carried = rel.channels;
       const projected = make.project({
         id: fresh('an'), input: rel, channels: carried,
@@ -1860,7 +1869,7 @@ function scalarTail(
     // `transformExpr` states — a scalar IS a one-element list, so both forms are the same over a value;
     // a LIST host's `asString(local)` (member stringify + a null-member guard) is `list.ts`'s.
     if (step.name === 'asString') {
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', out.kind === 'scalar' ? out.type : undefined);
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out));
       if (!tx) return null;
       const carried = rel.channels;
       const projected = make.project({
@@ -1889,8 +1898,7 @@ function scalarTail(
       // raises in-statement, rather than SQLite's coercion answering `upper(29)` = `'29'`.
       const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
       if (!offences) return null;
-      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values',
-        out.kind === 'scalar' ? out.type : undefined);
+      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out));
       if (!transformed) return null;
       const tx = { ...transformed, expr: raisingWhen(offences, transformed.expr) };
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
@@ -2082,7 +2090,9 @@ function scalarTail(
         // only the `aggregate().by(foo).cap().unfold().max()` path and dropped `g.inject(null,null).max()`
         // to an empty result. (sum/mean stay inherited below: SQL aggregation emits one NULL row even over
         // an EMPTY input, which those must SKIP — `SumGlobalStep` yields nothing over zero starts.)
-        out = { ...numeric, productiveNull: true };
+        // The winner of a known `long`/`bigint` stream is of that class, possibly decimal TEXT past 2^53 —
+        // stated statically for the `sumTower` arm's reason below (`wideClassOf`).
+        out = { ...numeric, ...wideClassOf(out), productiveNull: true };
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
@@ -2100,13 +2110,10 @@ function scalarTail(
         const weighted = bulk ? { kind: 'binary', op: '*', left: casted, right: col(rel.id, bulk.col) } as Expr : casted;
         const tower = sumTower({ kind: 'agg', fn: 'sum', args: [weighted] }, staticSumVt);
         rel = nonEmptyReducer(rel, [['v', tower.value], ['vt', tower.type]], fresh);
-        // The class is KNOWN, so it is stated STATICALLY — and as a TEXT-carried static
-        // (`sumTower` rides a result past 2^53 as decimal TEXT), the same type an injected wide `long`
-        // has. Every later consumer then reads it through the class: a predicate casts it before
-        // ordering (`predicate.ts` `ordered`), and equality meets a wide literal's own decimal text.
-        // As `result: 'number'` the type rode only in a `vt` column no predicate reads, so the text
-        // compared as a STRING — `inject(9007199254740992L, 29L).sum().is(gt(100))` answered nothing.
-        out = { kind: 'scalar', type: STATIC(staticSumVt, true), productiveNull: true };
+        // The class is KNOWN, so it is stated statically (`wideClassOf`) — and it STAYS `result: 'number'`:
+        // dropping that marker let a union merge lose the class (`sum().union(identity(), constant(5L)).sum()`
+        // answered an Int where it had declined).
+        out = { ...numeric, ...wideClassOf(out), productiveNull: true };
         continue;
       }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
@@ -3423,6 +3430,28 @@ export function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): read
 /** The winner row's own GREMLIN vtype — `int`/`long`/`string` from the stored `vtype` column or the
  *  source's static tag, else `typeof` (whose storage-class value the `result:'number'` framer routes to
  *  `sumBuffer`). The twin of `minMaxOrder`: the same authority, read off the SURVIVING row. */
+/**
+ * A REDUCER RESULT's static class, where the input's is a known `long`/`bigint`: the class `sum` keeps
+ * (`sumTower`) and the one a `min`/`max` winner already has. Stated as a TEXT-carried static — the
+ * value rides as decimal TEXT once past 2^53, the type an injected wide `long` has — so a later predicate
+ * casts before it orders (`predicate.ts` `ordered`) and `as()` records the class. Without it the subject
+ * was `SUBJECT_UNKNOWN`, whose storage-class test answered FALSE for the text:
+ * `inject(9007199254740992L, 29L).sum().is(P.gt(100))` and `inject(9007199254740993L, 1L).max().is(P.gt(100))`
+ * answered nothing. Only the `type` is set; the caller keeps `result: 'number'`, which is what every
+ * consumer not audited for a reducer result declines on (`variant.ts`'s branch merge, a filter body).
+ * Anything else stays `UNKNOWN` — its class is the `vt` column's, read only by the framer.
+ */
+export function wideClassOf(framing: RelFraming): { readonly type?: ScalarType } {
+  const known = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
+  return known && isLongSumClass(known) ? { type: STATIC(known, true) } : {};
+}
+
+/** The input type a value transform (`transformExpr`) is told about. A reducer result's class
+ *  (`wideClassOf`) is for its predicates and `as()`; no transform has been audited against it, so a
+ *  transform sees `UNKNOWN` there, as it did before the class was stated. */
+const transformInput = (framing: RelFraming): ScalarType | undefined =>
+  framing.kind !== 'scalar' ? undefined : framing.result === 'number' ? UNKNOWN : framing.type;
+
 export function minMaxWinnerVt(rel: Rel, framing: RelFraming): Expr {
   const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
   return rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype')

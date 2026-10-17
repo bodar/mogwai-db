@@ -7,7 +7,8 @@
 //    `v`, a token orders by its enum's declaration order, and anything else declines.
 // 2. A reducer never DROPS a text value: a `sum`/`mean` over one, and a `min`/`max` over text among
 //    numbers, defer — at every depth, because every reducer site shares the one guard.
-// 3. A sum over a known `long` class is stated as one, so a predicate after it compares the number.
+// 3. A sum/min/max over a known `long` class is stated as one, so a predicate after it compares the number —
+//    beside `result: 'number'`, so a branch merge after it still declines.
 // 4. A runtime `asNumber(GType.X)` defers where a SQLite CAST and `NumberHelper` disagree.
 // 5. A computed property value is stored with its type, or the write declines.
 // 6. A `constant()` inside a body keeps its declared type through a branch merge.
@@ -102,8 +103,34 @@ describe('a sum over a known long class compares as a number', () => {
     [`${WIDE}.as('a').where(__.select('a').is(P.lt(10007199254741021L))).select('a')`, [9007199254741021n]],
     ['g.inject(-9007199254740992L, -29L).sum().is(P.lt(-100))', [-9007199254741021n]],
     ['g.inject(9007199254740992L, 29L).fold().sum(local).is(P.lt(10007199254741021L))', [9007199254741021n]],
+    ['g.inject(9007199254740993L, 1L).max().is(P.gt(100))', [9007199254740993n]],
+    ['g.inject(9007199254740993L, 1L).fold().max(local).is(P.gt(100))', [9007199254740993n]],
+    ['g.inject(1L, 2L).sum().as(\'a\').select(\'a\')', [3]],
+    [`${WIDE}.as('a').select('a')`, [9007199254741021n]],
   ])('%s', async (q, want) => {
     expect(await typed(q)).toEqual(want.map((v) => [v, T.long]));
+  });
+
+  // The class rides beside `result: 'number'`, never in place of it: every consumer not audited for a
+  // reducer result (a branch merge, a filter body) still DECLINES, rather than merging the arms into a
+  // stream whose follow-on reducer types by storage class (an Int, where Long + Long is a Long —
+  // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452).
+  for (const q of [
+    "g.inject(1L,2L).sum().union(__.identity(), __.constant(5L)).sum()",
+    "g.inject(1L,2L).sum().union(__.identity(), __.constant(5L)).fold().sum(local)",
+    "g.inject(1L,2L).fold().sum(local).union(__.identity(), __.constant(5L)).sum()",
+    "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).sum()",
+    "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).max()",
+    "g.inject(1L,2L).sum().coalesce(__.is(4), __.constant(0))",
+    "g.inject(1L,2L).sum().choose(__.is(3), __.identity(), __.constant(1))",
+    "g.inject(9007199254740993L, 1L).max().union(__.identity(), __.constant(5L)).sum()",
+  ]) test(`declines: ${q}`, () => expect(typed(q)).rejects.toThrow(UnsupportedTraversal));
+
+  test('asNumber over a known long sum narrows as before: in range, or the reference overflow message', async () => {
+    expect(await typed('g.inject(1L,2L).sum().asNumber(GType.INT)')).toEqual([[3, T.int]]);
+    expect(await typed(`${WIDE}.asNumber(GType.DOUBLE)`)).toEqual([[9007199254741020, T.double]]);
+    // NumberHelper.java:766's message, raised by the reducer-result overflow guard over the decimal TEXT.
+    await expect(typed(`${WIDE}.asNumber(GType.INT)`)).rejects.toThrow("Can't convert number of type Long to Integer due to overflow.");
   });
 });
 
@@ -142,7 +169,7 @@ describe('a computed property value is stored with its type, or the write declin
   });
 
   test('a type a NULL vtype would retype declines (a Date read back as an Int)', () => {
-    expect(typed("g.V(1).property('n', __.values('age').asDate())")).rejects.toThrow(UnsupportedTraversal);
+    return expect(typed("g.V(1).property('n', __.values('age').asDate())")).rejects.toThrow(UnsupportedTraversal);
   });
 });
 

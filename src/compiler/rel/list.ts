@@ -709,6 +709,7 @@ export function listRetype(
     const members = membersOf(col(host.id, LIST_COL), fresh);
     const payload = memberPayload(of, members);
     const memberType = memberTypeOf(of);
+    const wideClass = memberType?.kind === 'static' && isLongSumClass(memberType.type) ? STATIC(memberType.type, true) : undefined;
     /** One correlated subquery over the members, projecting one named column. */
     const scalar = (value: Expr, name: string, type: 'any' | 'text'): readonly [string, Expr] => [name, {
       kind: 'scalar',
@@ -775,7 +776,9 @@ export function listRetype(
         rel: withPayload(held,
           [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
           [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-        type: UNKNOWN, result: 'number' as const, ...productive,
+        // A known `long`/`bigint` member class is the winner's, stated as the row-level arm states it
+        // (`wideClassOf`, `lower.ts`) so a later predicate casts the decimal TEXT before ordering.
+        type: wideClass ?? UNKNOWN, result: 'number' as const, ...productive,
       };
     }
 
@@ -788,11 +791,13 @@ export function listRetype(
     if (step.name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
       const casted = storedCompareOn(compilerText(memberType.type))(payload);
       const tower = sumTower({ kind: 'agg', fn: 'sum', args: [casted] }, memberType.type);
-      // The class is KNOWN, so it is stated statically as a TEXT-carried static — the row-level
-      // `sumTower` arm's framing (`lower.ts`), for the same reason: a later predicate must cast it.
+      // The class is KNOWN, so it is stated as a TEXT-carried static beside the `vt` column — the
+      // row-level `sumTower` arm's framing (`lower.ts`), for the same reason: a later predicate must
+      // cast it, while `result: 'number'` keeps every consumer not audited for a reducer declining.
       return {
-        rel: withPayload(host, [scalar(tower.value, 'v', 'any')], [meta('v', 'any', true)], fresh),
-        type: STATIC(memberType.type, true), ...productive,
+        rel: withPayload(host, [scalar(tower.value, 'v', 'any'), scalar(tower.type, 'vt', 'text')],
+          [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+        type: STATIC(memberType.type, true), result: 'number' as const, ...productive,
       };
     }
 
