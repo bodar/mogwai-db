@@ -7,6 +7,9 @@ import '../../../src/browser/buffer-global.ts'; // first — Buffer for the resp
 import { makeRouter } from '../../../src/router.ts';
 import { BrowserGraphManager, LocalWorkerSource } from '../../../src/browser/BrowserGraphManager.ts';
 import { ioc } from '../../../src/io.ts';
+import { spawnGraphWorker, destroyGraphWorker } from '../../../src/browser/worker-spawn.ts';
+import type { GraphWorkerHost } from '../../../src/browser/GraphWorkerHost.ts';
+import { newMessagePortRpcSession } from 'capnweb';
 
 const results: { name: string; ok: boolean; error?: string }[] = [];
 async function check(name: string, fn: () => Promise<void>): Promise<void> {
@@ -77,6 +80,86 @@ self.onmessage = async () => {
         if (j.vertexCount !== 0) throw new Error(`cycle ${i}: after destroy = ${JSON.stringify(j)}`);
         await manager.destroy(G);
       }
+    });
+
+    // A request for a graph issued WHILE its destroy is in flight is ordered after the destroy: it must land
+    // on a fresh graph that survives — never spawn a second Worker over the directory the old one still
+    // holds handles in, only for the destroy's removal to delete it underneath the new Worker.
+    await check('a write issued during destroy lands on the fresh graph and survives (×3)', async () => {
+      for (let i = 0; i < 3; i++) {
+        const G = `coord-overlap-${stamp}-${i}`;
+        await post(G, "g.addV('person').property('name','before').as('a').addE('self').to('a')");
+        // Cycle 0 destroys a BUSY Worker (a runaway query), whose teardown takes the bounded-close path —
+        // the widest window for a new Worker to race the old one's still-held handles.
+        if (i === 0) {
+          void post(G, 'g.V().repeat(both()).emit().count()').catch(() => {});
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        // manager.destroy directly (not a DELETE through the router), so the destroy is issued FIRST — the
+        // router's own awaits would leave which request reaches the manager first to scheduling.
+        const del = manager.destroy(G);
+        const write = post(G, "g.addV('person').property('name','after')");
+        const [, w] = await Promise.all([del, write]);
+        if (w.status !== 200) throw new Error(`cycle ${i}: write status ${w.status}: ${await w.text()}`);
+        const names = (await read(G, 'g.V().values("name")')).map(String);
+        if (JSON.stringify(names) !== JSON.stringify(['after'])) throw new Error(`cycle ${i}: after overlap = ${JSON.stringify(names)}`);
+        await manager.destroy(G);
+      }
+    });
+
+    // The OPEN-side twin of the destroy race: a graph's owner Worker dies WITHOUT a close (its tab was closed —
+    // the cross-tab failover case — modelled here by terminate()), and a new Worker opens the same graph
+    // straight away. The dead Worker's access handles are released only when its thread is torn down, with
+    // no event to await, so the new pool must wait them out rather than fail its open (which would leave the
+    // graph unopenable for that Worker's whole life) — and must find the committed data intact.
+    await check('a graph re-opened right after its owner Worker died waits out the handles, data intact (×3)', async () => {
+      for (let i = 0; i < 3; i++) {
+        const T = `coord-reopen-${stamp}-${i}`;
+        const a = spawnGraphWorker('/graph-worker.js', T);
+        const sa = newMessagePortRpcSession<GraphWorkerHost>(a.port);
+        await sa.framed("g.addV('person').as('a').addE('self').to('a')", {});
+        void Promise.resolve(sa.framed('g.V().repeat(both()).emit().count()', {})).catch(() => {}); // busy at death
+        await new Promise((r) => setTimeout(r, 200));
+        a.worker.terminate();
+        const b = spawnGraphWorker('/graph-worker.js', T);
+        const sb = newMessagePortRpcSession<GraphWorkerHost>(b.port);
+        try {
+          const info = await sb.info();
+          if (info.vertexCount !== 1 || info.edgeCount !== 1) throw new Error(`cycle ${i}: reopened = ${JSON.stringify(info)}`);
+        } finally {
+          sa[Symbol.dispose]();
+          sb[Symbol.dispose]();
+          await destroyGraphWorker(b.worker, T); // b is healthy: closes, then removes the directory
+        }
+      }
+    });
+
+    // Destroy while the graph's Worker is BUSY: a cyclic repeat() with no times() is infinite per the spec
+    // (and the browser has no per-request limit), so the Worker's one thread never dequeues a close request.
+    // The destroy must still finish — bounded, by terminating the Worker — and remove the store; and the cut-off
+    // query must FAIL, never be retried against the fresh empty graph a retry would resurrect.
+    await check('destroy during a runaway query is bounded, removes the store, and fails the query', async () => {
+      const R = `coord-runaway-${stamp}`;
+      await post(R, "g.addV('person').as('a').addE('self').to('a')");
+      const runaway = post(R, 'g.V().repeat(both()).emit().count()').then(
+        async (res) => {
+          const bytes = Buffer.from(await res.arrayBuffer());
+          const r = await ioc.graphBinaryReader.readResponse(bytes).catch((e: unknown) => ({ status: { code: -1, message: String(e) }, result: { data: [] } }));
+          return { http: res.status, code: r.status?.code, message: String(r.status?.message ?? ''), data: r.result?.data };
+        },
+        (e: unknown) => ({ http: -1, code: -1, message: String(e), data: undefined }),
+      );
+      await new Promise((r) => setTimeout(r, 500)); // let the Worker get stuck in the query
+      const within = <T>(p: Promise<T>, ms: number, what: string) =>
+        Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${what} still pending after ${ms}ms`)), ms))]);
+      const del = await within(router(new Request(`http://x/gremlin/${R}`, { method: 'DELETE' })), 25_000, 'DELETE');
+      if (del.status !== 204) throw new Error(`delete status ${del.status}: ${await del.text()}`);
+      const out = await within(runaway, 5_000, 'the cut-off query');
+      const failed = out.http >= 400 || (out.code !== undefined && out.code !== 200 && out.code !== 204);
+      if (!failed || !/destroyed/.test(out.message)) throw new Error(`cut-off query did not fail as destroyed: ${JSON.stringify(out)}`);
+      const j = await (await router(new Request(`http://x/gremlin/${R}`, { method: 'OPTIONS' }))).json() as any;
+      if (j.vertexCount !== 0) throw new Error(`after destroy = ${JSON.stringify(j)}`);
+      await manager.destroy(R);
     });
 
     (self as any).postMessage({ results });

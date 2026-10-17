@@ -159,22 +159,23 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
   }
 
   async destroy(id: string): Promise<void> {
+    // Detach the graph's stub FIRST (synchronously): a request arriving mid-destroy must solicit a fresh
+    // Worker (which the factory holds back until its teardown is done), and a port delivered for that new
+    // Worker must not be mistaken for the old one and then dropped by this destroy's cleanup.
+    const cur = this.current.get(id);
+    this.current.delete(id);
+    this.currentOwner.delete(id);
     const factories = await this.ensureFactories().catch(() => new Set<RpcStub<WorkerFactory>>());
     // Every tab removes the directory; a non-leader's removal may lose to the leader still closing its
     // Worker (NoModificationAllowedError) and that is fine once ANY tab's removal succeeded — the
     // directory is gone. Only if EVERY tab failed did the destroy not happen, and then it must fail
     // rather than report success over data that is still there.
     const outcomes = await Promise.allSettled([...factories].map((f) => f.destroyGraph(id)));
-    const cur = this.current.get(id);
-    if (cur) {
-      try {
-        cur[Symbol.dispose]();
-      } catch {
-        /* already dead */
-      }
-      this.current.delete(id);
+    try {
+      cur?.[Symbol.dispose](); // rejects any call still in flight on the destroyed Worker
+    } catch {
+      /* already dead */
     }
-    this.currentOwner.delete(id);
     if (outcomes.length > 0 && outcomes.every((o) => o.status === 'rejected')) {
       throw (outcomes[0] as PromiseRejectedResult).reason;
     }

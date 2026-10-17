@@ -1,6 +1,7 @@
 // Shared browser plumbing for a graph's dedicated Worker: spawning it, bootstrapping a fresh capnweb
-// session port to it, and removing its OPFS database. Used by both the LocalWorkerSource (a context that
-// spawns its own Workers) and the WorkerFactory (the page that spawns on the Service Worker's behalf).
+// session port to it, and tearing it down + removing its OPFS database. Used by both the
+// LocalWorkerSource (a context that spawns its own Workers) and the WorkerFactory (the page that spawns
+// on the Service Worker's behalf).
 //
 // It also declares the ONE native message class the browser port uses: the capnweb `Bootstrap` — a
 // MessagePort hand-off. capnweb's own MessagePortTransport posts with no transfer list, so it cannot
@@ -11,6 +12,7 @@
 import { newMessagePortRpcSession } from 'capnweb';
 import type { MogwaiConfig } from '../config.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
+import { retryWhileHandleHeld } from './opfs-release.ts';
 
 /** The native messages between the Service Worker edge and a WorkerFactory page. All are transport
  *  bootstraps: `*-port` hands a MessagePort over (transferred), `need-control` is the SW re-soliciting a
@@ -61,24 +63,56 @@ export function spawnRegistryWorker(workerUrl: string | URL): { worker: Worker; 
   return { worker, port: bootRegistrySession(worker) };
 }
 
-/** Shut graph `graphId`'s Worker down so its OPFS directory is REMOVABLE when this resolves: over a fresh
- *  session, ask the host to `close()` its store (which releases the opfs-sahpool access handles inside
- *  the Worker, synchronously), and only then terminate it. The ONE place a graph Worker is torn down —
- *  both the LocalWorkerSource and the WorkerFactory route through it.
+/** Where graph `graphId`'s opfs-sahpool database lives in OPFS — the ONE spelling of that path, shared by
+ *  the Worker that opens it (GraphWorkerHost) and the teardown that removes it (`destroyGraphWorker`). */
+export function graphOpfsDir(graphId: string): string {
+  return `.mogwai/${encodeURIComponent(graphId)}`;
+}
+
+/** How long `destroyGraphWorker` waits for a graph Worker to answer `close()` before terminating it. A
+ *  healthy Worker answers in milliseconds; one that does not is busy inside a synchronous query (a cyclic
+ *  `repeat()` with no `times()` is infinite per the spec, and the browser has no per-request limit), and a
+ *  busy Worker never even dequeues the close message — so an unbounded wait would hang the destroy (and,
+ *  in the WorkerFactory, the graph's Web Lock) forever. */
+const CLOSE_TIMEOUT_MS = 2_000;
+
+/** Tear graph `graphId` down and remove its OPFS database — the ONE place a graph Worker is torn down and
+ *  its storage deleted; both the LocalWorkerSource and the WorkerFactory route through it. `worker` is the
+ *  graph's Worker if this context owns one (absent ⇒ just remove the directory). Resolves only once the
+ *  directory is GONE; rejects if it could not be removed, so a destroy never reports success over data
+ *  that is still there.
  *
- *  Why not just `terminate()`: OPFS refuses to remove a directory while any `SyncAccessHandle` inside it
- *  is open (`NoModificationAllowedError`), and a terminated Worker's handles are released only when its
- *  thread is eventually torn down — HTML's terminate is fire-and-forget, with no completion event — so a
- *  removal right after it raced the teardown and lost (a ~50% CI flake, deterministic in a tight loop).
- *  A host that never opened (its open rejected) holds no handles, so its close rejecting is ignored; if
- *  the directory is still locked regardless, `removeOpfsDir` says so rather than reporting success. */
-export async function closeGraphWorker(worker: Worker, graphId: string): Promise<void> {
+ *  OPFS refuses to remove a directory while any `SyncAccessHandle` inside it is open
+ *  (`NoModificationAllowedError`), and the opfs-sahpool VFS holds one on every file of its pool for as long
+ *  as it is installed. So, in order:
+ *   1. CLOSE (the normal path): over a fresh session ask the host to `close()` — it closes the database and
+ *      `pauseVfs()`es the pool, releasing every handle SYNCHRONOUSLY inside the Worker
+ *      (`FileSystemSyncAccessHandle.close()` is sync). Its RPC resolving is a real completion signal, so
+ *      the removal that follows is a single attempt — no retry: a refusal then is a genuine failure.
+ *   2. TERMINATE, always. Bounded by {@link CLOSE_TIMEOUT_MS}: a Worker stuck in a runaway query is killed
+ *      rather than waited on (terminate is what interrupts a synchronous wasm loop at all).
+ *   3. If the close did NOT complete (timed out, or the host rejected it), the handles are released only by
+ *      the terminated thread's teardown, which the platform gives no event for — so ONLY on this fallback
+ *      path the removal is retried while refused, bounded (`retryWhileHandleHeld`, opfs-release.ts). */
+export async function destroyGraphWorker(worker: Worker | undefined, graphId: string): Promise<void> {
+  const dir = graphOpfsDir(graphId);
+  const released = worker ? await closeGraphWorker(worker, graphId) : true;
+  if (released) await removeOpfsDir(dir);
+  else await retryWhileHandleHeld(() => removeOpfsDir(dir));
+}
+
+/** Ask the Worker's host to close its store, wait at most {@link CLOSE_TIMEOUT_MS}, then terminate it.
+ *  Answers whether the close COMPLETED — i.e. whether the handles are known to be released now. A host that
+ *  never opened rejects its close (it holds no handles, but we cannot tell that from a busy one that has
+ *  not answered), so only a resolved close counts. */
+async function closeGraphWorker(worker: Worker, graphId: string): Promise<boolean> {
   const stub = newMessagePortRpcSession<GraphWorkerHost>(bootSession(worker, graphId));
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await stub.close();
-  } catch {
-    /* the host never opened — nothing to release */
+    const timeout = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), CLOSE_TIMEOUT_MS); });
+    return await Promise.race([Promise.resolve(stub.close()).then(() => true, () => false), timeout]);
   } finally {
+    clearTimeout(timer);
     try {
       stub[Symbol.dispose]();
     } catch {
@@ -90,10 +124,8 @@ export async function closeGraphWorker(worker: Worker, graphId: string): Promise
 
 /** Remove a graph's OPFS database directory (recursively) if present; a missing directory is a no-op.
  *  Navigates to the PARENT and removes only the leaf, so `.mogwai/<id>` never wipes the whole `.mogwai`
- *  tree. Call it only after `closeGraphWorker` — while any Worker still holds the graph's access handles
- *  the removal throws `NoModificationAllowedError`, and that propagates: a destroy that did not destroy
- *  must fail, never report success over data that is still there. */
-export async function removeOpfsDir(path: string): Promise<void> {
+ *  tree. A refusal (`NoModificationAllowedError` — a handle inside is still open) propagates. */
+async function removeOpfsDir(path: string): Promise<void> {
   const segs = path.split('/').filter((s) => s.length > 0);
   const leaf = segs.pop();
   if (leaf === undefined) return;

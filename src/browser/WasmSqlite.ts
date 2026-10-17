@@ -17,6 +17,7 @@
 // Bun and its `browser` export under the browser bundler — same statement, target-selected build.
 import sqlite3InitModule, { type Database, type Sqlite3Static, type SqlValue } from '@sqlite.org/sqlite-wasm';
 import type { Sql } from '../storage.ts';
+import { retryWhileHandleHeld } from './opfs-release.ts';
 
 /** `Sql` over an `@sqlite.org/sqlite-wasm` OO1 database handle. Synchronous — the OO1 API is, on every
  *  VFS. Construct with a handle from {@link memoryWasmSqlFactory} (in-memory) or
@@ -76,7 +77,15 @@ export async function opfsSahpoolWasmSql(directory: string, dbName = 'graph.sqli
   // The VFS registration name must be a plain identifier (no path separators), so sanitize the
   // directory into one; the `directory` itself may carry `/` path elements (created automatically).
   const name = `mogwai-${directory.replace(/[^A-Za-z0-9_.-]/g, '_')}`;
-  const pool = await sqlite3.installOpfsSAHPoolVfs({ name, directory });
+  // A previous owner that died WITHOUT closing (its tab closed → failover; a Worker terminated mid-query)
+  // may still hold the files' access handles, released whenever its thread is torn down with no event to
+  // await — so the install (which takes a handle on every file) is retried while refused, bounded
+  // (`retryWhileHandleHeld`, opfs-release.ts). `forceReinitIfPreviouslyFailed` is what makes a retry a real
+  // retry: sqlite-wasm otherwise caches the failed init per VFS name and replays its rejection forever
+  // (`installOpfsSAHPoolVfs` in @sqlite.org/sqlite-wasm's dist/index.mjs; its .d.ts omits the option, so
+  // the options are built as a variable rather than a literal the excess-property check would reject).
+  const options = { name, directory, forceReinitIfPreviouslyFailed: true };
+  const pool = await retryWhileHandleHeld(() => sqlite3.installOpfsSAHPoolVfs(options));
   // The pool holds an exclusive `SyncAccessHandle` on EVERY file in `directory` for as long as it is
   // installed — not only while the database is open — and OPFS refuses to remove a directory while any
   // handle inside it is open (`NoModificationAllowedError`). So `close()` also `pauseVfs()`es, which

@@ -22,6 +22,9 @@ describe.skipIf(!browserLaneEnabled())('browser: manager + makeRouter over per-g
     'management PUT creates (201)',
     'destroy wipes the store; re-address recreates it empty',
     'destroy is reliable under repetition (write → destroy → re-address, ×5)',
+    'a write issued during destroy lands on the fresh graph and survives (×3)',
+    'a graph re-opened right after its owner Worker died waits out the handles, data intact (×3)',
+    'destroy during a runaway query is bounded, removes the store, and fails the query',
   ];
 
   test('the driver ran every edge check (no fatal)', () => {

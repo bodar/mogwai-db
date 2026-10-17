@@ -76,6 +76,33 @@ async function main() {
     }
   });
 
+  // Destroy a BUSY graph over the edge: a runaway query (a cyclic repeat() with no times(), infinite per
+  // the spec) occupies the graph Worker's one thread, so it never answers a close request. The factory's
+  // teardown must still finish — bounded, by terminating the Worker — remove the store and release the
+  // graph's Web Lock (a re-address below needs it), and the cut-off query must fail, never be answered.
+  await check('destroy over the Service Worker edge during a runaway query is bounded and fails the query', async () => {
+    const url = `${location.origin}/gremlin/${G}-runaway`;
+    const send = (gremlinText: string) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/vnd.graphbinary-v4.0' }, body: JSON.stringify({ gremlin: gremlinText }) });
+    await send("g.addV('person').as('a').addE('self').to('a')");
+    const runaway = send('g.V().repeat(both()).emit().count()').then(
+      async (res) => {
+        const r = await ioc.graphBinaryReader.readResponse(Buffer.from(await res.arrayBuffer())).catch((e: unknown) => ({ status: { code: -1, message: String(e) }, result: { data: [] } }));
+        return { http: res.status, code: r.status?.code, message: String(r.status?.message ?? ''), data: r.result?.data };
+      },
+      (e: unknown) => ({ http: -1, code: -1, message: String(e), data: undefined }),
+    );
+    await new Promise((r) => setTimeout(r, 500)); // let the Worker get stuck in the query
+    const within = <T,>(p: Promise<T>, ms: number, what: string) =>
+      Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${what} still pending after ${ms}ms`)), ms))]);
+    const del = await within(fetch(url, { method: 'DELETE' }), 25_000, 'DELETE');
+    if (del.status !== 204) throw new Error(`delete status ${del.status}: ${await del.text()}`);
+    const out = await within(runaway, 5_000, 'the cut-off query');
+    const failed = out.http >= 400 || (out.code !== undefined && out.code !== 200 && out.code !== 204);
+    if (!failed || !/destroyed/.test(out.message)) throw new Error(`cut-off query did not fail as destroyed: ${JSON.stringify(out)}`);
+    const j = await within((async () => (await fetch(url, { method: 'OPTIONS' })).json() as Promise<any>)(), 15_000, 're-address');
+    if (j.vertexCount !== 0) throw new Error(`after destroy = ${JSON.stringify(j)}`);
+  });
+
   (window as any).__result = { results };
   (window as any).__done = true;
 }

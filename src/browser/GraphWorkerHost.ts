@@ -24,6 +24,7 @@ import { httpAwareIoStore } from '../http-io.ts';
 import { defaultHttp, remoteOrLocal } from '../http-federation.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { opfsSahpoolWasmSql } from './WasmSqlite.ts';
+import { graphOpfsDir } from './worker-spawn.ts';
 import { RpcTarget } from 'capnweb';
 
 /** How a graph's synchronous store is opened. Defaults to that graph's own opfs-sahpool database (one
@@ -34,7 +35,7 @@ export type GraphSqlFactory = (graphId: string) => Promise<GraphSql>;
  *  EVERY resource the store holds (for opfs-sahpool, its OPFS access handles) before it returns. */
 export type GraphSql = Sql & { close(): void };
 
-const opfsSahpoolFactory: GraphSqlFactory = (graphId) => opfsSahpoolWasmSql(`.mogwai/${encodeURIComponent(graphId)}`);
+const opfsSahpoolFactory: GraphSqlFactory = (graphId) => opfsSahpoolWasmSql(graphOpfsDir(graphId));
 
 export interface GraphWorkerHostOptions {
   /** The service registry (federation on by default). */
@@ -125,7 +126,7 @@ export class GraphWorkerHost extends RpcTarget {
 
   /** Close this graph's store and release its OPFS access handles — synchronously, so this RPC resolving
    *  IS the guarantee that the graph's OPFS directory can now be removed. The manager awaits it before
-   *  terminating the Worker and removing the directory (`closeGraphWorker`, worker-spawn.ts): terminating
+   *  terminating the Worker and removing the directory (`destroyGraphWorker`, worker-spawn.ts): terminating
    *  alone releases the handles only whenever the Worker's thread is torn down, with nothing to await, so
    *  the removal raced it (`NoModificationAllowedError`). The host is unusable afterwards — the Worker is
    *  terminated next. Idempotent. */

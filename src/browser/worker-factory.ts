@@ -8,7 +8,7 @@
 // capnweb cannot itself carry (worker-spawn.ts).
 import { newMessagePortRpcSession, RpcTarget } from 'capnweb';
 import {
-  spawnGraphWorker, bootSession, closeGraphWorker, spawnRegistryWorker, bootRegistrySession, removeOpfsDir, type BootstrapMessage,
+  spawnGraphWorker, bootSession, destroyGraphWorker, spawnRegistryWorker, bootRegistrySession, type BootstrapMessage,
 } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
 
@@ -36,6 +36,10 @@ export class WorkerFactory extends RpcTarget {
    *  itself, which is why "same owner" always means a duplicate delivery and never a new Worker. */
   private readonly ownerId = crypto.randomUUID();
   private readonly graphs = new Map<string, Leadership>();
+  /** Teardowns in flight, by graph id. An `openGraph` of that id waits for it, and a second `destroyGraph`
+   *  queues behind it: a Worker spawned mid-teardown would install its opfs-sahpool over a directory the
+   *  old Worker still holds handles in, and the teardown's removal would then delete it under the NEW one. */
+  private readonly destroying = new Map<string, Promise<void>>();
   /** This tab's stake in the SINGLETON registry Worker — the same Web-Lock leadership as a graph, keyed
    *  `mogwai-registry`, so exactly one tab owns the registry Worker and the rest fail over to it. */
   private registry?: Leadership;
@@ -56,6 +60,7 @@ export class WorkerFactory extends RpcTarget {
    *  not (yet) leader does nothing — the current leader delivers, and if the leader dies this tab's lock
    *  callback fires and delivers then (failover). Idempotent per id. */
   async openGraph(id: string): Promise<void> {
+    for (let p; (p = this.destroying.get(id)); ) await p.catch(() => {}); // its failure is ITS caller's
     let g = this.graphs.get(id);
     if (!g) {
       const abort = new AbortController();
@@ -66,6 +71,7 @@ export class WorkerFactory extends RpcTarget {
       // browser releases the lock when this tab's document is destroyed, promoting the next waiter.
       navigator.locks
         .request(`mogwai-graph-${id}`, { signal: abort.signal }, () => {
+          if (this.graphs.get(id) !== L) return; // destroyed while queued: never spawn over a removed graph
           L.isLeader = true;
           this.deliver(id, L); // granted leadership (initial election OR failover) → spawn + push a port
           return heldUntilAborted(abort.signal);
@@ -100,18 +106,28 @@ export class WorkerFactory extends RpcTarget {
     }
   }
 
-  /** Tear down graph `id` (idempotent): release/cancel this tab's lock (so a queued tab does not later
-   *  resurrect a destroyed graph), terminate the Worker if we own it, and remove the OPFS database. */
-  async destroyGraph(id: string): Promise<void> {
-    const g = this.graphs.get(id);
-    if (g) {
+  /** Tear down graph `id` (idempotent): terminate the Worker if we own it and remove the OPFS database
+   *  (`destroyGraphWorker` — bounded, so a Worker stuck in a runaway query cannot hang it), then release /
+   *  cancel this tab's lock so a queued tab does not later resurrect a destroyed graph. The lock is released
+   *  only AFTER the teardown: releasing it lets a queued tab take leadership and re-open the graph's pool,
+   *  which must not happen over this tab's still-held handles or a half-removed directory. Registered
+   *  SYNCHRONOUSLY, so no `openGraph` can slip in before the old Leadership leaves the map. */
+  destroyGraph(id: string): Promise<void> {
+    const prev = this.destroying.get(id);
+    const tracked: Promise<void> = (async () => {
+      await prev?.catch(() => {});
+      const g = this.graphs.get(id);
       this.graphs.delete(id);
-      // Close BEFORE releasing the lock: the abort lets a queued tab take leadership and re-open the
-      // graph's pool, so this tab's handles must already be released by then.
-      if (g.worker) await closeGraphWorker(g.worker, id); // resolves once its opfs-sahpool handles are released
-      g.abort.abort();
-    }
-    await removeOpfsDir(`.mogwai/${encodeURIComponent(id)}`);
+      try {
+        await destroyGraphWorker(g?.worker, id);
+      } finally {
+        g?.abort.abort();
+      }
+    })().finally(() => {
+      if (this.destroying.get(id) === tracked) this.destroying.delete(id);
+    });
+    this.destroying.set(id, tracked);
+    return tracked;
   }
 
   /** As leader for `id`: spawn its Worker if we don't own one yet (on failover this re-opens opfs-sahpool
