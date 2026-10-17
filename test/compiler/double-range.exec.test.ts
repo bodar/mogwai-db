@@ -57,7 +57,7 @@ describe('a stored Double outside the exact range rides the element payload exac
     for (const v of await decodeAll(executeQuery(store, "g.V().hasLabel('f')"))) byId.set(v.id, v.properties[0].value);
     const wrong = values.filter((x, i) => !Object.is(byId.get(ids[i]!), x));
     expect(wrong).toEqual([]);
-  });
+  }, 60_000); // ~425 sequential writes + a read: >5 s under the cored fan-out, so bun's 5 s default flakes
 
   test('g.E() — an edge property', async () => {
     const store = seededStore();
