@@ -49,6 +49,22 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     `g.V(1,2).as('a').addLabel('z').select('a').has('name','marko').property('n', __.V().hasLabel('z').count())`,
     `g.V(1,2).addLabel('z').range(0,1).property('n', __.V().hasLabel('z').count())`,
     `g.V(1,2).addLabel('z').tail(1).property('n', __.V().hasLabel('z').count())`,
+    // writes in a UNION's arms: `BranchStep` drains each arm lazily and only then the next
+    // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153),
+    // so arm 2's writes run after arm 1's traversers passed the site, and an arm's own write over an
+    // arm-internal stream interleaves too. The branch's input is ONE traverser in each (reference 1, 1, 0,
+    // 7, 0, 1, 1, 1; we answered 2, 2, 1, 8, 1, 2, 2, 2).
+    `g.union(__.addV('x'), __.addV('x')).limit(1).property('n', __.V().hasLabel('x').count())`,
+    `g.union(__.addV('x'), __.addV('x')).range(0,1).property('n', __.V().hasLabel('x').count())`,
+    `g.union(__.addV('x'), __.addV('y')).hasLabel('x').property('n', __.V().hasLabel('y').count())`,
+    `g.union(__.addV('x'), __.addV('y')).hasLabel('x').property('n', __.V().count())`,
+    `g.union(__.addV('x'), __.V(1).property('a',1)).hasLabel('x').property('n', __.V().values('a').count())`,
+    `g.union(__.addV('x').property('a',1), __.addV('x')).limit(1).property('n', __.V().hasLabel('x').count())`,
+    `g.union(__.V(1,2).addLabel('z')).has('name','marko').property('n', __.V().hasLabel('z').count())`,
+    `g.union(__.inject(1,2).addV('x')).limit(1).property('n', __.V().hasLabel('x').count())`,
+    // the count is a statement of its own over the write's input, so a program that DRAWS cannot be
+    // counted — the count would draw afresh (`ProgramWrites.draws`)
+    `g.V().sample(1).property('a',1).has('name').property('n', __.V().values('a').count())`,
   ];
   for (const traversal of refused) test(traversal, () => {
     expect(() => run(seededStore(), traversal)).toThrow(SEQUENTIAL);
@@ -62,6 +78,7 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     // an upstream write the body cannot observe is no reason to refuse
     [`g.V(1,2).property('b',1).has('name','marko').property('n', __.V().values('a').count())`, `g.V(1).values('n')`, 0],
     [`g.V(1,2).addLabel('z').limit(1).property('n', __.values('name'))`, `g.V(1).values('n')`, 'marko'],
+    [`g.V(1).union(__.addLabel('z')).property('n', __.values('name'))`, `g.V(1).values('n')`, 'marko'],
   ];
   for (const [traversal, check, expected] of answered) test(traversal, () => {
     const store = seededStore();

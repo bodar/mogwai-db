@@ -244,10 +244,19 @@ export function branchResult<T extends FramedRel>(merged: T | null, ctx: ChainCt
 
 /** Fold a branch's own effects (a write in one of its arms) into the tail lowered over its result — the
  *  arm's write bindings run BEFORE the tail, exactly as a top-level write's precede their tail, and the
- *  branch is UPSTREAM of that tail as any write is (`afterWrite`): `input` is the stream it ran over. */
+ *  branch is UPSTREAM of that tail as any write is (`afterWrite`).
+ *
+ *  Its stream is UNCOUNTABLE (`null`), so a downstream `property(k, <traversal>)` body that observes the
+ *  arms' writes always refuses. The reference drains the options ONE AT A TIME, each lazily —
+ *  `BranchStep.standardAlgorithm` returns an option's end step while it `hasNext()` and moves to the next
+ *  only once it is exhausted
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153`)
+ *  — so arm 2's writes run only after arm 1's traversers have gone all the way through the site, and an
+ *  arm's own write over an arm-internal stream (`union(__.V(1,2).addLabel('z'))`) interleaves with it as
+ *  well. Neither the branch's input nor its merged output counts the traversers through ITS writes. */
 const withBranchEffects = (
-  merged: BranchRel, step: IRStep, input: Rel, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
-): Tail | null => (merged.effects?.length ? afterWrite(ctx.writes, input, [step], merged.effects, ctx.params, fresh, tail) : tail());
+  merged: BranchRel, step: IRStep, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
+): Tail | null => (merged.effects?.length ? afterWrite(ctx.writes, null, [step], merged.effects, ctx.params, fresh, tail) : tail());
 
 /**
  * THE FAN-OUT SORT KEY, carried past the merge as two `origin` channels (the role the channel core
@@ -1552,7 +1561,7 @@ function scalarTail(
     if (BRANCH_HOSTS.has(step.name)) {
       const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels, { steps, at });
       if (!merged) return null;
-      return withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
+      return withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
 
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
@@ -3938,10 +3947,10 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   if (first.name === 'union') {
     const merged = sourceUnion(first, ctx, fresh);
     if (!merged) return null;
-    // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — a
-    // source union's single start makes arm-major order correct, so this composes like any other write.
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    return withBranchEffects(merged, first, one, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
+    // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — arm-major
+    // order makes the writes' own answer correct; a downstream body that OBSERVES them refuses
+    // (`withBranchEffects`), since arm 2 writes only after arm 1 has run through the rest of the chain.
+    return withBranchEffects(merged, first, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
   }
 
   if (first.name === 'inject') {
@@ -4439,7 +4448,7 @@ function elementTail(
       // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
       // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
       // heavier slice form — it trips `framed`'s backstop and declines the traversal.
-      return withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
+      return withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
     if (step.name === 'repeat') {
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
@@ -4818,7 +4827,7 @@ function propertyTail(
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels, { steps, at: from });
-    return merged && withBranchEffects(merged, step, rel, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases));
+    return merged && withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases));
   }
 
   // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with

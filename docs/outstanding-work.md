@@ -29,6 +29,13 @@ lowered.
   reducer **type** (`produced.vtype`) and **productivity** (empty-child NULL-ness) as two carried facts,
   so `by(sum/mean/…)` lands uniformly across `project`/`aggregate`/`store`/`where` (`group().by(k).by(__.…sum())`
   already works; the sibling hosts drop the fact). Rules RelIR §6·7; live gaps §10.
+  **Numeric reducer RESULT CLASS** (read side, and so every `property(k, __.…max())` that stores it): the
+  reference answers the HIGHEST COMMON class over all inputs (`NumberHelper.getHighestCommonNumberInfo`,
+  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390`;
+  `max`/`min` at :613 widen too), we answer the winner's own type (`max`/`min`) or the aggregate's storage
+  class (`sum`/`mean`). Wrong today: `inject(2, 1.0d).max()` Int (ref Double), `inject(2, 1L).max()` Int
+  (ref Long), `inject(2f, 1f).sum()` Double (ref Float), byte/short `sum()` untyped, `mean()` of
+  BigInteger Double (ref BigDecimal). Needs a per-input class rank aggregated beside the value.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full

@@ -29,6 +29,7 @@ import { constLit } from './const.ts';
 import { fieldCol, framingCols, type RelFraming } from './framing.ts';
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, OTHER_V, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
+import { nondeterministic } from './ranked-order.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -972,6 +973,8 @@ const readsLabelToken = (values: readonly unknown[]): boolean => values.some(fun
  *
  * A nested body the walk cannot read, or an `io()` (a read loads a whole graph), is `everythingWritten`.
  *
+ *  - `draws` — the program holds a random step (`nondeterministic`, ranked-order.ts), so no relation
+ *    re-evaluated in a statement of its own counts the stream another statement consumed (`afterWrite`).
  *  - `upstream` — the one LOWERING-TIME part: the mutating steps whose tail is being lowered right now,
  *    innermost last (`afterWrite`). Every other field says WHAT the program writes; this says which of
  *    those writes run UPSTREAM of the step being lowered, and over which stream — the fact
@@ -985,6 +988,7 @@ export interface ProgramWrites {
   readonly creates: boolean;
   readonly edges: boolean;
   readonly drops: boolean;
+  readonly draws: boolean;
   readonly upstream: UpstreamWrite[];
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
@@ -994,10 +998,10 @@ interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> |
  * `programWrites`), and the name of the binding that will hold how many traversers it runs over — taken
  * only if a guard asks for it (`used`), so a program with no observing body pays no statement.
  */
-interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string; used: boolean }
+interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string | null; used: boolean }
 
 const everythingWritten = (): ProgramWrites =>
-  ({ writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, upstream: [] });
+  ({ writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [] });
 
 /** Steps after which the traverser is still the element an `addV`/`addE` just made. */
 const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
@@ -1055,7 +1059,7 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     }
   };
   walk(steps, true);
-  return unreadable ? everythingWritten() : { writers, runOf, anyKey, labels, creates, edges, drops, upstream: [] };
+  return unreadable ? everythingWritten() : { writers, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [] };
 }
 
 /**
@@ -1073,17 +1077,22 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
  * host row and owes `n=1` — vadas is not labelled yet — while one statement per step labels both first.
  *
  * The count is a binding of its own, run BEFORE the write's statements, and only when a site used it.
+ * `input` is `null` where no relation counts the traversers the write ran over — a branch's arm writes
+ * (`withBranchEffects`, lower.ts) — and then an observing site always refuses. So does every site in a
+ * program that DRAWS (`ProgramWrites.draws`): the count is its own statement over `input`, and a
+ * `coin()`/`sample()` in it would draw afresh there, so it need not count the stream the write consumed.
  */
 export function afterWrite<T extends { readonly effects?: readonly Binding[] }>(
-  writes: ProgramWrites, input: Rel, writer: readonly IRStep[], bindings: readonly Binding[],
+  writes: ProgramWrites, input: Rel | null, writer: readonly IRStep[], bindings: readonly Binding[],
   params: Record<string, any>, fresh: Minter, tail: () => T | null,
 ): T | null {
-  const entry: UpstreamWrite = { effect: programWrites(writer, params), count: fresh('wn'), used: false };
+  const entry: UpstreamWrite = { effect: programWrites(writer, params), count: input && !writes.draws ? fresh('wn') : null, used: false };
   writes.upstream.push(entry);
   let lowered: T | null;
   try { lowered = tail(); } finally { writes.upstream.splice(writes.upstream.indexOf(entry), 1); }
   if (!lowered) return null;
-  return { ...lowered, effects: [...(entry.used ? [streamCount(input, entry.count, fresh)] : []), ...bindings, ...(lowered.effects ?? [])] };
+  const counted = input && entry.count !== null && entry.used ? [streamCount(input, entry.count, fresh)] : [];
+  return { ...lowered, effects: [...counted, ...bindings, ...(lowered.effects ?? [])] };
 }
 
 /** How many TRAVERSERS `input` holds — its rows, each weighted by its bulk where it carries one — as a
@@ -1169,7 +1178,10 @@ function sequentialGuard(
   for (const upstream of program.upstream) {
     if (!reaches.some((reach) => observes(reach, upstream.effect))) continue;
     upstream.used = true;
-    const counted = make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
+    // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises.
+    const counted = upstream.count === null
+      ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
+      : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
     const many = make.filter({ id: fresh('rf'), input: counted, channels: [], type: counted.type, pred: { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) } });
     guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
       { message: SEQUENTIAL_READ, raiseWhen: 'rows' });

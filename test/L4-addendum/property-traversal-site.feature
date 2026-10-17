@@ -459,3 +459,33 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
     When iterated to list
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
+
+  # A WRITE IN A UNION ARM: `BranchStep` drains its options one at a time, lazily
+  # (`BranchStep.java:123-153`), so the first arm's vertex runs through `limit` and the site before the
+  # second arm's `addV` runs — the body counts ONE `x`. The branch's input is one traverser; its writes ran
+  # twice.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_unionXaddVXxX_addVXxXX_limitX1X_propertyXn_V_hasLabelXxX_countX
+    Given the empty graph
+    And the traversal of
+      """
+      g.union(__.addV("x"), __.addV("x")).limit(1).property("n", __.V().hasLabel("x").count())
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"n\",1)"
+
+  # The same with the write over an ARM-INTERNAL stream: marko leaves the arm and goes through the site
+  # before vadas is labelled.
+  @gap:property-traversal-site
+  @Unsupported
+  Scenario: g_unionXV_1_2_addLabelXzXX_hasXname_markoX_propertyXn_V_hasLabelXzX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V(1,2).addLabel("z")).has("name","marko").property("n", __.V().hasLabel("z").count())
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"n\",1)"
