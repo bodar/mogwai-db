@@ -756,7 +756,7 @@ authorities.
   (`src/json-exact.ts` spelling rule) and a map merges by `mapIdentity` (no entry order); a merged branch frames
   by the column it projects (`mergeArms`) and a NULL per-row tag reads the value at every subject
   (`perRowSubject`, predicate.ts). Residue stays indexed in `docs/outstanding-work.md` (TraverserSet merge).
-- 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
+- ✅ **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`
   (positionless fallback when `!ctx.ordered`), `sliceableBranch` (no key stack), `tagArm` (DROPS the arm's own
@@ -769,8 +769,15 @@ authorities.
   `tagArm`'s callers. Size: L, ~300–500 LOC. Depends on A (first-occurrence key).
   ✅ **Stopgap LANDED (`9b1e80e9`):** `tagArmPositioned` keeps the arm's own encounter as a third key (an arm
   with no position declines); any step list holding a positional slice raises `sliced` (`chainDemandsSlice`),
-  and `branchResult` declines a sliced merge before its positionless case. The `EmissionKey` stack above is
-  still open.
+  and `branchResult` declines a sliced merge before its positionless case.
+  ✅ **EmissionKey stack LANDED ON TRUNK 2026-10-17 (`55a175a6`, fix-forward `2e917115`).** ONE authority in
+  `rel/lower.ts`: `branchOrderOwed` (does any reader read the order) + `BranchKeys` (`bord_p/a/s`, stacked by
+  depth) + `mintBranchOrder` (traverser-major, or arm-major per `armMajorScope` when an option holds a barrier,
+  `BranchStep.java:87-88,123-158`); replaces `withFanoutOrder`/`branchResult`/`sliceableBranch`/
+  `tagArmPositioned`/`mintTraverserMajor` and deletes the BRANCH_ORDER_READ stopgaps. Fix-forward: an
+  argument-less count renders `count(1)` over any derived table (`countArgument`, `src/rel/emit.ts`) — SQLite's
+  countOfViewOptimization miscounts a correlated nested UNION ALL; a correlated merged sort goes unfenced.
+  L3 1871 -> 1873. Residue: cap() BulkSet member grouping (outstanding-work.md, collection substrate).
 - 🚧 **C — the number/type channel.** Authority: `util/GremlinValueComparator.java` (Number is one rung,
   compared by `NumberHelper.compare`), `util/NumberHelper.java` `performConversion` (throws on an infinite or
   out-of-range double), `SumGlobalStep` / `MaxGlobalStep` / `MeanGlobalStep`, `Max.feature`'s `d[1.0].d`.
@@ -989,7 +996,7 @@ authorities.
 | 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
 | 4 | ✅ D — required `present` (landed `2b0b1e27`; fix-forward `da957253`..`3275d454`) | M | small once E adds the third `ChildValue` field in the same pass |
 | 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
-| 6 | B — the `EmissionKey` stack | L | needs A |
+| 6 | ✅ B — the `EmissionKey` stack (landed `55a175a6`; fix-forward `2e917115`) | L | needs A |
 | 7 | F — set-based merge interleave + writer-stream guard | M | independent; can run alongside 3–6 |
 
 **Per parked branch — resume or rebuild** (all tips fork from `2c3000b2`).
