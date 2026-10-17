@@ -468,6 +468,14 @@ UNEVALUABLE`.
   (`ScalarMapStep` over the whole traverser; the inject dispatch routes a `CONSTANT_FOLDED` cast at
   position 1 over an array/map arg to `injectSource`'s fold rather than the list/map shape source, and
   `javaTypeName` gives the one `ArrayList`/`LinkedHashMap` class-name authority for the message).
+- ✅ **Seeded fold `fold(seed, Operator.x)`** at every depth on the ONE Operator walk (`seededLeftFold`,
+  `operator.ts`, shared with `withSideEffect(k, seed, Operator.x)`): a scalar stream folds member-by-member in
+  emission order (composes as a correlated child; a terminal seeded fold is productive like `count()`); a map
+  stream + `addAll` is `mapsMerged`; `fold([], addAll)` is `fold()`. Long overflow and `/ by zero` raise the
+  reference's errors. Where the reference would have BULKED the input (the `NoOpBarrierStep`
+  `PathRetractionStrategy` puts after a path processor, including one `InlineFilterStrategy` splices out of a
+  `filter()`/`and()`), the arm declines unless the stream is provably distinct — `referenceUnbulkedAt` in
+  `src/compiler/ir/bulk.ts`, also used by the map `addAll` arm.
 
 ### Still open — the worklist, in unlock order
 
@@ -560,6 +568,12 @@ UNEVALUABLE`.
   type) — needs head-position tracking on the RelIR `AliasEntry`.
 - 🚧 **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
   `path().by(<transform>)` writes) — inert until tags join a comparison.
+- 🚧 **Seeded-fold residue** — declines (correct, but lost answers): a seeded fold as a `group` value and a
+  group value-by whose reducing barrier has more steps after it; a per-origin seeded fold mid-body in `local()`;
+  over-declines of `or(<path processor>)` (`processOrStep` inlines only `has()`) and `filter(math(…))` before the
+  fold (rank-0). DEFECTS (answer instead of raising/promoting): a per-row-typed stream answers where the
+  reference raises `ClassCastException` (`values('age').fold('z', min)`, `values('name').fold(0, sum)`), and
+  `fold(0L, sum)` over ints frames Int instead of promoting to Long.
 - 🚧 **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy) and `barrier(Barrier.normSack)`.
 - ✅ **`dateAdd`/`dateDiff` over a NON-datetime input RAISES** (2026-09-05). `DateAddStep.map` throws
   *"dateAdd() accept only OffsetDateTime or Date (deprecated)."* and `DateDiffStep` on a non-date LEFT
