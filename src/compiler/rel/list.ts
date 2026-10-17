@@ -1,17 +1,18 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { withChannel, type Channel } from '../../channels.ts';
-import { sliceBound } from './const.ts';
+import { constLit, itemTypeAt, sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
-import { isNested, isPred } from '../../gremlin/frontend.ts';
+import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
+import { flatType, type TypeNode } from '../../gremlin/types.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import { raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedKey, typedKeyAs, typedNode, typedSame, typeOf, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, inferredVtype, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -119,11 +120,13 @@ const memberNode = (of: ListOf, members: Rel): Expr => {
   // array/pairs as a quoted STRING. This is what lets a slice/order over a nested list keep its members
   // whole rather than stringifying them (the same `json()` `unfoldMap`/`mapSide` apply one container out).
   if (of.kind === 'list' || of.kind === 'map') return { kind: 'call', fn: 'json', args: [value] };
+  // A bare member of a typed list re-enters the JSON as `listOfMembers` takes a bare column: a REAL
+  // through `jsonMemberByTypeof`, so a negative zero and a 17-digit Double survive the re-aggregate.
   return isTypedList(of)
     ? {
       kind: 'case',
       whens: [[eqText(col(members.id, MEMBER.type), 'object'), { kind: 'call', fn: 'json', args: [value] }]],
-      else: value,
+      else: jsonMemberByTypeof(value),
     }
     : value;
 };
@@ -155,6 +158,20 @@ const memberTypeTag = (of: ListOf, members: Rel): Expr => {
   if (type?.kind === 'static') return compilerText(type.type);
   return memberVtype(of, members) ?? inferredVtype(col(members.id, MEMBER.value));
 };
+
+/**
+ * A MEMBER'S CLASS AS AN EQUALITY KEY — `memberTypeTag`, with the two readings that tag can leave open
+ * closed: an envelope whose `t` is NULL means "infer from the value" (as everywhere else in this
+ * channel), and a reducer's storage-class tag (`real`/`integer`) names the class its value infers to.
+ * So `{t:'real',v:1.5}` and a bare `1.5` are one Double, and `{t:'int',v:1}` and `{t:'long',v:1}` two.
+ */
+const memberClass = (of: ListOf, members: Rel, payload: Expr): Expr => ({
+  kind: 'call', fn: 'coalesce', args: [{
+    kind: 'case',
+    whens: [[{ kind: 'in-list', expr: memberTypeTag(of, members), values: [compilerText('real'), compilerText('integer')] }, compilerNull()]],
+    else: memberTypeTag(of, members),
+  }, inferredVtype(payload)],
+});
 
 /**
  * A MEMBER'S TYPE AS RECEIVER EVIDENCE (`receiver.ts`) — the member read the type-demanding transforms
@@ -202,9 +219,16 @@ const memberCompareKey = (of: ListOf, members: Rel): Expr => {
 const eqText = (subject: Expr, value: string): Expr => ({ kind: 'binary', op: '=', left: subject, right: compilerText(value) });
 
 /** The members BACK to a list value. `collected` is the shared idiom (`build.ts`) and carries the two
- *  non-derivable facts; this names the COLUMN a list relation carries them in. */
+ *  non-derivable facts; this names the COLUMN a list relation carries them in.
+ *
+ *  A REAL member re-enters the JSON through `jsonMemberByTypeof` — the one JSON-entry rule a fold
+ *  already spends — because `json_group_array` writes a binary64 at 15 digits and a negative zero as
+ *  `0.0`: every member op (`order`/`range`/`dedup(local)`, a set op) re-aggregated `[-0.0, 0.0]` as
+ *  `[0.0, 0.0]`, where `Double.equals` keeps them two values. A text, integer or JSON member is
+ *  untouched. Only a bare COLUMN is wrapped — the repair spells its value six times, so a computed
+ *  member is projected to a column first by a caller that needs it (`listSetOp`'s `payloads`). */
 const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], fresh: Minter): Expr =>
-  collectedOf(members, member, order, LIST_COL, fresh);
+  collectedOf(members, member.kind === 'col' ? jsonMemberByTypeof(member) : member, order, LIST_COL, fresh);
 
 /** The list column every list relation carries. One name, because the framing layer reads it too. */
 export const LIST_COL = 'list';
@@ -450,15 +474,18 @@ export function listMemberOp(
       // right, because it named only two of the three member columns: a TYPED list's member is a value
       // AND a tag, and `memberNode` reads the tag.
       //
-      // ⚠️ THE KEY IS THE PAYLOAD **AND** THE TAG, which is the same lesson the property identity key
+      // ⚠️ THE KEY IS THE PAYLOAD **AND** ITS CLASS, which is the same lesson the property identity key
       // records: `{t:'byte',v:1}` and `{t:'int',v:1}` share a payload and are `Byte(1)` and `Integer(1)`
-      // — not equal in Java, so not one member. A bare list has no tag and the payload is the whole key.
-      // An ELEMENT member's identity is its ROWID and nothing else (`ElementHelper.hashCode(Element)` is
-      // `element.id().hashCode()`), which the payload already is.
-      const tag = elemOf ? undefined : memberVtype(of, members);
+      // — not equal in Java, so not one member. `LinkedHashSet` is `Objects.equals`, so an untagged `1`
+      // and `1.0` are two members as well, and so are `-0.0` and `0.0` (`Double.equals` compares
+      // `doubleToLongBits`): the class is `memberClass` (the tag where one is carried, else the storage
+      // class's inference) and a zero's sign rides beside it (`typedKeyAs`, build.ts — the merges' typed
+      // equality). An ELEMENT member's identity is its ROWID and nothing else
+      // (`ElementHelper.hashCode(Element)` is `element.id().hashCode()`), which the payload already is.
+      const keyed = elemOf ? [payload] : typedKeyAs(payload, memberClass(of, members, payload));
       const rank = 'mdr';
       const ranked = rowNumberWindow(members, rank, [], {
-        partitionBy: tag ? [payload, tag] : [payload],
+        partitionBy: keyed,
         orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
       }, fresh);
       const survivors = make.filter({
@@ -806,8 +833,9 @@ export function listRetype(
     const storage: Expr = { kind: 'call', fn: 'typeof', args: [v] };
     return {
       rel: withPayload(held,
-        [['v', v], ['vt', step.name === 'mean' ? compilerText('real')
-          : tag ? numberClass(col(held.id, CLASS_MASK), v, storage)
+        // A `mean`'s class is its storage class — 'real', or 'null' for an all-null list — never a
+        // constant 'real' on a NULL (`reducerAggregate`'s rule).
+        [['v', v], ['vt', tag ? numberClass(col(held.id, CLASS_MASK), v, storage)
           : storage]],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
       type: UNKNOWN, result: 'number' as const, ...productive,
@@ -1370,16 +1398,29 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   // The operand's JSON crosses as ONE value. A `$param` list (`combine($x)`, the WHOLE list IS the
   // parameter's value) binds under its name; a literal array INLINES (the Golden Rule) — the old
   // `lit()` bound every literal collection.
-  // `stringifyExact` (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null` and a `-0.0`
-  // as `0`, another value; a runtime that cannot spell one declines.
-  const literal = (members: readonly unknown[], name: string | null) => {
-    const json = stringifyExact(members);
-    return json === null ? null : {
-      expr: { kind: 'call', fn: 'jsonb', args: [name != null ? param(json, name, 'text') : compilerText(json)] } as Expr,
-      of: BARE_LIST,
-    };
+  //
+  // THE OPERAND'S MEMBERS ARE COMPARED BY THEIR TYPE (`typedSame` — a set op's `HashSet` is
+  // `Objects.equals`), and a bare member states its type only through its storage class. So a LITERAL
+  // is the SAME bare blob `inject([…])`/`constant([…])` build (`listLiteralBlob`): a whole Double is
+  // written REAL, a negative zero keeps its sign, and a member its storage class cannot name back
+  // (`[1L]`, `[1.0f]`) declines. A PARAMETER crosses as JSON text, which cannot carry a whole Double
+  // (`1.0` stringifies `1`) or a negative zero at all — those decline with the rest.
+  const literal = (listArg: Arg, members: readonly ArgValue[]) => {
+    if (listArg.name == null) {
+      const blob = listLiteralBlob(listArg, members);
+      return blob && { expr: blob, of: BARE_LIST };
+    }
+    const carried = members.every((member, i) => {
+      const type = itemTypeAt(listArg.type, i);
+      if (!bareMemberRoundTrips(member, type)) return false;
+      const flat = flatType(type);
+      return typeof member !== 'number' || !(Object.is(member, -0) || (Number.isInteger(member) && (flat === 'double' || flat === 'float' || flat === 'bigdecimal')));
+    });
+    // `stringifyExact` (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null`, another value.
+    const json = carried ? stringifyExact(members) : null;
+    return json === null ? null : { expr: { kind: 'call', fn: 'jsonb', args: [param(json, listArg.name, 'text')] } as Expr, of: BARE_LIST };
   };
-  if (Array.isArray(arg)) return literal(arg, step.args[0]?.name ?? null);
+  if (Array.isArray(arg)) return literal(step.args[0]!, arg);
   // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
   // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,
   // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
@@ -1394,7 +1435,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
     if (extra !== undefined || value === undefined) return null;
     // A COMPILER-BUILT single-element list wrapping the constant — always inlined (the `[value]` list is
     // not itself a parameter, even if `value` came from one; that inner scalar is a separate concern).
-    return literal([value], null);
+    return literal({ value: [value], type: { t: 'list', items: [inner[0].args[0]!.type] }, name: null, members: [inner[0].args[0]!] }, [value]);
   }
   // A BARE `constant(v)` operand — no `fold()` — YIELDS v, and a value is not iterable. Same compile-time
   // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
@@ -1473,7 +1514,19 @@ export function listSetOp(
   const payloads = (listExpr: Expr, items: ListOf): Expr => {
     if (!isTypedList(items)) return listExpr;
     const members = membersOf(listExpr, fresh);
-    return listOfMembers(members, memberPayload(items, members), [memberOrder(members)], fresh);
+    // A floating member's payload is written REAL, so its storage class names its class the way a bare
+    // member's does: an envelope stores a whole Double as `{t:'double',v:1}`, whose payload is the
+    // INTEGER 1 — and the typed compare (`typedSame`) would have called it an Int.
+    // Only an ENVELOPE member states a class its storage class may not (a bare member's IS its storage
+    // class), so only an envelope's `t` is read.
+    const payload = memberPayload(items, members);
+    const value = col(members.id, MEMBER.value);
+    const floating: Expr = {
+      kind: 'binary', op: 'and', left: eqText(col(members.id, MEMBER.type), 'object'),
+      right: { kind: 'in-list', expr: jsonField(value, 't'), values: [compilerText('double'), compilerText('float')] },
+    };
+    return listOfMembers(members, { kind: 'case', whens: [[floating, { kind: 'cast', arg: jsonField(value, 'v'), to: 'real' }]], else: payload },
+      [memberOrder(members)], fresh);
   };
   const operand = payloads(resolved.expr, resolved.of);
   const selfList = payloads(col(rel.id, LIST_COL), of);
@@ -1499,12 +1552,15 @@ export function listSetOp(
   };
 
   /** Does the OTHER side contain this side's member? `IS`, not `=`: a null member must match a null
-   *  member, which is what null-safe membership means and what `=` cannot say. */
+   *  member, which is what null-safe membership means and what `=` cannot say. And TYPED (`typedSame`):
+   *  every set op builds a `HashSet`, which is `Objects.equals` — `1` is not `1.0`, `-0.0` is not `0.0`
+   *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/IntersectStep.java:68-80`).
+   *  An element member's rowid is an integer, where the typed key says no more than `IS`. */
   const contains = (other: Expr, mine_: Expr, negated: boolean): Expr => {
     const theirs = membersOf(other, fresh);
     const same = make.filter({
       id: fresh('cf'), input: theirs, channels: [], type: theirs.type,
-      pred: { kind: 'binary', op: 'is', left: col(theirs.id, MEMBER.value), right: mine_ },
+      pred: bothElem ? { kind: 'binary', op: 'is', left: col(theirs.id, MEMBER.value), right: mine_ } : typedSame(col(theirs.id, MEMBER.value), mine_),
     });
     return {
       kind: 'exists',
@@ -1524,9 +1580,19 @@ export function listSetOp(
    * was inheriting a dedup implementation detail as a contract.
    */
   const setOf = (rows: Rel): Rel => {
-    const deduped = make.distinct({ id: fresh('sd'), input: rows, channels: [], type: rows.type });
+    // DISTINCT BY THE TYPED KEY (`typedKey`) — `HashSet`'s `Objects.equals`, as `contains` above: the
+    // storage class and a zero's sign ride as columns of their own, so `merge([1.0])` over `[1]` keeps
+    // both. The value order is then broken by those columns too, so it stays deterministic.
+    const keyed = bothElem ? [] : typedKey(col(rows.id, MEMBER.value)).slice(1);
+    const extra = keyed.map((_, i) => `sk${i}`);
+    const input = keyed.length ? make.project({
+      id: fresh('sk'), input: rows, channels: [],
+      type: typeOf(meta(MEMBER.value, 'any', true), ...extra.map((name) => meta(name, 'any', true))),
+      exprs: [[MEMBER.value, col(rows.id, MEMBER.value)], ...keyed.map((expr, i) => [extra[i]!, expr] as const)],
+    }) : rows;
+    const deduped = make.distinct({ id: fresh('sd'), input, channels: [], type: input.type });
     return withList(rel, listOfMembers(deduped, col(deduped.id, MEMBER.value),
-      [{ expr: col(deduped.id, MEMBER.value), dir: 'asc' }], fresh), fresh);
+      [MEMBER.value, ...extra].map((name) => ({ expr: col(deduped.id, name), dir: 'asc' as const })), fresh), fresh);
   };
 
   /** The two sides' single-column member relations, unioned — the shape `merge` and `disjunct`
@@ -1824,4 +1890,49 @@ export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSou
     }),
     shape,
   };
+}
+
+/** One `[…]` literal argument as the `LIST_COL` pairs blob a list-valued relation carries, or `null` to
+ *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row) and
+ *  `constant([…])` (a per-row retype) — the two are one literal, produced at different positions. */
+export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null {
+  // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
+  // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
+  // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
+  const members = listArg.members;
+  // A BOOLEAN member has no carrier in a BARE list: `constLit(true)` is SQLite's integer 1, so the member
+  // framed as `1` and `asString(local)` rendered `'1'` (the reference's `[true, 1]` frames a Boolean and
+  // stringifies `'true'`). The member list stays BARE (untagged) here, so decline rather than retype it.
+  if (values.some((value) => typeof value === 'boolean')) return null;
+  // The same holds for every NUMERIC member a bare member's storage class does not name back
+  // (`inferredVtype`, list.ts: INTEGER → int/long by range, REAL → double): `[1L]` wrote `1` and framed an
+  // Integer, `[1.0f]` a Double. (A whole Double writes `1.0` and a negative zero rides `asExactReal`'s `-0.0`,
+  // and `parseExactJson` reads both back as the Doubles they are — json-exact.ts.) The bytes
+  // are also the list's merge key (`typedEquality`, build.ts), so `inject([1],[2],[1L])` merged `[1L]` into
+  // `[1]` — `List.equals` compares members with `equals`, and `Integer(1)` is not `Long(1)`. Decline.
+  if (values.some((value, mi) => !bareMemberRoundTrips(value, members ? members[mi]!.type : itemTypeAt(listArg.type ?? null, mi)))) return null;
+  const items = values.map((value, mi) => {
+    const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
+    // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
+    // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
+    // the repair — and so does a NEGATIVE ZERO, which SQLite's JSON writer spells `0.0` (`asExactReal`).
+    // `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
+    return item && typeof value === 'number' && (!Number.isInteger(value) || Object.is(value, -0)) ? jsonMemberByTypeof(item) : item;
+  });
+  return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
+}
+
+/** Does a NUMERIC literal member keep its declared type in a BARE list — does the storage class it is
+ *  written in infer back to that type (`inferredVtype`, list.ts)? A member with no declared type is
+ *  inferred by definition; a non-number is another rule's (`constLit` declines what it cannot spell). */
+export function bareMemberRoundTrips(value: ArgValue, type: TypeNode | null | undefined): boolean {
+  if (typeof value !== 'number' || Number.isNaN(value)) return true;
+  const flat = flatType(type);
+  // A negative zero keeps its sign only as a REAL literal (`constLit` writes an undeclared one as INTEGER 0).
+  if (Object.is(value, -0)) return flat === 'double';
+  if (flat == null) return true;
+  const integral = Number.isSafeInteger(value) && flat !== 'double' && flat !== 'float' && flat !== 'bigdecimal';
+  if (!integral) return flat === 'double';
+  const fitsInt = value >= -2147483648 && value <= 2147483647;
+  return fitsInt ? flat === 'int' : flat === 'long';
 }

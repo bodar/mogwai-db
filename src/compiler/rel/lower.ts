@@ -24,7 +24,7 @@ import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { constLit, declaredScalarType, itemTypeAt } from './const.ts';
+import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
@@ -33,7 +33,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffCo
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
-    payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
+    guardTies, payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, BRANCH_KEY_PREFIX,
     type Minter
 } from './build.ts';
@@ -48,7 +48,7 @@ import { CLASS_MASK, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClass, 
 import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listLiteralBlob, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -2492,6 +2492,19 @@ function scalarTail(
         out = { ...numeric, productiveNull: true };
         continue;
       }
+      // A `mean`'s class is its result's storage class ('real', or 'null' for an all-null stream —
+      // `reducerAggregate`'s rule), read off the reduced COLUMN rather than by spelling the weighted
+      // mean a second time.
+      if (step.name === 'mean') {
+        const meaned = nonEmptyReducer(rel, [['v', reduced.value]], fresh, [meta('v', 'any', true)]);
+        const v = col(meaned.id, 'v');
+        rel = make.project({
+          id: fresh('rc'), input: meaned, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+          exprs: [['v', v], ['vt', { kind: 'call', fn: 'typeof', args: [v] }]],
+        });
+        out = { ...numeric, productiveNull: true };
+        continue;
+      }
       rel = nonEmptyReducer(rel, [['v', reduced.value], ['vt', reduced.type]], fresh);
       // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
       // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
@@ -2787,51 +2800,6 @@ function injectSource(
  * MIXED arguments decline: `inject([1,2], 3)` is a list traverser and a scalar traverser in one
  * stream, which is the VARIANT shape rather than either of them.
  */
-/** One `[…]` literal argument as the `LIST_COL` pairs blob a list-valued relation carries, or `null` to
- *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row) and
- *  `constant([…])` (a per-row retype) — the two are one literal, produced at different positions. */
-function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null {
-  // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
-  // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
-  // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
-  const members = listArg.members;
-  // A BOOLEAN member has no carrier in a BARE list: `constLit(true)` is SQLite's integer 1, so the member
-  // framed as `1` and `asString(local)` rendered `'1'` (the reference's `[true, 1]` frames a Boolean and
-  // stringifies `'true'`). The member list stays BARE (untagged) here, so decline rather than retype it.
-  if (values.some((value) => typeof value === 'boolean')) return null;
-  // The same holds for every NUMERIC member a bare member's storage class does not name back
-  // (`inferredVtype`, list.ts: INTEGER → int/long by range, REAL → double): `[1L]` wrote `1` and framed an
-  // Integer, `[1.0f]` a Double. (A whole Double writes `1.0` and a negative zero rides `asExactReal`'s `-0.0`,
-  // and `parseExactJson` reads both back as the Doubles they are — json-exact.ts.) The bytes
-  // are also the list's merge key (`typedEquality`, build.ts), so `inject([1],[2],[1L])` merged `[1L]` into
-  // `[1]` — `List.equals` compares members with `equals`, and `Integer(1)` is not `Long(1)`. Decline.
-  if (values.some((value, mi) => !bareMemberRoundTrips(value, members ? members[mi]!.type : itemTypeAt(listArg.type ?? null, mi)))) return null;
-  const items = values.map((value, mi) => {
-    const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
-    // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
-    // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
-    // the repair — and so does a NEGATIVE ZERO, which SQLite's JSON writer spells `0.0` (`asExactReal`).
-    // `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
-    return item && typeof value === 'number' && (!Number.isInteger(value) || Object.is(value, -0)) ? jsonMemberByTypeof(item) : item;
-  });
-  return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
-}
-
-/** Does a NUMERIC literal member keep its declared type in a BARE list — does the storage class it is
- *  written in infer back to that type (`inferredVtype`, list.ts)? A member with no declared type is
- *  inferred by definition; a non-number is another rule's (`constLit` declines what it cannot spell). */
-function bareMemberRoundTrips(value: ArgValue, type: TypeNode | null | undefined): boolean {
-  if (typeof value !== 'number' || Number.isNaN(value)) return true;
-  const flat = flatType(type);
-  // A negative zero keeps its sign only as a REAL literal (`constLit` writes an undeclared one as INTEGER 0).
-  if (Object.is(value, -0)) return flat === 'double';
-  if (flat == null) return true;
-  const integral = Number.isSafeInteger(value) && flat !== 'double' && flat !== 'float' && flat !== 'bigdecimal';
-  if (!integral) return flat === 'double';
-  const fitsInt = value >= -2147483648 && value <= 2147483647;
-  return fitsInt ? flat === 'int' : flat === 'long';
-}
-
 function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
   const args = step.args.map((a) => a.value);
   if (step.modulators?.length || step.optionArms || !args.length) return null;

@@ -56,7 +56,9 @@ describe('collection-PARAMETER within/without → one jsonb(?) bind via json_eac
   test('without($names) negates the same json_each membership', async () => {
     const g = "g.V().values('name').is(without(names))";
     expect(plan(g, { names: NAMES }).binds).toHaveLength(1);
-    expect(plan(g, { names: NAMES }).sql).toContain('NOT IN (SELECT');
+    // The complement of the POSITIVE membership, read null-safely (`IS NOT 1`): `NOT IN` is NULL — the row
+    // dropped — for a null subject or a null member, where `Contains.without` is `!within` (predicate.ts).
+    expect(plan(g, { names: NAMES }).sql).toMatch(/IN \(SELECT [^)]*json_each\(jsonb\(\?\)\)[^)]*\) IS NOT 1/);
     expect(await vals(g, { names: NAMES })).toEqual(['josh', 'lop', 'peter', 'ripple']);
   });
 

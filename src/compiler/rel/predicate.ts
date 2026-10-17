@@ -793,13 +793,27 @@ export function predicateExpr(
   }
 
   if (op === 'within' || op === 'without') {
+    // MEMBERSHIP IS `eq` PER MEMBER, NULL INCLUDED. `Contains.within` tests each member with `Compare.eq`,
+    // which is `GremlinValueComparator.COMPARABILITY.equals`, and `comparable(null, null)` is TRUE
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Contains.java`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:314-316`)
+    // — so a null subject IS within a set holding null, exactly as `eq(null)` holds over it above, and
+    // `without` is its complement (`Contains.without` = `!within`). Every arm below therefore builds the
+    // POSITIVE membership and `settle` applies the op ONCE: a null member adds `subject IS NULL`, and
+    // `without` is `negated` (`IS NOT 1`), which reads SQL's NULL — a null subject, or a NULL among the
+    // `IN` members — as "not a member" rather than dropping the row as `NOT IN` did. Over a stored
+    // property the subject is never null, so `IS NULL` is FALSE there and nothing changes.
+    const settle = (positive: Expr, nullMember: boolean): Expr => {
+      const member = nullMember ? binary('or', positive, binary('is', subject, compilerNull())) : positive;
+      return op === 'within' ? member : negated(member);
+    };
     // A single NESTED-traversal operand ending in `fold()` is a RUN-TIME member list
     // (`within(__.V(x).…values(k).fold())`): the folded traversal produces the set at query time,
     // exploded by json_each. The caller resolves it (it holds the child seam); a NON-fold single
     // operand, or a mix of traversals and literals, FALLS THROUGH to the vararg member path below.
     if (operands.length === 1 && isNested(operands[0].value) && resolveListSet) {
       const set = resolveListSet(operands[0].value);
-      if (set) return { kind: 'in-query', negated: op === 'without', expr: subject, plan: set };
+      if (set) return settle({ kind: 'in-query', negated: false, expr: subject, plan: set }, false);
     }
     // A single collection operand — the faithful front-end leaves it whole. A bound list-PARAMETER
     // crosses as ONE `jsonb(?)` bind exploded by `json_each` (the parameter stays a bind of any size and
@@ -808,17 +822,18 @@ export function predicateExpr(
     const coll = operands.length === 1 && Array.isArray(operands[0].value) ? operands[0] : null;
     if (coll && coll.name != null && !coll.members) {
       if (!fresh) return null;   // no relation minter reached this caller — decline (fail closed)
-      return jsonEachInSet(subject, coll.value as readonly unknown[], coll.name, fresh, op === 'without');
+      const values = coll.value as readonly unknown[];
+      return settle(jsonEachInSet(subject, values, coll.name, fresh, false), values.some((v) => v === null));
     }
-    // A NULL MEMBER IS INERT — `Contains.within/without` test set membership, and a stored value is
-    // never null, so `null ∈ set` is always false: it can neither add a match to `within` nor remove one
-    // from `without`. Drop it, then the ALL-NULL set folds to the empty-set truth value below (matching
-    // nothing / everything), exactly as `labelSetArgs` treats a null label. Reference: `within(27,null)`
-    // over age 27 matches (27 ∈ {27,null}) and over 29 does not — i.e. `within(27)`.
-    const memberArgs = (coll ? collectionMembers(coll) : operands).filter((o) => o.value !== null);
+    // A literal NULL member leaves the `IN` list (where it could only ever make the test NULL) and becomes
+    // `settle`'s `subject IS NULL` arm. Reference: `within(27,null)` over age 27 matches and over 29 does
+    // not, and `inject(null).is(within(0,null))` keeps the null.
+    const allArgs = coll ? collectionMembers(coll) : operands;
+    const nullMember = allArgs.some((o) => o.value === null);
+    const memberArgs = allArgs.filter((o) => o.value !== null);
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
-    // nothing is never, without nothing is always (an all-null set lands here too).
-    if (!memberArgs.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
+    // nothing is never, without nothing is always (an all-null set is `IS [NOT] NULL` through `settle`).
+    if (!memberArgs.length) return nullMember ? settle(CONSTANT.false, true) : op === 'within' ? CONSTANT.false : CONSTANT.true;
     // NO SIZE LIMIT. A vararg set is bounded by the QUERY TEXT, and its members INLINE — 26 literals
     // cost zero bound parameters, so a cap derived from the 100-BIND wall was refusing queries that
     // spend none of it (measured: `within(<26 literals>)` declined while `within(<25>)` compiled, both
@@ -841,11 +856,9 @@ export function predicateExpr(
     const equalities = memberArgs.map((o, i) => isNested(o.value) ? binary('=', subject, members[i]!) : equality(subject, members[i]!, o.value, type, o.type));
     if (equalities.some((e) => !e)) return null;
     if (equalities.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {
-      const any = (equalities as Expr[]).reduce((acc, e) => binary('or', acc, e));
-      return op === 'within' ? any : negated(any);
+      return settle((equalities as Expr[]).reduce((acc, e) => binary('or', acc, e)), nullMember);
     }
-    const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
-    return op === 'within' ? inList : negated(inList);
+    return settle({ kind: 'in-list', expr: subject, values: members as Expr[] }, nullMember);
   }
 
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive both. outside = the OR-complement

@@ -150,16 +150,24 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr, non
   if (reducer === 'mean') {
     // The weighted mean: Σ(v·bulk) / Σ(bulk over ELIGIBLE rows). The denominator counts bulk only where
     // the guard passed, so an ineligible value neither contributes to the total nor dilutes it.
+    //
+    // THE TAG FOLLOWS THE RESULT, as `sum`/`min`/`max`'s does below: `typeof` of the mean, which is
+    // 'real' for every number and 'null' where every value was null. `MeanGlobalStep` skips a null and
+    // answers null for an all-null stream
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84`).
+    // A constant 'real' tag on that NULL told every `vt` reader it held a number: `math()`'s number
+    // check passed it and `CAST(NULL) + 1` dropped the row where `MathStep` raises.
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
-    if (!bulk) return { value: agg('avg', arg), type: compilerText('real') };
+    if (!bulk) {
+      const mean = agg('avg', arg);
+      return { value: mean, type: call('typeof', mean) };
+    }
     const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
     // A `Cast` and NOT a `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.
-    return {
-      value: { kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator },
-      type: compilerText('real'),
-    };
+    const mean: Expr = { kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator };
+    return { value: mean, type: call('typeof', mean) };
   }
 
   // `min`/`max` are bulk-INVARIANT — the smallest of N identical copies is the smallest — so the

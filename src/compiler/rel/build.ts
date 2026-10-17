@@ -474,10 +474,10 @@ const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf'
  *
  *  A NULL PASSES THROUGH, and the test is the INEQUALITY to make that so without spelling the value again: a
  *  NULL makes the comparison NULL, which a CASE reads as "no arm", so the ELSE must be the value itself —
- *  with the repair as the ELSE, `printf('%!.17g', NULL)` printed `0.0`, and every productive null tagged
- *  as a binary64 (a `mean()` over an all-null stream: `MeanGlobalStep` seeds null and `getFinal` keeps it,
- *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84`)
- *  entered a map or list as `0.0`. */
+ *  with the repair as the ELSE, `printf('%!.17g', NULL)` printed `0.0`. A reducer's null is now tagged
+ *  'null' at its producer (`reducer.ts` `reducerAggregate`, the all-null `mean()` included), so this is
+ *  the entry's own null rule rather than that tag's repair — kept because the negative-zero arm below
+ *  relies on the same "no arm, ELSE is the value" shape. */
 const asExactReal = (value: Expr): Expr => ({
   kind: 'case',
   whens: [
@@ -905,17 +905,49 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
     term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any'
       // A one-column scalar subquery (a map's order-free form, `mapIdentity`) is that column's type.
       : term.kind === 'scalar' && term.plan.type.cols.length === 1 ? term.plan.type.cols[0]!.type : 'any';
+  // A PER-ROW TAG, where the relation carries one, already names a tagged row's class — and names it
+  // better than the storage class does: a stored Double may sit as INTEGER `1` beside a computed REAL
+  // `1.0` under one `double` tag, and `typeof` would split the one Double in two. So the storage class
+  // keys only a row whose tag is NULL ("infer from the value", as every per-row reader takes it). The tag
+  // column itself is `text`, which keys as itself below.
+  const tag = rel.type.cols.some((column) => column.name === MERGED_VTYPE) ? col(rel.id, MERGED_VTYPE) : null;
   return terms.flatMap((term): Expr[] => {
     const type = declared(term);
     if (type !== 'any' && type !== 'real') return [term];
-    const signOfZero: Expr = {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: '=', left: term, right: compilerInt(0) }, { kind: 'call', fn: 'atan2', args: [term, compilerInt(-1)] }]],
-      else: compilerNull(),
-    };
-    return type === 'real' ? [term, signOfZero] : [term, { kind: 'call', fn: 'typeof', args: [term] }, signOfZero];
+    if (type === 'real') return [term, signOfZero(term)];
+    // Only a column OF this relation is described by its tag; a computed term (a `by()` key) keys by its own class.
+    if (!tag || term.kind !== 'col' || term.rel !== rel.id) return typedKey(term);
+    return typedKeyAs(term, {
+      kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: tag, right: compilerNull() }, { kind: 'call', fn: 'typeof', args: [term] }]], else: compilerNull(),
+    });
   });
 }
+
+/** A zero's sign as a key term — `atan2(±0, -1)` is ±π — and NULL for every other value. */
+const signOfZero = (term: Expr): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'binary', op: '=', left: term, right: compilerInt(0) }, { kind: 'call', fn: 'atan2', args: [term, compilerInt(-1)] }]],
+  else: compilerNull(),
+});
+
+/**
+ * `typedEquality`'s key for ONE value of unknown storage class (an `any` term): the value, its storage
+ * class and a zero's sign. Two values are `Objects.equals` iff every term agrees under `IS` — the form a
+ * caller that compares (a set op's membership) rather than partitions spends, through `typedSame`.
+ */
+export const typedKey = (term: Expr): Expr[] => typedKeyAs(term, { kind: 'call', fn: 'typeof', args: [term] });
+
+/** `typedKey` where the caller already knows a sharper CLASS term than the storage class — a list
+ *  member's own Gremlin tag, which tells a `{t:'int'}` from a `{t:'long'}` that share an INTEGER. */
+export const typedKeyAs = (term: Expr, cls: Expr): Expr[] => [term, cls, signOfZero(term)];
+
+/** `a` and `b` are the same value by the reference's TYPED equality (`typedKey`), null-safe (`IS`). */
+export const typedSame = (a: Expr, b: Expr): Expr => {
+  const right = typedKey(b);
+  return typedKey(a)
+    .map((term, i): Expr => ({ kind: 'binary', op: 'is', left: term, right: right[i]! }))
+    .reduce((acc, term) => ({ kind: 'binary', op: 'and', left: acc, right: term }));
+};
 
 /**
  * A `ROW_NUMBER()` WINDOW — mint one integer rank column `colName` over `(PARTITION BY … ORDER BY …)`,

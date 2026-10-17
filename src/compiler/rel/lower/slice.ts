@@ -3,9 +3,10 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
+import { and, carriedCols, eq, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import type { ColMeta } from '../../../rel/types.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
@@ -505,15 +506,23 @@ export function rowOp(
     // dedup. **The payload is `payloadCols`, not a hard-coded `id`** — that is what makes this ONE arm
     // serve every shape whose identity IS its whole payload (an element's `id`, a scalar's `(v, vtype)`,
     // a list's `list` JSON, a record's fields); for an element `payloadCols` IS `[id]`, byte-unchanged.
+    //
+    // The payload's TYPED key (`typedKeys`) rides as extra columns the `Distinct` sees and the result
+    // then drops, so `1`/`1.0` and `-0.0`/`0.0` stay two traversers.
     const graph = graphOf(input.channels);
     const chans = graph ? withChannel(BULK, graph) : BULK;
     const pcols = payloadCols(input);
+    const typed = typedKeys(input);
     const projected = make.project({
-      id: fresh('dd'), input, channels: chans, type: typeOf(...pcols, ...carriedCols(chans)),
-      exprs: [...pcols.map((c) => [c.name, col(input.id, c.name)] as const),
+      id: fresh('dd'), input, channels: chans, type: typeOf(...pcols, ...typed.cols, ...carriedCols(chans)),
+      exprs: [...pcols.map((c) => [c.name, col(input.id, c.name)] as const), ...typed.exprs,
         ...chans.map((c) => [c.col, c.role === 'graph' ? col(input.id, c.col) : compilerInt(1)] as const)],
     });
-    return make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
+    const distinct = make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
+    return typed.cols.length ? make.project({
+      id: fresh('dt'), input: distinct, channels: chans, type: typeOf(...pcols, ...carriedCols(chans)),
+      exprs: [...pcols, ...carriedCols(chans)].map((c) => [c.name, col(distinct.id, c.name)] as const),
+    }) : distinct;
   }
   // THE AGGREGATES ARE DERIVED FROM THE CHANNELS THE INPUT ACTUALLY CARRIES, never named — §12's rule,
   // and this line broke it. The pair `['bulk', 'encounter']` was hardcoded while every ordered element
@@ -548,14 +557,19 @@ export function rowOp(
   // reads `v` as a correlated `SELECT … LIMIT 1`. So when the payload is computed, FENCE a projection of
   // it (`AS MATERIALIZED`) first, evaluating each value once and letting `GROUP BY` name a column; when
   // it is physical, group directly on the input exactly as the element dedup always has (byte-unchanged).
-  const computed = input.kind === 'project'
-    && pcols.some((column) => input.exprs.find(([name]) => name === column.name)?.[1]?.kind !== 'col');
+  //
+  // The payload's TYPED key (`typedKeys`) is grouped on as extra columns of that same fence, which the
+  // result then drops — so a payload that needs one always takes the fenced form.
+  const typed = typedKeys(input);
+  const computed = typed.cols.length > 0 || (input.kind === 'project'
+    && pcols.some((column) => input.exprs.find(([name]) => name === column.name)?.[1]?.kind !== 'col'));
   const grouped = computed
     ? make.materialize({
-      id: fresh('df'), channels: input.channels, type: typeOf(...pcols, ...carried),
+      id: fresh('df'), channels: input.channels, type: typeOf(...pcols, ...typed.cols, ...carried),
       input: make.project({
-        id: fresh('dm'), input, channels: input.channels, type: typeOf(...pcols, ...carried),
-        exprs: [...pcols, ...carried].map((column) => [column.name, col(input.id, column.name)] as const),
+        id: fresh('dm'), input, channels: input.channels, type: typeOf(...pcols, ...typed.cols, ...carried),
+        exprs: [...pcols.map((column) => [column.name, col(input.id, column.name)] as const), ...typed.exprs,
+          ...carried.map((column) => [column.name, col(input.id, column.name)] as const)],
       }),
     })
     : input;
@@ -565,15 +579,35 @@ export function rowOp(
     else if (channel.role === 'encounter') reductions.push([channel.col, { kind: 'agg', fn: 'min', args: [col(grouped.id, channel.col)] }]);
     else return null;
   }
-  return make.aggregate({
+  const aggregated = make.aggregate({
     // The group keys are the whole payload (`payloadCols`, matching `shape.identity` for an
     // identity-IS-payload shape), then the aggregates — so this ordered dedup serves every such shape,
     // not just an element's `id`. The declared type names the keys positionally (`factory.aggregate`).
     id: fresh('dd'), input: grouped, channels: grouped.channels,
-    type: typeOf(...pcols, ...carried),
-    groupBy: computed ? pcols.map((column) => col(grouped.id, column.name)) : shape.identity(input),
+    type: typeOf(...pcols, ...typed.cols, ...carried),
+    groupBy: computed ? [...pcols, ...typed.cols].map((column) => col(grouped.id, column.name)) : shape.identity(input),
     aggs: reductions,
   });
+  return typed.cols.length ? make.project({
+    id: fresh('dt'), input: aggregated, channels: aggregated.channels, type: typeOf(...pcols, ...carried),
+    exprs: [...pcols, ...carried].map((column) => [column.name, col(aggregated.id, column.name)] as const),
+  }) : aggregated;
+}
+
+/**
+ * THE TYPED KEY a collapsing `dedup()` adds to its payload — `typedEquality`'s extra terms (a storage
+ * class, a zero's sign) as named columns. `DedupGlobalStep` collapses on a `HashSet`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:59,78`),
+ * which is `Objects.equals`: `Integer(1)` is not `Double(1.0)`, and `Double.equals(-0.0, 0.0)` is false.
+ * SQLite's `DISTINCT`/`GROUP BY` equate both, exactly as its `PARTITION BY` does at a merge — so the
+ * dedup keys on the merges' ONE authority rather than a rule of its own. An element's `id` (an `int`)
+ * needs nothing, and costs nothing.
+ */
+function typedKeys(input: Rel): { readonly cols: readonly ColMeta[]; readonly exprs: readonly (readonly [string, Expr])[] } {
+  const own = payloadCols(input).map((column) => col(input.id, column.name));
+  const extra = typedEquality(input, own).filter((term) => !own.includes(term as typeof own[number]));
+  const names = extra.map((_, i) => `dq${i}`);
+  return { cols: names.map((name) => meta(name, 'any', true)), exprs: extra.map((term, i) => [names[i]!, term] as const) };
 }
 
 /**
@@ -644,7 +678,10 @@ export function dedupOn(
   // FIRST partition key. This is the fold-mode rule (a barrier consults the ambient `origin`): at the top
   // level there is no `origin`, so the dedup stays global exactly as before.
   const origin = originOf(domain.channels);
-  const partitionBy = origin ? [col(domain.id, origin.col), ...keys] : keys;
+  // The keys partition by the reference's TYPED equality (`typedEquality`, build.ts) — a `by()` key and a
+  // label tuple are `HashSet` members like the traverser itself (`DedupGlobalStep.java:78,88`).
+  const typedKeysOf = typedEquality(domain, keys);
+  const partitionBy = origin ? [col(domain.id, origin.col), ...typedKeysOf] : typedKeysOf;
   // A `Window` may only EXTEND its input (§3.5), so `rowNumberWindow` declares the INPUT's columns IN
   // THE INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
   // declares the element side's channels BETWEEN the two payload halves; the projection below is where
