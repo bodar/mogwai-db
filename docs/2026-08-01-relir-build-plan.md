@@ -770,6 +770,12 @@ authorities.
   between writer and site" becomes a property of that count. Stopgap: decline a multi-row creating merge with
   an onMatch arm or match-dependent tail; `sequentialGuard` refuses a non-single-row upstream writer via ONE
   `isOneRowSeed` shared with `writeSnapshot` (unifying the duplicated checks). Size: stopgap S; full M, ~300 LOC.
+  ✅ **Slice/endpoint stopgap LANDED 2026-10-17 (`b9595f52`):** `EarlyLimitStrategy` performed where a slice crosses a
+  side effect (`src/compiler/ir/early-limit.ts`), and where it cannot move the slice the write DECLINES
+  (`ProgramWrites.truncated`, `src/compiler/rel/write.ts`, enumerating values through `ir/walk.ts`); an `addE`
+  endpoint runs the `property(k, <traversal>)` race guard, a literal-id source gets a program-start existence
+  pre-check (`ProgramWrites.preChecks`); `sum` keeps the reference number class. The per-traverser write driver
+  (full design above) is still open.
 - ✅ **G — label scope into nested arms; internal errors past the decline contract.** Authority:
   `step/util/Scoping.java` + `TraversalSelectStep` (a local child keeps the parent path),
   `strategy/optimization/IdentityRemovalStrategy.java` (copyLabels). Seams: the union arm merge (`mergeArms`
