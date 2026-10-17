@@ -287,7 +287,8 @@ lowered.
   a slice crosses a `SideEffectStep`/always-bound map (`src/compiler/ir/early-limit.ts`;
   `vendor/tinkerpop/gremlin-core/.../strategy/optimization/EarlyLimitStrategy.java`), so
   `g.V().property('x',1).limit(1)` writes one vertex; the keyed `groupCount('a')`/`group('a')`/`tree('a')`/
-  `subgraph('a')` are `SideEffectBarrierStep`s at the pin and are NOT crossed. What it cannot move — a
+  `subgraph('a')` are `SideEffectBarrierStep`s at the pin and are NOT crossed, and a keyed collector run per
+  traverser in a spliced `local`/`map`/`flatMap` body ahead of a slice declines (`ffca8f77`). What it cannot move — a
   movement between (`property().out().limit(1)`), `withoutStrategies(EarlyLimitStrategy)`, a slice that would
   split a creation from its `property()`, a branch's lazily emitted arm writes, a write in a body read for
   its first result (`where(__.out().property(…))`, formerly an internal "Ref 'pwN'" error) — DECLINES

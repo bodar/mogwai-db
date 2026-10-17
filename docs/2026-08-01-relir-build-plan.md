@@ -784,6 +784,12 @@ authorities.
   endpoint runs the `property(k, <traversal>)` race guard, a literal-id source gets a program-start existence
   pre-check (`ProgramWrites.preChecks`); `sum` keeps the reference number class. The per-traverser write driver
   (full design above) is still open.
+  ✅ **Keyed side effect run per traverser behind a slice LANDED 2026-10-17 (`ffca8f77`):** `local`/`map`/`flatMap`
+  (`__.aggregate('a')`) spliced by `inlineIdentityHostBody`, then sliced, answered the full collection;
+  `ProgramWrites.truncated` now counts a KEYED side-effect collector (`collectsSideEffect`: aggregate, keyed
+  group/groupCount/tree, subgraph) as a side effect at every depth, and `ir/early-limit.ts` no longer moves a
+  slice past a spliced step (`step/branch/LocalStep.java`, `step/filter/RangeGlobalStep.java:72-82`). Declines
+  pinned in `test/L4-addendum/early-limit-side-effect.feature`.
 - ✅ **G — label scope into nested arms; internal errors past the decline contract.** Authority:
   `step/util/Scoping.java` + `TraversalSelectStep` (a local child keeps the parent path),
   `strategy/optimization/IdentityRemovalStrategy.java` (copyLabels). Seams: the union arm merge (`mergeArms`
