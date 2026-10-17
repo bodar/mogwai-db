@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { STATIC, TYPED_MEMBERS, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
@@ -322,12 +322,14 @@ describe('group / properties SQL', () => {
     // compile-time constant inlined into the fold, not that a named relation carries it.
     const p = read('g.withSack(0.0d).V().sack(sum).by("age").sack()', rel);
     expect(p.kind).toBe('read');
-    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
+    // The sack carries its own per-row TYPE TAG (`sackt`), so its read frames by it rather than inferring.
+    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(p.sql).toContain('(0.0 + (SELECT');
     expect(p.binds).toEqual([]);
-    // `div` forces REAL division — SQLite's `/` is integer division on integer operands, which is the
-    // one operator whose obvious spelling answers a different question.
+    // `div` is REAL division where either operand's TAG is floating, and integer division otherwise —
+    // `NumberHelper`'s integral helpers truncate, so `withSack(1).sack(div).by(constant(2))` is 0.
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', rel).sql).toContain('CAST(2 AS REAL) / 4.0');
+    expect(runWith(store, 'g.withSack(1).V(1).sack(div).by(__.constant(2)).sack()', rel).map((r) => r.v)).toEqual([0]);
     // `assign` needs no prior value, so it MINTS the channel where no `withSack()` seeded one.
     expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v)).toEqual([29, 27, 32, 35]);
     // The by() is the ordinary modulator seam, so a CHILD body works here the day it works anywhere.

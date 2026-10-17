@@ -285,12 +285,15 @@ describe('repeat / path SQL', () => {
           // RelIR reads the carried `sack` channel of the walk row, the same way `loops()` reads its own
       // channel — one carried-state reader over a role, not a predicate that knows about sacks.
       // The walk header is the rowid then the channels in ROLE_ORDER, so the sack rides beside the
-      // loop counter rather than in a column of its own invention.
-      expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, sack, lp0, bulk\)/);
-      expect(p.sql).toMatch(/w\d+\.sack >= 50/);
-      // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED rather than assuming a
-      // number — the same honesty `ScalarType.UNKNOWN` buys everywhere else.
-      expect(p.sql).toMatch(/typeof\(w\d+\.sack\) IN \('integer', 'real'\)/);
+      // loop counter rather than in a column of its own invention. Its TYPE TAG (`sackt`) is a second
+      // column of the same role, so it rides the walk exactly as the value does.
+      expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, sack, sackt, lp0, bulk\)/);
+      expect(p.sql).toMatch(/CAST\(w\d+\.sack AS INT\) >= 50/);
+      // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED by the sack's own per-row
+      // tag rather than assuming a number. The tag is TOTAL (the seed's `long`, then each sum's storage
+      // class) — a NULL tag would match no arm and the until() would never fire.
+      expect(p.sql).toMatch(/WHEN w\d+\.sackt IN \('byte', 'short', 'int', 'long', 'bigint'\)/);
+      expect(p.sql).toContain("'long' AS sackt");
     
   });
 

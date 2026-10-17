@@ -11,7 +11,7 @@ import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
-import { constLit } from '../const.ts';
+import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -33,8 +33,9 @@ import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { mixedClassesRefused, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
+import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { comparableClass, continueAs, declaredScalarType, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -1673,8 +1674,11 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
     // Live on every row of a relation that carries the channel at all, which is what makes this a
     // CLAIM rather than the silence `undefined` means.
     present = ALWAYS_PRODUCTIVE;
-    // `loops()` is an int by construction (`CHANNEL_COL`); a sack holds whatever its seed was.
+    // `loops()` is an int by construction (`CHANNEL_COL`); a sack carries its own per-row tag
+    // (`sackTagOf`), the same carrier a stored property's `vtype` is — so every receiver check
+    // downstream reads a `withSack(true)` as the Boolean it is, not as SQLite's integer 1.
     if (carried.role === 'loops') type = STATIC('int');
+    if (carried.role === 'sack') vtype = sackTagOf(host.row!.rel);
     at = 1;
   } else if (leading?.name === 'constant') {
     const args = leading.args.map((a) => a.value);

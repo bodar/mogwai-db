@@ -202,6 +202,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           // this arm — `constLit` renders it `9e999 - 9e999`, since SQLite has no NaN at all.)
           case 'compiler-real': {
             if (!Number.isFinite(e.value as number)) return raw((e.value as number) > 0 ? '9e999' : '-9e999');
+            // `String(-0)` is `"0"`, so a negative zero keeps its sign only if it is spelled here.
+            if (Object.is(e.value, -0)) return raw('-0.0');
             const s = String(e.value); return raw(/[.eE]/.test(s) ? s : `${s}.0`);
           }
           case 'compiler-null': return raw('NULL');

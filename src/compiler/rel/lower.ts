@@ -23,7 +23,7 @@ import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { constLit, itemTypeAt } from './const.ts';
+import { constLit, declaredScalarType, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
@@ -584,33 +584,6 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
   if (!literal && !tail) return null;
   return projectScalar(input, [['v', literal ?? tail!.expr]], [meta('v', 'any', true)],
     { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : declaredScalarType(arg) }, fresh);
-}
-
-/**
- * A CONSTANT'S OWN TYPE, off the argument that declared it — `UNKNOWN` only where there is genuinely
- * nothing to say.
- *
- * `constant()` used to frame every plain literal `UNKNOWN`, i.e. "infer from the value at the wire", for
- * a value whose type the front end had already parsed and carried (`Arg.type`). Inference then re-derived
- * it from the SQL storage class, which cannot see the distinctions Gremlin spells LEXICALLY — and
- * `constLit` deliberately narrows that storage class further, inlining a boolean as INTEGER 1. Measured
- * before this, all three silently wrong on the wire: `constant(30L)` framed INT (not LONG),
- * `constant(30.5f)` DOUBLE (not FLOAT), and `constant(true)` **INT 1 rather than BOOLEAN true**.
- *
- * Dropping the INCOMING per-row `vtype` stays correct and is a different question — the stored type no
- * longer describes the value that is there now, which is what every transform does. What was missing is
- * the replacement.
- *
- * §6·7 in one line: the type is known at compile time, so a static tag is exactly the right carrier, and
- * the framer already renders a tagged value from a narrower column (a stored boolean is INTEGER + a
- * `boolean` tag → GraphBinary BOOLEAN). A COLLECTION type has no `ValueType` and no scalar literal form
- * — `constLit` has already declined it — so it cannot arrive here; `UNKNOWN` remains for a parameter
- * whose type the client did not send, where inference IS the honest answer.
- */
-export function declaredScalarType(arg: Arg | undefined): ScalarType {
-  const declared = flatType(arg?.type ?? null);
-  if (declared === null || declared === 'list' || declared === 'map' || declared === 'set') return UNKNOWN;
-  return STATIC(declared);
 }
 
 /**

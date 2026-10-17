@@ -61,8 +61,8 @@
   },
   "asString": {
     "binds": 0,
-    "bytes": 3911,
-    "compiler": 85,
+    "bytes": 4076,
+    "compiler": 91,
     "bound": 0
   },
   "both": {
@@ -103,8 +103,8 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 2494,
-    "compiler": 37,
+    "bytes": 2658,
+    "compiler": 39,
     "bound": 0
   },
   "conjoin": {
@@ -493,8 +493,8 @@
   },
   "sack": {
     "binds": 0,
-    "bytes": 609,
-    "compiler": 5,
+    "bytes": 701,
+    "compiler": 8,
     "bound": 0
   },
   "sample": {

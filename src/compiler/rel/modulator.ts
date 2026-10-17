@@ -7,7 +7,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
@@ -460,8 +460,8 @@ export function scopedHost(label: string, host: ChildHost): ChildHost | null {
  * already refuses.
  */
 /** A `{t,v}` node's tag from a scalar type: the STATIC class as a literal where the type names one,
- *  else SQL NULL (an UNKNOWN or a per-row type the framer must infer — a per-row column cannot ride a
- *  map side, so it is dropped here). A literal, so it never duplicates a correlated read. */
+ *  else SQL NULL (an UNKNOWN the framer must infer). A per-row tag is the caller's to pass where it has
+ *  one (`producedMemberNode`'s `vtype`). */
 const staticTagExpr = (type: ScalarType): Expr => {
   const tag = staticTypeOf(type);
   return tag ? compilerText(tag) : compilerNull('text');
@@ -475,9 +475,10 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * Factored out of `byNode` because the pooled fold-collect asks exactly this question of an
  * already-lowered ROW rather than a re-lowered child expression: given a value and what it IS, wrap it
  * as the member node the typed tree frames at any depth. An ELEMENT rowid becomes `{t:'vertex', v:{…}}`,
- * a MAP its pairs array, a scalar its `{t,v}` node tagged where the type is STATIC (a literal `t`, no
- * correlated read duplicated) and untagged where it is per-row (a stored value's tag is a second read a
- * member position has no room for).
+ * a MAP its pairs array, a scalar its `{t,v}` node tagged by its per-row `vtype` where the producer
+ * carries one, else by its STATIC type, else untagged (infer). Dropping a per-row tag here was not
+ * neutral: a stored Boolean or a `withSack(true)` sack is SQLite's integer 1, so
+ * `group().by(values('b'))` keyed it `1` where the reference keys `true`.
  *
  * THE SQL NULL OUTSIDE THE NODE MEANS "PRODUCED NOTHING", and nothing else — it is how the shared
  * productivity filter (`productivityFilter`) tells a child that yielded nothing from a value worth
@@ -494,14 +495,23 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * NULL ⟹ unproductive reading those producers' values were built for. Only a SCALAR can be a productive
  * null; an element/map/list framing's NULL is always "no value".
  */
-export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence): Expr | null {
+/** A scalar's `{t,v}` node from its per-row tag where it has one — the full `typedNode` where value and
+ *  tag are both plain columns/literals (cheap to repeat), else `typedNodeOnce`, which spells a
+ *  correlated read once — and from its static tag otherwise. */
+const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType): Expr => {
+  if (!vtype) return typedNode(value, staticTagExpr(type));
+  const plain = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
+  return plain(value) && plain(vtype) ? typedNode(value, vtype) : typedNodeOnce(value, vtype);
+};
+
+export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence, vtype?: Expr): Expr | null {
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
       : framing.kind === 'list' ? (() => {
         const members = listNodeExpr(value, framing.of, source, fresh);
         return members && listNode(members);
       })()
-      : framing.kind === 'scalar' ? typedNode(value, staticTagExpr(framing.type))
+      : framing.kind === 'scalar' ? scalarNode(value, vtype, framing.type)
         : null;
   if (!member) return null;
   // A scalar's node over a NULL value is `{t:<tag>, v:null}` — a non-NULL JSON object, which IS the
@@ -537,7 +547,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
     // ALIAS arm below gives — a child body and a labelled read are the same question about a different
     // scope, so they must not encode their results two ways.
-    return producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present);
+    return producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present, produced.vtype);
   }
 
   if (key.kind === 'alias') {

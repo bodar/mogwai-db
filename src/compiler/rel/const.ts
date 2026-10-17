@@ -1,5 +1,6 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
 import { flatType, type TypeNode } from '../../gremlin/types.ts';
+import { STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 
 // ---------- the one seam for "a value the compiler already holds" ----------
@@ -96,3 +97,31 @@ export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerI
  *  int-bind form, so it reduces too. */
 export const sliceBound = (n: number, paramName: string | null): Expr =>
   paramName != null && Number.isSafeInteger(n) ? param(n, paramName, 'int') : countLit(n);
+
+/**
+ * A CONSTANT'S OWN TYPE, off the argument that declared it — `UNKNOWN` only where there is genuinely
+ * nothing to say.
+ *
+ * `constant()` used to frame every plain literal `UNKNOWN`, i.e. "infer from the value at the wire", for
+ * a value whose type the front end had already parsed and carried (`Arg.type`). Inference then re-derived
+ * it from the SQL storage class, which cannot see the distinctions Gremlin spells LEXICALLY — and
+ * `constLit` deliberately narrows that storage class further, inlining a boolean as INTEGER 1. Measured
+ * before this, all three silently wrong on the wire: `constant(30L)` framed INT (not LONG),
+ * `constant(30.5f)` DOUBLE (not FLOAT), and `constant(true)` **INT 1 rather than BOOLEAN true**.
+ *
+ * Dropping the INCOMING per-row `vtype` stays correct and is a different question — the stored type no
+ * longer describes the value that is there now, which is what every transform does. What was missing is
+ * the replacement.
+ *
+ * §6·7 in one line: the type is known at compile time, so a static tag is exactly the right carrier, and
+ * the framer already renders a tagged value from a narrower column (a stored boolean is INTEGER + a
+ * `boolean` tag → GraphBinary BOOLEAN). A COLLECTION type has no `ValueType` and no scalar literal form
+ * — `constLit` has already declined it — so it cannot arrive here; `UNKNOWN` remains for a parameter
+ * whose type the client did not send, where inference IS the honest answer.
+ */
+export function declaredScalarType(arg: Arg | undefined): ScalarType {
+  const declared = flatType(arg?.type ?? null);
+  if (declared === null || declared === 'list' || declared === 'map' || declared === 'set') return UNKNOWN;
+  return STATIC(declared);
+}
+

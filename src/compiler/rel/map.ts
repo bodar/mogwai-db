@@ -425,7 +425,7 @@ export function groupRows(
         ? producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present)
         : produced.framing.kind === 'list'
           ? listNode(produced.expr)
-          : producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present);
+          : producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present, produced.vtype);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };

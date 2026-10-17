@@ -550,6 +550,23 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
 });
 
 /**
+ * `typedNode` for a per-row tag that is EXPENSIVE to spell — a correlated read, which `jsonMember`'s
+ * per-tag `CASE` would repeat (with the value) once per arm: measured, `group().by(values('name'))`
+ * went 1,700 → 5,540 statement bytes. So the tag is spelled ONCE and the value ONCE: the node keeps the
+ * tag only where the identity encoding is already right for it (`nullif` the rest, the same one-
+ * evaluation spelling `reducedVtype` uses), and drops to "infer" for a collection, floating or wide
+ * integer tag — exactly the untagged node every such member was before. What it gains is every tag
+ * whose VALUE encodes as itself but whose storage class reads as something else: a Boolean is SQLite's
+ * integer 1, so an untagged node keyed `group().by(values('b'))` by `1` where the reference keys `true`.
+ */
+export const typedNodeOnce = (value: Expr, vtype: Expr): Expr => ({
+  kind: 'json-object',
+  entries: [['t', [...COLLECTION_VTYPES, ...FLOATING_VTYPES, ...WIDE_INT_VTYPES].reduce<Expr>(
+    (inner, tag) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(tag)] }), vtype)], ['v', value]],
+  binary: false,
+});
+
+/**
  * The DETACHED-transfer member node — `{t, v, vpid, meta}`, the `{t,v}` node plus the two facts a
  * landed subgraph needs to reconstruct a full `DetachedVertexProperty`: the property's own id (`vpid`
  * = the `vertex_properties` rowid, TinkerPop's `Property` handle) and its meta-properties (`meta`).

@@ -171,6 +171,27 @@ export function concatOperandOffence(value: Expr, evidence: ValueEvidence): read
   return offends ? [offends, deferral('concat(): a traversal argument that yields a non-String')] : offends;
 }
 
+/**
+ * WHAT AN ARITHMETIC OPERATOR OWES ITS OPERANDS. `Operator.sum/minus/mult/div` cast both sides to
+ * `Number` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Operator.java`),
+ * so a non-null non-Number on either side is a `ClassCastException` there, while SQLite's arithmetic reads
+ * a Boolean as 1 and a String as 0. A null passes (`NumberHelper.mathOperationWithPromote` returns the
+ * other side). The same three answers as `receiverOffence`, collected: `false` declines (an operand is
+ * proven non-Number), else the per-row offences — a run-time DEFERRAL, because the reference's message
+ * is a JVM cast message naming per-row classes.
+ */
+export function numericOperandOffences(
+  operands: readonly (readonly [Expr, ValueEvidence])[], what: string,
+): readonly (readonly [Expr, string])[] | false {
+  const offences: (readonly [Expr, string])[] = [];
+  for (const [value, evidence] of operands) {
+    const offends = receiverOffence('number', value, evidence);
+    if (offends === false) return false;
+    if (offends) offences.push([offends, deferral(`${what}: an operand that is not a Number`)]);
+  }
+  return offences;
+}
+
 /** The integral Number tags — `String.valueOf` of each is its decimal digits, exactly SQLite's text. */
 const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bigint'];
 
@@ -227,7 +248,12 @@ function doubleText(value: Expr): Expr {
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
   const roundTrips: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
-  return { kind: 'case', whens: [[or(zero, and(plain, roundTrips)), shown]],
+  // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
+  // renders `0.0`, and `-0.0 < 0` is false). `atan2(±0, -1)` is ±π, the one comparison that reads the
+  // sign bit.
+  const negative: Expr = { kind: 'binary', op: '<', left: { kind: 'call', fn: 'atan2', args: [real, compilerReal(-1)] }, right: int(0) };
+  const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
+  return { kind: 'case', whens: [[zero, signedZero], [and(plain, roundTrips), shown]],
     else: raise(deferral('asString(): a Double outside the plain shortest form')) };
 }
 

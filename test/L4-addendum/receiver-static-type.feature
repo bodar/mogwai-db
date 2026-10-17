@@ -257,3 +257,158 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "Can't parse null as String."
+
+  # THE SACK carries its own type tag (`SACK_TYPE_COL`, src/compiler/rel/sack.ts) — the seed's declared
+  # type, an `assign`'s by() evidence — and reaches every reader as a per-row `vtype`, so the root read,
+  # the child `sack()` value run and a `group().by()` key all see a `withSack(true)` as the Boolean it is.
+  # Before it, the sack was SQLite's integer 1 to every reader: `sack()` framed Int 1, `asString()` '1',
+  # `math('_+1')` 2.0. The math() forms raise PER ROW with the reference's own message (the tag is a
+  # column, so the check is in-statement rather than a compile-time decline).
+
+  Scenario: g_withSackXtrueX_V_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().sack()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | true |
+      | true |
+      | true |
+      | true |
+      | true |
+      | true |
+
+  Scenario: g_withSackXtrueX_V_sack_mathX_plus_1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().sack().math("_+1")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+
+  Scenario: g_withSackXtrueX_V_localXsack_mathX_plus_1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().local(__.sack().math("_+1"))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+
+  Scenario: g_injectXtrueX_sackXassignX_byXidentityX_sack_mathX_plus_1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(true).sack(Operator.assign).by(__.identity()).sack().math("_+1")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+
+  Scenario: g_withSackXtrueX_V_sack_asString
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().sack().asString()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | str[true] |
+      | str[true] |
+      | str[true] |
+      | str[true] |
+      | str[true] |
+      | str[true] |
+
+  Scenario: g_withSackXtrueX_VX1X_projectXsX_byXsack_asStringX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V(1).project("s").by(__.sack().asString())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"s":"str[true]"}] |
+
+  Scenario: g_injectXtrueX_sackXassignX_byXconstantXtrueXX_sack_asString
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(true).sack(Operator.assign).by(__.constant(true)).sack().asString()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | str[true] |
+
+  Scenario: g_withSackXtrueX_V_groupCount_byXsackX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().groupCount().by(__.sack())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"true":"d[6].l"}] |
+
+  # A child value's per-row tag reaches a MAP KEY too (`producedMemberNode`): a stored Boolean keyed `1`.
+  Scenario: g_addVXxX_propertyXb_trueX_groupCount_byXvaluesXbXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.addV("x").property("b", true).groupCount().by(__.values("b"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"true":"d[1].l"}] |
+
+  # An ARITHMETIC sack operator casts both operands to Number (`Operator.java` sum/minus/mult/div), so a
+  # Boolean sack or a String operand raises there; SQLite added 1 or 0. The raise is a run-time deferral
+  # (the reference's message is a JVM cast message naming per-row classes); a by() value proven
+  # non-Number at compile time declines.
+  Scenario: g_withSackXtrueX_V_sackXsumX_byXageX_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(true).V().sack(Operator.sum).by("age").sack()
+      """
+    When iterated to list
+    Then the traversal will raise an error
+
+  Scenario: g_withSackX1X_V_sackXsumX_byXnameX_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by("name").sack()
+      """
+    When iterated to list
+    Then the traversal will raise an error
+
+  @Unsupported
+  Scenario: g_withSackX1X_V_sackXsumX_byXconstantXtrueXX_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(Operator.sum).by(__.constant(true)).sack()
+      """
+    When iterated to list
+    Then the traversal will raise an error
+
+  # Double.toString keeps a zero's sign; SQLite's text does not (and `String(-0)` spelled the literal `0.0`).
+  Scenario: g_injectX_0_0dX_asString
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(-0.0d).asString()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | str[-0.0] |
