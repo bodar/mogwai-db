@@ -21,7 +21,7 @@ import type { GraphSource } from '../source.ts';
 import { joinAliasEntry, type AliasEntry, type AliasMap } from '../../alias.ts';
 import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
-import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
+import { variantArm, variantArmOf, variantHasList, variantScalarType, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
 import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
@@ -511,15 +511,17 @@ export function variantMerge(
   };
 }
 
-/** The declared arms, one per distinct SHAPE. Two `{kind:'scalar'}` arms whose types differ collapse
- *  to one here and the payload then frames `UNKNOWN` — the wire carries a single static tag per
- *  variant, which is the one place its vocabulary is short of the algebra's (§6·7's extension point). */
+/** The declared arms, one per distinct SHAPE. Two `{kind:'scalar'}` arms collapse to one whose type is
+ *  their MEET (`variantScalarType`): one shared static description, else each row's own class off the
+ *  variant's tag column — never the first arm's type, which framed a Long arm by an Integer arm's tag. */
 export const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] => {
   const seen = new Map<string, VariantArm>();
   for (const arm of arms) {
     const key = arm.kind === 'elements' ? `e:${arm.elem}` : arm.kind;
     if (!seen.has(key)) seen.set(key, arm);
   }
+  const scalars = arms.flatMap((arm) => (arm.kind === 'scalar' ? [arm.type] : []));
+  if (scalars.length) seen.set('scalar', { kind: 'scalar', type: variantScalarType(scalars) });
   return [...seen.values()];
 };
 

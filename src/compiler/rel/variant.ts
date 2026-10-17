@@ -1,8 +1,8 @@
-import { col, compilerInt, compilerNull, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { STATIC, staticTypeOf, UNKNOWN, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
+import { isPerRow, PER_ROW, perRowColumnOf, sameScalarType, staticTypeOf, UNKNOWN, type ScalarType, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
 import { byEncounter, carriedCols, meta, scalarFramedValue, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { correlatedElementColumns } from './element.ts';
@@ -53,6 +53,32 @@ export type VariantArm =
  *  some arm is a list, so the common element/scalar variant costs three columns. */
 const VK = 'vk';
 const RID = 'rid';
+/** A scalar row's OWN Gremlin class, per row — the variant's type channel. Every scalar arm fills it from
+ *  its own type (a static tag as text, a per-row tag from its column, NULL = infer from the value), so
+ *  arms whose classes disagree each keep theirs instead of one arm's tag (or inference) framing them all. */
+const VT = 'vkt';
+/** The type a variant's scalar slot is framed by where its arms do not share ONE static description. */
+const PER_ROW_VT: ScalarType = PER_ROW(VT);
+
+/** One scalar arm's per-row class, as the `VT` column holds it. */
+const scalarTagExpr = (rel: Rel, type: ScalarType): Expr => {
+  const column = perRowColumnOf(type);
+  if (column) return col(rel.id, column);
+  const tag = staticTypeOf(type);
+  return tag ? compilerText(tag) : compilerNull('text');
+};
+
+/**
+ * THE MEET of the scalar arms' types, as the variant DECLARES it: one shared description (every arm the
+ * same static tag, or every arm `unknown`) stays as it is; anything else reads each row's own class off
+ * `VT`. Never one arm's type for all — that framed a Long arm's `3` by an Integer arm's tag (`3i`), and
+ * `UNKNOWN` inferred an Integer for every integral value whatever class the arm declared.
+ */
+export const variantScalarType = (types: readonly ScalarType[]): ScalarType => {
+  const [head, ...rest] = types as [ScalarType, ...ScalarType[]];
+  const shared = rest.every((type) => sameScalarType(head, type));
+  return shared && (head.kind === 'static' || head.kind === 'unknown') ? head : PER_ROW_VT;
+};
 
 const tagOf = (arm: VariantArm): number =>
   (arm.kind === 'scalar' ? 1 : arm.kind === 'list' ? 4 : arm.elem === 'edge' ? 3 : 2);
@@ -65,7 +91,12 @@ const tagOf = (arm: VariantArm): number =>
  * be a wire concept this layer does not own (§6·3: RelIR builds the VALUE, `execute.ts` frames it).
  */
 export function variantArmOf(framing: RelFraming): VariantArm | null {
-  if (framing.kind === 'scalar') return framing.result === undefined ? { kind: 'scalar', type: framing.type } : null;
+  // An ENVELOPE-carried per-row type belongs to a value inside a JSON blob; a scalar ROW has no envelope
+  // to read it from, so the arm declines rather than projecting a tag it cannot reach.
+  if (framing.kind === 'scalar') {
+    return framing.result === undefined && !(isPerRow(framing.type) && !perRowColumnOf(framing.type))
+      ? { kind: 'scalar', type: framing.type } : null;
+  }
   if (framing.kind === 'elements') return { kind: 'elements', elem: framing.elem };
   if (framing.kind === 'list') return framing.set ? null : { kind: 'list', of: framing.of };
   return null;
@@ -84,12 +115,13 @@ export function variantArm(rel: Rel, arm: VariantArm, hasList: boolean, fresh: M
   const value: Expr = arm.kind === 'scalar' ? col(rel.id, 'v') : compilerNull();
   const rowid: Expr = arm.kind === 'elements' ? col(rel.id, 'id') : compilerNull('int');
   const listed: Expr = arm.kind === 'list' ? col(rel.id, 'list') : compilerNull('json');
-  const cols: ColMeta[] = [meta(VK, 'int'), meta('v', 'any', true), meta(RID, 'int', true),
+  const vt: Expr = arm.kind === 'scalar' ? scalarTagExpr(rel, arm.type) : compilerNull('text');
+  const cols: ColMeta[] = [meta(VK, 'int'), meta('v', 'any', true), meta(VT, 'text', true), meta(RID, 'int', true),
     ...(hasList ? [meta('list', 'json', true)] : [])];
   return make.project({
     id: fresh('va'), input: rel, channels: carried,
     type: typeOf(...cols, ...carriedCols(carried)),
-    exprs: [[VK, compilerInt(tag)], ['v', value], [RID, rowid],
+    exprs: [[VK, compilerInt(tag)], ['v', value], [VT, vt], [RID, rowid],
       ...(hasList ? [['list', listed] as const] : []),
       ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
   });
@@ -107,11 +139,11 @@ export const variantHasList = (arms: readonly VariantArm[]): boolean => arms.som
  * always, the element triple where some arm is an element, `src`/`tgt` where one is an edge, and
  * `list` where one is a list.
  *
- * The SCALAR arm is declared even where no arm produced one — the framer reads
- * `staticTypeOf(scalar.type)` and a missing arm would make a `vk=1` row throw rather than infer. A
- * per-row scalar tag is the one thing the wire vocabulary is short of (`VariantShapeArm.scalar` takes
- * a whole `ScalarType`, but the framer reads only its static tag), so arms whose types disagree frame
- * `UNKNOWN` and infer per value — the extension point §6·7 names.
+ * The SCALAR arm is declared even where no arm produced one — the framer reads its type and a missing
+ * arm would make a `vk=1` row throw rather than infer. Arms that share ONE static description frame by
+ * it; arms that do not frame each row by its own class off `VT` (`variantScalarType`) — never by one
+ * arm's tag for all, and never by value inference, which reads every integral value as an Integer
+ * (`inject(3L).union(fold(), identity())` answered `3i`).
  */
 export function variantPayload(
   rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter, realDecimals = false,
@@ -120,22 +152,20 @@ export function variantPayload(
   const elems = new Set(arms.flatMap((arm) => (arm.kind === 'elements' ? [arm.elem] : [])));
   const listArm = arms.find((arm): arm is Extract<VariantArm, { kind: 'list' }> => arm.kind === 'list');
   const scalars = arms.filter((arm): arm is Extract<VariantArm, { kind: 'scalar' }> => arm.kind === 'scalar');
-  // ONE STATIC tag across every scalar arm, or `UNKNOWN` — and never the `perRow` a scalar arm may
-  // arrive with. That is not a simplification, it is the payload telling the truth: this tuple has no
-  // `vtype` column, and the framer reads `staticTypeOf(scalar.type)`, so declaring `perRow` would be a
-  // claim about a column that is not there. It costs nothing today because `staticTypeOf` of a
-  // `perRow` is undefined and the framer infers per value either way — the DECLARATION would simply
-  // be describing a row shape the algebra did not build. Carrying the column instead is §6·7's
-  // extension point (`VariantShapeArm.scalar` already takes a whole `ScalarType`), and it wants the
-  // framer to read it, which is a wire change rather than this one.
-  const tags = new Set(scalars.map((arm) => staticTypeOf(arm.type)));
-  const uniform = tags.size === 1 ? [...tags][0] : undefined;
-  const scalarType = uniform ? STATIC(uniform) : UNKNOWN;
+  const scalarType = scalars.length ? variantScalarType(scalars.map((arm) => arm.type)) : UNKNOWN;
+  const perRow = scalarType.kind === 'perRow';
+  const uniform = staticTypeOf(scalarType);
+  // A BigDecimal scalar row frames off its carrier, as every scalar result does (`scalarFramedValue`) —
+  // gated on the one static tag, else on the row's own.
+  const rowIsDecimal: Expr = { kind: 'binary', op: '=', left: col(ordered.id, VT), right: compilerText('bigdecimal') };
+  const decimal: Expr | null = !realDecimals ? null
+    : uniform === 'bigdecimal' ? eqTag(ordered, 1)
+      : perRow ? { kind: 'binary', op: 'and', left: eqTag(ordered, 1), right: rowIsDecimal } : null;
 
   const payload: (readonly [ColMeta, Expr])[] = [
     [meta(VK, 'int'), col(ordered.id, VK)],
-    // A BigDecimal scalar arm frames off its carrier, as every scalar result does (`scalarFramedValue`).
-    [meta('v', 'any', true), scalarFramedValue(col(ordered.id, 'v'), realDecimals && uniform === 'bigdecimal' ? eqTag(ordered, 1) : null)],
+    [meta('v', 'any', true), scalarFramedValue(col(ordered.id, 'v'), decimal)],
+    ...(perRow ? [[meta(VT, 'text', true), col(ordered.id, VT)] as const] : []),
   ];
   // The element triple is a CASE over the tag rather than a per-kind column, because the framer reads
   // ONE `id`/`label`/`props` whichever kind the row is — `rowVertex` and `rowEdge` take the same names.

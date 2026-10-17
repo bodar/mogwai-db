@@ -209,9 +209,16 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
 /** Frame a scalar field from its declared record channel. Unlike a bare JS value,
  * a stored UUID/date/long needs its sibling vtype to avoid storage-class inference. */
 function recordValueBuffer(row: any, prefix: string, type: ScalarType): Buffer {
-  const v = row[`${prefix}_v`];
+  return typedValueBuffer(row[`${prefix}_v`], row, type, 'recordValueBuffer');
+}
+
+/** THE ONE scalar-by-its-type framing for a ROW: a static/unknown type frames every row by its one tag
+ *  (or infers), a per-row type reads THIS row's tag off its column — a collection tag naming the stored
+ *  `{t,v}` tree. Shared by a `value` stream, a record field and a variant's scalar arm, so the three
+ *  cannot disagree about what a per-row tag means. */
+function typedValueBuffer(v: any, row: any, type: ScalarType, site: string): Buffer {
   if (type.kind !== 'perRow') return frameValue(v, staticTypeOf(type));
-  const vtype = row[perRowColumn(type, 'recordValueBuffer')];
+  const vtype = row[perRowColumn(type, site)];
   return isCollectionType(vtype) ? frameStoredValue(v, vtype) : frameValue(v, vtypeToValueType(vtype));
 }
 
@@ -689,12 +696,8 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.
     case 'value': {
       const t = shape.type;
-      for (const r of rows) {
-        if (t.kind !== 'perRow') { yield frameValue(r.v, staticTypeOf(t)); continue; }
-        const vtype = r[perRowColumn(t, "Shape 'value'")];
-        // A collection vtype names the OUTER shape, so frame the stored {t,v} tree.
-        yield isCollectionType(vtype) ? frameStoredValue(r.v, vtype) : frameValue(r.v, vtypeToValueType(vtype));
-      }
+      // A collection vtype names the OUTER shape, so frame the stored {t,v} tree (`typedValueBuffer`).
+      for (const r of rows) yield typedValueBuffer(r.v, r, t, "Shape 'value'");
       return;
     }
     // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
@@ -706,7 +709,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
       const list = shape.arms.find((arm): arm is Extract<typeof arm, { kind: 'list' }> => arm.kind === 'list');
       const framed = rows.map((r) => {
         if (r.vk === 0) return frameValue(null, undefined);
-        if (r.vk === 1 && scalar) return frameValue(r.v, staticTypeOf(scalar.type));
+        if (r.vk === 1 && scalar) return typedValueBuffer(r.v, r, scalar.type, "Shape 'variant'");
         if (r.vk === 2 && vertex) return rowVertex(r);
         if (r.vk === 3 && edge) return rowEdge(r);
         if (r.vk === 4 && list) return frameListOf(r.list, list.of);
