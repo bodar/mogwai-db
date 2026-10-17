@@ -63,6 +63,22 @@ self.onmessage = async () => {
       if (j.vertexCount !== 0) throw new Error(`after destroy A = ${JSON.stringify(j)}`);
     });
 
+    // The destroy RACE, amplified: a graph whose Worker is live and holding its opfs-sahpool access
+    // handles is destroyed straight after a write, then re-addressed — many times over, so a destroy that
+    // removes the OPFS directory before the Worker has RELEASED its handles (NoModificationAllowedError)
+    // or that leaves the old rows behind cannot pass by luck of scheduling.
+    await check('destroy is reliable under repetition (write → destroy → re-address, ×5)', async () => {
+      for (let i = 0; i < 5; i++) {
+        const G = `coord-cycle-${stamp}-${i}`;
+        await post(G, "g.addV('person').property('name','x')");
+        const del = await router(new Request(`http://x/gremlin/${G}`, { method: 'DELETE' }));
+        if (del.status !== 204) throw new Error(`cycle ${i}: delete status ${del.status}: ${await del.text()}`);
+        const j = await (await router(new Request(`http://x/gremlin/${G}`, { method: 'OPTIONS' }))).json() as any;
+        if (j.vertexCount !== 0) throw new Error(`cycle ${i}: after destroy = ${JSON.stringify(j)}`);
+        await manager.destroy(G);
+      }
+    });
+
     (self as any).postMessage({ results });
   } catch (e: any) {
     (self as any).postMessage({ results, fatal: String(e?.stack || e) });

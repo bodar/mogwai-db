@@ -28,7 +28,11 @@ import { RpcTarget } from 'capnweb';
 
 /** How a graph's synchronous store is opened. Defaults to that graph's own opfs-sahpool database (one
  *  DB per graph = one DO); a test injects an in-memory factory. Async only for the WASM/pool init. */
-export type GraphSqlFactory = (graphId: string) => Promise<Sql>;
+export type GraphSqlFactory = (graphId: string) => Promise<GraphSql>;
+
+/** A graph's store as its Worker holds it: the synchronous `Sql` seam plus `close()`, which must release
+ *  EVERY resource the store holds (for opfs-sahpool, its OPFS access handles) before it returns. */
+export type GraphSql = Sql & { close(): void };
 
 const opfsSahpoolFactory: GraphSqlFactory = (graphId) => opfsSahpoolWasmSql(`.mogwai/${encodeURIComponent(graphId)}`);
 
@@ -56,6 +60,7 @@ export interface GraphWorkerHostOptions {
 export class GraphWorkerHost extends RpcTarget {
   private constructor(
     readonly graphId: string,
+    private readonly sql: GraphSql,
     private readonly store: GraphStore,
     /** This graph's executor — also the endpoint a manager routes a SIBLING'S federated hop INTO
      *  (its `runForeign`), which is the cross-Worker twin of the Cloudflare DO's `raw`/`runForeign` RPC. */
@@ -95,7 +100,7 @@ export class GraphWorkerHost extends RpcTarget {
         }),
     };
     const executor = new Executor(store, opts.registry ?? extendedRegistry, source, undefined, io);
-    host = new GraphWorkerHost(graphId, store, executor, http);
+    host = new GraphWorkerHost(graphId, sql, store, executor, http);
     return host;
   }
 
@@ -116,6 +121,16 @@ export class GraphWorkerHost extends RpcTarget {
    *  when another graph's Worker federates INTO this one (the browser twin of the DO `runForeign` RPC). */
   runForeign(gremlin: string, params: Record<string, unknown>, depth: number, paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {
     return this.executor.runForeign(gremlin, params, depth, paramTypes, terminal);
+  }
+
+  /** Close this graph's store and release its OPFS access handles — synchronously, so this RPC resolving
+   *  IS the guarantee that the graph's OPFS directory can now be removed. The manager awaits it before
+   *  terminating the Worker and removing the directory (`closeGraphWorker`, worker-spawn.ts): terminating
+   *  alone releases the handles only whenever the Worker's thread is torn down, with nothing to await, so
+   *  the removal raced it (`NoModificationAllowedError`). The host is unusable afterwards — the Worker is
+   *  terminated next. Idempotent. */
+  close(): void {
+    this.sql.close();
   }
 
   /** Element counts (the management GET). */
@@ -173,5 +188,6 @@ export class GraphWorkerHost extends RpcTarget {
     return conflictsFeed(this.store);
   }
 }
-// Lifecycle (removing this graph's opfs-sahpool database, terminating its Worker + releasing the pool's
-// file handles) is the manager's concern — it owns the Worker — so the host exposes no close/destroy.
+// Lifecycle is split at the one thing only the host can do: `close()` releases the store's handles from
+// INSIDE the Worker (the thread that owns them); terminating the Worker and removing its opfs-sahpool
+// directory is the manager's concern — it owns the Worker.

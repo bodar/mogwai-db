@@ -21,6 +21,7 @@ describe.skipIf(!browserLaneEnabled())('browser: manager + makeRouter over per-g
     'management OPTIONS returns counts JSON, auto-creating an empty graph',
     'management PUT creates (201)',
     'destroy wipes the store; re-address recreates it empty',
+    'destroy is reliable under repetition (write → destroy → re-address, ×5)',
   ];
 
   test('the driver ran every edge check (no fatal)', () => {

@@ -61,6 +61,21 @@ async function main() {
     }
   });
 
+  // The WorkerFactory's destroy path (SW edge → factory.destroyGraph → closeGraphWorker → removeOpfsDir),
+  // repeated: removing the graph's OPFS directory while its Worker still held the opfs-sahpool access
+  // handles failed with NoModificationAllowedError — and the SW used to swallow that and answer 204 over
+  // data that was still there.
+  await check('destroy over the Service Worker edge wipes the graph; re-address recreates it empty (×5)', async () => {
+    for (let i = 0; i < 5; i++) {
+      const url = `${location.origin}/gremlin/${G}-cycle-${i}`;
+      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gremlin: "g.addV('person')" }) });
+      const del = await fetch(url, { method: 'DELETE' });
+      if (del.status !== 204) throw new Error(`cycle ${i}: delete status ${del.status}: ${await del.text()}`);
+      const j = await (await fetch(url, { method: 'OPTIONS' })).json() as any;
+      if (j.vertexCount !== 0) throw new Error(`cycle ${i}: after destroy = ${JSON.stringify(j)}`);
+    }
+  });
+
   (window as any).__result = { results };
   (window as any).__done = true;
 }

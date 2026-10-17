@@ -13,7 +13,7 @@ import type { GraphManager, GraphInfo, RemoteExecutor } from '../manager.ts';
 import type { Framed } from '../execute.ts';
 import type { ForeignResult, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../api.ts';
 import type { GraphWorkerHost } from './GraphWorkerHost.ts';
-import { spawnGraphWorker, removeOpfsDir } from './worker-spawn.ts';
+import { spawnGraphWorker, closeGraphWorker, removeOpfsDir } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
 
 // capnweb stub methods return an `RpcPromise` whose type `Stubify`s the payload (an over-approximation for
@@ -141,13 +141,13 @@ export class LocalWorkerSource implements GraphStubSource {
   async destroy(id: string): Promise<void> {
     const g = this.graphs.get(id);
     if (g) {
+      this.graphs.delete(id);
       try {
         g.stub[Symbol.dispose]();
       } catch {
         /* already dead */
       }
-      g.worker.terminate(); // releases the graph's opfs-sahpool file handles
-      this.graphs.delete(id);
+      await closeGraphWorker(g.worker, id); // resolves only once the opfs-sahpool handles are released
     }
     await removeOpfsDir(`.mogwai/${encodeURIComponent(id)}`);
   }

@@ -160,7 +160,11 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
 
   async destroy(id: string): Promise<void> {
     const factories = await this.ensureFactories().catch(() => new Set<RpcStub<WorkerFactory>>());
-    await Promise.all([...factories].map((f) => f.destroyGraph(id).catch(() => {})));
+    // Every tab removes the directory; a non-leader's removal may lose to the leader still closing its
+    // Worker (NoModificationAllowedError) and that is fine once ANY tab's removal succeeded — the
+    // directory is gone. Only if EVERY tab failed did the destroy not happen, and then it must fail
+    // rather than report success over data that is still there.
+    const outcomes = await Promise.allSettled([...factories].map((f) => f.destroyGraph(id)));
     const cur = this.current.get(id);
     if (cur) {
       try {
@@ -171,6 +175,9 @@ export class FactoryStubSource implements GraphStubSource, RegistryStubSource {
       this.current.delete(id);
     }
     this.currentOwner.delete(id);
+    if (outcomes.length > 0 && outcomes.every((o) => o.status === 'rejected')) {
+      throw (outcomes[0] as PromiseRejectedResult).reason;
+    }
   }
 
   /** At least one control session, soliciting one from any open page if we have none. Bounded so a missing

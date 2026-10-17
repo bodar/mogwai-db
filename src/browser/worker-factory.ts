@@ -8,7 +8,7 @@
 // capnweb cannot itself carry (worker-spawn.ts).
 import { newMessagePortRpcSession, RpcTarget } from 'capnweb';
 import {
-  spawnGraphWorker, bootSession, spawnRegistryWorker, bootRegistrySession, removeOpfsDir, type BootstrapMessage,
+  spawnGraphWorker, bootSession, closeGraphWorker, spawnRegistryWorker, bootRegistrySession, removeOpfsDir, type BootstrapMessage,
 } from './worker-spawn.ts';
 import type { MogwaiConfig } from '../config.ts';
 
@@ -105,9 +105,11 @@ export class WorkerFactory extends RpcTarget {
   async destroyGraph(id: string): Promise<void> {
     const g = this.graphs.get(id);
     if (g) {
-      g.abort.abort();
-      g.worker?.terminate();
       this.graphs.delete(id);
+      // Close BEFORE releasing the lock: the abort lets a queued tab take leadership and re-open the
+      // graph's pool, so this tab's handles must already be released by then.
+      if (g.worker) await closeGraphWorker(g.worker, id); // resolves once its opfs-sahpool handles are released
+      g.abort.abort();
     }
     await removeOpfsDir(`.mogwai/${encodeURIComponent(id)}`);
   }

@@ -20,6 +20,7 @@ describe.skipIf(!browserLaneEnabled())('browser: Service Worker edge + unmodifie
     'a plain fetch is intercepted by the Service Worker and reaches the store',
     'the Service Worker routes a management OPTIONS (JSON) to the manager',
     'the UNMODIFIED TinkerPop GLV works over the Service Worker edge (fetch)',
+    'destroy over the Service Worker edge wipes the graph; re-address recreates it empty (×5)',
   ];
 
   test('the page ran every edge check (no fatal)', () => {

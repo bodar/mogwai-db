@@ -22,7 +22,9 @@ import type { Sql } from '../storage.ts';
  *  VFS. Construct with a handle from {@link memoryWasmSqlFactory} (in-memory) or
  *  {@link opfsSahpoolWasmSql} (`opfs-sahpool`, browser Worker). */
 export class WasmSqlite implements Sql {
-  constructor(private readonly db: Database) {}
+  /** `release` frees whatever the VFS holds beyond the database handle itself — for `opfs-sahpool`, the
+   *  pool's OPFS `SyncAccessHandle`s (see {@link opfsSahpoolWasmSql}). */
+  constructor(private readonly db: Database, private readonly release?: () => void) {}
 
   exec(sql: string): void {
     this.db.exec(sql);
@@ -37,8 +39,14 @@ export class WasmSqlite implements Sql {
     return rows as T[];
   }
 
+  /** Close the database AND release the VFS's resources, synchronously: when this returns, nothing of
+   *  this store holds an OPFS lock. Idempotent (OO1 `close()` and the pool's `pauseVfs()` both are). */
   close(): void {
-    this.db.close();
+    try {
+      this.db.close();
+    } finally {
+      this.release?.();
+    }
   }
 }
 
@@ -69,5 +77,12 @@ export async function opfsSahpoolWasmSql(directory: string, dbName = 'graph.sqli
   // directory into one; the `directory` itself may carry `/` path elements (created automatically).
   const name = `mogwai-${directory.replace(/[^A-Za-z0-9_.-]/g, '_')}`;
   const pool = await sqlite3.installOpfsSAHPoolVfs({ name, directory });
-  return new WasmSqlite(new pool.OpfsSAHPoolDb(`/${dbName}`));
+  // The pool holds an exclusive `SyncAccessHandle` on EVERY file in `directory` for as long as it is
+  // installed — not only while the database is open — and OPFS refuses to remove a directory while any
+  // handle inside it is open (`NoModificationAllowedError`). So `close()` also `pauseVfs()`es, which
+  // closes them all SYNCHRONOUSLY (`FileSystemSyncAccessHandle.close()` is sync): a caller that has
+  // awaited the close knows the directory is removable. `Worker.terminate()` gives no such guarantee —
+  // a terminated worker's handles are released whenever its thread is finally torn down, with no event
+  // to await — which is the destroy race this closes.
+  return new WasmSqlite(new pool.OpfsSAHPoolDb(`/${dbName}`), () => pool.pauseVfs());
 }

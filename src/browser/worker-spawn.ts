@@ -8,7 +8,9 @@
 // messages carry ONLY a port (+ a tag) or nothing, so there is no application payload to grow — everything
 // with meaning is a typed capnweb call.
 
+import { newMessagePortRpcSession } from 'capnweb';
 import type { MogwaiConfig } from '../config.ts';
+import type { GraphWorkerHost } from './GraphWorkerHost.ts';
 
 /** The native messages between the Service Worker edge and a WorkerFactory page. All are transport
  *  bootstraps: `*-port` hands a MessagePort over (transferred), `need-control` is the SW re-soliciting a
@@ -59,10 +61,38 @@ export function spawnRegistryWorker(workerUrl: string | URL): { worker: Worker; 
   return { worker, port: bootRegistrySession(worker) };
 }
 
+/** Shut graph `graphId`'s Worker down so its OPFS directory is REMOVABLE when this resolves: over a fresh
+ *  session, ask the host to `close()` its store (which releases the opfs-sahpool access handles inside
+ *  the Worker, synchronously), and only then terminate it. The ONE place a graph Worker is torn down —
+ *  both the LocalWorkerSource and the WorkerFactory route through it.
+ *
+ *  Why not just `terminate()`: OPFS refuses to remove a directory while any `SyncAccessHandle` inside it
+ *  is open (`NoModificationAllowedError`), and a terminated Worker's handles are released only when its
+ *  thread is eventually torn down — HTML's terminate is fire-and-forget, with no completion event — so a
+ *  removal right after it raced the teardown and lost (a ~50% CI flake, deterministic in a tight loop).
+ *  A host that never opened (its open rejected) holds no handles, so its close rejecting is ignored; if
+ *  the directory is still locked regardless, `removeOpfsDir` says so rather than reporting success. */
+export async function closeGraphWorker(worker: Worker, graphId: string): Promise<void> {
+  const stub = newMessagePortRpcSession<GraphWorkerHost>(bootSession(worker, graphId));
+  try {
+    await stub.close();
+  } catch {
+    /* the host never opened — nothing to release */
+  } finally {
+    try {
+      stub[Symbol.dispose]();
+    } catch {
+      /* already dead */
+    }
+    worker.terminate();
+  }
+}
+
 /** Remove a graph's OPFS database directory (recursively) if present; a missing directory is a no-op.
  *  Navigates to the PARENT and removes only the leaf, so `.mogwai/<id>` never wipes the whole `.mogwai`
- *  tree. Best-effort: a still-releasing SAH handle is not retried here — the schema DDL on the next open
- *  restores a clean empty graph regardless. */
+ *  tree. Call it only after `closeGraphWorker` — while any Worker still holds the graph's access handles
+ *  the removal throws `NoModificationAllowedError`, and that propagates: a destroy that did not destroy
+ *  must fail, never report success over data that is still there. */
 export async function removeOpfsDir(path: string): Promise<void> {
   const segs = path.split('/').filter((s) => s.length > 0);
   const leaf = segs.pop();
