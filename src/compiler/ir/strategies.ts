@@ -1485,24 +1485,40 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   //     .times(2).count()` gave 4, the reference 6 — `Repeat.feature` g_V_emit_repeatXoutX_timesX2X_path).
   //   - until FIRST, emit LAST (`times(n).repeat(b).emit()`): `RepeatEndStep` emits a SPLIT of the level-n
   //     traverser (`doEmit(start, false)`) AND hands the original back to `RepeatStep`, whose entry check
-  //     (`doUntil(start, true)`, loops == n) then outputs it again — level n TWICE: union(b, …, b^n, b^n).
+  //     (`doUntil(start, true)`, loops == n) then outputs it again — level n TWICE: union(b, …, b^n·union(identity, identity)).
   //     With emit FIRST the end step's `doEmit(…, false)` is false, so no such double.
   // A UNION ALL of independently-unrolled prefixes is multiset-exact and self-loop-safe: each arm is
   // materialised on its own, so a self-loop's extra traverser is preserved (the §6 disjunctive-join trap
   // is about the RECURSIVE walk's compound arms, not a flat union of prefixes). `union` lowers already.
   const emitFirst = region.indexOf(emit) < region.indexOf(rep);
   const untilFirst = region.indexOf(times) < region.indexOf(rep);
-  const levels: number[] = [];
-  // Levels past `lastLevel` are empty (the dedup argument above), so they contribute no arm.
-  for (let level = emitFirst ? 0 : 1; level <= Math.min(n, lastLevel); level++) levels.push(level);
-  if (untilFirst && !emitFirst && n <= lastLevel) levels.push(n);
+  const identity = (): Step => ({ name: 'identity', args: [], ctx: rep.ctx });
+  // The level-n DOUBLE is ONE traverser output twice, not the body run twice: the reference's second
+  // copy is the ORIGINAL handed back to `RepeatStep`, which `doUntil(true)` outputs WITHOUT another body
+  // pass (RepeatStep.java:265-278), so a side effect in the body is written ONCE for it. It is therefore
+  // the level-n arm's OUTPUT doubled (`union(identity(), identity())` on its tail) — a second arm that
+  // re-spliced the body re-ran every `aggregate`/`groupCount` in it (`g.V(1).times(1).repeat(out()
+  // .aggregate('x')).emit().cap('x')` counted each vertex twice) and would re-choose every `limit`.
+  // Levels past `lastLevel` are empty (the dedup argument above), so they contribute no arm and no double.
+  const doubleTop = untilFirst && !emitFirst && n <= lastLevel;
   const arms: Step[][] = [];
-  for (const level of levels) {
+  for (let level = emitFirst ? 0 : 1; level <= Math.min(n, lastLevel); level++) {
     const arm: Step[] = [];
     for (let k = 0; k < level; k++) arm.push(...phase());
+    if (doubleTop && level === n) {
+      arm.push({ name: 'union', args: [arg({ nested: [identity()] }), arg({ nested: [identity()] })], ctx: rep.ctx });
+    }
     // Level 0 is the origin unchanged — `identity()` so the arm is a legal non-empty traversal.
-    arms.push(arm.length ? arm : [{ name: 'identity', args: [], ctx: rep.ctx }]);
+    arms.push(arm.length ? arm : [identity()]);
   }
+  // The union arms are INDEPENDENT prefixes, so arm k re-runs the body k times for traversers the
+  // reference ran through it ONCE — exact for a pure stream (a multiset is a multiset), wrong for a body
+  // that WRITES a side effect: each arm's `aggregate`/`group`/`groupCount` registers its level-1..k
+  // traversers again (`g.V(1).emit().repeat(out().aggregate('x')).times(2).cap('x')` has 5 members; the
+  // arms gave 8). So a side-effect body is admitted only where the emit unroll is ONE arm (no union,
+  // nothing re-run) and every other emit form DECLINES — fail closed, at every depth this pass serves,
+  // and no wider than the single-arm shape served before (an emit-FIRST body always has ≥ 2 arms).
+  if (arms.length > 1 && body.some((s) => s.name in SIDE_EFFECT_BARRIERS)) return null;
   // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
   // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
   // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` declined above).

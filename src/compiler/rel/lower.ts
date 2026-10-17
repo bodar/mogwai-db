@@ -4451,7 +4451,25 @@ function elementTail(
       return withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
     if (step.name === 'repeat') {
+      // A SIDE EFFECT IN THE WALK'S BODY DECLINES. The body folds over the walk's `SelfRef`, so an
+      // `aggregate`/`group`/`groupCount` in it registers a site whose relation reads the recursive
+      // reference from OUTSIDE its `Recursive` — `src/rel/check.ts` then rejects the plan with an
+      // internal error (`g.V(1).repeat(out().aggregate('x')).emit().cap('x')`). The reference writes
+      // the side effect once per traverser per iteration (RepeatStep's body is one traversal instance,
+      // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/
+      // step/branch/RepeatStep.java:265-278), which a recursive term cannot accumulate into (it cannot
+      // hold an aggregate). Decided by what the fold DID — any collection the body added or changed —
+      // so every side-effect writer at every nesting depth of the body is covered, and the map is put
+      // back so the decline leaves no half-registered site behind.
+      const before = new Map(ctx.collections);
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
+      const touched = ctx.collections.size !== before.size
+        || [...ctx.collections].some(([name, collection]) => before.get(name) !== collection);
+      if (touched) {
+        ctx.collections.clear();
+        for (const [name, collection] of before) ctx.collections.set(name, collection);
+        return null;
+      }
       if (!walked) return null;
       return continueAs(walked.rel, walked.framing, steps, at + 1, bulked, ctx, fresh, walked.aliases);
     }

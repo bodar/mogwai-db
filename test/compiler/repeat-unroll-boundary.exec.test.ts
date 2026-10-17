@@ -238,6 +238,34 @@ describe('the repeat() unroll boundary', () => {
     expect(count('g.V().emit().repeat(__.dedup()).times(1)')).toBe(12);
   });
 
+  test('a body SIDE EFFECT is written once per traverser — never re-run by an emit arm or the level-n double', () => {
+    // The level-n double is the ORIGINAL traverser handed back to RepeatStep and output by its
+    // `doUntil(true)` WITHOUT another body pass (RepeatStep.java:265-278), so `aggregate` sees each
+    // level-1 vertex once while the stream carries it twice. A second union arm that re-spliced the body
+    // wrote the side effect twice (cap = 6, groupCount values 2).
+    const count = (q: string) => vals(`${q}.count()`)[0];
+    expect(count("g.V(1).times(1).repeat(__.out().aggregate('x')).emit().cap('x').unfold()")).toBe(3);
+    expect(count("g.V(1).times(1).repeat(__.out().aggregate('x')).emit()")).toBe(6);
+    expect(vals("g.V(1).times(1).repeat(__.out().groupCount('x')).emit().cap('x').select(values).unfold().sum()")).toEqual([3]);
+    expect(count("g.V(1).repeat(__.out().aggregate('x')).emit().times(1).cap('x').unfold()")).toBe(3);
+    // Every other emit form is ≥ 2 INDEPENDENT arms, each re-running the body prefix for traversers the
+    // reference ran through it once (the reference aggregates 5 members from marko; the arms gave 8 and
+    // 13). DECLINED, at every depth — and so is the recursive walk, whose term cannot hold an aggregate
+    // (it used to leak an internal `SelfRef` error instead of a refusal).
+    for (const q of [
+      "g.V(1).emit().repeat(__.out().aggregate('x')).times(2).cap('x')",
+      "g.V(1).emit().repeat(__.out().aggregate('x')).times(1).cap('x')",
+      "g.V(1).repeat(__.out().aggregate('x')).emit().times(2).cap('x')",
+      "g.V(1).times(2).repeat(__.out().aggregate('x')).emit().cap('x')",
+      "g.V(1).emit().repeat(__.out().group('x')).times(1).cap('x')",
+      "g.V(1).union(__.emit().repeat(__.out().groupCount('x')).times(2), __.identity()).cap('x')",
+      "g.V(1).local(__.times(1).repeat(__.out().aggregate('x')).emit()).cap('x')",
+      "g.V(1).repeat(__.out().aggregate('x')).emit().cap('x')",
+      "g.V(1).emit().repeat(__.out().aggregate('x')).cap('x')",
+      "g.V(1).repeat(__.out().groupCount('x')).until(__.outE().count().is(0)).cap('x')",
+    ]) expect(() => compile(q, {}), q).toThrow(/not supported yet/);
+  });
+
   test('a NAMED repeat is not unrolled — the identity has nowhere to go', () => {
     // The refusal above is asserted through a downstream throw, which is necessary but not sufficient:
     // it would still pass if the unroll fired and something later happened to refuse. So pin the

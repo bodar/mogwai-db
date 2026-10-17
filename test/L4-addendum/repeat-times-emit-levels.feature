@@ -141,3 +141,68 @@ Feature: mogwai addendum — a bounded repeat().times(n) with emit() emits exact
       | l[d[2].i,d[3].i] |
       | l[d[3].i] |
       | l[d[3].i] |
+
+  # A SIDE EFFECT in the body is written once per traverser per iteration. The level-n double is the
+  # ORIGINAL traverser handed back to `RepeatStep` and output by its `doUntil(true)` WITHOUT another body
+  # pass (RepeatStep.java:265-278), so the stream carries level 1 twice and `aggregate` holds it once.
+  Scenario: g_VX1X_timesX1X_repeatXout_aggregateXxXX_emit_capXxX_unfold_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).times(1).repeat(__.out().aggregate("x")).emit().cap("x").unfold().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  Scenario: g_VX1X_timesX1X_repeatXout_aggregateXxXX_emit_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).times(1).repeat(__.out().aggregate("x")).emit().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  # Every other emit form unrolls to ≥ 2 INDEPENDENT union arms, each re-running the body prefix for
+  # traversers the reference ran through it once (the arms answered 8). From marko the reference
+  # aggregates level 1 (vadas, lop, josh) and level 2 (ripple, lop): 5 members.
+  @Unsupported
+  Scenario: g_VX1X_emit_repeatXout_aggregateXxXX_timesX2X_capXxX_unfold_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).emit().repeat(__.out().aggregate("x")).times(2).cap("x").unfold().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  @Unsupported
+  Scenario: g_VX1X_timesX2X_repeatXout_aggregateXxXX_emit_capXxX_unfold_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).times(2).repeat(__.out().aggregate("x")).emit().cap("x").unfold().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  # The unbounded walk: a recursive term cannot hold an aggregate (it used to leak an internal error).
+  @Unsupported
+  Scenario: g_VX1X_repeatXout_aggregateXxXX_emit_capXxX_unfold_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).repeat(__.out().aggregate("x")).emit().cap("x").unfold().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
