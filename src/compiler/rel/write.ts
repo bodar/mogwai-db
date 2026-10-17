@@ -1010,7 +1010,11 @@ export interface ProgramWrites {
    *  - a side effect in a body read for its FIRST result (a filter's, a `map`'s, a `by()`'s, a merge
    *    option's, a `choose` predicate's — `TraversalUtil.test`/`apply`,
    *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`)
-   *    that the body reaches only after it has fanned out: the rest of the body is abandoned.
+   *    that the body reaches only after it has fanned out: the rest of the body is abandoned;
+   *  - a LAZY READ (`select`/`where`/`math`/`dedup` of the key, any depth) of a side-effect collection
+   *    still FILLING one traverser at a time — a collector its host runs per traverser, with no drain
+   *    between: the reference reads a growing prefix (`Scoping.getScopeValue`), the plan the finished
+   *    collection (`readsSideEffect`, `runsBodyPerTraverser`).
    * A side effect over at most one traverser (per start of its chain) cannot be cut short and is exempt.
    * "Side effect" is a graph write AND a keyed side-effect collector (`collectsSideEffect`: `aggregate`,
    * keyed `group`/`groupCount`/`tree`, `subgraph`) run per traverser — inside a `local`/`map`/`flatMap`/
@@ -1060,19 +1064,29 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
   const writers: KeyWriter[] = [];
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
+  // Keys a MAP-valued collector fills (keyed `group`/`groupCount`/`tree` — a `Tree` is a `HashMap`).
+  const mapKeyed = new Set<string>();
   let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false, truncated = false;
   // What one nested body contributes to its step: whether it has a side effect at all, and whether one of
   // them is `lazy` — made after the body's stream fanned out past one traverser, so a consumer that stops
   // pulling early cuts it short. Every node of the value is enumerated by the one IR walker (`valueNodes`);
   // only the PULL mode is this caller's, which is why it does not go through `eachChildChain`.
-  const nested = (value: unknown, pull: BodyPull, into: { effects: boolean; lazy: boolean }): void => {
+  const nested = (value: unknown, pull: BodyPull, into: ChainEffects, scope: GrowthScope): void => {
     for (const node of valueNodes(value)) {
       if (!isNested(node)) continue;
       let body: readonly IRStep[];
       // The NORMALIZED body — the one the lowering reads (`bodyOf`), so a slice `EarlyLimitStrategy` moves inside it
       // and a `choose`'s absorbed option arms are judged as they will run.
       try { body = childSteps(node.nested, params); } catch { unreadable = true; continue; }
-      const inner = walk(body, false, pull === 'loop' ? false : true);
+      // A body its host runs ONCE PER TRAVERSER of a stream of more than one is, for a collector in it, one
+      // invocation of many: nothing in it drains the stream its host stands in (`GrowthScope`).
+      const perTraverser = runsBodyPerTraverser(scope.host, pull) && !scope.single;
+      // A GLOBAL child of a host more than one traverser reaches holds every one of them (`manyStarts`).
+      const inner = walk(body, false, pull === 'loop' ? false : true, scope.perInvocation || perTraverser, scope.growing, !runsBodyPerTraverser(scope.host, pull) && !scope.single);
+      // A collection still filling as the host emits stays so downstream of it: every collector such a
+      // body holds, or (a global child, one traverser) what is still filling at the body's end.
+      for (const key of perTraverser ? inner.collects : inner.growing) into.growing.add(key);
+      for (const key of inner.collects) into.collects.add(key);
       if (!inner.effects) continue;
       into.effects = true;
       // A body read for its first result abandons every write it would have made after that result.
@@ -1084,11 +1098,24 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
   // `ownable` — the top-level chain, whose `property()` runs write their traverser's own element;
   // `single` — the chain starts from ONE traverser (a nested body, per invocation; the top-level chain
   // only from a one-traverser source). Answers whether the chain has a side effect, and whether one is lazy.
-  const walk = (chain: readonly IRStep[], ownable: boolean, single: boolean): { effects: boolean; lazy: boolean } => {
+  // `perInvocation` — the chain is a body run once per traverser of a longer stream, so a collector in it
+  // fills ACROSS invocations and no drain in it drains that stream; `inherited` — the keys of collections
+  // still filling where the chain is pulled (`GrowthScope`); `manyStarts` — a global child, which holds
+  // every traverser its host is reached by even where `single` (per invocation) says one.
+  const walk = (chain: readonly IRStep[], ownable: boolean, single: boolean, perInvocation = false, inherited: ReadonlySet<string> = new Set(), manyStarts = false): ChainEffects => {
     let fresh = false, run = -1, pending = false, effects = false, lazy = false;
+    const growing = new Set(inherited), collects = new Set<string>();
     if (ownable) single = singleSource(chain);
     for (const [index, step] of chain.entries()) {
       if (truncates(step) && pending) truncated = true;
+      // A LAZY READ of a collection still filling: `select('a')`/`where(within('a'))`/`math`/`dedup('a')`
+      // read the side effect AS IT IS NOW (`Scoping.getScopeValue`,
+      // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:120-135`),
+      // so behind a per-traverser collector with no drain between the reference sees a growing prefix —
+      // `g.V().local(__.aggregate('a')).select('a').count(local)` is [1,2,3,4,5,6] — where the plan reads the
+      // finished collection. A read in a body is that body's own walk's (`inherited`). A read whose value
+      // the very next step replaces unseen is no observation (`discardedRead`).
+      if (growing.size && readsSideEffect(step, growing) && !discardedRead(step, chain[index + 1], growing, mapKeyed)) truncated = true;
       const args = step.args.map((a) => a.value);
       if (step.name !== 'property') run = -1;
       const site = writeSiteOf(step);
@@ -1118,17 +1145,20 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
         }
       }
       fresh = step.name === 'addV' || step.name === 'addE' || (fresh && KEEPS_FRESH.has(step.name));
-      const bodies = { effects: false, lazy: false };
-      args.forEach((value, at) => nested(value, bodyPull(step, at), bodies));
-      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value, 'first', bodies);
-      for (const [, value] of step.withArgs ?? []) nested(value, 'first', bodies);
+      const bodies: ChainEffects = { effects: false, lazy: false, growing: new Set(), collects: new Set() };
+      const scope: GrowthScope = { host: step, single: single && !manyStarts, perInvocation, growing };
+      args.forEach((value, at) => nested(value, bodyPull(step, at), bodies, scope));
+      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value, 'first', bodies, scope);
+      for (const [, value] of step.withArgs ?? []) nested(value, 'first', bodies, scope);
       if (step.repeatRegion) {
-        const inner = walk(step.repeatRegion as IRStep[], false, false);
+        const inner = walk(step.repeatRegion as IRStep[], false, false, perInvocation, growing, true);
         bodies.effects ||= inner.effects;
         bodies.lazy ||= inner.lazy;
+        for (const key of inner.growing) bodies.growing.add(key);
+        for (const key of inner.collects) bodies.collects.add(key);
       }
       // A `choose`'s arms: the selector is read for its first result, the arm emitted lazily.
-      for (const option of step.optionArms ?? []) option.args.forEach((a, at) => nested(a.value, at === 0 ? 'first' : 'lazy', bodies));
+      for (const option of step.optionArms ?? []) option.args.forEach((a, at) => nested(a.value, at === 0 ? 'first' : 'lazy', bodies, scope));
       // A side effect HERE — this step's own, or one in a body it pulls — runs for every traverser that
       // reaches this step, or (`bodies.lazy`) fans out inside the body; either way more than one write
       // that a consumer stopping early cuts short. Over one traverser with an eager body it cannot be cut.
@@ -1152,10 +1182,21 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
       // A drain pulls everything before it emits; a `drop`/`none` emits nothing for anything to pull. A
       // per-traverser collector pulls only its own traverser.
       if ((drains(step) && !perTraverserCollector) || step.name === 'drop' || step.name === 'none') pending = false;
+      // A drain also FINISHES every collection filling upstream of it — except in a body run once per
+      // invocation, whose drain sees one traverser of the stream its host stands in.
+      if (drains(step) && !perTraverserCollector && !perInvocation) growing.clear();
+      // A collection filling one traverser at a time: a collector spliced out of a per-traverser host over
+      // a stream of more than one, any collector of a per-invocation body, and what its bodies leave filling.
+      const key = collectsSideEffect(step) ? sideEffectKey(step) : null;
+      if (key !== null) collects.add(key);
+      if (key !== null && step.name !== 'aggregate' && step.name !== 'subgraph') mapKeyed.add(key);
+      if (key !== null && ((perTraverserCollector && (!single || manyStarts)) || perInvocation)) growing.add(key);
+      for (const k of bodies.growing) growing.add(k);
+      for (const k of bodies.collects) collects.add(k);
       // (The top-level source is `singleSource`'s to judge.)
       single &&= (ownable && index === 0) || KEEPS_ONE.has(step.name) || (REDUCERS.has(step.name) && !isLocalScope(step));
     }
-    return { effects, lazy };
+    return { effects, lazy, growing, collects };
   };
   walk(steps, true, false);
   return unreadable ? everythingWritten(truncated)
@@ -1174,6 +1215,81 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
  *  - `loop` — a `repeat` body, whose later iterations run over every traverser the earlier ones made.
  */
 type BodyPull = 'first' | 'lazy' | 'drained' | 'loop';
+
+/** What one chain of `programWrites`' walk answers: whether it has a side effect, whether one is lazy,
+ *  the keys of side-effect collections still FILLING at its end (`growing`), and every key a collector in
+ *  it writes at any depth (`collects`). */
+interface ChainEffects { effects: boolean; lazy: boolean; readonly growing: Set<string>; readonly collects: Set<string> }
+
+/** Where a nested body sits, for the filling-collection question: its `host` step, whether one traverser
+ *  reaches that host (`single`), whether the host's own chain is one invocation of a per-traverser body
+ *  (`perInvocation`), and the collections still filling where the host pulls the body (`growing`). */
+interface GrowthScope { readonly host: IRStep; readonly single: boolean; readonly perInvocation: boolean; readonly growing: ReadonlySet<string> }
+
+/**
+ * Does `host` run this body ONCE PER TRAVERSER, handing its results on before the next traverser enters?
+ * A LOCAL child does — `LocalStep`, `TraversalMapStep`/`TraversalFlatMapStep`, `CoalesceStep`,
+ * `OptionalStep` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/OptionalStep.java`
+ * `processNextStart` resets and re-seeds it per start), a filter's body, a `by()`, a `sideEffect` body, a
+ * `choose` selector. A GLOBAL child does not: a `union`/`choose` arm (`BranchStep.standardAlgorithm`,
+ * `…/step/branch/BranchStep.java:143-151`, feeds EVERY start into an arm holding a barrier before it
+ * iterates it) and a `repeat` body. There a collector drains the stream its arm holds, and only a
+ * per-traverser collector inside the arm still fills.
+ */
+const GLOBAL_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'branch', 'repeat']);
+function runsBodyPerTraverser(host: IRStep, pull: BodyPull): boolean {
+  if (pull === 'loop') return false;
+  return pull !== 'lazy' || !GLOBAL_CHILD_HOSTS.has(host.name);
+}
+
+/**
+ * Is a lazy `select(k)` of a filling collection DISCARDED before anything observes it? Only when it is the
+ * one-key form with no `by()`, and the next step replaces the traverser with a value that does not depend
+ * on it: a `select(k2)` of a key not filling, over a collection that is not a Map — `getScopeValue` looks
+ * a key up in a Map traverser FIRST (`…/traversal/step/Scoping.java:120-123`), so after a filling
+ * `groupCount` map `select('person')` would read the map — or a `constant`. That is the corpus'
+ * `g.withoutStrategies(LazyBarrierStrategy).V().as("label").local(aggregate("x")).select("x").select("label")`
+ * (`vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/map/Select.feature`),
+ * whose answer is the path's vertex whatever `x` held.
+ */
+function discardedRead(step: IRStep, next: IRStep | undefined, growing: ReadonlySet<string>, mapKeyed: ReadonlySet<string>): boolean {
+  if (step.name !== 'select' || step.modulators?.length || step.args.length !== 1 || next === undefined) return false;
+  const key = step.args[0]!.value;
+  if (typeof key !== 'string' || mapKeyed.has(key)) return false;
+  if (next.name === 'constant') return true;
+  if (next.name !== 'select' || next.modulators?.length || next.args.length !== 1) return false;
+  const replacement = next.args[0]!.value;
+  return typeof replacement === 'string' && !growing.has(replacement);
+}
+
+/** The key a keyed side-effect collector (`collectsSideEffect`) writes: its string argument. */
+function sideEffectKey(step: IRStep): string | null {
+  const key = step.args.find((a) => typeof a.value === 'string');
+  return key ? key.value as string : null;
+}
+
+/**
+ * Does this step READ a side effect named in `keys` through `Scoping.getScopeValue`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:120-135`,
+ * which prefers a side effect over a path label of the same name)? The `Scoping` steps of that package:
+ * `select` (`SelectOneStep`/`SelectStep`/`TraversalSelectStep`), `where` (`WherePredicateStep`/
+ * `WhereTraversalStep` — a key is a predicate operand), `dedup` (`DedupGlobalStep`'s labels), `math`
+ * (`MathStep`'s variables), `format` (`FormatStep`) and `match`. Over-approximate by design: a string
+ * that merely EQUALS a filling key costs a decline, never a wrong answer.
+ */
+const SCOPING_STEPS: ReadonlySet<string> = new Set(['select', 'where', 'dedup', 'math', 'format', 'match']);
+function readsSideEffect(step: IRStep, keys: ReadonlySet<string>): boolean {
+  if (!SCOPING_STEPS.has(step.name)) return false;
+  for (const a of step.args) {
+    for (const node of valueNodes(a.value)) {
+      if (typeof node !== 'string') continue;
+      if (keys.has(node)) return true;
+      // `math('a + 1')`/`format('%{a}')` name their variables inside one string: any mention declines.
+      if ((step.name === 'math' || step.name === 'format') && [...keys].some((k) => node.includes(k))) return true;
+    }
+  }
+  return false;
+}
 const LAZY_BODIES: ReadonlySet<string> = new Set(['union', 'local', 'flatMap', 'coalesce', 'optional']);
 const SELECTING_BODIES: ReadonlySet<string> = new Set(['choose', 'branch']);
 function bodyPull(step: IRStep, at: number): BodyPull {

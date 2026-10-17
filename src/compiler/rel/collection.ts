@@ -3,6 +3,7 @@ import * as make from '../../rel/factory.ts';
 import { type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
+import { freeRelIds } from '../../rel/walk.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { meetScalarTypes, PER_ROW, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MixedArm, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -245,7 +246,7 @@ export function registerCollection(
   const built = bys[0]
     ? projectedMembers(step, input, host, framing, bys[0], encounter, child, source, fresh)
     : traverserMembers(step, input, framing, encounter);
-  if (!built) return null;
+  if (!built || correlatedSite(built)) return null;
   const policied = { ...built, merge };
   const { collection: retained, bindings } = mutating ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
   const held = collections.get(label);
@@ -293,6 +294,21 @@ function snapshotted(
   });
   return { collection: { ...collection, sites }, bindings };
 }
+
+/**
+ * IS A SITE CORRELATED to a relation outside itself? A collector inside a CORRELATED child body — a
+ * filter's (`where`/`filter`/`not`), an `optional`'s, a `coalesce` arm's — is lowered against the outer
+ * traverser's row, so its member relation names that row (`src0`, `c1`) without defining it. The
+ * collection is ROOT-scoped (`AggregateStep.java:57` resolves through the root's side effects) and read
+ * at a `cap`/`select` far outside that scope, where the reference is not in scope at all — which reached
+ * the user as `src/rel/check.ts`' internal "no relation 'src0' is in scope". Collecting it would need the
+ * body decorrelated into a self-contained per-traverser relation (not built), so the registration
+ * DECLINES. `freeRelIds` (`src/rel/walk.ts`) is the one authority for "is this relation self-contained",
+ * so every collector (`aggregate`, keyed `group`/`groupCount`) at every correlated depth is covered here,
+ * at the one seam they all register through, rather than per host.
+ */
+const correlatedSite = (collection: Collection): boolean =>
+  collection.sites.some((site) => freeRelIds(site.rel).size > 0);
 
 /**
  * A SECOND SITE ACCUMULATES — side effects live on the ROOT traversal (`AggregateStep.java:57`
@@ -464,6 +480,7 @@ export function registerGrouping(
       of: { kind: 'grouped', recipe: rows.recipe },
       merge: undefined,
     };
+  if (correlatedSite(added)) return false;
   const held = collections.get(label);
   if (!held) { collections.set(label, added); return true; }
   const accumulated = accumulate(held, added, source, fresh);
