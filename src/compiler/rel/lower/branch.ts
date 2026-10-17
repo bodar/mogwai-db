@@ -24,6 +24,7 @@ import { pathCarried } from '../path.ts';
 import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
+import { pullAt } from '../raise-channel.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
 import { augmentParent, BORD_ARM, BORD_PARENT, branchResult, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
 
@@ -326,8 +327,9 @@ export function variantTail(
 ): Tail | null {
   let cur = rel;
   for (let at = from; at < steps.length; at++) {
+    ctx = pullAt(ctx, steps, at);
     const step = steps[at]!;
-    const sliced = sliceOp(step, cur, bulked, fresh);
+    const sliced = sliceOp(step, cur, bulked, fresh, ctx.pull);
     if (sliced) { cur = sliced; continue; }
     if (step.name === 'count' && !step.args.length && !isLocalScope(step)) {
       const counted = countTail(cur, fresh);

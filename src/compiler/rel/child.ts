@@ -4,6 +4,7 @@ import { exprMayRaise } from '../../rel/raise.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import type { IRStep } from '../ir/step.ts';
+import type { PullPosition } from './raise-channel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
@@ -122,6 +123,9 @@ export interface ChildSeam {
   readonly unscopeRows: (rows: Rel) => Rel;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+  /** WHERE the host whose bodies this seam lowers stands (`ChainCtx.pull`), so a raise a body evaluates
+   *  in-statement asks how fully the reference pulls it (`raise-channel.ts`'s `settlesExactly`). */
+  readonly pull?: PullPosition;
 }
 
 /** A continued chain: a rooted read plus the labels live at its end. */

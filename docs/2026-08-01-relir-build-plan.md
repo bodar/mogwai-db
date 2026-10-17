@@ -807,6 +807,27 @@ authorities.
   eagerly before a head slice (a movement-headed `where(__.out()…toUpper().fold())`) DECLINES. Also: a NaN
   literal the sack may fold declines (`ir/sack-nan.ts`), and a list-local reducer's own deferral is evaluated
   under an existence-only tail (`values('name').fold().sum(local).count()` raises).
+  ✅ **Round 2 (`wf7/substrate-raise-channel-r2`): exactness is a property of the PULL, at every depth.** The
+  r1 rules looked only at a source's own step list, so a body's raise settled eagerly under a slice AFTER its
+  host (`optional(where(…toUpper().fold())).limit(1)`, a `choose` arm, a `project().by(…)`), and a head slice
+  assumed `n + 1` even when a later slice stopped pulling first (`limit(2).limit(1)` pulls 2). Now
+  `ChainCtx.pull` marks every step a tail folds (`pullAt`), and a list's `PullLevel` (`reached` / `drained`)
+  is derived from its HOST's position, so `settlesExactly` answers through every enclosing host to the root.
+  `pullExtent` composes a RUN of `limit`/`range`/`skip` from its far end (asked `k` times a `range(lo, hi)`
+  pulls `min(lo + k, hi + 1)`), and is `null` where a filter between two slices makes it data-dependent. ONE
+  generic check, `raisesWherePulled`, runs at every step boundary (and at every tail handoff): an in-statement
+  raise a step minted — a projector's, a list-local reducer's, a child value's own at any depth — declines
+  unless the reference pulls every row reaching that step. That also closes the silent UNDER-raise: SQLite
+  evaluates a select-list raise only for the rows a `LIMIT` returns (measured: `VALUES (1),('a')` with a
+  raising `CASE` and `LIMIT 1` answers `[2]`), while the reference pulls one more and raises; `math()` now
+  defers through the channel like the transform family (`inject(1, 2, 'a').math('_+1').limit(1)` is `[2.0]`,
+  `limit(2)` raises). The compile-time coercion fold over `inject()` casts only the values a slice run after it
+  pulls (`inject('1','2','x').asNumber().limit(1)` is `[1]`), and elsewhere raises only where the reference
+  casts the offending value (`foldRaiseMet`), else declines; a `dateAdd`/`dateDiff` subject is checked per
+  value. A raise inside a branch arm or an `optional()`/`local()` body under a slice after
+  the host still DECLINES: carrying it out of the host's merge is the next increment. `LazyBarrierStrategy`'s
+  `NoOpBarrierStep`s are deliberately not drains (a barrier holds at most 2500 traversers, so what it pulls
+  ahead depends on the data), which is why `sack(sum).by('age').out().limit(1)` declines.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no

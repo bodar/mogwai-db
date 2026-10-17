@@ -250,9 +250,9 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
-  # A body that MOVES is a correlated EXISTS whose raise rides inside it, where no host can carry it as
-  # data, so before a limit it cannot be confined to the traversers the limit pulls: it declines.
-  @Unsupported
+  # A body that MOVES: its raise is not one the reference meets on every row under the limit, so the
+  # eager EXISTS form is refused there and the body's raise is escalated as data like any other — lop and
+  # ripple have no out(), so their fold is []; marko's out() reaches vadas' age only under limit(2).
   Scenario: g_V_orderXbyXlabel_descXX_whereXout_valuesXageX_toUpper_foldX_limitX1X
     Given the modern graph
     And the traversal of
@@ -263,6 +263,207 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     Then the result should be ordered
       | result |
       | lop |
+
+  Scenario: g_V_orderXbyXlabel_descXX_whereXout_valuesXageX_toUpper_foldX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.out().values("age").toUpper().fold()).limit(2).values("name")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # A RUN of head slices: the outer one stops asking first, so limit(a).limit(b) pulls min(a, b) + 1
+  # (with k requests a limit(a) pulls min(k, a + 1)), which is also what EarlyLimitStrategy's merge of
+  # adjacent RangeGlobalSteps gives. limit(2).limit(1) pulls lop and ripple; marko is never reached.
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_limitX1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).limit(2).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX5X_limitX1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).limit(5).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_rangeX0_2X_limitX1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).range(0, 2).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_rangeX0_1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).limit(2).range(0, 1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  # The composed run still pulls one past ITS bound: limit(3).limit(2) pulls three.
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX3X_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).limit(3).limit(2).values("name")
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  Scenario: g_injectXa_b_1X_toUpper_limitX2X_limitX1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("a", "b", 1).toUpper().limit(2).limit(1)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | A |
+
+  Scenario: g_V_orderXbyXlabel_descXX_valuesXname_ageX_toUpper_limitX3X_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).values("name", "age").toUpper().limit(3).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | LOP |
+      | RIPPLE |
+
+  # A label is no step of the reference's: it neither stops the raise riding to the slice nor the run.
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_asXaX_limitX1X_selectXaX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).as("a").limit(1).select("a").values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  # A FILTER between two bounded slices makes how far the inner one is pulled depend on the data (the
+  # filter may drop what the outer one would have counted), so the raise cannot be settled over a fixed
+  # extent: it declines (the reference answers [lop] here).
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_whereXvaluesXnameXX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).where(__.values("age").toUpper().fold()).limit(2).where(__.values("name")).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  # A raise inside a BODY is pulled no further than its host is: optional() and choose() iterate their
+  # body one start per pull (OptionalStep.processNextStart; BranchStep iterates its arms in order), so
+  # under a limit after the host the person arm is never run. The raise cannot be carried out of the
+  # host's body to that limit, so these decline rather than raise where the reference answers [lop].
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_optionalXwhereXvaluesXageX_toUpper_foldXX_limitX1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).optional(__.where(__.values("age").toUpper().fold())).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_optionalXwhereXvaluesXageX_toUpper_countXX_limitX1X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).optional(__.where(__.values("age").toUpper().count())).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_chooseXhasLabelXsoftwareX_identity_whereXvaluesXageX_toUpper_foldXX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).choose(__.hasLabel("software"), __.identity(), __.where(__.values("age").toUpper().fold())).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_optionalXvaluesXageX_toUpperX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).optional(__.values("age").toUpper()).limit(1).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+
+  # The same at a by(): project() is pulled one traverser past the limit, never on to marko.
+  @Unsupported
+  Scenario: g_V_orderXbyXlabel_descXX_projectXaX_byXvaluesXageX_toUpper_foldX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).project("a").by(__.values("age").toUpper().fold()).limit(1)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | m[{"a":[]}] |
+
+  # With nothing bounded after the host, the body's raise is met on every row, at any depth.
+  Scenario: g_V_optionalXwhereXvaluesXageX_toUpper_foldXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.where(__.values("age").toUpper().fold()))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # A drain after the host pulls every start through it, so a later limit changes nothing.
+  Scenario: g_V_orderXbyXlabel_descXX_optionalXwhereXvaluesXageX_toUpper_foldXX_fold_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).optional(__.where(__.values("age").toUpper().fold())).fold().limit(1)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
   # sum(local)'s text-operand deferral raises on every traverser it reaches, whether or not a consumer
   # reads the sum: count() does not.
@@ -327,3 +528,122 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     Then the result should be ordered
       | result |
       | d[3].i |
+
+  # A slice run that starts with a SKIP: asked k times, range(lo, hi) pulls min(lo + k, hi + 1) and
+  # skip(lo) pulls lo + k, so skip(1).limit(1) and range(1, 2) each pull three — LOP, RIPPLE, MARKO — and
+  # range(1, 3) pulls four, the fourth marko's age.
+  Scenario: g_V_orderXbyXlabel_descXX_valuesXname_ageX_toUpper_skipX1X_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).values("name", "age").toUpper().skip(1).limit(1)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | RIPPLE |
+
+  Scenario: g_V_orderXbyXlabel_descXX_valuesXname_ageX_toUpper_rangeX1_2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).values("name", "age").toUpper().range(1, 2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | RIPPLE |
+
+  Scenario: g_V_orderXbyXlabel_descXX_valuesXname_ageX_toUpper_rangeX1_3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).values("name", "age").toUpper().range(1, 3)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # A skip with nothing bounded after it pulls everything: the raise is met.
+  Scenario: g_V_orderXbyXlabel_descXX_valuesXname_ageX_toUpper_skipX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(T.label, Order.desc).values("name", "age").toUpper().skip(1)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+
+  # math()'s variable must resolve to a Number (MathStep), and its raise rides the row to the slice like a
+  # transform's: limit(1) pulls 1 and 2, limit(2) pulls 'a'.
+  Scenario: g_injectX1_2_aX_mathX___plus_1X_limitX1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, "a").math("_+1").limit(1)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[2.0].d |
+
+  Scenario: g_injectX1_2_aX_mathX___plus_1X_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, "a").math("_+1").limit(2)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+
+  # The compile-time cast of an inject()'s values raises only for a value the reference casts: the limit
+  # pulls "1" and "2" and stops, so "x" is never parsed; limit(2) pulls it.
+  Scenario: g_injectX1_2_xX_asNumber_limitX1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("1", "2", "x").asNumber().limit(1)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1].i |
+
+  Scenario: g_injectX1_2_xX_asNumber_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("1", "2", "x").asNumber().limit(2)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "Can't parse string 'x' as number."
+
+  # A filter between the cast and the slice makes how many values are pulled depend on the data: declines.
+  @Unsupported
+  Scenario: g_injectX1_2_xX_asNumber_whereXisXgtX5XXX_limitX1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("1", "2", "x").asNumber().where(__.is(P.gt(5))).limit(1)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "Can't parse string 'x' as number."
+
+  # The first value is cast wherever the traversal runs at all.
+  Scenario: g_injectXx_1X_asNumber_limitX1X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("x", "1").asNumber().limit(1)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "Can't parse string 'x' as number."
+
+  # A DateDiff subject is checked per value: the second, not the first, is the one that is no Date.
+  Scenario: g_injectXdatetime_aX_dateDiffXdatetimeX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(datetime("2020-01-01T00:00:00Z"), "a").dateDiff(datetime("2020-01-01T00:00:00Z"))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "encountered String"

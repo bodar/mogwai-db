@@ -26,21 +26,27 @@ import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts'
 import { withChannel } from '../../../channels.ts';
 import { dropPath, mergeObservableAt, orderRows } from '../lower.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
-import { headSliceStep, pendingRaise, pulledBy, settledSlice, settleRaise, trustSlice } from '../raise-channel.ts';
+import { pendingRaise, pullExtent, pulledBy, settledSlice, settleRaise, trustSlice, type PullPosition } from '../raise-channel.ts';
 
 /**
  * THE SLICE — and the consumer of a PENDING RAISE (`raise-channel.ts`) the step before it deferred.
  *
- * A head slice settles the raise over exactly the rows the reference PULLS — its bound plus the one more
- * traverser `RangeGlobalStep` drags through before it learns the bound is met (`pulledBy`) — and then
- * takes its own rows from those, so a raising row past them is never met. Any other slice pulls rows it
- * does not keep, so the raise is settled over its whole input first — the eager answer, and
- * `defersRaise` never hands it one.
+ * A head slice settles the raise over exactly the rows the reference PULLS — `pullExtent`: its bound (the
+ * least of a run of head slices) plus the one more traverser `RangeGlobalStep` drags through before it
+ * learns the bound is met — and then takes its own rows from those, so a raising row past them is never
+ * met. `pull` is where the slice stands (`ChainCtx.pull`, marked at this very step); a slice that cannot
+ * say, or whose extent the rest of the chain leaves open, DECLINES. Any other slice pulls rows it does not
+ * keep, so the raise is settled over its whole input first — the eager answer, and `defersRaise` never
+ * hands it one.
  */
-export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
+export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter, pull: PullPosition | undefined): Rel | null {
   if (!pendingRaise(input)) return sliceRows(step, input, bulked, fresh);
-  if (!headSliceStep(step)) return sliceRows(step, settleRaise(input, fresh), bulked, fresh);
-  const pulled = sliceRows(pulledBy(step), input, bulked, fresh);
+  // A raise reaches only a slice `defersRaise` handed it to; anything else here is a lowering that lost
+  // track of where it stands, and declines rather than guess an extent.
+  const extent = pull && pull.steps[pull.at] === step ? pullExtent(pull.steps, pull.at, pull) : null;
+  if (extent === null) return null;
+  if (extent === 'all') return sliceRows(step, settleRaise(input, fresh), bulked, fresh);
+  const pulled = sliceRows(pulledBy(step, extent), input, bulked, fresh);
   if (pulled) trustSlice(pulled, input);
   const settled = pulled && settledSlice(pulled, fresh);
   return settled && sliceRows(step, settled, bulked, fresh);
@@ -395,7 +401,7 @@ export function rowOp(
   if (mergeObservableAt(ctx, position.steps, position.at)) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
   if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, shape);
-  const sliced = sliceOp(step, input, bulked, fresh);
+  const sliced = sliceOp(step, input, bulked, fresh, ctx.pull);
   if (sliced) return sliced;
   // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks
   // to one vertex differ by route), defeating the collapse — but the path has already done its work

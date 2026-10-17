@@ -37,7 +37,7 @@ import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
-import { escalatedRaise, pendingRaise, raiseMessage } from '../raise-channel.ts';
+import { escalatedRaise, pendingRaise, raiseMessage, settlesExactly } from '../raise-channel.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -54,6 +54,7 @@ import { escalatedRaise, pendingRaise, raiseMessage } from '../raise-channel.ts'
  * used that inversion separately and this is the same move made once.
  */
 export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
+  ...(ctx.pull ? { pull: ctx.pull } : {}),
   params: ctx.params,
   sideEffects: ctx.sideEffects,
   writes: ctx.writes,
@@ -771,6 +772,8 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
     // caller remembered to pass.
     services: ctx.services, sack: ctx.sack, sideEffectPolicies: ctx.sideEffectPolicies, collections: ctx.collections,
     writes: ctx.writes,
+    // Its host's position, so a raise in the rooted body knows how fully the reference pulls it.
+    ...(ctx.pull ? { pull: ctx.pull } : {}),
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };
@@ -1971,6 +1974,10 @@ export function valueRun(
       vtype = undefined;
       continue;
     }
+    // An IN-STATEMENT raise is evaluated wherever SQL evaluates the value — on every host row SQL reads.
+    // Exact only where the reference pulls this body for every one of them (`settlesExactly`, through
+    // the host's own position): under a slice after the host it would raise where the reference answers.
+    if ((transformed.fenced || offences.length) && !settlesExactly(body, at + 1, child)) return null;
     if ((transformed.fenced || offences.length) && present !== 'unknown') {
       const raises = raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1));
       present = present === ALWAYS_PRODUCTIVE ? raises : and(present, raises);

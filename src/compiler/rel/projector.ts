@@ -13,6 +13,8 @@ import type { FramedRel, RelFraming } from './framing.ts';
 import { byExpr, byTyped, modulations, scopedHost, type Modulation } from './modulator.ts';
 import { mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
 import { raiseInRow } from '../../rel/raise.ts';
+import { keepingRaise, pendingRaise, RAISE, raiseMessage } from './raise-channel.ts';
+import { withChannel } from '../../channels.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
@@ -121,6 +123,15 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
  * the same reason.
  */
 export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter): Expr | null {
+  const parts = mathParts(step, host, child, source, fresh);
+  return parts && raisingWhen(parts.offences, parts.value);
+}
+
+/** `math()`'s formula over its resolved variables (`value`), and the reference's raise for a variable that is
+ *  not a Number (`offences`) kept APART from it, so a host that carries a raise as data can take it so. */
+function mathParts(
+  step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+): { readonly value: Expr; readonly offences: readonly (readonly [Expr, string])[] } | null {
   const formula = step.args[0]?.value, extra = step.args[1]?.value;
   if (typeof formula !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
@@ -162,7 +173,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     resolved.set(name, typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
-  return raisingWhen(offences, compileMath(formula, relMathOps((name) => resolved.get(name)!)));
+  return { value: compileMath(formula, relMathOps((name) => resolved.get(name)!)), offences };
 }
 
 
@@ -296,22 +307,34 @@ export function projectorValue(
  * a token at all, so a constant template emits every traverser.
  */
 export function projectorTail(
-  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter, deferRaise = false,
 ): FramedRel | null {
-  const produced = projectorValue(step, host, child, source, fresh);
-  if (!produced) return null;
-  const { value, drop, sqlType, framing } = produced;
-  const carried = input.channels;
+  // DEFERRED where the step after consumes a pending raise (`raise-channel.ts`'s `defersRaise`): a variable
+  // that is not a Number rides the row as the reference's message (`MathStep` raises on the traverser it is
+  // handed, so it is the slice's to decide whether that one is ever pulled), and the value is the plain
+  // formula. Otherwise the raise is part of the value, which the drop filter below always evaluates.
+  const parts = deferRaise && step.name === 'math' ? mathParts(step, host, child, source, fresh) : null;
+  const produced = parts?.offences.length ? null : projectorValue(step, host, child, source, fresh);
+  if (!parts?.offences.length && !produced) return null;
+  const value = parts?.offences.length ? parts.value : produced!.value;
+  const { drop, sqlType, framing } = parts?.offences.length ? MATH_SHAPE : produced!;
+  const prior = pendingRaise(input);
+  const raised = parts?.offences.length ? raiseMessage(parts.offences) : undefined;
+  const carried = raised && !prior ? withChannel(input.channels, RAISE) : input.channels;
+  const carriedExpr = (name: string): Expr => !raised || name !== RAISE.col ? col(input.id, name)
+    : prior ? { kind: 'call', fn: 'COALESCE', args: [col(input.id, prior.col), raised] } : raised;
   const projected = make.project({
     id: fresh('pv'), input, channels: carried,
     type: typeOf(meta('v', sqlType, true), ...carriedCols(carried)),
-    exprs: [['v', value], ...carried.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+    exprs: [['v', value], ...carried.map((channel) => [channel.col, carriedExpr(channel.col)] as const)],
   });
-  const rel = drop
-    ? make.filter({
-      id: fresh('pf'), input: projected, channels: carried, type: projected.type,
-      pred: { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() },
-    })
-    : projected;
+  const kept: Expr = { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() };
+  // A raising row's value is no value at all, so the drop filter must not decide it: it is KEPT.
+  const rel = !drop ? projected
+    : pendingRaise(projected) ? keepingRaise(projected, kept, fresh('pf'))
+      : make.filter({ id: fresh('pf'), input: projected, channels: carried, type: projected.type, pred: kept });
   return { rel, framing };
 }
+
+/** `math()`'s relation facts (`projectorValue`'s), for the deferred form that builds its value apart. */
+const MATH_SHAPE = { drop: true, sqlType: 'real', framing: { kind: 'scalar', type: STATIC('double') } } as const;

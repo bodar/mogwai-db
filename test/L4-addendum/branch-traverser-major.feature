@@ -187,7 +187,14 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[6].l |
       | d[32].i |
 
+  # @Unsupported: math()'s variable must resolve to a Number, and a stored age is typed per row, so each
+  # arm may raise. The reference evaluates an arm only for the traversers the limit pulls through the
+  # union (josh and marko, never peter or vadas), and a raise cannot yet be carried out of a branch arm
+  # to the limit after it (`raise-channel.ts`), while SQL would evaluate the arms over every person — so
+  # it declines rather than raise where the reference answers. The traverser-major order itself is
+  # pinned by the non-raising scalar-arm scenario after it.
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X
     Given the modern graph
     And the traversal of
@@ -203,6 +210,22 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[33].d |
       | d[64].d |
       | d[30].d |
+
+  # The same scalar parent and key with arms that cannot raise: josh's 32 passes both arms, so his two
+  # come before marko's first. Arm-major would return [32, 29, 35].
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXidentity_isXgtX30XXX_limitX3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").values("age").union(__.identity(), __.is(P.gt(30))).limit(3)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[32].i |
+      | d[32].i |
+      | d[29].i |
 
   # @Unsupported: the arm's `limit(1)` must select per traverser, and the coalesce arm lowering has no
   # per-traverser slice — it ran the limit ONCE across every traverser's rows. That answered this

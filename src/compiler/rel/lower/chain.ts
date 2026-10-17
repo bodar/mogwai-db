@@ -11,6 +11,7 @@ import type { Collections } from '../collection.ts';
 import type { LabelRegime } from '../../../api.ts';
 import type { ChainRead, Subject } from '../child.ts';
 import type { ProgramWrites } from '../write.ts';
+import type { PullPosition } from '../raise-channel.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
 // threads, and the carried-channel constants the whole lowering mints and reads. It lives in its own
@@ -223,6 +224,13 @@ export interface ChainCtx extends FilterCtx {
    * BY IDENTITY against the step list a source holds, as `traversal` is, so nothing nested inherits it.
    */
   readonly raiseEscalates?: readonly IRStep[];
+  /**
+   * WHERE THIS SCOPE STANDS in the chain the reference pulls — the list a tail is folding, the step it is
+   * at, and how fully that list is pulled (`raise-channel.ts`'s `PullLevel`). Every tail marks it per step
+   * (`pullAt`), so a body lowered from that step reads its own level off its host's position, at any depth:
+   * a raise inside `optional(…)` under a later `limit()` is not one the reference meets on every row.
+   */
+  readonly pull?: PullPosition;
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;

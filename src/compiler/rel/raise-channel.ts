@@ -1,12 +1,12 @@
 import { withChannel, type Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { raiseCarried } from '../../rel/raise.ts';
+import { exprMayRaise, raiseCarried } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { RelId } from '../../rel/types.ts';
 import { exprRels, forEachExpr, relChildren, relExprs } from '../../rel/walk.ts';
 import { meta, typeOf, type Minter } from './build.ts';
-import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
+import { isLocalScope, sliceOf, SLICE_STEPS, type IRStep } from '../ir/step.ts';
 import { isScopeArg } from '../../gremlin/frontend.ts';
 
 /**
@@ -33,10 +33,12 @@ import { isScopeArg } from '../../gremlin/frontend.ts';
  * into the child value's own `raise`, which its host carries on the host row in turn.
  *
  * A raise is DEFERRED only across a span this module can prove (`defersRaise`): from its source, through a
- * run of filters that keep a raising row, to the step that consumes it. Every other position settles at
- * the source, which is what it did before — exact wherever every row is pulled. `raiseContained` checks
- * the finished plan: a raising relation read by anything other than a vetted carrier or a consumer
- * declines, so a raise a builder dropped on the way can never become an answer.
+ * run of filters that keep a raising row, to the slice run that consumes it (`pullExtent`). Every other
+ * position settles at the source — but only where the reference pulls every row reaching it, through every
+ * enclosing host up to the root (`PullLevel`, `settlesExactly`); every in-statement raise any step mints is
+ * held to that one rule at the step boundary (`raisesWherePulled`), and anywhere it fails the traversal
+ * DECLINES. `raiseContained` checks the finished plan: a raising relation read by anything other than a
+ * vetted carrier or a consumer declines, so a raise a builder dropped on the way can never become an answer.
  *
  * The executor needs no part in it: the slice's settle is exact over the rows the reference pulls, and a
  * raise never rides past the step that consumes it, so no framed row ever carries one.
@@ -51,72 +53,172 @@ export const pendingRaise = (rel: Rel): Channel | undefined => rel.channels.find
 export const raiseMessage = (offences: readonly (readonly [Expr, string])[]): Expr =>
   ({ kind: 'case', whens: offences.map(([test, message]) => [test, compilerText(message)] as const), else: compilerNull('text') });
 
-/** Is `step` a HEAD slice — `limit(n)`/`range(0, n)` over the stream — the one consumer that keeps exactly
- *  the rows the reference pulls (`RangeGlobalStep` with `low = 0` pulls `high` traversers and stops). A
- *  `skip`/`range(lo>0, …)` pulls the rows it discards, and `tail`/`sample` drain everything. */
-export function headSliceStep(step: IRStep | undefined): boolean {
-  if (!step || (step.name !== 'limit' && step.name !== 'range')) return false;
-  if (step.modulators?.length || step.optionArms || isLocalScope(step)) return false;
-  // A PARAMETER bound stays a bind (root CLAUDE.md: a bind serves a user parameter); the widened bound
-  // `pulledBy` needs would be a constant beside it, so a parameterized slice keeps the eager settle.
-  if (step.args.some((a) => a.name != null)) return false;
+
+/** `step` as the reference's `RangeGlobalStep` — `limit`/`range`/`skip` over the stream, as its `low` and
+ *  `high` (`null`: unbounded) — or `null` where it is no such step. `tail`/`sample` are not: they drain. */
+function globalSlice(step: IRStep | undefined): { readonly low: number; readonly high: number | null } | null {
+  if (!step || !SLICE_STEPS.has(step.name)) return null;
+  if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
+  // A PARAMETER bound stays a bind (root CLAUDE.md: a bind serves a user parameter); the extent `pullExtent`
+  // derives would be a constant computed from it, so a parameterized slice keeps the eager settle.
+  if (step.args.some((a) => a.name != null)) return null;
   try {
-    const slice = sliceOf(step);
-    return slice.offset === 0 && slice.limit !== null;
-  } catch { return false; }
+    const { offset, limit } = sliceOf(step);
+    // A negative count (`limit(-1)`) is `RangeGlobalStep`'s `high = -1`: unbounded.
+    return { low: offset, high: limit === null || limit < 0 ? null : offset + limit };
+  } catch { return null; }
 }
 
 /**
- * THE SLICE THAT PULLS what a head slice's consumer makes the reference evaluate — ONE traverser past the
- * bound. `RangeGlobalStep` tests its bound inside `filter`, AFTER `FilterStep.processNextStart` has pulled
- * the next start (`if (this.high != -1 && counter.get() >= this.high) throw FastNoSuchElementException`),
- * so the `hasNext()` that follows the `high`-th result drags one more traverser through every step before
- * the slice (`g.V().union(values('name'), values('age')).toUpper().limit(1)` raises on marko's age, the
- * second traverser). The raise is settled over THESE rows; the slice proper is taken after it.
+ * HOW FULLY THE REFERENCE PULLS ONE STEP LIST — the question every raise asks before it is evaluated over
+ * every row SQL scans, at ANY depth.
+ *
+ * The reference is lazy: a step is evaluated on a traverser only when the step after it pulls one, and a
+ * `limit()` stops pulling one traverser past its bound (`RangeGlobalStep.filter` throws
+ * `FastNoSuchElementException` on the first traverser it is handed once it holds `high`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java`).
+ * Inside a child body the same is true ONE LEVEL UP: an `optional()`/`local()`/`union()` iterates its body
+ * as its own consumer pulls (`OptionalStep.processNextStart`, `LocalStep.processNextStart`, both one start
+ * per pull — `…/step/branch/OptionalStep.java`, `…/step/branch/LocalStep.java`), so a body under a host a
+ * slice follows is pulled no further than that slice pulls the host. A body's own exactness is therefore
+ * never the body's alone — it is the body's, then its host's position in the chain above, up to the root.
+ *
+ * A level answers two things: `reached` — every invocation of the list SQL makes, the reference makes too
+ * (it pulls every start SQL feeds the list's first step); and `drained` — beyond that, the reference pulls
+ * EVERYTHING the list emits, and asks once more (so a head slice at its end meets exactly `n + 1` rows).
+ * The root traversal is both. A body is `reached` where its host is (`exactFrom` from the host's own
+ * position — a draining host such as `order().by(…)` evaluates every by() it was handed), and `drained`
+ * only where its host also iterates it to exhaustion (`LAZY_BODY_HOSTS`): a filter's body or a `by()` is
+ * read for its FIRST result (`TraversalUtil.test`/`apply`), and a `choose`'s selector is too.
  */
-export function pulledBy(step: IRStep): IRStep {
-  const { offset, limit } = sliceOf(step);
-  // `limit(n)`'s count and `range(0, n)`'s high are each the LAST numeric argument.
-  const at = step.args.map((a) => !isScopeArg(a.value)).lastIndexOf(true);
-  return { ...step, args: step.args.map((a, i) => (i === at ? { ...a, value: offset + limit! + 1 } : a)) };
+export interface PullLevel { readonly reached: boolean; readonly drained: boolean }
+
+/** WHERE a tail stands — the list it is folding, the step it is at, and that list's `PullLevel`. Carried on
+ *  `ChainCtx.pull` (`pullAt`), so a body lowered from the step at `at` reads its level off its host. `below`
+ *  is the relation the tail held BEFORE folding that step, so the next step can tell what it minted
+ *  (`raisesWherePulled`). */
+export interface PullPosition { readonly steps: readonly IRStep[]; readonly at: number; readonly level: PullLevel; readonly below?: Rel }
+
+/** The top-level traversal: driven to the end by the terminal, every row pulled. */
+const TOP: PullLevel = { reached: true, drained: true };
+
+/** Hosts that iterate a body to exhaustion for each start before asking for the next one — when their own
+ *  output is fully pulled. A `choose`/`branch` is absent: its selector is read for its first result, and
+ *  the position does not say which of its bodies is being lowered. */
+const LAZY_BODY_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'flatMap', 'optional', 'coalesce', 'sideEffect']);
+
+/** `ctx` at `steps[at]` — the ONE marker every tail sets per step, so a body lowered from that step knows
+ *  its host. Within the same list the level is inherited; a new list is a body of the marked host. */
+export function pullAt<C extends { readonly pull?: PullPosition }>(ctx: C, steps: readonly IRStep[], at: number, below?: Rel): C {
+  if (ctx.pull?.steps === steps && ctx.pull.at === at && ctx.pull.below === below) return ctx;
+  return { ...ctx, pull: { steps, at, level: levelOf(ctx.pull, steps), ...(below ? { below } : {}) } };
+}
+
+/** The `PullLevel` of `steps`, given the innermost marked position. No marker is the top-level chain. */
+function levelOf(pull: PullPosition | undefined, steps: readonly IRStep[]): PullLevel {
+  if (!pull) return TOP;
+  if (pull.steps === steps) return pull.level;
+  const host = pull.steps[pull.at];
+  const reached = exactFrom(pull.steps, pull.at, pull.level, 'reached');
+  return { reached, drained: reached && host !== undefined && LAZY_BODY_HOSTS.has(host.name) && exactFrom(pull.steps, pull.at, pull.level, 'drained') };
+}
+
+/**
+ * Does the reference pull EVERY row that reaches `steps[at]` — `need: 'reached'` — or, beyond that, ask
+ * once more past the last (`'drained'`)? A DRAINING step (`CollectingBarrierStep`/`ReducingBarrierStep`
+ * pull every start before they emit, `step/util/CollectingBarrierStep.java`) settles it as the level's
+ * `reached`; a bounded slice first means no; the list's end hands the question to the level.
+ *
+ * The implicit `NoOpBarrierStep`s `LazyBarrierStrategy` places after a flat-map are NOT drains here: one
+ * holds at most `MAX_BARRIER_SIZE` (2500) traversers
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/NoOpBarrierStep.java`),
+ * so what it pulls ahead depends on the data — counting one would raise where a larger graph answers.
+ */
+function exactFrom(steps: readonly IRStep[], at: number, level: PullLevel, need: 'reached' | 'drained'): boolean {
+  for (let next = at; next < steps.length; next++) {
+    const step = steps[next]!;
+    if (DRAINING.has(step.name) && !isLocalScope(step)) return level.reached;
+    if ((step.name === 'limit' || step.name === 'range') && !isLocalScope(step)) {
+      try { const { limit } = sliceOf(step); if (limit !== null && limit >= 0) return false; } catch { return false; }
+    }
+  }
+  return need === 'drained' ? level.drained : level.reached;
+}
+
+/**
+ * THE ROWS A SLICE AT `steps[at]` MAKES THE REFERENCE EVALUATE — a count, `'all'` where it pulls its whole
+ * input, or `null` where the count is not fixed by the traversal and a raise riding to it must not be
+ * settled there.
+ *
+ * `RangeGlobalStep` tests its bound inside `filter`, AFTER `FilterStep.processNextStart` has pulled the next
+ * start, so the `hasNext()` that follows the `high`-th result drags ONE more traverser through every step
+ * before the slice (`g.V().union(values('name'), values('age')).toUpper().limit(1)` raises on marko's age):
+ * asked `k` times, a `range(low, high)` pulls `min(low + k, high + 1)` — the `low` it discards, then one
+ * per request until `high` — and a `skip(low)` pulls `low + k`. That holds only as far as the consumer
+ * after the slice asks, so a RUN of slices composes from its far end: the step after the run must drain it
+ * (`exactFrom … 'drained'`, through every enclosing host — `k` is then unbounded), and each slice's pulls
+ * are the requests of the one before. So `limit(2).limit(1)` pulls 2, not 3 (what `EarlyLimitStrategy`'s
+ * merge of adjacent `RangeGlobalStep`s also gives, `…/strategy/optimization/EarlyLimitStrategy.java`
+ * `moveRangeStep`), and `skip(1).limit(1)` pulls 3. A filter or a flat-map between two slices makes the
+ * inner one's requests data-dependent, so the run ends there and the step after it must drain.
+ */
+export function pullExtent(steps: readonly IRStep[], at: number, pull: PullPosition | undefined): number | 'all' | null {
+  const run: { readonly low: number; readonly high: number | null }[] = [];
+  let next = at;
+  for (; next < steps.length; next++) {
+    const step = steps[next]!;
+    const slice = globalSlice(step);
+    if (slice) run.push(slice);
+    else if (!run.length || !TRANSPARENT.has(step.name) || step.modulators?.length) break;
+  }
+  if (!run.length || !exactFrom(steps, next, levelOf(pull, steps), 'drained')) return null;
+  let requests = Infinity;
+  for (let i = run.length - 1; i >= 0; i--) {
+    const { low, high } = run[i]!;
+    requests = high === null ? low + requests : Math.min(low + requests, high + 1);
+  }
+  return requests === Infinity ? 'all' : requests;
+}
+
+/** The FIRST `extent` rows of the slice's input, as a `limit(extent)` beside it — the rows the reference
+ *  pulled (`pullExtent`). The raise is settled over THESE rows; the slice proper is taken after it. */
+export function pulledBy(step: IRStep, extent: number): IRStep {
+  const count = step.args.find((a) => !isScopeArg(a.value))!;
+  return { ...step, name: 'limit', args: [{ ...count, value: extent }] };
 }
 
 /**
  * MAY A RAISE BORN AT `steps[at - 1]` RIDE TO `steps[at]` — the ONE deferral rule every source asks.
  *
- * Yes where a step CONSUMES it exactly: a head slice (`sliceOp` settles it over the rows it pulls), or —
- * inside a child body whose host asked for its raise as data (`ChainCtx.raiseEscalates`, the body's own
- * step list BY IDENTITY, so no nested or rewritten list inherits it) — the body's terminal reducing barrier,
- * which `escalatedRaise` turns into the child value's `raise`. A run of FILTER steps may stand between
- * (`passesRaise`): `FilterStep` hands a traverser on or drops it, and a raising traverser never reached
- * the filter in the reference, so the filter keeps it (`hostFilter`). Anywhere else the source settles
- * immediately.
+ * Yes where a step CONSUMES it exactly: a head slice whose pulled extent is fixed (`pullExtent`; `sliceOp`
+ * settles it over those rows), or — inside a child body whose host asked for its raise as data
+ * (`ChainCtx.raiseEscalates`, the body's own step list BY IDENTITY, so no nested or rewritten list inherits
+ * it) — the body's terminal reducing barrier, which `escalatedRaise` turns into the child value's `raise`.
+ * A run of FILTER steps may stand between (`passesRaise`): `FilterStep` hands a traverser on or drops it,
+ * and a raising traverser never reached the filter in the reference, so the filter keeps it
+ * (`hostFilter`); so may a label (`as()`), which is no step of the reference's at all. Anywhere else the
+ * source settles immediately.
  */
-export function defersRaise(steps: readonly IRStep[], at: number, escalates: readonly IRStep[] | undefined, collapses: (name: string) => boolean): boolean {
+export function defersRaise(
+  steps: readonly IRStep[], at: number, ctx: { readonly pull?: PullPosition; readonly raiseEscalates?: readonly IRStep[] }, collapses: (name: string) => boolean,
+): boolean {
   let next = at;
   while (passesRaise(steps[next])) next++;
   const consumer = steps[next];
-  if (headSliceStep(consumer)) return true;
-  return escalates === steps && next === steps.length - 1 && consumer !== undefined && collapses(consumer.name);
+  // A run pulling its WHOLE input needs no carrying: the eager settle is exact there (`settlesExactly`).
+  if (typeof pullExtent(steps, next, ctx.pull) === 'number') return true;
+  return ctx.raiseEscalates === steps && next === steps.length - 1 && consumer !== undefined && collapses(consumer.name);
 }
 
 /**
- * IS AN EAGER SETTLE AT `steps[at - 1]` EXACT — does the reference pull EVERY row the source sees? Yes
- * where a DRAINING step comes before any bounded slice (a `CollectingBarrierStep`/`ReducingBarrierStep`
- * drains every start before it emits, `step/util/CollectingBarrierStep.java`), or where nothing bounded
- * follows at all (the root drains to the end). A bounded slice after only streaming steps
- * (`dedup()`, a movement, a map) stops pulling where the reference would, so a raise SQL evaluates on
- * every row would be an error the reference never meets — the caller DECLINES rather than over-raise.
+ * IS AN EAGER SETTLE AT `steps[at - 1]` EXACT — does the reference pull EVERY row the source sees, at this
+ * level AND through every host above it (`PullLevel`)? A bounded slice after only streaming steps
+ * (`dedup()`, a movement, a map), or a host a bounded slice follows, stops pulling where the reference
+ * would, so a raise SQL evaluates on every row would be an error the reference never meets — the caller
+ * DECLINES rather than over-raise.
  */
-export function settlesExactly(steps: readonly IRStep[], at: number): boolean {
-  for (let next = at; next < steps.length; next++) {
-    const step = steps[next]!;
-    if (DRAINING.has(step.name) && !isLocalScope(step)) return true;
-    if ((step.name === 'limit' || step.name === 'range') && !isLocalScope(step)) {
-      try { if (sliceOf(step).limit !== null) return false; } catch { return false; }
-    }
-  }
-  return true;
+export function settlesExactly(steps: readonly IRStep[], at: number, ctx: { readonly pull?: PullPosition }): boolean {
+  return exactFrom(steps, at, levelOf(ctx.pull, steps), 'reached');
 }
 
 /** The steps that pull EVERY start before they emit — the collecting and reducing barriers. */
@@ -125,12 +227,16 @@ const DRAINING: ReadonlySet<string> = new Set([
   'group', 'groupCount', 'tree', 'cap', 'subgraph',
 ]);
 
-/** The filter steps a pending raise rides THROUGH — each lowered by `hostFilter`, which keeps a raising row.
- *  A form some other route lowers (an alias-compare `where`) is refused at the end by `raiseContained`. */
+/** Steps that are no step of the reference's — a label rides the previous step, `identity()` is removed
+ *  (`IdentityRemovalStrategy`) — so neither changes what is pulled. */
+const TRANSPARENT: ReadonlySet<string> = new Set(['as', 'identity']);
+
+/** The filter steps a pending raise rides THROUGH — each lowered by `hostFilter`, which keeps a raising row
+ *  — and the transparent steps. A form some other route lowers (an alias-compare `where`) is refused at the
+ *  end by `raiseContained`. */
 const FILTER_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or', 'has', 'hasLabel', 'hasId', 'hasKey', 'hasValue', 'hasNot']);
 const passesRaise = (step: IRStep | undefined): boolean =>
-  step !== undefined && FILTER_HOSTS.has(step.name) && !step.modulators?.length && !step.optionArms;
-
+  step !== undefined && (FILTER_HOSTS.has(step.name) || TRANSPARENT.has(step.name)) && !step.modulators?.length && !step.optionArms;
 /** A relation's rows with `message` POISONING the ones it is non-null on — the row is kept, and an
  *  earlier pending raise on it wins (the reference raised there first). */
 export function poisonRows(rel: Rel, message: Expr, fresh: Minter): Rel {
@@ -326,4 +432,36 @@ export function raiseContained(plan: Rel): boolean {
     }
   }
   return true;
+}
+
+/**
+ * THE ONE AUTHORITY OVER AN IN-STATEMENT RAISE A STEP MINTED — whatever minted it: a receiver test, a
+ * projector's (`math()`'s variable must be a Number), a list-local reducer's operand, a child value's
+ * own raise evaluated per host row (a correlated subplan's, at any depth), a narrowing cast's overflow.
+ * SQL evaluates such a raise on every row it reads, so it is exact only where the reference pulls every
+ * row reaching that step (`settlesExactly` from the step itself — a DRAINING step pulls all it is handed,
+ * so `order().by(<raising>)` is exact under a later `limit()`, and a `project().by(<raising>)` is not).
+ * `false` is a DECLINE: the reference would answer where the plan raises.
+ *
+ * The nodes the step minted are those between `rel` and `pull.below`, where `pull` marks a step of THIS
+ * list (a body's own list is a different array, and is checked by its own tail). A pending raise's SETTLE
+ * (`settledSlice`/`settleRaise`, registered as consumers) is exempt — it is the exact answer by
+ * construction — and a raise carried as DATA (`raiseMessage`) is no raise here at all.
+ */
+export function raisesWherePulled(pull: PullPosition | undefined, steps: readonly IRStep[], rel: Rel): boolean {
+  if (!pull?.below || pull.steps !== steps || rel === pull.below || !mintedRaise(rel, pull.below)) return true;
+  return settlesExactly(pull.steps, pull.at, { pull });
+}
+
+function mintedRaise(top: Rel, below: Rel): boolean {
+  const seen = new Set<Rel>();
+  const stack = [top];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node === below || seen.has(node)) continue;
+    seen.add(node);
+    if (!CONSUMERS.has(node) && relExprs(node).some(exprMayRaise)) return true;
+    stack.push(...relChildren(node));
+  }
+  return false;
 }

@@ -485,21 +485,26 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     // SOURCE is a datetime literal (the first coercion over an `inject(datetime(…))`, whose args carry
     // `type: 'datetime'`). `dateDiff`'s result is a `long`, so a `dateAdd` chained after one correctly
     // falls to the raise.
-    const datetimeSubject = as === 'datetime'
-      || (at === 1 && steps[0].args.length > 0 && steps[0].args.every((a) => a.type === 'datetime'));
+    // PER VALUE: each traverser is a datetime or raises on its own (`inject(datetime(…), 'x')` raises on the
+    // second, not the first), so the message names the value that offends.
+    const datetimeSubject = (i: number): boolean => as === 'datetime' || (at === 1 && steps[0].args[i]?.type === 'datetime');
     if (step.name === 'dateAdd') {
-      if (!datetimeSubject) throw new ValueParseError('dateAdd() accept only OffsetDateTime or Date (deprecated).');
       const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
-      for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
+      for (let i = 0; i < vals.length; i++) {
+        if (!datetimeSubject(i)) throw new ValueParseError('dateAdd() accept only OffsetDateTime or Date (deprecated).');
+        vals[i] = Number(vals[i]) + delta;
+      }
       as = 'datetime';
       continue;
     }
-    if (!datetimeSubject) {
-      const v = vals[0];
-      throw new ValueParseError(`DateDiff can only take OffsetDateTime or Date (deprecated) as argument, encountered ${v === null || v === undefined ? 'null' : javaTypeName(v)}`);
-    }
     const other = dateDiffOtherMs(step.args[0]?.value, {});
-    for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
+    for (let i = 0; i < vals.length; i++) {
+      if (!datetimeSubject(i)) {
+        const v = vals[i];
+        throw new ValueParseError(`DateDiff can only take OffsetDateTime or Date (deprecated) as argument, encountered ${v === null || v === undefined ? 'null' : javaTypeName(v)}`);
+      }
+      vals[i] = Number(vals[i]) - other;
+    }
     as = 'long';
   }
   return perRow ? { at, as, perRow } : { at, as };
