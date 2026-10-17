@@ -96,6 +96,9 @@ function canonMapExpected(v: unknown, refs?: ReadonlyMap<string, unknown>): stri
 function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string {
   const t = tok.trim();
   if (t === 'null') return 'null';
+  // str[…] — the string AS IS, so a String that reads like another token (`str[true]`) can be stated
+  // (vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/feature-steps.js:44).
+  const str = t.match(/^str\[(.*)\]$/); if (str) return 'S' + str[1];
   // v[marko].id — an element reference, resolved against the seeded store by the caller.
   if (refs?.has(t)) return canon(refs.get(t));
   // v[marko] / e[marko-knows->vadas] — the ELEMENT itself, not its id. Canonicalizes to the same

@@ -748,19 +748,24 @@ describe('the RelIR spine', () => {
 
   // A LOCAL (`Scope.local`) `StringLocalStep` transform maps over the members, but throws on any member
   // that is neither null nor a String (`StringLocalStep.java:54-58`). The member type is per-row/unknown
-  // here (never a static tag), so the check is a RUNTIME guard binding — the plan is a PROGRAM whose
-  // guard raises iff a non-string member EXISTS. Not a decline (that would refuse the valid all-string
-  // case) and not silent coercion (SQLite `upper(1)`=`'1'` is the wrong answer §12). `asString(local)`
-  // is the null twin: `AsStringLocalStep` stringifies each member but throws on a NULL one
-  // (`AsStringLocalStep.java:57-59`), so it too is a guarded program — the guard fires on a null member.
-  test('a local StringLocalStep transform is a guarded program', () => {
+  // here (never a static tag), so the check is a RUNTIME raise — IN the one statement, a WHERE over the
+  // list row that raises iff a non-string member EXISTS (`raisingMembers`, the scalar fold's in-statement
+  // raise one level down), not a separate guard statement re-folding the list. Not a decline (that would
+  // refuse the valid all-string case) and not silent coercion (SQLite `upper(1)`=`'1'` is the wrong
+  // answer §12). `asString(local)` is the null twin: `AsStringLocalStep` stringifies each member but
+  // throws on a NULL one (`AsStringLocalStep.java:57-59`).
+  test('a local StringLocalStep transform raises in-statement — one read, no guard statement', () => {
     for (const gremlin of [
       "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
       "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
       "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
       "g.inject(['ab','c']).length(Scope.local)", "g.V().values('name').fold().toUpper(Scope.local)",
       "g.inject([1,2]).asString(Scope.local)", "g.inject([1,null]).asString(Scope.local)",
-    ]) expect(compile(gremlin, {}).kind, gremlin).toBe('program');
+    ]) {
+      const plan = compile(gremlin, {});
+      expect(plan.kind, gremlin).toBe('read');
+      expect(plan.kind === 'read' && plan.sql, gremlin).toContain('$!raise:');
+    }
   });
 
   // The guard FIRES on a provably-non-string member (a literal int list, an `age` fold), keeps a valid

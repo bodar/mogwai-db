@@ -15,7 +15,7 @@ import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, casePresence, knownPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -165,13 +165,9 @@ export function collapseInput(rel: Rel): Rel | null {
 export function reductionHost(
   rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, labels: AliasMap,
 ): ChildHost {
-  return framing.kind === 'elements'
-    ? elementHost(rel, framing.elem, labels)
-    : {
-      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
-      ...(rel.type.cols.some((column) => column.name === 'vtype') ? { vtype: col(rel.id, 'vtype') }
-        : framing.type.kind === 'static' ? { vtype: compilerText(framing.type.type) } : {}),
-    };
+  if (framing.kind === 'elements') return elementHost(rel, framing.elem, labels);
+  const vtype = hostTag(framing.type, rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined);
+  return { kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels }, ...(vtype ? { vtype } : {}) };
 }
 
 /**
@@ -883,7 +879,7 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
   const row = { row: host.row } as const;
   if (proj.read.kind === 'element') return { kind: 'element', id: proj.payload[0]![1]!, elem: proj.read.elem, ...row };
   if (proj.read.kind === 'value') {
-    const vtype = proj.payload[1]?.[1];
+    const vtype = hostTag(proj.read.type, proj.payload[1]?.[1]);
     return { kind: 'scalar', value: proj.payload[0]![1]!, ...(vtype ? { vtype } : {}), ...row };
   }
   return null; // a list/Pop history alias in a child body is a later phase
@@ -1851,8 +1847,9 @@ export function valueRun(
       // property, a failed `is()`), which a `math()` over it must drop rather than raise on. A seed that
       // cannot say keeps the old reading — a NULL is unproductive — rather than raise on every NULL.
       const hostPresent: Expr | undefined = productive === ALWAYS_PRODUCTIVE ? undefined : productive ?? compilerInt(0);
+      const hostVtype = hostTag(type, vtype);
       const host: ChildHost = {
-        kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}), ...(hostPresent ? { present: hostPresent } : {}),
+        kind: 'scalar', value, ...(hostVtype ? { vtype: hostVtype } : {}), ...(row ? { row } : {}), ...(hostPresent ? { present: hostPresent } : {}),
       };
       const projected = projectorValue(step, host, child, source, fresh);
       if (!projected) return null;
@@ -1891,10 +1888,10 @@ export function valueRun(
     // THE RECEIVER first — the same authority the root scalar fold asks (`receiver.ts`), so a body at
     // any depth (`map`/`local`/`by()`/`where`/a branch arm) gets the reference's raise, not SQLite's
     // coercion. A NULL here is a productive null exactly where the seed says the body produced.
-    const offences = transformOffences(step, value, evidenceOf(type, vtype),
-      productive === ALWAYS_PRODUCTIVE ? true : productive);
+    const evidence = evidenceOf(type, vtype);
+    const offences = transformOffences(step, value, evidence, productive === ALWAYS_PRODUCTIVE ? true : productive);
     if (!offences) return null;
-    const transformed = transformExpr(step, value, false);
+    const transformed = transformExpr(step, value, false, undefined, evidence);
     if (!transformed) return null;
     // A RAISING transform (a runtime `asNumber(GType.X)`) still produces iff its input did — but a host
     // that asks only WHETHER the run produced (`where`/`not`/`choose`) never reads the fenced value, so

@@ -771,6 +771,23 @@ authorities.
   so every depth) and per math variable; math `/`,`%` raise "Division by zero!"; a filtered-out child value is
   unproductive to the checks; concat's traversal operand is type-checked. L3 unchanged. The `raise` channel role
   (full design) is still open.
+  ✅ **Consolidation LANDED 2026-10-17 (`wf6/substrate-raise-channel-r1`):** the per-row VALUE raises of the scalar
+  fold and the list member ops are ONE in-statement form — `raisingRows`/`projectRaising` (`lower.ts`) and
+  `raisingMembers` (`list.ts`), all fed by the receiver authority's offences. The five value-error
+  `Binding.guard` builders (`concatEmptyGuard`, `asStringNullGuard`, `asNumberOverflowGuard`,
+  `localStringMemberGuard`, `asStringNullMemberGuard`) are deleted; `Binding.guard` is left to §6·5 refusals
+  and the `drainRaisingSite` drain. The verifier's remaining wrong answers were EVIDENCE reachability, not a
+  missing substrate: a scalar host dropped its static tag (`hostTag`, `child.ts`, now the one carrier), the root
+  receiver evidence ignored a mixed `inject`'s `vt` tag, and `asString` rendered by storage class — now
+  `asStringOf` (`receiver.ts`, `String.valueOf` by Java type: Boolean `true`/`false`, a Double only where
+  SQLite's text is `Double.toString`, else a deferral). A bare list literal with a Boolean member declines.
+  **Measured against the channel design before building it:** its claim "a root `limit(1)` never frames the
+  raising row, exact by construction" is NOT the reference — `RangeGlobalStep.filter` only learns it is past
+  `high` on the NEXT pull (`step/filter/RangeGlobalStep.java:72-82`), so the upstream map raises on traverser
+  n+1 (`g.inject('a', 1).toUpper().limit(1)` raises). Exact extent is "evaluate n+1 under a slice", which the
+  in-statement WHERE already gets wherever the chain is ordered (the `ORDER BY` evaluates every row). A
+  physical `raise` column through ~900 node-construction sites is therefore not the next step; an
+  unordered-chain slice over a raising input evaluating n+1 is.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no

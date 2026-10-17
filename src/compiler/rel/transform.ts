@@ -7,6 +7,7 @@ import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../.
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { IRStep } from '../ir/step.ts';
+import { asStringOf, type ValueEvidence } from './receiver.ts';
 
 // The Number family, as `GremlinValueComparator` treats it — one ordered type (§6·7). Bare
 // `asNumber()` over a value ALREADY in this family is TinkerPop's IDENTITY (`AsNumberStep.map`:
@@ -197,7 +198,6 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
   length: (v) => call('length', v),
   toUpper: (v) => call('upper', v),
   toLower: (v) => call('lower', v),
-  asString: (v) => ({ kind: 'cast', arg: v, to: 'text' }),
   // Gremlin's `trim()` trims JAVA's whitespace set, not SQLite's default space — hence the explicit
   // second argument, and hence importing the list rather than restating it.
   trim: (v) => call('trim', v, held(JAVA_WHITESPACE)),
@@ -307,7 +307,7 @@ export const CONSTANT_FOLDED: ReadonlySet<string> = new Set(['asNumber', 'asDate
  *  BEFORE asking for a lowering, so an unlowerable member ends the transform run rather than falling
  *  through to some other arm's interpretation of it. */
 export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
-  ...Object.keys(VALUE_TX), 'asNumber', 'asDate', 'dateAdd', 'dateDiff', 'asBool',
+  ...Object.keys(VALUE_TX), 'asString', 'asNumber', 'asDate', 'dateAdd', 'dateDiff', 'asBool',
 ]);
 
 /**
@@ -318,7 +318,9 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * semantic fact about this family, not a shortcut; a LIST stream's local transform is a different
  * lowering entirely and never reaches here.
  */
-export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?: ScalarType): Transformed | null {
+export function transformExpr(
+  step: IRStep, v: Expr, literal: boolean, incoming?: ScalarType, evidence?: ValueEvidence,
+): Transformed | null {
   const args = step.args.map((a) => a.value);
 
   // OVER A COMPILE-TIME LITERAL, THE CAST SUBFAMILY IS NOT A SQL CAST AT ALL — it is a parse that must
@@ -333,13 +335,20 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
   // literal has no parse to fail — so the decline is the cast subfamily and not the family.
   if (literal && CONSTANT_FOLDED.has(step.name)) return null;
 
+  // `asString()` is `String.valueOf`, a function of the receiver's TYPE rather than its storage class —
+  // rendered by the receiver authority from the caller's evidence (`asStringOf`), declined without any.
+  // No static type on the result: the framing `UNKNOWN` infers per VALUE, which for text is `string`.
+  if (step.name === 'asString') {
+    const expr = evidence ? asStringOf(v, evidence) : null;
+    return expr && { expr };
+  }
+
   const pure = VALUE_TX[step.name];
   if (pure) {
     const expr = pure(v, args, step);
-    // No static type, `asString` included. That looks wrong for a `CAST(… AS TEXT)` and is not: the
-    // framing `UNKNOWN` infers per VALUE, which for a text value is `string` anyway, so it frames
-    // correctly — and CLAIMING a type here where none is warranted would be the worse error. A
-    // semantic improvement to the tag is a separate change.
+    // No static type: the framing `UNKNOWN` infers per VALUE, which for a text value is `string`
+    // anyway, so it frames correctly — and CLAIMING a type here where none is warranted would be the
+    // worse error.
     return expr && { expr };
   }
 

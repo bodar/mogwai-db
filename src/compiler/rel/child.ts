@@ -1,4 +1,4 @@
-import { compilerInt, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
@@ -6,7 +6,7 @@ import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
-import type { ListOf } from '../../sql/kernel/render.ts';
+import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { ProgramWrites } from './write.ts';
 
 /**
@@ -262,6 +262,19 @@ export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compiler
  * its source and answers the empty chain, i.e. an endpoint that silently matched nothing.
  */
 export type BodyScope = 'child' | 'rooted';
+
+/**
+ * THE TYPE TAG A SCALAR HOST CARRIES — its per-row `vtype` where it has one, else its STATIC tag as a
+ * compiler literal (the same fact, constant-folded), else nothing. Every scalar host that knows a type
+ * is built through this, because a host that dropped its static tag read as STORAGE evidence downstream:
+ * a `constant(true)` is SQLite's integer 1, so `math('_+1')` over it passed the Number check and
+ * answered `2.0` where `MathStep` raises
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:80-87`).
+ * `receiver.ts`'s `evidenceOf` reads a compiler-text tag back as static, so the receiver checks decide
+ * it at compile time, and `byNode` frames with it rather than inferring from the JS value (§6·7).
+ */
+export const hostTag = (type: ScalarType | undefined, vtype: Expr | undefined): Expr | undefined =>
+  vtype ?? (type?.kind === 'static' ? compilerText(type.type) : undefined);
 
 /**
  * The traverser a child body is rooted AT — a union rather than a bag of optional fields, because the

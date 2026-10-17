@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { raiseInRow as raise } from '../../rel/raise.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -169,6 +169,66 @@ export const stringReceiverMessage = (step: string): string =>
 export function concatOperandOffence(value: Expr, evidence: ValueEvidence): readonly [Expr, string] | null | false {
   const offends = receiverOffence('string', value, evidence);
   return offends ? [offends, deferral('concat(): a traversal argument that yields a non-String')] : offends;
+}
+
+/** The integral Number tags — `String.valueOf` of each is its decimal digits, exactly SQLite's text. */
+const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bigint'];
+
+/**
+ * `asString()`'s VALUE — `String.valueOf` of the receiver (`AsStringGlobalStep.java:46`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsStringGlobalStep.java`),
+ * which is a function of the receiver's JAVA TYPE, not of its storage class: a Boolean is stored as
+ * SQLite's integer 1/0, so `CAST(v AS TEXT)` answered `'1'` where the reference answers `'true'`. So the
+ * rendering is decided by the same evidence the receiver checks read, at this one authority, for every
+ * host (the root scalar fold, a child value run at any depth, a list member under `asString(local)`):
+ *
+ * - a String is itself, an integral Number its digits, a Boolean `true`/`false`;
+ * - a Double is SQLite's text only where the two agree — `Double.toString` is the SHORTEST decimal that
+ *   round-trips, in plain notation inside `[1e-3, 1e7)`; SQLite's `CAST` prints 15 significant digits.
+ *   Inside that range a value whose 15-digit text round-trips IS the shortest form (DBL_DIG = 15), so it
+ *   answers there and RAISES a deferral elsewhere (`1.0/3`, `1.0e7`) rather than print a different string;
+ * - anything else (a Float, whose shortest form is a float's not a double's; a BigDecimal; a Date; a
+ *   UUID) has a `toString` SQL does not reproduce — refuted statically it DECLINES (`null`), per row it
+ *   raises the deferral.
+ *
+ * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
+ */
+export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
+  const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
+  const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
+  const nullable = (rendered: Expr): Expr => ({ kind: 'case', whens: [[isNull(value), compilerNull()]], else: rendered });
+  if (evidence.kind === 'static') {
+    const tag = evidence.tag;
+    if (tag === 'string') return value;
+    if (INTEGRAL_TAGS.includes(tag)) return cast;
+    if (tag === 'boolean') return nullable(bool);
+    if (tag === 'double') return nullable(doubleText(value));
+    return null;
+  }
+  // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
+  // over NULL), so they share one arm — the statement spells the type test once per arm.
+  // Over STORAGE evidence the name is a storage class, so no Gremlin tag (a Boolean) can occur.
+  const type = typeName(value, evidence);
+  const tagged = evidence.kind === 'tag';
+  return { kind: 'case', whens: [
+    [inList(type, ['null', 'text', 'integer', ...(tagged ? ['string', ...INTEGRAL_TAGS] : [])]), cast],
+    ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
+    [inList(type, ['real', ...(tagged ? ['double'] : [])]), doubleText(value)],
+  ], else: raise(deferral('asString(): rendering this value at run time')) };
+}
+
+/** A non-null Double's `Double.toString`, where SQLite's 15-digit text is that string — else the
+ *  deferral. Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`). */
+function doubleText(value: Expr): Expr {
+  const real: Expr = { kind: 'cast', arg: value, to: 'real' };
+  const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
+  const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
+  const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
+    { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
+  const roundTrips: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
+  const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
+  return { kind: 'case', whens: [[or(zero, and(plain, roundTrips)), shown]],
+    else: raise(deferral('asString(): a Double outside the plain shortest form')) };
 }
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to

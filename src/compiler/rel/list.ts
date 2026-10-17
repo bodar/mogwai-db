@@ -3,11 +3,11 @@ import { withChannel, type Channel } from '../../channels.ts';
 import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Binding, Guard } from '../../rel/plan.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
+import { raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
@@ -156,6 +156,19 @@ const memberTypeTag = (of: ListOf, members: Rel): Expr => {
 };
 
 /**
+ * A MEMBER'S TYPE AS RECEIVER EVIDENCE (`receiver.ts`) — the member read the type-demanding transforms
+ * need. A static list states its tag; a self-describing member states its own `t`, and a bare member in
+ * that list states nothing (NULL), which the receiver reads by storage class exactly as it reads an
+ * untagged list — so the storage-class inference `memberTypeTag` spells out is not repeated here.
+ */
+const memberEvidence = (of: ListOf, members: Rel): ValueEvidence => {
+  const type = memberTypeOf(of);
+  if (type?.kind === 'static') return { kind: 'static', tag: type.type };
+  if (!isTypedList(of)) return { kind: 'storage' };
+  return { kind: 'tag', tag: { kind: 'case', whens: [[eqText(col(members.id, MEMBER.type), 'object'), jsonField(col(members.id, MEMBER.value), 't')]] } };
+};
+
+/**
  * THE MEMBER'S ORDERING KEY — `storedCompareOn` over the member's own type, which is the SAME cast
  * authority `order().by()`, the row-level `min`/`max` and every range predicate use.
  *
@@ -301,48 +314,37 @@ function nonStringMember(of: ListOf, members: Rel): Expr {
 }
 
 /**
- * A per-MEMBER runtime VALUE guard: raise `message` iff any list member matches `offender`. The shared
- * scaffolding behind the two member checks — `localStringMemberGuard` (a non-string member throws the
- * `*LocalStep` type error) and `asStringNullMemberGuard` (a null member throws `AsStringLocalStep`'s
- * "Can't parse null as String."). One fenced explode, one filter, one row probe.
+ * WHAT A LOCAL MEMBER TRANSFORM OWES PER MEMBER — the offender test and the reference's message, or
+ * `undefined` where no member can offend.
  *
- * The guard is its OWN statement, so it fences `input` inside its own tree — self-contained, and the
- * shared relation ids cannot collide across two independent statements' alias namespaces. It reads the
- * SAME list the main read does; a re-fold of a graph aggregate is one extra statement, inside P5. The
- * explode is ROOTED at `source` (an `input`, not the sole-FROM correlated form `membersOf` builds for
- * an OUTER row) so the `json_each` sees the fence's `list` column within the guard's own query.
+ * - The `*LocalStep`s that EXTEND `StringLocalStep` throw on a non-null non-string MEMBER (the set is
+ *   exactly `GLOBAL_STRING_THROWS` — every one has a `*GlobalStep`/`*LocalStep` pair over
+ *   `StringLocalStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/StringLocalStep.java:54-58`).
+ * - `asString(local)` is NOT one: `AsStringLocalStep` stringifies each member (`String.valueOf`) and only
+ *   a NULL member raises `Can't parse null as String.`
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsStringLocalStep.java:57-59`).
  */
-function memberGuard(input: Rel, offender: (members: Rel) => Expr, message: string, fresh: Minter): Binding {
-  const source = fenced(input, fresh);
-  const members = make.explode({
-    id: fresh('sgx'), input: source, expr: col(source.id, LIST_COL), channels: [], as: MEMBER,
-    type: typeOf(...source.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
-  });
-  const offenders = make.filter({
-    id: fresh('sgf'), input: members, channels: [], type: members.type, pred: offender(members),
-  });
-  const one = make.project({
-    id: fresh('sgp'), input: offenders, channels: [], type: typeOf(meta(MEMBER.ord, 'int')),
-    exprs: [[MEMBER.ord, col(offenders.id, MEMBER.ord)]],
-  });
-  const node = make.limit({ id: fresh('sgl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
-  const guard: Guard = { message, raiseWhen: 'rows' };
-  return { name: `${fresh('sg')}`, node, guard };
+function memberOffence(step: IRStep, of: ListOf): readonly [(members: Rel) => Expr, string] | undefined {
+  if (GLOBAL_STRING_THROWS.has(step.name))
+    return [(members) => nonStringMember(of, members), `The ${step.name}(local) step can only take string or list of strings`];
+  if (step.name === 'asString')
+    return [(members) => ({ kind: 'binary', op: 'is', left: col(members.id, MEMBER.value), right: compilerNull() }), `Can't parse null as String.`];
+  return undefined;
 }
 
-function localStringMemberGuard(step: IRStep, of: ListOf, input: Rel, fresh: Minter): Binding {
-  return memberGuard(input, (members) => nonStringMember(of, members),
-    `The ${step.name}(local) step can only take string or list of strings`, fresh);
-}
-
-/** `asString(Scope.local)` raises on a null MEMBER — `AsStringLocalStep.map` stringifies each element
- *  with `String.valueOf` but throws `"Can't parse null as String."` for a null element
- *  (`vendor/tinkerpop/gremlin-core/.../step/map/AsStringLocalStep.java:57-59`). The null twin of
- *  `localStringMemberGuard`: a runtime value guard firing only when a member is provably null. */
-function asStringNullMemberGuard(input: Rel, fresh: Minter): Binding {
-  return memberGuard(input,
-    (members) => ({ kind: 'binary', op: 'is', left: col(members.id, MEMBER.value), right: compilerNull() }),
-    `Can't parse null as String.`, fresh);
+/**
+ * A per-MEMBER runtime VALUE raise, IN-STATEMENT: the traverser row raises `message` where any member of
+ * its list matches `offender`, and passes otherwise. A WHERE over the list row — the scalar fold's
+ * `raisingRows` one level down — so a consumer that never reads the rewritten list (`count()`) still
+ * evaluates it. It replaced a separate guard STATEMENT that re-folded the list a second time.
+ */
+function raisingMembers(rel: Rel, offender: (members: Rel) => Expr, message: string, fresh: Minter): Rel {
+  const members = membersOf(col(rel.id, LIST_COL), fresh);
+  const offenders = make.filter({ id: fresh('sgf'), input: members, channels: [], type: members.type, pred: offender(members) });
+  return make.filter({
+    id: fresh('sg'), input: rel, channels: rel.channels, type: rel.type,
+    pred: raisingWhen([[{ kind: 'exists', plan: offenders, negated: false }, message]], compilerInt(1)),
+  });
 }
 
 /**
@@ -354,7 +356,7 @@ function asStringNullMemberGuard(input: Rel, fresh: Minter): Binding {
  */
 export function listMemberOp(
   step: IRStep, input: Rel, of: ListOf, source: GraphSource, fresh: Minter, child?: ChildSeam,
-): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean; readonly guard?: Binding } | null {
+): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean } | null {
   if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms) return null;
   // A GLOBAL string transform over a collection is a permanent type error, WHATEVER the member framing:
   // the traverser IS the list, and every `*GlobalStep` throws `IllegalArgumentException` on a non-String
@@ -395,28 +397,22 @@ export function listMemberOp(
   // rewrite the id, not a string.
   if (STRING_LOCAL_TX.has(step.name)) {
     if (!isLocalScope(step) || !isBareList(of)) return null;
-    const members = membersOf(list, fresh);
+    // The member raise first (`memberOffence`), so the rewrite reads only rows that passed it.
+    const offence = memberOffence(step, of);
+    const source = offence ? raisingMembers(rel, offence[0], offence[1], fresh) : rel;
+    const members = membersOf(col(source.id, LIST_COL), fresh);
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
-    // decline here exactly as they do over a column.
-    const tx = transformExpr(step, memberPayload(of, members), false);
+    // decline here exactly as they do over a column. The member's own type is the receiver evidence.
+    const tx = transformExpr(step, memberPayload(of, members), false, undefined, memberEvidence(of, members));
     if (!tx) return null;
-    // The `*LocalStep`s that EXTEND `StringLocalStep` throw on a non-null non-string MEMBER (the set is
-    // exactly `GLOBAL_STRING_THROWS` — every one has a `*GlobalStep`/`*LocalStep` pair over
-    // `StringLocalStep`). `asString(local)` is NOT one: `AsStringLocalStep` stringifies each member
-    // (`String.valueOf`) and only a NULL member raises `Can't parse null as String.` — a different guard,
-    // built here. Both are runtime VALUE guards (the member type is per-row/unknown, never a static tag),
-    // firing only when a member is provably offending AT RUN TIME.
-    const guard = GLOBAL_STRING_THROWS.has(step.name) ? localStringMemberGuard(step, of, input, fresh)
-      : step.name === 'asString' ? asStringNullMemberGuard(input, fresh)
-        : undefined;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
     // the INPUT's type.
     // `rewrites` is what a SET marker cannot survive: the members are new values, so "these are the
     // distinct results of a set operation" has stopped being true of them. A slice and a whole-traverser
     // filter both leave the members alone and keep it.
-    return { rel: withList(rel, listOfMembers(members, tx.expr, [memberOrder(members)], fresh), fresh), of: BARE_LIST, rewrites: true, ...(guard ? { guard } : {}) };
+    return { rel: withList(source, listOfMembers(members, tx.expr, [memberOrder(members)], fresh), fresh), of: BARE_LIST, rewrites: true };
   }
 
   // `reverse()` ON A LIST REVERSES ORDER, not each member, and it takes NO `Scope`: `ReverseStep.map`

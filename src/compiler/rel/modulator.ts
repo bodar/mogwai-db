@@ -5,7 +5,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
+import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -436,7 +436,7 @@ export function scopedHost(label: string, host: ChildHost): ChildHost | null {
   if (scoped.framing.kind === 'scalar') {
     // The recorded per-row type rides along: it is what makes an ordering/comparison over the scoped
     // value read as its Gremlin type rather than as its storage class, exactly as the host's own does.
-    const vtype = scoped.payload[1]?.[1];
+    const vtype = hostTag(scoped.framing.type, scoped.payload[1]?.[1]);
     // An unbound key reads as a NULL and carries no `present`, so `math()` reads it as a PRODUCTIVE null
     // and raises — as the reference does, which resolves a variable through `getNullableScopeValue`
     // (`Scoping.java:155-161`: an unbound key IS a null) before testing it (`MathStep.java:72-87`).

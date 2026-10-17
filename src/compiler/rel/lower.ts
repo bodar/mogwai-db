@@ -39,7 +39,7 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -1196,42 +1196,66 @@ function naturalSort(
  * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
 /**
- * The `concat(__.<t>…)` EMPTY-OPERAND guard (§6·5): a binding whose relation holds a row iff some
- * surviving traverser had an operand that produced nothing, so the executor raises `TraversalUtil.apply`'s
- * message rather than let `concat_ws` silently skip the NULL a correlated scalar leaves for an empty read.
- * `presents` are the operands' "did it produce" predicates over `rel`'s columns, so the guard filters
- * `rel` directly (a member's `present` references `rel.id`); `NOT (all produced)` is "some was empty".
+ * THE SCALAR FOLD'S ONE RUNTIME VALUE RAISE — a `Filter` over `rel` that raises an offence's message on
+ * an offending row and keeps every other row (and applies a raising `asNumber` fence where one is passed).
+ *
+ * A WHERE rather than part of the value, because a position that consumes only EXISTENCE (`count()`, a
+ * `where`/`not` body, a `choose` condition) never reads the value, and the reference raises there all
+ * the same. IN-STATEMENT rather than a separate guard statement (`Binding.guard`): the guard re-ran the
+ * whole upstream as a second statement — a second, independent draw of any `coin()`/`sample()` above
+ * it. `Binding.guard` is kept for what only a statement can decide (§6·5's graph-dependent refusals);
+ * every per-row VALUE error of this fold lands here, through the receiver authority's offences
+ * (`receiver.ts`), so one rule covers asString/asNumber/concat/dateDiff/the string family alike.
  */
-function concatEmptyGuard(rel: Rel, presents: readonly Expr[], fresh: Minter): Binding {
-  const anyEmpty = presents.map((p) => ({ kind: 'unary', op: 'not', arg: p } as Expr))
-    .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
-  const offenders = make.filter({ id: fresh('cgf'), input: rel, channels: rel.channels, type: rel.type, pred: anyEmpty });
-  const one = make.project({ id: fresh('cgp'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  const node = make.limit({ id: fresh('cgl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
-  return { name: `${fresh('cg')}`, node, guard: { message: 'The provided traverser does not map to a value', raiseWhen: 'rows' } };
+function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr): Rel {
+  if (!offences.length && !fence) return rel;
+  return make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type, pred: raisingWhen(offences, fence ?? compilerInt(1)) });
 }
 
-/** `asString()`/`asString(Scope.local)` over a SCALAR stream raises on a NULL value — a runtime guard,
- *  the scalar twin of `list.ts`'s `asStringNullMemberGuard`. `AsStringGlobalStep.map` (and
- *  `AsStringLocalStep.map` for a null item) throw `"Can't parse null as String."`
- *  (`vendor/tinkerpop/gremlin-core/.../step/map/AsStringGlobalStep.java:44-45`), where SQL
- *  `CAST(v AS TEXT)` would silently yield NULL. Fires only when a surviving row's value is null. */
-function asStringNullGuard(rel: Rel, value: Expr, fresh: Minter): Binding {
-  const offenders = make.filter({
-    id: fresh('agf'), input: rel, channels: rel.channels, type: rel.type,
-    pred: { kind: 'binary', op: 'is', left: value, right: compilerNull() },
+/** The column a `projectRaising` projection carries its raise test in, read once by the filter above it. */
+const RAISE_COL = 'rz';
+
+/**
+ * A scalar projection `v := value` whose offences read the SAME correlated operands the value does — a
+ * `concat(__.t)`/`dateDiff(__.t)` operand is a correlated read of `rel`'s row, so the test cannot be a
+ * WHERE on `rel` without lowering the operand twice. It rides as a column beside the value instead, and
+ * a filter reads that column, so an existence-only consumer still evaluates it.
+ */
+function projectRaising(rel: Rel, value: Expr, offences: readonly (readonly [Expr, string])[], fresh: Minter, tag: string): Rel {
+  const carried = rel.channels;
+  const channels = carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const);
+  if (!offences.length) return make.project({
+    id: fresh(tag), input: rel, channels: carried, type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
+    exprs: [['v', value], ...channels],
   });
-  const one = make.project({ id: fresh('agp'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  const node = make.limit({ id: fresh('agl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
-  return { name: `${fresh('ag')}`, node, guard: { message: `Can't parse null as String.`, raiseWhen: 'rows' } };
+  const computed = make.project({
+    id: fresh(tag), input: rel, channels: carried,
+    type: typeOf(meta('v', 'any', true), meta(RAISE_COL, 'int', true), ...carriedCols(carried)),
+    exprs: [['v', value], [RAISE_COL, raisingWhen(offences, compilerInt(1))], ...channels],
+  });
+  const kept = make.filter({ id: fresh('txf'), input: computed, channels: carried, type: computed.type, pred: col(computed.id, RAISE_COL) });
+  return withPayload(kept, [['v', col(kept.id, 'v')]], [meta('v', 'any', true)], fresh);
+}
+
+/**
+ * WHAT AN EMPTY TRAVERSAL OPERAND OWES — `TraversalUtil.apply` THROWS "The provided traverser does not map
+ * to a value" where a correlated scalar subquery yields NULL
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:41-53`),
+ * which `concat_ws` would silently SKIP. `false` — provably productive, nothing owed; the offence where it
+ * may be empty; `null` — the seam cannot say whether it produced, so the caller declines.
+ */
+function emptyOperand(cv: ChildValue): readonly [Expr, string] | false | null {
+  if (cv.present === ALWAYS_PRODUCTIVE) return false;
+  const present = knownPresence(cv.present);
+  if (!present) return null;
+  return [{ kind: 'unary', op: 'not', arg: present }, 'The provided traverser does not map to a value'];
 }
 
 /** `asNumber(GType.X)` over a RUNTIME value NARROWS to a bounded integer type and must RAISE on overflow —
  *  `asNumberConst` does so at compile time over a literal (`Can't convert number of type … to X due to
- *  overflow.`), and SQL cannot, so a runtime narrowing rides this guard: raise iff the pre-cast value is
- *  outside `[min, max]`. Only the bounded GTypes (byte/short/int) carry a range; long/bigint/real never
- *  overflow a 64-bit SQLite integer/real, so their callers pass no guard. */
-function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, disp: string, fresh: Minter): Binding {
+ *  overflow.`, `NumberHelper.java:770-771`), and SQL cannot: the offence is a pre-cast value outside
+ *  `[min, max]`. Only the bounded GTypes (byte/short/int) carry a range. */
+function narrowingOverflow(value: Expr, min: number, max: number, disp: string): readonly [Expr, string] {
   // INTEGER rows only — a native one, or an exact integer carried as decimal TEXT (a `sumTower` result
   // past 2^53, which round-trips through `CAST AS INTEGER`). A REAL one truncates before its range test,
   // which `asNumberCast` fences inline (`2147483647.5` is the Integer `2147483647`, not an overflow —
@@ -1247,13 +1271,10 @@ function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, 
     right: { kind: 'binary', op: 'or',
       left: { kind: 'binary', op: '<', left: asInt, right: compilerInt(min) },
       right: { kind: 'binary', op: '>', left: asInt, right: compilerInt(max) } } };
-  const offenders = make.filter({ id: fresh('nof'), input: rel, channels: rel.channels, type: rel.type, pred: outOfRange });
-  const one = make.project({ id: fresh('nop'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  const node = make.limit({ id: fresh('nol'), input: one, channels: [], type: one.type, count: compilerInt(1) });
   // The source type in the message is the reducer's own — a `sum`/`mean` over integers is a Long in
   // TinkerPop; unwitnessed (no corpus scenario overflows a runtime narrowing), so a wrong source name
   // would fail loudly and prompt a refinement rather than mis-answer.
-  return { name: `${fresh('no')}`, node, guard: { message: `Can't convert number of type Long to ${disp} due to overflow.`, raiseWhen: 'rows' } };
+  return [outOfRange, `Can't convert number of type Long to ${disp} due to overflow.`];
 }
 
 /**
@@ -1555,8 +1576,8 @@ function scalarTail(
   // `count().is(P.typeOf(GType.LONG))` constant-fold without touching a row; an injected value with a
   // heterogeneous or untagged type is honestly `unknown`. Same three cases `predicateSql` calls
   // `TypeCtx`, in the algebra's own expression vocabulary.
-  const subjectType = (): SubjectType => {
-    if (carries('vtype')) return { kind: 'perRow', vtype: col(rel.id, 'vtype') };
+  const subjectType = (at: Rel = rel): SubjectType => {
+    if (carries('vtype')) return { kind: 'perRow', vtype: col(at.id, 'vtype') };
     if (out.kind === 'scalar' && out.type.kind === 'static') return { kind: 'static', type: out.type.type, text: out.type.text };
     // A PER-ROW tag column (a mixed `inject`, a min/max winner's stored vtype) is the row's Gremlin type
     // where it names one; a NULL tag means "read the value", so the storage class stands in for it.
@@ -1564,13 +1585,13 @@ function scalarTail(
     const reducerTag = out.kind === 'scalar' && out.result === 'number' && carries('vt');
     const tagCol = reducerTag ? 'vt' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
     if (tagCol && carries(tagCol)) {
-      const value = col(rel.id, 'v');
+      const value = col(at.id, 'v');
       const inferred: Expr = { kind: 'case', whens: [
         [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('integer') }, compilerText('long')],
         [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, compilerText('double')],
         [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('text') }, compilerText('string')],
       ] };
-      const tag = col(rel.id, tagCol);
+      const tag = col(at.id, tagCol);
       return { kind: 'perRow', vtype: { kind: 'call', fn: 'coalesce', args: [reducerTag ? reducedVtype(tag) : tag, inferred] } };
     }
     return SUBJECT_UNKNOWN;
@@ -1578,9 +1599,14 @@ function scalarTail(
   /** This stream's traverser as a filter SUBJECT — the value, the type column where there is one, and
    *  the row the clause is correlated to. Read off `rel` at the moment it is asked for, like every
    *  other fact here, so a step that reshaped the relation cannot leave it stale. */
-  /** The same fact as `subjectType`, in the receiver authority's vocabulary (`receiver.ts`). */
-  const receiverEvidence = (): ValueEvidence =>
-    evidenceOf(out.kind === 'scalar' ? out.type : undefined, carries('vtype') ? col(rel.id, 'vtype') : undefined);
+  /** The same fact as `subjectType`, in the receiver authority's vocabulary (`receiver.ts`) — derived
+   *  from it rather than re-read, because a second reading that knew only the `vtype` column missed a
+   *  mixed `inject`'s `vt` tag and judged `inject(true, 1)`'s Boolean by its storage class. */
+  const receiverEvidence = (at: Rel = rel): ValueEvidence => {
+    const known = subjectType(at);
+    return known.kind === 'static' ? { kind: 'static', tag: known.type as ValueType }
+      : known.kind === 'perRow' ? { kind: 'tag', tag: known.vtype } : { kind: 'storage' };
+  };
   const scalarSubject = (): Subject => ({
     kind: 'scalar', value: col(rel.id, 'v'), rel, type: subjectType(),
     ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
@@ -1649,11 +1675,10 @@ function scalarTail(
     // off was not neutral: `byNode` tags an untagged value NULL, and NULL means "infer from the JS
     // value", which cannot tell a BigInt from an Int, a BigDecimal from an Int, or a datetime from a
     // long. §6·7's rule at one more carrier — what is KNOWN is carried, never re-guessed downstream.
-    const staticTag = out.kind === 'scalar' && out.type.kind === 'static' ? out.type.type : undefined;
+    const hostVtype = hostTag(out.kind === 'scalar' ? out.type : undefined, carries('vtype') ? col(rel.id, 'vtype') : undefined);
     const host: ChildHost = {
       kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
-      ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') }
-        : staticTag ? { vtype: compilerText(staticTag) } : {}),
+      ...(hostVtype ? { vtype: hostVtype } : {}),
     };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
@@ -1752,13 +1777,11 @@ function scalarTail(
     // over a filtered stream where the key is present succeeds, and raises only where it is genuinely empty.
     if (step.name === 'concat' && args.some(isNested)) {
       const seam = childSeam(ctx, fresh);
-      const host: ChildHost = {
-        kind: 'scalar', value: col(rel.id, 'v'),
-        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}), row: { rel, aliases: labels },
-      };
+      // The traverser itself must be a String or null (`ConcatStep.java:71-76`) — the receiver authority —
+      // and is tested first; then each operand in order, the order `ConcatStep.map` raises in.
+      const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
+      if (!offences) return null;
       const parts: Expr[] = [];
-      const mayBeEmpty: Expr[] = []; // productivity predicates for operands not provably productive
-      const operandOffences: (readonly [Expr, string])[] = [];
       for (const a of args) {
         if (a === null) continue;         // a null operand is skipped (`ConcatStep`)
         if (!isNested(a)) return null;     // the Java API cannot MIX string and traversal operands
@@ -1766,46 +1789,28 @@ function scalarTail(
         if (!body) return null;
         const cv = scalarChild(body, host, ctx, fresh);
         if (!cv || cv.framing.kind !== 'scalar') return null;
+        const empty = emptyOperand(cv);
+        if (empty === null) return null;
+        if (empty) offences.push(empty);
         // The OPERAND must yield a String or null too (`concatOperandOffence`).
         const operand = concatOperandOffence(cv.expr, evidenceOf(cv.framing.type, cv.vtype));
         if (operand === false) return null;
-        if (operand) operandOffences.push(operand);
+        if (operand) offences.push(operand);
         parts.push(cv.expr);
-        // Where the seam cannot say productivity at all (`'unknown'`) there is nothing to guard on
-        // — decline rather than risk a silent skip; otherwise collect a concrete "did it produce" predicate.
-        if (cv.present !== ALWAYS_PRODUCTIVE) {
-          const present = knownPresence(cv.present);
-          if (!present) return null;
-          mayBeEmpty.push(present);
-        }
       }
       // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
       // literal to force it, an all-null concatenation must be NULL rather than `''`, so the guard tests
       // every part (the traverser's own value included) IS NULL. Mirrors `VALUE_TX.concat`.
-      // The traverser itself must be a String or null (`ConcatStep.java:71-76`) — the receiver authority.
-      const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
-      if (!offences) return null;
       const all = [col(rel.id, 'v'), ...parts];
-      // The traverser is tested first, then each operand in order — the order `ConcatStep.map` raises in.
-      const value: Expr = raisingWhen([...offences, ...operandOffences], {
+      const value: Expr = {
         kind: 'case',
         whens: [[all.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
           .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],
         else: { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] },
-      });
-      const carried = rel.channels;
-      const projected = make.project({
-        id: fresh('cc'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', value], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-      });
-      // A provably-productive concat continues the fold; a guarded one is an EXECUTION step, so it recurses
-      // the rest of the chain and the guard rides on the tail's `effects` (the `localStringMemberGuard`
-      // pattern). The guard reads `rel`'s columns, so it fences and filters `rel`, not `projected`.
-      if (!mayBeEmpty.length) { rel = projected; out = { kind: 'scalar', type: UNKNOWN }; continue; }
-      const guard = concatEmptyGuard(rel, mayBeEmpty, fresh);
-      const tail = scalarTail(projected, { kind: 'scalar', type: UNKNOWN }, steps, at + 1, bulked, ctx, fresh, labels);
-      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+      };
+      rel = projectRaising(rel, value, offences, fresh, 'cc');
+      out = { kind: 'scalar', type: UNKNOWN };
+      continue;
     }
 
     // `dateDiff(__.<t>)` — a TRAVERSAL right operand is a per-traverser CHILD (`TraversalUtil.apply`),
@@ -1822,30 +1827,18 @@ function scalarTail(
     // (`inject(datetime(…))`, a movement) is this seam's.
     if (step.name === 'dateDiff' && args.length === 1 && args[0] !== null && isNested(args[0]) && !isDateDiffConstant(args[0], {})) {
       const seam = childSeam(ctx, fresh);
-      const host: ChildHost = {
-        kind: 'scalar', value: col(rel.id, 'v'),
-        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}), row: { rel, aliases: labels },
-      };
       const body = seam.body(args[0].nested, 'child');
       if (!body) return null;
       const cv = scalarChild(body, host, ctx, fresh);
       if (!cv || cv.framing.kind !== 'scalar') return null;
-      const diff: Expr = { kind: 'binary', op: '-', left: col(rel.id, 'v'), right: cv.expr };
-      const carried = rel.channels;
-      const projected = make.project({
-        id: fresh('dd'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', diff], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-      });
       // An EMPTY operand (`dateDiff(__.V(99999))`) maps to no value and must RAISE, exactly as concat's
-      // does (`TraversalUtil.apply` — the same guard message). A provably-productive operand (the inject
-      // degeneracy, a live alias) continues the fold; otherwise the guard rides on the tail's effects.
-      if (cv.present === ALWAYS_PRODUCTIVE) { rel = projected; out = { kind: 'scalar', type: STATIC('long') }; continue; }
-      const present = knownPresence(cv.present);
-      if (!present) return null;
-      const guard = concatEmptyGuard(rel, [present], fresh);
-      const tail = scalarTail(projected, { kind: 'scalar', type: STATIC('long') }, steps, at + 1, bulked, ctx, fresh, labels);
-      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+      // does (`TraversalUtil.apply` — the same message, `emptyOperand`).
+      const empty = emptyOperand(cv);
+      if (empty === null) return null;
+      const diff: Expr = { kind: 'binary', op: '-', left: col(rel.id, 'v'), right: cv.expr };
+      rel = projectRaising(rel, diff, empty ? [empty] : [], fresh, 'dd');
+      out = { kind: 'scalar', type: STATIC('long') };
+      continue;
     }
 
     // A bare `asNumber()` over a stream that is ALREADY numeric is IDENTITY — `AsNumberStep.map` returns
@@ -1866,47 +1859,23 @@ function scalarTail(
       let spec; try { spec = numericSpec(args[0]); } catch { return null; }
       if (!spec) return null;
       const value = col(rel.id, 'v');
-      // The overflow guard below raises the reference's message for an INTEGER result; a REAL one (a
-      // `mean`, a sum of doubles) is fenced inline, as every runtime `asNumber` is (`asNumberCast`).
-      // Not `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT.
-      // The fence is a WHERE for the reason the transform family's is (`asNumberFilter`): an existence
-      // position never reads the value.
+      // The overflow raise below is the reference's message for an INTEGER result; a REAL one (a `mean`,
+      // a sum of doubles) is fenced inline, as every runtime `asNumber` is (`asNumberCast`). Not
+      // `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT. Both are
+      // a WHERE for the reason the transform family's is (`raisingRows`): an existence position never
+      // reads the value.
       const { refuse } = asNumberParts(value, spec, true);
-      const source = refuse
-        ? make.filter({ id: fresh('anf'), input: rel, channels: rel.channels, type: rel.type, pred: asNumberFilter(value, refuse) })
-        : rel;
+      const overflow = spec.min === undefined ? [] : [narrowingOverflow(value, spec.min, spec.max!, spec.disp)];
+      const source = raisingRows(rel, overflow, fresh, refuse ? asNumberFilter(value, refuse) : undefined);
       const cast = asNumberParts(col(source.id, 'v'), spec, true).value;
       const carried = rel.channels;
-      const projected = make.project({
+      rel = make.project({
         id: fresh('an'), input: source, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', cast], ...carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)],
       });
-      const framing: RelFraming = { kind: 'scalar', type: STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint') };
-      if (spec.min === undefined) { rel = projected; out = framing; continue; }
-      const guard = asNumberOverflowGuard(rel, value, spec.min, spec.max!, spec.disp, fresh);
-      const tail = scalarTail(projected, framing, steps, at + 1, bulked, ctx, fresh, labels);
-      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
-    }
-
-    // `asString()` over a SCALAR value RAISES on a null — the reference stringifies with `String.valueOf`
-    // but throws "Can't parse null as String." for a null traverser (global) or a null item (local)
-    // (`AsStringGlobalStep.java:44-45`, `AsStringLocalStep.java:51-52`). SQL `CAST(v AS TEXT)` gives NULL,
-    // so the transform rides a runtime null guard. Scope is not consulted here for the reason
-    // `transformExpr` states — a scalar IS a one-element list, so both forms are the same over a value;
-    // a LIST host's `asString(local)` (member stringify + a null-member guard) is `list.ts`'s.
-    if (step.name === 'asString') {
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out));
-      if (!tx) return null;
-      const carried = rel.channels;
-      const projected = make.project({
-        id: fresh('as'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-      });
-      const guard = asStringNullGuard(rel, col(rel.id, 'v'), fresh);
-      const tail = scalarTail(projected, { kind: 'scalar', type: tx.type ?? UNKNOWN }, steps, at + 1, bulked, ctx, fresh, labels);
-      return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
+      out = { kind: 'scalar', type: STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint') };
+      continue;
     }
 
     // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
@@ -1923,9 +1892,13 @@ function scalarTail(
       // THE RECEIVER first (`receiver.ts`): a string transform over a non-String, an `asNumber(GType)`
       // over a non-Number, is the reference's raise — refuted statically it declines, and per row it
       // raises in-statement, rather than SQLite's coercion answering `upper(29)` = `'29'`.
+      // A runtime `asNumber(GType.X)` spells its input many times over (`asNumberCast`), so a COMPUTED
+      // input (a preceding transform's projection — `asString()`'s per-type rendering) is materialized
+      // once rather than re-inlined into every spelling.
+      if (step.name === 'asNumber' && step.args.length && rel.kind === 'project') rel = fenced(rel, fresh);
       const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
       if (!offences) return null;
-      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out));
+      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence());
       if (!transformed) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
@@ -1940,11 +1913,10 @@ function scalarTail(
       // `filter`, a `choose` condition, `count()`) never reads the value, and the reference raises there
       // all the same (`asNumberFilter`). The value is then the plain conversion over the filter's rows.
       const raises = offences.length > 0 || transformed.fenced !== undefined;
-      const source = raises
-        ? make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type,
-          pred: raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1)) })
-        : rel;
-      const plain = raises ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', transformInput(out)) : transformed;
+      const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter) : rel;
+      const plain = raises
+        ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence(source))
+        : transformed;
       if (!plain) return null;
       const tx = { ...plain, expr: plain.fenced?.value ?? plain.expr };
       const projected = make.project({
@@ -2476,6 +2448,10 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
   // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
   // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
   const members = listArg.members;
+  // A BOOLEAN member has no carrier in a BARE list: `constLit(true)` is SQLite's integer 1, so the member
+  // framed as `1` and `asString(local)` rendered `'1'` (the reference's `[true, 1]` frames a Boolean and
+  // stringifies `'true'`). The member list stays BARE (untagged) here, so decline rather than retype it.
+  if (values.some((value) => typeof value === 'boolean')) return null;
   const items = values.map((value, mi) => {
     const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
     // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
@@ -2694,15 +2670,6 @@ function listTail(
       // decides the marker states it and the field is authoritative when present. A rewrite drops it for
       // its own reason: new member values are not the distinct results of anything.
       if (member.set !== undefined) set = member.set;
-      // A member op may owe a RUNTIME guard (a local string transform over a non-string member raises,
-      // §6·5). It is an execution step — a `Binding.guard` the executor runs before the read — so it
-      // recurses the rest of the chain and rides on the tail's `effects`, exactly as a snapshot binding
-      // does. This is the ONE list-loop return that carries a guard, so the merge is here rather than a
-      // loop-wide accumulator.
-      if (member.guard) {
-        const tail = listTail(rel, items, steps, at + 1, ctx, fresh, labels, set);
-        return tail && { ...tail, effects: [member.guard, ...(tail.effects ?? [])] };
-      }
       continue;
     }
 
