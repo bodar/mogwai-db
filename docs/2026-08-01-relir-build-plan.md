@@ -552,6 +552,13 @@ UNEVALUABLE`.
 - 🚧 **`content-demand` 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes
   `has(label, key, value)`'s FIRST argument (the label) as the key to fetch; if that narrowing ever applies to the
   3-arg form the real key is not fetched. Unverified — check.
+- ✅ **A write over a multi-row literal input runs once per traverser** (`MergeEdgeStep`/`MergeVertexStep` are
+  per-traverser) — `writeSnapshot()` in `src/compiler/rel/write.ts` skips the input snapshot only for a ≤1-row
+  `Values` input, so "no position ⇒ one row" is true by construction across all six write hosts
+  (`inject(1,2,3).mergeE(..)` / `mergeE([:])` / computed `mergeV`/`mergeE` no longer cross N traversers × N
+  matches). Regression: `test/merge-multi-row-values.test.ts`.
+- 🚧 **Merge inside `sideEffect`/`map`/`flatMap`/`coalesce`/`optional`/`choose` arms** still declines
+  (`UnsupportedTraversal`); the multi-row-input fix is not yet promoted to an L4 `.feature` scenario.
 - 🚧 **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
   needs an `UPDATE` this route does not emit.
 - 🚧 **`with()` on a write · singletons** (`addE` after `addE`, `addInE`; ~10 writes) — one reason each.
