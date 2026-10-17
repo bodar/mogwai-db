@@ -14,7 +14,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadCsv } from '../../src/formats/csv.ts';
 import { executeQuery } from '../support/executor.ts';
-import { decodeAll } from '../support/decode.ts';
+import { decodeAll, typedAll } from '../support/decode.ts';
 
 const ir = (q: string) => {
   const tree = parseGremlin(q);
@@ -261,28 +261,58 @@ describe('a merge never reads a branch emission order', () => {
 
 describe('traverser equality is the reference’s TYPED equals — AbstractTraverser.java:185-188', () => {
   // Integer(1) is not Double(1.0), and Double.equals(-0.0, 0.0) is false: SQLite's PARTITION BY says both
-  // are equal, so every merge key term is widened by `typedEquality` (src/compiler/rel/build.ts).
-  test('an Integer and a Double never share a slot, at any merge', async () => {
+  // are equal, so every merge key term is widened by `typedEquality` (src/compiler/rel/build.ts). Read
+  // TYPED (`typedAll`): the client decodes an Int and a Double to one JS number, and `-0` to `0` when nested.
+  const typed = (q: string) => typedAll(executeQuery(seededStore(), q, {}));
+
+  test('an Integer and a Double never share a slot, at any merge', () => {
     for (const q of [
       'g.inject(1, 2, 1.0).fold()',
       'g.inject(1, 2, 1.0).barrier().fold()',
       'g.inject(1, 2, 1.0).order().by(__.constant(0)).fold()',
       'g.inject(1, 2, 1.0).local(__.identity()).barrier().fold()',
+      'g.inject(1, 2, 1.0).map(__.identity()).barrier().fold()',
       'g.inject(1, 2, 1.0).aggregate("a").fold()',
-    ]) expect(await run(q), q).toEqual([[1, 2, 1]]);
-    expect(await run('g.inject(1, 2, 1.0).limit(2)')).toEqual([1, 2]);
-    expect(await run('g.inject(1.0, 2, 1).limit(2)')).toEqual([1, 2]);
+    ]) expect(typed(q), q).toEqual(['[1i,2i,1d]']);
+    expect(typed('g.inject(1, 2, 1.0).limit(2)')).toEqual(['1i', '2i']);
+    expect(typed('g.inject(1.0, 2, 1).limit(2)')).toEqual(['1d', '2i']);
     // equal TYPES still merge: two Doubles, two Integers
-    expect(await run('g.inject(1.0d, 2, 1.0).limit(2)')).toEqual([1, 1]);
-    expect(await run('g.inject(1, 2, 1).limit(2)')).toEqual([1, 1]);
+    expect(typed('g.inject(1.0d, 2, 1.0).limit(2)')).toEqual(['1d', '1d']);
+    expect(typed('g.inject(1, 2, 1).limit(2)')).toEqual(['1i', '1i']);
   });
 
-  test('a signed zero keeps its own slot', async () => {
-    const answer = await run('g.inject(-0.0, 2, 0.0).limit(2)');
-    expect(answer).toEqual([-0, 2]);
-    expect(Object.is(answer[0], -0)).toBe(true);
-    const barrier = await run('g.inject(-0.0, 0.0, -0.0).barrier()');
-    expect(barrier.map((v: number) => Object.is(v, -0))).toEqual([true, true, false]);
+  test('a whole Double frames as a Double — scalar, folded, and as a list member', () => {
+    // GenericLiteralVisitor.java:490-511: an unsuffixed `1.0` is a Double. SQLite hands a whole REAL back as
+    // a JS integer, so the inject carries the class (`injectValueTypes`) and a list reads `1.0` by its
+    // spelling (`parseExactJson`).
+    expect(typed('g.inject(1.0)')).toEqual(['1d']);
+    expect(typed('g.inject(1.0d)')).toEqual(['1d']);
+    expect(typed('g.inject(2.0, 1).fold()')).toEqual(['[2d,1i]']);
+    expect(typed('g.inject([1.0, 2.5, 2])')).toEqual(['[1d,2.5d,2i]']);
+    expect(typed('g.inject(1).constant([1.0])')).toEqual(['[1d]']);
+  });
+
+  test('a signed zero keeps its own slot, and its sign, at every depth', () => {
+    expect(typed('g.inject(-0.0, 2, 0.0).limit(2)')).toEqual(['-0d', '2i']);
+    expect(typed('g.inject(-0.0, 0.0, -0.0).barrier()')).toEqual(['-0d', '-0d', '0d']);
+    expect(typed('g.inject(-0.0, 2, 0.0).fold()')).toEqual(['[-0d,2i,0d]']);
+    // in a LIST: List.equals compares members with Double.equals
+    expect(typed('g.inject([-0.0], [2], [0.0]).limit(2)')).toEqual(['[-0d]', '[2i]']);
+    expect(typed('g.inject([0.0], [2], [-0.0]).barrier().fold()')).toEqual(['[[0d],[2i],[-0d]]']);
+    // in a MAP: Map.equals compares values with equals — `stringifyExact` spells the literal's `-0.0`
+    expect(typed('g.inject([a:-0.0], [a:2], [a:0.0]).limit(2)')).toEqual(['{"a":-0d}', '{"a":2i}']);
+    expect(typed('g.inject([a:0.0], [a:2], [a:-0.0]).limit(2)')).toEqual(['{"a":0d}', '{"a":2i}']);
+    expect(typed('g.inject([a:-0.0], [a:2], [a:0.0]).barrier().fold()')).toEqual(['[{"a":-0d},{"a":2i},{"a":0d}]']);
+    expect(typed('g.inject(1).constant([a:-0.0])')).toEqual(['{"a":-0d}']);
+    expect(typed('g.inject([a:[-0.0]])')).toEqual(['{"a":[-0d]}']);
+  });
+
+  test('a map equals another holding the same entries in any order — AbstractMap.equals', () => {
+    expect(typed('g.inject([a:1, b:2], [c:3], [b:2, a:1]).fold()')).toEqual(['[{"a":1i,"b":2i},{"b":2i,"a":1i},{"c":3i}]']);
+    expect(typed('g.inject([a:1, b:2], [c:3], [b:2, a:1]).limit(2)')).toEqual(['{"a":1i,"b":2i}', '{"b":2i,"a":1i}']);
+    expect(typed('g.inject([a:1], [a:1.0], [a:1]).fold()')).toEqual(['[{"a":1i},{"a":1i},{"a":1d}]']);
+    // A NESTED map compares in its own order (`mapIdentity` reorders one level), so it raises, never merges short.
+    expect(() => typed('g.inject([a:[b:1, c:2]], [d:1], [a:[c:2, b:1]]).fold()')).toThrow(/nested map is not supported/);
   });
 
   test('two different traversers tying on an order() key behind a branch still raise', async () => {
@@ -290,12 +320,17 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
   });
 
   test('a list member the bare encoding cannot type declines rather than merge as another', async () => {
-    // List.equals compares members with equals: [1] and [1L] differ, as do [0.0] and [-0.0].
-    for (const q of ['g.inject([1], [2], [1L]).limit(2)', 'g.inject([1.0f], [2]).limit(2)', 'g.inject([-0.0], [2]).limit(2)', 'g.V().constant([1L]).limit(1)']) {
+    // List.equals compares members with equals: [1] and [1L] differ.
+    for (const q of ['g.inject([1], [2], [1L]).limit(2)', 'g.inject([1.0f], [2]).limit(2)', 'g.V().constant([1L]).limit(1)']) {
       await expect(run(q), q).rejects.toThrow(/not supported/);
     }
-    expect(await run('g.inject([1.0], [2], [1]).limit(2)')).toEqual([[1], [2]]);
-    expect(await run('g.inject([1], [2], [1]).limit(2)')).toEqual([[1], [1]]);
+    expect(typed('g.inject([1.0], [2], [1]).limit(2)')).toEqual(['[1d]', '[2i]']);
+    expect(typed('g.inject([1], [2], [1]).limit(2)')).toEqual(['[1i]', '[1i]']);
+  });
+
+  test('a collection property keeps a negative zero member — the stored tree is spelled by `stringifyExact`', () => {
+    expect(typed("g.addV('q').property('x', [-0.0, 1.0]).values('x')")).toEqual(['[-0d,1d]']);
+    expect(typed("g.addV('q').property('x', [a:-0.0]).values('x')")).toEqual(['{"a":-0d}']);
   });
 });
 

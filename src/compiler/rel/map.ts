@@ -8,6 +8,7 @@ import type { Elem } from '../elem.ts';
 import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
+import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { and, byEncounter, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { withChannel } from '../../channels.ts';
@@ -1210,8 +1211,12 @@ export function mapLiteralBlob(value: unknown, type: TypeNode | null, paramName:
     try { valNode = valueNodeOf(vv, entries[String(k)]?.value ?? null); } catch { return null; }
     pairs.push([keyNode, valNode]);
   }
-  let json: string;
-  try { json = JSON.stringify(pairs); } catch { return null; }
+  // `stringifyExact`: `JSON.stringify(-0)` is `0`, so `[a:-0.0]` framed `{a:0.0}` and its bytes — the map's
+  // merge key (`typedEquality`, build.ts) — equalled `[a:0.0]`'s, where `Map.equals` compares values with
+  // `Double.equals` and keeps them apart. Spelled `-0.0`, SQLite's JSON keeps the sign and the bytes differ.
+  let json: string | null;
+  try { json = stringifyExact(pairs); } catch { return null; }
+  if (json == null) return null;
   // `MAP_COL` is JSONB, exactly what `mapPayload` reads back through `json()`. A bound map uses the
   // same pairs encoding, but the whole data-sized document is one user bind before `json_each` reads it.
   return { kind: 'call', fn: 'jsonb', args: [paramName == null ? compilerText(json) : param(json, paramName)] };
@@ -1497,6 +1502,20 @@ export const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
  *  Exported for the map-VALUED merge driver (`write.ts`). */
 export const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
   ({ kind: 'call', fn: 'json_extract', args: [pair, compilerText(side === 'keys' ? '$[0]' : '$[1]')] });
+
+/**
+ * A map AS ITS EQUALITY — the pairs re-collected in KEY order, so two maps holding the same entries in a
+ * different order key alike. `Map.equals` is `AbstractMap.equals`: same size, and every entry's key maps
+ * to an equal value, in no order (`LinkedHashMap` keeps an iteration order it does not compare). The
+ * blob a map relation carries is its ORDERED pairs, which is what the wire frames, so the order-free form
+ * is computed only where traversers are compared (`mergeEqual`, lower.ts); the keys of one map are
+ * distinct, so ordering by the key node's text is total. A map VALUE nested inside stays in its own order.
+ */
+export const mapIdentity = (map: Expr, fresh: Minter): Expr => {
+  const pairs = pairsOf(map, fresh);
+  const pair = col(pairs.id, PAIR.value);
+  return collectedOf(pairs, jsonOf(pair), [{ expr: pairSide(pair, 'keys'), dir: 'asc' }], MAP_COL, fresh);
+};
 
 /**
  * WHAT A MAP SIDE BECOMES WHEN IT IS COLLECTED INTO A LIST — the `MapOf`→`ListOf` translation, and it

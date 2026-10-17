@@ -328,7 +328,11 @@ function literalKey(value: unknown): string | undefined {
   if (value === null || ['string', 'number', 'boolean', 'bigint'].includes(typeof value)) return String(value);
   if (Array.isArray(value) || value instanceof Map) {
     try {
-      return JSON.stringify(value, (_k, v) => (v instanceof Map ? [...v.entries()] : typeof v === 'bigint' ? String(v) : v));
+      // A map's entries in KEY order: `Map.equals` compares entries in no order (`AbstractMap.equals`), so
+      // `[a:1,b:2]` and `[b:2,a:1]` must share a key.
+      return JSON.stringify(value, (_k, v) => (v instanceof Map
+        ? [...v.entries()].sort(([a], [b]) => (String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0))
+        : typeof v === 'bigint' ? String(v) : v));
     } catch { return undefined; }
   }
   return undefined;

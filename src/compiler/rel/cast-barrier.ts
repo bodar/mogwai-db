@@ -1,4 +1,4 @@
-import { asNumberBare } from '../../gremlin/coerce.ts';
+import { asNumberBare, foldConstantCoercions } from '../../gremlin/coerce.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { SegmentPlan } from '../segment.ts';
 import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
@@ -40,8 +40,13 @@ function castCoercion(step: IRStep): ((value: unknown) => unknown) | null {
  *  not just in the builder, so a cast the fold owns (a STATIC-typed or inject one) never claims the
  *  boundary and preempts a later barrier. */
 export function castBarrierIn(steps: readonly IRStep[], lowering: Lowering): { at: number } | null {
+  // An `inject()`'s leading coercion prefix is const-fold's whatever its source frames as — a literal
+  // stream whose arguments declare different classes (`inject(1.0, 2)`: a Double and an Int) rides its
+  // tags PER ROW too, and the fold, not this barrier, owns that cast.
+  let folded = 0;
+  if (steps[0]?.name === 'inject') try { folded = foldConstantCoercions(steps as IRStep[], []).at; } catch { /* the fold decides */ }
   for (let at = 0; at < steps.length; at++) {
-    if (!castCoercion(steps[at]!)) continue;
+    if (at < folded || !castCoercion(steps[at]!)) continue;
     const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
     if (head?.shape.kind === 'value' && head.shape.type.kind === 'perRow') return { at };
   }

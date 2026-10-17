@@ -480,7 +480,18 @@ const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf'
  *  entered a map or list as `0.0`. */
 const asExactReal = (value: Expr): Expr => ({
   kind: 'case',
-  whens: [[{ kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, jsonCall(printf('%!.17g', value))]],
+  whens: [
+    // A NEGATIVE ZERO, which SQLite's JSON writer (and `printf`) spells `0.0`: `Double.equals(-0.0, 0.0)` is
+    // false, so a member that lost its sign is another member. `json('-0.0')` is kept as written, and the
+    // reader parses it back as the Double it is (`parseExactJson`, `json-exact.ts`). `atan2(±0, -1)` is ±π,
+    // the one comparison that reads the sign bit (`receiver.ts`'s `floatingText`). A NULL makes both
+    // comparisons NULL — no arm — so it reaches the ELSE as itself.
+    [{ kind: 'binary', op: 'and',
+      left: { kind: 'binary', op: '=', left: value, right: compilerInt(0) },
+      right: { kind: 'binary', op: '<', left: { kind: 'call', fn: 'atan2', args: [value, compilerInt(-1)] }, right: compilerInt(0) } },
+    jsonCall(compilerText('-0.0'))],
+    [{ kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, jsonCall(printf('%!.17g', value))],
+  ],
   else: value,
 });
 /** A wide integer as decimal TEXT past 2^53, reconstructed via `BigInt` at the wire; smaller values
@@ -876,7 +887,9 @@ export function regroupFirstOccurrence(
  */
 export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
   const declared = (term: Expr): SqlType =>
-    term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any' : 'any';
+    term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any'
+      // A one-column scalar subquery (a map's order-free form, `mapIdentity`) is that column's type.
+      : term.kind === 'scalar' && term.plan.type.cols.length === 1 ? term.plan.type.cols[0]!.type : 'any';
   return terms.flatMap((term): Expr[] => {
     const type = declared(term);
     if (type !== 'any' && type !== 'real') return [term];

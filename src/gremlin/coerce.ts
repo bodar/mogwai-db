@@ -376,10 +376,14 @@ const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
  *  COLLECTION (a list/map/set is reached through the list substrate, never framed by a scalar tag,
  *  which is what `ValueType` excludes). */
 export function injectValueTypes(steps: readonly Step[], count: number): (ValueType | null)[] {
-  const argTypes = steps[0].args.map((a) => a.type);
+  const args = steps[0].args;
   return Array.from({ length: count }, (_, i) => {
-    const name = flatType(argTypes[i]);
-    return name && DECLARED_TYPE_REQUIRED.has(name) ? (name as ValueType) : null;
+    const name = flatType(args[i]?.type);
+    if (name && DECLARED_TYPE_REQUIRED.has(name)) return name as ValueType;
+    // A WHOLE Double (`1.0`, `1.0d`, `-0.0`) reads back from SQLite as a JS integer, which inference frames
+    // as an Int — `Integer(1)` is not `Double(1.0)` (`AbstractTraverser.java:185-188`). Only a fractional
+    // Double is recoverable from its value.
+    return name === 'double' && Number.isInteger(args[i]?.value) ? 'double' : null;
   });
 }
 

@@ -77,12 +77,15 @@ lowered.
   emission key (cluster B) lands; the reads that bypass a merge stay B's residue on trunk: an order() over a
   pairwise-DISTINCT branch stream (`g.V().union(out(),in()).dedup().order().by(constant(0))` answers id order,
   not the arms' order) and a keyed `dedup().by(label)` after a branch (keeps the first by id, not by arm).
-  (6) **merge equality vs `Map.equals`**: a map payload keys on its JSONB bytes, so two maps equal in Java but
-  built in different key orders would not merge (no lowered traversal is known to reach it — `inject([…map…])`
-  with repeats declines). Typed equality otherwise holds (`typedEquality`, build.ts; a bare-list member whose
-  type the encoding cannot carry — `[1L]`, `[1.0f]`, `[-0.0]` — declines at `listLiteralBlob`).
-  (7) **a folded `-0.0` loses its sign** (pre-existing, not a merge defect): SQLite's JSON writer spells it
-  `0.0`, so `inject(-0.0).fold()` answers `[0.0]`; the scalar stream keeps it.
+  (6) **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
+  on its entries in no order (`mapIdentity`, map.ts; a NESTED map raises at a merge). Siblings that read their
+  own key and still equate what `equals` keeps apart: `dedup()` collapses `-0.0` into `0.0`
+  (`inject(-0.0,0.0).dedup()` = `[-0.0]`, ref both) and keeps `[a:1,b:2]`/`[b:2,a:1]` apart (ref one);
+  `dedup(local)` over a bare list merges `1` and `1.0` (`inject([1,2,1.0]).dedup(local)` = `{1,2}`, ref
+  `{1,2,1.0}`); a `groupCount()` key of a whole Double frames as an Int (`inject(1,1.0).groupCount()` =
+  `{1:1,1:1}`). One authority would be `typedEquality` + `mapIdentity` behind every identity a step groups on
+  (`RowShape.identity`, the member ops), not only `mergeEqual`. A bare-list `[1L]`/`[1.0f]` member still
+  declines at `listLiteralBlob` (its encoding infers the class back from the storage class).
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

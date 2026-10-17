@@ -49,7 +49,7 @@ import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -367,6 +367,15 @@ export function mergeEqual(
   if (!encounterOf(rel.channels)) return rel;
   if (ctx.sack || rel.channels.some((channel) => channel.role === 'sack')) return ctx.sack?.operator ? null : rel;
   const deferral = (message: string) => (dependsOn: Expr): Expr => deferralExpr(message, dependsOn);
+  // A MAP payload keys on its entries in no order (`mapIdentity`); every other term is widened to the
+  // typed equality where the set is built (`typedEquality`, build.ts). A map NESTED in one (a `{t:'map'}`
+  // node anywhere inside) would still compare in its own order, so such a row raises rather than merge
+  // short: `Map.equals` recurses through `equals` at every depth.
+  key = key.map((term) => {
+    if (term.kind !== 'col' || term.rel !== rel.id || term.name !== MAP_COL) return term;
+    const nested: Expr = { kind: 'binary', op: '>', left: { kind: 'call', fn: 'instr', args: [jsonOf(term), compilerText('"t":"map"')] }, right: compilerInt(0) };
+    return { kind: 'case', whens: [[nested, deferral(NESTED_MAP_MERGE)(term)]], else: mapIdentity(term, fresh) };
+  });
   const exceeded = deferral(mergeWindowExceeded(window, !!opts.explicit));
   if (!readsBranchOrder(ctx, arrival, !!(opts.explicit || opts.ties))) return regroupFirstOccurrence(rel, key, window, exceeded, fresh);
   if (opts.explicit) return null;
@@ -388,6 +397,10 @@ const readsBranchOrder = (ctx: ChainCtx, arrival: Arrival, ordersStream: boolean
  *  (`mergeEqual`) — the arm order is not yet the reference's (RelIR plan §10, cluster B). */
 const BRANCH_ORDER_READ =
   'merging equal traversers, or breaking an order() tie, by the emission order of a union/choose/coalesce/optional is not supported';
+
+/** The deferral a merge raises over a map that holds a nested map (`mergeEqual`): the order-free key
+ *  (`mapIdentity`) reorders one level only. */
+const NESTED_MAP_MERGE = 'merging equal traversers whose map value holds a nested map is not supported';
 
 /** WHERE a merge stands: the step list the lowering is folding and the index of the step the merged stream
  *  reaches — what `mergeEqual` asks `branchOrderedAt` whether the arrival order it reads is the reference's. */
@@ -2781,7 +2794,8 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
   if (values.some((value) => typeof value === 'boolean')) return null;
   // The same holds for every NUMERIC member a bare member's storage class does not name back
   // (`inferredVtype`, list.ts: INTEGER → int/long by range, REAL → double): `[1L]` wrote `1` and framed an
-  // Integer, `[1.0f]` a Double, and SQLite's JSON drops a zero's sign, so `[-0.0]` framed `0.0`. The bytes
+  // Integer, `[1.0f]` a Double. (A whole Double writes `1.0` and a negative zero rides `asExactReal`'s `-0.0`,
+  // and `parseExactJson` reads both back as the Doubles they are — json-exact.ts.) The bytes
   // are also the list's merge key (`typedEquality`, build.ts), so `inject([1],[2],[1L])` merged `[1L]` into
   // `[1]` — `List.equals` compares members with `equals`, and `Integer(1)` is not `Long(1)`. Decline.
   if (values.some((value, mi) => !bareMemberRoundTrips(value, members ? members[mi]!.type : itemTypeAt(listArg.type ?? null, mi)))) return null;
@@ -2789,8 +2803,9 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
     const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
     // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
     // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
-    // the repair. `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
-    return item && typeof value === 'number' && !Number.isInteger(value) ? jsonMemberByTypeof(item) : item;
+    // the repair — and so does a NEGATIVE ZERO, which SQLite's JSON writer spells `0.0` (`asExactReal`).
+    // `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
+    return item && typeof value === 'number' && (!Number.isInteger(value) || Object.is(value, -0)) ? jsonMemberByTypeof(item) : item;
   });
   return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
 }
@@ -2800,8 +2815,9 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
  *  inferred by definition; a non-number is another rule's (`constLit` declines what it cannot spell). */
 function bareMemberRoundTrips(value: ArgValue, type: TypeNode | null | undefined): boolean {
   if (typeof value !== 'number' || Number.isNaN(value)) return true;
-  if (Object.is(value, -0)) return false;
   const flat = flatType(type);
+  // A negative zero keeps its sign only as a REAL literal (`constLit` writes an undeclared one as INTEGER 0).
+  if (Object.is(value, -0)) return flat === 'double';
   if (flat == null) return true;
   const integral = Number.isSafeInteger(value) && flat !== 'double' && flat !== 'float' && flat !== 'bigdecimal';
   if (!integral) return flat === 'double';

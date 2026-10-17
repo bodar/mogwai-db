@@ -12,6 +12,7 @@
 // consumed on read (typeOf filter + per-row framing).
 
 import { ioc } from '../io.ts';
+import { stringifyExact } from '../json-exact.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -332,7 +333,12 @@ export function propertyValueBind(
   val: any, vtype: CanonicalType | null, typeNode?: TypeNode | null,
 ): { stored: any; collection: boolean } {
   const collection = isCollectionType(vtype);
-  return { collection, stored: collection ? JSON.stringify(valueNodeOf(val, typeNode ?? null).v) : storedScalar(val, vtype) };
+  if (!collection) return { collection, stored: storedScalar(val, vtype) };
+  // `stringifyExact` (`json-exact.ts`): a member `-0.0` spelled by `JSON.stringify` is `0`, a stored zero
+  // that lost its sign. A runtime that cannot spell it refuses the write rather than store the other value.
+  const stored = stringifyExact(valueNodeOf(val, typeNode ?? null).v);
+  if (stored == null) throw new Error('a collection holding -0.0 cannot be stored on this runtime: its JSON would drop the sign');
+  return { collection, stored };
 }
 
 /** Types without a bidirectional GraphBinary serializer. Formerly {bigdecimal, char,
