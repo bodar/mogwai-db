@@ -765,7 +765,11 @@ authorities.
   as IdentityRemovalStrategy does. Size: S–M, ~200 LOC. Do this FIRST — cheap, and every later branch re-trips it.
 - 🚧 **H — reference strategy/step facts copied by hand.** emit-first `times(n)` unroll drops the last level
   (`step/branch/RepeatStep.java` RepeatEndStep emits on `doUntil`; seam `tryUnroll` in `ir/strategies.ts` —
-  emit it or decline emit-first; check `l3-state.json` for `g_V_emit_repeatXoutX_timesX2X_path`);
+  emit it or decline emit-first; check `l3-state.json` for `g_V_emit_repeatXoutX_timesX2X_path`) — ✅ LANDED
+  2026-10-17 (`eaf3093c`..`91689dab`): a bounded emit unroll emits exactly the reference levels, a
+  cross-iteration dedup body declines (its empty-past-level-1 exception admits only GLOBAL-scope steps), a body
+  side effect is written once (the level-n double doubles the arm's OUTPUT), and multi-arm emit / walk
+  side-effect bodies decline; pinned in `test/L4-addendum/repeat-times-emit-levels.feature`;
   `fold([], addAll)` treated as `fold()` (`dsl/graph/GraphTraversal.java` / `util/function/ConstantSupplier.java`
   / `ReducingBarrierStep.java` — the seed is shared, so the identity holds only where the fold runs once;
   seam `PLAIN_FOLD` in `rel/operator.ts`; decline a mutable seed in a per-traverser child); keyed
