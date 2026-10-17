@@ -13,7 +13,7 @@ Feature: mogwai addendum — a bounded repeat().times(n) with emit() emits exact
   # (`DedupGlobalStep.duplicateSet`, …/step/filter/DedupGlobalStep.java:59,78 — never reset between
   # loops, unlike `RangeGlobalStep`'s per-loop counters). The unroll's phase-local dedups cannot carry
   # it, so n ≥ 2 DECLINES; each @Unsupported scenario carries the reference answer. The one exact
-  # exception is a body of value-preserving filters only (`dedup()`, `has…`, `limit`, `order`, …):
+  # exception is a body of value-preserving steps only (`dedup()`, `has…`, GLOBAL `limit`/`range`/`order`):
   # iteration 2's input is iteration 1's output, all already seen, so every level ≥ 2 is empty.
 
   Scenario: g_VX1X_emit_repeatXoutX_timesX2X_count
@@ -111,3 +111,33 @@ Feature: mogwai addendum — a bounded repeat().times(n) with emit() emits exact
     Then the result should be unordered
       | result |
       | d[6].l |
+
+  # A `Scope.local` slice is NOT a value-preserving filter — it is a value transform with a global
+  # step's name. `[1,2,3]` → `[2,3]` → `[3]`: `[3]` is unseen by the shared dedup, so level 2 is not
+  # empty. Declaring it empty (admitting the step by NAME) answered [] here.
+  @Unsupported
+  Scenario: g_injectX1_2_3X_repeatXrangeXlocal_1_3X_dedupX_timesX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1,2,3]).repeat(__.range(Scope.local,1,3).dedup()).times(2)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[3].i] |
+
+  @Unsupported
+  Scenario: g_injectX1_2_3X_timesX2X_repeatXrangeXlocal_1_3X_dedupX_emit
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1,2,3]).times(2).repeat(__.range(Scope.local,1,3).dedup()).emit()
+      """
+    # Level 1 [2,3]; level 2 [3], emitted by the end step AND output by the until — twice.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[2].i,d[3].i] |
+      | l[d[3].i] |
+      | l[d[3].i] |

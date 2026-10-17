@@ -104,6 +104,20 @@ describe('the repeat() unroll boundary', () => {
       'g.V().repeat(__.both().dedup()).emit().times(2)',
       'g.V().local(__.emit().repeat(__.both().dedup()).times(2)).count()',
       'g.V().union(__.repeat(__.dedup().both()).times(2), __.out()).count()',
+      // A NESTED repeat is unrolled into the outer body first, so its dedup is the outer body's too —
+      // one instance across every OUTER iteration.
+      'g.V().repeat(__.repeat(__.dedup()).times(1).out()).times(2)',
+      // A `Scope.local` slice/reorder is the same NAME as a value-preserving global step and a value
+      // TRANSFORM: `[1,2,3]` → `[2,3]` → `[3]`, and `[3]` is a value the dedup has NOT seen, so level 2
+      // is not empty. The reference answers are [[3]], [[2,3],[3]] and [[2,3],[3],[3]]; declaring level 2
+      // empty gave [], [[2,3]], [[2,3]]. The admission is by ARGUMENT, so these decline.
+      'g.inject([1,2,3]).repeat(__.range(Scope.local,1,3).dedup()).times(2)',
+      'g.inject([1,2,3]).repeat(__.range(Scope.local,1,3).dedup()).emit().times(2)',
+      'g.inject([1,2,3]).times(2).repeat(__.range(Scope.local,1,3).dedup()).emit()',
+      "g.V().values('name').fold().repeat(__.range(Scope.local,1,5).dedup()).times(2)",
+      'g.inject([1,2,3,4]).repeat(__.limit(Scope.local,3).range(Scope.local,1,3).dedup()).times(2)',
+      'g.inject([3,1,2]).repeat(__.order(Scope.local).dedup()).times(2)',
+      'g.inject([1,2,3]).local(__.repeat(__.limit(Scope.local,2).dedup()).times(2))',
     ]) expect(() => compile(q, {})).toThrow(/not supported/);
     // …EXCEPT a body of value-preserving filters only: iteration 2's input is iteration 1's output, all
     // of it already seen, so every level ≥ 2 is EMPTY — exact by construction, not by phase-local dedup.
@@ -116,6 +130,11 @@ describe('the repeat() unroll boundary', () => {
     expect(count('g.V().times(3).repeat(__.dedup()).emit()')).toBe(6);                // no level-n double: empty
     expect(count('g.V().times(1).repeat(__.dedup()).emit()')).toBe(12);               // level 1, doubled
     expect(count('g.V().local(__.emit().repeat(__.dedup()).times(2))')).toBe(12);
+    // GLOBAL slices/reorders keep the value, so they stay inside the exception.
+    expect(count('g.V().repeat(__.dedup().limit(3)).times(2)')).toBe(0);
+    expect(count('g.V().emit().repeat(__.range(Scope.global,0,3).dedup()).times(2)')).toBe(9);
+    // …and a LOCAL slice at n = 1 has no earlier iteration to inherit from, so it still unrolls.
+    expect(() => compile('g.inject([1,2,3]).repeat(__.range(Scope.local,1,3).dedup()).times(1)', {})).not.toThrow();
   });
 
   /**

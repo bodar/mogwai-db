@@ -1153,12 +1153,18 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
  *  "unintentional traversal semantics changes in the past when allowing a large variety of steps
  *  (especially barriers)". We go further than it deliberately, one name at a time.
  *  Boundary pinned in `test/compiler/repeat-unroll-boundary.exec.test.ts`. */
-const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
+/** The half of `UNROLLABLE_BARRIERS` that writes NO side effect — a collapse, a slice or a reordering
+ *  of the frontier it is handed. In GLOBAL scope each one passes traversers through with their VALUE
+ *  unchanged, which is the property `valuePreservingBodyStep` reads; a `Scope.local` form is a
+ *  different operation on ONE value's members (`range(Scope.local, 1, 3)` turns `[1,2,3]` into
+ *  `[2,3]`) and has no such property. */
+const SIDE_EFFECT_FREE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   // A BARE `dedup()` — but ONLY for a body that runs once (`times(1)`): the reference's dedup is ONE
   // step instance whose seen-set spans every iteration (`DedupGlobalStep.duplicateSet`, never reset by
   // `RepeatStep`), so the "stateless in the set it is handed" argument the comment above makes for it
   // is REFUTED for n ≥ 2 by `Dedup.feature` g_V_repeatXdedupX_timesX2X_count (= 0) — `tryUnroll`
-  // declines that case, except for a body of `VALUE_PRESERVING_FILTERS`, whose levels ≥ 2 are empty. `dedup('a','b')` dedups by LABELS bound earlier in the traversal, which is a
+  // declines that case, except for a body every step of which is `valuePreservingBodyStep`, whose
+  // levels ≥ 2 are empty. `dedup('a','b')` dedups by LABELS bound earlier in the traversal, which is a
   // different question and not this one's argument.
   dedup: (s) => !(s.args ?? []).length,
   // THE SLICE FAMILY, and one argument covers all of it: phase k's relation IS the frontier at
@@ -1176,6 +1182,10 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   // `repeat()` is outside the emission-order substrate, so the rolled form has no order to disagree
   // with.
   order: () => true,
+};
+
+/** The other half of `UNROLLABLE_BARRIERS`: the barriers that DO write a side effect. */
+const SIDE_EFFECT_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   /**
    * THE NAMED SIDE EFFECTS, and their argument is `Collection.sites` rather than statelessness.
    *
@@ -1202,12 +1212,23 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   groupCount: labelled,
 };
 
-/** Body steps that never change a traverser's VALUE and write no side effect — filters and
- *  reorderings. A dedup body made only of these yields nothing past its first iteration (`tryUnroll`):
- *  iteration k+1's input is iteration k's output, all of whose values the shared dedup has already
- *  seen. A movement, a side effect (`aggregate` would register a traverser before the dedup drops it)
- *  or a `call` is outside it, so such a body at n ≥ 2 declines instead. */
-const VALUE_PRESERVING_FILTERS: ReadonlySet<string> = new Set(['dedup', 'has', 'hasLabel', 'hasId', 'identity', 'limit', 'range', 'order']);
+const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = { ...SIDE_EFFECT_FREE_BARRIERS, ...SIDE_EFFECT_BARRIERS };
+
+/** The row-local FILTERS a phase may contain — they drop traversers and change none. */
+const ROW_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'identity']);
+
+/** A body step that never changes a traverser's VALUE and writes no side effect: a row filter, or a
+ *  side-effect-free barrier in GLOBAL scope. Derived from the two admission vocabularies above rather
+ *  than listed a second time, and decided by ARGUMENT, not by name — `range(Scope.local, …)` is the same
+ *  name as a global slice and a value TRANSFORM (it slices a list), so admitting it by name was a wrong
+ *  answer: `g.inject([1,2,3]).repeat(__.range(Scope.local,1,3).dedup()).times(2)` is `[[3]]` (iteration 2
+ *  sees `[3]`, a value the dedup has not seen), and declaring its level 2 empty gave `[]`.
+ *  A dedup body made only of these yields nothing past its first iteration (`tryUnroll`): iteration k+1's
+ *  input is iteration k's output, all of whose values the shared dedup has already seen. A movement, a
+ *  local-scope transform, a side effect (`aggregate` would register a traverser before the dedup drops
+ *  it) or a `call` is outside it, so such a body at n ≥ 2 declines instead. */
+const valuePreservingBodyStep = (s: Step): boolean =>
+  ROW_FILTERS.has(s.name) || (s.name in SIDE_EFFECT_FREE_BARRIERS && !isLocalScope(s as IRStep));
 
 /**
  * `withoutStrategies(RepeatUnrollStrategy)` — mark every `repeat` at EVERY depth, so `tryUnroll`
@@ -1258,7 +1279,7 @@ export function markUnrollSuppressed(steps: Step[], params: Record<string, any>)
 const unrollableBodyStep = (s: Step): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
-  || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity'
+  || ROW_FILTERS.has(s.name)
   // `simplePath()`/`cyclicPath()` are PURE PATH FILTERS: a spliced phase checks the whole-path-so-far
   // distinctness exactly as the recursive term's per-iteration filter does, so unrolling reproduces the
   // walk's semantics precisely. They ride no modulator/from/to here (those forms carry an `absorbed`
@@ -1391,14 +1412,14 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // (`Dedup.feature` g_V_repeatXdedupX_timesX2X_count) and `repeat(__.dedup().both()).times(2)` is empty
   // (`Repeat.feature` g_V_repeatXdedup_bothX_timesX2X). n phase-LOCAL dedups cannot carry that set, so
   // the unroll is exact only when the body runs ONCE (n = 1) — with ONE exception that is exact by
-  // construction: a body of VALUE-PRESERVING filters only (`VALUE_PRESERVING_FILTERS`). Its iteration-2
+  // construction: a body of VALUE-PRESERVING steps only (`valuePreservingBodyStep`, GLOBAL scope). Its iteration-2
   // input is iteration 1's output, every traverser of which already passed the dedup with the SAME value,
   // so iteration 2's dedup rejects all of it and every level ≥ 2 is EMPTY (`Repeat.feature`
   // g_V_emit_repeatXdedupX_timesX2X: each vertex twice, levels 0 and 1). Any other dedup body at n ≥ 2
   // declines (fail closed) rather than answer with per-phase dedups.
   let lastLevel = n;
   if (n > 1 && body.some((s) => s.name === 'dedup')) {
-    if (!body.every((s) => VALUE_PRESERVING_FILTERS.has(s.name))) return null;
+    if (!body.every(valuePreservingBodyStep)) return null;
     lastLevel = 1;
   }
   // `withoutStrategies(RepeatUnrollStrategy)` — SCOPED TO THE TRANSFORMATION THAT STRATEGY PERFORMS,
