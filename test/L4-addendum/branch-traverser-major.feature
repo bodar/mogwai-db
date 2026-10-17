@@ -225,3 +225,88 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | ripple |
       | lop |
+
+  # A slice that lands INSIDE one parent's arm output reads the order THAT ARM emitted, which a
+  # payload tie-break does not: `BranchStep` drains arm 1 for the start before arm 2
+  # (vendor/tinkerpop/gremlin-core/.../step/branch/BranchStep.java:123-158) and the unfold emits the
+  # list in list order, so the first traverser is 3. The re-mint keys `[parent, arm, arm position]`.
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_unionXconstantXl3_1X_unfold_constantX0XX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant([3, 1]).unfold(), __.constant(0)).limit(1)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+
+  # The same slice INSIDE a per-traverser body: the body's own `limit(1)` reads the branch merged in
+  # that body, which the ROOT chain's slice demand cannot see — so each body re-entry asks
+  # (`continueAs`). Arm 1 is drained first, so the one survivor is 2, not the payload-least 1.
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_localXunionXconstantX2X_constantX1XX_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.union(__.constant(2), __.constant(1)).limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_flatMapXunionXconstantX2X_constantX1XX_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).flatMap(__.union(__.constant(2), __.constant(1)).limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_localXchooseXconstantXtrueX_constantXl3_1X_unfold_constantX0XX_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.choose(__.constant(true), __.constant([3, 1]).unfold(), __.constant(0)).limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+
+  # @Unsupported: the body's slice reads a branch that the chain-global order demand did not see, so
+  # no traverser-major key was minted for it; a positionless merge would hand the slice a payload-order
+  # subset (trunk answered 1). It declines until the emission-key stack lands.
+  @gap:branch-traverser-major @Unsupported
+  Scenario: g_VX1X_localXunionXconstantX2X_constantX1XX_limitX1XX_sum
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.union(__.constant(2), __.constant(1)).limit(1)).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  # @Unsupported: a sliced branch NESTED inside another branch's arm needs a stacked emission key
+  # (trunk answered [1, 9]).
+  @gap:branch-traverser-major @Unsupported
+  Scenario: g_VX1X_unionXlocalXunionXconstantX2X_constantX1XX_limitX1XX_constantX9XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.local(__.union(__.constant(2), __.constant(1)).limit(1)), __.constant(9))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+      | d[9].i |

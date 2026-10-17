@@ -406,3 +406,97 @@ export function referenceDistinctAt(steps: readonly IRStep[], at: number, rooted
   for (let i = rooted ? 1 : 0; i < at; i++) if (!DISTINCT_PRESERVING.has(steps[i]!.name)) return false;
   return true;
 }
+
+/** The steps after which no ORDER of the stream survives — each consumes the whole stream into one
+ *  order-free value (a count, a numeric reduction, a count map), so an upstream reorder is invisible. */
+const ORDER_ERASING: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', 'mean', 'groupCount']);
+
+/** Steps that keep a pairwise-distinct stream distinct ON TOP of `DISTINCT_PRESERVING`: a reorder (a
+ *  merge point over distinct traversers merges nothing). */
+const REORDERS: ReadonlySet<string> = new Set(['order', 'barrier']);
+
+/** Is the stream reaching `at` pairwise distinct? Walking back over steps that keep a distinct stream
+ *  distinct (`DISTINCT_PRESERVING`, `REORDERS`), it is when it reaches a whole-traverser `dedup()`
+ *  (`DedupGlobalStep` with no key and no `by()` keeps one traverser per equal class, whatever reached
+ *  it) or the START of a step list known to begin a traversal (`start`): a rooted chain's start naming
+ *  distinct traversers (`knownStart`), or a child traversal's one parent traverser. Anything else —
+ *  a flat-map, a map, an unknown start — may hold equal traversers. */
+function distinctAt(steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined): boolean {
+  for (let i = at - 1; i >= 0; i--) {
+    const s = steps[i]!;
+    if (s.name === 'dedup') return !isLocalScope(s) && !(s.args ?? []).length && !s.modulators?.length;
+    if (i === 0 && start?.rooted) return knownStart(s);
+    if (!DISTINCT_PRESERVING.has(s.name) && !REORDERS.has(s.name)) return false;
+  }
+  return !!start && !start.rooted;
+}
+
+/** Does an `order()` TIE EVERY TRAVERSER — a `by()` whose key is a bare `constant(…)`? Then the stable
+ *  sort leaves the merged set in arrival order, so the merge is the whole answer. A key that ties only
+ *  SOME unequal traversers (two vertices sharing a `name`) shows the merge only on data where it ties;
+ *  that data-dependent residue is the regroup mint's (Cluster A), declining it here would lose dozens of
+ *  correct L3 scenarios (measured), and it stays tracked in `docs/outstanding-work.md`. */
+function byTiesEveryTraverser(step: IRStep): boolean {
+  return (step.modulators ?? []).some((by: readonly unknown[]) => by.some((arg) => {
+    if (!isNested(arg)) return false;
+    let chain: readonly IRStep[];
+    try { chain = stepChain(arg.nested, {}); } catch { return true; }
+    const real = chain.filter((c) => !NOT_A_REFERENCE_STEP.has(c.name));
+    return real.length === 1 && real[0]!.name === 'constant';
+  }));
+}
+
+/**
+ * Does the reference MERGE EQUAL TRAVERSERS at the explicit `barrier()` / global `order()` at `steps[at]`
+ * in a way this spine — which never merges, every row one traverser — does not reproduce and a reader
+ * can observe? A STOPGAP DECLINE with ONE authority, which every tail consults (`mergeObservableAt`,
+ * `lower.ts`) at every depth a step list is lowered.
+ *
+ * Both steps add their starts into ONE `TraverserSet`, which merges an equal traverser into the FIRST
+ * arrival's slot (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/TraverserSet.java:88-96`):
+ * `barrier()` is a `NoOpBarrierStep` that drains that set in slot order
+ * (`…/process/traversal/step/map/NoOpBarrierStep.java:40-60`), and `order()` is a `CollectingBarrierStep`
+ * that STABLE-sorts the merged set (`…/process/traversal/step/util/CollectingBarrierStep.java:42-90`,
+ * `…/process/traversal/step/map/OrderGlobalStep.java:78`). So `inject(1,2,1,3).barrier()` emits
+ * `1,1,2,3`, and so does `order().by(constant(0))`, where every traverser ties.
+ *
+ * It is unobservable — and nothing declines — where the scan can vouch the stream reaching `at` is
+ * pairwise distinct (`distinctAt`), and for an `order()` whose keys do not tie every traverser
+ * (`byTiesEveryTraverser`). A `barrier()` changes only ORDER, so it declines only where a reader demands
+ * one (`ordered`, `ChainFacts.demandsEncounter`); an `order()`'s output order is its answer, so it
+ * declines unless a later step erases order (`ORDER_ERASING`). Everywhere else this is a decline, until
+ * a first-occurrence regroup mint lowers the merge itself.
+ *
+ * Deliberately NOT applied to the implicit `NoOpBarrierStep`s `LazyBarrierStrategy` places after a
+ * flat-map (`…/strategy/optimization/LazyBarrierStrategy.java:73,86-135`): declining those loses most of
+ * L3 (measured), and they are the plain-chain residue tracked in `docs/outstanding-work.md`.
+ */
+export function referenceMergeObservableAt(
+  steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined, ordered: boolean,
+): boolean {
+  const step = steps[at];
+  if (!step || (step.name !== 'barrier' && step.name !== 'order') || isLocalScope(step)) return false;
+  if (step.name === 'order' && !byTiesEveryTraverser(step)) return false;
+  if (distinctAt(steps, at, start)) return false;
+  const after = steps.slice(at + 1);
+  if (step.name === 'order') return !after.some((s) => ORDER_ERASING.has(s.name));
+  // A ROOT chain's downstream is `after` itself; a body's continues into whatever encloses it, which
+  // only the inherited chain-global `ordered` speaks for.
+  return readsOrder(after) || (!start?.rooted && ordered);
+}
+
+/** The steps whose answer READS the order of the stream reaching them — the slices
+ *  (`ChainFacts.demandsSlice`'s positional consumers) and the collecting consumers, whose members keep
+ *  arrival order (`ir/analyze.ts`'s `COLLECTING_CONSUMERS`). */
+const ORDER_READERS: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'cap', 'group']);
+
+/** Does any step of `steps` — or of any body nested in one, at any depth — read stream order? Nested
+ *  bodies count because a per-traverser child (`local(limit(1))`) or a branch arm reads the order its
+ *  host is fed in. An unnormalizable body is assumed to read it. */
+function readsOrder(steps: readonly IRStep[]): boolean {
+  return steps.some((s) => (ORDER_READERS.has(s.name) && !isLocalScope(s))
+    || [...(s.args ?? []).map((a) => a.value), ...(s.modulators ?? []).flat()].some((v) => {
+      if (!isNested(v)) return false;
+      try { return readsOrder(stepChain(v.nested, {})); } catch { return true; }
+    }));
+}

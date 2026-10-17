@@ -129,6 +129,13 @@ function armChains(step: IRStep): IRStep[][] {
   return chains;
 }
 
+/** Does a POSITIONAL slice read this chain's stream order at its own top level (`ChainFacts.demandsSlice`)?
+ *  Asked of the root chain once, and of every BODY a lowering re-enters (`continueAs`), because a slice
+ *  inside a `local()`/arm body reads the order of a branch merged in that same body — which the root
+ *  chain's flag cannot see. */
+export const chainDemandsSlice = (steps: readonly IRStep[]): boolean =>
+  steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s));
+
 /** Does this step chain contain a drop-slice whose survivor depends on the incoming order — at its own
  *  top level, or inside a nested branch-merge arm (recursively)? `Scope.local` is exempt: it slices a
  *  value's members, not the stream's rows. */
@@ -378,7 +385,7 @@ export function analyzeChain(steps: IRStep[]): ChainFacts {
   return {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s)),
     demandsEncounter: computeDemandsEncounter(steps),
-    demandsSlice: steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)),
+    demandsSlice: chainDemandsSlice(steps),
     demandsPathLabels: steps.some((s) => PATH_STEPS.has(s.name) && (s.from !== undefined || s.to !== undefined)),
   };
 }

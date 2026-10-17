@@ -24,7 +24,7 @@ import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../prope
 import { pathCarried } from '../path.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
-import { dropPath, orderRows } from '../lower.ts';
+import { dropPath, mergeObservableAt, orderRows } from '../lower.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
 
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
@@ -365,9 +365,15 @@ export const payloadRowShape = (host: ChildHost): RowShape => ({
   identifiedByPayload: true,
 });
 
-export function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: ChainCtx, fresh: Minter): Rel | null {
+export function rowOp(
+  step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: ChainCtx, fresh: Minter,
+  position: { readonly steps: readonly IRStep[]; readonly at: number },
+): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
+  // The reference MERGES equal traversers at an explicit `barrier()`/`order()`; where that is observable
+  // and this spine cannot vouch the stream is distinct, decline (`mergeObservableAt`).
+  if (mergeObservableAt(ctx, position.steps, position.at)) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
   if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, shape);
   const sliced = sliceOp(step, input, bulked, fresh);
