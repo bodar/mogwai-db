@@ -261,3 +261,9 @@ lowered.
   arm holding a slice declines because TinkerPop resets the arm per start
   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-60`,
   `.../step/branch/OptionalStep.java:47-57`); pinned in `test/L4-addendum/branch-arm-decline.feature`.
+- **`property(k, <traversal>)` over an UNCOUNTABLE upstream write stream** — decline (`4899a9d6`,
+  `047df68b`): a body observing an upstream write that >1 traverser ran through (or a branch's arm
+  writes) refuses rather than answering from one statement's snapshot, since the reference re-evaluates
+  the child per traverser after each write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java`);
+  a numeric reducer's `vt` now crosses into a per-row `vtype` through `reducedVtype` (`fb3b4703`, exact —
+  `mean()` is a Double, `.../step/map/MeanGlobalStep.java:175-177`). Pinned in `test/property-traversal-sequencing.test.ts`.
