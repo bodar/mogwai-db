@@ -523,8 +523,23 @@ UNEVALUABLE`.
   injected list/map stream keeps stream order across a later `unfold()` — `split()`/`reverse()` re-injects shared the
   bug (they interleaved lists: `x,p,y,q` for `split(',').unfold()` over `'x,y','p,q'`). LEFT: an element-membered
   list (cannot round-trip — the rowid is gone once it JSONs through the barrier — fail-closed decline). A SCALAR
-  stream stays in SQL (SQLite orders by storage class). (`order(Scope.local).by(Column.values)` — sorting one map's
-  entries in place — is the other open leaf, a `mapRange`-family local op, not the row engine.)
+  stream stays in SQL (SQLite orders by storage class).
+- ✅ **Ranked-order barrier + map-local order landed (2026-10-17).** `order().by(<key>)` whose key is a
+  path/list/map (ORDERABILITY, `Order.java`) runs as a RANKED barrier (`src/compiler/rel/ranked-order.ts`): head
+  reads each key as JSON text, JS dense-ranks via `orderability.ts`, the resume re-lowers the chain joined to the
+  rank through ONE `json_each` bind and orders on (rank, arrival) — every channel survives. Fails closed on a
+  writing/random chain. `order(Scope.local)` over a MAP, bare or `by(Column.keys|values)` (`order-dedup-local.ts`).
+  Computed longs past 2^53 stay exact at every JS reader (`src/json-exact.ts` `parseExactJson`;
+  `BarrierInput.injectedText` carries head text across DO RPC). Sub-path `from`/`to` labels survive non-reducing
+  barriers (`ir/labels.ts`).
+- 🚧 **Computed wide-long residue** (needs wide longs TYPED in SQL, bigger than a leaf): a wide `long` constant
+  (stored as text) is DROPPED by `sum`/`min`/`mean` over a per-row-varying stream
+  (`local(union(constant(2^53L), values('age')).sum())`); a top-level runtime-typed sum past 2^53 is still rounded
+  on the wire. `json-exact.ts` relies on ES2025 JSON.parse source-text access — unverified on workerd (absent →
+  declines, fail-closed). Per-value size cap on the single ranking bind on CF is unmeasured.
+- 🚧 **Sub-path residue:** `as('a').out().dedup().path().from('a')` declines at lowering; a sub-path inside a
+  nested body declines unless the body binds its own label — raising `Path.subPath`'s exact errors needs a
+  runtime guard binding.
 - 🚧 **Property-stream vocabulary:** the `by()` vocabulary (`T.key`/`T.value` absent from `TOKENS`), the
   `id()`/`label()` retypes off a property row, `where(<body>)` over a property host, and META-properties
   (`properties().properties()`). `project`/`select` over a property needs FRAMER work — the record→map wire
