@@ -17,7 +17,7 @@ import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/fronten
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
-import { BULK, NO_ALIASES, bodyOf, elementSubject, inBody, type ChainCtx, type ElementSubject } from './chain.ts';
+import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
 import { foldedListSet, nestedFirstValue, scalarChild, scalarChildDeferred } from './reduction.ts';
 
@@ -83,7 +83,7 @@ export function correlatedExists(
   // A correlated hop threads NO carried state — an EXISTS asks whether a row is there, never in what
   // order or how many times — so the child starts from the bulk channel `movement` gave it and any
   // order the body mints is the body's own.
-  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
+  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inOrderFreeBody(ctx), fresh, NO_ALIASES);
   if (!tail) return null;
   // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
   // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,
@@ -143,7 +143,7 @@ function matchPredicate(
     id: fresh('ms'), input: scan, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
     exprs: [['id', col(scan.id, 'id')], ['bulk', compilerInt(1)]],
   });
-  const ran = continueAs(seed, { kind: 'elements', elem: subject.elem }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
+  const ran = continueAs(seed, { kind: 'elements', elem: subject.elem }, body, 0, false, inOrderFreeBody(ctx), fresh, NO_ALIASES);
   if (!ran) return null;
   const probeCol = ran.rel.type.cols[0];
   if (!probeCol) return null;

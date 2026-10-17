@@ -85,8 +85,8 @@ export const ENCOUNTER: Channel = { col: 'encounter', role: 'encounter' };
  */
 export const ORIGIN: Channel = { col: 'origin', role: 'origin' };
 
-export const originOf = (channels: Channels): Channel | undefined =>
-  channels.find((channel) => channel.role === 'origin');
+/** The per-origin partition key — never a branch emission key (`originOf`, `build.ts`). */
+export { originOf } from '../build.ts';
 export const encounterOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'encounter');
 
@@ -132,10 +132,10 @@ export interface ChainCtx extends FilterCtx {
    *  rather than re-derived. A step that MINTS a fresh traverser (`addV`) has to know: it seeds the
    *  position channel exactly where the source would have. */
   readonly ordered: boolean;
-  /** Does a POSITIONAL slice read the emission order downstream (`ChainFacts.demandsSlice`)? A branch
-   *  merge mints one deterministic fan-out order for a COLLECT/write demand, but DECLINES when a slice
-   *  reads its fan-out — a slice pins the reference's traverser-major/arm-major subset, which this
-   *  spine does not mint yet. Threaded, not re-derived, for the reason `ordered` is. */
+  /** Does a POSITIONAL slice read the emission order downstream (`ChainFacts.demandsSlice`, or a body's
+   *  own slice, `continueAs`)? A branch merge it reads owes the reference's order, and declines rather
+   *  than number an input whose order is unknown (`branchSliced`, lower.ts). Threaded, not re-derived,
+   *  for the reason `ordered` is. */
   readonly sliced: boolean;
   /** How a `T.label` ENTRY renders — a set of names or one name. Decided ONLY by an explicit
    *  `with("multilabel")`/`with("singlelabel")`, since storage no longer carries a regime to inherit
@@ -241,13 +241,16 @@ export interface ChainCtx extends FilterCtx {
   /** This chain is a REWRITTEN list — a seeded resume or a re-sourced chain (`lowerChainOf`) — whose
    *  positions are not the reference traversal's, so no merge can be placed in it by scanning it. */
   readonly rewritten?: boolean;
-  /** The stream this scope's step list is HANDED arrives in a branch's order (`branchOrderedAt`,
-   *  `ir/bulk.ts`) — a branch ARM, whose input is its host's stream at the branch. Inherited by every body
-   *  nested under it, which only ever adds a decline (`mergeEqual`). */
-  readonly branchOrderedInput?: boolean;
-  /** The stream this scope's step list EMITS leaves in a branch's order (`branchOrderedAfter`) — set for every
-   *  branch arm (`inArmBody`), whose output its branch re-orders, and inherited below it. */
-  readonly branchOrderedOutput?: boolean;
+  /**
+   * Is the order this body's END emits in READ by its host — where the host knows, rather than the
+   * chain-global `ordered`/`sliced` guessing for it? `'free'`: the consumer provably ignores it — an EXISTS
+   * gate (`where`/`not`/`filter` asks only whether a row is there), a branch ARM whose merge owes no order,
+   * a recursive term (the walk carries no emission order at all) — so a branch merge in the body owes the
+   * reference's order only to a reader in its OWN step list. `'read'`: an ARM of a merge that owes its order
+   * (`branchOrderOwed`, lower.ts), so a branch in the arm owes it too. `inBody` clears it: a body nested
+   * inside another has a consumer of its own.
+   */
+  readonly bodyOrder?: 'free' | 'read';
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;
@@ -279,16 +282,18 @@ export const withEnclosing = (ctx: ChainCtx, labels: AliasMap | undefined): Chai
   labels?.size ? { ...ctx, enclosingLabels: new Set([...(ctx.enclosingLabels ?? []), ...labels.keys()]) } : ctx;
 
 export const inBody = (ctx: ChainCtx): ChainCtx =>
-  (ctx.collapse || ctx.needsFromV ? { ...ctx, collapse: false, needsFromV: false } : ctx);
+  (ctx.collapse || ctx.needsFromV || ctx.bodyOrder ? { ...ctx, collapse: false, needsFromV: false, bodyOrder: undefined } : ctx);
+
+/** A body whose END is order-free (`ChainCtx.bodyOrder`) — `inBody`, then marked. */
+export const inOrderFreeBody = (ctx: ChainCtx): ChainCtx => ({ ...inBody(ctx), bodyOrder: 'free' });
 
 /** A BRANCH ARM whose merged result an outer `otherV()` reads — `inBody` but RE-INJECTING `needsFromV`,
  *  so each arm's tail edge hop mints its entering vertex. Every arm mints it UNIFORMLY (same column), so
  *  the peer merge carries it as a shared rigid channel (`mergeArms`); an arm that does not (a non-edge
  *  shape) makes the arms disagree and the merge declines. The value host `flatMapRejoin` uses `childRows`'s
- *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. An arm's
- *  output is re-ordered by its branch, so it is `branchOrderedOutput` (`mergeEqual`). */
+ *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. */
 export const inArmBody = (ctx: ChainCtx): ChainCtx =>
-  ({ ...inBody(ctx), ...(ctx.needsFromV ? { needsFromV: true } : {}), branchOrderedOutput: true });
+  ({ ...inBody(ctx), ...(ctx.needsFromV ? { needsFromV: true } : {}) });
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */

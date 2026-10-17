@@ -6,7 +6,7 @@
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, extractStrategies } from '../../src/gremlin/frontend.ts';
 import { runPasses } from '../../src/compiler/ir/passes.ts';
-import { branchOrderedAfter, branchOrderedAt, bulkingPositions, MAX_BARRIER_SIZE, referenceUnbulkedAt } from '../../src/compiler/ir/bulk.ts';
+import { bulkingPositions, MAX_BARRIER_SIZE, referenceUnbulkedAt } from '../../src/compiler/ir/bulk.ts';
 import { MERGE_WINDOW_EXCEEDED, mergeWindowExceeded } from '../../src/compiler/rel/lower.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { seededStore } from '../support/harness.ts';
@@ -201,49 +201,31 @@ describe('a child traversal merges where its own strategies put the barriers', (
   });
 });
 
-// A branch's emission order is not the reference's yet (`BranchStep.java:123-158` walks its arms in order;
-// RelIR plan §10 cluster B), so a merge or an order() tie that would READ it — on either side of the branch,
-// at any depth — refuses rather than answer from the wrong order (`branchOrderedAt`/`branchOrderedAfter`,
-// `mergeEqual`). Each witness below declined on trunk; the comment is the reference answer.
-describe('a merge never reads a branch emission order', () => {
-  test('branchOrderedAt — behind a branch, at this level or in a child that streams it, until an order-free reduction', () => {
-    expect(branchOrderedAt(ir('g.V(1).union(__.constant(9), __.constant(5)).barrier().fold()'), 2)).toBe(true);
-    expect(branchOrderedAt(ir('g.V(1).out().flatMap(__.union(__.out(), __.identity())).order().fold()'), 3)).toBe(true);
-    expect(branchOrderedAt(ir('g.V(1).union(__.constant(9), __.constant(5)).count().barrier()'), 3)).toBe(false);
-    expect(branchOrderedAt(ir('g.inject(1, 2, 1, 3).barrier().fold()'), 1)).toBe(false);
-    // A list handed a branch's stream (an arm) inherits it.
-    expect(branchOrderedAt(ir('g.inject(1).barrier()'), 1, true)).toBe(true);
-  });
-
-  test('branchOrderedAfter — an order that reaches its reader only through a branch', () => {
-    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().union(__.identity()).fold()'), 2)).toBe(true);
-    // An order-free reduction after the branch reads no order; a slice BEFORE it read the right one.
-    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().union(__.identity()).count()'), 2)).toBe(false);
-    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().limit(2).union(__.identity()).sum()'), 2)).toBe(false);
-    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier().fold()'), 2)).toBe(false);
-    expect(branchOrderedAfter(ir('g.inject(3, 2, 3, 1).barrier()'), 2, true)).toBe(true);
-  });
-
-  test('every witness refuses', async () => {
-    for (const q of [
-      'g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', // [9,9,5]
-      'g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).order().by(__.constant(0)).fold()', // [9,9,5]
-      'g.V(1).local(__.union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold())', // [9,9,5]
-      'g.inject(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', // [9,9,5]
-      'g.V(1).union(__.constant(9), __.constant(5)).order().by(__.constant(0)).fold()', // [9,5]
-      'g.V(1).out().union(__.out(), __.identity()).order().by(__.constant(0)).id().fold()',
-      'g.V(1).out().union(__.out(), __.identity()).barrier().id().fold()',
-      'g.V(1).out().union(__.out(), __.identity()).id().barrier().fold()',
-      'g.V(1).out().flatMap(__.union(__.out(), __.identity())).order().by(__.constant(0)).id().fold()',
-      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).id().fold()',
-      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(1).id()',
-      'g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(4).id()',
-      // the order leaves through a branch: its ties never reach the reader as sorted
-      'g.inject(3, 2, 3, 1).order().by(__.constant(0)).union(__.identity()).fold()', // [3,3,2,1]
-      'g.inject(9, 5, 9).union(__.identity().barrier()).fold()', // [9,9,5]
-      // an implicit merge behind a branch that would move a row
-      'g.V().union(__.out(), __.in()).out().out().id().fold()',
-    ]) await expect(run(q), q).rejects.toThrow();
+// A branch emits in the reference's order wherever a reader reads it (the emission key, `BranchKeys` in
+// src/compiler/rel/lower.ts; `BranchStep.java:123-158` walks its arms IN ORDER, one start at a time or
+// arm-major over all starts), so a merge or an order() tie that READS that order — on either side of the
+// branch, at any depth — answers from it. Each witness below declined while the branch merged by content;
+// the expected value is the reference's.
+describe('a merge reads a branch emission order — the reference’s', () => {
+  test('every witness answers the reference', async () => {
+    for (const [q, want] of [
+      ['g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', [[9, 9, 5]]],
+      ['g.V(1).union(__.constant(9), __.constant(5), __.constant(9)).order().by(__.constant(0)).fold()', [[9, 9, 5]]],
+      ['g.V(1).local(__.union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold())', [[9, 9, 5]]],
+      ['g.inject(1).union(__.constant(9), __.constant(5), __.constant(9)).barrier().fold()', [[9, 9, 5]]],
+      ['g.V(1).union(__.constant(9), __.constant(5)).order().by(__.constant(0)).fold()', [[9, 5]]],
+      // the branch's first arrival of 3 holds the slot its second copy joins
+      ['g.V(1).out().union(__.out(), __.identity()).order().by(__.constant(0)).id().fold()', [[2, 3, 3, 5, 4]]],
+      ['g.V(1).out().union(__.out(), __.identity()).barrier().id().fold()', [[2, 3, 3, 5, 4]]],
+      ['g.V(1).out().union(__.out(), __.identity()).id().barrier().fold()', [[2, 3, 3, 5, 4]]],
+      ['g.V(1).out().flatMap(__.union(__.out(), __.identity())).order().by(__.constant(0)).id().fold()', [[2, 3, 3, 5, 4]]],
+      ['g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).id().fold()', [[3, 3, 5, 2, 4]]],
+      ['g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(1).id()', [3]],
+      ['g.V(1).union(__.out().out(), __.out()).order().by(__.constant(0)).limit(4).id()', [3, 3, 5, 2]],
+      // the order leaves through a branch: the branch keeps it
+      ['g.inject(3, 2, 3, 1).order().by(__.constant(0)).union(__.identity()).fold()', [[3, 3, 2, 1]]],
+      ['g.inject(9, 5, 9).union(__.identity().barrier()).fold()', [[9, 9, 5]]],
+    ] as const) expect(await run(q), q).toEqual(want as unknown as unknown[]);
   });
 
   test('…and answer where the arrival order is never read', async () => {
@@ -315,8 +297,9 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
     expect(() => typed('g.inject([a:[b:1, c:2]], [d:1], [a:[c:2, b:1]]).fold()')).toThrow(/nested map is not supported/);
   });
 
-  test('two different traversers tying on an order() key behind a branch still raise', async () => {
-    await expect(run('g.inject(1.0, 1).union(__.identity()).order().by(__.constant(0)).fold()')).rejects.toThrow();
+  test('two different traversers tying on an order() key behind a branch keep the branch order', () => {
+    // The branch emits in the reference's order (`BranchKeys`), so the stable sort's tie reads it: 1.0 then 1.
+    expect(typed('g.inject(1.0, 1).union(__.identity()).order().by(__.constant(0)).fold()')).toEqual(['[1d,1i]']);
   });
 
   test('a list member the bare encoding cannot type declines rather than merge as another', async () => {

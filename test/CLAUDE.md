@@ -165,9 +165,8 @@ collapse are mutually exclusive by construction and never both live. Multi-value
 that encounter by the property row's insertion id (`pord`, `source.ts`); `concat` inlines its parsed
 literals (they were `'bound'` binds, doubling a `select(Pop.all)` re-projection's cost). The 2 that
 remain are branch-order/federation-order substrate residue, both fail-loud-under-perturbation only: a
-bare `coalesce()`-over-record-arms emission (needs the TRAVERSER-MAJOR branch mint — `withFanoutOrder`'s
-content sort is a wrong order for an observable stream, right only for a fold; a branch-merge chain is
-excluded from the lever until that mint exists) and a federated `group().by(T.label).by(name-fold)` whose
+bare `coalesce()`-over-record-arms emission (a branch-merge chain is excluded from the lever: the emission
+key, `BranchKeys`, is minted only where a reader owes it, and seeding a bare emission would add declines) and a federated `group().by(T.label).by(name-fold)` whose
 bound-graph member fold is not yet order-pinned (Fix was base-graph `pord` only). A failure here is a real
 under-specification, never a flake — the remainder are the "Encounter and order" item in
 `docs/outstanding-work.md`, and this becomes a gate when they are cleared. **Baseline it before blaming a

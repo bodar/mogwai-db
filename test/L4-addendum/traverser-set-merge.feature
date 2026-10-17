@@ -509,10 +509,10 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | d[6].l |
 
   # A BRANCH emits its arms IN ORDER (BranchStep.java:123-158), and the set keeps the FIRST arrival's slot:
-  # one start through `union(9, 5, 9)` arrives 9, 5, 9 and the barrier drains 9(2), 5. This spine does not
-  # yet emit a branch in the reference's order (RelIR plan §10, cluster B), so every merge that would read
-  # it refuses — behind the branch, inside a child that streams it, or where a merged order leaves through one.
-  @gap:traverser-set-merge @Unsupported
+  # one start through `union(9, 5, 9)` arrives 9, 5, 9 and the barrier drains 9(2), 5. The branch emits in the
+  # reference's order wherever it is read (the emission key, `BranchKeys`), so a merge reads it — behind the
+  # branch, inside a child that streams it, or where a merged order leaves through one.
+  @gap:traverser-set-merge
   Scenario: g_VX1X_unionXconstantX9X_constantX5X_constantX9XX_barrier_fold
     Given the modern graph
     And the traversal of
@@ -524,7 +524,7 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | result |
       | l[d[9].i,d[9].i,d[5].i] |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_VX1X_unionXconstantX9X_constantX5X_constantX9XX_order_byXconstantX0XX_fold
     Given the modern graph
     And the traversal of
@@ -536,7 +536,7 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | result |
       | l[d[9].i,d[9].i,d[5].i] |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_VX1X_localXunionXconstantX9X_constantX5X_constantX9XX_barrier_foldX
     Given the modern graph
     And the traversal of
@@ -549,7 +549,7 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | l[d[9].i,d[9].i,d[5].i] |
 
   # No two traversers are equal, but every one ties on the key: the stable sort keeps the arm order.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_VX1X_unionXconstantX9X_constantX5XX_order_byXconstantX0XX_fold
     Given the modern graph
     And the traversal of
@@ -562,7 +562,7 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | l[d[9].i,d[5].i] |
 
   # The order leaves THROUGH a branch: `union(identity())` re-emits the sorted stream one start at a time.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX3_2_3_1X_order_byXconstantX0XX_unionXidentityX_fold
     Given the empty graph
     And the traversal of
@@ -575,7 +575,7 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | l[d[3].i,d[3].i,d[2].i,d[1].i] |
 
   # An arm holding a barrier runs ARM-major over its merged starts (BranchStep.java:87-88): 9(2), 5.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX9_5_9X_unionXidentity_barrierX_fold
     Given the empty graph
     And the traversal of

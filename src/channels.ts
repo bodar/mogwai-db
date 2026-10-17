@@ -26,7 +26,7 @@
  *
  * ⚠️ **`origin` is a PROVENANCE/IDENTITY key that a rejoin groups children by, and it is ONE role — the
  * former `branchOrder` was the same thing.** The fan-out rejoin (one `origin` column), the branch
- * traverser-/arm-major keys (`bord_p`/`bord_a`), and the group-value reducer's member pool are all this
+ * traverser-/arm-major emission keys (`bord_p`/`bord_a`/`bord_s`, `BranchKeys`), and the group-value reducer's member pool are all this
  * role: they share every policy below (`identical` merge, `empty` barrier, `undefined` group, not
  * row-unique), which is the algebra's definition of a role — so they are one role, not three. `encounter`
  * is the twin for SELF position (row-unique, `combine` group); `origin` is a GROUPING key, which is why

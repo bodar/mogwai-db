@@ -28,7 +28,7 @@ import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
-import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, inOrderFreeBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
@@ -82,7 +82,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // widening that has nothing to do with it. A term's inability to collapse is not a limitation to route
   // around: it is the reason the BOUNDED regime unrolls into phases instead.
   chain: (input, framing, body, aliases) =>
-    continueAs(input, framing, body, 0, false, inBody(ctx), fresh, aliases),
+    continueAs(input, framing, body, 0, false, inOrderFreeBody(ctx), fresh, aliases),
   scopeRows: (rows) => mintRowOrigin(rows, fresh),
   unscopeRows: (rows) => dropOrigin(rows, fresh),
   body: (nested, scope) => (scope === 'child'
@@ -513,7 +513,7 @@ export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
 export function dropOrigin(rel: Rel, fresh: Minter): Rel {
   const origin = originOf(rel.channels);
   if (!origin) return rel;
-  const channels = rel.channels.filter((channel) => channel.role !== 'origin');
+  const channels = rel.channels.filter((channel) => channel.col !== origin.col);
   const cols = rel.type.cols.filter((column) => column.name !== origin.col);
   return make.project({
     id: fresh('dx'), input: rel, channels, type: typeOf(...cols),
@@ -592,7 +592,7 @@ export function childRows(
       // in a different order from `elementCols` — which the factory catches, and which would otherwise be
       // a schema desync no test names.
       exprs: [['id', col(input.id, 'id')],
-        ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, originFrom) : col(input.id, channel.col)] as const)],
+        ...channels.map((channel) => [channel.col, channel.col === ORIGIN.col ? col(input.id, originFrom) : col(input.id, channel.col)] as const)],
     });
   })();
   // THE HOST'S LABELS RIDE IN, and handing over `NO_ALIASES` was a WRONG ANSWER rather than a

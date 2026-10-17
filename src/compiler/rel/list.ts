@@ -11,7 +11,7 @@ import { raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, inferredVtype, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -1074,7 +1074,7 @@ export function foldScalars(
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
   const memberType: ScalarType = vtype ? PER_ROW_ENVELOPE : opts.type;
   const of: ListOf = { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull };
-  const origin = flagged.channels.find((channel) => channel.role === 'origin');
+  const origin = originOf(flagged.channels);
   if (origin && domain) return foldPerOrigin(flagged, origin, domain, member, order, of, fresh);
   return {
     rel: make.aggregate({
@@ -1160,7 +1160,7 @@ export function foldElements(
   // ORDER BY the encounter when there is one; else by the member ROWID — see `foldScalars`. Only the
   // no-encounter (correlated) branch is new, so an ordinary element fold's SQL is byte-unchanged.
   const order = foldOrder(input, opts.order, 'id');
-  const origin = input.channels.find((channel) => channel.role === 'origin');
+  const origin = originOf(input.channels);
   if (origin && domain) return foldPerOrigin(input, origin, domain, col(input.id, 'id'), order, { kind: 'elem', elem }, fresh);
   return {
     rel: make.aggregate({

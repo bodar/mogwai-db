@@ -1,13 +1,13 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, meta, notProduced, payloadCols, reducedVtype, renumber, typeOf, withMergedVtype, type Minter } from '../build.ts';
-import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channels } from '../../../channels.ts';
+import { and, carriedCols, eq, meta, notProduced, payloadCols, reducedVtype, typeOf, withMergedVtype, type Minter } from '../build.ts';
+import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { unionColumnsViolation } from '../../../rel/structure.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
-import { armBatches, isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
-import { branchOrderedAt, isReferenceBarrier, orderReadAfter, referenceDistinctAt } from '../../ir/bulk.ts';
+import { isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
+import { isReferenceBarrier, referenceDistinctAt } from '../../ir/bulk.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
@@ -22,17 +22,17 @@ import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
-import { BULK, ENCOUNTER, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
+import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
 import { pullAt } from '../raise-channel.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
-import { armStartMerge, type Arrival, augmentParent, BORD_ARM, BORD_PARENT, branchResult, bulkForwardingDiverges, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
+import { armMajorScope, armStartMerge, type Arrival, augmentParent, branchKeys, branchOrderOwed, branchSliced, type BranchKeys, bulkForwardingDiverges, continueAs, countTail, dropEncounter, mintBranchOrder, positioned, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
 // the arm builders (unionArms/mergeArms/chooseArms/coalesceMerge/optionalArms) and their variant/scalar
 // meet helpers. Mutually recursive with the fold core (branchArms is called by the tails and calls
-// continueAs back); the fan-out helpers it uses (withFanoutOrder/tagArm/…) stay in lower.ts.
+// continueAs back); the emission-order authority it uses (`BranchKeys`/`mintBranchOrder`/…) is lower.ts's.
 
 
 /** The three steps that MERGE arms over the same input. One set and one dispatcher, so a tail gains all
@@ -60,40 +60,38 @@ export function branchArms(
 ): BranchRel | null {
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels, position)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels, position)
-      : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
+      : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels, position)
         : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels, position)
           : null;
 }
 
 /**
- * THE ARM-MAJOR MERGE — a `union`/`choose` whose EVERY arm holds a batched barrier (`armBatches`), so
- * `BranchStep.standardAlgorithm` runs each option over the WHOLE input and drains them in ARM ORDER
- * (`vendor/tinkerpop/gremlin-core/.../branch/BranchStep.java:143`). Each arm was already lowered by
- * `continueAs` as a GLOBAL reduction over the branch source (a `count`/`fold`/`sum` over the whole input,
- * not per-traverser), so the only work is to UNION them arm-major: tag each with its ordinal, merge, and
- * re-mint `encounter` over `[arm_idx, payload]` — the mirror of `mintTraverserMajor` with no parent key.
+ * THE ARM-MAJOR MERGE OF A REDUCING BRANCH — a `union`/`choose` with an arm holding a COLLAPSING barrier,
+ * so `BranchStep.standardAlgorithm` runs each option over the WHOLE input and drains them in ARM ORDER
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:143-150`).
+ * A reducing arm was already lowered by `continueAs` as a GLOBAL reduction over the branch source (one row);
+ * a streaming arm beside it (`mixedBranch`) keeps its own emission order. So the merge is the emission
+ * key's ARM-major numbering (`mintBranchOrder`): `[scope…, arm, seq, payload]`, where a reducing arm's `seq`
+ * is 0 (`single`) and a streaming arm's is its own `encounter` — a merge that owes no order lets a streaming
+ * arm without one sort by payload.
  *
- * The arms COLLAPSED (a barrier drops the per-row channels), so the merge base is the arms' OWN channels,
- * not the input's — which is exactly what made the per-row `mergeArms` refuse them (base `[bulk]` vs arm
- * `[]`). They must agree; a disagreement (e.g. one arm kept `bulk`, i.e. it did NOT actually collapse)
- * declines.
+ * The reducing arms COLLAPSED (a barrier drops the per-row channels), so the merge base is the arms' OWN
+ * channels, not the input's; they must agree but for the emission position a streaming arm hands over as its
+ * `seq` — a disagreement (one arm kept `bulk`, i.e. it did NOT actually collapse) declines.
  */
-export const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: AliasMap, graph: GraphSource, fresh: Minter): BranchRel | null => {
-  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
-  const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
-  const merged = mergeArms(tagged, withChannel(base, BORD_ARM), labels, graph, fresh);
-  if (!merged) return null;
-  const rel = merged.rel;
-  if (!rel.channels.some((channel) => channel.col === BORD_ARM.col)) return null;
-  const kept = rel.channels.filter((channel) => channel.col !== BORD_PARENT.col && channel.col !== BORD_ARM.col);
-  const outChannels = withChannel(kept, ENCOUNTER);
-  const payload = payloadCols(rel);
-  const outCols = [...payload, ...carriedCols(outChannels)];
-  const terms = [
-    { expr: col(rel.id, BORD_ARM.col), dir: 'asc' as const },
-    ...payload.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const })),
-  ];
-  return { ...merged, rel: renumber(rel, terms, outCols, outChannels, fresh) };
+/** What an arm-major merge numbers by: which arms REDUCED to one row, this level's keys, the per-start
+ *  scope (`armMajorScope`), and whether a consumer reads the order at all (`branchOrderOwed`). */
+export interface ArmMajorOrder {
+  readonly reduced: readonly boolean[]; readonly keys: BranchKeys; readonly scope: readonly Channel[]; readonly owed: boolean;
+}
+
+export const mintArmMajor = (
+  arms: readonly Tail[], reduced: readonly boolean[], keys: BranchKeys, scope: readonly Channel[], owed: boolean,
+  labels: AliasMap, graph: GraphSource, fresh: Minter,
+): BranchRel | null => {
+  const base = withoutEncounter(arms[0]!.rel.channels);
+  if (arms.some((arm) => !sameChannels(base, withoutEncounter(arm.rel.channels)))) return null;
+  return mintBranchOrder(arms, base, keys, 'arm', scope, labels, graph, fresh, (k) => !owed || !!reduced[k]);
 };
 
 /**
@@ -104,9 +102,9 @@ export const mintArmMajor = (arms: readonly Tail[], base: Channels, labels: Alia
  * arm's subplan roots at it), so a second reference from an `Exists` makes `name` CTE it — no replication.
  */
 export function batchedBranch(
-  arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap,
+  arms: readonly Tail[], input: Rel, order: ArmMajorOrder, graph: GraphSource, fresh: Minter, labels: AliasMap,
 ): BranchRel | null {
-  const merged = mintArmMajor(arms, arms[0]!.rel.channels, labels, graph, fresh);
+  const merged = mintArmMajor(arms, order.reduced, order.keys, order.scope, order.owed, labels, graph, fresh);
   if (!merged) return null;
   const gated = make.filter({
     id: fresh('bg'), input: merged.rel, channels: merged.rel.channels, type: merged.rel.type,
@@ -183,7 +181,7 @@ export function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
  * path/property arm, or an arm carrying an alias the collapsed arm cannot (`union(min.as('x'),
  * …).select('x')`, the `mintArmMajor` channel check), declines.
  */
-export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap): BranchRel | null {
+export function mixedBranch(arms: readonly Tail[], input: Rel, order: ArmMajorOrder, graph: GraphSource, fresh: Minter, labels: AliasMap): BranchRel | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
     const fr = arm.framing;
@@ -199,52 +197,80 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
     if (fr.kind !== 'elements' && fr.kind !== 'list') return null;
     normalized.push({ ...arm, rel: ensureBulk(arm.rel, fresh) });
   }
-  return batchedBranch(normalized, input, graph, fresh, labels);
+  return batchedBranch(normalized, input, order, graph, fresh, labels);
 }
 
+/** An ARM of a branch merge — `inArmBody`, with whether the merge reads the arm's emission order
+ *  (`ChainCtx.bodyOrder`): an owed merge numbers by it, an unowed one discards it. */
+const armBody = (ctx: ChainCtx, owed: boolean): ChainCtx => ({ ...inArmBody(ctx), bodyOrder: owed ? 'read' : 'free' });
+
 /**
- * THE SCOPE A `union()` ARM LOWERS IN. Every arm is `inArmBody`; an arm additionally BEGINS a traversal
+ * THE SCOPE A `union()`/`choose()` ARM LOWERS IN — `armBody`; an arm additionally BEGINS a traversal
  * (`ChainCtx.traversal`) only when the reference provably hands it a stream of distinct, unbulked
  * traversers — `BranchStep` drains every start into the arm's ONE `TraverserSet`, which merges equal ones
  * (`referenceDistinctAt`). Only then may a bulk-sensitive consumer in the arm (a seeded fold reducing the
  * whole input) read its rows as the reference's traversers; anywhere else it declines.
- *
- * An arm is HANDED its host's stream at the branch, so where that stream arrives in a branch's order
- * (`branchOrderedAt`) — or where the branch's position is unknown — the arm inherits it
- * (`ChainCtx.branchOrderedInput`), and a merge inside the arm reading that order declines (`mergeEqual`). Its
- * OUTPUT is re-ordered by the branch, which matters only where the branch's output is read in any order
- * (`orderReadAfter` — an order-free reduction after the branch reads none): `ChainCtx.branchOrderedOutput`.
  */
-const armScope = (ctx: ChainCtx, position: Arrival | undefined) => {
+const armScope = (ctx: ChainCtx, position: Arrival | undefined, owed: boolean) => {
   const distinct = !!position && ctx.traversal?.steps === position.steps
     && referenceDistinctAt(position.steps, position.at, ctx.traversal.rooted);
-  const branchOrderedInput = !position || branchOrderedAt(position.steps, position.at, ctx.branchOrderedInput);
-  const branchOrderedOutput = !position || orderReadAfter(position.steps, position.at + 1, ctx.branchOrderedOutput ?? true);
   return (body: readonly IRStep[]): ChainCtx => {
-    const scoped = { ...inArmBody(ctx), branchOrderedOutput, ...(branchOrderedInput ? { branchOrderedInput } : {}) };
+    const scoped = armBody(ctx, owed);
     return distinct ? { ...scoped, traversal: { steps: body, rooted: false } } : scoped;
   };
 };
 
 /** Does any arm hold a `Barrier` at ANY depth — `BranchStep.hasBarrier`, which the reference sets by
  *  `getStepsOfAssignableClassRecursively(Barrier.class, …)` (`…/step/branch/BranchStep.java:87-88`)? Then
- *  every start enters each arm's own set first (`armStartMerge`). */
+ *  every start enters each arm's own set first (`armStartMerge`), and the options drain ARM-major
+ *  (`branchMajor`). */
 const branchHasBarrier = (bodies: readonly (readonly IRStep[] | null | undefined)[], ctx: ChainCtx): boolean =>
   bodies.some((body) => !body || someStepDeep(body, ctx.params, (s) => isReferenceBarrier(s as IRStep), true));
+
+/** WHICH emission order a `BranchStep` (`union`/`choose`) gives its options — ARM-major when one holds a
+ *  barrier (`branchHasBarrier`), else TRAVERSER-major (`BranchStep.java:143-150`). */
+const branchMajor = (bodies: readonly (readonly IRStep[] | null | undefined)[], ctx: ChainCtx): 'traverser' | 'arm' =>
+  branchHasBarrier(bodies, ctx) ? 'arm' : 'traverser';
+
+/** The stream a branch's arms run over, per the emission key (`BranchKeys`, lower.ts): the input itself where
+ *  nothing reads the order; else the POSITIONED input (`positioned`) — with its parent frozen for a
+ *  traverser-major merge (`augmentParent`), or scoped per start for an arm-major one (`armMajorScope`). `null`
+ *  where the order is owed and cannot be named — a decline, never a different order. `arrived` is the stream as
+ *  the branch RECEIVED it, before an arm-start merge re-positioned it: what proves a per-start scope. */
+export function emissionSource(
+  input: Rel, owed: boolean, slicing: boolean, major: 'traverser' | 'arm', keys: BranchKeys, fresh: Minter, arrived: Rel = input,
+): { readonly source: Rel; readonly scope: readonly Channel[] } | null {
+  if (!owed) return { source: input, scope: [] };
+  const at = positioned(input, fresh, slicing);
+  if (!at) return null;
+  if (major === 'traverser') return { source: augmentParent(at, keys, fresh), scope: [] };
+  const scope = armMajorScope(arrived);
+  return scope && { source: at, scope };
+}
+
+/** The merge a branch returns: numbered by the emission key where the order is owed (`mintBranchOrder`),
+ *  positionless otherwise — every arm's own position dropped, as a stream nobody reads in order carries none. */
+function emissionMerge(
+  arms: readonly Tail[], input: Rel, from: { readonly source: Rel; readonly scope: readonly Channel[] }, owed: boolean,
+  major: 'traverser' | 'arm', keys: BranchKeys, labels: AliasMap, ctx: ChainCtx, fresh: Minter, single?: (k: number) => boolean,
+): BranchRel | null {
+  return owed
+    ? mintBranchOrder(arms, from.source.channels, keys, major, from.scope, labels, ctx.source, fresh, single)
+    : mergeArms(arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) })), withoutEncounter(input.channels), labels, ctx.source, fresh);
+}
 
 export function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
-  const armCtx = armScope(ctx, position);
   if (step.modulators?.length || step.optionArms) return null;
-  // A `union` is a fresh UNORDERED stream (`BranchStep` drains arm-by-arm and every scenario of
-  // `Union.feature` asserts unordered), so a position the input carried OR an arm minted inside itself
-  // does NOT survive the merge — dropping it is what lets an ordered/limited arm merge rather than
-  // decline on a channel its sibling has not got. Where a downstream positional/collecting consumer
-  // READS the fan-out's emission order (`ctx.ordered`, the chain-global demand), the merge MINTS one
-  // deterministic order over the whole fan-out after the fact (`withFanoutOrder`, §10) rather than
-  // declining — the positionless rows are the same either way.
+  // Every scenario of `Union.feature` asserts an UNORDERED result, but the reference's emission order is
+  // fixed (`BranchKeys`, lower.ts), and a consumer that reads it — a slice, a fold's member order, a write —
+  // sees exactly that order. So the merge either owes nothing (`branchOrderOwed` false: a position the input
+  // carried or an arm minted inside itself does not survive, which is what lets an ordered or limited arm
+  // merge beside one that has none) or presents the reference's order, numbered by its keys.
+  const owed = branchOrderOwed(ctx, position);
+  const armCtx = armScope(ctx, position, owed);
   const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
@@ -254,45 +280,52 @@ export function unionArms(
   // receives every traverser and its output is the whole result (`gremlin-core/.../branch/UnionStep`).
   // No merge, and — for a non-reduction arm — no arm-major empty gate: the arm emits per input, so an
   // empty input is an empty output. A single REDUCTION arm (`union(__.count())`) DOES need the batched
-  // path's `Exists(input)` gate (an empty input emits nothing, not the seed), and an arm that binds a
-  // label or a SLICE-demanded one carry merge questions the multi-arm path owns — all three decline here.
+  // path's `Exists(input)` gate (an empty input emits nothing, not the seed), so it declines here. Where the
+  // order is owed, the arm's OWN order is the branch's (one arm has no sibling to interleave), so it keeps
+  // the position it ends with — or declines if it ends with none.
   if (args.length === 1) {
-    if (isReductionArm(bodies[0]!) || sliceableBranch(ctx, input)) return null;
-    const only = continueAs(input, framing, bodies[0]!, 0, bulked, armCtx(bodies[0]!), fresh, labels);
-    if (!only) return null;
+    if (isReductionArm(bodies[0]!)) return null;
+    const at = owed ? positioned(input, fresh, branchSliced(ctx, position)) : input;
+    const only = at && continueAs(at, framing, bodies[0]!, 0, bulked, armCtx(bodies[0]!), fresh, labels);
+    if (!only || (owed && !encounterOf(only.rel.channels))) return null;
     // A write in the single arm (`union(__.mergeV(…))`) threads its effects out — a `Tail`'s `effects`
     // become the branch's, so the arm's write bindings reach the program instead of dangling.
-    return branchResult({ rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases, ...(only.effects?.length ? { effects: only.effects } : {}) }, ctx, fresh);
+    return {
+      rel: owed ? only.rel : dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases,
+      ...(only.effects?.length ? { effects: only.effects } : {}),
+    };
   }
 
-  const slice = sliceableBranch(ctx, input);
-  // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects
-  // one start), but an arm holding a BATCHED barrier sets `hasBarrier` and makes it ARM-major over the
-  // whole input (`BranchStep.java:120-152`). The arm-major lowering — the batched arm running over the
-  // whole input — is not built, so a SLICE-demanded union with a batched arm declines rather than
-  // present a traverser-major subset the reference does not. (`armBatches`, `ir/step.ts`.)
-  if (slice && bodies.some((body) => armBatches(body!))) return null;
-  const merged = branchHasBarrier(bodies, ctx) ? armStartMerge(input, framing, ctx, fresh, position) : input;
+  // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects one
+  // start), an arm holding a barrier at any depth makes it ARM-major over the whole input, every start first
+  // merged into each arm's set (`armStartMerge`). Every arm here is lowered over the whole input either way,
+  // so the two orders differ only in the KEY the merge is numbered by (`branchMajor`, `emissionSource`).
+  const major = branchMajor(bodies, ctx);
+  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!merged) return null;
-  const source = slice ? augmentParent(merged, fresh) : merged;
+  const keys = branchKeys(merged);
+  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  if (!from) return null;
   const arms: Tail[] = [];
   for (const body of bodies) {
-    const arm = continueAs(source, framing, body!, 0, bulked, armCtx(body!), fresh, labels);
+    const arm = continueAs(from.source, framing, body!, 0, bulked, armCtx(body!), fresh, labels);
     if (!arm) return null;
-    arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
+    arms.push(arm);
   }
-  // A REDUCTION arm holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so when the
-  // branch batches it, the arm is a global reduction over the whole input. This is NARROWER than
-  // `armBatches` (any Barrier): a SLICE arm (`out().limit(1)`) batches too but does NOT collapse, so it
-  // stays the ordinary merge rather than an arm-major reduction (else `union(out().limit(1), in())`
-  // would wrongly decline). Only reachable when `!slice` (a batched arm under a downstream slice already
-  // declined above).
-  if (!slice && bodies.every((body) => isReductionArm(body!))) return batchedBranch(arms, input, ctx.source, fresh, labels);
-  // SOME (not all) reduce → a MIXED arm-major union of a collapsed arm and a per-input one (`mixedBranch`).
-  if (!slice && bodies.some((body) => isReductionArm(body!))) return mixedBranch(arms, input, ctx.source, fresh, labels);
-  return slice
-    ? mintTraverserMajor(arms, source, labels, ctx.source, fresh)
-    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
+  // A REDUCTION arm holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so the branch
+  // batches it and the arm is a global reduction over the whole input; `batchedBranch`/`mixedBranch` number
+  // the merge ARM-major (the reference's order whether or not anyone reads it) and gate it on a non-empty
+  // input. NARROWER than a barrier: a SLICE arm (`out().limit(1)`) batches but does NOT collapse, so it
+  // stays the ordinary merge.
+  const reduced = bodies.map((body) => isReductionArm(body!));
+  if (reduced.some(Boolean)) {
+    const order: ArmMajorOrder = { reduced, keys, scope: from.scope, owed };
+    const streaming = owed ? arms : arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
+    return reduced.every(Boolean)
+      ? batchedBranch(streaming, input, order, ctx.source, fresh, labels)
+      : mixedBranch(streaming, input, order, ctx.source, fresh, labels);
+  }
+  return emissionMerge(arms, input, from, owed, major, keys, labels, ctx, fresh);
 }
 
 /**
@@ -329,7 +362,7 @@ export function unionArms(
  * THE SHAPE-AGNOSTIC TAIL OVER A VARIANT STREAM — a mixed-shape branch merge (`union`/`choose`/
  * `coalesce` whose arms disagree on shape) composes with the steps that read only the carried channels,
  * never the payload. A SLICE (`sliceOp` — `limit`/`range`/`skip`) reads the fan-out `encounter` the branch
- * minted (`mintTraverserMajor`/`withFanoutOrder`) and KEEPS the variant; `count()` is `countTail`
+ * minted (`mintBranchOrder`) and KEEPS the variant; `count()` is `countTail`
  * (`SUM(bulk)`), the same barrier every other tail uses.
  *
  * Anything that reads the payload DECLINES rather than mis-executing: a variant has NO uniform member
@@ -677,14 +710,30 @@ function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): Alias
  */
 export function chooseOptions(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
-  const subject = branchSubject(input, framing);
-  if (!subject) return null;
   const seam = childSeam(ctx, fresh);
   const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
   if (!arms) return null;
+  // THE EMISSION ORDER, as for every `BranchStep`: barrier-free it is traverser-major — `ChooseStep.pickBranches`
+  // routes each traverser to ONE option (`…/step/branch/ChooseStep.java:139-142`), so within a parent only
+  // that option's own order shows. An option holding a barrier makes it ARM-major (`hasBarrier`), drained in
+  // `getGlobalChildren` order: the `Pick` options first, then the keyed ones in the order they were added
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:110-114`)
+  // — `armRank` below. The two `Pick` options sit in a `HashMap`, so their order between THEMSELVES is the
+  // JVM's; `unproductive` first is one realization of it.
+  const owed = branchOrderOwed(ctx, position);
+  const major = branchMajor(arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child'))), ctx);
+  const startMerged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
+  if (!startMerged) return null;
+  const keys = branchKeys(startMerged);
+  const from = emissionSource(startMerged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  if (!from) return null;
+  const unkeyed = input;
+  input = from.source;
+  const subject = branchSubject(input, framing);
+  if (!subject) return null;
   const choiceArg = step.args?.[0]?.value;
   const host = childHostOf(subject, labels);
   // A `T` TOKEN CHOICE — `choose(T.label).option('person', …)`. It needs no child body at all: the token
@@ -804,32 +853,51 @@ export function chooseOptions(
     });
   };
 
-  const built: Tail[] = [];
+  // An option's place in the ARM-major drain (`getGlobalChildren`): `Pick.unproductive`, `Pick.none`, then
+  // each keyed option by the ordinal `whens` assigned it, which is the order they were added.
+  const armRank = (ordinal: number): number => (ordinal === UNPRODUCTIVE ? 0 : ordinal === NONE ? 1 : 2 + ordinal);
+  const built: { readonly tail: Tail; readonly rank: number; readonly reduced: boolean }[] = [];
   for (const { arm, ordinal } of gated) {
     const body = seam.body(arm.nested, 'child');
     if (!body?.length) return null;
-    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, inArmBody(ctx), fresh, labels);
+    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, armBody(ctx, owed), fresh, labels);
     if (!lowered) return null;
-    built.push(lowered);
+    // A REDUCING option emits only where a start was routed to it (`BranchStep.java:130-134` drains an
+    // option once it `hasStarts()`), never its seed over nothing — `chooseArms`' gate, on this option's input.
+    const reduced = isReductionArm(body);
+    const tail = !reduced ? lowered : {
+      ...lowered, rel: make.filter({
+        id: fresh('or'), input: lowered.rel, channels: lowered.rel.channels, type: lowered.rel.type,
+        pred: { kind: 'exists', plan: gate(takes(ordinal)), negated: false },
+      }),
+    };
+    built.push({ tail, rank: armRank(ordinal), reduced });
   }
   // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
   // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
   // rather than from which tokens were written is what keeps it right when both are, and what makes a
-  // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed.
+  // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed. ARM-major drains the
+  // two as the separate options they are; traverser-major sees one per start, so one arm serves both.
   const unclaimed = [NONE, ...(canBeUnproductive ? [UNPRODUCTIVE] : [])]
     .filter((ordinal) => !claimed.includes(ordinal));
-  if (unclaimed.length) {
+  for (const group of major === 'arm' ? unclaimed.map((ordinal) => [ordinal]) : unclaimed.length ? [unclaimed] : []) {
     built.push({
-      rel: gate(unclaimed.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
-      framing,
-      aliases: labels,
-      // The pass-through arm IS the branch's input, unchanged, so it stands for exactly what the input
-      // did — nothing here collapses and nothing resets a multiplicity.
-      bulked,
+      tail: {
+        rel: gate(group.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
+        framing,
+        aliases: labels,
+        // The pass-through arm IS the branch's input, unchanged, so it stands for exactly what the input
+        // did — nothing here collapses and nothing resets a multiplicity.
+        bulked,
+      },
+      rank: Math.min(...group.map(armRank)),
+      reduced: false,
     });
   }
   if (built.length < 2) return null;
-  return mergeArms(built, input.channels, labels, ctx.source, fresh);
+  const drained = owed ? [...built].sort((left, right) => left.rank - right.rank) : built;
+  return emissionMerge(drained.map((arm) => arm.tail), unkeyed, from, owed, major, keys, labels, ctx, fresh,
+    (k) => major === 'arm' && drained[k]!.reduced);
 }
 
 /**
@@ -851,14 +919,14 @@ export function chooseOptions(
  */
 export function coalesceArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
-  return coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels);
+  return coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels, position);
 }
 
 /**
@@ -881,24 +949,27 @@ export function optionalArms(
   // `…/step/branch/OptionalStep.java:47-57`) — unlike `coalesce`, which resets it to 1
   // (`…/step/map/CoalesceStep.java:52-55`) — so a body not linear in the bulk diverges on a merged slot.
   if (bulkForwardingDiverges(ctx, position?.steps, position?.at ?? 0, [body])) return null;
-  return coalesceMerge([body, []], input, framing, bulked, ctx, fresh, labels);
+  return coalesceMerge([body, []], input, framing, bulked, ctx, fresh, labels, position);
 }
 
 /**
  * THE COALESCE MERGE over explicit arm bodies — shared by `coalesce` and `optional` (its identity
- * fallback is the one empty body this admits). `coalesce`/`optional` are `FlatMapStep`-family, so they
- * reset PER TRAVERSER and are always traverser-major, arm-minor — never batched. Under a SLICE demand
- * (`ctx.sliced`) that fixes the subset a downstream `limit`/`tail` takes (`branch-traverser-major.feature`),
- * so the arms lower from `augmentParent(input)` — freezing the parent position as the major sort key — and
- * merge through `mintTraverserMajor`. A COLLECT demand takes any deterministic order (`withFanoutOrder`); a
- * positionless one drops the order (`dropEncounter`). See `unionArms`.
+ * fallback is the one empty body this admits). `coalesce`/`optional` reset PER TRAVERSER
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-60`,
+ * `…/step/branch/OptionalStep.java:47-57`), so they are always TRAVERSER-major, arm-minor — never batched:
+ * where a consumer reads the order (`branchOrderOwed`) the arms lower from the positioned input with its
+ * parent frozen (`emissionSource`) and merge through the emission key; otherwise the merge is positionless.
+ * See `unionArms`.
  */
 export function coalesceMerge(
   bodies: readonly (readonly IRStep[])[], input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position: Arrival | undefined,
 ): BranchRel | null {
-  const slice = sliceableBranch(ctx, input);
-  const source = slice ? augmentParent(input, fresh) : input;
+  const owed = branchOrderOwed(ctx, position);
+  const keys = branchKeys(input);
+  const from = emissionSource(input, owed, branchSliced(ctx, position), 'traverser', keys, fresh);
+  if (!from) return null;
+  const source = from.source;
   const subject = branchSubject(source, framing);
   if (!subject) return null;
 
@@ -920,11 +991,9 @@ export function coalesceMerge(
     // `g.V().coalesce(__.out().limit(1), __.constant('x')).count()` is 6 there; this route answered 4.
     // A per-traverser slice is a per-origin lowering this route does not have, so it DECLINES.
     if (!reduced && slicesAcrossStarts(body!, ctx.params)) return null;
-    const arm = reduced ?? continueAs(domain, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
+    const arm = reduced ?? continueAs(domain, framing, body!, 0, bulked, armBody(ctx, owed), fresh, labels);
     if (!arm) return null;
-    // The slice path keeps each arm's within-arm order for `mintTraverserMajor` to consume; every
-    // other path drops it, as a fresh unordered stream carries none.
-    arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
+    arms.push(arm);
     // The LAST arm owes no guard for anyone, so it is not asked for one — a body whose non-production
     // this route cannot express still coalesces when it is last, which is the common `constant(x)`
     // fallback.
@@ -943,9 +1012,7 @@ export function coalesceMerge(
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
-  return slice
-    ? mintTraverserMajor(arms, source, labels, ctx.source, fresh)
-    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
+  return emissionMerge(arms, input, from, owed, 'traverser', keys, labels, ctx, fresh);
 }
 
 /** The slice barriers whose answer over the UNION of several traversers' sub-streams differs from the
@@ -985,12 +1052,7 @@ export function chooseArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
-  if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
-  // A `choose` is a `BranchStep` like `union` — barrier-free it is TRAVERSER-major, a batched-barrier
-  // arm makes it ARM-major (`BranchStep.java`). Only the ARM bodies decide `hasBarrier` (the condition
-  // is a per-traverser predicate, not an option), so a SLICE with a batched then/else arm declines
-  // (arm-major not built); otherwise the arms lower from `augmentParent(input)` and merge through
-  // `mintTraverserMajor`, else the fan-out order is minted for a collect / dropped. See `unionArms`.
+  if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels, position);
   const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.length > 3) return null;
   // THE CONDITION MAY BE A BARE PREDICATE, not only a body: `choose(P.eq(29), __.constant('matched'))`
@@ -1006,13 +1068,22 @@ export function chooseArms(
   const [then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
 
-  const slice = sliceableBranch(ctx, input);
-  if (slice && [then, otherwise ?? []].some((body) => armBatches(body!))) return null;
-  const merged = branchHasBarrier([then, otherwise ?? []], ctx) ? armStartMerge(input, framing, ctx, fresh, position) : input;
+  // A `choose` is a `BranchStep` like `union` — barrier-free it is TRAVERSER-major, an arm holding a barrier
+  // makes it ARM-major (`BranchStep.java:143-150`). Only the ARM bodies decide `hasBarrier` (the condition
+  // is a per-traverser LOCAL child, not an option), and the if-then constructor adds the options TRUE then
+  // FALSE (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/ChooseStep.java:87-91`),
+  // after the identity `Pick` options a boolean choice never routes to — so the arms are numbered
+  // `[then, else]` by the emission key wherever the order is owed. See `unionArms`.
+  const owed = branchOrderOwed(ctx, position);
+  const major = branchMajor([then, otherwise ?? []], ctx);
+  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!merged) return null;
-  const source = slice ? augmentParent(merged, fresh) : merged;
+  const keys = branchKeys(merged);
+  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  if (!from) return null;
+  const source = from.source;
   const subject = branchSubject(source, framing);
-  const armCtx = armScope(ctx, position);
+  const armCtx = armScope(ctx, position, owed);
   if (!subject) return null;
 
   // The condition is a child of THIS chain, rooted afresh at the subject row with no alias channel, so
@@ -1033,14 +1104,22 @@ export function chooseArms(
 
   const armThen = continueAs(guarded(false), framing, then, 0, bulked, armCtx(then), fresh, labels);
   // The else arm over ZERO steps is `identity` on the complement — see above.
-  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, otherwise ? armCtx(otherwise) : inArmBody(ctx), fresh, labels);
+  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, otherwise ? armCtx(otherwise) : armBody(ctx, owed), fresh, labels);
   if (!armThen || !armElse) return null;
-  const arms = [armThen, armElse];
-  if (slice) return mintTraverserMajor(arms, source, labels, ctx.source, fresh);
-  // Drop the spent position from each arm (an arm-local `order()`/`limit()`), as `union` does — a
-  // `choose` is unordered, so the merged stream carries none.
-  const dropped = arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
-  return branchResult(mergeArms(dropped, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
+  // An ARM-major arm that REDUCED (`isReductionArm`) is one row per scope, so it has no order of its own —
+  // and it is one row only where a start was ROUTED to it: `BranchStep` drains an option only once
+  // `getStartStep().hasStarts()` (`BranchStep.java:130-134`, "a ReducingBarrierStep … will always return
+  // true for hasNext()"), so a `count()` arm no start reached emits nothing, never its seed — the gate
+  // `batchedBranch` puts on a union's reducing arms, on this arm's own routed input.
+  const reduced = [then, otherwise ?? []].map((body) => isReductionArm(body));
+  const routed = (arm: Tail, negated: boolean): Tail => ({
+    ...arm, rel: make.filter({
+      id: fresh('cr'), input: arm.rel, channels: arm.rel.channels, type: arm.rel.type,
+      pred: { kind: 'exists', plan: guarded(negated), negated: false },
+    }),
+  });
+  const arms = [reduced[0] ? routed(armThen, false) : armThen, reduced[1] ? routed(armElse, true) : armElse];
+  return emissionMerge(arms, input, from, owed, major, keys, labels, ctx, fresh, (k) => major === 'arm' && !!reduced[k]);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which

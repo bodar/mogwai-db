@@ -186,8 +186,8 @@ describe('record-valued branch arms', () => {
   // coalesce and made arm 2 unreachable: the two software vertices returned NOTHING instead of their
   // `lang`. Measured, and asserted here so it cannot come back.
   // The assertions SORT: nothing downstream observes position here, so the merge takes the positionless
-  // route and is arm-major rather than traverser-major (`coalesceArms`' `dropEncounter`; the
-  // order-observing case goes through `mintTraverserMajor` instead). What is under test is WHICH ROWS
+  // route (`branchOrderOwed` false, so every arm's position is dropped; the order-observing case is
+  // numbered by the emission key, `mintBranchOrder`). What is under test is WHICH ROWS
   // exist, and the bug was that two of them did not.
   test('coalesce() over FILTERED project arms dispatches per member', async () => {
     expect(sortByJson(await decodedRows(

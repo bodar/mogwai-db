@@ -50,7 +50,6 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | lop |
 
   @gap:branch-traverser-major
-  @Unsupported
   Scenario: g_V_hasXname_within_josh_markoX_order_byXnameX_unionXunionXoutXknowsX_outXcreatedXX_inX_valuesXnameX_limitX3X
     Given the modern graph
     And the traversal of
@@ -132,39 +131,41 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[32].i |
 
   @gap:branch-traverser-major
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_foldX_valuesXageX_foldX_limitX2X
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").order().by("name").union(__.values("name").fold(), __.values("age").fold()).limit(2)
       """
-    # The LIST merge. Each arm folds per traverser (a scoped fold, not a batched barrier), so josh
-    # contributes [josh] then [32] before marko's pair.
+    # The LIST merge. A `fold()` is a `Barrier`, so `hasBarrier` is set and the reference injects EVERY
+    # start into both options before draining them ARM-major
+    # (vendor/tinkerpop/gremlin-core/.../step/branch/BranchStep.java:87-88,143-150): each arm reduces the
+    # whole input — the shape Union.feature's g_VX1_2X_unionXoutE_count__inE_count__outE_weight_sumX pins.
+    # (This scenario used to assert a per-traverser fold, [josh] then [32], which is not the reference.)
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[josh] |
-      | l[d[32].i] |
+      | l[josh,marko,peter,vadas] |
+      | l[d[32].i,d[29].i,d[35].i,d[27].i] |
 
   @gap:branch-traverser-major
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_valuesXageX_foldX_limitX2X
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").order().by("name").union(__.values("name"), __.values("age").fold()).limit(2)
       """
-    # The MIXED-SHAPE (variant) merge, whose arms carry no layout of their own — the fork is handed
-    # to it explicitly. Same answer shape: josh's scalar then josh's list.
+    # The MIXED-SHAPE (variant) merge. The fold arm sets `hasBarrier`, so the options drain ARM-major
+    # over the whole input: every name in input order before the one fold of every age — the slice takes
+    # the first two names. (This scenario used to assert josh's scalar then josh's list, a per-traverser
+    # order the reference does not have.)
     When iterated to list
     Then the result should be unordered
       | result |
       | josh |
-      | l[d[32].i] |
+      | marko |
 
   @gap:branch-traverser-major
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX_limitX2X
     Given the modern graph
     And the traversal of
@@ -304,10 +305,10 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | d[3].i |
 
-  # @Unsupported: the body's slice reads a branch that the chain-global order demand did not see, so
-  # no traverser-major key was minted for it; a positionless merge would hand the slice a payload-order
-  # subset (trunk answered 1). It declines until the emission-key stack lands.
-  @gap:branch-traverser-major @Unsupported
+  # The body's slice reads a branch the chain-global order demand does not see; the branch is the head
+  # of a per-start body, so it is positioned by that body's per-row origin and numbered traverser-major.
+  # (A positionless merge handed the slice a payload-order subset — 1.) A sum of Integers is an Integer.
+  @gap:branch-traverser-major
   Scenario: g_VX1X_localXunionXconstantX2X_constantX1XX_limitX1XX_sum
     Given the modern graph
     And the traversal of
@@ -317,11 +318,12 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[2].l |
+      | d[2].i |
 
-  # @Unsupported: a sliced branch NESTED inside another branch's arm needs a stacked emission key
-  # (trunk answered [1, 9]).
-  @gap:branch-traverser-major @Unsupported
+  # A sliced branch NESTED inside another branch's arm: the inner merge freezes its own keys beside the
+  # outer ones (the emission key STACK), and the limit inside `local` puts a Barrier in the outer arm,
+  # so the outer union drains arm-major. (Trunk once answered [1, 9].)
+  @gap:branch-traverser-major
   Scenario: g_VX1X_unionXlocalXunionXconstantX2X_constantX1XX_limitX1XX_constantX9XX
     Given the modern graph
     And the traversal of
@@ -333,3 +335,248 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | d[2].i |
       | d[9].i |
+
+  # ── THE EMISSION KEY READ BY A FOLD ─────────────────────────────────────────────────────────────────
+  # A fold's MEMBER order is part of its answer, so a collect reads the branch's emission order exactly
+  # as a slice does. These used to be numbered by the merged rows' content ("any deterministic order"):
+  # [5,9], [marko,x], [josh,lop,vadas,z] — never the reference's.
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_unionXconstantX9X_constantX5XX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant(9), __.constant(5)).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[9].i,d[5].i] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1_2X_unionXconstantXxX_valuesXnameXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 2).union(__.constant("x"), __.values("name")).fold()
+      """
+    # Traverser-major, arm-minor: marko's two rows, then vadas's.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[x,marko,x,vadas] |
+
+  # A child run ONCE PER START (`LocalStep`): the branch heads the body, so each start is its own parent.
+  @gap:branch-traverser-major
+  Scenario: g_VX1_2X_localXunionXconstantXxX_valuesXnameXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 2).local(__.union(__.constant("x"), __.values("name")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[x,marko] |
+      | l[x,vadas] |
+
+  # An `order()` in an arm is a Barrier: ARM-major, and the arm keeps the order it sorted into.
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_unionXout_order_byXname_descX_valuesXnameX_constantXzXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.out().order().by("name", Order.desc).values("name"), __.constant("z")).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[vadas,lop,josh,z] |
+
+  # ARM-major over the WHOLE input: one sort across every start's out(), then every start's constant.
+  @gap:branch-traverser-major
+  Scenario: g_VX1_4X_unionXout_order_byXname_descX_valuesXnameX_constantXzXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 4).union(__.out().order().by("name", Order.desc).values("name"), __.constant("z")).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[vadas,ripple,lop,lop,josh,z,z] |
+
+  # …but ARM-major PER START inside `local`: each start drains its own arms.
+  @gap:branch-traverser-major
+  Scenario: g_VX1_4X_localXunionXout_order_byXname_descX_valuesXnameX_constantXzXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 4).local(__.union(__.out().order().by("name", Order.desc).values("name"), __.constant("z")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[vadas,lop,josh,z] |
+      | l[ripple,lop,z] |
+
+  # The key STACK under a fold: the inner union numbers its own merge, which the outer reads as the arm's
+  # own order.
+  @gap:branch-traverser-major
+  Scenario: g_VX1_2X_unionXunionXconstantXaX_constantXbXX_constantXxXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 2).union(__.union(__.constant("a"), __.constant("b")), __.constant("x")).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[a,b,x,a,b,x] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1_2X_unionXunionXconstantXaX_constantXbXX_constantXxXX_limitX3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 2).union(__.union(__.constant("a"), __.constant("b")), __.constant("x")).limit(3)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | b |
+      | x |
+
+  # `choose` routes each start to ONE option, in input order.
+  @gap:branch-traverser-major
+  Scenario: g_VX1_3_4X_chooseXhasLabelXpersonX_valuesXnameX_constantXsXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 3, 4).choose(__.hasLabel("person"), __.values("name"), __.constant("s")).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko,s,josh] |
+
+  # A reducing option no start was routed to emits NOTHING, never its seed
+  # (BranchStep.java:130-134 drains an option only once it `hasStarts()`): lop is software, so its count
+  # option is empty and only the constant arrives.
+  @gap:branch-traverser-major
+  Scenario: g_VX3X_localXchooseXhasLabelXpersonX_out_count_constantXzXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(3).local(__.choose(__.hasLabel("person"), __.out().count(), __.constant("z")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[z] |
+
+  # A slice INSIDE one parent's arm output reads that arm's own order, after a first-arrival merge.
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_dedup_localXunionXconstantX2X_constantX1XX_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).dedup().local(__.union(__.constant(2), __.constant(1)).limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_localXunionXconstantXxX_valuesXnameXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.union(__.constant("x"), __.values("name")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[x,marko] |
+
+  # ── THE SAME KEY AT EVERY DEPTH ─────────────────────────────────────────────────────────────────────
+  # One authority (`branchOrderOwed` + the emission key), so a fold of a branch inside a `by()`, a `map()`,
+  # a `group()` value or a `local(fold().limit(local))` reads the same order the root does.
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_unionXconstantXxX_valuesXnameXX_fold_limitXlocal_1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.constant("x"), __.values("name")).fold().limit(Scope.local, 1)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[x] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_mapXunionXconstantXxX_valuesXnameXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).map(__.union(__.constant("x"), __.values("name")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[x,marko] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_projectXaX_byXunionXconstantXxX_valuesXnameXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).project("a").by(__.union(__.constant("x"), __.values("name")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"l[x,marko]"}] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1_2X_group_byXlabelX_byXunionXconstantXxX_valuesXnameXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1, 2).group().by(T.label).by(__.union(__.constant("x"), __.values("name")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[x,marko,x,vadas]"}] |
+
+  @gap:branch-traverser-major
+  Scenario: g_VX1X_localXchooseXhasLabelXpersonX_unionXconstantXxX_valuesXnameXX_constantXyXX_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.choose(__.hasLabel("person"), __.union(__.constant("x"), __.values("name")), __.constant("y")).limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | x |
+
+  # An ARM-major `choose(…).option(…)`: an option holding a barrier drains the `Pick` options first, then the
+  # keyed ones (BranchStep.java:110-114) — lop and ripple take `Pick.none` before any person's sorted out().
+  @gap:branch-traverser-major
+  Scenario: g_V_chooseXlabelX_optionXperson_out_order_byXnameXX_optionXnone_identityX_limitX3X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(T.label).option("person", __.out().order().by("name")).option(Pick.none, __.identity()).limit(3).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+      | josh |

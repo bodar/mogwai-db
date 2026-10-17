@@ -15,7 +15,7 @@ import type { AliasMap } from '../../alias.ts';
 import { aliasIdAt, aliasListAt, aliasProjection, aliasValueAt } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
 import { payloadCols } from '../build.ts';
-import { exprChildren } from '../../../rel/walk.ts';
+import { exprChildren, freeRelIds } from '../../../rel/walk.ts';
 import { ValueParseError } from '../../../gremlin/coerce.ts';
 import { BY_HOSTS as BY_READERS } from '../../ir/strategies.ts';
 import type { ChildHost } from '../child.ts';
@@ -440,7 +440,7 @@ export function rowOp(
     if (distinct) return (step.args ?? []).length > 1 ? null : input;
     return barrierRows(step, input, shape.mergeKey, ctx, position.steps, position.at, fresh);
   }
-  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, ...(!distinct && !isLocalScope(step) ? { merge: position } : {}) });
+  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, ...(!distinct && !isLocalScope(step) ? { merge: true } : {}) });
   const sliced = sliceOp(step, input, bulked, fresh, ctx.pull);
   if (sliced) return sliced;
   // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks
@@ -535,6 +535,11 @@ export function rowOp(
   // fused away and the SQL is byte-unchanged; for a subquery payload it becomes a derived table the
   // GROUP BY references by name, evaluating it once. (The `Distinct` arm above already projects first,
   // which is why the unordered dedup never had this cost.)
+  // A CORRELATED stream (a child's host row, `freeRelIds`) may carry a payload that IS an outer column,
+  // and SQLite resolves no outer column in a `GROUP BY` (measured: `SELECT (SELECT x FROM (SELECT t.a AS x
+  // FROM (VALUES(1)) u GROUP BY t.a)) FROM t` is `no such column: t.a`), while a window's `PARTITION BY`
+  // resolves it — so there the ranked window (`dedupOn`) is the ordered dedup, the same survivor rule.
+  if (freeRelIds(input).size) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
   const pcols = payloadCols(input);
   const carried = carriedCols(input.channels);
   // An aggregate names its group keys TWICE (in `GROUP BY` and in `SELECT`), so grouping directly by a

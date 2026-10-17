@@ -331,7 +331,7 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 6977,
+    "bytes": 5427,
     "compiler": 54,
     "bound": 0
   },
@@ -361,13 +361,13 @@
   },
   "max": {
     "binds": 0,
-    "bytes": 4164,
-    "compiler": 120,
+    "bytes": 4516,
+    "compiler": 123,
     "bound": 0
   },
   "mean": {
     "binds": 0,
-    "bytes": 2389,
+    "bytes": 2741,
     "compiler": 65,
     "bound": 0
   },
@@ -391,8 +391,8 @@
   },
   "min": {
     "binds": 0,
-    "bytes": 4162,
-    "compiler": 120,
+    "bytes": 4514,
+    "compiler": 123,
     "bound": 0
   },
   "none": {
@@ -565,8 +565,8 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 10926,
-    "compiler": 95,
+    "bytes": 8728,
+    "compiler": 86,
     "bound": 0
   },
   "V": {

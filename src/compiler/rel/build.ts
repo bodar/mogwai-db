@@ -1,4 +1,4 @@
-import type { ChannelRole, Channels } from '../../channels.ts';
+import type { Channel, ChannelRole, Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
@@ -797,6 +797,21 @@ export function renumber(
 }
 
 /**
+ * A BRANCH EMISSION KEY — a `bord_*` column a branch merge freezes so its result can be numbered in the
+ * reference's emission order (`BranchKeys`, `lower.ts`). The keys share the `origin` ROLE's policies
+ * (identical merge, empty at a barrier, never a group key — `src/channels.ts`), but they are not a
+ * PARTITION: a body scoping a slice/dedup/fold/merge "per origin" must never partition by one, because a
+ * frozen parent position is copied across every hop of an arm and so names the BRANCH's traverser, not the
+ * body's. `originOf` skips them.
+ */
+export const BRANCH_KEY_PREFIX = 'bord_';
+export const isBranchKey = (channel: Channel): boolean => channel.col.startsWith(BRANCH_KEY_PREFIX);
+
+/** The PER-ORIGIN partition key a body scopes by — an `origin`-role channel that is not a branch key. */
+export const originOf = (channels: Channels): Channel | undefined =>
+  channels.find((channel) => channel.role === 'origin' && !isBranchKey(channel));
+
+/**
  * THE TRAVERSERSET MERGE, as a relational operator — every row EQUAL to an earlier one moves into the
  * FIRST arrival's slot, which is what `TraverserSet.add` does with an equal traverser
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/TraverserSet.java:88-96`):
@@ -851,7 +866,7 @@ export function regroupFirstOccurrence(
     // JOINS an earlier slot of an overflowing set that raises: exactly the rows whose merge one drain
     // cannot vouch for.
     const SLOTS = 'rg_slots';
-    const origin = rel.channels.find((channel) => channel.role === 'origin');
+    const origin = originOf(rel.channels);
     const opens: Expr = { kind: 'case', whens: [[{ kind: 'binary', op: '=', left: col(first.id, encounter.col), right: col(first.id, FIRST) }, compilerInt(1)]], else: compilerInt(0) };
     const slots = make.window({
       id: fresh('rs'), input: first, channels: first.channels, type: typeOf(...first.type.cols, meta(SLOTS, 'int')),
@@ -899,49 +914,6 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
       else: compilerNull(),
     };
     return type === 'real' ? [term, signOfZero] : [term, { kind: 'call', fn: 'typeof', args: [term] }, signOfZero];
-  });
-}
-
-/**
- * THE TIE GUARD — a stable sort's tie-break reads the ARRIVAL position only among rows whose sort keys are
- * EQUAL (`…/step/map/OrderGlobalStep.java:78`), so where that position cannot be vouched for (`mergeEqual`)
- * the sort is still exact wherever no two DIFFERENT traversers tie: equal traversers sit together whatever
- * their arrival. This re-projects the encounter so a row whose key group (`ties`, the sort keys as columns
- * of `rel`) holds more than one traverser `identity` RAISES (`raise`) when the position is read, and every
- * other row keeps its own. "More than one" is per identity column: two values differ iff some column's
- * `MIN` and `MAX` over the group differ, or the column is NULL in some rows and not in others.
- */
-export function guardTies(
-  rel: Rel, ties: readonly Expr[], identity: readonly Expr[], raise: (dependsOn: Expr) => Expr, fresh: Minter,
-): Rel {
-  const encounter = rel.channels.find((channel) => channel.role === 'encounter');
-  if (!encounter) throw new Error('RelIR lowering: guardTies() needs an encounter channel to guard');
-  const spec: WindowSpec = { partitionBy: ties, orderBy: [] };
-  // Two traversers differ by the merge's TYPED equality, not SQLite's: `MIN`/`MAX` of 1 and 1.0 agree.
-  identity = typedEquality(rel, identity);
-  const name = (kind: string, i: number): string => `tg_${kind}${i}`;
-  const specs = identity.flatMap((expr, i) => [
-    [name('lo', i), { kind: 'window-expr', fn: 'min', args: [expr], spec }],
-    [name('hi', i), { kind: 'window-expr', fn: 'max', args: [expr], spec }],
-    [name('nn', i), { kind: 'window-expr', fn: 'count', args: [expr], spec }],
-  ] as const);
-  const ALL = 'tg_all';
-  const windowed = make.window({
-    id: fresh('tg'), input: rel, channels: rel.channels,
-    type: typeOf(...rel.type.cols, ...specs.map(([n]) => meta(n, 'any', true)), meta(ALL, 'int')),
-    specs: [...specs, [ALL, { kind: 'window-expr', fn: 'count', args: [compilerInt(1)], spec }]],
-  });
-  const at = (n: string): Expr => col(windowed.id, n);
-  const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
-  const tied = identity.map((_, i): Expr => or(
-    { kind: 'binary', op: 'is not', left: at(name('lo', i)), right: at(name('hi', i)) },
-    { kind: 'binary', op: 'and', left: { kind: 'binary', op: '>', left: at(name('nn', i)), right: compilerInt(0) }, right: { kind: 'binary', op: '<', left: at(name('nn', i)), right: at(ALL) } },
-  )).reduce(or);
-  return make.project({
-    id: fresh('tp'), input: windowed, channels: rel.channels, type: rel.type,
-    exprs: rel.type.cols.map((column) => [column.name, column.name === encounter.col
-      ? { kind: 'case', whens: [[tied, raise(at(column.name))]], else: at(column.name) }
-      : at(column.name)] as const),
   });
 }
 

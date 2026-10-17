@@ -10,7 +10,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { withChannel } from '../../channels.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { inferredVtype } from './predicate.ts';
@@ -524,7 +524,7 @@ export function groupRows(
   // A PER-ORIGIN group (`local(__.out().group().by(k))`) carries `origin` as a plain column that `groupMap`
   // CONSULTS as an extra GROUP BY key — `origin` is `undefined` group policy, so it can never be a grouped
   // Aggregate passenger; it rides as data (like `KEY_COL`) and is re-declared as the channel on the output.
-  const origin = input.channels.find((channel) => channel.role === 'origin');
+  const origin = originOf(input.channels);
   // A COLLECTING group states its member order, and only an ELEMENT relation has the `id` column the
   // rowid fallback below reads — a value relation has none, and a PROPERTY relation's `id` is the
   // OWNER's rather than the property's. `analyzeChain` demands an encounter for every `group()`, so

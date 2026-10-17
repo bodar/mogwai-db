@@ -1,6 +1,6 @@
-import { BRANCH_KINDS, type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
+import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import { eachChildChain, rawBodies, someStepDeep } from './walk.ts';
+import { rawBodies, someStepDeep } from './walk.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
 //
@@ -748,78 +748,16 @@ export function slicedAfter(steps: readonly IRStep[], at: number): boolean {
 }
 const WHOLE_STREAM: ReadonlySet<string> = new Set([...REDUCING, 'order', 'barrier', 'dedup']);
 
-/** The steps whose output arrival order is a BRANCH's — the `BranchStep`s (`BRANCH_KINDS`, and a folded
- *  `branch()`/`option()` cluster). */
-const BRANCH_ORDERED: ReadonlySet<string> = new Set([...BRANCH_KINDS, 'branch']);
-/** The hosts whose CHILD's output stream becomes this traversal's stream, so the child's arrival order is
- *  this stream's: `LocalStep` emits its child's traversers, `flatMap()` splits its body's off the parent, and
- *  a `repeat()` body's output is the loop's. */
-const STREAMS_CHILD: ReadonlySet<string> = new Set(['local', 'flatMap', 'repeat']);
 /** The global reductions whose ONE value carries no member order — nothing upstream of them is readable as
  *  an arrival order downstream. (`fold`/`group`/`cap` keep their members in arrival order, so an `unfold()`
  *  behind one re-emits that order: not resets.) */
 const ORDER_FREE: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', 'mean']);
-
-/**
- * Does the stream reaching `steps[at]` arrive in an order a BRANCH decided — the output of a `union`/
- * `choose`/`coalesce`/`optional`/`branch` at this level, or of one inside a child whose output stream
- * becomes this one (`STREAMS_CHILD`), at any depth — with no order-free reduction since? `inherited` answers
- * for the stream a step list is handed (a branch arm receives its host's input; a per-traverser child one
- * traverser, which has no order to inherit).
- *
- * This spine does not yet emit a branch in the reference's order — `BranchStep.standardAlgorithm` walks its
- * arms IN ORDER, one start at a time (barrier-free) or arm-major over all starts (an arm holding a barrier)
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,123-158`),
- * where the branch lowering mints a collect order over the merged rows' content (`withFanoutOrder`,
- * `rel/lower.ts`) or a single-level traverser-major key (RelIR plan §10, cluster B). So every step that READS
- * the arrival order to decide its answer — a `TraverserSet` merge keeps the FIRST arrival's slot
- * (`…/traverser/util/TraverserSet.java:88-96`), and a stable sort keeps ties in that merged order
- * (`…/step/map/OrderGlobalStep.java:78`) — would answer from the wrong order there, and declines
- * (`mergeEqual`, `rel/lower.ts`). Conservative by construction: an unreadable child body counts as one.
- */
-export function branchOrderedAt(steps: readonly IRStep[], at: number, inherited = false): boolean {
-  for (let i = at - 1; i >= 0; i--) {
-    const verdict = branchOrderVerdict(steps[i]!);
-    if (verdict !== undefined) return verdict;
-  }
-  return inherited;
-}
-
-/**
- * The same question asked FORWARD: is the stream leaving `steps[from - 1]` READ in an order a branch then
- * decides — does it pass through a branch with no order-free reduction after it? `inherited` answers past
- * the end of the list (a branch arm's output is re-ordered by its branch, `orderReadAfter`). A step whose
- * whole purpose is an order — an explicit `barrier()`, an `order()` whose ties keep the arrival order —
- * hands its reader the branch's order instead there, and declines (`mergeEqual`). A reader BEFORE the branch
- * (a slice) took its members from the right order; it is the order that survives the branch that is wrong.
- */
-export function branchOrderedAfter(steps: readonly IRStep[], from: number, inherited = false): boolean {
-  let branched = false;
-  for (let i = from; i < steps.length; i++) {
-    const verdict = branchOrderVerdict(steps[i]!);
-    if (verdict === false) return false;
-    branched ||= verdict === true;
-  }
-  return branched || inherited;
-}
 
 /** Is the stream leaving `steps[from - 1]` read in ANY order — does it reach the end of the list with no
  *  order-free reduction (`ORDER_FREE`) on the way? `inherited` is whether the list's own output is read. */
 export function orderReadAfter(steps: readonly IRStep[], from: number, inherited = true): boolean {
   for (let i = from; i < steps.length; i++) if (ORDER_FREE.has(steps[i]!.name) && !isLocalScope(steps[i]!)) return false;
   return inherited;
-}
-
-/** What one step does to the question "is this stream in a branch's order": an order-free reduction ends it
- *  (`false`), a branch — or a child whose output stream becomes this one and holds one, at any depth —
- *  answers `true`, anything else passes it on (`undefined`). */
-function branchOrderVerdict(s: IRStep): boolean | undefined {
-  if (ORDER_FREE.has(s.name) && !isLocalScope(s)) return false;
-  if (BRANCH_ORDERED.has(s.name) || s.optionArms?.length) return true;
-  if (!STREAMS_CHILD.has(s.name)) return undefined;
-  let branched = false;
-  eachChildChain(s, rawBodies({}), (chain) => { branched ||= branchOrderedAt(chain as readonly IRStep[], chain.length); }, () => { branched = true; });
-  return branched || undefined;
 }
 
 export function mayMergeUnplaced(steps: readonly IRStep[], at: number): boolean {
