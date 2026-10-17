@@ -1,4 +1,4 @@
-import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
+import { parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { sideEffectShadowedLabel, unlocatableSubPath } from './ir/labels.ts';
@@ -48,6 +48,9 @@ function applyDiscard(plan: Executable): Executable {
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
   const tree = parseGremlin(gremlin);
+  // A terminal method the step walk cannot see (`next()`, `toSet()`, …) asks a different question than
+  // the stream does — decline rather than answer the stream for it (`unansweredTerminalMethod`).
+  if (unansweredTerminalMethod(tree) !== null) throw new UnsupportedTraversal(gremlin);
   const sackInit = extractSack(tree, params);
   // BEFORE `runPasses`, because a `verify` Pass parses the write steps' arguments and a
   // `__.select(k)` key or value IS a `withSideEffect` constant — verifying without the registry

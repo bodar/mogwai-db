@@ -116,7 +116,8 @@ function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string
   // (the client's Long deserializer is magnitude-dependent) — so count()/groupCount() longs, which
   // are small, compare as Numbers, exactly as TinkerPop's own harness (parseFloat) treats `.l`.
   // int/double/float/byte/short → number.
-  const num = t.match(/^d\[(-?[\d.eE+]+)\]\.([bsilfnd])$/);
+  // `d[-Infinity].d` — Java's `Math.log(0)`; the decoded Double is a JS `±Infinity`, which `Number()` reads.
+  const num = t.match(/^d\[(-?(?:[\d.eE+]+|Infinity))\]\.([bsilfnd])$/);
   if (num) {
     if (num[2] === 'n') return 'L' + BigInt(num[1]).toString();
     if (num[2] === 'l') {

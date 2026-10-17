@@ -4,6 +4,7 @@ import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, m
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
+import { isReferenceBarrier } from './bulk.ts';
 import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -1370,6 +1371,44 @@ export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, a
   return markAtDepth(steps, params, (s) => SLICE_STEPS.has(s.name), (s) => { s.earlyLimitSuppressed = true; });
 }
 
+/**
+ * `BranchStep.hasBarrier` IS A CONSTRUCTION-TIME FACT — set in `addChildOption` from
+ * `getStepsOfAssignableClassRecursively(Barrier.class, option)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88`),
+ * i.e. over the options AS WRITTEN, before any strategy runs, and never recomputed. So it is read off the RAW
+ * chain here, at every depth, and stamped on the `union`/`choose`/`branch` step (`IRStep.hasBarrier`), before
+ * a rewrite of ours can delete the barrier that set it: `isAlwaysProductiveFilterNoOp` drops
+ * `where(outE().count())` as inert, which made `V().union(values('name'), where(outE().count()).values('age'))`
+ * TRAVERSER-major where the reference drains it ARM-major. Every reader of the fact (`branchMajor`,
+ * `branchHoldsBarrier`) consults the stamp. The options are the union's arguments, a predicate `choose`'s
+ * true/false bodies, and the bodies of the `option()` steps that follow a `choose`/`branch` — never the
+ * choice traversal itself, which is not an option.
+ */
+export function markBranchBarrier(steps: Step[], params: Record<string, any>): IRStep[] {
+  const read = rawBodies(params);
+  const holds = (value: unknown): boolean => {
+    if (!isNested(value)) return false;
+    const body = read(value.nested);
+    return !body || someStepDeep(body, read, (s) => isReferenceBarrier(s as IRStep), true);
+  };
+  let changed = false;
+  const marked = steps.map((s, at) => {
+    const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markBranchBarrier(inner, params));
+    let options: readonly Arg[] = [];
+    if (s.name === 'union') options = s.args;
+    else if (s.name === 'choose' || s.name === 'branch') {
+      options = s.name === 'choose' ? s.args.slice(1) : [];
+      for (let next = at + 1; next < steps.length && steps[next]!.name === 'option'; next++)
+        options = [...options, ...steps[next]!.args.slice(-1)];
+    }
+    const hasBarrier = options.some((option) => holds(option.value));
+    if (!hasBarrier && !argsChanged) return s;
+    changed = true;
+    return { ...s, ...(argsChanged ? { args } : {}), ...(hasBarrier ? { hasBarrier: true } : {}) };
+  });
+  return (changed ? marked : steps) as IRStep[];
+}
+
 /** Mark each step `matches` accepts, at every depth, preserving identity where nothing was marked. */
 function markAtDepth(steps: Step[], params: Record<string, any>, matches: (s: Step) => boolean, mark: (s: IRStep) => void): IRStep[] {
   let changed = false;
@@ -1789,7 +1828,13 @@ interface EntryWalk {
   readonly entry: ReadonlySet<string>;
   readonly maybe: ReadonlySet<string>;
   readonly ambiguous: boolean;
+  /** A label bound again by a NON-SPLITTING step after an unlabelled split, while the last labelled entry
+   *  holds it — see `valueMergedRebind`. */
+  readonly valueMerged: boolean;
 }
+
+/** Stands for a label `retractUnreadAlias` removed — no `as()` can name it, so it never matches a real one. */
+const RETRACTED_LABEL = '\u0000retracted';
 
 function mergeLabelsFrom(
   steps: IRStep[], seed: ReadonlySet<string>, seedMaybe: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null,
@@ -1797,6 +1842,12 @@ function mergeLabelsFrom(
   let entry = new Set(seed);
   let maybe = new Set(seedMaybe);
   let ambiguous = false;
+  let valueMerged = false;
+  // The labels of the most recent LABELLED entry — the head of a labelled-path traverser's path — and
+  // whether a non-splitting step has passed since the current entry opened (so an `as()` here labels a
+  // FILTER step, not the split that opened the entry).
+  let head = new Set<string>();
+  let sealed = false;
   let changed = false;
   const out: IRStep[] = [];
   for (const s of steps) {
@@ -1805,6 +1856,7 @@ function mergeLabelsFrom(
         if (typeof a.value !== 'string') return true;
         if (entry.has(a.value)) return false;
         if (maybe.has(a.value)) { ambiguous = true; maybe.delete(a.value); }
+        if (sealed && entry.size === 0 && head.has(a.value)) valueMerged = true;
         entry.add(a.value);
         return true;
       });
@@ -1816,6 +1868,8 @@ function mergeLabelsFrom(
     if (seeded.host !== s) changed = true;
     out.push(seeded.host);
     if (seeded.arms?.some((arm) => arm !== 'identity' && arm !== 'unreadable' && arm.ambiguous)) ambiguous = true;
+    if (seeded.arms?.some((arm) => arm !== 'identity' && arm !== 'unreadable' && arm.valueMerged)) valueMerged = true;
+    if (entry.size) head = new Set(entry);
     if (ENTRY_PASSING_HOSTS.has(s.name) && !s.opensPathEntry && seeded.arms) {
       // The entry after the host is the entry its traverser's ARM ended on.
       const ends = seeded.arms.map((arm) => arm === 'identity' ? { entry, maybe } : arm === 'unreadable' ? null : arm);
@@ -1832,9 +1886,13 @@ function mergeLabelsFrom(
       maybe = new Set([...any].filter((l) => !certain.has(l)));
       continue;
     }
-    if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s) || s.opensPathEntry) { entry = new Set(); maybe = new Set(); }
+    if (!KEEPS_PATH_ENTRY.has(s.name) || isLocalScope(s) || s.opensPathEntry) { entry = new Set(); maybe = new Set(); sealed = false; }
+    else sealed = true;
+    // A label `retractUnreadAlias` dropped after this step is still on the reference's path
+    // (`IRStep.labelsRetracted`): the entry IS labelled there, so a later `as()` on it is no rebind.
+    if (s.labelsRetracted) entry.add(RETRACTED_LABEL);
   }
-  return { steps: changed ? out : steps, entry, maybe, ambiguous };
+  return { steps: changed ? out : steps, entry, maybe, ambiguous, valueMerged };
 }
 
 /** A host's STREAM arms — the bodies one of which a traverser leaves the host through — or `null` when
@@ -1901,10 +1959,32 @@ function seedBodies(
 export function ambiguousEntryBind(steps: readonly Step[], params: Record<string, any>): boolean {
   const read = rawBodies(params);
   let hit = false;
+  let merged = false;
   eachChainDeep(steps, read, (chain) => {
-    if (!hit && mergeLabelsFrom(chain as IRStep[], new Set(), new Set(), read).ambiguous) hit = true;
+    const walk = mergeLabelsFrom(chain as IRStep[], new Set(), new Set(), read);
+    if (walk.ambiguous) hit = true;
+    if (walk.valueMerged) merged = true;
   });
-  return hit;
+  return hit || (merged && valueMergedRebind(steps, read));
+}
+
+/**
+ * A REBIND WHOSE ENTRY THE DATA DECIDES. Without a PATH requirement the reference runs a LABELLED-path
+ * traverser, which records only labelled steps; a label on a step that does not split (a filter) is added by
+ * `addLabels`, which EXTENDS the head entry when the current object EQUALS it and opens a new one otherwise
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:82-87`).
+ * So after an unlabelled split, `V(1).as('a').both().both().has('name').as('a')` binds `a` once where
+ * `both().both()` came back to v[1] and twice elsewhere — and a `Pop.all`/`Pop.mixed` read counts the
+ * binds (`select(all,'a').count(local)` answered 2 for all seven). A Pop.first/last read sees the same object
+ * either way, and a PATH requirement (`path`/`simplePath`/`cyclicPath`) switches to the full-path traverser
+ * whose entries this compiler models exactly — so only a history read without one declines.
+ */
+function valueMergedRebind(steps: readonly Step[], read: BodyReader): boolean {
+  if (someStepDeep(steps, read, (s) => PATH_FAMILY.has(s.name))) return false;
+  return someStepDeep(steps, read, (s) => s.args.some((a) => {
+    const pop = (a.value as { pop?: unknown } | null)?.pop;
+    return pop === 'all' || pop === 'mixed';
+  }));
 }
 
 /** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`

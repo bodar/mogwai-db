@@ -179,7 +179,7 @@ const collectionKeyOf = (step: IRStep): string | null => {
  *  step's OWN text, so a re-parse reproduces it. */
 const TEXTLESS_FIELDS = [
   'modulators', 'withArgs', 'optionArms', 'repeatRegion', 'from', 'to',
-  'productiveBy', 'perTraverser', 'opensPathEntry', 'unrollSuppressed', 'landedSource', 'graphTag',
+  'productiveBy', 'perTraverser', 'opensPathEntry', 'unrollSuppressed', 'landedSource', 'graphTag', 'hasBarrier',
 ] as const;
 
 /** Does an IR step denote the same thing as `parsed`, the step its source text parses to? Same name,

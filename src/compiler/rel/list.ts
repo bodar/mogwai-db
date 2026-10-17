@@ -20,7 +20,7 @@ import { stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
-import { inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { exactWideTotal, inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 /** The column a list reducer carries its members' class pair in (`numberClassPair`). */
 const CLASS_PAIR = 'cw';
 import { transformExpr } from './transform.ts';
@@ -913,7 +913,7 @@ export function listRetype(
       rel: withPayload(held,
         // A `mean` is a REAL (a Double) or, over an all-null list, a NULL whose class is none — `inferred` names both,
         // so a null mean never carries a number's tag past `math()`'s check (`MeanGlobalStep.java:50-58,80-84`).
-        [['v', v], ['vt', tag ? pairedNumberClass(col(held.id, CLASS_PAIR), v, inferred)
+        [['v', step.name === 'sum' ? exactWideTotal(v) : v], ['vt', tag ? pairedNumberClass(col(held.id, CLASS_PAIR), v, inferred)
           : inferred]],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
       type: REDUCED_TYPE, result: 'number' as const, ...productive,

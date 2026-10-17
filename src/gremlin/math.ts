@@ -58,6 +58,12 @@ export interface MathOps<T> {
 /** One of exp4j's built-in functions, expressed in the target algebra's primitives. All unary. */
 type MathFn = <T>(a: T, ops: MathOps<T>) => T;
 
+/** A logarithm whose zero is `-Infinity` — Java's `Math.log(0)`/`Math.log10(0)` (and exp4j's `log2`, a quotient
+ *  of `Math.log`s) answer the VALUE `-Infinity` there, where SQLite's `LN(0)` is NULL. A negative argument stays
+ *  NULL: it is the NaN Java answers, which the projector defers (`nanDeferred`, `projector.ts`). */
+const logAt = <T>(fn: string, a: T, ops: MathOps<T>): T =>
+  ops.conditional([[ops.compare('=', a, ops.real('0')), ops.real('-Infinity')]], ops.call(fn, [a]));
+
 /** exp4j's built-in functions → SQL. `log` = natural log (→ `LN`); `signum`/`cbrt` have no
  *  SQLite builtin, so they expand through `conditional`. The math functions are provided by
  *  SQLite's math extension (verified present on both DO SQLite 3.47 and Bun 3.53). */
@@ -77,9 +83,9 @@ const FN: Record<string, MathFn> = {
     ], ops.nul());
   },
   exp: (a, ops) => ops.call('EXP', [a]),
-  log: (a, ops) => ops.call('LN', [a]),   // exp4j `log` is the natural log; SQLite `log()` is log10
-  log10: (a, ops) => ops.call('LOG10', [a]),
-  log2: (a, ops) => ops.call('LOG2', [a]),
+  log: (a, ops) => logAt('LN', a, ops),   // exp4j `log` is the natural log; SQLite `log()` is log10
+  log10: (a, ops) => logAt('LOG10', a, ops),
+  log2: (a, ops) => logAt('LOG2', a, ops),
   sin: (a, ops) => ops.call('SIN', [a]),
   cos: (a, ops) => ops.call('COS', [a]),
   tan: (a, ops) => ops.call('TAN', [a]),

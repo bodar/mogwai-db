@@ -208,6 +208,11 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
   if (inner.length < 2 || inner[0]!.name !== 'select') return null;
   const starts = (inner[0]!.args ?? []).map((s) => s.value).filter((v): v is string => typeof v === 'string');
   if (starts.length !== 1) return null;
+  // A leg re-roots at the label's LAST binding (`MatchStartStep`/`WhereStartStep` read `Pop.last`). A
+  // `select(Pop.first|all|mixed, k)` reads another end of the history (`SelectOneStep.java:64` hands the Pop
+  // to `Scoping.getScopeValue`), so it is not this leg: `where(select(Pop.first,'a').values('age'))` read
+  // the last `a`. Declined here, it reaches the filter seam's select re-root, which honors the Pop.
+  if ((inner[0]!.args ?? []).some((s) => typeof s.value !== 'string' && (s.value as { pop?: unknown } | null)?.pop !== 'last')) return null;
   const start = starts[0]!;
   const body = inner.slice(1);
   // A mid-body re-anchor binds a variable; a leg binds nothing, so decline (a later phase).

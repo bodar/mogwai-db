@@ -41,11 +41,11 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, freshTraverserRow, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource, type FloatSource } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
-import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { deferralExpr, raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { promotedExtremum, resultIsDecimal, widensDoubleToDecimal } from './float.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
@@ -279,7 +279,7 @@ const SLICE_READERS: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 't
 /** The steps that READ the arrival order of the stream reaching them: the positional slices, the collecting
  *  barriers whose members keep arrival order, and the steps that keep a FIRST arrival (`TraverserSet`'s
  *  merge, a stable sort's ties, `dedup`). */
-const ORDER_READERS: ReadonlySet<string> = new Set([
+export const ORDER_READERS: ReadonlySet<string> = new Set([
   'limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'store', 'cap', 'group', 'tree', 'dedup', 'order', 'barrier', 'sample',
 ]);
 
@@ -2558,7 +2558,7 @@ function scalarTail(
         const v = col(summed.id, 'v');
         rel = make.project({
           id: fresh('rc'), input: summed, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', v], ['vt', reducedNumberClass(summed.id, v, inferredVtype(v))]],
+          exprs: [['v', exactWideTotal(v)], ['vt', reducedNumberClass(summed.id, v, inferredVtype(v))]],
         });
         out = { ...numeric, productiveNull: true };
         continue;
@@ -2573,7 +2573,7 @@ function scalarTail(
       const uv = col(untagged.id, 'v');
       rel = make.project({
         id: fresh('rc'), input: untagged, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-        exprs: [['v', uv], ['vt', inferredVtype(uv)]],
+        exprs: [['v', step.name === 'sum' ? exactWideTotal(uv) : uv], ['vt', inferredVtype(uv)]],
       });
       out = { ...numeric, productiveNull: true };
       continue;
@@ -5816,7 +5816,7 @@ function aliasValueWhere(
   if (!ring || !ring.length) return null;
   const seam = childSeam(ctx, fresh);
   const hostOf = (proj: NonNullable<ReturnType<typeof aliasProjection>>): ChildHost =>
-    ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
+    ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: freshTraverserRow(rel) });
   // Under `ProductiveByStrategy` an unproductive `by()` is KEPT as a null and compared; that keep-null
   // compare is not built, so it declines (as the single-binary path does).
   if (isProductiveBy(step)) return 'decline';
@@ -5912,7 +5912,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         }
         // VALUE compare under a `by(key)`: project the key off each alias's element host, compare.
         const hostOf = (proj: NonNullable<typeof projA>): ChildHost =>
-          ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
+          ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: freshTraverserRow(rel) });
         const seam = childSeam(ctx, fresh);
         // Under `ProductiveByStrategy` a non-productive `by()` KEEPS the row as a real NULL, a
         // null-keeping compare this does not build, so DECLINE.

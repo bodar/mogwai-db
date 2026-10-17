@@ -6,6 +6,7 @@ import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { countOf, isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
+import { isReferenceBarrier, placedMergeBefore } from '../ir/bulk.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -451,34 +452,20 @@ export function groupRows(
   // encoding is identical to `byNode`'s (both `producedMemberNode`), so only the shape is new.
   let member: Expr | undefined;
   let singleOf: MapOf = { kind: 'scalar' };
-  let entryListMember = false;
-  let entryRootedList = false;
   if (valueBy && !lastOnly) {
     if (valueBy.key.kind === 'child') {
       const produced = child.scalar(valueBy.key.body, host);
       if (!produced) return null;
-      // A child list is already the root-encoded member array. Keep that retained form under its
-      // list node: the map's `valOf` routes the direct framing projection through `listNodeExpr`,
-      // while an entry-side read keeps the rowids for `unfoldList` to re-enter. Expanding here would
-      // make a single list value look like raw rowids to that later projection and frame nulls.
-      entryListMember = host.kind === 'scalar' && !!host.entry && produced.framing.kind === 'list';
-      // A re-sourced entry child (`by(__.V()…)`) itself produces the group's folded List.
-      // Unlike `by(select(values))`, that list is not one member to collect again: GroupStep's
-      // value traversal owns the fan-out, so retain the one list node as the value.
-      entryRootedList = entryListMember && (valueBy.key.body[0]?.name === 'V' || valueBy.key.body[0]?.name === 'E');
-      const node = entryRootedList
-        // The rooted child already aggregated its fan-out to retained rowids. Keep those rowids
-        // under the list node; `producedMemberNode` would expand them one container too early,
-        // and the map framer would then (correctly) reject the node as a rowid list.
+      // A CHILD value `by()` with no barrier is ONE value per traverser, ASSIGNED (`Operator.assign`), at
+      // every host — an entry host's `by(select(Column.values))` included. Only a `ColumnTraversal`
+      // (`by(Column.values)`, the token form, not this child) gets `convertValueTraversal`'s injected
+      // `map(…).fold()` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:92-101`);
+      // `__.select(Column.values)` is a `TraversalMapStep` (`…/dsl/graph/GraphTraversal.java`), so the value is
+      // the entry's own list, not a one-member list of it. A list keeps its retained rowids under its list
+      // node, which the map's `valOf` routes through `listNodeExpr` at framing.
+      const node = produced.framing.kind === 'list'
         ? listNode(produced.expr)
-        : entryListMember
-        // The entry's list is the member of the new collecting group, like `by(Column.values)`.
-        // Its typed-tree copy expands the retained rowids, while the entry relation remains suitable
-        // for a following `unfold()` child body.
-        ? memberNodeOf(produced, source, fresh)
-        : produced.framing.kind === 'list'
-          ? listNode(produced.expr)
-          : memberNodeOf(produced, source, fresh);
+        : memberNodeOf(produced, source, fresh);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
@@ -622,7 +609,7 @@ export function groupRows(
       counting: !collecting,
       keyElem: elementKey?.elem,
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
-      single: lastOnly || (valueBy?.key.kind === 'child' && (!entryListMember || entryRootedList)),
+      single: lastOnly || valueBy?.key.kind === 'child',
       singleOf,
       ...(memberOf ? { memberOf } : {}),
       // A by()-less entry re-group (`memberOf` set) has no value `by()` to be unproductive, and its member
@@ -1029,6 +1016,18 @@ function groupCollected(
   // exists for a pre-fold body. THE POOLING needs a rowid to name each child row's parent, so only an
   // ELEMENT host reaches it — `origin` is typed `int` and a value stream has none.
   if (!pre.length || host.kind !== 'element') return null;
+  // THE VALUE TRAVERSAL RUNS ITS OWN STRATEGIES, once per member: `GroupStep.projectTraverser` resets it and
+  // adds ONE start (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:111-114`),
+  // and `LazyBarrierStrategy` puts a `NoOpBarrierStep` after its second flat-map, which merges equal
+  // traversers of that member's sub-stream at the first one's place before the fold collects them
+  // (`by(out().in().values('name').fold())` is `[marko,marko,marko,josh,peter]`). The pool collects rows in
+  // their arrival order unmerged, so where the scan places such a merge before the fold, decline.
+  // Asked up to the body's first `Barrier`: the pool is cut THERE (`Grouping.determineBarrierStep`), and a
+  // collecting barrier's own merge (a pooled `order()`) is that step's, sorted equal values being adjacent.
+  const cut = pre.findIndex((bodyStep) => isReferenceBarrier(bodyStep));
+  // The EXACT scan only: where it cannot see (a label read in the body) the pool keeps its previous answer —
+  // residue recorded in the build plan (§10, cluster A), not a guess in either direction.
+  if (placedMergeBefore(pre, cut < 0 ? pre.length : cut) === true) return null;
   // A `dedup()` in the value traversal belongs to the OUTER group key, not to the whole child stream.
   // `GroupStep.projectTraverser` resets its dedup state per value traversal and the barrier accumulates
   // per key (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:113,127-128,205-216`;

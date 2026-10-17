@@ -1,3 +1,4 @@
+import { writesAnywhere } from '../../ir/strategies.ts';
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { exprMayRaise } from '../../../rel/raise.ts';
@@ -18,7 +19,7 @@ import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/fronten
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
-import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, type ChainCtx, type ElementSubject } from './chain.ts';
+import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
 import { foldedListSet, nestedFirstValue, scalarChild, scalarChildDeferred } from './reduction.ts';
 
@@ -64,8 +65,12 @@ function inOrder(op: string, left: Expr | undefined, right: Expr): Expr {
  * to get the child's own filter recursion wrong.
  */
 export function correlatedExists(
-  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
+  // A WRITE in the body is a statement this correlated EXISTS has nowhere to declare — the one
+  // `writesAnywhere` authority `scalarChild` and `lowerRankHead` consult (`where(out().mergeE(…))` reached the
+  // checker's internal "Ref 'pwN' is not a Plan binding").
+  if (writesAnywhere(body, ctx.params)) return null;
   // A MOVEMENT NEEDS AN ELEMENT TO MOVE FROM. A scalar traverser has no adjacency, so this arm is not
   // "not yet taught" for one — it is the arm that does not apply, and `bodyPredicate` falls through to
   // the two that do.
@@ -84,7 +89,11 @@ export function correlatedExists(
   // A correlated hop threads NO carried state — an EXISTS asks whether a row is there, never in what
   // order or how many times — so the child starts from the bulk channel `movement` gave it and any
   // order the body mints is the body's own.
-  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inOrderFreeBody(ctx), fresh, NO_ALIASES);
+  // The hop starts a fresh relation with NO alias channel, but the labels the subject's traverser holds are
+  // still on its path (`TraversalUtil.prepare` splits the WHOLE traverser into the child): they ride in as
+  // ENCLOSING (`withEnclosing`), so a `select('a')` past the hop DECLINES rather than reading an absent
+  // label as the empty answer — `V().as('a').where(out().select('a'))` answered `[]` for every vertex.
+  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, withEnclosing(inOrderFreeBody(ctx), aliases), fresh, NO_ALIASES);
   if (!tail) return null;
   // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
   // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,
@@ -172,6 +181,8 @@ function matchPredicate(
 export function bodyPredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
 ): Expr | null {
+  // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
+  if (writesAnywhere(body, ctx.params)) return null;
   let clause: Expr | undefined;
   // A filter step's raise is the row's only where the steps before it PASSED the traverser on — the
   // `and` connective's rule, since a run of filters is one (`sourceFilter`'s connective arm).
@@ -179,7 +190,7 @@ export function bodyPredicate(
   for (const [at, step] of body.entries()) {
     const stepSink: RaiseSink | undefined = sink ? {} : undefined;
     const filter = sourceFilter(step, subject, fresh, ctx, aliases, stepSink);
-    if (!filter) return correlatedExists(body, subject, fresh, ctx, false)
+    if (!filter) return correlatedExists(body, subject, fresh, ctx, false, aliases)
       ?? valuePredicate(body, subject, fresh, ctx, false, aliases, sink)
       ?? projectionProductive(body, subject, fresh, ctx, aliases, sink);
     // A filter that may raise meets the traversers the reference hands it only where
@@ -263,6 +274,8 @@ export function childPredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
   aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
 ): Expr | null {
+  // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
+  if (writesAnywhere(body, ctx.params)) return null;
   // A body that leads with `select(<label>)` REROOTS the subject to the aliased traverser and continues
   // — `Scoping.getScopeValue` resolves a label off the traverser's scope for a filter body exactly as it
   // does for a projection, so `where(__.select('n').hasLabel('person'))` is a filter on the element `n`
@@ -346,7 +359,7 @@ function childPredicateDirect(
   if (!negated) return bodyPredicate(body, subject, fresh, ctx, aliases, sink);
   // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
   // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
-  const exact = correlatedExists(body, subject, fresh, ctx, true)
+  const exact = correlatedExists(body, subject, fresh, ctx, true, aliases)
     ?? valuePredicate(body, subject, fresh, ctx, true, aliases, sink);
   if (exact) return exact;
   const positive = bodyPredicate(body, subject, fresh, ctx, aliases, sink);
@@ -378,6 +391,12 @@ export function valuePredicate(
   if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
   const hosted = hostedChild(body.slice(0, -1), childHostOf(subject, aliases), ctx, fresh, sink);
   if (!hosted) return null;
+  // ONE value is the comparison's subject only where the prefix had ONE to give: `is()` tests EVERY result
+  // of a multi-valued read (`values('loc')` over `loc = [a, b]`), and the filter passes when ANY survives —
+  // the first SURVIVOR, which `scalarChild` builds for the whole body (`propertyFirstPassing`) and
+  // `projectionProductive` reads. Comparing the first stored value answered `where(values('loc').is('b'))`
+  // with a dropped vertex.
+  if (hosted.produced.yields !== 'one') return null;
   const clause = valueClause(hosted.produced, last, subject, fresh, ctx, negate, aliases);
   if (clause && sink && hosted.raise) sink.raise = hosted.raise;
   return clause;

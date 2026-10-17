@@ -373,7 +373,7 @@ function nextReferenceStep(steps: readonly IRStep[], i: number): IRStep | undefi
  *  every start enters each arm's own set and is merged there, so the branch's output is no longer
  *  per-traverser. A folded `option()` cluster or an unreadable arm answers `true`. */
 function branchHoldsBarrier(step: IRStep): boolean {
-  if (step.optionArms?.length) return true;
+  if (step.optionArms?.length || step.hasBarrier) return true;
   const read = rawBodies({});
   return (step.args ?? []).some(({ value }) => {
     if (!isNested(value)) return false;
@@ -681,6 +681,53 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
  */
 export function bulkingPositions(steps: readonly IRStep[], rooted: boolean, upTo = steps.length): readonly BulkingPosition[] | 'unknown' {
   return scan(steps, rooted, 'exact', upTo);
+}
+
+/**
+ * DOES A BRANCH OPTION MERGE EQUAL TRAVERSERS AT ITS OWN END? Every `BranchStep` option is closed by an
+ * `EndStep` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85`),
+ * which is neither a `Barrier` nor the `EmptyStep` that ends any other traversal — so `LazyBarrierStrategy`
+ * puts its `NoOpBarrierStep` after an option's LAST flat-map too
+ * (`…/strategy/optimization/LazyBarrierStrategy.java:116-127`), where the root and a `local()`/`by()` child
+ * get none: `V(1,4,6).out().values('name').fold()` keeps every `lop` where it arrived, while
+ * `union(…, out().values('name'))` merges them at the first one's place. The option is scanned as the child
+ * traversal it is, with a non-barrier step after its end; `true` where the superset scan places a merge of
+ * possibly-equal traversers there (or cannot see).
+ */
+export function armEndMerges(body: readonly IRStep[]): boolean {
+  if (!body.length) return false;
+  const closed = [...body, { name: '__end', args: [] } as unknown as IRStep];
+  const positions = scan(closed, false, 'superset', body.length);
+  if (positions === 'unknown') return true;
+  // Only `LazyBarrierStrategy`'s merge is the EndStep's doing; a side-effect barrier at the end merges with or
+  // without it, and that merge is its own step's to reproduce.
+  return positions.some((p) => p.after === body.length - 1 && !p.distinct && p.kind === 'lazy') && !sortedAdjacent(body, body.length - 1);
+}
+
+/**
+ * A merge of EQUAL traversers that are already ADJACENT moves nothing: `order().by(k).values(k)` hands the
+ * barrier after `values(k)` its equal values side by side, so collapsing them at the first one's place keeps
+ * the stream as it was (only the bulk moves, and every reader here counts it).
+ */
+function sortedAdjacent(steps: readonly IRStep[], at: number): boolean {
+  const read = steps[at];
+  const sort = steps[at - 1];
+  const key = read?.name === 'values' && read.args?.length === 1 ? read.args[0]!.value : undefined;
+  if (typeof key !== 'string' || sort?.name !== 'order' || isLocalScope(sort) || sort.modulators?.length !== 1) return false;
+  return sort.modulators[0]![0] === key;
+}
+
+/**
+ * Where the EXACT scan places a `LazyBarrierStrategy` merge of possibly-equal traversers before `at` in a CHILD
+ * traversal — `'unknown'` where it cannot see (a label, a sack, …). The narrower twin of `referenceUnbulkedAt`
+ * for a consumer that reproduces nothing past the scan's sight and keeps its previous answer there. A
+ * retraction barrier after a `select()` of a label bound OUTSIDE the child is left out: every traverser of
+ * one start selects the same object there, so the equal ones are already adjacent.
+ */
+export function placedMergeBefore(steps: readonly IRStep[], at: number): boolean | 'unknown' {
+  const positions = scan(steps, false, 'exact', at);
+  if (positions === 'unknown') return 'unknown';
+  return positions.some((p) => p.after < at && !p.distinct && p.kind === 'lazy' && !sortedAdjacent(steps, p.after));
 }
 
 /**

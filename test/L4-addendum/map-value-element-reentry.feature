@@ -59,9 +59,12 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
       | result |
       | m[{"josh":[["v[lop]","v[ripple]"]],"marko":[["v[vadas]","v[lop]","v[josh]"]],"peter":[["v[lop]"]],"vadas":[[]]}] |
 
-  # The equivalent entry-side child read is a collecting member too, not an assignment scalar.
-  # `Column.values` passes the live value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/
-  # org/apache/tinkerpop/gremlin/structure/Column.java:57-68`), so it frames identically to the token form.
+  # The CHILD-traversal twin is NOT the token form, and frames one list shallower. Only a
+  # `ColumnTraversal` (`by(Column.values)`) gets `convertValueTraversal`'s injected `map(...).fold()`
+  # (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:92-101`);
+  # `__.select(Column.values)` is a GraphTraversal holding a `TraversalMapStep`, so with no barrier the value
+  # is its one result, ASSIGNED (`GroupStep`'s `Operator.assign`) — the entry's own list. The member elements
+  # still re-enter as vertices. (This scenario once asserted the collected form, which is the token's.)
   Scenario: g_V_hasLabelXpersonX_group_byXnameX_byXout_foldX_unfold_group_byXkeysX_byXselect_valuesX
     Given the modern graph
     And the traversal of
@@ -71,7 +74,7 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"josh":[["v[lop]","v[ripple]"]],"marko":[["v[vadas]","v[lop]","v[josh]"]],"peter":[["v[lop]"]],"vadas":[[]]}] |
+      | m[{"josh":["v[lop]","v[ripple]"],"marko":["v[vadas]","v[lop]","v[josh]"],"peter":["v[lop]"],"vadas":[]}] |
 
   # `valueMap()` is a per-traverser Map, not one of Grouping's shorthand value traversals that
   # receives an injected fold (`Grouping.java:92-101`). A group value-by therefore carries the bare

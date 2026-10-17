@@ -14,12 +14,12 @@ import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit, declaredScalarType } from '../const.ts';
-import { byExpr, byNode, propertyVtype, scopedHost } from '../modulator.ts';
+import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, boundBeyondMap, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
-import type { GraphSource } from '../source.ts';
+import { BaseGraph, type GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
@@ -29,7 +29,7 @@ import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
 import { propertyReadOf } from '../property.ts';
-import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
+import { PATH_CHANNEL, PATH_COL, appendValuePosition, extendPath, pathCarried, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, inOrderFreeBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
@@ -270,7 +270,10 @@ export function reductionArm(
   // produces or raises still exhausts the coalesce, and the tail's presence filter then evaluates the raise.
   const produced = scalarChildValue(body, reductionHost(domain, framing, labels), ctx, fresh);
   if (!produced || produced.yields !== 'one' || produced.present !== ALWAYS_PRODUCTIVE) return null;
-  return reductionTail(domain, raisingPresence(produced), fresh, labels, bulked);
+  const tail = reductionTail(domain, raisingPresence(produced), fresh, labels, bulked);
+  // Shared by `coalesce` (a `FlatMapStep`) and `optional` (which forwards the child's traverser), so the
+  // arm cannot say which entry its result opens — drop the path rather than guess (`childResultPath`).
+  return tail && childResultPath(tail, false, fresh);
 }
 
 export function perTraverserChild(
@@ -306,7 +309,28 @@ export function perTraverserChild(
   // The body's ONE result framed as this stream's payload, presence filtered and shed — see
   // `reductionTail`, shared with the `coalesce`/`optional` reduction arm. The tail then continues.
   const tail = reductionTail(rel, produced, fresh, labels, bulked);
-  return tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  if (!tail) return null;
+  const pathed = childResultPath(tail, step.name !== 'local', fresh);
+  return continueAs(pathed.rel, pathed.framing, steps, at + 1, bulked, ctx, fresh, labels);
+}
+
+/**
+ * THE PATH ENTRY a per-traverser child's ONE result leaves on the traverser — the one authority every
+ * correlated-scalar host consults, so a carried path never rides past such a host unextended.
+ *
+ * `map`/`flatMap` (and `coalesce`, a `FlatMapStep`) emit `head.split(result)`: the PRE-child path extended
+ * by exactly the emitted value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`,
+ * `…/step/map/MapStep.java`, `…/traverser/B_LP_O_S_SE_SL_Traverser.java:66-71`), so a scalar result is
+ * APPENDED as a value position — `V(1).map(values('age')).path()` is `[v[1], 29]`, which answered `[v[1]]`.
+ * `local`/`optional` forward the CHILD's own traverser (`…/step/branch/LocalStep.java:80-88`), whose path
+ * depends on the body (a reducing barrier mints a fresh one, `ReducingBarrierStep`), and a non-scalar
+ * result has no value position this can append — both DROP the path, so a later path read declines.
+ */
+function childResultPath(tail: Tail, opensEntry: boolean, fresh: Minter): Tail {
+  if (!pathCarried(tail.rel)) return tail;
+  if (opensEntry && tail.framing.kind === 'scalar' && tail.rel.type.cols.some((column) => column.name === 'v'))
+    return { ...tail, rel: appendValuePosition(tail.rel, tail.framing.type, fresh) };
+  return { ...tail, rel: dropPath(tail.rel, fresh) };
 }
 
 /** The stream barriers that SELF-SCOPE per origin when run inside a per-traverser body — `order()` (a
@@ -1308,10 +1332,18 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   }
   const noneArm = arms.find((a) => a.pick === 'none');
   const unproductiveArm = arms.find((a) => a.pick === 'unproductive');
+  // BOTH `Pick` arms default to IDENTITY when unwritten (`ChooseStep`'s constructor installs a pass-through
+  // for `Pick.unproductive` AND `Pick.none`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/ChooseStep.java:71-79`),
+  // and `BranchStep.applyCurrentTraverser` routes an unproductive choice to the FIRST, never to `Pick.none`
+  // (`…/step/branch/BranchStep.java:161-163`). So a written `none` does not serve an unproductive choice: it
+  // falls to the identity pass-through, which is one value only over a SCALAR host.
+  const identity = (): ChildValue | null => (host.kind === 'scalar' ? scalarHostIdentity(host) : null);
   const noneCV = noneArm ? armValue(noneArm) : null;
-  const unproductiveCV = unproductiveArm ? armValue(unproductiveArm) : null;
+  const unproductiveCV = unproductiveArm ? armValue(unproductiveArm)
+    : choicePresent !== ALWAYS_PRODUCTIVE ? identity() : null;
   if ((noneArm && !noneCV) || (unproductiveArm && !unproductiveCV)) return null;
-  const elseCV: ChildValue | null = noneCV ?? (host.kind === 'scalar' ? scalarHostIdentity(host) : null);
+  if (!unproductiveCV && choicePresent !== ALWAYS_PRODUCTIVE) return null;
+  const elseCV: ChildValue | null = noneCV ?? identity();
   if (!elseCV) return null;
 
   const guard: { readonly when: Expr; readonly cv: ChildValue } | null =
@@ -1762,6 +1794,37 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     // the insertion-order first, which is `map()`'s answer and not `local()`/`flatMap()`'s.
     yields = 'first';
     at = 1;
+    // A FILTER right after the read tests EVERY value, and the first-result answer is the first SURVIVOR —
+    // so the leading `is(P)`s are pushed INTO the property rows (`propertyFirstPassing`) rather than applied
+    // to the first stored value, which over `loc = [a, b]` made `by(__.values('loc').is('b'))` unproductive
+    // and `where(__.values('loc').is('b'))` drop the vertex. The filtered read names the base property
+    // tables, so any other source declines rather than read rows it does not hold.
+    const tests: { readonly pred: unknown; readonly arg: IRStep['args'][number] }[] = [];
+    while (body[at]?.name === 'is' && !body[at]!.modulators?.length) {
+      const pred = body[at]!.args[0]?.value;
+      if (pred == null || body[at]!.args.length !== 1) return null;
+      tests.push({ pred, arg: body[at]!.args[0]! });
+      at++;
+    }
+    if (tests.length) {
+      if (ctx.source !== BaseGraph) return null;
+      // A traversal OPERAND (`is(select(Column.values))`, `is(__.V(x).values(k))`) resolves as the predicate
+      // seam resolves it (`valueClause`, filter.ts): a folded list as a set, anything else as its first value.
+      const subject = hostSubject(host);
+      const operandHost = subject?.kind === 'element' ? subject : null;
+      const passing = propertyFirstPassing(args[0], host, (stored, storedType) => {
+        let all: Expr | undefined;
+        for (const t of tests) {
+          const one = predicateExpr(stored, t.pred, perRowSubject(storedType, stored), t.arg.type ?? null, t.arg.name ?? null, fresh,
+            (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, operandHost, ctx, fresh, host.row?.aliases ?? NO_ALIASES));
+          if (!one) return null;
+          all = and(all, one);
+        }
+        return all ?? null;
+      }, fresh);
+      if (!passing) return null;
+      ({ value, vtype, present } = passing);
+    }
   } else if (leading?.name === 'call') {
     // A `streaming` SERVICE is a value projection like any other, so it leads a body exactly as
     // `values(k)` does — which is what makes `where(__.call(dc).is(3))` and `group().by(__.call(dc))`
@@ -1811,6 +1874,8 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     //
     // Zero-arg only. `sack(Operator.x)` is a MUTATION and not a read, and `loops("a")` names a loop
     // this route does not model — a named `repeat` declines in `walk.ts` before reaching here.
+    // A FRESH traverser (`freshTraverserRow`) holds the INITIAL sack and no loop — not the row's channel.
+    if (host.row?.fresh) return null;
     const carried = host.row?.rel.channels.find((channel) => channel.role === CARRIED_READ[leading!.name]);
     // The state is not carried HERE — `sack()` with no `withSack()`, `loops()` outside a walk. The
     // reference raises for both; declining hands the whole traversal to a route that can say so.
@@ -2025,6 +2090,11 @@ export function valueRun(
     // channel `ByField` does not have. The type tag rides through unchanged (a filter narrows, never
     // retypes). Only a value-`P` `is`; a `typeOf`/gtype assert or a nested-traversal `is` declines.
     if (step.name === 'is' && !step.modulators?.length) {
+      // …over ONE value. A value that is only the FIRST of several (`yields: 'first'`) is not the filter's
+      // subject — `is()` tests every result and the first SURVIVOR is the answer — so it declines here; the
+      // leading `values(k).is(P)` form is answered upstream by filtering the property rows
+      // (`propertyFirstPassing`).
+      if (seed.yields !== 'one') return null;
       const pred = step.args[0]?.value;
       if (pred == null || isNested(pred)) return null;
       const subjType: SubjectType = vtype ? perRowSubject(vtype, value)

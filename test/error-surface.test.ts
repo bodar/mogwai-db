@@ -208,10 +208,13 @@ describe('a negative zero keeps its sign through every set op', () => {
   });
 });
 
-test("math()'s NULL-result deferral names an infinity as well as a NaN (`log(0)` is -Infinity in exp4j)", async () => {
-  const error = await failure("g.inject(1).math('log(0)')");
+// `log(0)`/`log10(0)`/`log2(0)` are the VALUE -Infinity in exp4j (Math.log), which `math.ts`'s `logAt` computes
+// rather than leave SQLite's NULL to the deferral; a genuine NaN (`sqrt(-1)`) still defers.
+test("math(): log(0) is -Infinity, a NaN result defers", async () => {
+  expect(await run("g.inject(1).math('log(0)')")).toEqual(['-Infinityd']);
+  const error = await failure("g.inject(1).math('sqrt(-1)')");
   expect(error).toBeInstanceOf(RaisedByQuery);
-  expect(error.message).toContain('infinity');
+  expect(error.message).toContain('NaN');
 });
 
 describe('a NaN element id declines, never an internal TypeError', () => {

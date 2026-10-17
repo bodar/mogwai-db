@@ -40,6 +40,9 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  *  - `bulkingSuppressed` — the traversal runs `withoutStrategies(LazyBarrierStrategy)` or
  *    `withoutStrategies(PathRetractionStrategy)`, so the implicit barriers `bulkingPositions` models are
  *    not all there.
+ *  - `hasBarrier` — a `union`/`choose`/`branch` whose options, AS WRITTEN, hold a `Barrier` at any depth
+ *    (`markBranchBarrier`): `BranchStep.hasBarrier` is fixed at construction, so a later rewrite that
+ *    removes the barrier (an inert filter dropped) does not unset it.
  *  - `graphTag` — the graph-identity VALUE a synthesized `V()`/`E()` seeds into the `graph` channel
  *    (`channels.ts`), so a multi-graph merge keeps per-graph identity through `dedup`. The nested-branch
  *    federate segment stamps it on every arm of an identity-sensitive merge: a landed arm gets its
@@ -54,7 +57,7 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; earlyLimitSuppressed?: boolean; unrolled?: 'strategy' | 'beyond'; unrolledPhaseEnd?: 'mid' | 'last'; splicedHost?: string; labelsRetracted?: boolean; bulkingSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; earlyLimitSuppressed?: boolean; unrolled?: 'strategy' | 'beyond'; unrolledPhaseEnd?: 'mid' | 'last'; splicedHost?: string; labelsRetracted?: boolean; bulkingSuppressed?: boolean; hasBarrier?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
 
 /** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
  *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?

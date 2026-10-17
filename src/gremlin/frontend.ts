@@ -419,6 +419,25 @@ export function extractStrategies(tree: any, params: Record<string, any>): Strat
  */
 export interface MergePolicy { readonly seed: Arg; readonly operator?: string; }
 
+/**
+ * The query's TERMINAL METHOD other than `toList()` — `next()`, `next(n)`, `tryNext()`, `hasNext()`,
+ * `toSet()`, `toBulkSet()`, `iterate()`, `explain()`, or a trailing `toString()` — as its source text, or
+ * `null`. The grammar admits one after the root traversal (`Gremlin.g4` `query`,
+ * `vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4:29-36`) and the reference EXECUTES it
+ * (`TraversalTerminalMethodVisitor`): `next()` is ONE result, `hasNext()` a Boolean, `toSet()` a deduplicated
+ * set. The step walk never sees it, so `g.V().values('name').next()` answered the whole stream. `toList()` is
+ * the stream itself and is the one this front end answers; the caller declines the rest.
+ */
+export function unansweredTerminalMethod(tree: any): string | null {
+  for (const query of descendants(tree, 'QueryContext')) {
+    if (query.K_TOSTRING?.()) return 'toString()';
+    const terminal = query.traversalTerminalMethod?.();
+    // The rule wraps one labelled alternative (`TraversalTerminalMethod_<name>Context`).
+    if (terminal && descendants(terminal, 'TraversalTerminalMethod_toListContext').length === 0) return terminal.getText();
+  }
+  return null;
+}
+
 /** Pull withSack(seed[, Operator.x]) out of the parse tree, or null if none. */
 export function extractSack(tree: any, params: Record<string, any>): MergePolicy | null {
   const w = descendants(tree, 'TraversalSourceSelfMethod_withSackContext')[0];

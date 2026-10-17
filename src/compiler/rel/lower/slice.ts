@@ -19,7 +19,7 @@ import { payloadCols } from '../build.ts';
 import { exprChildren, freeRelIds } from '../../../rel/walk.ts';
 import { ValueParseError } from '../../../gremlin/coerce.ts';
 import { BY_HOSTS as BY_READERS } from '../../ir/strategies.ts';
-import type { ChildHost } from '../child.ts';
+import { freshTraverserRow, type ChildHost } from '../child.ts';
 import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
 import { pathCarried } from '../path.ts';
@@ -760,7 +760,8 @@ export function dedupByLabels(
       // A `by()` projection reads each label's ELEMENT as its host; a scalar/list alias under a `by()`
       // is a later phase.
       if (proj.read.kind !== 'element') return null;
-      const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
+      // `DedupGlobalStep.java:82` runs the by() on a NEW traverser for the label's value (`freshTraverserRow`).
+      const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: freshTraverserRow(rel) };
       const key = byEqualityKey(by, host, ctx.source, fresh, seam);
       if (!key) return null;
       keyTerms.push(...key.terms);

@@ -354,6 +354,20 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
 }
 
 /**
+ * AN INTEGRAL TOTAL PAST 2^53 RIDES AS DECIMAL TEXT — applied to the reduced COLUMN where a reducer's result is
+ * projected for its consumers (the scalar tail, `sum(local)`; a pooled group value is not yet — its value node inlines the column per arm), never inside the aggregate,
+ * which it would spell three times over — the carrier every wide long already has (`sumTower`,
+ * `asExactWideInt`), whatever classes the rows were tagged with. SQLite's integer `SUM` is exact to int64,
+ * but a plain read of it is a JS number: `inject(2^52 L, 2^52 L, 29).sum()` answered `…020` for the Long
+ * `…021` that `NumberHelper.add` gives (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452-454`).
+ * Only an INTEGER total converts: a REAL one is a Double whose read is already exact.
+ */
+export function exactWideTotal(total: Expr): Expr {
+  const wide = bin('and', bin('=', call('typeof', total), compilerText('integer')), bin('>', call('abs', total), compilerInt(SAFE_INT)));
+  return { kind: 'case', whens: [[wide, { kind: 'cast', arg: total, to: 'text' }]], else: total };
+}
+
+/**
  * A `sum` whose common class is BigDecimal BECAUSE a Double or Float meets a 128-bit row (a BigInteger, or
  * a BigDecimal the per-row screen admitted — an integral source's scale-0 INTEGER carrier) is BigDecimal
  * SCALE arithmetic: `NumberHelper.add` widens every addend through `bigDecimalValue` (`BigDecimal.valueOf`

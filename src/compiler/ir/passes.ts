@@ -1,7 +1,7 @@
 import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, markEarlyLimitSuppressed, markBranchBarrier, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
@@ -147,6 +147,9 @@ const FOLD: Pass[] = group('canonicalize', [
     applies: (_steps, ctx) => ctx.strategies.without.some((s) => s === 'LazyBarrierStrategy' || s === 'PathRetractionStrategy'),
     run: (steps) => steps.map((s) => ({ ...s, bulkingSuppressed: true })),
   },
+  // On the RAW chain, before any rewrite can delete an option's barrier: `BranchStep.hasBarrier` is
+  // computed when the step is CONSTRUCTED (see `markBranchBarrier`). Every depth, identity-preserving.
+  { name: 'markBranchBarrier', run: (steps, ctx) => markBranchBarrier(steps, ctx.params) },
   // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
   // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
   // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's

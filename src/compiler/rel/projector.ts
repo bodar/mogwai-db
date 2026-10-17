@@ -147,7 +147,7 @@ function mathParts(
     // variable and N by()s feed N variables (`TraversalRing.next()`).
     const modulation: Modulation = ring.length ? ring[at % ring.length]! : { key: { kind: 'identity' } };
     if (modulation.order !== undefined) return null;
-    const varHost = name === CURRENT ? host : scopedHost(name, host);
+    const varHost = name === CURRENT ? host : scopedHost(name, host, true);
     if (!varHost) {
       // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
       // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).

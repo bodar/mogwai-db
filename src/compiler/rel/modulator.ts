@@ -6,7 +6,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
+import { ALWAYS_PRODUCTIVE, freshTraverserRow, hostTag, knownPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, classedKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -552,10 +552,13 @@ export function mapScopeMayHold(host: ChildHost, label: string): boolean {
  * projection can run against (a LIST, a MAP, a nested RECORD): declining beats picking an element of
  * one, which would answer a different question.
  */
-export function scopedHost(label: string, host: ChildHost): ChildHost | null {
+export function scopedHost(label: string, host: ChildHost, generated = false): ChildHost | null {
   const scoped = scopeValue({ kind: 'alias', label, pop: 'last' }, host);
   if (!scoped) return null;
-  const row = host.row ? { row: host.row } : {};
+  // `generated`: the caller runs a `by()` on the value through `TraversalUtil.produce(start, …)` — a NEW
+  // traverser (`freshTraverserRow`), as `math()`'s named variables are (`MathStep.java:73`). A `select(k)`
+  // STEP that re-roots a body splits the CURRENT traverser instead, and keeps its row.
+  const row = host.row ? { row: generated ? freshTraverserRow(host.row.rel) : host.row } : {};
   if (scoped.framing.kind === 'elements')
     return { kind: 'element', id: scoped.payload[0]![1], elem: scoped.framing.elem, ...row };
   if (scoped.framing.kind === 'scalar') {
@@ -965,6 +968,35 @@ function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: stri
     id: fresh('f'), input: scan, channels: [], type: scan.type,
     pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
   });
+}
+
+/**
+ * THE FIRST VALUE AT `key` THAT PASSES `test` — `values(k).is(P)…` read as the reference runs it: the
+ * property values stream in insertion order, `is()` drops each one that fails, and a first-result consumer
+ * (`by()`, `map()`, a `choose`/`coalesce` arm, a filter's existence test — `TraversalUtil.produce`/`test`)
+ * takes the FIRST SURVIVOR
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/IsStep.java`,
+ * `…/util/TraversalUtil.java:108-123`). Testing only the first stored value answers a different question: over
+ * `loc = [a, b]`, `by(__.values('loc').is('b'))` is `b`, not unproductive, and `where(values('loc').is('b'))`
+ * keeps the vertex. The same rows `propertyRowFor` names, filtered by `test` over each row's `(value, vtype)`,
+ * read three ways like the unfiltered reads. `null` where `test` cannot be built.
+ */
+export function propertyFirstPassing(
+  key: string, host: Extract<ChildHost, { kind: 'element' }>,
+  test: (value: Expr, vtype: Expr) => Expr | null, fresh: Minter,
+): { readonly value: Expr; readonly vtype: Expr; readonly present: Expr } | null {
+  const filtered = (): Rel | null => {
+    const mine = propertyRowFor(host, key, fresh);
+    const pred = test(col(mine.id, 'value'), col(mine.id, 'vtype'));
+    return pred && make.filter({ id: fresh('pfp'), input: mine, channels: [], type: mine.type, pred });
+  };
+  const [forValue, forVtype, forPresent] = [filtered(), filtered(), filtered()];
+  if (!forValue || !forVtype || !forPresent) return null;
+  return {
+    value: firstOf(forValue, col(forValue.id, 'value'), col(forValue.id, 'id'), fresh),
+    vtype: firstOf(forVtype, col(forVtype.id, 'vtype'), col(forVtype.id, 'id'), fresh),
+    present: { kind: 'exists', plan: forPresent, negated: false },
+  };
 }
 
 /** The stored `vtype` of the FIRST value at `key` — `byExpr`'s property arm with the other column

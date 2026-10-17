@@ -176,7 +176,9 @@ describe('property(k, <numeric reducer>) stores the reference type', () => {
     `__.map(__.values('age').mean())`,
     `__.flatMap(__.values('age').mean())`,
     `__.choose(__.has('age'), __.values('age').mean(), __.constant(0))`,
-    `__.choose(__.values('age')).option(29, __.values('age').mean()).option(none, __.constant(0))`,
+    // An explicit `Pick.unproductive` arm: the implicit one is the identity pass-through (ChooseStep.java:71-79),
+    // the vertex itself, which a value body cannot carry — that form declines.
+    `__.choose(__.values('age')).option(29, __.values('age').mean()).option(none, __.constant(0)).option(unproductive, __.constant(0))`,
     `__.coalesce(__.values('age').mean(), __.constant(0))`,
   ]) test(`mean() under ${body} is a Double`, () => {
     expect(stored(`g.V(1).property('n', ${body})`)).toEqual({ v: 29, vtype: 'double' });

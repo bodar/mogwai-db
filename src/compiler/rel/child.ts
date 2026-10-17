@@ -405,7 +405,30 @@ export interface HostRow {
    *  ENCLOSING scope bound — which an ABSENT map key falls through to (`boundBeyondMap`). Absent reads
    *  as "may bind", so a map-scope reader handed no view declines rather than dropping the row. */
   readonly elsewhere?: (label: string) => boolean;
+  /** The host is a NEW traverser the reference GENERATES for this body, not a split of the row's own —
+   *  see `freshTraverserRow`. Its path, labels, sack and loops are not the row's. */
+  readonly fresh?: true;
 }
+
+/** No alias in scope — a fresh traverser's path holds nothing (a module-local twin of `chain.ts`'s
+ *  `NO_ALIASES`, which this module cannot import without a cycle). */
+const NO_LABELS: AliasMap = new Map();
+
+/**
+ * THE ROW OF A BY() RUN ON A SCOPE VALUE — one authority for every host that resolves a LABEL (a select key,
+ * a `where(a, P(b))` key, a `dedup(a)` key, a `math()` variable) and then applies a `by()` to it.
+ *
+ * The reference runs that `by()` through `TraversalUtil.produce(S start, traversal)`, which GENERATES a new
+ * traverser for the value (`traversal.getTraverserGenerator().generate(start, …, 1L)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:125-130`;
+ * `SelectOneStep.java:64`, `SelectStep.java:70`, `WherePredicateStep.java:98,135`, `DedupGlobalStep.java:82`,
+ * `MathStep.java:73`) — not a split of the current one. So the body sees NO path and NO labels, and the
+ * INITIAL sack (`B_O_S_SE_SL_Traverser.java:43-44`): `V().as('a').select('a').by(select('a'))` is EMPTY, and
+ * `select('a').by(sack())` reads the seed, never the running sack. The row stays (the scope value is a column
+ * of it), but its alias scope is empty and `fresh` tells every state reader (`sack()`/`loops()`) it may not
+ * read the row's channels.
+ */
+export const freshTraverserRow = (rel: Rel): HostRow => ({ rel, aliases: NO_LABELS, fresh: true });
 
 /**
  * WHAT A CORRELATED PREDICATE IS FILTERING — a total union over the traverser SHAPE, exactly as

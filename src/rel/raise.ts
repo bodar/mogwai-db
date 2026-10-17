@@ -140,9 +140,18 @@ export function exprMayRaise(e: Expr): boolean {
  * raising CTE's fence) and by `raiseOrdered` (`compiler/rel/raise-channel.ts`).
  */
 export function raiseTest(rel: Rel): boolean {
-  if (rel.kind === 'filter') return exprMayRaise(rel.pred) || (rel.pred.kind === 'col' && columnRaises(rel.input, rel.pred.rel, rel.pred.name));
+  if (rel.kind === 'filter') return exprMayRaise(rel.pred) || readsRaisingColumn(rel.pred, rel.input);
   if (rel.kind === 'join') return (rel.on !== undefined && exprMayRaise(rel.on)) || ((rel.join === 'semi' || rel.join === 'anti') && mayRaise(rel.right));
   return false;
+}
+
+/** Does `pred` read, ANYWHERE in it (not only as the whole predicate), a column of `input` whose projected
+ *  expression may raise — `presence IS NOT NULL` over a carried presence column the flattener inlines is as
+ *  much a raise test as the bare column (a coalesce arm's exhaustion guard). */
+function readsRaisingColumn(pred: Expr, input: Rel): boolean {
+  let found = false;
+  forEachExpr(pred, (node) => { if (!found && node.kind === 'col' && columnRaises(input, node.rel, node.name)) found = true; });
+  return found;
 }
 
 function columnRaises(rel: Rel, id: string, name: string): boolean {
@@ -162,6 +171,11 @@ export function blockRaiseTest(rel: Rel): boolean {
     case 'project': case 'sort': case 'distinct': case 'materialize': return blockRaiseTest(rel.input);
     case 'join': return raiseTest(rel) || blockRaiseTest(rel.left) || (rel.join !== 'semi' && rel.join !== 'anti' && blockRaiseTest(rel.right));
     case 'explode': return rel.input !== undefined && blockRaiseTest(rel.input);
+    // A UNION ALL closes its arms' blocks, but SQLite's PUSH-DOWN optimization copies a reader's `WHERE` term
+    // into EACH arm (https://sqlite.org/optoverview.html#pushdown), where it becomes one more term beside the
+    // arm's own raise test, in no fixed order: a `coalesce(values('age'), constant(0).math('1/_'))` arm whose
+    // guard says "never evaluated" raised `Division by zero!` once an `is(gt(30))` after it was pushed in.
+    case 'union': return rel.inputs.some(blockRaiseTest);
     default: return false;
   }
 }

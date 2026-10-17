@@ -5,7 +5,7 @@ import { perRowColumn, type MapOf, type MixedArm, type Shape } from '../../sql/k
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
-import type { ChildHost, ChildSeam } from './child.ts';
+import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, PRESENT_COL, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
 import { freeRelIds } from '../../rel/walk.ts';
@@ -571,6 +571,14 @@ export function selectKeys(
     const projectedBy = byField(step, by, read.host, framing, (name) => payload.get(name) ?? compilerNull(), source, fresh, child);
     const built = projectedBy && passesNull ? nullPassing(projectedBy, read.value!) : projectedBy;
     if (!built) return null;
+    // A REPEATED key is ONE map entry, and the ring ends at the first unproductive `by()` — the traverser
+    // is kept when every DISTINCT key was bound before the break, holding the value its last reached
+    // occurrence gave (`bindings.size() == selectKeysSet.size()`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-84`).
+    // The conjunction of drops below is that rule only where every occurrence of a repeated key produces:
+    // `V().as('a').select('a','a').by('name').by('age')` dropped `lop` where the reference keeps
+    // `{a:'lop'}`. A repeated key whose `by()` may be unproductive declines.
+    if (built.optional && spec.labels.indexOf(label) !== spec.labels.lastIndexOf(label)) return null;
     const prefix = prefixAt(index);
     const cols = framingCols(built.framing);
     if (!cols) return null;
@@ -673,7 +681,7 @@ function scopeRead(
   const payload = new Map(projected.payload.map(([column, expr]) => [column.name, expr] as const));
   const bound = aliasGuard(rel, projected.entry) ? projected.entry.col : undefined;
   return {
-    payload, framing: readFraming(projected.read), host: selectedHost(projected.read, payload, rel, aliases),
+    payload, framing: readFraming(projected.read), host: selectedHost(projected.read, payload, rel),
     ...(bound ? { bound } : {}),
   };
 }
@@ -709,13 +717,15 @@ function nullPassing(built: ByField, value: Expr): ByField | null {
  * child `by()` over a collection declines, which is the honest answer until the by() vocabulary grows
  * a list host.
  */
-function selectedHost(read: AliasRead, payload: ReadonlyMap<string, Expr>, rel: Rel, aliases: AliasMap): ChildHost | null {
-  if (read.kind === 'element') return { kind: 'element', id: payload.get('id')!, elem: read.elem, row: { rel, aliases } };
+function selectedHost(read: AliasRead, payload: ReadonlyMap<string, Expr>, rel: Rel): ChildHost | null {
+  // The by() runs on a NEW traverser for the selected value (`freshTraverserRow`), never the current one.
+  const row = freshTraverserRow(rel);
+  if (read.kind === 'element') return { kind: 'element', id: payload.get('id')!, elem: read.elem, row };
   // A LIST label (a `Pop.all` history, a `fold()`-bound alias) becomes a LIST host: the body iterates
   // the collection (`select(Pop.all).by(__.unfold()…)`), which the child arm lowers correlated to this
   // list value. A bare `by()` over one still reads the host framing (identity); only a body that
   // consumes the list needs this host to exist.
-  if (read.kind === 'list') return { kind: 'list', list: payload.get('list')!, of: read.of, row: { rel, aliases } };
+  if (read.kind === 'list') return { kind: 'list', list: payload.get('list')!, of: read.of, row };
   const vtype = payload.get('vtype');
-  return { kind: 'scalar', value: payload.get('v')!, row: { rel, aliases }, ...(vtype ? { vtype } : {}) };
+  return { kind: 'scalar', value: payload.get('v')!, row, ...(vtype ? { vtype } : {}) };
 }
