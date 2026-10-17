@@ -59,12 +59,11 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
       | l[lop] |
       | l[ripple] |
 
-  # PRECEDENCE / fail-closed: when the alias name IS also a possible map key (project("n").as("n")),
-  # TinkerPop returns the MAP value (containsKey wins). We cannot express the heterogeneous union, so
-  # we DECLINE rather than answer the alias — a fail-closed gap, never a wrong answer. And valueMap()
-  # all-keys has an unknown key set, so a live-alias select over it declines too.
+  # PRECEDENCE: when the alias name IS also a possible map key (project("n").as("n")), TinkerPop returns
+  # the MAP value where the map holds the key (containsKey wins) and the alias only where it does not. A
+  # row the map answers is answered; a row that would fall through to the alias RAISES a deferral rather
+  # than dropping (`mapKey`'s `raise`, src/compiler/rel/map.ts) — never a wrong answer.
   @gap:map-alias
-  @Unsupported
   Scenario: g_V_projectXnX_asXnX_selectXnX_ambiguous_declines
     Given the modern graph
     And the traversal of

@@ -10,7 +10,7 @@ import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } fro
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn } from './predicate.ts';
-import { aliasGuard, aliasProjection, readFraming, type Pop } from './alias.ts';
+import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './receiver.ts';
@@ -462,11 +462,18 @@ function scopeValue(
   key: Extract<ByKey, { kind: 'alias' }>, host: ChildHost,
 ): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean; readonly present: Expr } | null {
   const row = host.row;
+  // A MAP host's own scope is a per-row key read this minter-less resolver cannot make (`correlatedMapKey`
+  // is the readers' that can), and answering the path label instead would skip the scope the reference
+  // reads FIRST — decline wherever the map may hold the key.
+  if (host.kind === 'map' && mapScopeMayHold(host, key.label)) return null;
   const field = host.kind === 'record' ? fieldNamed(host.fields, key.label) : undefined;
   if (field && row) {
     // A `Pop` names a position in a path HISTORY; a map key has no history, so a Pop-qualified read
     // of a field is a form Gremlin does not have and declining beats picking an end.
     if (key.pop !== 'last') return null;
+    // An ABSENT optional field falls through to a side effect or a same-named path label rather than
+    // reading as unproductive, so it is unproductive only where no other scope binds the name.
+    if (field.optional && boundBeyondMap(key.label, row)) return null;
     const cols = framingCols(field.framing);
     if (!cols) return null;
     // An optional field's presence is the record's own (`fieldPresence`) — its presence column where
@@ -490,6 +497,18 @@ function scopeValue(
     // alias reader shares (`aliasGuard`), so a bound NULL value is a value and an unbound label is not.
     present: aliasGuard(row.rel, projected.entry) ?? ALWAYS_PRODUCTIVE,
   };
+}
+
+/**
+ * CAN THE HOST'S OWN MAP SCOPE HOLD THIS KEY? — a record's FIELD of that name, or a map whose static key
+ * set names it (or that has none). Where it can, a `null` from `scopedHost` is a DECLINE, not a miss, so
+ * a reader must not fall through to the side effects behind it: `Scoping.getScopeValue` reads the Map
+ * first (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:120-121`).
+ */
+export function mapScopeMayHold(host: ChildHost, label: string): boolean {
+  if (host.kind === 'record') return fieldNamed(host.fields, label) !== undefined;
+  if (host.kind === 'map') return !host.keys || host.keys.includes(label);
+  return false;
 }
 
 /**

@@ -13,7 +13,7 @@ import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations, type ByField } from './modulator.ts';
 import { raisingColumns } from './receiver.ts';
 import type { GraphSource } from './source.ts';
-import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
+import { aliasGuard, aliasPresent, boundBeyondMap, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 
@@ -545,6 +545,12 @@ export function selectKeys(
   /** A productive-null-capable `by()`'s presence, as a column the drop reads (`ByField.present`). */
   const presentCols: (readonly [ColMeta, Expr])[] = [];
   const bound: string[] = [];
+
+  // An ABSENT optional field falls through to a side effect or path label of the same name, so it is
+  // the `KeyNotFoundException` drop `scopeRead` builds only where no other scope binds it
+  // (`boundBeyondMap`); elsewhere decline — every arity, Pop and by() at once.
+  const elsewhere = host && ((label: string): boolean => host.named(label) || host.hidden(label));
+  if (spec.labels.some((label) => fieldOf(label)?.optional && boundBeyondMap(label, { rel, aliases, ...(elsewhere ? { elsewhere } : {}) }))) return null;
 
   for (const [index, label] of spec.labels.entries()) {
     const read = scopeRead(label, fieldOf(label), spec.pop, rel, aliases, fresh);

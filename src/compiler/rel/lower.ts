@@ -37,10 +37,10 @@ import {
     typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
-import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
+import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -2919,7 +2919,7 @@ function mapTail(
     // tail). One lowering at every host (§6·6). `math` yields a Double, `format` a String — a scalar
     // stream, so the rest of the chain continues through `continueAs`.
     if (REL_PROJECTORS.has(step.name)) {
-      const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels } };
+      const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels, elsewhere: beyondAliases(ctx) } };
       const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh, raiseDefersTo(steps, at + 1, ctx));
       return projected && continueAs(projected.rel, projected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -3014,8 +3014,10 @@ function mapTail(
     // `select(<key>)` reads the MAP first — see `mapKey`. A key that also names a LIVE alias declines:
     // the reference's fallthrough (map, then labels) is one COALESCE of two sources whose "absent"
     // tests differ, and answering only the map's half would be a wrong answer where the label is the
-    // one that resolves. An alias the relation no longer carries is not live and does not block.
+    // one that resolves. An alias the relation no longer carries is not live and does not block. A SIDE
+    // EFFECT or an enclosing scope's label of the same name is the same fallthrough (`boundBeyondMap`).
     if (step.name === 'select') {
+      const mapScope: HostRow = { rel, aliases: labels, elsewhere: beyondAliases(ctx) };
       const key = selectedKey(step);
       if (key !== null) {
         // TinkerPop's precedence (`Scoping.getScopeValue`): the map is consulted FIRST, the label only
@@ -3023,16 +3025,15 @@ function mapTail(
         // when it could be a map key — and `keys` is the compile-time answer to that. If we KNOW the
         // static key set and `key` isn't in it, the map cannot resolve it, so the alias wins
         // unambiguously and re-enters via `selectKeys` (the ordinary alias read). Where the keys are not
-        // known (a stored map property), the ambiguity stands and we keep the fail-closed decline.
-        if (liveAliases(labels, rel).has(key)) {
-          if (keys && !keys.includes(key)) {
-            const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-              { framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, ...selectScope(ctx) });
-            return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
-          }
-          return null;
+        // known (a stored map property), the ambiguity stands per ROW: the map answers where it holds the
+        // key, and a row where it does not RAISES a deferral (`mapKey`'s `raise`) rather than dropping.
+        const shadowed = boundBeyondMap(key, mapScope);
+        if (shadowed && keys && !keys.includes(key)) {
+          const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+            { framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, ...selectScope(ctx) });
+          return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
         }
-        const keyed = mapKey(rel, key, valOf, fresh);
+        const keyed = mapKey(rel, key, valOf, fresh, shadowed ? 'raise' : 'drop');
         if (!keyed) return null;
         // A LIST value continues as a LIST stream (its members have shape `valOf.of`), so
         // `select('k').unfold()`, `select('k').order(Scope.local)` and every member op compose; a MAP
@@ -3048,7 +3049,7 @@ function mapTail(
       // select never reaches here (the loop head refuses one).
       const spec = selectSpec(step);
       if (!spec || spec.labels.length < 2) return null;
-      if (spec.labels.some((k) => liveAliases(labels, rel).has(k))) return null;
+      if (spec.labels.some((k) => boundBeyondMap(k, mapScope))) return null;
       const selected = mapSelect(rel, spec.labels, valOf, fresh);
       return selected && continueAs(selected.rel, { kind: 'map', keyOf: selected.keyOf, valOf: selected.valOf }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -3077,7 +3078,7 @@ function mapTail(
     const kd = keyedDedup(step, rel, labels, ctx, fresh);
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; continue; }
-    const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels } };
+    const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels, elsewhere: beyondAliases(ctx) } };
     const row = rowOp(step, rel, payloadRowShape(mapHost), false, ctx, fresh, { steps, at });
     if (!row) return null;
     rel = row;
@@ -3110,6 +3111,13 @@ const selectScope = (ctx: ChainCtx) => ({
   named: namedElsewhere(ctx),
   hidden: (label: string): boolean => ctx.enclosingLabels?.has(label) ?? false,
 });
+
+/** `selectScope`'s two answers as ONE — every scope past the Map the alias map cannot see, which is what
+ *  an absent map key falls through to (`boundBeyondMap`). */
+const beyondAliases = (ctx: ChainCtx) => {
+  const scope = selectScope(ctx);
+  return (label: string): boolean => scope.named(label) || scope.hidden(label);
+};
 
 /** The two payload columns a Map.Entry relation carries — `framingCols` names the same pair, and
  *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
@@ -5547,7 +5555,8 @@ function recordTail(
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
     // The record's own MAP SCOPE rides on the host, which is what makes `by(__.select('a'))` read the
     // FIELD rather than a same-named `as()` label (§ `scopeValue`).
-    const host: ChildHost = { kind: 'record', fields, row: { rel, aliases: labels } };
+    const hostRow: HostRow = { rel, aliases: labels, elsewhere: beyondAliases(ctx) };
+    const host: ChildHost = { kind: 'record', fields, row: hostRow };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (step.args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
 
@@ -5572,6 +5581,8 @@ function recordTail(
         ? fieldNamed(fields, spec.labels[0]!)
         : undefined;
       if (field) {
+        // An ABSENT optional field is a drop only where no other scope binds the name (`boundBeyondMap`).
+        if (field.optional && boundBeyondMap(field.key, hostRow)) return null;
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }

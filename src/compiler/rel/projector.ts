@@ -10,7 +10,7 @@ import type { SqlType } from '../../rel/types.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { byExpr, byTyped, modulations, scopedHost, type Modulation } from './modulator.ts';
+import { byExpr, byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
 import { mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
 import { raiseInRow } from '../../rel/raise.ts';
 import { keepingRaise, pendingRaise, RAISE, raiseMessage } from './raise-channel.ts';
@@ -18,6 +18,7 @@ import { withChannel } from '../../channels.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
+import { boundBeyondMap } from './alias.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -148,6 +149,9 @@ function mathParts(
     if (!varHost) {
       // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
       // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).
+      // Only a TRUE miss: where the host's own Map may hold the name, `scopedHost` declined and the
+      // side effect behind it is not the answer (`mapScopeMayHold`).
+      if (name !== CURRENT && mapScopeMayHold(host, name)) return null;
       const se = name === CURRENT ? null : sideEffectConst(name, child);
       if (!se) return null;
       // A side-effect constant is a compile-time value, so its Number-ness is decided here: anything
@@ -231,6 +235,8 @@ function formatValue(
     if (host.kind === 'map') {
       if (host.valOf.kind !== 'scalar') return null;
       if (host.keys && !host.keys.includes(part.name)) return null;
+      // An ABSENT key falls through to a same-named side effect or path label, not to a null token.
+      if (!host.row || boundBeyondMap(part.name, host.row)) return null;
       pieces.push(jsonField(correlatedMapKey(host.map, part.name, fresh).node, 'v'));
       continue;
     }

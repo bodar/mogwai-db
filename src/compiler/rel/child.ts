@@ -374,7 +374,14 @@ export type ChildHost =
  * a rowid, not from a row of the outer relation — and the alias arm declines rather than guessing when
  * it is absent.
  */
-export interface HostRow { readonly rel: Rel; readonly aliases: AliasMap; }
+export interface HostRow {
+  readonly rel: Rel;
+  readonly aliases: AliasMap;
+  /** The scopes past the traverser's Map that the alias map cannot see — a side effect, a path label an
+   *  ENCLOSING scope bound — which an ABSENT map key falls through to (`boundBeyondMap`). Absent reads
+   *  as "may bind", so a map-scope reader handed no view declines rather than dropping the row. */
+  readonly elsewhere?: (label: string) => boolean;
+}
 
 /**
  * WHAT A CORRELATED PREDICATE IS FILTERING — a total union over the traverser SHAPE, exactly as
