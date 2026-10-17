@@ -1575,6 +1575,9 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
   // WHETHER THIS BODY PRODUCES anything for the host row, where the leading step can say precisely.
   // `undefined` is "cannot say", which is not the same as "always" — see `ChildValue.present`.
   let present: Expr | undefined;
+  // What a NULL means to the RECEIVER checks alone (`valueRun`'s `productive`) where `present` stays
+  // withheld from the host — a leading projector, whose productivity no consumer was given.
+  let productive: Expr | undefined;
   // The value's type as the body computes it, not as the wire guesses it. `UNKNOWN` is the honest seed:
   // until a step below NAMES the projection, nothing has been read yet.
   let type: ScalarType = UNKNOWN;
@@ -1634,6 +1637,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
     if (!projected) return null;
     value = projected.value;
     type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
+    productive = projected.drop ? droppedWhenNull(ALWAYS_PRODUCTIVE, value) : ALWAYS_PRODUCTIVE;
     at = 1;
   } else if (CARRIED_READ[leading?.name ?? ''] !== undefined && !(leading!.args ?? []).length) {
     // A PER-TRAVERSER STATE READ — `sack()`, `loops()` — and it is ONE arm over a channel ROLE rather
@@ -1680,7 +1684,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
+  return valueRun(body, at, { value, type, vtype, present, ...(productive ? { productive } : {}), yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1775,6 +1779,13 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
   return null;
 }
 
+/** `present` narrowed to the rows where a step that produces NOTHING as a NULL (`math()`'s `drop`)
+ *  produced a value. */
+const droppedWhenNull = (present: Expr, value: Expr): Expr => {
+  const produced = isNot(value, compilerNull());
+  return present === ALWAYS_PRODUCTIVE ? produced : and(present, produced);
+};
+
 /**
  * THE VALUE RUN — a child body's tail once its SUBJECT is named: a sequence of steps that each turn
  * one value into another.
@@ -1793,25 +1804,40 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
  */
 export function valueRun(
   body: readonly IRStep[], from: number,
-  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr; readonly yields: ChildValue['yields'] },
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr; readonly productive?: Expr; readonly yields: ChildValue['yields'] },
   row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): ChildValue | null {
   let value = seed.value;
   let type = seed.type;
   let vtype = seed.vtype;
   // A value TRANSFORM does not change WHETHER the body produced — `toUpper()` of nothing is still
-  // nothing — so the leading step's answer rides through the whole run unchanged. A trailing `is(pred)`
-  // NULLs the value where the predicate fails, which the host's own productivity filter then drops.
-  const present = seed.present;
+  // nothing — so the leading step's answer rides through a transform unchanged. An `is(pred)` DOES
+  // change it: it NULLs the value where the predicate fails AND narrows `present` to the rows it passed,
+  // so a NULL it made is UNPRODUCTIVE to every consumer — a later receiver check (`receiver.ts`:
+  // `asString()`/`math()` raise on a PRODUCTIVE null only), a `map()` host, a `coalesce()` arm.
+  let present = seed.present;
+  // The same fact for the RECEIVER checks alone: `present`, or where the seed withholds that from its
+  // host, what it can still say about a NULL (`seed.productive`). Narrowed in step with `present`.
+  let productive = seed.present ?? seed.productive;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     if (REL_PROJECTORS.has(step.name)) {
-      const host: ChildHost = { kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}) };
+      // The run's productivity rides on the host: the value here can be an UNPRODUCTIVE NULL (an absent
+      // property, a failed `is()`), which a `math()` over it must drop rather than raise on. A seed that
+      // cannot say keeps the old reading — a NULL is unproductive — rather than raise on every NULL.
+      const hostPresent: Expr | undefined = productive === ALWAYS_PRODUCTIVE ? undefined : productive ?? compilerInt(0);
+      const host: ChildHost = {
+        kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}), ...(hostPresent ? { present: hostPresent } : {}),
+      };
       const projected = projectorValue(step, host, child, source, fresh);
       if (!projected) return null;
       value = projected.value;
       type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
       vtype = undefined;
+      // A projector whose NULL is UNPRODUCTIVE (`drop`: `math()` over an unproductive `by()` FILTERS —
+      // `MathStep.java:75-78`) narrows `present` exactly as an `is()` does, for the same consumers.
+      if (projected.drop && present) present = droppedWhenNull(present, value);
+      if (projected.drop && productive) productive = droppedWhenNull(productive, value);
       continue;
     }
     // A trailing `is(pred)` FILTERS the child value: `by(__.values('age').is(P.gt(29)))` contributes the
@@ -1829,6 +1855,11 @@ export function valueRun(
       const test = predicateExpr(value, pred, subjType, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
       if (!test) return null;
       value = { kind: 'case', whens: [[test, value]], else: compilerNull() };
+      // `present := present AND test`, a NULL test (SQL's unknown) counting as a failed filter —
+      // `FilterStep` keeps a traverser only where the predicate is TRUE. A seed that cannot say stays
+      // unable to (`ChildValue.present` absent), so its consumers keep declining.
+      if (present) present = { kind: 'case', whens: [[test, present]], else: compilerInt(0) };
+      if (productive) productive = { kind: 'case', whens: [[test, productive]], else: compilerInt(0) };
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;
@@ -1836,7 +1867,7 @@ export function valueRun(
     // any depth (`map`/`local`/`by()`/`where`/a branch arm) gets the reference's raise, not SQLite's
     // coercion. A NULL here is a productive null exactly where the seed says the body produced.
     const offences = transformOffences(step, value, evidenceOf(type, vtype),
-      present === ALWAYS_PRODUCTIVE ? true : present);
+      productive === ALWAYS_PRODUCTIVE ? true : productive);
     if (!offences) return null;
     const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
@@ -1885,7 +1916,10 @@ export function scalarHostChild(
   }
   // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
   // replaces it and every transform maps it, neither of which can produce a second.
-  return valueRun(body, at, { value, type, vtype, yields: 'one' }, host.row, child, source, fresh);
+  // The value IS the traverser (or a constant replacing it), so a NULL is a productive null unless the
+  // host says otherwise — told to the receiver checks only (`productive`), since `present` was never
+  // claimed here and claiming it now would admit consumers that decline today.
+  return valueRun(body, at, { value, type, vtype, productive: host.present ?? ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, child, source, fresh);
 }
 
 /**
@@ -1932,7 +1966,7 @@ function mapHostChild(
     const value = jsonField(node, 'v');
     const vtype = jsonField(node, 't');
     if (body.length === 1) return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
-    reHost = { kind: 'scalar', value, vtype, row: host.row };
+    reHost = { kind: 'scalar', value, vtype, row: host.row, present };
   } else if (valOf.kind === 'list') {
     reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row: host.row };
   } else if (valOf.kind === 'map') {

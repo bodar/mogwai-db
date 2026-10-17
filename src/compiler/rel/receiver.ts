@@ -158,6 +158,19 @@ export const stringReceiverMessage = (step: string): string =>
   step === 'concat' ? 'String concat() can only take string as argument'
     : `The ${step}() step can only take string as argument`;
 
+/**
+ * WHAT A `concat(__.t)` TRAVERSAL OPERAND OWES. `ConcatStep.map` assigns `TraversalUtil.apply(traverser,
+ * ct)` to a `String` local (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ConcatStep.java:87-92`),
+ * so a non-null non-String result is a `ClassCastException` there, where `concat_ws` coerced
+ * `concat(__.V().values('age'))` to `'a29'`. Null is skipped, not an offence. The same three answers as
+ * `receiverOffence`: `false` declines, `null` owes nothing, else the per-row offence and its message —
+ * a run-time DEFERRAL, because the reference's message is a JVM cast message naming per-row classes.
+ */
+export function concatOperandOffence(value: Expr, evidence: ValueEvidence): readonly [Expr, string] | null | false {
+  const offends = receiverOffence('string', value, evidence);
+  return offends ? [offends, deferral('concat(): a traversal argument that yields a non-String')] : offends;
+}
+
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to
  *  the per-row type and value it goes on to name. */
 export const mathVariableMessage = (variable: string): string =>

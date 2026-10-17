@@ -42,7 +42,7 @@ import { byExpr, modulations, orderProductivity, productivityFilter, type Modula
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
-import { evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
+import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
@@ -1252,13 +1252,15 @@ function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, 
  * site silently skipped the raise — `inject(2,1,0).aggregate('x').by(math('1/_')).order().limit(1)`
  * answered `[0]`. Where the site can raise (`mayRaise`), a guard binding that READS every payload column
  * of every member row is its own execution step, so the raise fires; its predicate is never true, so it
- * never raises anything of its own.
+ * never raises anything of its own. `undefined` — nothing to drain; `null` — the site can raise but
+ * carries no column to read it through, so the caller DECLINES rather than skip the raise.
  */
-function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter): Binding | undefined {
+function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter): Binding | undefined | null {
   const label = step.args[0]?.value;
   const site = typeof label === 'string' ? collections.get(label)?.sites.at(-1) : undefined;
   if (!site || !mayRaise(site.rel)) return undefined;
   const rel = site.rel;
+  if (!rel.type.cols.length) return null;
   const never: Expr = rel.type.cols
     .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') }))
     .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
@@ -1347,6 +1349,7 @@ function collectionArm(
       if (ctx.mutating) return { tail: null };
       if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
       const drained = drainRaisingSite(step, ctx.collections, fresh);
+      if (drained === null) return { tail: null };
       if (!drained) return 'continue';
       const tail = reenter(at + 1);
       return { tail: tail && { ...tail, effects: [drained, ...(tail.effects ?? [])] } };
@@ -1363,6 +1366,7 @@ function collectionArm(
       ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
     if (!snapshot) return { tail: null };
     const drained = drainRaisingSite(step, ctx.collections, fresh);
+    if (drained === null) return { tail: null };
     const effects = [...(drained ? [drained] : []), ...snapshot];
     // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the rest
     // of the chain writes, which is the whole point of taking it. The recursion returns the tail from
@@ -1720,6 +1724,7 @@ function scalarTail(
       };
       const parts: Expr[] = [];
       const mayBeEmpty: Expr[] = []; // productivity predicates for operands not provably productive
+      const operandOffences: (readonly [Expr, string])[] = [];
       for (const a of args) {
         if (a === null) continue;         // a null operand is skipped (`ConcatStep`)
         if (!isNested(a)) return null;     // the Java API cannot MIX string and traversal operands
@@ -1727,6 +1732,10 @@ function scalarTail(
         if (!body) return null;
         const cv = scalarChild(body, host, ctx, fresh);
         if (!cv || cv.framing.kind !== 'scalar') return null;
+        // The OPERAND must yield a String or null too (`concatOperandOffence`).
+        const operand = concatOperandOffence(cv.expr, evidenceOf(cv.framing.type, cv.vtype));
+        if (operand === false) return null;
+        if (operand) operandOffences.push(operand);
         parts.push(cv.expr);
         // Where the seam cannot say productivity at all (`present` undefined) there is nothing to guard on
         // — decline rather than risk a silent skip; otherwise collect a concrete "did it produce" predicate.
@@ -1742,7 +1751,8 @@ function scalarTail(
       const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
       if (!offences) return null;
       const all = [col(rel.id, 'v'), ...parts];
-      const value: Expr = raisingWhen(offences, {
+      // The traverser is tested first, then each operand in order — the order `ConcatStep.map` raises in.
+      const value: Expr = raisingWhen([...offences, ...operandOffences], {
         kind: 'case',
         whens: [[all.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
           .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],

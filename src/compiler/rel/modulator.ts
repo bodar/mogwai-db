@@ -356,7 +356,7 @@ export function byTyped(
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
     return { value, evidence: evidenceOf(scoped.framing.type, scoped.payload[1]?.[1]), productiveNull: !scoped.optional };
   }
-  if (host.kind === 'scalar') return { value, evidence: evidenceOf(undefined, host.vtype), productiveNull: true };
+  if (host.kind === 'scalar') return { value, evidence: evidenceOf(undefined, host.vtype), productiveNull: host.present ?? true };
   if (host.kind === 'property' && key.kind === 'token')
     return key.token === 'key'
       ? { value, evidence: { kind: 'static', tag: 'string' }, productiveNull: true }
@@ -437,6 +437,9 @@ export function scopedHost(label: string, host: ChildHost): ChildHost | null {
     // The recorded per-row type rides along: it is what makes an ordering/comparison over the scoped
     // value read as its Gremlin type rather than as its storage class, exactly as the host's own does.
     const vtype = scoped.payload[1]?.[1];
+    // An unbound key reads as a NULL and carries no `present`, so `math()` reads it as a PRODUCTIVE null
+    // and raises — as the reference does, which resolves a variable through `getNullableScopeValue`
+    // (`Scoping.java:155-161`: an unbound key IS a null) before testing it (`MathStep.java:72-87`).
     return { kind: 'scalar', value: scoped.payload[0]![1], ...(vtype ? { vtype } : {}), ...row };
   }
   return null;

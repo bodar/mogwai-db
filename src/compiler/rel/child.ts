@@ -246,6 +246,14 @@ export type BodyScope = 'child' | 'rooted';
 export type ChildHost =
   | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow;
+      /** WHETHER A NULL `value` IS A VALUE (`TraversalProduct`'s distinction, as `ChildValue.present`).
+       *  ABSENT where the host is a TRAVERSER — a traverser's NULL is a productive null. Set where the
+       *  host is an INTERMEDIATE value that can be an unproductive NULL: a child value run's value past an
+       *  `is()` filter or over an absent property (`valueRun`), a `select(k)` of an absent map key. A
+       *  type-demanding consumer (`math()`'s variables, `receiver.ts`) raises on a NULL only where this
+       *  holds. (A scope value `math()` reads by name is NOT one: `getNullableScopeValue` hands the
+       *  reference an unbound key as a null, and it raises.) */
+      readonly present?: Expr;
       /** Present only for a child rooted at an unfolded Map.Entry. */
       readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
   /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an
