@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, meta, notProduced, payloadCols, reducedVtype, typeOf, withMergedVtype, type Minter } from '../build.ts';
+import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
@@ -151,20 +151,13 @@ export function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
   if (arm.framing.kind !== 'scalar') return null;
   const result = arm.framing.result;
   const vtype: ScalarType | null =
-    result === 'number' ? PER_ROW('vt')
-      : result === 'count' ? STATIC('long')
-        : result === undefined ? arm.framing.type
-          : null;
+    result === 'count' ? STATIC('long')
+      : result === undefined || result === 'number' ? arm.framing.type
+        : null;
   if (!vtype) return null;
-  const merged = withMergedVtype(arm.rel, vtype, fresh);
-  // The merged column is a per-row `vtype`, a Gremlin type alone, so a reducer's `vt` crosses through
-  // `reducedVtype` (build.ts): `union(__.values('age').mean(), __.constant(1))` answers the Double 29.0
-  // (`MeanGlobalStep.java:175-177`), never an Int framed by inference from `'real'`.
-  return ensureBulk(result !== 'number' ? merged : make.project({
-    id: fresh('rt'), input: merged, channels: merged.channels, type: merged.type,
-    exprs: merged.type.cols.map((column) => [column.name,
-      column.name === MERGED_VTYPE ? reducedVtype(col(merged.id, column.name)) : col(merged.id, column.name)] as const),
-  }), fresh);
+  // A reducer's `vt` is a Gremlin type name (`REDUCED_TYPE`), so it lands in the merged per-row `vtype`
+  // as is: `union(__.values('age').mean(), __.constant(1))` answers the Double 29.0.
+  return ensureBulk(withMergedVtype(arm.rel, vtype, fresh), fresh);
 }
 
 /**

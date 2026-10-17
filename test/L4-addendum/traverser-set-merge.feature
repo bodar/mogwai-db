@@ -723,8 +723,8 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
 
   # `List.equals` compares MEMBERS with `equals`, so `[1]` and `[1L]` are different traversers. A bare list
   # carries an Integer and a Long alike (its member type is inferred from the storage class), so a `[1L]`
-  # literal declines rather than frame — and merge — as `[1]`.
-  @gap:traverser-set-merge @Unsupported
+  # literal rides as a typed `{t,v}` member — its bytes, the merge key, differ from `[1]`'s.
+  @gap:traverser-set-merge
   Scenario: g_injectXl1_l2_l1LX_limitX2X
     Given the empty graph
     And the traversal of

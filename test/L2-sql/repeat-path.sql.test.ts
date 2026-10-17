@@ -292,7 +292,7 @@ describe('repeat / path SQL', () => {
       // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED by the sack's own per-row
       // tag rather than assuming a number. The tag is TOTAL (the seed's `long`, then each sum's storage
       // class); a NULL tag reads the value (`perRowSubject`), so it can never match no arm.
-      expect(p.sql).toMatch(/WHEN coalesce\(w\d+\.sackt, CASE WHEN \(typeof\(w\d+\.sack\) = 'text'\)[^]*?\) IN \('byte', 'short', 'int', 'long', 'bigint'\)/);
+      expect(p.sql).toMatch(/WHEN coalesce\(w\d+\.sackt, nullif\(nullif\(replace\([^]*?\) IN \('byte', 'short', 'int', 'long', 'bigint'\)/);
       expect(p.sql).toContain("'long' AS sackt");
     
   });

@@ -10,7 +10,9 @@ import { MERGED_VTYPE, PER_ROW, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
-import { carriedCols, meta, payloadCols, reducedVtype, typeOf, type Minter } from './build.ts';
+import { carriedCols, letValues, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { extremumKeepingFirst, inferredVtype } from './reducer.ts';
+import { floatValueOf } from './float.ts';
 import { hostTag, type ChildHost, type ChildSeam } from './child.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import type { FramedRel } from './framing.ts';
@@ -60,7 +62,7 @@ const SACK_CHANNEL: Channel = { col: SACK_COL, role: 'sack' };
  *
  * It holds the Gremlin `ValueType` the sack's value IS: the seed's declared type, an `assign`'s `by()`
  * evidence, and where neither says — an arithmetic fold, a `by()` known only by its storage class — the
- * tag the wire's inference would have framed it as (`storageTag`). It is TOTAL (NULL only for a NULL
+ * tag the wire's inference would have framed it as (`inferredVtype`). It is TOTAL (NULL only for a NULL
  * sack), and that is load-bearing rather than tidy: a per-row type is AUTHORITATIVE to its consumers
  * (`predicateExpr`'s per-row arm has no storage fallback), so a NULL tag over a live value read as "no
  * class matches" — measured, `until(__.sack().is(P.gte(50)))` never fired and the walk ran forever.
@@ -89,32 +91,13 @@ const tagOf = (evidence: ValueEvidence): Expr =>
 
 const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
 
-/**
- * The tag a value's STORAGE CLASS gives — what the wire's inference frames an untagged value as
- * (`ioc.anySerializer`: an integer in int32 range is an Int, a wider one a Long; a REAL a Double, which
- * also repairs an integral REAL that inference read as an Int), and a String for text. NULL for NULL.
- *
- * Spelled with the value TWICE, not once per arm: the value is routinely a fused arithmetic over a
- * correlated read, and a `CASE typeof(v) …` per class would repeat that subquery four times. `typeof` is
- * rewritten by `replace` (no class name contains another's), and the int32 test is the one-spelling
- * `abs(2v + 1) <= 2^32 - 1`.
- */
-const storageTag = (value: Expr): Expr => {
-  const int32: Expr = { kind: 'binary', op: '<=',
-    left: call('abs', { kind: 'binary', op: '+', left: { kind: 'binary', op: '*', left: compilerInt(2), right: value }, right: compilerInt(1) }),
-    right: compilerInt(4294967295) };
-  const integral: Expr = { kind: 'case', whens: [[int32, compilerText('int')]], else: compilerText('long') };
-  const renamed = [['integer', integral], ['real', compilerText('double')], ['text', compilerText('string')]] as const;
-  const named = renamed.reduce<Expr>((inner, [cls, tag]) => call('replace', inner, compilerText(cls), tag), call('typeof', value));
-  return call('nullif', call('nullif', named, compilerText('null')), compilerText('blob'));
-};
-
-/** A partial tag completed from the value's storage class. A literal tag is already total; a per-row one
- *  may be a reducer's raw storage-class name, which `reducedVtype` reads as a Gremlin tag or NULL. */
+/** A partial tag completed from the value's storage class (`inferredVtype`, what the wire infers for an
+ *  untagged value). A literal tag is already total; a per-row one — a reducer's `vt` included
+ *  (`REDUCED_TYPE`) — is a Gremlin type name or NULL. */
 const totalTag = (tag: Expr, value: Expr): Expr =>
   tag.kind === 'lit' && tag.value !== null ? tag
-    : tag.kind === 'lit' ? storageTag(value)
-      : { kind: 'call', fn: 'COALESCE', args: [reducedVtype(tag), storageTag(value)] };
+    : tag.kind === 'lit' ? inferredVtype(value)
+      : { kind: 'call', fn: 'COALESCE', args: [tag, inferredVtype(value)] };
 
 /** Does this relation carry a sack? Asked of the RELATION rather than of a flag, for `liveAliases`'
  *  reason: a barrier consumes the channel (`CHANNEL_BARRIER_POLICY`), and a reader that trusted a
@@ -260,7 +243,7 @@ export function sackMutate(
   // the traverser it is handed, so the raise belongs to the rows that slice keeps — the offending row rides
   // with its message rather than raising over every row before the slice decides
   // (`raise-channel.ts`). Only where the fold's own value raises nothing eagerly.
-  const combinedOver = (over: Rel): Expr | null => combine(operator, facts(over));
+  const combinedOver = (over: Rel): Expr | null => combine(operator, facts(over), fresh);
   const eager = combinedOver(kept);
   const defer = raiseAt.defer && eager !== null && !exprMayRaise(eager) && !exprMayRaise(foldedTag(operator, facts(kept), eager));
   // Settled where it is born, the raise meets every row SQL scans — exact only where the reference pulls
@@ -394,7 +377,12 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
     const comparable = bin('or', bin('is not', common, compilerNull()),
       bin('and', bin('=', sackTag, operandTag), { kind: 'in-list', expr: sackTag, values: [...COMPARABLE_TAGS].map(compilerText) }));
     const offends = bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), not(comparable));
-    return [[offends, deferral(`${what}: operands that are not mutually Comparable`)], ...numericTail];
+    // In a FLOAT common class the winner is its `floatValue()` (`FLOAT_NUMBER_HELPER.min/max`), which an
+    // Integer past 2^24 is not — the carrier would no longer be the Float's exact value (`float.ts`).
+    const pastFloat: readonly [Expr, string] = [bin('and', bin('=', common, compilerInt(FLOAT_CODE)),
+      bin('>', call('max', call('abs', sack), call('abs', operand)), compilerInt(16777216))),
+    deferral(`${what}: a Float compared with an Integer past 2^24`)];
+    return [[offends, deferral(`${what}: operands that are not mutually Comparable`)], pastFloat, ...numericTail];
   }
   if (!ARITHMETIC.has(operator)) return null;
   const typed = numericOperandOffences([
@@ -418,8 +406,12 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
     ...divByZero,
     [bin('=', overflowed, compilerInt(BIGINT_CODE)), INTEGER_OVERFLOW],
     [bin('and', bin('>=', overflowed, compilerInt(0)), bin('<=', overflowed, compilerInt(LONG_CODE))), 'long overflow'],
-    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('>', call('abs', result), compilerReal(FLOAT_MAX))),
+    // A Float result at the edge of `Float.MAX_VALUE` (within the error of reading it off the carriers
+    // rather than the floats) or SUBNORMAL is not one the float authority rounds (`inFloatClass`).
+    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('>', call('abs', result), compilerReal(FLOAT_MAX * (1 - 1e-6)))),
       deferral(`${what}: a Float result past Float.MAX_VALUE`)],
+    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('and', bin('<', call('abs', result), compilerReal(1.2e-38)), bin('!=', result, compilerInt(0)))),
+      deferral(`${what}: a subnormal Float result`)],
   ];
 }
 
@@ -451,17 +443,45 @@ function foldedTag(operator: string, facts: FoldFacts, result: Expr): Expr {
  * the non-null side (`NumberHelper.java:402,558-559`), where SQLite's arithmetic and two-argument
  * `MIN`/`MAX` would answer NULL.
  */
-function combine(operator: string, facts: FoldFacts): Expr | null {
+function combine(operator: string, facts: FoldFacts, fresh: Minter): Expr | null {
   const { sack, operand, nullable } = facts;
   switch (operator) {
     case 'assign': return operand;
-    case 'min':
     // The sack is spelled ONCE where the operand cannot be NULL (see `CLASSES` for why a spelling counts).
-    case 'max': return call(operator.toUpperCase(), call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
-    default:
+    // A TIE keeps the SACK — `SackValueStep` applies `Operator.max/min(sack, value)` — which is observable
+    // for `-0.0` against `0.0` (`reducer.ts` `extremumKeepingFirst`).
+    case 'min':
+    case 'max': return extremumKeepingFirst(operator, call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
+    default: {
       if (!ARITHMETIC.has(operator)) return null;
-      return nullable ? caseOf([[isNull(operand), sack]], arithmetic(operator, facts)) : arithmetic(operator, facts);
+      const folded = inFloatClass(operator, facts, fresh);
+      return nullable ? caseOf([[isNull(operand), sack]], folded) : folded;
+    }
   }
+}
+
+/**
+ * The arithmetic in its COMMON CLASS: in a Float class it is FLOAT arithmetic — `FLOAT_NUMBER_HELPER`'s
+ * `a.floatValue() op b.floatValue()`, a float
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:225-229`):
+ * the double operation over the two operands' exact floats (an Integer past 2^24 rounds to its float),
+ * rounded once to a float by the float authority (`floatValueOf` — one IEEE operation over floats rounded
+ * through a double IS the float operation, 53 ≥ 2·24 + 2). So the carrier stays the Float's EXACT value
+ * (`src/gremlin/float.ts`), which every later compare, sum and `math()` reads. The operands are read once
+ * each through a LET carrying their exact digits (`%!.17g`; JSON's own REAL keeps 15), so a chain of folds
+ * does not re-spell them. Every other class is SQLite's own arithmetic (`arithmetic`). A Float result past
+ * `Float.MAX_VALUE` or subnormal is `foldOffences`' deferral, so the split only meets the normal range.
+ */
+function inFloatClass(operator: string, facts: FoldFacts, fresh: Minter): Expr {
+  const digits = (x: Expr): Expr => call('printf', compilerText('%!.17g'), { kind: 'cast', arg: x, to: 'real' });
+  const float = letValues([digits(facts.sack), digits(facts.operand)], ([s, o]) => {
+    const asFloat = (read: Expr): Expr => {
+      const real: Expr = { kind: 'cast', arg: read, to: 'real' };
+      return caseOf([[bin('>', call('abs', real), compilerInt(16777216)), floatValueOf(real)]], real);
+    };
+    return floatValueOf(arithmetic(operator, { ...facts, sack: asFloat(s!), operand: asFloat(o!) }));
+  }, fresh);
+  return caseOf([[bin('=', facts.common, compilerInt(FLOAT_CODE)), float]], arithmetic(operator, facts));
 }
 
 /**

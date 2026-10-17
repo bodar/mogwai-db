@@ -358,7 +358,10 @@ INSIDE the family changes no answer Gremlin can be asked — cited, not assumed:
   (`NumberHelper.getHighestCommonNumberInfo` for sum/min/max/arithmetic, `MeanGlobalStep` always
   Double, literal and stored classes carried) through ONE `numericClassOf` authority (§10 cluster C).
   The cost the closure cited (a sort + O(N) sorter on narrow sums) is accepted; the four deviations
-  above still stand.
+  above still stand. LANDED: the authority is `reducer.ts` `numberWidth`/`numberFloating` (a row's
+  width/floating pair) → `commonNumberClass` (`determineNumberClass`), read by every `sum`, every
+  `min`/`max` and the sack's folds (whose class rides in its own `sack`-role column); residue in
+  `docs/outstanding-work.md` (Value carriage).
 
 ---
 

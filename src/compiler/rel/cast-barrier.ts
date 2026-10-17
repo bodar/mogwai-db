@@ -1,8 +1,9 @@
-import { asNumberBare, foldConstantCoercions } from '../../gremlin/coerce.ts';
+import { asNumberTagged, CoercionDeferral, inLeadingCoercionPrefix } from '../../gremlin/coerce.ts';
+import { RaisedByQuery } from '../../rel/raise.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { SegmentPlan } from '../segment.ts';
 import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
-import { lowerToRel, lowerValueResume, type Lowering } from './lower.ts';
+import { lowerToRel, lowerTypedValueResume, type Lowering, type TypedDatum } from './lower.ts';
 
 // ---------- bare asNumber()/asBool() over a per-row stream — a value-transform barrier ----------
 //
@@ -29,24 +30,35 @@ import { lowerToRel, lowerValueResume, type Lowering } from './lower.ts';
  *  `coerce.ts`'s own const-fold coercion — the same authority, so a runtime `values()` cast and an
  *  `inject()` one raise the identical message. A null value is `AsNumberStep.map`'s early `return null`
  *  (never a parse). */
-function castCoercion(step: IRStep): ((value: unknown) => unknown) | null {
+function castCoercion(step: IRStep): ((value: unknown, text?: string, type?: string | null) => unknown) | null {
   if (step.modulators?.length || step.optionArms) return null;
-  if (step.name === 'asNumber' && step.args.length === 0)
-    return (value) => (value === null || value === undefined ? null : asNumberBare(value, null).val);
+  if (step.name === 'asNumber' && step.args.length === 0) return runtimeAsNumber;
   return null;
+}
+
+/** `asNumberTagged` per row — the row's TAG first (`BarrierInput.injectedType`), so a stored Boolean raises
+ *  `Can't parse type Boolean as number.` rather than answer its 0/1. The result re-injects TYPED
+ *  (`typedValueSeed`): the class `createNumber` chose rides beside the value, and an exact carrier — a Long
+ *  or BigInteger past 2^53, a BigDecimal — crosses as its exact TEXT, so `'9007199254740993'` stays that
+ *  Long and `'1.5'` a Float rather than whatever a JSON number would be re-guessed as. */
+function runtimeAsNumber(value: unknown, _text?: string, type?: string | null): TypedDatum {
+  if (value === null || value === undefined) return [null, null];
+  try {
+    const { val, as } = asNumberTagged(value, type);
+    return [typeof val === 'number' ? val : String(val), as];
+  } catch (error) {
+    if (error instanceof CoercionDeferral) throw new RaisedByQuery(`${error.message} is not supported yet`);
+    throw error;
+  }
 }
 
 /** The FIRST bare `asNumber()`/`asBool()` over a PER_ROW scalar stream, and its position — lowered here,
  *  not just in the builder, so a cast the fold owns (a STATIC-typed or inject one) never claims the
  *  boundary and preempts a later barrier. */
 export function castBarrierIn(steps: readonly IRStep[], lowering: Lowering): { at: number } | null {
-  // An `inject()`'s leading coercion prefix is const-fold's whatever its source frames as — a literal
-  // stream whose arguments declare different classes (`inject(1.0, 2)`: a Double and an Int) rides its
-  // tags PER ROW too, and the fold, not this barrier, owns that cast.
-  let folded = 0;
-  if (steps[0]?.name === 'inject') try { folded = foldConstantCoercions(steps as IRStep[], []).at; } catch { /* the fold decides */ }
   for (let at = 0; at < steps.length; at++) {
-    if (at < folded || !castCoercion(steps[at]!)) continue;
+    // An `inject()`'s leading cast is the compile-time fold's, whatever per-row tags its literals declare.
+    if (!castCoercion(steps[at]!) || inLeadingCoercionPrefix(steps, at)) continue;
     const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
     if (head?.shape.kind === 'value' && head.shape.type.kind === 'perRow') return { at };
   }
@@ -57,5 +69,5 @@ export function castBarrierIn(steps: readonly IRStep[], lowering: Lowering): { a
 export function buildCastSegment(steps: readonly IRStep[], at: number, lowering: Lowering): SegmentPlan | null {
   const coerce = castCoercion(steps[at]!);
   if (!coerce) return null;
-  return buildValueTransformSegment(steps, at, lowering, coerce, lowerValueResume, steps[at]!.name);
+  return buildValueTransformSegment(steps, at, lowering, coerce, lowerTypedValueResume, steps[at]!.name);
 }

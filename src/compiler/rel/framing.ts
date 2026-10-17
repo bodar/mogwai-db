@@ -224,9 +224,9 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
     case 'elements': return [{ name: 'id', type: 'int', nullable: true }];
     case 'scalar': {
       // The SAME rule `scalarPayload` (`lower.ts`) applies at the wire, and it is stated here rather
-      // than there because a record field needs it too: a numeric reducer's type is the aggregate's own
-      // `typeof(…)` in `vt`, a stored value's is its `vtype` column, and a static/unknown tag needs no
-      // column at all.
+      // than there because a record field needs it too: a numeric reducer's class is its `vt` column (a
+      // Gremlin type name, `reducer.ts` `REDUCED_TYPE`), a stored value's is its `vtype` column, and a
+      // static/unknown tag needs no column at all.
       const typeCol = framing.result === 'number' ? 'vt' : perRowColumnOf(framing.type);
       return [
         { name: 'v', type: 'any', nullable: true },

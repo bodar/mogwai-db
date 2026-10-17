@@ -302,11 +302,13 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
     expect(typed('g.inject(1.0, 1).union(__.identity()).order().by(__.constant(0)).fold()')).toEqual(['[1d,1i]']);
   });
 
-  test('a list member the bare encoding cannot type declines rather than merge as another', async () => {
-    // List.equals compares members with equals: [1] and [1L] differ.
-    for (const q of ['g.inject([1], [2], [1L]).limit(2)', 'g.inject([1.0f], [2]).limit(2)', 'g.V().constant([1L]).limit(1)']) {
-      await expect(run(q), q).rejects.toThrow(/not supported/);
-    }
+  test('a list member whose class its storage cannot say rides typed, so it merges only with its equal', () => {
+    // List.equals compares members with equals: [1] and [1L] differ. The literal envelopes the member its
+    // storage class cannot name back (a Long, a Float — §6·7), so the bytes, the merge key, differ too.
+    expect(typed('g.inject([1], [2], [1L]).limit(2)')).toEqual(['[1i]', '[2i]']);
+    expect(typed('g.inject([1.0f], [2]).limit(2)')).toEqual(['[1f]', '[2i]']);
+    expect(typed('g.V().constant([1L]).limit(1)')).toEqual(['[1L]']);
+    expect(typed('g.inject([1], [1L], [1]).dedup()')).toEqual(['[1i]', '[1L]']);
     expect(typed('g.inject([1.0], [2], [1]).limit(2)')).toEqual(['[1d]', '[2i]']);
     expect(typed('g.inject([1], [2], [1]).limit(2)')).toEqual(['[1i]', '[1i]']);
   });

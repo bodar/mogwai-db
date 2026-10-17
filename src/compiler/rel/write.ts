@@ -18,7 +18,7 @@ import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, t
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, meta, or, reducedVtype, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
@@ -452,7 +452,9 @@ const storedExpr = (write: PropertySet): Expr => {
   // materialized value's class, which is why an integral Double continues to land INTEGER
   // (the JSON set writer has the same representation). This keeps writes and bulk imports
   // byte-identical while `vtype: double` still frames the property as a Double on read.
-  const storageType = typeof write.stored === 'number' && Number.isInteger(write.stored) ? 'int' : write.vtype;
+  // A NEGATIVE ZERO is the exception: it is not integral to SQLite (an INTEGER has no −0), so it stays
+  // the REAL −0.0 the untyped `value` column keeps — `Double.toString(-0.0)` is `-0.0` on read.
+  const storageType = typeof write.stored === 'number' && Number.isInteger(write.stored) && !Object.is(write.stored, -0) ? 'int' : write.vtype;
   return constLit(arg(write.stored, storageType, write.valueName))!;
 };
 
@@ -1665,7 +1667,7 @@ function resolveValueRows(
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
     const reduced = rows.framing.result === 'number' && rows.rel.type.cols.some((column) => column.name === 'vt');
     const encounter = rows.rel.channels.find((channel) => channel.role === 'encounter');
-    const vt = typed ? col(rows.rel.id, 'vtype') : reduced ? reducedVtype(col(rows.rel.id, 'vt')) : scalarVtype(rows.framing, asKey);
+    const vt = typed ? col(rows.rel.id, 'vtype') : reduced ? col(rows.rel.id, 'vt') : scalarVtype(rows.framing, asKey);
     if (!vt) return null;
     return {
       rel: make.project({
@@ -1682,8 +1684,8 @@ function resolveValueRows(
   const produced = child.scalar(body, host);
   const present = produced && knownPresence(produced.present);
   if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !present) return null;
-  // A NUMERIC reducer's `vt` is either a Gremlin type or a storage class (`reducedVtype` says which).
-  const vt = (produced.framing.result === 'number' ? (produced.vtype && reducedVtype(produced.vtype)) : produced.vtype)
+  // A NUMERIC reducer's `vt` is a Gremlin type name like any other tag (`REDUCED_TYPE`).
+  const vt = produced.vtype
     ?? scalarVtype(produced.framing, asKey);
   if (!vt) return null;
   const valued = make.project({
@@ -2103,7 +2105,7 @@ function mapFormStatements(
     const typeCol = cols.find((column) => column.name !== 'v');
     const value = col(source.id, fieldCol(field.prefix, 'v'));
     const vt = typeCol && typeCol.name === 'vtype' ? col(source.id, fieldCol(field.prefix, 'vtype'))
-      : typeCol && typeCol.name === 'vt' ? reducedVtype(col(source.id, fieldCol(field.prefix, 'vt'))) : scalarVtype(field.framing);
+      : typeCol && typeCol.name === 'vt' ? col(source.id, fieldCol(field.prefix, 'vt')) : scalarVtype(field.framing);
     if (!vt) return false;
     const entry = make.project({
       id: fresh('mf'), input: source, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),

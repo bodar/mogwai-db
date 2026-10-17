@@ -5,12 +5,12 @@ import { raiseExpr } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { isOperatorArg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { flatType } from '../../gremlin/types.ts';
-import { perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
+import { perRowColumnOf, STATIC, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { eq, meta, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { constLit } from './const.ts';
 import type { FramedRel } from './framing.ts';
-import { SAFE_INT } from './reducer.ts';
+import { extremumKeepingFirst, REDUCED_TYPE, SAFE_INT } from './reducer.ts';
 
 /**
  * `Operator` — ONE FOLD STEP, in the algebra, and the SEEDED LEFT FOLD that iterates it.
@@ -317,7 +317,9 @@ function foldStep(operator: string, acc: Expr, value: Expr, kind: Expr): Expr | 
       else: raise(say.nonFinite),
     };
   };
-  const extremum = (fn: 'MIN' | 'MAX'): Expr => ({
+  // The ACCUMULATOR keeps a tie — `FoldStep` applies `operator.apply(seed, value)` — observable for a
+  // `-0.0` against a `0.0` (`reducer.ts` `extremumKeepingFirst`).
+  const extremum = (fn: 'min' | 'max'): Expr => ({
     kind: 'case',
     whens: [
       [eqInt(kind, KIND.none), acc],
@@ -327,7 +329,7 @@ function foldStep(operator: string, acc: Expr, value: Expr, kind: Expr): Expr | 
       [isNull(acc), value],
       [bin('!=', typeOfIs(acc, 'text'), eqInt(kind, KIND.string)), raise(say.cannotAct)],
     ],
-    else: { kind: 'call', fn, args: [acc, value] },
+    else: extremumKeepingFirst(fn, acc, value),
   });
   const logical = (op: 'and' | 'or'): Expr => ({
     kind: 'case',
@@ -342,8 +344,8 @@ function foldStep(operator: string, acc: Expr, value: Expr, kind: Expr): Expr | 
     case 'minus': return arith('-');
     case 'mult': return arith('*');
     case 'div': return arith('/');
-    case 'min': return extremum('MIN');
-    case 'max': return extremum('MAX');
+    case 'min': return extremum('min');
+    case 'max': return extremum('max');
     case 'and': return logical('and');
     case 'or': return logical('or');
     default: return null;
@@ -520,7 +522,7 @@ export function seededLeftFold(
         }],
       ],
     }),
-    framing: { kind: 'scalar', type: UNKNOWN, result: 'number', productiveNull },
+    framing: { kind: 'scalar', type: REDUCED_TYPE, result: 'number', productiveNull },
   };
 }
 

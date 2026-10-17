@@ -470,6 +470,14 @@ export function rowOp(
   //    parent, and the set arms cannot carry `origin` (its group policy is `undefined`).
   if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
   if (originOf(input.channels)) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
+  // A payload a VALUE can sit in keys on the reference's TYPED equality (`typedEquality`, the one authority
+  // a merge partitions on too): `DedupGlobalStep` collects into a `HashSet`, whose `equals` keeps
+  // `Integer(1)` from `Double(1.0)` and `Double.equals(-0.0, 0.0)` false, where SQL's `=` (and so a
+  // `DISTINCT`/`GROUP BY`) folds both pairs. The set arms below cannot key on a term they do not keep as a
+  // column, so such a payload takes the window arm, whose partition carries the widened key.
+  const identity = shape.identity(input);
+  const typedKey = typedEquality(input, identity);
+  if (typedKey.length !== identity.length) return dedupOn(typedKey, input, shape.tie(input), fresh);
 
   // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(payload, bulk[, encounter])`, so
   // they may carry ONLY the channels with a defined N→1 answer — `bulk`/`encounter`; an ALIAS/`sack`

@@ -47,7 +47,7 @@ export function buildValueTransformSegment(
   steps: readonly Step[], at: number, lowering: Lowering,
   // `text` is the head's JSON text for a collection head (`BarrierInput.injectedText`) — a transform that
   // COMPARES or RENDERS members reads it exactly (`parseExactJson`); one that only reshapes ignores it.
-  transform: (value: unknown, text?: string) => unknown,
+  transform: (value: unknown, text?: string, type?: string | null) => unknown,
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
@@ -67,7 +67,7 @@ export function buildValueTransformSegment(
     mode: 'sync',
     head,
     resume: (headRows: readonly BarrierInput[]): Plan => {
-      const transformed = headRows.map((row) => transform(row.injectedValue, row.injectedText));
+      const transformed = headRows.map((row) => transform(row.injectedValue, row.injectedText, row.injectedType));
       const resumed = resume(transformed, steps, at + 1, lowering);
       if (resumed) return { kind: 'sql', compiled: finishLowering(resumed) };
       const nested = nest?.(transformed);

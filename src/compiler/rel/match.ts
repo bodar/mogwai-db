@@ -16,6 +16,7 @@ import { perRowSubject, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 import type { GraphSource } from './source.ts';
+import { perRowColumnOf } from '../../sql/kernel/render.ts';
 
 /**
  * `match(p1, p2, …)` — the CONJUNCTIVE PATTERN step, lowered as a BINDING TABLE threaded through the
@@ -668,7 +669,9 @@ function producedObject(rel: Rel, framing: RelFraming): { readonly value: Expr; 
     // `select(key)`) has no such marker and binds directly.
     if (framing.result === 'count' || framing.result === 'number') return null;
     const value = col(rel.id, 'v');
-    const vtype = rel.type.cols.some((c) => c.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+    // The row's own tag column — the stored `vtype`, else the framing's PER-ROW one (a mixed inject's tag).
+    const tagCol = ['vtype', perRowColumnOf(framing.type)].find((name) => name && rel.type.cols.some((c) => c.name === name));
+    const vtype = tagCol ? col(rel.id, tagCol) : undefined;
     return { value, kind: 'value', bind: { kind: 'value', value, type: framing.type, ...(vtype ? { vtype } : {}) } };
   }
   return null;

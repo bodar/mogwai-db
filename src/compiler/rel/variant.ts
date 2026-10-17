@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { STATIC, staticTypeOf, UNKNOWN, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
-import { byEncounter, carriedCols, meta, typeOf, type Minter } from './build.ts';
+import { byEncounter, carriedCols, meta, scalarFramedValue, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { correlatedElementColumns } from './element.ts';
 import type { RelFraming } from './framing.ts';
@@ -114,7 +114,7 @@ export const variantHasList = (arms: readonly VariantArm[]): boolean => arms.som
  * `UNKNOWN` and infer per value — the extension point §6·7 names.
  */
 export function variantPayload(
-  rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter,
+  rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter, realDecimals = false,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
   const elems = new Set(arms.flatMap((arm) => (arm.kind === 'elements' ? [arm.elem] : [])));
@@ -134,7 +134,8 @@ export function variantPayload(
 
   const payload: (readonly [ColMeta, Expr])[] = [
     [meta(VK, 'int'), col(ordered.id, VK)],
-    [meta('v', 'any', true), col(ordered.id, 'v')],
+    // A BigDecimal scalar arm frames off its carrier, as every scalar result does (`scalarFramedValue`).
+    [meta('v', 'any', true), scalarFramedValue(col(ordered.id, 'v'), realDecimals && uniform === 'bigdecimal' ? eqTag(ordered, 1) : null)],
   ];
   // The element triple is a CASE over the tag rather than a per-kind column, because the framer reads
   // ONE `id`/`label`/`props` whichever kind the row is — `rowVertex` and `rowEdge` take the same names.

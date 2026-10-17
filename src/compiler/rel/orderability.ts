@@ -31,10 +31,10 @@ const PRIORITY = {
 type Kind = keyof typeof PRIORITY;
 
 /** The tags that map to `Type.Number` — a numeric compare, not the lexical `naturalOrder`. The Gremlin
- *  vtypes, plus SQLite's own storage classes `integer`/`real`: a computed reducer (`sum`) tags its member
- *  with `typeof(<the aggregate>)` (`reducer.ts`), and `frameTypedNode` frames those as a `Long`/`Double` —
- *  so they are numbers here too, never the `unknown` rung (which compared a wide sum's decimal TEXT
- *  lexically and ranked every sum after every `int`). */
+ *  vtypes, plus SQLite's own storage classes `integer`/`real`, which a member tagged by its storage class
+ *  carries and `frameTypedNode` frames as a `Long`/`Double` — so they are numbers here too, never the
+ *  `unknown` rung (which compared a wide sum's decimal TEXT lexically and ranked every sum after every
+ *  `int`). A reducer's own `vt` is a Gremlin type name (`reducer.ts` `REDUCED_TYPE`). */
 const NUMERIC = new Set(['byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal', 'integer', 'real']);
 
 /** The kind of a delivered member — off its `{t}` tag where it has one, else inferred from the JS value

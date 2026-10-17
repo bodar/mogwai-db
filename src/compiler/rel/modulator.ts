@@ -6,7 +6,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
+import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, classedKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -592,6 +592,11 @@ const staticTagExpr = (type: ScalarType): Expr => {
   return tag ? compilerText(tag) : compilerNull('text');
 };
 
+/** A CHILD BODY's member node: the producer's own one-read node where it built one (`ChildValue.node`),
+ *  else composed from its value, framing, presence and per-row tag. */
+export const memberNodeOf = (produced: ChildValue, source: GraphSource, fresh: Minter): Expr | null =>
+  produced.node ?? producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present, produced.vtype);
+
 /**
  * A CHILD BODY'S RESULT AS A SELF-DESCRIBING `{t,v}` MEMBER NODE — the encoding a value `by()` puts in a
  * map, and (via `groupCollected`) the one a `by(__.…​.fold())` collects into a list, or `null` for a
@@ -619,7 +624,8 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * DECLINES: its NULL could be either, and reading it as "nothing" is the productive-null drop this seam
  * exists to end.
  */
-/** A scalar's `{t,v}` node from its per-row tag where it has one, and from its static tag otherwise.
+/** A scalar's `{t,v}` node: its STATIC class where the type names one (a literal, no read duplicated), else its
+ *  per-row tag where it has one, else untagged.
  *
  *  A per-row tag is always written as its NORMALIZED class (`classedNode`): this node may be a map KEY,
  *  compared by its JSON text, and a NULL tag ("infer") or a dropped `long` keyed `Integer(3)` and
@@ -627,7 +633,7 @@ const staticTagExpr = (type: ScalarType): Expr => {
  *  keys the two apart (`Integer.equals(Long)` is false). Inline where value and tag are free of a
  *  correlated read (cheap to repeat), else `typedNodeOnce`, which evaluates each ONCE. */
 const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType, fresh: Minter): Expr => {
-  if (!vtype) return typedNode(value, staticTagExpr(type));
+  if (staticTypeOf(type) || !vtype) return typedNode(value, staticTagExpr(type));
   if (vtype.kind === 'lit') return typedNode(value, vtype);
   return exprHasSubquery(value) || exprHasSubquery(vtype) ? typedNodeOnce(value, vtype, fresh) : classedNode(value, vtype);
 };
@@ -682,7 +688,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
     // ALIAS arm below gives — a child body and a labelled read are the same question about a different
     // scope, so they must not encode their results two ways.
-    return producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present, produced.vtype);
+    return memberNodeOf(produced, source, fresh);
   }
 
   if (key.kind === 'alias') {

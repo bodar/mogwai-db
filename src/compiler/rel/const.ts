@@ -37,15 +37,11 @@ import type { Arg } from '../../gremlin/frontend.ts';
  *  so binding it spent a parameter to reach the same value a literal reaches for free (the root
  *  `CLAUDE.md` bind rule: a value the compiler already holds is a constant).
  *
- *  ⚠️ **`NaN` FOLDS TO `null` at the front door — a DELIBERATE, documented deviation from Java.** SQLite
- *  has no NaN: it is `NULL` however it arrives (`typeof(9e999-9e999)` = `'null'`), so the substrate has
- *  ALREADY collapsed IEEE's `Error<Number>` poison-value into "absent". Rather than let that collapse
- *  emerge implicitly three layers down, this states it ONCE: `NaN` → `compilerNull()`. Mechanical
- *  sympathy with the store (`docs/feature-support-matrix.md` §10 records the deviation and its
- *  consequence — `inject(NaN).is(P.eq(null))` MATCHES where TinkerPop returns empty, because for us NaN
- *  IS null). No workload carries NaN as a distinct value — it arrives only as a typed conformance-probe
- *  literal or from a `0.0/0.0` computation SQLite already NULLs — so folding it costs no real query and
- *  buys one legible rule over a footnoted coincidence. A USER PARAMETER that is `±Infinity` still binds
+ *  ⚠️ **`NaN` FOLDS TO `null` here — and is admitted only where that is never observed.** SQLite has no
+ *  NaN: it is `NULL` however it arrives (`typeof(9e999-9e999)` = `'null'`), so this states the collapse
+ *  ONCE: `NaN` → `compilerNull()`. A NaN traverser VALUE has no carrier, so the traversal DECLINES before
+ *  lowering (`ir/uncarried-literal.ts`) unless the NaN is a predicate operand or the next step drops it as
+ *  it drops a null (`docs/feature-support-matrix.md` §10). A USER PARAMETER that is `±Infinity` still binds
  *  (a parameter is the user's intent, the cap is a parameter budget); a NaN parameter is unreachable
  *  (`NaN` has no wire form to arrive as a bound `GValue`). */
 export const constLit = (a: Arg): Expr | null => {
@@ -67,8 +63,10 @@ export const constLit = (a: Arg): Expr | null => {
     // `bigint`), and no exact SQLite integer can be written for it — so it is a REAL.
     if (!Number.isSafeInteger(value)) return compilerReal(value);
     const flat = flatType(type);
-    return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
-      ? compilerReal(value) : compilerInt(value);
+    // A whole BigDecimal (an integral source's `asNumber(BIGDECIMAL)`, scale 0) is the INTEGER carrier — a
+    // REAL inside a list would read back as `BigDecimal.valueOf(double)`, scale 1 (`bigDecimalOfCarrier`).
+    if (flat === 'bigdecimal') return Number.isInteger(value) ? compilerInt(value) : compilerReal(value);
+    return flat === 'float' || flat === 'double' ? compilerReal(value) : compilerInt(value);
   }
   return null;
 };

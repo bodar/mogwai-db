@@ -1,3 +1,4 @@
+import { stringifyExactOrRefuse } from './json-exact.ts';
 import { emit, emitProgram, isRowsBind, type Emitted } from './rel/emit.ts';
 import type { Guard, Plan } from './rel/plan.ts';
 
@@ -103,7 +104,7 @@ function payload(name: string, columns: Readonly<Record<string, readonly string[
   const cols = columns[name];
   const rows = retained.get(name);
   if (!cols || !rows) throw new Error(`RelIR program: binding '${name}' has no retained rows — it must run before the step that references it`);
-  return JSON.stringify(rows.map((row) => cols.map((column) => transportable(row[column], name, column))));
+  return stringifyExactOrRefuse(rows.map((row) => cols.map((column) => transportable(row[column], name, column))));
 }
 
 /** JSON carries null, numbers, strings and booleans losslessly and nothing else. A blob or a

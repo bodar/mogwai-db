@@ -19,7 +19,7 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
     const store = seededStore();
     const r = run(store, 'g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").sum())');
     // lop's inbound created weights are 0.4 + 0.4 + 0.2 — Doubles, so the field's tag is `double` (their
-    // common number class, `reducer.ts` `numberClass`), never the Int magnitude inference would pick for
+    // common number class, `reducer.ts` `commonNumberClass`), never the Int magnitude inference would pick for
     // a whole number.
     expect(field(r, 'n')).toEqual({ t: 'string', v: 'lop' });
     expect(field(r, 'w').t).toBe('double');
@@ -30,8 +30,8 @@ describe('by(<numeric reducer>) carries its type into fields and members', () =>
     const store = seededStore();
     const r = run(store, 'g.V().has("name","lop").project("n","w").by("name").by(__.inE("created").values("weight").mean())');
     // mean of [0.4, 0.4, 0.2] ≈ 0.333 — and even a whole-number mean must frame Double, which is why
-    // `frameTypedNode` routes a `real` tag through `sumBuffer` rather than inferring by magnitude.
-    expect(field(r, 'w').t).toBe('real');
+    // a reducer states its class as a Gremlin type name (`reducer.ts` `REDUCED_TYPE`), never `real`.
+    expect(field(r, 'w').t).toBe('double');
     expect(field(r, 'w').v).toBeCloseTo(1 / 3, 9);
   });
 

@@ -10,6 +10,7 @@ import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, knownPresence, raisingPresence, type ChildHost, type ChildValue, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -402,7 +403,9 @@ function valueClause(
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'perRow' && produced.vtype
       ? perRowSubject(produced.vtype, produced.expr)
-      : SUBJECT_UNKNOWN;
+      // A `result: 'number'` branch (a scalar coalesce) keeps its per-row arm tag in a mixed vocabulary:
+      // not a cast key, but still what says a `constant(true)` arm is a Boolean, not the Number 1.
+      : produced.vtype ? { kind: 'unknown', tag: produced.vtype } : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
     (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   if (!pred) return null;
@@ -487,7 +490,13 @@ export function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
   // — a property is not a scalar — which `sourceFilter` handles by narrowing.
   if (framing.kind === 'property') return { kind: 'property', id: propertyRowId(rel), ownerElem: framing.ownerElem, rel };
   if (framing.kind !== 'scalar') return null;
-  const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+  // The row's own tag column — the stored `vtype`, else the framing's PER-ROW one (a min/max winner's `vt`,
+  // a mixed inject's tag) — exactly as `subjectType` reads it. Reading `vtype` alone judged a reducer
+  // result by its storage class: a BigDecimal winner carried as decimal TEXT failed `is(P.gt(0.9m))` here
+  // while the same `where(is(…))` passed.
+  const has = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
+  const tagCol = has('vtype') ? 'vtype' : perRowColumnOf(framing.type);
+  const vtype = tagCol && has(tagCol) ? col(rel.id, tagCol) : undefined;
   return {
     kind: 'scalar', value: col(rel.id, 'v'), rel,
     type: vtype ? perRowSubject(vtype, col(rel.id, 'v'))

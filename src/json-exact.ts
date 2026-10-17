@@ -30,7 +30,10 @@
 
 // A number past 2^53 is spelled with a run of 16+ digits, or with an exponent (`2.7e+19`); a whole Double
 // with a point (`1.0`, `-0.0`).
-const WIDE_DIGITS = /\d{16}|\d[eE]|\d\.0/;
+import { hasExactDecimal, INEXACT_DECIMAL } from './rel/exact-decimal.ts';
+import { RaisedByQuery } from './rel/raise.ts';
+
+const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
 const INTEGRAL = /^-?\d+$/;
 const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown; isRawJSON?: (value: unknown) => boolean };
 
@@ -60,10 +63,20 @@ export function parseExactJson(text: string): any {
 /** `JSON.stringify`, spelling a negative zero `-0.0` — the writing half of the module rule, for a
  *  compile-time tree headed into SQLite's JSON (a literal map, a stored collection). `null` where the
  *  runtime lacks `JSON.rawJSON` and the tree holds a negative zero: the caller declines rather than write
- *  a zero that lost its sign. */
+ *  a zero that lost its sign.
+ *
+ *  A finite number OUTSIDE the range SQLite reads decimal text exactly in (`rel/exact-decimal.ts`) RAISES the
+ *  in-row deferral's own `RaisedByQuery`: JS spells it exactly, but SQLite's JSON reader turns `1.5e-300` into
+ *  1.4999999999999998E-300, so the tree would hand every SQL reader of it another number. This is the ONE
+ *  writer of a JSON text headed into SQLite, so the rule holds for a literal, a bound set, a barrier's
+ *  re-injected values and a retained binding alike. */
 export function stringifyExact(value: unknown): string | null {
   let lost = false;
   const text = JSON.stringify(value, (_key, member: unknown) => {
+    // A raw exact number is a Double only when spelled with a point or exponent (`exactNumberOf`).
+    const raw = isExactNumber(member) ? exactNumberOf(member) : null;
+    const number = typeof member === 'number' ? member : raw && !raw.integral ? Number(raw.text) : null;
+    if (number !== null && !hasExactDecimal(number)) throw new RaisedByQuery(INEXACT_DECIMAL);
     const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
     if (spelled === undefined) return member;
     if (rawJson.rawJSON) return rawJson.rawJSON(spelled);
@@ -83,4 +96,13 @@ function exactSpelling(member: number): string | undefined {
   if (member === Infinity) return '9.0e+999';
   if (member === -Infinity) return '-9.0e+999';
   return undefined;
+}
+
+/** `stringifyExact` for a caller with no decline of its own to fall back on (a bound JSON set, a
+ *  retained binding's transport, a compile-time literal blob): a runtime that cannot spell a negative
+ *  zero or an infinity REFUSES rather than write another value. Both runtimes we ship on have `JSON.rawJSON`. */
+export function stringifyExactOrRefuse(value: unknown): string {
+  const text = stringifyExact(value);
+  if (text == null) throw new Error('a value holding -0.0 or an infinity cannot cross as JSON on this runtime: its text would change the value');
+  return text;
 }

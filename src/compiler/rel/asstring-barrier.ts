@@ -7,6 +7,7 @@ import { buildValueTransformSegment, mapHead, valueHead } from './barrier-value.
 import { isBareList } from './list.ts';
 import { gremlinString } from './gremlin-string.ts';
 import { exactOf } from './orderability.ts';
+import { staticTypeOf, type ListOf } from '../../sql/kernel/render.ts';
 
 // ---------- asString() over a COLLECTION — a value-transform barrier ----------
 //
@@ -39,6 +40,34 @@ const asStringMember = (member: unknown): string => {
     throw new ValueParseError('Can\'t parse null as String.');
   return gremlinString(member);
 };
+
+/**
+ * A delivered list MEMBER → the self-describing node `gremlinString` prints, by the list's member SHAPE —
+ * the ONE place a member's class is re-attached, recursing through the shape so every depth reads the same
+ * rule (`fold().fold()`, a label re-read, a list inside a list inside a list).
+ *
+ * A scalar member under a STATIC member tag rides BARE — its class is the list's, not its own — so it is
+ * re-wrapped in that tag: the renderer prints by class (`Float.toString` of the exact float `0.1f` is
+ * `0.1`, a whole Double is `1.0`, a Boolean `true`, a negative zero `-0.0`), where a bare number would read
+ * as a Double and a bare 0/1 as a number. A NESTED list member re-attaches its own members' shape one level
+ * down. A MAP member arrives as its BARE pairs array (`[[keyNode,valNode],…]`, ambiguous with a plain list),
+ * so it is wrapped back into the `{t:'map'}` node the renderer frames as `{k=v}` (its pairs are
+ * self-describing). An element (`{id,label}`) or a self-describing (`perRow`/`unknown`) member renders as-is.
+ */
+function memberNode(of: ListOf): (member: unknown) => unknown {
+  switch (of.kind) {
+    case 'map': return (member) => ({ t: 'map', v: member });
+    case 'list': {
+      const inner = memberNode(of.of);
+      return (member) => (Array.isArray(member) ? { t: 'list', v: member.map(inner) } : member);
+    }
+    case 'scalar': {
+      const tag = staticTypeOf(of.type);
+      return tag === undefined ? (member) => member : (member) => (member === null || member === undefined ? member : { t: tag, v: member });
+    }
+    default: return (member) => member;
+  }
+}
 
 /** Does this `asString()` position claim the barrier — a MAP head (global only), or a LIST head that is
  *  NOT the scalar-membered-local case `list.ts` already casts in SQL. Lowered here, not just in the
@@ -78,12 +107,7 @@ export function buildAsStringSegment(steps: readonly IRStep[], at: number, lower
   }
   const head = valueHead(lowered);
   if (head?.shape.kind !== 'jsonbList' || (isBareList(head.shape.items) && local)) return null;
-  // A MAP member arrives as its BARE pairs array (`[[keyNode,valNode],…]`, ambiguous with a plain list),
-  // so wrap it back into the `{t:'map'}` node the renderer frames as `{k=v}`; an element (`{id,label}`),
-  // scalar, or nested-list member is already self-describing and renders as-is.
-  const nodeOf = head.shape.items.kind === 'map'
-    ? (member: unknown): unknown => ({ t: 'map', v: member })
-    : (member: unknown): unknown => member;
+  const nodeOf = memberNode(head.shape.items);
   return local
     ? buildValueTransformSegment(steps, at, lowering,
       (list, text) => (exactOf(list, text) as unknown[]).map((m) => asStringMember(nodeOf(m))), lowerListResume, 'asString')

@@ -1,6 +1,9 @@
+import { stringifyExactOrRefuse } from '../../json-exact.ts';
+import { INEXACT_DECIMAL, outsideExactDecimal } from '../../rel/exact-decimal.ts';
+import { deferralExpr } from '../../rel/raise.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { SAFE_INT } from './reducer.ts';
+import { col, compilerInt, compilerNull, compilerText, param, signBit, type Expr } from '../../rel/expr.ts';
+import { inferredVtype, SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -309,7 +312,7 @@ export const notProduced = (pred: Expr): Expr =>
  * exclusive with `jsonTypes` (a membership set has no meaningful order) — the resume path never uses both.
  */
 export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[], ordCol?: string): Rel {
-  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(value), name)] };
+  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(stringifyExactOrRefuse(value), name)] };
   const exploded = make.explode(jsonTypes
     ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
     : ordCol
@@ -321,6 +324,25 @@ export function jsonEachSet(name: string, value: readonly unknown[], fresh: Mint
     pred: { kind: 'in-list', expr: col(exploded.id, 'st'), values: jsonTypes.map(compilerText) },
   });
   return make.project({ id: fresh('jesp'), input: kept, channels: [], type: typeOf(meta('sv', 'any', true)), exprs: [['sv', col(kept.id, 'sv')]] });
+}
+
+/**
+ * `body(values…)` with each value SPELLED ONCE — SQL has no LET, and a fused projection re-inlines a named
+ * column at every read, so an expression that reads an operand five times (a class test over a correlated
+ * read) would spell that read five times. The operands ride as one JSON array through a one-row
+ * `json_each`, and the body reads each back by position (`json_extract(value, '$[i]')`): a scalar
+ * subquery correlated to the row, which a recursive term may hold as well (it names no relation).
+ *
+ * ⚠️ JSON carries a REAL to 15 significant digits, so the body may read only what survives that — a
+ * value's storage class, its sign, its magnitude against a bound — never its exact digits.
+ */
+export function letValues(values: readonly Expr[], body: (read: readonly Expr[]) => Expr, fresh: Minter): Expr {
+  const exploded = make.explode({
+    id: fresh('let'), channels: [], type: typeOf(meta('lv', 'any', true)), as: { value: 'lv' },
+    expr: { kind: 'call', fn: 'json_array', args: [{ kind: 'call', fn: 'json_array', args: [...values] }] },
+  });
+  const read = values.map((_, i): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'lv'), compilerText(`$[${i}]`)] }));
+  return { kind: 'scalar', plan: make.project({ id: fresh('letp'), input: exploded, channels: [], type: typeOf(meta('lr', 'any', true)), exprs: [['lr', body(read)]] }) };
 }
 
 /** The json_each `type` names for a JSON number and a JSON string — a `V()`/`E()` id list routes the
@@ -461,6 +483,13 @@ export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value')
  *  and cannot round-trip one that needs 16-17 (a mean, a `math()` quotient). Both the Gremlin classes
  *  and SQLite's own `real` (what `typeof` reports for a computed reducer) are here. */
 const FLOATING_VTYPES: readonly string[] = ['float', 'double', 'real'];
+/** `FLOATING_VTYPES` plus `bigdecimal` — every tag whose value MAY be a binary64 REAL. A BigDecimal rides as
+ *  decimal TEXT, an INTEGER (scale 0), or the REAL whose `BigDecimal.valueOf` it IS (a whole Double widened at
+ *  or past 10^7, `doubleDecimalText` in `rel/float.ts`; read by `bigDecimalOfCarrier`, `src/gremlin/float.ts`).
+ *  That REAL crosses SQLite's 15-digit JSON writer like any Double — `json_array(1.0000000000000002E20)` is
+ *  `[1.0e+20]`, which reads back as `1.0E20`, another BigDecimal — so it takes `asExactReal` too, which
+ *  re-spells a REAL only and leaves the TEXT and INTEGER carriers as they are. */
+const REAL_CARRYING_VTYPES: readonly string[] = [...FLOATING_VTYPES, 'bigdecimal'];
 /** VTYPE tags whose value can exceed 2^53 — a JS reader's `JSON.parse` ROUNDS an integer past that, so
  *  it must ride as decimal TEXT and be reconstructed via `BigInt` (`frameValue`'s long/bigint arm).
  *  `int`/`short`/`byte` are ≤2^31 and safe; `integer` is SQLite's class for a computed reducer. */
@@ -474,30 +503,48 @@ const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf'
  *
  *  A NULL PASSES THROUGH, and the test is the INEQUALITY to make that so without spelling the value again: a
  *  NULL makes the comparison NULL, which a CASE reads as "no arm", so the ELSE must be the value itself —
- *  with the repair as the ELSE, `printf('%!.17g', NULL)` printed `0.0`. A reducer's null is now tagged
- *  'null' at its producer (`reducer.ts` `reducerAggregate`, the all-null `mean()` included), so this is
- *  the entry's own null rule rather than that tag's repair — kept because the negative-zero arm below
- *  relies on the same "no arm, ELSE is the value" shape. */
-const asExactReal = (value: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    // A NEGATIVE ZERO, which SQLite's JSON writer (and `printf`) spells `0.0`: `Double.equals(-0.0, 0.0)` is
-    // false, so a member that lost its sign is another member. `json('-0.0')` is kept as written, and the
-    // reader parses it back as the Double it is (`parseExactJson`, `json-exact.ts`). `atan2(±0, -1)` is ±π,
-    // the one comparison that reads the sign bit (`receiver.ts`'s `floatingText`). A NULL makes both
-    // comparisons NULL — no arm — so it reaches the ELSE as itself.
-    [{ kind: 'binary', op: 'and',
-      left: { kind: 'binary', op: '=', left: value, right: compilerInt(0) },
-      right: { kind: 'binary', op: '<', left: { kind: 'call', fn: 'atan2', args: [value, compilerInt(-1)] }, right: compilerInt(0) } },
-    jsonCall(compilerText('-0.0'))],
-    [{ kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, jsonCall(printf('%!.17g', value))],
-  ],
-  // A WHOLE Double the store keeps as INTEGER (a stored `1.0` weight under 'double') is spelled as the REAL
-  // it is, so it writes `1.0` exactly as a computed `1.0` does. Every JSON TEXT that is compared — a
-  // label's history entry (`dedup('a')`), a map key node (`groupCount()`) — is then one text for one
-  // Double: `Double.equals(1.0, 1.0)` (DedupGlobalStep.java:80-88, a HashMap key). `CAST(NULL)` is NULL.
-  else: { kind: 'cast', arg: value, to: 'real' },
-});
+ *  with the repair as the ELSE, `printf('%!.17g', NULL)` printed `0.0`, and every productive null tagged
+ *  as a binary64 (a `mean()` over an all-null stream: `MeanGlobalStep` seeds null and `getFinal` keeps it,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84`)
+ *  entered a map or list as `0.0`. */
+const isReal = (value: Expr): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') });
+const asExactReal = (value: Expr, realOnly = true, ranged = true): Expr => {
+  // Re-spelled where the 15-digit form does not round-trip — and, `realOnly`, only where the value IS a REAL:
+  // a tag that admits a non-REAL carrier (a BigDecimal's decimal TEXT `12.50`) would otherwise have the test
+  // read the text as a number and re-spell it `12.5`, losing the scale it carries. A Double/Float tag's value
+  // is numeric storage, so its STATIC entry skips the storage-class test (no bytes where it cannot matter).
+  // `ranged` is false only for a static FLOAT tag: a Float's exact value lies inside the exact range
+  // (`Float.MAX_VALUE` 3.4E38, `Float.MIN_VALUE` 1.4E-45), so its entry skips that test the same way.
+  const outside: Expr = realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: outsideExactDecimal(value) } : outsideExactDecimal(value);
+  const lossy: Expr = { kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value };
+  return {
+    kind: 'case',
+    whens: [
+      // A NEGATIVE ZERO, which SQLite's JSON writer (and `printf`) spells `0.0`: `Double.equals(-0.0, 0.0)` is
+      // false, so a member that lost its sign is another member. `json('-0.0')` is kept as written, and the
+      // reader parses it back as the Double it is (`parseExactJson`, `json-exact.ts`). `atan2(±0, -1)` is ±π,
+      // the one comparison that reads the sign bit (`signBit`, `rel/expr.ts`). A NULL makes both
+      // comparisons NULL — no arm — so it reaches the ELSE as itself. (TEXT never equals the integer 0.)
+      [{ kind: 'binary', op: 'and',
+        left: { kind: 'binary', op: '=', left: value, right: compilerInt(0) },
+        right: signBit(value) },
+      jsonCall(compilerText('-0.0'))],
+      // OUTSIDE the range SQLite's decimal conversion is exact in (`exact-decimal.ts`), no spelling it writes is
+      // known to be the value — `printf('%!.17g')` is off by ulps, the 15-digit writer is right only where 15
+      // digits suffice, and the `lossy` test that would say so is itself wrong there — and SQLite's own reader
+      // misreads the text even where it is right. So the member DEFERS rather than enter as another number.
+      ...(ranged ? [[outside, deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] })] as [Expr, Expr]] : []),
+      [realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: lossy } : lossy, jsonCall(printf('%!.17g', value))],
+    ],
+    // A WHOLE Double the store keeps as INTEGER (a stored `1.0` weight under 'double') is spelled as the REAL
+    // it is, so it writes `1.0` exactly as a computed `1.0` does. Every JSON TEXT that is compared — a
+    // label's history entry (`dedup('a')`), a map key node (`groupCount()`) — is then one text for one
+    // Double: `Double.equals(1.0, 1.0)` (DedupGlobalStep.java:80-88, a HashMap key). `CAST(NULL)` is NULL.
+    // Only where the value IS a binary64 (`realOnly` false): a BigDecimal's INTEGER/TEXT carrier and an
+    // untagged INTEGER (an Int) stay themselves.
+    else: realOnly ? value : { kind: 'cast', arg: value, to: 'real' },
+  };
+};
 /** A wide integer as decimal TEXT past 2^53, reconstructed via `BigInt` at the wire; smaller values
  *  stay numbers. The same `SAFE_INT` boundary `sumTower` uses, so the two cannot disagree. */
 const asExactWideInt = (value: Expr): Expr => ({
@@ -528,7 +575,7 @@ const inList = (vtype: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list
 export const jsonMember = (value: Expr, vtype: Expr): Expr => {
   if (literalCollection(vtype) === true) return jsonCall(value);
   if (vtype.kind === 'lit') {
-    if (vtype.source === 'compiler-text' && FLOATING_VTYPES.includes(vtype.value)) return asExactReal(value);
+    if (vtype.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(vtype.value)) return asExactReal(value, vtype.value === 'bigdecimal', vtype.value !== 'float');
     if (vtype.source === 'compiler-text' && WIDE_INT_VTYPES.includes(vtype.value)) return asExactWideInt(value);
     return value;
   }
@@ -536,7 +583,7 @@ export const jsonMember = (value: Expr, vtype: Expr): Expr => {
     kind: 'case',
     whens: [
       [inList(vtype, COLLECTION_VTYPES), jsonCall(value)],
-      [inList(vtype, FLOATING_VTYPES), asExactReal(value)],
+      [binary64Under(vtype, value, false), asExactReal(value, false)],
       [inList(vtype, WIDE_INT_VTYPES), asExactWideInt(value)],
     ],
     else: value,
@@ -553,11 +600,27 @@ export const jsonMember = (value: Expr, vtype: Expr): Expr => {
  * wide integer that arrived UNTYPED stays a bare number (type-correct, magnitude-inferred; the tagged
  * `jsonMember` path is where a wide integer rides as TEXT). Everything else passes through.
  */
-export const jsonMemberByTypeof = (value: Expr): Expr => ({
+export const jsonMemberByTypeof = (value: Expr): Expr => asExactReal(value);
+
+/**
+ * A SCALAR result COLUMN as the framer reads it, where the row may be a BigDecimal (`decimal`: the test that
+ * it is one, `null` where it never is). A BigDecimal's REAL carrier is `BigDecimal.valueOf(double)`
+ * (`gremlin/float.ts` `bigDecimalOfCarrier`: `1.0E7` is (10, −6), `100.0` scale 1), and a scalar row would
+ * hand it to the framer as the same bare JS number an integral source's scale-0 INTEGER is. So it crosses
+ * HERE, the last SQL position, as the one-member JSON array of its exact spelling (`[10000000.0]`) — through
+ * `asExactReal`, the entry a list member takes, so the scalar and the member cannot disagree (an always-17-digit
+ * spelling did: `math('_*1.1e300')` of 27, i.e. `2.97E301`, framed 2.9699999999999996E301 at the top level while
+ * its member kept `2.97E301`, because SQLite's `printf` 17th digit is not correctly rounded that far out)
+ * — which the carrier authority reads as `valueOf`; never as decimal TEXT, which it would read as
+ * `new BigDecimal(text)`. Every other row is the column itself.
+ */
+export const scalarFramedValue = (value: Expr, decimal: Expr | null): Expr => decimal === null ? value : {
   kind: 'case',
-  whens: [[{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, asExactReal(value)]],
+  whens: [[{ kind: 'binary', op: 'and',
+    left: { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, right: decimal },
+  { kind: 'call', fn: 'json_array', args: [asExactReal(value, false)] }]],
   else: value,
-});
+};
 
 /**
  * A SCALAR's binary64 repair alone, for a JSON entry whose other members stay as they were (a history
@@ -566,13 +629,35 @@ export const jsonMemberByTypeof = (value: Expr): Expr => ({
  * floating or not, and a NULL per-row tag ("infer") falls back to the storage class — and on the storage
  * class alone (`jsonMemberByTypeof`) for an untagged COLUMN, the one place `typeof` cannot splice a
  * subquery (§12 trap 2). An untagged expression is left as it was.
+ *
+ * A Float is carried as its EXACT value (`src/gremlin/float.ts`), which SQLite's 15-digit JSON writer does
+ * not keep (`as('a').select('a')` read `0.1f` back as 0.100000001490116, which no float equals), and a
+ * BigDecimal may ride as the REAL whose `valueOf` it is (`REAL_CARRYING_VTYPES`) — both take the repair.
  */
 export const exactRealEntry = (value: Expr, tag: Expr | undefined): Expr => {
   if (!tag) return value.kind === 'col' ? jsonMemberByTypeof(value) : value;
-  if (tag.kind === 'lit') return tag.source === 'compiler-text' && FLOATING_VTYPES.includes(tag.value) ? asExactReal(value) : value;
-  const floating: Expr = { kind: 'call', fn: 'coalesce', args: [inList(tag, FLOATING_VTYPES), {
-    kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }] };
-  return { kind: 'case', whens: [[floating, asExactReal(value)]], else: value };
+  if (tag.kind === 'lit') {
+    return tag.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(tag.value)
+      ? asExactReal(value, tag.value === 'bigdecimal', tag.value !== 'float') : value;
+  }
+  return { kind: 'case', whens: [[binary64Under(tag, value, true), asExactReal(value, false)]], else: value };
+};
+
+/**
+ * Is this value a binary64 under its PER-ROW tag — a Double/Float tag (whose whole value the store may keep
+ * as INTEGER, which the entry then writes as the REAL it is), or a REAL carrier under a `bigdecimal` tag
+ * (whose INTEGER/TEXT carriers are NOT a binary64: `printf('%!.17g')` would round a 17-digit INTEGER and
+ * re-read `12.50` as `12.5`), or — `inferred`, for an entry whose NULL tag means "read the value" — a REAL
+ * under no tag. ONE condition, so the entry's repair is spelled once rather than once per carrier — and the
+ * tag ONCE in it: a per-row tag is routinely a fused class computation (a list reducer's `vt` reads its class
+ * pair column twice per mention), so each mention re-inlines it. The tag looks its carrier up in a constant
+ * (1 a binary64, 0 a REAL-only carrier, absent anything else); the REAL test adds to it.
+ */
+const BINARY64_CARRIER = JSON.stringify({ ...Object.fromEntries(FLOATING_VTYPES.map((t) => [t, 1])), bigdecimal: 0 });
+const binary64Under = (tag: Expr, value: Expr, inferred: boolean): Expr => {
+  const key: Expr = inferred ? { kind: 'call', fn: 'coalesce', args: [tag, compilerText('bigdecimal')] } : tag;
+  const carrier: Expr = { kind: 'call', fn: 'json_extract', args: [compilerText(BINARY64_CARRIER), { kind: 'binary', op: '||', left: compilerText('$.'), right: key }] };
+  return { kind: 'binary', op: '>=', left: { kind: 'binary', op: '+', left: carrier, right: isReal(value) }, right: compilerInt(1) };
 };
 
 /**
@@ -633,38 +718,6 @@ export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson
   entries: [['t', vtype], ['v', jsonMember(value, vtype)], ['vpid', vpid], ['meta', metaJson]],
   binary: false,
 });
-
-/** SQLite storage classes — what `typeof(…)` answers, never a Gremlin type a reader frames by. */
-const STORAGE_CLASSES: readonly string[] = ['integer', 'text', 'blob', 'null'];
-/**
- * THE STORED TYPE OF A NUMERIC REDUCER'S RESULT — its `vt` (`framingCols`), which is ONE of two
- * vocabularies, decided per row: `min()`/`max()` hand on the WINNING row's own Gremlin `vtype`
- * (`minMaxWinnerVt`), while `sum()`/`mean()` carry the aggregate's storage class (`typeof(…)`, or the
- * literal `'real'` that `mean` always is). Stored untyped, the value frames by its storage class, and an
- * integral Double the store keeps as INTEGER (`1.0`) comes back an Int — where the reference keeps the
- * input's type for `max`/`min` (`MaxGlobalStep`/`MinGlobalStep` return the winning `Number` itself; `Max.feature`
- * pins `d[1.0].d`) and always answers a floating point for `mean` (`MeanNumber.getFinal` is
- * `div(sum, count, true)`, forced floating point —
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`;
- * `Mean.feature:70` pins `d[1.0].d`).
- * So: a Gremlin name is kept, `real` IS a Double, and any other storage class stays untyped, which is
- * what it framed as before.
- *
- * THE ONE CROSSING from the `vt` vocabulary into a `vtype` one. Only a `result: 'number'` framing reads
- * a storage class (the wire's `sumBuffer`); every per-row `vtype` column — a stored property, a
- * `choose`'s per-branch tag, a merged branch arm (`withMergedVtype`) — is read as a Gremlin type alone,
- * so a reducer's `vt` that lands in one goes through here, or `'real'` names nothing and the Double is
- * framed by inference as an Int.
- *
- * Spelled as ONE evaluation of `vt` — `nullif(…nullif(replace(vt, 'real', 'double'), 'integer')…)` —
- * rather than a `CASE` that names it three times, because `vt` is the reducer's own correlated subquery
- * and a fused projection would run it once per mention. `replace` is exact here: no Gremlin type name
- * contains `real`, so only the storage class itself is rewritten.
- */
-export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
-  (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(storageClass)] }),
-  { kind: 'call', fn: 'replace', args: [vt, compilerText('real'), compilerText('double')] },
-);
 
 /**
  * A SCALAR RELATION RE-PROJECTED ONTO THE MET TYPE's per-row column — its own per-row tag where it
@@ -919,32 +972,6 @@ export function regroupFirstOccurrence(
   });
 }
 
-const typeofIs = (value: Expr, storageClass: string): Expr =>
-  ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
-
-/**
- * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
- * inference the wire would apply to an untagged value,
- * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
- * bare, which is exactly what `typed` means) hand every member a type without a second channel.
- */
-export const inferredVtype = (value: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [typeofIs(value, 'text'), compilerText('string')],
-    [typeofIs(value, 'real'), compilerText('double')],
-    [typeofIs(value, 'null'), compilerNull()],
-    [typeofIs(value, 'integer'), {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
-        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
-      else: compilerText('long'),
-    }],
-  ],
-  else: compilerText('string'),
-});
-
 /**
  * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
@@ -1067,3 +1094,35 @@ export function rowNumberWindow(
     specs: [[colName, { kind: 'window-expr', fn: 'row_number', args: [], spec }]],
   });
 }
+
+/** SQLite storage classes — what `typeof(…)` answers, never a Gremlin type a reader frames by. */
+const STORAGE_CLASSES: readonly string[] = ['integer', 'text', 'blob', 'null'];
+/**
+ * THE STORED TYPE OF A NUMERIC REDUCER'S RESULT — its `vt` (`framingCols`), which is ONE of two
+ * vocabularies, decided per row: `min()`/`max()` hand on the WINNING row's own Gremlin `vtype`
+ * (`minMaxWinnerVt`), while `sum()`/`mean()` carry the aggregate's storage class (`typeof(…)`, or the
+ * literal `'real'` that `mean` always is). Stored untyped, the value frames by its storage class, and an
+ * integral Double the store keeps as INTEGER (`1.0`) comes back an Int — where the reference keeps the
+ * input's type for `max`/`min` (`MaxGlobalStep`/`MinGlobalStep` return the winning `Number` itself; `Max.feature`
+ * pins `d[1.0].d`) and always answers a floating point for `mean` (`MeanNumber.getFinal` is
+ * `div(sum, count, true)`, forced floating point —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`;
+ * `Mean.feature:70` pins `d[1.0].d`).
+ * So: a Gremlin name is kept, `real` IS a Double, and any other storage class stays untyped, which is
+ * what it framed as before.
+ *
+ * THE ONE CROSSING from the `vt` vocabulary into a `vtype` one. Only a `result: 'number'` framing reads
+ * a storage class (the wire's `sumBuffer`); every per-row `vtype` column — a stored property, a
+ * `choose`'s per-branch tag, a merged branch arm (`withMergedVtype`) — is read as a Gremlin type alone,
+ * so a reducer's `vt` that lands in one goes through here, or `'real'` names nothing and the Double is
+ * framed by inference as an Int.
+ *
+ * Spelled as ONE evaluation of `vt` — `nullif(…nullif(replace(vt, 'real', 'double'), 'integer')…)` —
+ * rather than a `CASE` that names it three times, because `vt` is the reducer's own correlated subquery
+ * and a fused projection would run it once per mention. `replace` is exact here: no Gremlin type name
+ * contains `real`, so only the storage class itself is rewritten.
+ */
+export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
+  (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(storageClass)] }),
+  { kind: 'call', fn: 'replace', args: [vt, compilerText('real'), compilerText('double')] },
+);

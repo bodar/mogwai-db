@@ -105,20 +105,21 @@ describe('dedup and the set ops key on typed equality — HashSet is Objects.equ
   });
 
   test('intersect/difference/disjunct/merge compare an Integer and a Double as two values', () => {
-    // A terminal set op frames as a SET (value order — a set has none of its own).
+    // A terminal set op frames as a SET (value order, then class name — a set has none of its own).
     expect(typed('g.inject([1, 2]).intersect([1.0])')).toEqual(['set[]']);
     expect(typed('g.inject([1, 2]).difference([1.0])')).toEqual(['set[1i,2i]']);
-    expect(typed('g.inject([1, 2]).disjunct([1.0])')).toEqual(['set[1i,1d,2i]']);
-    expect(typed('g.inject([1, 2]).merge([1.0])')).toEqual(['set[1i,1d,2i]']);
+    expect(typed('g.inject([1, 2]).disjunct([1.0])')).toEqual(['set[1d,1i,2i]']);
+    expect(typed('g.inject([1, 2]).merge([1.0])')).toEqual(['set[1d,1i,2i]']);
     expect(typed('g.inject([1, 2]).intersect([1])')).toEqual(['set[1i]']);
     // a stored whole Double (`{t:'double',v:1}`) is a Double on either side
     expect(typed("g.E().values('weight').fold().intersect([1.0])")).toEqual(['set[1d]']);
     expect(typed("g.E().values('weight').fold().intersect([1])")).toEqual(['set[]']);
   });
 
-  test('an operand member the bare encoding cannot carry declines rather than compare as another type', () => {
-    // `[1L]` is written INTEGER and would read back an Integer (`listLiteralBlob`).
-    expect(() => typed('g.inject([1, 2]).intersect([1L])')).toThrow(/not supported/);
+  test('an operand member the bare encoding cannot name back rides as its {t,v} node and compares by its class', () => {
+    // `[1L]` is a Long member (`literalMemberEnvelopes`): `Integer(1).equals(Long(1))` is false.
+    expect(typed('g.inject([1, 2]).intersect([1L])')).toEqual(['set[]']);
+    expect(typed('g.inject([1L, 2]).intersect([1L])')).toEqual(['set[1L]']);
   });
 });
 

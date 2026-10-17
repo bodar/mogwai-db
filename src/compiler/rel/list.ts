@@ -1,25 +1,28 @@
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, compilerText, param, signBit, type Expr } from '../../rel/expr.ts';
 import { withChannel, type Channel } from '../../channels.ts';
 import { constLit, itemTypeAt, sliceBound } from './const.ts';
+import { flatType, NUMBER_STORED_NON_NUMBERS, valueNodeOf, type TypeNode } from '../../gremlin/types.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
-import { flatType, type TypeNode } from '../../gremlin/types.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
-import { raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
+import { asStringOf, raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, inferredVtype, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedKey, typedKeyAs, typedNode, typedSame, typeOf, withPayload, type Minter } from './build.ts';
-import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { promotedExtremum, resultIsDecimal } from './float.ts';
+import { comparabilityClass, mixedClassesRefused, orderingTerms, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
-import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
+import { inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+/** The column a list reducer carries its members' class pair in (`numberClassPair`). */
+const CLASS_PAIR = 'cw';
 import { transformExpr } from './transform.ts';
 
 /**
@@ -98,18 +101,21 @@ const memberOrder = (members: Rel, dir: 'asc' | 'desc' = 'asc'): SortTerm =>
  *   `json_group_array` re-encodes the object as a JSON STRING, which is the double-encoding
  *   corruption a fail-closed guard used to exist for.
  */
-const memberPayload = (of: ListOf, members: Rel): Expr => {
-  const value = col(members.id, MEMBER.value);
-  return isTypedList(of)
+const memberPayload = (of: ListOf, members: Rel): Expr =>
+  payloadOf(of, col(members.id, MEMBER.value), col(members.id, MEMBER.type));
+
+/** `memberPayload` over any explode's (value, JSON type) column pair — the set-op family's operand side
+ *  is an explode of its own, with its own column names. */
+const payloadOf = (of: ListOf, value: Expr, jsonType: Expr): Expr =>
+  isTypedList(of)
     ? {
       kind: 'case',
       // `json_extract(x, '$.v')` rather than SQLite's `->>` operator: the same SQL value, and the
       // node set stays closed (§3.3 — a construct missing from it is a derived form).
-      whens: [[eqText(col(members.id, MEMBER.type), 'object'), jsonField(value, 'v')]],
+      whens: [[eqText(jsonType, 'object'), jsonField(value, 'v')]],
       else: value,
     }
     : value;
-};
 
 /** Takes any relation carrying the MEMBER columns — the explode itself, or a slice over it, since a
  *  node addresses its own INPUT. */
@@ -126,7 +132,7 @@ const memberNode = (of: ListOf, members: Rel): Expr => {
     ? {
       kind: 'case',
       whens: [[eqText(col(members.id, MEMBER.type), 'object'), { kind: 'call', fn: 'json', args: [value] }]],
-      else: jsonMemberByTypeof(value),
+      else: exactMember(value),
     }
     : value;
 };
@@ -140,6 +146,29 @@ const memberVtype = (of: ListOf, members: Rel): Expr | undefined => {
     kind: 'case',
     whens: [[eqText(col(members.id, MEMBER.type), 'object'), jsonField(col(members.id, MEMBER.value), 't')]],
     else: inferredVtype(col(members.id, MEMBER.value)),
+  };
+};
+
+/**
+ * A member's OWN tag, where the member states one — an envelope's `t`, or `boolean` for a bare JSON
+ * `true`/`false` (SQLite reads both as INTEGER 1/0) — else NULL; a static list's tag as a literal. The
+ * lighter sibling of `memberTypeTag` for a consumer that only needs to tell a type stored as something
+ * else (a Boolean, a Date, a Long held as text) from what its storage class says — a reducer's row tag,
+ * `asString`'s — and so has no use for the storage-class inference spelled at every mention.
+ */
+const memberOwnTag = (of: ListOf, members: Rel): Expr =>
+  ownTagOf(of, col(members.id, MEMBER.value), col(members.id, MEMBER.type));
+
+/** `memberOwnTag` over any explode's (value, JSON type) column pair (`payloadOf`'s reason). */
+const ownTagOf = (of: ListOf, value: Expr, jsonType: Expr): Expr => {
+  const type = memberTypeOf(of);
+  if (type?.kind === 'static') return compilerText(type.type);
+  return {
+    kind: 'case',
+    whens: [
+      [eqText(jsonType, 'object'), jsonField(value, 't')],
+      [{ kind: 'in-list', expr: jsonType, values: [compilerText('true'), compilerText('false')] }, compilerText('boolean')],
+    ],
   };
 };
 
@@ -228,7 +257,14 @@ const eqText = (subject: Expr, value: string): Expr => ({ kind: 'binary', op: '=
  *  untouched. Only a bare COLUMN is wrapped — the repair spells its value six times, so a computed
  *  member is projected to a column first by a caller that needs it (`listSetOp`'s `payloads`). */
 const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], fresh: Minter): Expr =>
-  collectedOf(members, member.kind === 'col' ? jsonMemberByTypeof(member) : member, order, LIST_COL, fresh);
+  collectedOf(members, exactMember(member), order, LIST_COL, fresh);
+
+/** A member COLUMN re-entering a JSON writer, made exact. `json_each` reads a member back as its SQL
+ *  value, and SQLite's JSON writer re-serializes a REAL at 15 digits and a negative zero as `0.0` — so a
+ *  slice, an order or a set op over a list would hand back a different Double than the one it held
+ *  (`math('1/3').fold().tail(local)` → `0.333333333333333`, `inject(-0.0d).fold().tail(local)` → `[0.0]`).
+ *  A column is not a spliced subquery, so its storage class is the gate (`jsonMemberByTypeof`). */
+const exactMember = (member: Expr): Expr => (member.kind === 'col' ? jsonMemberByTypeof(member) : member);
 
 /** The list column every list relation carries. One name, because the framing layer reads it too. */
 export const LIST_COL = 'list';
@@ -407,7 +443,7 @@ export function listMemberOp(
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
     // decline here exactly as they do over a column. The member's own type is the receiver evidence.
-    const tx = transformExpr(step, memberPayload(of, members), false, undefined, memberEvidence(of, members));
+    const tx = transformExpr(step, memberPayload(of, members), false, fresh, undefined, memberEvidence(of, members));
     if (!tx) return null;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
@@ -476,16 +512,15 @@ export function listMemberOp(
       //
       // ⚠️ THE KEY IS THE PAYLOAD **AND** ITS CLASS, which is the same lesson the property identity key
       // records: `{t:'byte',v:1}` and `{t:'int',v:1}` share a payload and are `Byte(1)` and `Integer(1)`
-      // — not equal in Java, so not one member. `LinkedHashSet` is `Objects.equals`, so an untagged `1`
-      // and `1.0` are two members as well, and so are `-0.0` and `0.0` (`Double.equals` compares
-      // `doubleToLongBits`): the class is `memberClass` (the tag where one is carried, else the storage
-      // class's inference) and a zero's sign rides beside it (`typedKeyAs`, build.ts — the merges' typed
-      // equality). An ELEMENT member's identity is its ROWID and nothing else
+      // — not equal in Java, so not one member. The class is `memberClass` (the tag where one is carried, else
+      // the storage class's inference), so an untagged `1` and `1.0` are two members. An ELEMENT member's identity is its ROWID and nothing else
       // (`ElementHelper.hashCode(Element)` is `element.id().hashCode()`), which the payload already is.
-      const keyed = elemOf ? [payload] : typedKeyAs(payload, memberClass(of, members, payload));
+      // A scalar member also keys on its zero's SIGN: `LinkedHashSet` membership is `equals`, and
+      // `Double.equals(-0.0, 0.0)` is false where SQL's `=` folds them (the row-level `dedup()`'s rule,
+      // `typedEquality`).
       const rank = 'mdr';
       const ranked = rowNumberWindow(members, rank, [], {
-        partitionBy: keyed,
+        partitionBy: elemOf ? [payload] : [payload, memberClass(of, members, payload), signBit(payload)],
         orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
       }, fresh);
       const survivors = make.filter({
@@ -547,7 +582,10 @@ export function listMemberOp(
     if (!key) return null;
     return {
       rel: withList(rel, listOfMembers(kept, memberNode(of, kept), [
-        { expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' },
+        // A scalar member orders its zero's sign (`orderingTerms`); an element member's key is its own.
+        ...(elemOf ? [{ expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' } as const]
+          : orderingTerms(key, only.order === 'desc' ? 'desc' : 'asc', memberPayload(of, kept),
+            ((type) => (type?.kind === 'static' ? compilerText(type.type) : undefined))(memberTypeOf(of)))),
         // THE ORIGINAL POSITION BREAKS TIES, and it is not tidiness: `json_group_array` takes rows in
         // whatever order SQLite produced, so equal keys would land in an arbitrary one — the defect
         // `mise run test:perturbed` exists to find and that no assertion in the ladder can see.
@@ -674,6 +712,12 @@ export function listRetype(
       id: fresh('mf'), input: members, channels: [], type: members.type,
       pred: { kind: 'binary', op: 'is not', left: memberPayload(of, members), right: compilerNull() },
     });
+    // Each member is `StringBuilder.append(Object)` — `String.valueOf`, the `asString()` printing authority
+    // (`receiver.ts` `asStringOf`) keyed by the member's own class: a Float prints `0.1`, a Boolean `true`,
+    // a negative zero `-0.0`, where SQLite's text of the carrier is none of those
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ConjoinStep.java:62`).
+    const printed = asStringOf(memberPayload(of, present), memberEvidence(of, present), fresh);
+    if (!printed) return null;
     const joined: Expr = {
       kind: 'scalar',
       plan: make.aggregate({
@@ -682,7 +726,7 @@ export function listRetype(
         aggs: [['v', {
           kind: 'call',
           fn: 'COALESCE',
-          args: [{ kind: 'agg', fn: 'group_concat', args: [memberPayload(of, present), compilerText(sep)], orderBy: [{ expr: col(present.id, MEMBER.ord), dir: 'asc' }] },
+          args: [{ kind: 'agg', fn: 'group_concat', args: [printed, compilerText(sep)], orderBy: [{ expr: col(present.id, MEMBER.ord), dir: 'asc' }] },
             compilerText('')],
         }]],
       }),
@@ -747,10 +791,14 @@ export function listRetype(
         id: fresh('mw'),
         input: make.sort({
           id: fresh('mo'), input: present, channels: [], type: present.type,
-          // A total tie-break on the raw payload keeps the survivor deterministic, as it does at row level.
+          // THE TIE goes to the LATER member, in both directions: `MaxLocalStep`/`MinLocalStep` fold
+          // `result = max(next, result)` and every NumberHelper `max`/`min` keeps its FIRST argument on a
+          // tie (`reducer.ts` `tieRepresentation`), so of two members that compare equal — a `-0.0` and a
+          // `0.0`, a BigDecimal `1.0` and `1.00` — the one iterated last is the answer. The member's list
+          // position is a column, so this is exact (and total).
           terms: [
             { expr: { kind: 'binary', op: 'is', left: memberPayload(of, present), right: compilerNull() }, dir: 'asc' },
-            { expr: key, dir }, { expr: memberPayload(of, present), dir },
+            { expr: key, dir }, memberOrder(present, 'desc'),
           ],
         }),
         channels: [], type: present.type, count: compilerInt(1),
@@ -764,11 +812,19 @@ export function listRetype(
         kind: 'scalar',
         plan: make.project({
           id: fresh('mp'), input: winner, channels: [], type: typeOf(meta('w', 'json')),
-          exprs: [['w', {
-            kind: 'json-object',
-            entries: [['v', memberPayload(of, winner)], ['t', memberTypeTag(of, winner)]],
-            binary: false,
-          }]],
+          // The pair is a JSON WRITE, so the winner crosses it exactly: a bare member through
+          // `exactMember` (a 17-digit REAL, a negative zero), and an ENVELOPE member AS the `{v,t}`
+          // pair it already is — re-writing its `json_extract`ed `v` would round it the same way.
+          exprs: [['w', ((): Expr => {
+            const bare: Expr = {
+              kind: 'json-object',
+              entries: [['v', exactMember(col(winner.id, MEMBER.value))], ['t', memberTypeTag(of, winner)]],
+              binary: false,
+            };
+            return isTypedList(of)
+              ? { kind: 'case', whens: [[eqText(col(winner.id, MEMBER.type), 'object'), jsonOf(col(winner.id, MEMBER.value))]], else: bare }
+              : bare;
+          })()]],
         }),
       };
       // Members that may mix comparability classes refuse rather than let SQLite's class order pick
@@ -779,16 +835,33 @@ export function listRetype(
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
       // fenced, for the same plan).
+      // The winner's CLASS is the members' highest common number class (`NumberHelper.max` promotes,
+      // `reducer.ts` `commonNumberClass`), read in one more correlated pass as the `[width, floating]`
+      // pair; a statically-typed list is already of one class.
+      const tag = memberType?.kind === 'static' ? null : memberOwnTag(of, present);
+      const info = tag && scalar(numberClassPair(payload, tag, 'number'), 'cw', 'any');
       // A mixed-class refusal rides inside the pick, so the pick is EVALUATED as well (`raisingColumns`).
-      const held = raisingColumns(fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh), [['w', picked]], fresh);
+      const held = raisingColumns(fenced(withPayload(host, [['w', picked], ...(info ? [info] : [])],
+        [meta('w', 'any', true), ...(info ? [meta('cw', 'any', true)] : [])], fresh), fresh), [['w', picked]], fresh);
+      const winnerV = jsonField(col(held.id, 'w'), 'v');
+      const winnerT = jsonField(col(held.id, 'w'), 't');
+      // The winner promoted to the members' common class IS its widening (`float.ts` `promotedExtremum`),
+      // over the class and the winner's own class each NAMED ONCE (fenced), so neither the widening nor the
+      // framer re-inlines them.
+      const resultCols = [meta('v', 'any', true), meta('vt', 'text', true)];
+      const classed = info && fenced(withPayload(held,
+        [['v', winnerV], ['vt', pairedNumberClass(col(held.id, 'cw'), winnerV, winnerT)], ['own', coalesce(winnerT, inferredVtype(winnerV))]],
+        [...resultCols, meta('own', 'text', true)], fresh), fresh);
       return {
-        rel: withPayload(held,
-          [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
-          [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+        rel: classed
+          ? fenced(withPayload(classed,
+            [['v', promotedExtremum(col(classed.id, 'v'), col(classed.id, 'own'), resultIsDecimal(col(classed.id, 'vt')), fresh)], ['vt', col(classed.id, 'vt')]],
+            resultCols, fresh), fresh)
+          : withPayload(held, [['v', winnerV], ['vt', winnerT]], resultCols, fresh),
         // A known `long`/`bigint` member class is the winner's, stated as the row-level arm states it
         // (`wideClassOf`, `lower.ts`) so a later predicate casts the decimal TEXT before ordering.
         // Otherwise the winner's own member tag rides PER ROW in `vt` (`subjectType`, `lower.ts`).
-        type: wideClass ?? PER_ROW('vt'), result: 'number' as const, ...productive,
+        type: wideClass ?? REDUCED_TYPE, result: 'number' as const, ...productive,
       };
     }
 
@@ -799,7 +872,7 @@ export function listRetype(
     // through `storedCompareOn` for the known class admits it exactly, and `sumTower` keeps the class
     // and rides a >2^53 result as exact TEXT so the int64 survives the JS-number read.
     if (step.name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
-      const casted = storedCompareOn(compilerText(memberType.type))(payload);
+      const casted = towerOperand(payload, memberType.type);
       const tower = sumTower({ kind: 'agg', fn: 'sum', args: [casted] }, memberType.type);
       // The class is KNOWN, so it is stated as a TEXT-carried static beside the `vt` column — the
       // row-level `sumTower` arm's framing (`lower.ts`), for the same reason: a later predicate must
@@ -811,34 +884,39 @@ export function listRetype(
       };
     }
 
-    // `sum`/`mean` REDUCE rather than order, so the result is a fresh value whose storage class the
-    // aggregate itself reports — `typeof(<the aggregate>)`, the row-level rule unchanged. The
+    // `sum`/`mean` REDUCE rather than order, so the result is a fresh value whose class is named over
+    // the reduced column — the members' common class, else what the wire infers from the value
+    // (`inferredVtype`), the row-level rule unchanged. The
     // aggregate is COMPUTED ONCE and its class read off the column: `reducerAggregate` splices its
     // subject into the eligibility guard as well as the aggregate, and for a self-describing list
     // that subject is a decode CASE, so writing the whole thing twice is what made this family's
     // statement grow when projected collections became typed. Same rule as the argmax above.
-    const reduced = reducerAggregate(payload, step.name);
+    // The members' own Gremlin type is the reducer's ROW TAG (`reducerAggregate`), so a Boolean or Date
+    // member (`coalesce(values('age'), constant(true)).fold().sum(local)`) refuses rather than adds as 0/1.
+    const memberTag = memberOwnTag(of, members);
+    const reduced = reducerAggregate(payload, step.name, memberTag);
+    if (!reduced) return null;
     // A `sum` over members that carry their OWN Gremlin type takes the members' common number class
-    // (`reducer.ts` `numberClass`) — the storage class alone frames a Double stored integral as an Int.
-    // Its class mask is one more correlated read, and the class is named over it and the held sum.
-    const tag = step.name !== 'sum' ? undefined : memberType?.kind === 'static' ? compilerText(memberType.type) : memberVtype(of, members);
-    // The reducer's own deferral (a text operand) rides INSIDE the value, so the value is EVALUATED by a
-    // row predicate (`raisingColumns`) as well: a consumer that never reads it (`count()`) would prune it
-    // with the raise, where `sum(local)` raises on every traverser it reaches.
+    // (`reducer.ts` `commonNumberClass`) — the storage class alone frames a Double stored integral as an
+    // Int. Its class pair is one more correlated read, and the class is named over it and the held sum.
+    const tag = step.name !== 'sum' ? undefined : memberType?.kind === 'static' ? compilerText(memberType.type) : isTypedList(of) ? memberOwnTag(of, members) : undefined;
+    // The reducer's own deferral (a text operand, a Float total) rides INSIDE the value, so the value is
+    // EVALUATED by a row predicate (`raisingColumns`) as well: a consumer that never reads it (`count()`)
+    // would prune it with the raise, where `sum(local)` raises on every traverser it reaches.
     const sumValue = scalar(reduced.value, 'v', 'any')[1];
     const held = raisingColumns(fenced(withPayload(host,
-      [['v', sumValue], ...(tag ? [scalar(numberClassMask(payload, tag), CLASS_MASK, 'any')] : [])],
-      [meta('v', 'any', true), ...(tag ? [meta(CLASS_MASK, 'any', true)] : [])], fresh), fresh), [['v', sumValue]], fresh);
+      [['v', sumValue], ...(tag ? [scalar(numberClassPair(payload, tag, 'not-a-number'), CLASS_PAIR, 'any')] : [])],
+      [meta('v', 'any', true), ...(tag ? [meta(CLASS_PAIR, 'any', true)] : [])], fresh), fresh), [['v', sumValue]], fresh);
     const v = col(held.id, 'v');
-    const storage: Expr = { kind: 'call', fn: 'typeof', args: [v] };
+    const inferred = inferredVtype(v);
     return {
       rel: withPayload(held,
-        // A `mean`'s class is its storage class — 'real', or 'null' for an all-null list — never a
-        // constant 'real' on a NULL (`reducerAggregate`'s rule).
-        [['v', v], ['vt', tag ? numberClass(col(held.id, CLASS_MASK), v, storage)
-          : storage]],
+        // A `mean` is a REAL (a Double) or, over an all-null list, a NULL whose class is none — `inferred` names both,
+        // so a null mean never carries a number's tag past `math()`'s check (`MeanGlobalStep.java:50-58,80-84`).
+        [['v', v], ['vt', tag ? pairedNumberClass(col(held.id, CLASS_PAIR), v, inferred)
+          : inferred]],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-      type: UNKNOWN, result: 'number' as const, ...productive,
+      type: REDUCED_TYPE, result: 'number' as const, ...productive,
     };
   }
 
@@ -1330,12 +1408,23 @@ const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.wind
  */
 const SET_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'merge', 'product']);
 
+/**
+ * Does a LIST LITERAL's member need a `{t,v}` envelope to keep its CLASS (§6·7: the class is carried,
+ * never re-guessed)? Yes for a Number its storage class cannot name back — a Byte, a Short or a Long is
+ * an INTEGER that reads back an Int, a Float a REAL that reads back a Double, and a WHOLE Double (`2.0d`,
+ * `-0.0d`) a JSON number that reads back as the JS integer an Int is. The ONE rule for every literal list,
+ * whichever position it is written at (an `inject([…])`/`constant([…])` blob, a set-op operand).
+ */
+export const literalMemberEnvelopes = (declared: string | null, value: unknown): boolean =>
+  declared !== null && (['byte', 'short', 'long', 'float'].includes(declared)
+    || (declared === 'double' && typeof value === 'number' && Number.isInteger(value)));
+
 /** The four whose result is a SET rather than a list — deduped content, and it frames as a
  *  GraphBinary SET only when TERMINAL: with a follower (`order(Scope.local)`, `unfold()`) TinkerPop
  *  treats it as a plain List, which is what the suite asserts. */
 const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 
-const OPERAND = { value: 'ov', ord: 'oo' } as const;
+const OPERAND = { value: 'ov', ord: 'oo', type: 'ot' } as const;
 
 /**
  * THE LIST-FUNCTION STEPS and their SHAPE ERRORS — the traversal's ANSWER is an error, so these RAISE
@@ -1399,28 +1488,29 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   // parameter's value) binds under its name; a literal array INLINES (the Golden Rule) — the old
   // `lit()` bound every literal collection.
   //
-  // THE OPERAND'S MEMBERS ARE COMPARED BY THEIR TYPE (`typedSame` — a set op's `HashSet` is
-  // `Objects.equals`), and a bare member states its type only through its storage class. So a LITERAL
-  // is the SAME bare blob `inject([…])`/`constant([…])` build (`listLiteralBlob`): a whole Double is
-  // written REAL, a negative zero keeps its sign, and a member its storage class cannot name back
-  // (`[1L]`, `[1.0f]`) declines. A PARAMETER crosses as JSON text, which cannot carry a whole Double
-  // (`1.0` stringifies `1`) or a negative zero at all — those decline with the rest.
-  const literal = (listArg: Arg, members: readonly ArgValue[]) => {
-    if (listArg.name == null) {
-      const blob = listLiteralBlob(listArg, members);
-      return blob && { expr: blob, of: BARE_LIST };
-    }
-    const carried = members.every((member, i) => {
-      const type = itemTypeAt(listArg.type, i);
-      if (!bareMemberRoundTrips(member, type)) return false;
-      const flat = flatType(type);
-      return typeof member !== 'number' || !(Object.is(member, -0) || (Number.isInteger(member) && (flat === 'double' || flat === 'float' || flat === 'bigdecimal')));
+  // A member keeps its CLASS the way every list literal does (`literalMemberEnvelopes`): a Number its
+  // storage class cannot name back — `[4L]`, `[0.1f]`, `[2.0d]` — rides as its `{t,v}` node, which makes
+  // the operand a typed list; a Date or Duration member, whose bare form is the number SQLite stores it
+  // as, declines (`listLiteralBlob`'s rule for the same literal). The JSON is `stringifyExact`
+  // (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null` and a `-0.0` as `0`, another
+  // value; a runtime that cannot spell one declines.
+  const literal = (members: readonly unknown[], types: readonly (TypeNode | null)[], name: string | null) => {
+    const declared = (mi: number): string | null => flatType(types[mi] ?? null);
+    if (members.some((_, mi) => NUMBER_STORED_NON_NUMBERS.includes(declared(mi) ?? '') && declared(mi) !== 'boolean')) return null;
+    let typed = false;
+    const encoded = members.map((value, mi) => {
+      if (!literalMemberEnvelopes(declared(mi), value)) return value;
+      typed = true;
+      return valueNodeOf(value, types[mi] ?? null);
     });
-    // `stringifyExact` (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null`, another value.
-    const json = carried ? stringifyExact(members) : null;
-    return json === null ? null : { expr: { kind: 'call', fn: 'jsonb', args: [param(json, listArg.name, 'text')] } as Expr, of: BARE_LIST };
+    const json = stringifyExact(encoded);
+    return json === null ? null : {
+      expr: { kind: 'call', fn: 'jsonb', args: [name != null ? param(json, name, 'text') : compilerText(json)] } as Expr,
+      of: typed ? TYPED_MEMBERS : BARE_LIST,
+    };
   };
-  if (Array.isArray(arg)) return literal(step.args[0]!, arg);
+  const listArg = step.args[0];
+  if (Array.isArray(arg)) return literal(arg, arg.map((_, mi) => listArg?.members?.[mi]?.type ?? itemTypeAt(listArg?.type ?? null, mi)), listArg?.name ?? null);
   // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
   // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,
   // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
@@ -1435,7 +1525,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
     if (extra !== undefined || value === undefined) return null;
     // A COMPILER-BUILT single-element list wrapping the constant — always inlined (the `[value]` list is
     // not itself a parameter, even if `value` came from one; that inner scalar is a separate concern).
-    return literal({ value: [value], type: { t: 'list', items: [inner[0].args[0]!.type] }, name: null, members: [inner[0].args[0]!] }, [value]);
+    return literal([value], [inner[0].args[0]?.type ?? null], null);
   }
   // A BARE `constant(v)` operand — no `fold()` — YIELDS v, and a value is not iterable. Same compile-time
   // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
@@ -1506,71 +1596,98 @@ export function listSetOp(
   if (bothElem && step.name === 'product') return null;
   const rel = fenced(input, fresh);
 
-  // BOTH SIDES IN ONE VOCABULARY: bare payloads. A typed list's members MAY be `{t,v}` envelopes, and
-  // comparing an envelope against a bare value never matches — so either side that might carry one is
-  // re-emitted as its payloads first, through the same member frame every other op uses. Applying it
-  // to BOTH sides (not only self) is the same code and stays correct for an operand whose members are
-  // not all storage-class-determined.
-  const payloads = (listExpr: Expr, items: ListOf): Expr => {
-    if (!isTypedList(items)) return listExpr;
+  // BOTH SIDES IN ONE VOCABULARY: each member as its PAYLOAD (the comparable SQL value), its CLASS (a
+  // Gremlin type name — an envelope's `t`, a static list's tag, a bare JSON Boolean's `boolean`, else the
+  // class its storage names back, `inferredVtype`) and its SIGN (`signBit`, which keeps a `-0.0` apart from
+  // `0.0`). Membership is all three, because the reference's is `equals` over a `HashSet` — `Integer(1)` is
+  // not `Long(1)`, a Float is not the Double of its value, and `Double.equals(-0.0, 0.0)` is false
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/IntersectStep.java:68-80`,
+  // `MergeStep.java:100-110`, `DisjunctStep.java:67-80`, `DifferenceStep.java:68-80`).
+  //
+  // The CLASS then rides into the result (`collect`): a set op's members re-enter a list under the same
+  // runtime rule a `fold()` spends (`withLossyFlag` — envelope the whole list iff some member's class does
+  // not survive its storage), so a Float stays a Float, a Long a Long, a whole Double a Double, at every
+  // depth past the set op. Flattening a typed side to bare payloads instead (the earlier rule) kept the
+  // Float's exact Double carrier and dropped the tag that says it is a Float, so `combine` printed
+  // `0.10000000149011612` and framed `[0.1f, 4L]` as `[0.1d, 4i]`. An ELEMENT list's members are rowids
+  // whose identity is the rowid alone; they carry no class.
+  const SIDE = { value: MEMBER.value, ord: MEMBER.ord, cls: 'mg', sign: 'ms' } as const;
+  const sideCols = [meta(SIDE.value, 'any', true), meta(SIDE.ord, 'int'), meta(SIDE.cls, 'text', true), meta(SIDE.sign, 'int', true)];
+  /** The class column's expression, given the member's payload COLUMN and its own tag (NULL = infer). */
+  const classOf = (ownTag: Expr, payload: Expr): Expr => (bothElem ? compilerNull() : coalesce(ownTag, inferredVtype(payload)));
+  /** One side's members as `(mv payload, mo position, mg class, ms sign)` — correlated to the list row. */
+  const sideOf = (listExpr: Expr, items: ListOf): Rel => {
     const members = membersOf(listExpr, fresh);
-    // A floating member's payload is written REAL, so its storage class names its class the way a bare
-    // member's does: an envelope stores a whole Double as `{t:'double',v:1}`, whose payload is the
-    // INTEGER 1 — and the typed compare (`typedSame`) would have called it an Int.
-    // Only an ENVELOPE member states a class its storage class may not (a bare member's IS its storage
-    // class), so only an envelope's `t` is read.
-    const payload = memberPayload(items, members);
-    const value = col(members.id, MEMBER.value);
-    const floating: Expr = {
-      kind: 'binary', op: 'and', left: eqText(col(members.id, MEMBER.type), 'object'),
-      right: { kind: 'in-list', expr: jsonField(value, 't'), values: [compilerText('double'), compilerText('float')] },
-    };
-    return listOfMembers(members, { kind: 'case', whens: [[floating, { kind: 'cast', arg: jsonField(value, 'v'), to: 'real' }]], else: payload },
-      [memberOrder(members)], fresh);
+    const read = make.project({
+      id: fresh('sr'), input: members, channels: [],
+      type: typeOf(meta(SIDE.value, 'any', true), meta(SIDE.ord, 'int'), meta(SIDE.cls, 'text', true)),
+      exprs: [[SIDE.value, memberPayload(items, members)], [SIDE.ord, col(members.id, MEMBER.ord)], [SIDE.cls, memberOwnTag(items, members)]],
+    });
+    const value = col(read.id, SIDE.value);
+    return make.project({
+      id: fresh('sc'), input: read, channels: [], type: typeOf(...sideCols),
+      exprs: [[SIDE.value, value], [SIDE.ord, col(read.id, SIDE.ord)], [SIDE.cls, classOf(col(read.id, SIDE.cls), value)], [SIDE.sign, signBit(value)]],
+    });
   };
-  const operand = payloads(resolved.expr, resolved.of);
-  const selfList = payloads(col(rel.id, LIST_COL), of);
+  const selfList = col(rel.id, LIST_COL);
+  const mine = sideOf(selfList, of);
+  /** The `equals` of two member rows — `IS`, not `=`, so a null member matches a null member. */
+  const same = (a: Rel, b: Rel): Expr => [SIDE.cls, SIDE.sign].reduce<Expr>(
+    (acc, column) => and(acc, { kind: 'binary', op: 'is', left: col(a.id, column), right: col(b.id, column) }),
+    { kind: 'binary', op: 'is', left: col(a.id, SIDE.value), right: col(b.id, SIDE.value) });
 
-  const mine = membersOf(selfList, fresh);
-
-  /**
-   * One side's members as a single-column `(mv)` relation, optionally filtered.
-   *
-   * `column` is which of the input's columns holds the member, and the filter is applied BEFORE the
-   * projection — so the projection addresses the FILTER, not the explode. Every expression here names
-   * the relation it is read from, which is the one rule the emitter's scope enforces and the one this
-   * function exists to make impossible to get wrong.
-   */
-  const valuesOf = (members: Rel, column: string, pred?: (side: Rel) => Expr): Rel => {
+  /** One side's `(mv, mg, ms)` member rows, optionally filtered — the filter BEFORE the projection, so the
+   *  projection addresses the FILTER, not the explode (the emitter's one scope rule). */
+  const SET_COLS = [meta(SIDE.value, 'any', true), meta(SIDE.cls, 'text', true), meta(SIDE.sign, 'int', true)];
+  const valuesOf = (members: Rel, pred?: (side: Rel) => Expr): Rel => {
     const filtered = pred
       ? make.filter({ id: fresh('sf'), input: members, channels: [], type: members.type, pred: pred(members) })
       : members;
     return make.project({
-      id: fresh('sp'), input: filtered, channels: [], type: typeOf(meta(MEMBER.value, 'any', true)),
-      exprs: [[MEMBER.value, col(filtered.id, column)]],
+      id: fresh('sp'), input: filtered, channels: [], type: typeOf(...SET_COLS),
+      exprs: [SIDE.value, SIDE.cls, SIDE.sign].map((column) => [column, col(filtered.id, column)] as const),
     });
   };
 
-  /** Does the OTHER side contain this side's member? `IS`, not `=`: a null member must match a null
-   *  member, which is what null-safe membership means and what `=` cannot say. And TYPED (`typedSame`):
-   *  every set op builds a `HashSet`, which is `Objects.equals` — `1` is not `1.0`, `-0.0` is not `0.0`
-   *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/IntersectStep.java:68-80`).
-   *  An element member's rowid is an integer, where the typed key says no more than `IS`. */
-  const contains = (other: Expr, mine_: Expr, negated: boolean): Expr => {
-    const theirs = membersOf(other, fresh);
-    const same = make.filter({
-      id: fresh('cf'), input: theirs, channels: [], type: theirs.type,
-      pred: bothElem ? { kind: 'binary', op: 'is', left: col(theirs.id, MEMBER.value), right: mine_ } : typedSame(col(theirs.id, MEMBER.value), mine_),
-    });
+  /** Does the OTHER side contain this member? */
+  const contains = (otherList: Expr, otherOf: ListOf, row: Rel, negated: boolean): Expr => {
+    const theirs = sideOf(otherList, otherOf);
+    const found = make.filter({ id: fresh('cf'), input: theirs, channels: [], type: theirs.type, pred: same(theirs, row) });
     return {
       kind: 'exists',
       negated,
-      plan: make.project({ id: fresh('cp'), input: same, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }),
+      plan: make.project({ id: fresh('cp'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }),
     };
   };
 
+  // THE RESULT'S MEMBER TYPE. Where both sides are bare and AGREE on one static tag, that tag describes
+  // every member of the result and the members stay bare (the static tag frames them). Otherwise each
+  // member's class is per-member, so the result is a self-describing list whose members envelope under
+  // `withLossyFlag`'s runtime rule — bare when every member's class is what its storage says (the common
+  // `[1, 'a']` case keeps its bytes), every one enveloped otherwise (the encoding stays uniform per list).
+  const mineType = memberTypeOf(of) ?? UNKNOWN, theirType = memberTypeOf(resolved.of) ?? UNKNOWN;
+  const staticMeet = !isTypedList(of) && !isTypedList(resolved.of) && staticTypeOf(mineType) !== undefined
+    && sameScalarType(mineType, theirType) ? mineType : undefined;
+  const bareResult = bothElem || staticMeet !== undefined;
+  /** A member written back: bare where the list is bare, else its `{t,v}` node where the list is lossy. */
+  const memberAt = (rows: Rel, value: string, cls: string): Expr => bareResult
+    ? exactMember(col(rows.id, value))
+    : {
+      kind: 'case',
+      whens: [[and(col(rows.id, LOSSY_COL), { kind: 'binary', op: 'is not', left: col(rows.id, cls), right: compilerNull() }),
+        typedNode(col(rows.id, value), col(rows.id, cls))]],
+      else: exactMember(col(rows.id, value)),
+    };
+  /** The member rows back into ONE list, in `order` — the lossy flag asked of the WHOLE result relation,
+   *  which spans both sides. */
+  const collect = (rows: Rel, lossyClass: (r: Rel) => Expr, member: (r: Rel) => Expr, order: (r: Rel) => readonly SortTerm[]): Rel => {
+    const flagged = bareResult ? rows : withLossyFlag(rows, lossyClass(rows), fresh);
+    return withList(rel, listOfMembers(flagged, member(flagged), order(flagged), fresh), fresh);
+  };
+
   /**
-   * A finished SET result: the members, deduped, back into one list — in VALUE order.
+   * A finished SET result: the members, deduped, back into one list — in VALUE order (then class, so two
+   * members equal in storage but not in class — `1` an Int, `1` a Long — have a total order too).
    *
    * A set has no member order, so the order is ours to choose, and choosing it is the point.
    * `Distinct` over `UNION ALL` is §3.3's declared collapse of SQL's distinct `UNION`, but the two
@@ -1580,27 +1697,16 @@ export function listSetOp(
    * was inheriting a dedup implementation detail as a contract.
    */
   const setOf = (rows: Rel): Rel => {
-    // DISTINCT BY THE TYPED KEY (`typedKey`) — `HashSet`'s `Objects.equals`, as `contains` above: the
-    // storage class and a zero's sign ride as columns of their own, so `merge([1.0])` over `[1]` keeps
-    // both. The value order is then broken by those columns too, so it stays deterministic.
-    const keyed = bothElem ? [] : typedKey(col(rows.id, MEMBER.value)).slice(1);
-    const extra = keyed.map((_, i) => `sk${i}`);
-    const input = keyed.length ? make.project({
-      id: fresh('sk'), input: rows, channels: [],
-      type: typeOf(meta(MEMBER.value, 'any', true), ...extra.map((name) => meta(name, 'any', true))),
-      exprs: [[MEMBER.value, col(rows.id, MEMBER.value)], ...keyed.map((expr, i) => [extra[i]!, expr] as const)],
-    }) : rows;
-    const deduped = make.distinct({ id: fresh('sd'), input, channels: [], type: input.type });
-    return withList(rel, listOfMembers(deduped, col(deduped.id, MEMBER.value),
-      [MEMBER.value, ...extra].map((name) => ({ expr: col(deduped.id, name), dir: 'asc' as const })), fresh), fresh);
+    const deduped = make.distinct({ id: fresh('sd'), input: rows, channels: [], type: rows.type });
+    return collect(deduped, (r) => col(r.id, SIDE.cls), (r) => memberAt(r, SIDE.value, SIDE.cls),
+      (r) => [{ expr: col(r.id, SIDE.value), dir: 'asc' }, { expr: col(r.id, SIDE.cls), dir: 'asc' }]);
   };
 
-  /** The two sides' single-column member relations, unioned — the shape `merge` and `disjunct`
-   *  aggregate over. `all: true` plus the `Distinct` in `setOf` IS SQL's distinct `UNION` (§3.3's
-   *  declared collapse), so there is no second union node kind. */
+  /** The two sides' member rows, unioned — the shape `merge` and `disjunct` aggregate over. `all: true`
+   *  plus the `Distinct` in `setOf` IS SQL's distinct `UNION` (§3.3's declared collapse), so there is no
+   *  second union node kind. */
   const union = (left: Rel, right: Rel): Rel => make.union({
-    id: fresh('su'), inputs: [left, right], all: true, channels: [],
-    type: typeOf(meta(MEMBER.value, 'any', true)),
+    id: fresh('su'), inputs: [left, right], all: true, channels: [], type: typeOf(...SET_COLS),
   });
 
   const result = ((): Rel | null => {
@@ -1608,81 +1714,71 @@ export function listSetOp(
       // CONCATENATION: my members then theirs, order, duplicates and nulls all kept. The segment
       // column is what makes "then" expressible — a UNION ALL has no order of its own.
       case 'combine': {
+        const segCols = [meta(SIDE.value, 'any', true), meta(SIDE.cls, 'text', true), meta('seg', 'int'), meta(SIDE.ord, 'int')];
         const seg = (members: Rel, index: number): Rel => make.project({
-          id: fresh('cs'), input: members, channels: [],
-          type: typeOf(meta(MEMBER.value, 'any', true), meta('seg', 'int'), meta(MEMBER.ord, 'int')),
-          exprs: [[MEMBER.value, col(members.id, MEMBER.value)], ['seg', compilerInt(index)], [MEMBER.ord, col(members.id, MEMBER.ord)]],
+          id: fresh('cs'), input: members, channels: [], type: typeOf(...segCols),
+          exprs: [[SIDE.value, col(members.id, SIDE.value)], [SIDE.cls, col(members.id, SIDE.cls)], ['seg', compilerInt(index)], [SIDE.ord, col(members.id, SIDE.ord)]],
         });
         const both = make.union({
-          id: fresh('cu'), inputs: [seg(mine, 0), seg(membersOf(operand, fresh), 1)],
-          all: true, channels: [], type: typeOf(meta(MEMBER.value, 'any', true), meta('seg', 'int'), meta(MEMBER.ord, 'int')),
+          id: fresh('cu'), inputs: [seg(mine, 0), seg(sideOf(resolved.expr, resolved.of), 1)], all: true, channels: [], type: typeOf(...segCols),
         });
-        return withList(rel, listOfMembers(both, col(both.id, MEMBER.value),
-          [{ expr: col(both.id, 'seg'), dir: 'asc' }, { expr: col(both.id, MEMBER.ord), dir: 'asc' }], fresh), fresh);
+        return collect(both, (r) => col(r.id, SIDE.cls), (r) => memberAt(r, SIDE.value, SIDE.cls),
+          (r) => [{ expr: col(r.id, 'seg'), dir: 'asc' }, { expr: col(r.id, SIDE.ord), dir: 'asc' }]);
       }
       // MEMBERSHIP: mine that are (not) theirs, deduped.
       case 'intersect':
-        return setOf(valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), false)));
+        return setOf(valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, false)));
       case 'difference':
-        return setOf(valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), true)));
+        return setOf(valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, true)));
       // SYMMETRIC difference: in exactly one side, which is the two one-sided differences unioned.
       case 'disjunct':
         return setOf(union(
-          valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), true)),
-          valuesOf(membersOf(operand, fresh), MEMBER.value, (side) => contains(selfList, col(side.id, MEMBER.value), true)),
+          valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, true)),
+          valuesOf(sideOf(resolved.expr, resolved.of), (side) => contains(selfList, of, side, true)),
         ));
       // SET UNION: every distinct member of either side.
       case 'merge':
-        return setOf(union(valuesOf(mine, MEMBER.value), valuesOf(membersOf(operand, fresh), MEMBER.value)));
+        return setOf(union(valuesOf(mine), valuesOf(sideOf(resolved.expr, resolved.of))));
       // CARTESIAN product → a list of PAIR-lists, so the result's members are lists and no further
       // member op reads it (`isBareList` names the scalar encodings only). The second `json_each`
-      // takes the first as its INPUT, which is exactly a cross join.
+      // takes the first side as its INPUT, which is exactly a cross join; its member is read through the
+      // same `payloadOf`/`ownTagOf` as a side's. Every PAIR is one inner list under ONE descriptor, so the
+      // lossy question spans both members of every pair: the class asked is a pair's lossy one, if any.
       case 'product': {
         const paired = make.explode({
-          id: fresh('px'), input: mine, expr: operand, channels: [], as: OPERAND,
-          type: typeOf(...mine.type.cols, meta(OPERAND.value, 'any', true), meta(OPERAND.ord, 'int')),
+          id: fresh('px'), input: mine, expr: resolved.expr, channels: [], as: OPERAND,
+          type: typeOf(...mine.type.cols, meta(OPERAND.value, 'any', true), meta(OPERAND.ord, 'int'), meta(OPERAND.type, 'text', true)),
         });
-        const pair: Expr = { kind: 'json-array', items: [col(paired.id, MEMBER.value), col(paired.id, OPERAND.value)], binary: true };
-        return withList(rel, listOfMembers(paired, pair,
-          [{ expr: col(paired.id, MEMBER.ord), dir: 'asc' }, { expr: col(paired.id, OPERAND.ord), dir: 'asc' }], fresh), fresh);
+        const theirValue = payloadOf(resolved.of, col(paired.id, OPERAND.value), col(paired.id, OPERAND.type));
+        const pairCols = [...sideCols, meta('pv', 'any', true), meta('pg', 'text', true), meta(OPERAND.ord, 'int')];
+        const read = make.project({
+          id: fresh('pr'), input: paired, channels: [], type: typeOf(...sideCols, meta('pv', 'any', true), meta('pg', 'text', true), meta(OPERAND.ord, 'int')),
+          exprs: [...sideCols.map((column) => [column.name, col(paired.id, column.name)] as const),
+            ['pv', theirValue], ['pg', ownTagOf(resolved.of, col(paired.id, OPERAND.value), col(paired.id, OPERAND.type))], [OPERAND.ord, col(paired.id, OPERAND.ord)]],
+        });
+        const pairs = make.project({
+          id: fresh('pc'), input: read, channels: [], type: typeOf(...pairCols),
+          exprs: [...sideCols.map((column) => [column.name, col(read.id, column.name)] as const),
+            ['pv', col(read.id, 'pv')], ['pg', classOf(col(read.id, 'pg'), col(read.id, 'pv'))], [OPERAND.ord, col(read.id, OPERAND.ord)]],
+        });
+        const losslessAt = (r: Rel): Expr =>
+          ({ kind: 'in-list', expr: coalesce(col(r.id, SIDE.cls), compilerText('string')), values: LOSSLESS_VTYPES.map(compilerText) });
+        return collect(pairs,
+          (r) => ({ kind: 'case', whens: [[losslessAt(r), col(r.id, 'pg')]], else: col(r.id, SIDE.cls) }),
+          (r) => ({ kind: 'json-array', items: [memberAt(r, SIDE.value, SIDE.cls), memberAt(r, 'pv', 'pg')], binary: true }),
+          (r) => [{ expr: col(r.id, SIDE.ord), dir: 'asc' }, { expr: col(r.id, OPERAND.ord), dir: 'asc' }]);
       }
       default: return null;
     }
   })();
   if (!result) return null;
 
-  // THE RESULT'S MEMBER TYPE IS THE TWO SIDES' MEET. Both sides were normalized to payloads above, so
-  // the members no longer state their own types — but where BOTH were bare and AGREED on a static
-  // tag, that tag still describes every member of the result and dropping it framed a set of longs
-  // by JS inference.
-  //
-  // 🔴 AN ENVELOPE SIDE IS STILL FLATTENED, so a set-op over stored `datetime`s/`uuid`s loses their
-  // types. Normalizing both sides to the TYPED encoding instead is the fix and it is
-  // information-preserving (a bare member's tag is what `inferredVtype` reads off its storage class,
-  // which is what the wire would infer anyway) — but it MUST be gated on the same RUNTIME lossy test
-  // `foldScalars` spends, not on the compile-time `typed` flag. Measured by trying the compile-time
-  // gate: `values('name').fold()` is `typed` while every member is bare at run time, so it wrapped
-  // members that needed no envelope, changed the bytes of the common case and broke the
-  // uniform-only-when-needed rule (6 failures). The runtime test has to span BOTH sides, which
-  // is the part that does not exist yet: `withLossyFlag` asks it of one relation.
-  //
-  // One piece of it IS worth keeping and is not here: `memberTypeTag` returns a NULL tag unresolved
-  // for a wrapped member whose `t` is null (`path().by(<a transform>)` writes exactly that), where a
-  // null tag means "infer from the value" everywhere else in this channel. That is a latent defect in
-  // the tag reader regardless of the set-op, and it surfaced as three conformance scenarios the
-  // moment the tag joined a comparison.
-  const merged = isTypedList(of) || isTypedList(resolved.of) ? UNKNOWN
-    : sameScalarType(memberTypeOf(of) ?? UNKNOWN, memberTypeOf(resolved.of) ?? UNKNOWN)
-      ? memberTypeOf(of) ?? UNKNOWN : UNKNOWN;
+  const memberOf: ListOf = bareResult ? withMemberType(BARE_LIST, staticMeet ?? UNKNOWN) : TYPED_MEMBERS;
   // An ELEMENT-membered result keeps its members as ELEMENTS: every op admitted for `bothElem` above
   // carries the rowids through unchanged (a set op neither transforms nor pairs a member), and both
   // sides are the same kind, so the result is a list of that one kind — framed by `listPayloadExpr`'s
-  // elem arm exactly as the input was. The scalar `merged` meet is irrelevant to it.
-  const resultOf: ListOf = bothElem
-    ? of
-    : step.name === 'product'
-      ? { kind: 'list', of: withMemberType(BARE_LIST, merged) }
-      : withMemberType(BARE_LIST, merged);
+  // elem arm exactly as the input was.
+  const resultOf: ListOf = bothElem ? of : step.name === 'product' ? { kind: 'list', of: memberOf } : memberOf;
   return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
 }
 
@@ -1893,46 +1989,41 @@ export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSou
 }
 
 /** One `[…]` literal argument as the `LIST_COL` pairs blob a list-valued relation carries, or `null` to
- *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row) and
- *  `constant([…])` (a per-row retype) — the two are one literal, produced at different positions. */
-export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null {
+ *  decline (a member that is not a scalar literal). The SHARED builder for `inject([…])` (a SOURCE row),
+ *  `constant([…])` (a per-row retype) and a set op's literal operand — one literal, produced at different
+ *  positions. */
+export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): { readonly blob: Expr; readonly of: ListOf } | null {
   // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
   // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
   // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
   const members = listArg.members;
-  // A BOOLEAN member has no carrier in a BARE list: `constLit(true)` is SQLite's integer 1, so the member
-  // framed as `1` and `asString(local)` rendered `'1'` (the reference's `[true, 1]` frames a Boolean and
-  // stringifies `'true'`). The member list stays BARE (untagged) here, so decline rather than retype it.
-  if (values.some((value) => typeof value === 'boolean')) return null;
-  // The same holds for every NUMERIC member a bare member's storage class does not name back
-  // (`inferredVtype`, list.ts: INTEGER → int/long by range, REAL → double): `[1L]` wrote `1` and framed an
-  // Integer, `[1.0f]` a Double. (A whole Double writes `1.0` and a negative zero rides `asExactReal`'s `-0.0`,
-  // and `parseExactJson` reads both back as the Doubles they are — json-exact.ts.) The bytes
-  // are also the list's merge key (`typedEquality`, build.ts), so `inject([1],[2],[1L])` merged `[1L]` into
-  // `[1]` — `List.equals` compares members with `equals`, and `Integer(1)` is not `Long(1)`. Decline.
-  if (values.some((value, mi) => !bareMemberRoundTrips(value, members ? members[mi]!.type : itemTypeAt(listArg.type ?? null, mi)))) return null;
+  // A BOOLEAN, DATE or DURATION member declines: the bare encoding writes it as the number SQLite stores
+  // it as (1/0, epoch millis), so every member read after — `unfold()`, `sum(local)`, `asString(local)`,
+  // the list itself — answered a Number (`inject([true,1])` framed `[1,1]`, a Date member a Long). A
+  // bare member has no tag to say otherwise (`NUMBER_STORED_NON_NUMBERS`).
+  const memberType = (mi: number): string | null => flatType(members?.[mi]?.type ?? itemTypeAt(listArg.type ?? null, mi));
+  if (values.some((value, mi) => typeof value === 'boolean' || NUMBER_STORED_NON_NUMBERS.includes(memberType(mi) ?? ''))) return null;
+  let typed = false;
   const items = values.map((value, mi) => {
     const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
-    // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
-    // (`inject([0.3333333333333333])`); ints/strings/whole values write exactly, so only these carry
-    // the repair — and so does a NEGATIVE ZERO, which SQLite's JSON writer spells `0.0` (`asExactReal`).
-    // `jsonMemberByTypeof` because a bare decimal's declared type is UNKNOWN here.
-    return item && typeof value === 'number' && (!Number.isInteger(value) || Object.is(value, -0)) ? jsonMemberByTypeof(item) : item;
+    // A REAL member needs an exact JSON spelling: SQLite's JSON writer prints 15 significant digits, so a
+    // 16- or 17-digit Double — whole (`1.2345678901234567E16`) or not (`0.30000000000000004`) — and a
+    // negative zero come back another number. A literal the COMPILER wrote is re-spelled by the emitter's
+    // one JSON-entry rule (`jsonEntry`, `rel/emit.ts`), which knows its value at compile time; a user
+    // PARAMETER member (`$x`) is a bind whose value it cannot see, so it takes the run-time repair, gated on
+    // its storage class (`jsonMemberByTypeof`) — whole or not, since a bind's class is the runtime's.
+    const bound = item?.kind === 'lit' && (item.source === 'parameter' || item.source === 'bound');
+    const bare = item && typeof value === 'number' && bound ? jsonMemberByTypeof(item) : item;
+    // A Number whose CLASS its storage cannot say — a Byte, a Short or a Long is an INTEGER and reads
+    // back an Int, a Float a REAL that reads back a Double — rides as a self-describing `{t,v}` member
+    // (§6·7: the class is carried, never re-guessed), which makes the list a typed one.
+    // A WHOLE Double is the same case: SQLite's JSON spells it `1.0`, but a member read off it is a JS 1.
+    const declared = memberType(mi);
+    const enveloped = literalMemberEnvelopes(declared, value);
+    if (!bare || !enveloped) return bare;
+    typed = true;
+    return { kind: 'json-object', entries: [['t', compilerText(declared!)], ['v', bare]], binary: false } as Expr;
   });
-  return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
-}
-
-/** Does a NUMERIC literal member keep its declared type in a BARE list — does the storage class it is
- *  written in infer back to that type (`inferredVtype`, list.ts)? A member with no declared type is
- *  inferred by definition; a non-number is another rule's (`constLit` declines what it cannot spell). */
-export function bareMemberRoundTrips(value: ArgValue, type: TypeNode | null | undefined): boolean {
-  if (typeof value !== 'number' || Number.isNaN(value)) return true;
-  const flat = flatType(type);
-  // A negative zero keeps its sign only as a REAL literal (`constLit` writes an undeclared one as INTEGER 0).
-  if (Object.is(value, -0)) return flat === 'double';
-  if (flat == null) return true;
-  const integral = Number.isSafeInteger(value) && flat !== 'double' && flat !== 'float' && flat !== 'bigdecimal';
-  if (!integral) return flat === 'double';
-  const fitsInt = value >= -2147483648 && value <= 2147483647;
-  return fitsInt ? flat === 'int' : flat === 'long';
+  return items.some((item) => !item) ? null
+    : { blob: { kind: 'json-array', items: items as Expr[], binary: true }, of: typed ? TYPED_MEMBERS : BARE_LIST };
 }

@@ -1,6 +1,8 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, reducedVtype, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import type { RelId } from '../../../rel/types.ts';
+import { raiseExpr } from '../../../rel/raise.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -12,17 +14,17 @@ import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit, declaredScalarType } from '../const.ts';
-import { byExpr, propertyVtype, scopedHost } from '../modulator.ts';
+import { byExpr, byNode, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, boundBeyondMap, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, relHostTag, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, casePresence, hostTag, knownPresence, raisingPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
 import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
-import { isReducer } from '../reducer.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, isReducer, numberFloating, numberWidth, REDUCED_TYPE, TIED_REPRESENTATIONS, tieRepresentation } from '../reducer.ts';
 import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -35,7 +37,8 @@ import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, typ
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { comparableClass, continueAs, dropPath, lowerChain, MIN_MAX_COMPARE_TERMS, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { promotedExtremum } from '../float.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 import { escalatedRaise, pendingRaise, raiseMessage, settlesExactly } from '../raise-channel.ts';
 
@@ -169,7 +172,11 @@ export function reductionHost(
   rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, labels: AliasMap,
 ): ChildHost {
   if (framing.kind === 'elements') return elementHost(rel, framing.elem, labels);
-  const vtype = relHostTag(rel, framing.type);
+  // The host's tag is the ONE reading of the row's own type (`streamRowTag`): the stored `vtype`, a per-row tag
+  // column (a reducer's `vt`), else the static tag. Reading `vtype` alone re-framed a min/max winner by
+  // inference inside `local()` — `max()` of [5, 2.5d] came back the Int 5 — and judged its predicates by
+  // storage class.
+  const vtype = streamRowTag(rel, framing) ?? undefined;
   return { kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels }, ...(vtype ? { vtype } : {}) };
 }
 
@@ -193,13 +200,9 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
     if (produced.framing.kind === 'list')
       return { cols: [[meta(LIST_COL, 'json'), produced.expr]], framing: produced.framing };
     if (produced.framing.kind !== 'scalar') return null;
-    // The body's type becomes a per-row `vtype` — a Gremlin type alone. A NUMERIC REDUCER's `vt` is EITHER a
-    // Gremlin vtype (`min`/`max`'s winner) OR the aggregate's storage class (`sum`'s `typeof`, `mean`'s
-    // `'real'`), so it crosses through `reducedVtype` (build.ts): carried raw, `'real'` named no type and
-    // `local(__.values('age').mean())` framed by inference as an Int, where `MeanGlobalStep` always answers a
-    // Double (`div(sum, count, true)` —
-    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`).
-    const vtype = produced.vtype && produced.framing.result === 'number' ? reducedVtype(produced.vtype) : produced.vtype;
+    // The body's type becomes a per-row `vtype` — a Gremlin type alone, which a NUMERIC REDUCER's `vt`
+    // already is (`REDUCED_TYPE`): `local(__.values('age').mean())` is the Double `MeanGlobalStep` answers.
+    const vtype = produced.vtype;
     return vtype
       ? {
         cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), vtype]],
@@ -1033,18 +1036,73 @@ export function correlatedReduce(
       // case rather than emit SQL that fails only in execution — fail closed, the class `capability.test.ts`
       // guards.
       if (valueColIsSubquery(values.rel, 'v')) return null;
-      const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
-      const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
+      // A winner tied with a value of another representation refuses rather than pick by an arrival order
+      // the rows do not carry (`reducer.ts` `tieRepresentation`). Over the compare order, the FIRST peer group
+      // is the rows of `rank()` 1, and the default window frame at any of them is exactly that group — so a
+      // row of rank 1 whose representation is not its group's least is the observable tie. The test rides
+      // each row (SQLite projects before it sorts and limits), but only a rank-1 row can meet it. The
+      // representation is spelled over whichever relation reads it, the tag re-read off ITS columns.
+      const reprOn = (id: RelId): Expr | null => {
+        const tag = streamRowTag(values.rel, values.framing);
+        return tieRepresentation(col(id, 'v'), tag && tag.kind === 'col' ? col(id, tag.name) : tag);
+      };
+      const pickOf = (rel: Rel): Rel => {
+        const ordered = make.sort({ id: fresh('ms'), input: rel, channels: rel.channels, type: rel.type, terms: minMaxOrder(rel, values.framing, last.name === 'min') });
+        return make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
+      };
+      const tieTerm = reprOn(values.rel.id);
+      const peers = { partitionBy: [], orderBy: minMaxOrder(values.rel, values.framing, last.name === 'min').slice(0, MIN_MAX_COMPARE_TERMS) };
+      // The winner promoted to the stream's common class IS its widening (`float.ts` `promotedExtremum`). The
+      // class pair rides the SAME pick as two whole-stream windows, so the promotion re-reads no relation; a
+      // stream statically of one class never promotes.
+      const statically = values.framing.kind === 'scalar' && staticTypeOf(values.framing.type) !== undefined;
+      const whole = { partitionBy: [], orderBy: [] };
+      const rowTag = streamRowTag(values.rel, values.framing);
+      const classSpecs = statically ? [] : [
+        [CLASS_WIDTH_COL, { kind: 'window-expr', fn: 'max', args: [numberWidth(col(values.rel.id, 'v'), rowTag)], spec: whole }],
+        [CLASS_FLOATING_COL, { kind: 'window-expr', fn: 'max', args: [numberFloating(col(values.rel.id, 'v'), rowTag)], spec: whole }],
+      ] as const;
+      const rows = !tieTerm && !classSpecs.length ? values.rel : make.window({
+        id: fresh('mw'), input: values.rel, channels: values.rel.channels,
+        type: typeOf(...values.rel.type.cols, ...(tieTerm ? [meta('trk', 'int'), meta('tlo', 'any', true)] : []),
+          ...classSpecs.map(([name]) => meta(name, 'int', true))),
+        specs: [
+          ...(tieTerm ? [
+            ['trk', { kind: 'window-expr', fn: 'rank', args: [], spec: peers }],
+            ['tlo', { kind: 'window-expr', fn: 'min', args: [tieTerm], spec: peers }],
+          ] as const : []),
+          ...classSpecs,
+        ],
+      });
+      const winner = pickOf(rows);
       // A stream that may mix comparability classes refuses rather than let SQLite's class order pick.
       const cls = comparableClass(values.rel, values.framing);
-      const picked = cls ? mixedClassesRefused(col(winner.id, 'v'), values.rel, cls, fresh) : col(winner.id, 'v');
+      const tied: Expr = { kind: 'binary', op: 'and',
+        left: { kind: 'binary', op: '=', left: col(winner.id, 'trk'), right: compilerInt(1) },
+        right: { kind: 'binary', op: 'is not', left: col(winner.id, 'tlo'), right: reprOn(winner.id) ?? compilerNull() } };
+      // THE RESULT'S CLASS — the stream's highest common number class over EVERY row (`NumberHelper.max`
+      // promotes both sides, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:639-655`),
+      // else (no Number at all — a String's `max`) the winner's own; read off the pick's class windows. The
+      // result's own magnitude never widens a min/max (it is one of the rows), so `0` stands in for it.
+      const ownVt = minMaxWinnerVt(winner, values.framing);
+      const resultVt = statically ? ownVt
+        : commonNumberClass(col(winner.id, CLASS_WIDTH_COL), col(winner.id, CLASS_FLOATING_COL), compilerInt(0), ownVt);
+      // A FLOATING winner's result is BigDecimal exactly where the widest width is 128 (`resultIsDecimal`).
+      const value = statically ? col(winner.id, 'v')
+        : promotedExtremum(col(winner.id, 'v'), ownVt, { kind: 'binary', op: '=', left: col(winner.id, CLASS_WIDTH_COL), right: compilerInt(128) }, fresh);
+      const untied: Expr = tieTerm
+        ? { kind: 'case', whens: [[tied, raiseExpr(TIED_REPRESENTATIONS, col(winner.id, 'v'))]], else: value }
+        : value;
+      const picked = cls ? mixedClassesRefused(untied, values.rel, cls, fresh) : untied;
       const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', picked]] });
-      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
+      // The CLASS reads the same pick.
+      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', resultVt]] });
       return {
         expr: { kind: 'scalar', plan: vExpr },
-        // A winner off a STORED vtype names its Gremlin type, so a predicate on it reads that per row —
-        // a wide `long` carried as TEXT then orders as the number it is (`valuePredicate`).
-        framing: { kind: 'scalar', type: values.rel.type.cols.some((c) => c.name === 'vtype') ? PER_ROW('vtype') : UNKNOWN, result: 'number' },
+        // The result's class rides per row in `vt` (`REDUCED_TYPE`), so a predicate, a fold member and a
+        // record field re-read through `select` all read it — a wide `long` carried as TEXT orders as the
+        // number it is (`valuePredicate`).
+        framing: { kind: 'scalar', type: REDUCED_TYPE, result: 'number' },
         vtype: { kind: 'scalar', plan: vtExpr },
         present: existsAny(values.rel, fresh)!,
         yields: 'one',
@@ -1197,13 +1255,12 @@ const scalarHostIdentity = (host: Extract<ChildHost, { kind: 'scalar' }>): Child
 
 /**
  * One scalar ARM's per-row type tag, for a branch that tags each row by the arm it came from: its own
- * `vtype` where it has one, its static tag as a literal, else NULL. `asVtype` says which vocabulary the
- * branch's OWN framing reads — a `choose` frames `PER_ROW('vtype')`, a Gremlin type alone, so a numeric
- * reducer arm's `vt` crosses through `reducedVtype` there (`choose(…, __.values('age').mean(), …)` is a
- * Double, `MeanGlobalStep.java:175-177`); a `coalesce` keeps `result: 'number'`, which reads both.
+ * `vtype` where it has one, its static tag as a literal, else NULL. Every tag is a Gremlin type name — a
+ * numeric reducer arm's `vt` included (`REDUCED_TYPE`), so `choose(…, __.values('age').mean(), …)` is the
+ * Double `MeanGlobalStep` answers (`MeanGlobalStep.java:175-177`).
  */
-const armTag = (cv: ChildValue, asVtype: boolean): Expr => {
-  if (cv.vtype) return asVtype && cv.framing.kind === 'scalar' && cv.framing.result === 'number' ? reducedVtype(cv.vtype) : cv.vtype;
+const armTag = (cv: ChildValue): Expr => {
+  if (cv.vtype) return cv.vtype;
   const tag = cv.framing.kind === 'scalar' ? staticTypeOf(cv.framing.type) : undefined;
   return tag ? compilerText(tag) : compilerNull('text');
 };
@@ -1271,7 +1328,7 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, armTag(b.cv, true)] as const), else: armTag(elseCV, true) };
+  const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, armTag(b.cv)] as const), else: armTag(elseCV) };
   return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
@@ -1314,7 +1371,7 @@ function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: 
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  const vtype: Expr = { kind: 'case', whens: [[pred, armTag(thenCV, true)]], else: armTag(elseCV, true) };
+  const vtype: Expr = { kind: 'case', whens: [[pred, armTag(thenCV)]], else: armTag(elseCV) };
   return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
@@ -1402,12 +1459,16 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   // THE TAG OF THE ARM THAT ANSWERED — the same presence test the value's CASE makes, arm for arm. A
   // `COALESCE` of the tags instead picks the first arm that HAS a tag, which is not the arm that
   // produced: `coalesce(__.constant('x'), __.out().count())` paired `'x'` (an untagged constant, NULL)
-  // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization. The raw `vt` is
-  // kept (`armTag(…, false)`) because this framing stays `result: 'number'`, which reads both vocabularies.
+  // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization. The tag is a
+  // Gremlin type alone (`armTag` — a reducer arm's `vt` is one, `REDUCED_TYPE`), framed
+  // `PER_ROW('vtype')` exactly as `choose`'s arm merge is: ONE arm-tag rule for
+  // every branch child. A `result: 'number'` framing here was read only by the top-level framer, so a
+  // Boolean or Date arm re-read after a `project(…).select(…)` / `fold()` lost its tag and came back a
+  // Number (`project('a').by(coalesce(values('age'), constant(true))).select('a').fold()` answered `1`).
   const vtype: Expr = caseArms.length
-    ? { kind: 'case', whens: caseArms.map(([p, a]) => [p, armTag(a, false)] as const), else: armTag(final, false) }
-    : armTag(final, false);
-  return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
+    ? { kind: 'case', whens: caseArms.map(([p, a]) => [p, armTag(a)] as const), else: armTag(final) }
+    : armTag(final);
+  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
 /** A child body's ONE value per host row — `scalarChildValue`'s answer with a raising body's raise made
@@ -1793,7 +1854,11 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh, deferRaise);
+  const run = valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh, deferRaise);
+  // A BARE stored read's member node is the `by(k)` node: value and tag off ONE row (`ChildValue.node`).
+  const key = body.length === 1 && leading?.name === 'values' ? leading.args[0]?.value : undefined;
+  const node = run && typeof key === 'string' ? byNode({ key: { kind: 'property', key } }, host, ctx.source, fresh) : null;
+  return run && node ? { ...run, node } : run;
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1981,7 +2046,7 @@ export function valueRun(
     const evidence = evidenceOf(type, vtype);
     const offences = transformOffences(step, value, evidence, productive === ALWAYS_PRODUCTIVE ? true : productive);
     if (!offences) return null;
-    const transformed = transformExpr(step, value, false, undefined, evidence);
+    const transformed = transformExpr(step, value, false, fresh, step.name === 'asNumber' ? type : undefined, evidence);
     if (!transformed) return null;
     // A RAISING transform (a runtime `asNumber(GType.X)`) still produces iff its input did — but a host
     // that asks only WHETHER the run produced (`where`/`not`/`choose`) never reads the fenced value, so

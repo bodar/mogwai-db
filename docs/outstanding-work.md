@@ -29,25 +29,50 @@ lowered.
   reducer **type** (`produced.vtype`) and **productivity** (empty-child NULL-ness) as two carried facts,
   so `by(sum/mean/…)` lands uniformly across `project`/`aggregate`/`store`/`where` (`group().by(k).by(__.…sum())`
   already works; the sibling hosts drop the fact). Rules RelIR §6·7; live gaps §10.
-  **Numeric reducer RESULT CLASS** (read side, and so every `property(k, __.…max())` that stores it): the
-  reference answers the HIGHEST COMMON class over all inputs (`NumberHelper.getHighestCommonNumberInfo`,
-  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390`;
-  `max`/`min` at :613 widen too), we answer the winner's own type (`max`/`min`) or the aggregate's storage
-  class (`mean`). `sum` now takes the rows' common class wherever they carry a tag (`reducer.ts`
-  `numberClassMask`/`numberClass` — the scalar `sum`, `sum(local)`, and grouped `sum`/`min`/`max`), so a
-  whole-number Double sum stays a Double and byte/short/float sums keep their class. Wrong today:
-  `inject(2, 1.0d).max()` Int (ref Double), `inject(2, 1L).max()` Int (ref Long), `inject(5i, 2.0d).max()`
-  Int 5 (ref Double 5.0), `inject(1b, 2s).max()` Int (ref Short) — the top-level and `local` argmax
-  `min`/`max` arms still frame the WINNER's tag (only a grouped `by()` `min`/`max` reads `numberClass`);
-  `inject([1b, 2s]).sum(local)` Int (ref Short — a bare list literal carries no member tags); `mean()` of
-  BigInteger Double (ref BigDecimal); an UNTAGGED stored integer counts as an Int whatever its size; and an
-  intermediate overflow the final total cannot show is not widened.
+  **Numeric RESULT CLASS** — the class is exact (§6·7, decided 2026-10-17), named by ONE authority
+  (`reducer.ts` `numberWidth`/`numberFloating` → `commonNumberClass`, `NumberHelper.getHighestCommonNumberInfo`
+  + `determineNumberClass`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390,861-874`)
+  that every `sum`, every `min`/`max` (top-level, `local`, correlated, grouped), and the sack's folds read;
+  a reducer states that class PER ROW in `vt` as a Gremlin type name (`REDUCED_TYPE`), so every consumer
+  at every depth reads it, and the sack's class rides through `sackOf`. List literals envelope
+  Byte/Short/Long/Float members, `asNumber()` is `createNumber`'s Float/Double/BigDecimal ladder, and a whole
+  Double stringifies `1.0` (pinned: `test/compiler/number-class-authority.exec.test.ts`). A FLOAT is carried
+  as its EXACT value (`src/gremlin/float.ts`, `src/compiler/rel/float.ts`): every compare widens it as
+  `NumberHelper` does, a sack fold is float arithmetic, and a `sum`/`mean` over Floats is exact on the
+  2^-10 grid below 2^14 and DEFERS elsewhere (per-step float rounding is not a SQL `SUM`).
+  Still open: `mean()` of BigInteger Double (ref BigDecimal); an intermediate overflow the final total cannot
+  show is not widened; `fold(seed, Operator.x)` (`operator.ts`) keeps its own int/long/double lattice and
+  declines the other classes; an Integer whose class only its storage class states, compared with a Float
+  past 2^24, DEFERS; an UNTAGGED whole REAL a value-transform barrier re-injects UNKNOWN (`lowerValueResume`)
+  frames as an Int (the framer sees a JS number); `asString()` of a Double outside [10^-3, 10^7) or past 15
+  digits DEFERS (SQLite's text is not `Double.toString`'s there); a Float STORED before the exact-carrier
+  rule (its shortest decimal, not its value) reads as that decimal until rewritten. A `sum`/`mean` of three
+  or more Float traversers off the grid DEFERS: the reference's total is order- AND bulking-dependent
+  (`SumGlobalStep.projectTraverser` multiplies a bulk once, then adds in stream order), and an aggregate holds
+  neither; two Floats overflowing a float promote to a Double (`mathOperationWithPromote`, `NumberHelper.java:400-425`),
+  not to `Infinityf`. A BigDecimal widening of an INTEGRAL Double at or past 10^7 has a NEGATIVE scale
+  (`BigDecimal.valueOf(1.0E7)` is (10, −6)), which no carrier keeps apart from an integral source's scale-0
+  INTEGER below 10^21: it DECLINES at compile time and DEFERS at run time (an E-notation decimal-TEXT carrier
+  would answer it; so would a `1e7m` literal, which declines likewise — `ir/uncarried-literal.ts`). A `sum`/`mean` whose summands are all
+  `-0.0` answers `0.0` (SQL `SUM` starts at +0; the reference seeds with the first value). A set-op literal
+  operand (`combine([1.0d])`) is a BARE list, so a whole Double/Float member reads back by storage class.
   An EXACT-TAIL value held as decimal TEXT (a BigDecimal — `1.5m` is stored `'1.5'` — a BigInteger, or a
   Long past 2^53) cannot be added by a SQL `sum`. Every `sum`/`mean` over such a row now DEFERS in-statement
   (`reducer.ts` `arithmeticArg`, a raising arm of the aggregate inside the read, so a nested body carries it). The answer it
   owes is exact decimal arithmetic, which remains open: `values('p').sum()` over `1.5m` and `2` is a
   deferral, where the reference gives BigDecimal 3.5. A sum over a KNOWN `long`/`bigint` stream is exact
-  (`sumTower`). See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
+  (`sumTower`). **A Double outside [1e-80, 1e116] DEFERS wherever it would cross SQLite's decimal text**
+  (`src/rel/exact-decimal.ts`): SQLite's own decimal↔binary64 conversion is exact only in [1e-82, 1e118) on
+  Bun's 3.51.2 and 10-45% off by a few ulps beyond, in `printf`, `CAST`, a SQL literal and the JSON
+  reader/writer alike — including its own round-trip test, so no SQL-side test can pick out the survivors.
+  A compiler literal is spelled as an exact product (`exactRealSpelling`, `rel/emit.ts`), so a top-level
+  value is exact; every JSON entry (`asExactReal`), the BigDecimal digits (`doubleDecimalText`) and the JS
+  writer of a tree headed into SQLite (`stringifyExact`) defer. Open: an EXACT carrier there instead of the
+  deferral — today an element holding such a property defers every payload that frames its properties
+  (`g.V()`), a `fold()`/`project()`/`select()` of one defers, and a bulk load of one refuses. Also open: a
+  BigDecimal's decimal TEXT carrier is still `CAST` to REAL where it compares against a Double, which is the
+  same reader at a magnitude outside the range. DO's SQLite build is unmeasured.
+  See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
   ([archived](./archive/2026-09-05-fan-out-rejoin-authority-plan.md)). Remaining are PATH-as-a-VALUE
@@ -315,7 +340,7 @@ lowered.
   `047df68b`): a body observing an upstream write that >1 traverser ran through (or a branch's arm
   writes) refuses rather than answering from one statement's snapshot, since the reference re-evaluates
   the child per traverser after each write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java`);
-  a numeric reducer's `vt` now crosses into a per-row `vtype` through `reducedVtype` (`fb3b4703`, exact —
+  a numeric reducer's `vt` is a Gremlin type name (`reducer.ts` `REDUCED_TYPE`; `fb3b4703`, exact —
   `mean()` is a Double, `.../step/map/MeanGlobalStep.java:175-177`). Pinned in `test/property-traversal-sequencing.test.ts`.
 - **A merge over several traversers beside ANOTHER write its search could observe** — decline
   (`guardMergeInterleaving` rule (0) via `mergeObservesOtherWrites`, plus the onMatch/tail per-traverser

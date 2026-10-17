@@ -196,7 +196,7 @@ heterogeneous stream frames each value by its own tag.
 | 128-bit arithmetic declines | |
 | int64 overflow raises natively | |
 | 32-bit float arithmetic is not expressible | SQLite REAL is always a double |
-| **`NaN` IS `null`** | SQLite has no NaN (stores one as `NULL` however it arrives), so mogwai folds a `NaN` literal to `null` at ingestion. Diverges from Java (`NaN ≠ null`): `inject(NaN).is(P.eq(null))` MATCHES for us (Java returns empty), `inject(NaN).is(P.neq(null))` is empty (Java returns `[NaN]`). `±Infinity` is unaffected (SQLite represents it via `9e999`/`-9e999`). Both fold at one seam (`compiler/rel/const.ts`), inlined as constants — never a bind |
+| **`NaN` has no carrier — a NaN VALUE declines** | SQLite has no NaN (stores one as `NULL` however it arrives), so a NaN literal in a VALUE position (`inject`, `constant`, a list/map member, a property value) DECLINES at every depth (`compiler/ir/uncarried-literal.ts`) rather than answer for a null (`inject(NaN,1,NaN).fold()` was `[null,null,1]`, `inject(NaN,1).sum()` was 1). Exempt: a predicate OPERAND (`is(P.lt(NaN))`), and a NaN the very next step drops as it drops a null (`is(P.eq/lt/gt(x))`, `lte`/`gte` of a non-null, an `inject`'s `asBool()`). A negative-scale BigDecimal literal (`1e7m`) declines the same way — plain decimal text cannot spell its scale. `±Infinity` is unaffected (SQLite represents it via `9e999`/`-9e999`), inlined as a constant — never a bind |
 
 ## 11. Writes
 

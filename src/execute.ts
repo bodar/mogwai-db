@@ -14,6 +14,7 @@ import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
 import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from './json-exact.ts';
+import { bigDecimalOfCarrier } from './gremlin/float.ts';
 
 // ---- GraphBinary v4 result framing ----
 // This module is CONCERN B — execute + frame. `executeQuery` compiles a traversal,
@@ -222,7 +223,7 @@ function mapSideBuffer(raw: any, of: MapOf): Buffer {
   if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
   if (of.kind === 'list') return frameListOf(raw, of.of);
   // scalar: always a self-describing {t,v} node (JSON text) → frame each its own exact type.
-  return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? JSON.parse(raw) : raw));
+  return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw));
 }
 
 // A Map.Entry (group()/valueMap()/is(typeOf(MAP)).unfold()) frames as a one-entry MAP —
@@ -237,7 +238,8 @@ function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').List
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
   // A MIXED-member list frames each member by its own {t,v} tag, exactly as listItemBuffers does.
-  if (of.kind === 'mixed') return listBuffer(items.map(frameTypedNode));
+  // (Parsed EXACTLY, as every `{t,v}` tree is: a BigDecimal's REAL carrier spells its scale.)
+  if (of.kind === 'mixed') return listBuffer(parseExactJson(json).map(frameTypedNode));
   return ioc.listSerializer.serialize(items);
 }
 
@@ -313,7 +315,9 @@ function frameTypedNode(node: FrameNode): Buffer {
   // A leaf value `parseExactJson` kept as its source text frames from that text — the tag names the class.
   const value = isExactNumber(node.v) ? node.v.rawJSON : node.v;
   const as = vtypeToValueType(tag);
-  if (as !== undefined) return frameValue(value, as);
+  // A BigDecimal reads its carrier's own spelling (`bigDecimalOfCarrier` — a raw JSON REAL is a Double's
+  // `BigDecimal.valueOf`, not the decimal text it happens to print as).
+  if (as !== undefined) return frameValue(as === 'bigdecimal' ? node.v : value, as);
   if (tag != null) return sumBuffer(value, tag);
   return isExactNumber(node.v) ? exactNumberBuffer(node.v) : frameValue(value, undefined);
 }
@@ -485,7 +489,9 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     case 'uuid': return ioc.uuidSerializer.serialize(String(v), true);
     // The exact tail: the value is a stored canonical TEXT string. serialize() parses it
     // (BigDecimal.fromText / Duration total-nanos / 1-codepoint char) → exact GraphBinary.
-    case 'bigdecimal': return bigDecimalSerializer.serialize(String(v), true);
+    // Every carrier — decimal TEXT, an INTEGER, a REAL, a list member's raw JSON spelling — is read by the
+    // ONE carrier authority, which fixes the SCALE (`bigDecimalOfCarrier`, `gremlin/float.ts`).
+    case 'bigdecimal': return bigDecimalSerializer.serialize(bigDecimalOfCarrier(v), true);
     case 'duration': return durationSerializer.serialize(String(v), true);
     case 'char': return charSerializer.serialize(String(v), true);
   }
@@ -514,7 +520,7 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
     // an unknown type infers from the JS value (correct for the storage-class-determined three).
     const as = staticTypeOf(of.type);
     return hasTypedMembers(of) ? items.map(frameTypedNode)
-      : as ? items.map((x: any) => frameValue(isExactNumber(x) ? x.rawJSON : x, as))
+      : as ? items.map((x: any) => frameValue(isExactNumber(x) && as !== 'bigdecimal' ? x.rawJSON : x, as))
         : items.map((x: any) => (isExactNumber(x) ? exactNumberBuffer(x) : ioc.anySerializer.serialize(x)));
   }
   // A MIXED list: every member is a self-describing {t,v} envelope (a vertex, an edge, a scalar leaf),
@@ -717,13 +723,13 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
     // A whole-map VALUE per row: the `map` blob is [[keyNode,valNode],…] of self-describing
     // {t,v} nodes → frame the reconstructed map tree (each key/value its own exact type).
-    case 'mapValue': for (const r of rows) yield frameTypedNode({ t: 'map', v: JSON.parse(r.map) }); return;
+    case 'mapValue': for (const r of rows) yield frameTypedNode({ t: 'map', v: parseExactJson(r.map) }); return;
     // A Map.Entry stream (map unfold): one size-1 MAP per row.
     case 'mapEntry': for (const r of rows) yield mapEntryBuffer(r, shape.keyOf, shape.valOf); return;
     // A per-row self-describing TYPED NODE (unfold() over a mixed-member collection): each row's
     // `node` column is a `{t,v}` envelope (JSON text) → the ONE frameTypedNode rule frames a vertex,
     // an edge or a scalar leaf by its own tag, preserving a per-member type the variant arm cannot.
-    case 'typedNode': for (const r of rows) yield frameTypedNode(r.node == null ? null : JSON.parse(r.node)); return;
+    case 'typedNode': for (const r of rows) yield frameTypedNode(r.node == null ? null : parseExactJson(r.node)); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;
@@ -787,6 +793,12 @@ export type Framed = { buf: Buffer; bulk: bigint };
  *  framer uses, so a collection value nests its parsed tree and a scalar rides raw. */
 const foreignLeaf = (v: any, vtype: string | null): ValueNode => valueNodeFromStored(v, vtype);
 
+/** A scalar row's BigDecimal REAL carrier, which crosses a scalar frame as the one-member JSON array of its
+ *  raw spelling (`scalarFramedValue`), back to the raw JSON REAL a `{t,v}` node holds — so a node re-entering
+ *  SQL (a barrier, a federated stream) carries the number, never the bracketed text. */
+const decimalCarrier = (v: any, tag: string | null | undefined): any =>
+  tag === 'bigdecimal' && typeof v === 'string' && v.startsWith('[') ? (parseExactJson(v) as any[])[0] : v;
+
 /** One element row's public payload as a `{t,v}` element FrameNode — the SAME `{id,label,props}` tuple
  *  `rowVertex`/`rowEdge` consume, so a landed element re-frames byte-identically. A vertex's `label` is
  *  the JSON labels array; an edge carries `src`/`tgt`. */
@@ -825,13 +837,13 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
       const t = shape.type;
       if (t.kind === 'perRow') {
         const colName = perRowColumn(t, 'foreignValueNodes');
-        return rows.map((r) => foreignLeaf(r.v, r[colName] ?? null));
+        return rows.map((r) => foreignLeaf(decimalCarrier(r.v, r[colName]), r[colName] ?? null));
       }
-      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: r.v }));
+      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: decimalCarrier(r.v, staticTypeOf(t)) }));
     }
     // A numeric reducer stream that was NOT flagged 'reduce' (e.g. a local-scope reducer terminal): each
     // row's `vt` is a Gremlin vtype or a storage class, exactly as the scalar framer resolves.
-    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: r.v }));
+    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: decimalCarrier(r.v, r.vt) }));
     // A list/set VALUE per row (`values(k).fold()`, `cap('a')`, intersect/…): the members convert per the
     // item descriptor.
     case 'jsonbList': return rows.map((r) => ({ t: 'list', v: foreignListNodes(r.list, shape.items) }));
@@ -841,9 +853,9 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
     // A relational element-list value per row (element members already expanded to payload objects).
     case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: JSON.parse(r.list).map((it: any) => foreignElementNode(it, shape.elem)) }));
     // A per-row self-describing node already (`unfold()` over a mixed collection): pass through.
-    case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : JSON.parse(r.node)));
+    case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : parseExactJson(r.node)));
     // A whole-map VALUE per row (`project`/`valueMap`/`group` folded to a map value).
-    case 'mapValue': return rows.map((r) => ({ t: 'map', v: JSON.parse(r.map) }));
+    case 'mapValue': return rows.map((r) => ({ t: 'map', v: parseExactJson(r.map) }));
     default: return null;
   }
 }
@@ -933,7 +945,7 @@ function mapNode(r: any, entries: MapEntry[]): FrameNode {
 function mapSideNode(raw: any, of: MapOf): FrameNode {
   if (of.kind === 'elem') return raw == null ? null : foreignElementNode(JSON.parse(raw), of.elem);
   if (of.kind === 'list') return raw == null ? null : { t: 'list', v: foreignListNodes(raw, of.of) };
-  return raw == null ? null : (typeof raw === 'string' ? JSON.parse(raw) : raw);
+  return raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw);
 }
 
 /** A Map.Entry (a MapStream unfold) as a size-1 `{t:'map'}` node — the node twin of `mapEntryBuffer`
@@ -1138,7 +1150,7 @@ export class Executor implements ExecutorApi {
       // nodes — so it crosses on the scalar arm losslessly (keys and partials keep their Gremlin types). An
       // empty group set yields no row → an empty map, which the combine reads as "every parent matched 0".
       if (plan.shape.kind === 'mapValue')
-        return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
+        return { kind: 'scalar', value: { t: 'map', v: rows[0]?.map ? parseExactJson(rows[0].map) : [] } };
       throw new Error(`federate: expected a reduced scalar or keyed map from the pushed reducer, got a ${plan.shape.kind} result`);
     }
     // The mapValues injection query (`'keyedMap'`, `ForeignTerminal`) crosses as ONE typed map tree. Its
@@ -1146,7 +1158,7 @@ export class Executor implements ExecutorApi {
     // is a stream of maps and frames below, one node per row.
     if (terminal === 'keyedMap') {
       if (plan.shape.kind !== 'mapValue') throw new Error(`federate: expected a keyed map from the mapValues injection, got a ${plan.shape.kind} result`);
-      return { kind: 'map', value: { t: 'map', v: rows[0]?.map ? JSON.parse(rows[0].map) : [] } };
+      return { kind: 'map', value: { t: 'map', v: rows[0]?.map ? parseExactJson(rows[0].map) : [] } };
     }
     // A pushed-down VALUE-PRODUCING terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, …): the whole
     // tail ran on the sibling and returned a STREAM of N values, each re-framed by its own Gremlin type. It
@@ -1210,7 +1222,14 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // A SCALAR head is the injected VALUE itself, one row per parent — everything a barrier reads of
   // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
   // materialized the whole parent tuple to reach the same one field.
-  if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
+  // A per-row typed head also delivers the row's TAG, which is what tells a Boolean (0/1) or a Date (epoch
+  // millis) from the number it is stored as (`BarrierInput.injectedType`).
+  if (head.shape.kind === 'value') {
+    const tagCol = perRowColumnOf(head.shape.type);
+    const staticTag = staticTypeOf(head.shape.type);
+    return rows.map((r) => (tagCol ? { injectedValue: decimalCarrier(r.v, r[tagCol]), injectedType: r[tagCol] ?? null }
+      : { injectedValue: decimalCarrier(r.v, staticTag) }));
+  }
   if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same
   // encoding the `map` column carries (a global `order()` over a map stream reads it, `orderMapStreamValue`).

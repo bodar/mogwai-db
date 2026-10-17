@@ -11,8 +11,8 @@
 // It is stored on write (vertex_properties.vtype / edge_properties.vtype) and
 // consumed on read (typeOf filter + per-row framing).
 
-import { ioc } from '../io.ts';
 import { stringifyExact } from '../json-exact.ts';
+import { ioc } from '../io.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -42,10 +42,32 @@ export class BigDecimal {
     }
     return neg ? '-' + out : out;
   }
+  /**
+   * `BigDecimal.toString()` — the PRINTED form `asString()` shows, which is not the storage form above:
+   * plain when the scale is non-negative and the adjusted exponent is at least −6, else scientific with
+   * the exponent always signed (`1.0E+7`, `1.0E-7`, `1E+3`)
+   * (`java.math.BigDecimal#toString` — the `layoutChars(true)` rule).
+   */
+  toJavaString(): string {
+    const neg = this.unscaled < 0n;
+    const digits = (neg ? -this.unscaled : this.unscaled).toString();
+    const adjusted = -this.scale + (digits.length - 1);
+    if (this.scale >= 0 && adjusted >= -6) return this.toString();
+    const mantissa = digits.length > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
+    return `${neg ? '-' : ''}${mantissa}E${adjusted >= 0 ? '+' : ''}${adjusted}`;
+  }
   /** Parse a plain decimal string into {unscaled, scale}. No exponent notation
    *  (neither our stored form nor a `m`-suffixed literal ever uses it). */
   static fromText(str: string): BigDecimal {
     str = str.trim();
+    // An EXPONENT spelling (`1.4e-45`, `1e+21`, Java's `1.0E-5`) — what a run-time REAL reaches the
+    // BigDecimal framer as through `String(v)`: `new BigDecimal(s)`'s scale is the fraction's length
+    // minus the exponent.
+    const sci = /^(.*)[eE]([+-]?\d+)$/.exec(str);
+    if (sci) {
+      const mantissa = BigDecimal.fromText(sci[1]!);
+      return new BigDecimal(mantissa.unscaled, mantissa.scale - Number(sci[2]));
+    }
     let neg = false;
     if (str[0] === '+') str = str.slice(1);
     else if (str[0] === '-') { neg = true; str = str.slice(1); }
@@ -61,6 +83,10 @@ export class BigDecimal {
   static from(x: BigDecimal | string | bigint | number): BigDecimal {
     if (x instanceof BigDecimal) return x;
     if (typeof x === 'bigint') return new BigDecimal(x, 0);
+    // A NUMBER spelled with an exponent is a Double past 10^21 or below 10^-6 (no int64 is that wide), so it
+    // is `BigDecimal.valueOf(d)` — `Double.toString` has at least one fractional digit (`1.0E300`, scale
+    // −299), where JS writes `1e+300` (scale −300). The digits are the same shortest ones.
+    if (typeof x === 'number') return BigDecimal.fromText(String(x).replace(/^(-?\d)e/i, '$1.0e'));
     return BigDecimal.fromText(String(x));
   }
 }
@@ -250,6 +276,14 @@ export const REDUCER_CLASSES = {
   arithmetic: ['integer', 'real'],
   comparable: ['integer', 'real', 'text'],
 } as const;
+
+/**
+ * The Gremlin types SQLite holds in a NUMERIC storage class that are NOT Numbers — a Boolean as INTEGER
+ * 0/1, a Date as epoch millis, a Duration as a millisecond span. Only their TAG tells them from a Number,
+ * so every consumer that does arithmetic or ordering by storage class (`reducer.ts`, the receiver checks
+ * in `receiver.ts`, equality's type spaces in `predicate.ts`) reads the tag against this one list.
+ */
+export const NUMBER_STORED_NON_NUMBERS: readonly string[] = ['boolean', 'datetime', 'duration'];
 
 /** Collections are stored as JSONB in the value column (not a raw scalar bind). */
 export const COLLECTION_TYPES = new Set<CanonicalType>(['list', 'map', 'set']);

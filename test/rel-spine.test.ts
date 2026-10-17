@@ -742,20 +742,22 @@ describe('the RelIR spine', () => {
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual(want);
   });
 
-  // ⚠️ NaN IS null on this substrate — a DOCUMENTED DEVIATION (feature-support-matrix §10). SQLite has
-  // no NaN, so `inject(NaN)` folds to `null` at the front door (`const.ts`), a constant not a bind.
-  // `±Infinity` is representable (a real overflow literal) and inlines faithfully.
-  test('NaN folds to null; Infinity inlines as a constant, no bind', () => {
+  // SQLite has no NaN, so a NaN literal folds to `null` at the front door (`const.ts`), a constant not a
+  // bind — and a NaN traverser therefore has no carrier: a VALUE position declines (`uncarriedLiteral`)
+  // unless the next step drops it as it drops a null. `±Infinity` is representable (a real overflow
+  // literal) and inlines faithfully.
+  test('NaN folds to null where it is never observed; Infinity inlines as a constant, no bind', () => {
     for (const [gremlin, sql] of [
-      ['g.inject(NaN)', 'VALUES (NULL)'], ['g.inject(Infinity)', 'VALUES (9e999)'],
+      ['g.inject(NaN).is(P.lt(1.0d))', 'VALUES (NULL'], ['g.inject(Infinity)', 'VALUES (9e999)'],
       ['g.inject(-Infinity)', 'VALUES (-9e999)'],
     ] as const) {
       const plan = read(gremlin);
       expect(plan.binds.length, gremlin).toBe(0);
       expect(plan.sql, gremlin).toContain(sql);
     }
-    // The deviation's consequence: NaN matches the null-space eq (Java returns empty).
-    expect(read('g.inject(NaN).is(P.eq(null))').sql).toContain('IS NULL');
+    // A NaN the traversal would observe as a null declines rather than answer for the null.
+    for (const gremlin of ['g.inject(NaN)', 'g.inject(NaN).is(P.eq(null))', 'g.inject(NaN).is(P.neq(1.0d))'])
+      expect(() => read(gremlin), gremlin).toThrow(UnsupportedTraversal);
   });
 
   // A LOCAL (`Scope.local`) `StringLocalStep` transform maps over the members, but throws on any member
@@ -1755,7 +1757,7 @@ describe('the RelIR spine', () => {
     expect(mean.sql).toMatch(/CAST\(sum\([^]*AS REAL\) \//);
 
     // …and the result's class rides out as the `vt` column, because a sum of integers is an integer and
-    // of reals a real — the rows' COMMON number class where they carry their own tag (`numberClass`:
+    // of reals a real — the rows' COMMON number class where they carry their own tag (`commonNumberClass`:
     // stored ages are untagged Ints, so an `int`, `Sum.feature` `g_V_age_sum` `d[123].i`), else the
     // aggregate's storage class.
     const sum = read("g.V().values('age').sum()");

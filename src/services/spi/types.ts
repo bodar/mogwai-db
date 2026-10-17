@@ -295,6 +295,11 @@ export interface BarrierInput {
    *  whose spelling tells a wide `Long` from a whole-valued `Double`; the parsed value stays what is
    *  re-injected. A string, so it crosses the DO RPC boundary exactly as the head row did. */
   readonly injectedText?: string;
+  /** The value's own per-row Gremlin TYPE TAG, where a scalar head carries one (a stored `vtype`, a merged
+   *  branch's arm tag) — `null` where the row says nothing. A Boolean rides as 0/1 and a Date as epoch
+   *  millis, so a value-transform that converts BY TYPE (`asNumber()`, `cast-barrier.ts`) reads this, not
+   *  the storage class `injectedValue` arrives in. */
+  readonly injectedType?: string | null;
 }
 
 // ---------- the `rel` arm: a contribution lowered into the RelIR fold ----------

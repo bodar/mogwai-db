@@ -5,6 +5,7 @@ import { sideEffectShadowedLabel, unlocatableSubPath } from './ir/labels.ts';
 import { perTraverserMutableFold } from './ir/fold-seed.ts';
 import { ambiguousEntryBind, erasedPathEntry } from './ir/strategies.ts';
 import { sackFoldsNaN } from './ir/sack-nan.ts';
+import { uncarriedLiteral } from './ir/uncarried-literal.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { labelRegime } from '../api.ts';
@@ -79,6 +80,9 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // A NaN literal the sack may fold declines here, once, for every host (`sackFoldsNaN`) — SQLite stores
   // NaN as NULL, and the fold would answer for a NULL operand where the reference computes with NaN.
   if (sackFoldsNaN(steps, params, sackInit)) throw new UnsupportedTraversal(gremlin);
+  // A literal VALUE no carrier keeps — a NaN (SQLite stores it as NULL) or a negative-scale BigDecimal
+  // (plain decimal text cannot spell its scale) — declines here, once, at every depth (`uncarriedLiteral`).
+  if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
   // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,

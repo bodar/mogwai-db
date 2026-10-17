@@ -2,6 +2,7 @@ import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value
 import { NEEDS_SUBQUERY, aliasOf, free, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { compilerInt, type Expr } from './expr.ts';
+import { exactRealSpelling, hasExactDecimal, INEXACT_DECIMAL } from './exact-decimal.ts';
 import { recursiveSelf } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
@@ -9,7 +10,7 @@ import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
 import { exprChildren, forEachExpr, rewriteExpr } from './walk.ts';
-import { blockRaiseTest, RAISE_SENTINEL } from './raise.ts';
+import { blockRaiseTest, deferralExpr, RAISE_SENTINEL } from './raise.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -195,10 +196,37 @@ interface Side {
   readonly scope: Scope;
 }
 
+/** The SQL functions that WRITE a JSON value from their arguments — each argument is a JSON entry. */
+const JSON_WRITERS: ReadonlySet<string> = new Set([
+  'json_array', 'jsonb_array', 'json_object', 'jsonb_object',
+  'json_group_array', 'jsonb_group_array', 'json_group_object', 'jsonb_group_object',
+  'json_insert', 'jsonb_insert', 'json_replace', 'jsonb_replace', 'json_set', 'jsonb_set',
+]);
+
 function assembler(bindings: ReadonlyMap<string, Binding>) {
 
   const expr = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
+    // An ENTRY of a JSON writer: a compiler NEGATIVE ZERO crosses as the JSON number `-0.0`, because
+    // SQLite's JSON writer prints a REAL −0.0 as `0.0` — the sign every reader then loses. The one
+    // spelling for a literal, at every JSON-constructing position; a run-time zero takes the same
+    // repair at its own authority (`jsonMember`'s `asExactReal`, `compiler/rel/build.ts`).
+    // A literal OUTSIDE the range SQLite's decimal conversion is exact in DEFERS where it would enter, as a
+    // run-time one does (`asExactReal`): the writer would print SQLite's own digits of it (`exact-decimal.ts`).
+    // And a literal whose 15-significant-digit form is ANOTHER Double — SQLite's JSON writer prints a REAL at
+    // 15 digits, so `json_array(1.2345678901234568E16)` is `[1.23456789012346e+16]` and `0.30000000000000004`
+    // comes back `0.3` — crosses as the JSON number of its shortest round-trip spelling, with a point or an
+    // exponent so every reader keeps it a Double (`parseExactJson`, `json-exact.ts`). The run-time twin is
+    // `asExactReal`'s `printf('%!.17g')`; a literal needs no test in SQL, its value is known here.
+    const jsonEntry = (x: Expr): Expression => {
+      if (x.kind !== 'lit' || x.source !== 'compiler-real' || !Number.isFinite(x.value as number)) return self(x);
+      const v = x.value as number;
+      if (Object.is(v, -0)) return raw("json('-0.0')");
+      if (!hasExactDecimal(v)) return self(deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] }));
+      if (Number(v.toPrecision(15)) === v) return self(x);
+      const shortest = String(v);
+      return raw(`json('${/[.eE]/.test(shortest) ? shortest : v.toExponential()}')`);
+    };
     switch (e.kind) {
       case 'col': {
         const column = scope.get(e.rel)?.get(e.name);
@@ -222,8 +250,13 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           // this arm — `constLit` renders it `9e999 - 9e999`, since SQLite has no NaN at all.)
           case 'compiler-real': {
             if (!Number.isFinite(e.value as number)) return raw((e.value as number) > 0 ? '9e999' : '-9e999');
-            // `String(-0)` is `"0"`, so a negative zero keeps its sign only if it is spelled here.
+            // A NEGATIVE ZERO is a distinct Double (`Double.toString` prints `-0.0`, `Double.compare` orders
+            // it below `0.0`), and `String(-0)` is `"0"` — so its sign is spelled, which SQLite keeps.
             if (Object.is(e.value, -0)) return raw('-0.0');
+            // Outside the range SQLite's decimal reader is exact in, a literal is spelled as an exact product
+            // (`exactRealSpelling`, `exact-decimal.ts`): `1.5e-300` typed as itself reads back 1.4999999999999998E-300.
+            const exact = exactRealSpelling(e.value as number);
+            if (exact !== null) return raw(exact);
             const s = String(e.value); return raw(/[.eE]/.test(s) ? s : `${s}.0`);
           }
           case 'compiler-null': return raw('NULL');
@@ -232,21 +265,21 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       case 'binary': return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;
       case 'cast': return q`CAST(${self(e.arg)} AS ${raw(e.to.toUpperCase())})`;
-      case 'call': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(self))})`;
+      case 'call': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self))})`;
       // An `Agg` with no arguments means "over all rows", and SQL spells that `count(*)` — not
       // `count()`, which is SQLite LENIENCY rather than syntax. Emitting the lenient form would be
       // the exact species `src/cf-limits.ts` exists to catch: valid on the dev runtime, unproven on
       // the one we ship to. The star is a SPELLING, so it belongs here and not as a node field.
       // `FILTER (WHERE …)` follows the closing paren, not the argument list — it qualifies WHICH ROWS the
       // aggregate takes, while the group stays whatever `GROUP BY` decided (see `Agg.filter`).
-      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})${e.filter ? q` FILTER (WHERE ${self(e.filter)})` : empty}`;
+      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})${e.filter ? q` FILTER (WHERE ${self(e.filter)})` : empty}`;
       case 'window-expr': return q`${raw(e.fn)}(${list(e.args.map(self))}) OVER (${windowSpec(e.spec, scope)})`;
       // A json object's KEYS are compile-time strings in the node, not `Expr`s — so they render as
       // LITERALS, never as binds. `value(key)` here spent one of the platform's 100 parameters per
       // key: a `{t,v}` member node cost two and one `as()` cost two, which is a plan the seam declines
       // for a constant the compiler itself wrote.
-      case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [textLiteral(key), self(val)]))})`;
-      case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(self))})`;
+      case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [textLiteral(key), jsonEntry(val)]))})`;
+      case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(jsonEntry))})`;
       case 'scalar': return q`(${renderRel(e.plan, scope)})`;
       case 'exists': return q`${e.negated ? raw('NOT ') : empty}EXISTS (${renderRel(e.plan, scope)})`;
       case 'in-list': return q`${self(e.expr)} IN (${list(e.values.map(self))})`;

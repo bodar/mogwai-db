@@ -155,13 +155,13 @@ describe('property(k, <numeric reducer>) stores the reference type', () => {
     expect(stored(`g.V(1).property('n', __.values('age').fold().mean(local))`)).toEqual({ v: 29, vtype: 'double' });
   });
   // A sum of Doubles is a Double, fractional or WHOLE: the class is the rows' common `double` tag
-  // (`reducer.ts` `numberClass`), not the sum's storage class — an integral Double the store keeps as
+  // (`reducer.ts` `commonNumberClass`), not the sum's storage class — an integral Double the store keeps as
   // INTEGER sums to an INTEGER.
   test('a sum() of Doubles is a Double, even integral', () => {
     expect(stored(`g.V(1).property('n', __.outE().values('weight').sum())`)).toEqual({ v: 1.9, vtype: 'double' });
     expect(stored(`g.V(1).property('n', __.outE().has('weight', 1.0d).values('weight').sum())`)).toEqual({ v: 1, vtype: 'double' });
   });
-  // A sum takes its values' common number class (`reducer.ts` `numberClass`, NumberHelper's promotion):
+  // A sum takes its values' common number class (`reducer.ts` `commonNumberClass`, NumberHelper's promotion):
   // stored ages are Ints, so their sum is an `int`.
   test('sum() of Ints is an Int', () => {
     expect(stored(`g.V(1).property('n', __.values('age').sum())`)).toEqual({ v: 29, vtype: 'int' });

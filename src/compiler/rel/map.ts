@@ -10,16 +10,16 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, inferredVtype, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { withChannel } from '../../channels.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
-import { byExpr, byNode, modulations, nodeProductivityFilter, producedMemberNode, type Modulation } from './modulator.ts';
+import { byExpr, byNode, memberNodeOf, modulations, nodeProductivityFilter, producedMemberNode, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
 import { ALWAYS_PRODUCTIVE, relHostTag, type ChildHost, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
-import { CLASS_MASK, isReducer, numberClass, numberClassMask, reducerAggregate } from './reducer.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
 import { raiseInRow } from '../../rel/raise.ts';
 
 /**
@@ -475,10 +475,10 @@ export function groupRows(
         // The entry's list is the member of the new collecting group, like `by(Column.values)`.
         // Its typed-tree copy expands the retained rowids, while the entry relation remains suitable
         // for a following `unfold()` child body.
-        ? producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present)
+        ? memberNodeOf(produced, source, fresh)
         : produced.framing.kind === 'list'
           ? listNode(produced.expr)
-          : producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present, produced.vtype);
+          : memberNodeOf(produced, source, fresh);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
@@ -889,17 +889,20 @@ function groupReduced(
   const key = keyOf(col(rows.rel.id, rows.origin));
   if (!key) return null;
   // THE ROWS' OWN GREMLIN TYPE, where they carry one (a stored value's per-row tag, or the stream's static
-  // one): a `sum`/`min`/`max` result's class is the rows' COMMON number class (`reducer.ts` `numberClass`),
+  // one): a `sum`/`min`/`max` result's class is the rows' COMMON number class (`reducer.ts` `commonNumberClass`),
   // which the result's storage class alone gets wrong — a Double stored integral (the modern graph's
   // ripple `weight` 1.0) reduced to an INTEGER and framed as the Int 1, where `Sum.feature`
   // `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX` answers `d[1.0].d`. A `mean` is a Double
   // whatever it reduces (`MeanGlobalStep`), so it needs none.
   const tagCol = framingCols(rows.framing)?.find((column) => column.name !== 'v')?.name;
   const staticTag = rows.framing.kind === 'scalar' ? staticTypeOf(rows.framing.type) : undefined;
-  const tag = counting || reducer === 'mean' ? null
+  // Every reducer reads the tag as its ROW TAG (`reducerAggregate`) — a Boolean or Date value refuses, a
+  // `mean` included; only the result's class (`commonNumberClass`) is a `mean`'s to skip.
+  const rowTag = counting ? null
     : tagCol && rows.rel.type.cols.some((column) => column.name === tagCol) ? col(rows.rel.id, tagCol)
     : staticTag ? compilerText(staticTag) : null;
-  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), ...(tag ? [meta(TAG_COL, 'text', true)] : []));
+  const tag = reducer === 'mean' ? null : rowTag;
+  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), ...(rowTag ? [meta(TAG_COL, 'text', true)] : []));
   // THE KEY IS A COLUMN FIRST, for the reason the barrier's own key is: a `by()` key is a correlated
   // subquery and SQL needs it in the SELECT list AND the GROUP BY, so naming it once is what stops the
   // whole subquery being inlined at every position it appears.
@@ -907,9 +910,13 @@ function groupReduced(
   // A COUNT's value column is the traverser WEIGHT rather than a value — `SUM(bulk)` where the stream
   // carries a multiplicity, which is `countExpr`'s rule, and the seed arm below contributes 0.
   const bulk = rows.rel.channels.find((channel) => channel.role === 'bulk');
+  // Each pooled row is SCREENED by its tag here, once (`screenedByTag`) — the aggregate below is spelled
+  // again at every read of the reduced value, and the screen would be spelled with it.
+  const screened = counting ? col(rows.rel.id, 'v') : screenedByTag(col(rows.rel.id, 'v'), reducer, rowTag);
+  if (!screened) return null;
   const projected = make.project({
     id: fresh('rk'), input: rows.rel, channels: [], type: keyCols,
-    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : col(rows.rel.id, 'v')], ...(tag ? [[TAG_COL, tag] as const] : [])],
+    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : screened], ...(rowTag ? [[TAG_COL, rowTag] as const] : [])],
   });
   /**
    * A COUNT KEEPS ITS KEY WHERE EVERY OTHER REDUCER LOSES IT, and that is a SEED ROW rather than an
@@ -945,24 +952,25 @@ function groupReduced(
   // carries one: a group whose every row is a zero seed must answer 0, not NULL.
   const reduced = counting
     ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rowsIn.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
-    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer);
+    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer, SCREENED, undefined, rowTag ? col(rowsIn.id, TAG_COL) : undefined);
+  if (!reduced) return null;
   const productive = make.aggregate({
     id: fresh('rb'), input: rowsIn, channels: [],
     type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true),
-      ...(tag ? [meta(CLASS_MASK, 'int', true)] : [])),
+      ...(tag ? [meta(CLASS_WIDTH_COL, 'int', true), meta(CLASS_FLOATING_COL, 'int', true)] : [])),
     groupBy: [col(rowsIn.id, KEY_COL)],
-    aggs: [[VAL_COL, reduced.value], ...(tag ? [[CLASS_MASK, numberClassMask(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL))] as const] : [])],
+    aggs: [[VAL_COL, reduced.value], ...(tag ? numberClassAggs(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL), reducer === 'sum' ? 'not-a-number' : 'number') : [])],
   });
   // The class is NAMED ONCE, as a column FENCED on both sides: `typedNode` reads its tag at every arm of
   // its value encoding, and the assembler fuses an unfenced projection into its neighbour — into the
-  // aggregate (re-spelling `numberClassMask` per class test) or into the map fold (`numberClass` per arm).
+  // aggregate (re-spelling `numberClassAggs` per class test) or into the map fold (`commonNumberClass` per arm).
   const reducedRows = tag ? fenced(productive, fresh) : productive;
   const groups = tag
     ? fenced(make.project({
       id: fresh('rt'), input: reducedRows, channels: [],
       type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), meta(TAG_COL, 'text', true)),
       exprs: [[KEY_COL, col(reducedRows.id, KEY_COL)], [VAL_COL, col(reducedRows.id, VAL_COL)],
-        [TAG_COL, numberClass(col(reducedRows.id, CLASS_MASK), col(reducedRows.id, VAL_COL), inferredVtype(col(reducedRows.id, VAL_COL)))]],
+        [TAG_COL, reducedNumberClass(reducedRows.id, col(reducedRows.id, VAL_COL), inferredVtype(col(reducedRows.id, VAL_COL)))]],
     }), fresh)
     : productive;
   const value = col(groups.id, VAL_COL);
@@ -1053,7 +1061,8 @@ function groupCollected(
   // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
   // The payload column is the framing's own (`framingCols`) — a LIST row carries `list`, not `v`, and
   // naming `v` for it was an internal error (`by(__.constant([0,1]).fold())`) rather than an answer.
-  const payload = framingCols(rows.framing)?.[0];
+  const rowCols = framingCols(rows.framing);
+  const payload = rowCols?.[0];
   if (!payload) return null;
   const valueCol = col(rows.rel.id, payload.name);
   // A MAP column is the relational JSONB form; `json()` turns it back into JSON TEXT carrying the JSON

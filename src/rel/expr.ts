@@ -99,6 +99,20 @@ export const compilerReal = (value: number): Expr => {
   return { kind: 'lit', value, type: 'real', source: 'compiler-real' };
 };
 
+/**
+ * `x`'s SIGN BIT (`atan2` reads its argument as a number) — true for any negative value AND for a negative ZERO, which no SQLite
+ * comparison or text form sees (`-0.0 < 0` is false; `CAST`, `printf` and the JSON writer all print
+ * `0.0`). `atan2(±0, -1)` is ±π, so it is the one operator that reads the bit. The ONE spelling of that
+ * fact — a signed zero is a distinct Double (`Double.toString(-0.0)` is `-0.0`, `Double.compare` orders
+ * it below `0.0`), and every site that must keep it (a printed zero, a `Double.compare` cell, a zero
+ * crossing into JSON) asks here.
+ */
+export const signBit = (x: Expr): Expr => ({
+  kind: 'binary', op: '<',
+  left: { kind: 'call', fn: 'atan2', args: [x, compilerReal(-1)] },
+  right: compilerInt(0),
+});
+
 /** SQL NULL selected by the compiler itself. A null supplied by the query/store stays a bound `lit`. */
 export const compilerNull = (type: SqlType = 'any'): Expr => ({ kind: 'lit', value: null, type, source: 'compiler-null' });
 

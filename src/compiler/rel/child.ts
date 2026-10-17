@@ -207,6 +207,14 @@ export interface ChildValue {
    */
   readonly vtype?: Expr;
   /**
+   * The value as its self-describing `{t,v}` MEMBER NODE, built from ONE correlated read — set only
+   * where the producer reads the value and its tag off the same row (a bare stored `values(k)`), so a
+   * map key/value or a collected member keeps its type (`memberNodeOf`, `modulator.ts`) without paying
+   * for the tag as a second subquery spelled at every mention. Absent, the node is composed from
+   * `expr` and `vtype`, which is the same answer at a plan cost.
+   */
+  readonly node?: Expr;
+  /**
    * DID THIS BODY PRODUCE ANYTHING for this host row — the productivity signal, carried rather than
    * guessed back from the value.
    *

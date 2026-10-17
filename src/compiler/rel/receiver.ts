@@ -1,9 +1,10 @@
-import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, signBit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { exprMayRaise, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
-import type { Minter } from './build.ts';
+import { letValues, type Minter } from './build.ts';
+import { floatShortest } from './float.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
@@ -110,9 +111,9 @@ const STORAGE_CLASSES: Readonly<Record<ReceiverKind, readonly string[]>> = {
   number: ['integer', 'real'],
 };
 
-/** Every per-row type name that admits `kind`. A per-row carrier is either a Gremlin tag (`vtype`) or a
- *  numeric reducer's raw `typeof` (`vt`, `reducedVtype`), and a storage class answers where no tag does
- *  — the storage-class names share no spelling with a `ValueType`, so one list serves all three. */
+/** Every per-row type name that admits `kind`. A per-row carrier is a Gremlin tag (a stored `vtype`, or a
+ *  numeric reducer's `vt`, `reducer.ts` `REDUCED_TYPE`), and a storage class answers where no tag does —
+ *  the storage-class names share no spelling with a `ValueType`, so one list serves both. */
 const admitting = (kind: ReceiverKind): readonly string[] =>
   [...(kind === 'string' ? ['string'] : [...NUMBER_TAGS]), ...STORAGE_CLASSES[kind]];
 
@@ -270,7 +271,7 @@ const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bi
  *
  * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
  */
-export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
+export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter): Expr | null {
   const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
   const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
   const nullable = (rendered: Expr): Expr => ({ kind: 'case', whens: [[isNull(value), compilerNull()]], else: rendered });
@@ -279,7 +280,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
     if (tag === 'string') return value;
     if (INTEGRAL_TAGS.includes(tag)) return cast;
     if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float' ? FLOAT_DIGITS : undefined));
+    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh));
     return null;
   }
   // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
@@ -290,9 +291,9 @@ export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
   return { kind: 'case', whens: [
     [inList(type, ['null', 'text', 'integer', ...(tagged ? ['string', ...INTEGRAL_TAGS] : [])]), cast],
     ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
-    // ONE floating arm for a Double and a Float: they differ only in the digit cap, which is per row.
+    // ONE floating arm for a Double and a Float: a Float prints its shortest decimal, per row.
     [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]),
-      floatingText(value, tagged ? { kind: 'case', whens: [[inList(type, ['float']), FLOAT_DIGITS]], else: DOUBLE_DIGITS } : undefined)],
+      floatingText(value, tagged ? inList(type, ['float']) : false, fresh)],
   ], else: raise(deferral('asString(): rendering this value at run time')) };
 }
 
@@ -301,41 +302,36 @@ export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
  * Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`).
  *
  * A DOUBLE's `Double.toString` is the shortest decimal that round-trips, and inside the plain range a
- * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT's `Float.toString` is the shortest
- * decimal that rounds to the FLOAT; it is held as the double of its 32-bit value, so its exact decimal is
- * SQLite's text only where that text round-trips, and that decimal is the float's SHORTEST one only where
- * it has at most 7 significant digits (`digits`): a shorter or nearer decimal would have to lie within
- * half a float ulp (≤ 2^-24 relative) of a ≤7-digit decimal, whose own last-place unit is ≥ 10^-7
- * relative. So `1.5f` and `254.0f` render, and `1.00390625f` (Java: `1.0039062`) raises the deferral
- * rather than print a different string.
+ * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT is carried as its EXACT value
+ * (`src/gremlin/float.ts`), and `Float.toString` prints its SHORTEST decimal — `floatShortest`, at most nine
+ * digits, which the same 15-digit text spells exactly; so a Float renders through the Double's rule over
+ * that decimal (`0.1f` is `0.1`, `1.00390625f` is `1.0039062`). Its decimal is a correlated read the text
+ * reads several times, so it is spelled once, in a one-row LET carrying its exact digits (`%!.17g`; JSON's
+ * own REAL keeps only 15).
  */
-function floatingText(value: Expr, digits: Expr | undefined): Expr {
+function floatingText(value: Expr, float: boolean | Expr, fresh: Minter): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
+  const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
+  // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
+  // renders `0.0`, and `-0.0 < 0` is false). `atan2(±0, -1)` is ±π, the one comparison that reads the
+  // sign bit. `printf` drops it too, so it is read before the Float's LET.
+  const negative = signBit(real);
+  const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
+  if (float !== false) {
+    const shortest = floatShortest(real, fresh);
+    const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
+      float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
+    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero]],
+      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh), fresh) };
+  }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
   const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
   const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
   const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
-  // The significant digits of the shown text: drop the sign and the point, then the leading and trailing
-  // zeros (`254.0` → `2540` → `254`, `0.125` → `0125` → `125`).
-  const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
-  const significant = call('length', call('rtrim', call('ltrim',
-    call('replace', call('replace', shown, text('-'), text('')), text('.'), text('')), text('0')), text('0')));
-  const roundTrips: Expr = digits === undefined ? exact
-    : and(exact, { kind: 'binary', op: '<=', left: significant, right: digits });
-  const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
-  // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
-  // renders `0.0`, and `-0.0 < 0` is false). `atan2(±0, -1)` is ±π, the one comparison that reads the
-  // sign bit.
-  const negative: Expr = { kind: 'binary', op: '<', left: { kind: 'call', fn: 'atan2', args: [real, compilerReal(-1)] }, right: int(0) };
-  const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
-  return { kind: 'case', whens: [[zero, signedZero], [and(plain, roundTrips), shown]],
+  return { kind: 'case', whens: [[zero, signedZero], [and(plain, exact), shown]],
     else: raise(deferral('asString(): a floating-point Number outside the plain shortest form')) };
 }
-
-/** A Float's significant-digit cap (`floatingText`), and a Double's — any 15-digit text satisfies it. */
-const FLOAT_DIGITS: Expr = compilerInt(7);
-const DOUBLE_DIGITS: Expr = compilerInt(17);
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to
  *  the per-row type and value it goes on to name. */

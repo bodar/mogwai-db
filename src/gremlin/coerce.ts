@@ -2,6 +2,7 @@ import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
 import { BigDecimal, flatType, type CanonicalType } from './types.ts';
+import { decimalCompare, decimalOf, doubleText, floatingDecimal, floatText, javaFloatOf, javaNumberText } from './float.ts';
 
 /**
  * NOT LEARNED YET, raised from inside the fold — the front-end twin of the compiler's `Deferral`.
@@ -123,7 +124,7 @@ export function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: 
 /** asNumber(GType.X) over a compile-time constant: parse/convert + overflow-check,
  *  raising TinkerPop's exact messages (SQL can't raise these; inject inputs are
  *  literals). Integer targets truncate toward zero. */
-export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>, sourceType: string | null = null): number | bigint | null {
+export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>, sourceType: string | null = null): number | bigint | BigDecimal | null {
   // A null object returns null — no parse, no throw (`AsNumberStep.map`, line 55:
   // `if (object == null) return null;`, before the token branch). `g.inject(null).asNumber(GType.INT)`
   // is the empty result `null`, not the parse error a non-null unparseable value raises.
@@ -160,22 +161,127 @@ function javaNumber(v: any, sourceType: string | null): JavaNumber {
     const cls = declared ?? (Number.isInteger(v) ? integralClass(BigInt(v)) : 'Double');
     return cls === 'Float' || cls === 'Double' ? { cls, real: v } : { cls, real: v, int: BigInt(Math.trunc(v)) };
   }
-  if (typeof v === 'string') {
-    const t = v.trim();
-    // Number('') / Number('  ') are 0, not NaN — a blank string raises the parse error like any other.
-    if (t === '' || Number.isNaN(Number(t))) throw new ValueParseError(`Can't parse string '${v}' as number.`);
-    if (/^[-+]?\d+$/.test(t)) { const n = BigInt(t); return { cls: integralClass(n), real: Number(n), int: n }; }
-    const d = Number(t);
-    return { cls: Number.isFinite(Math.fround(d)) && Number(floatText(Math.fround(d))) === d ? 'Float' : 'Double', real: d };
-  }
+  if (typeof v === 'string') return createNumber(v);
   throw new ValueParseError(`Can't parse type ${javaTypeName(v)} as number.`);
 }
 
-/** `Float.toString` — the shortest decimal that reads back as the same float. */
-function floatText(f: number): string {
-  for (let p = 1; p <= 9; p++) { const s = f.toPrecision(p); if (Math.fround(Number(s)) === f) return String(Number(s)); }
-  return String(f);
+// ---------- `AsNumberStep.parseNumber`: `isCreatable` then `createNumber` ----------
+//
+// `parseNumber` is `NumberUtils.isCreatable(s.trim())` → `NumberUtils.createNumber(s.trim())`, else
+// `Can't parse string '…' as number.`
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsNumberStep.java:103-107`;
+// commons-lang3 at the version `vendor/tinkerpop/pom.xml` pins, `commons.lang3.version` 3.20.0). JS's
+// `Number()` is NOT that parse: it reads '0b101'/'0o17'/'Infinity' and '0123e2' (all refused by
+// `isCreatable`), reads '010' as ten (octal eight), and cannot say WHICH class a hex spelling is. So the
+// grammar is ported, and only a decimal's VALUE is read through `Number()` (the forms that reach it are
+// exactly `Double.valueOf`'s).
+
+const isSign = (c: string | undefined): boolean => c === '-' || c === '+';
+const isDigit = (c: string | undefined): boolean => c !== undefined && c >= '0' && c <= '9';
+
+/** `NumberUtils.isCreatable`, ported line for line. */
+function isCreatable(str: string): boolean {
+  if (str === '') return false;
+  const chars = str;
+  let sz = chars.length;
+  let hasExp = false, hasDecPoint = false, allowSigns = false, foundDigit = false;
+  const start = isSign(chars[0]) ? 1 : 0;
+  if (sz > start + 1 && chars[start] === '0' && !str.includes('.')) {
+    if (chars[start + 1] === 'x' || chars[start + 1] === 'X') {
+      if (start + 2 === sz) return false;
+      return /^[0-9a-fA-F]+$/.test(chars.slice(start + 2));
+    }
+    if (isDigit(chars[start + 1])) return /^[0-7]+$/.test(chars.slice(start + 1));
+  }
+  sz--;
+  let i = start;
+  while (i < sz || (i < sz + 1 && allowSigns && !foundDigit)) {
+    const c = chars[i]!;
+    if (isDigit(c)) { foundDigit = true; allowSigns = false; }
+    else if (c === '.') { if (hasDecPoint || hasExp) return false; hasDecPoint = true; }
+    else if (c === 'e' || c === 'E') { if (hasExp || !foundDigit) return false; hasExp = true; allowSigns = true; }
+    else if (isSign(c)) { if (!allowSigns) return false; allowSigns = false; foundDigit = false; }
+    else return false;
+    i++;
+  }
+  if (i < chars.length) {
+    const c = chars[i]!;
+    if (isDigit(c)) return true;
+    if (c === 'e' || c === 'E') return false;
+    if (c === '.') return hasDecPoint || hasExp ? false : foundDigit;
+    if (!allowSigns && (c === 'd' || c === 'D' || c === 'f' || c === 'F')) return foundDigit;
+    if (c === 'l' || c === 'L') return foundDigit && !hasExp && !hasDecPoint;
+    return false;
+  }
+  return !allowSigns && foundDigit;
 }
+
+/** `Integer.decode` → `Long.decode` → `createBigInteger`: an integral spelling's value, by its radix
+ *  prefix (`0x`/`0X` hex, a leading `0` octal), and the narrowest class that holds it. */
+function decodeIntegral(t: string): bigint {
+  const neg = t[0] === '-';
+  const body = isSign(t[0]) ? t.slice(1) : t;
+  const magnitude = /^0[xX]/.test(body) ? BigInt(`0x${body.slice(2)}`)
+    : body.length > 1 && body[0] === '0' ? BigInt(`0o${body.slice(1)}`)
+    : BigInt(body);
+  return neg ? -magnitude : magnitude;
+}
+
+/** `NumberUtils.createNumber` over a string `isCreatable` admitted (`AsNumberStep.parseNumber`). */
+function createNumber(v: string): JavaNumber {
+  const t = v.trim();
+  if (!isCreatable(t)) throw new ValueParseError(`Can't parse string '${v}' as number.`);
+  const offset = isSign(t[0]) ? 1 : 0;
+  // HEX: the class is decided by the count of SIGNIFICANT hex digits, not by the value — `-0x80000000`
+  // is a Long although an Integer holds it (`createNumber`'s hex branch). (`#` cannot pass `isCreatable`.)
+  if (t.startsWith('0x', offset) || t.startsWith('0X', offset)) {
+    const significant = t.slice(offset + 2).replace(/^0+/, '');
+    const first = significant[0] ?? '0';
+    const n = decodeIntegral(t);
+    const cls: JavaNumber['cls'] = significant.length > 16 || (significant.length === 16 && first > '7') ? 'BigInteger'
+      : significant.length > 8 || (significant.length === 8 && first > '7') ? 'Long' : 'Integer';
+    return { cls, real: Number(n), int: n };
+  }
+  // A trailing type qualifier (`5L`, `1.5f`, `2d`) REQUESTS a class — a Long, or a Float/Double/BigDecimal
+  // chosen by precision. Not learned yet: decline rather than answer a class the qualifier did not ask for.
+  const last = t[t.length - 1]!;
+  if (!isDigit(last) && last !== '.') throw new CoercionDeferral(`asNumber() of a type-qualified numeric string ('${t}')`);
+  // No '.' and no exponent: `createInteger` → `createLong` → `createBigInteger`, each `decode`-ing the
+  // radix prefix — so the class is the narrowest that holds the VALUE.
+  if (!/[.eE]/.test(t)) { const n = decodeIntegral(t); return { cls: integralClass(n), real: Number(n), int: n }; }
+  // `createNumber`'s DECIMAL ladder, rung for rung — Float, then Double, then BigDecimal:
+  //   f = createFloat(s); d = createDouble(s)
+  //   if (!f.isInfinite() && !(f == 0 && !isZero) && f.toString().equals(d.toString())) return f;
+  //   if (!d.isInfinite() && !(d == 0 && !isZero)) { b = createBigDecimal(s); return b.compareTo(BigDecimal.valueOf(d)) == 0 ? d : b; }
+  //   return createBigDecimal(s);
+  // So '1.5'/'0.1'/'5.' are FLOATS (each prints the same as a float and as a double), '0.123456789' a
+  // Double, and a decimal a double cannot hold exactly ('9007199254740993.0') the exact BigDecimal.
+  const d = Number(t);
+  // A Double that underflows to zero from a non-zero mantissa: whether `createNumber` lands on its
+  // BigDecimal hangs on its `isZero` reading of the mantissa — decline rather than answer 0.0 for '1e-400'.
+  if (d === 0 && /[1-9]/.test(t.split(/[eE]/)[0]!)) throw new CoercionDeferral(`asNumber() of a decimal string past Double's precision ('${t}')`);
+  // `Float.valueOf(s)` rounds the decimal ONCE (`javaFloatOf` resolves the one case two roundings differ
+  // on). The Float is carried as its EXACT value — the float authority's rule (`src/gremlin/float.ts`).
+  const f = javaFloatOf(t);
+  // `f.toString().equals(d.toString())` over the two JAVA spellings (`javaNumberText`), so a subnormal float
+  // ('1e-45' prints `1.4E-45` as a float and `1.0E-45` as a double) falls through to its Double.
+  if (Number.isFinite(f) && javaNumberText(f, true) === javaNumberText(d)) return { cls: 'Float', real: f };
+  const exact = decimalOf(t);
+  if (Number.isFinite(d) && exact !== null && decimalCompare(exact, decimalOf(doubleText(d))!) === 0) return { cls: 'Double', real: d };
+  // The exact BigDecimal: carried as its canonical plain TEXT (`BigDecimal.toString` for a non-negative
+  // scale). A negative scale ('1e400' is unscaled 1, scale -400) has no plain spelling that keeps it.
+  if (exact === null || exact.scale < 0) throw new CoercionDeferral(`asNumber() of a decimal string whose BigDecimal has no plain form ('${t}')`);
+  const decimal = exact.toString();
+  return { cls: 'BigDecimal', real: d, int: truncatedDecimal(decimal), decimal };
+}
+
+/**
+ * `Double.toString(d)` — or, with `float`, `Float.toString((float) d)`: the SHORTEST digits that read back
+ * as the value (JS's own number spelling for a double, `floatText` for a float), laid out as Java lays them
+ * out — PLAIN for a magnitude in [10^-3, 10^7), always with a fractional digit (`1.0`), and computerized
+ * scientific notation outside it (`1.0E10`, `1.0E-5`).
+ */
+export const javaFloatingString = (d: number, float = false): string => javaNumberText(d, float);
 
 /** `(float) n` for an exact integer, rounded ONCE (round-half-even), as Java's `long → float` is. */
 function integerToFloat(n: bigint): number {
@@ -212,16 +318,32 @@ function longValue(a: JavaNumber, target: string): bigint {
 
 /** `NumberHelper.performConversion`, over a compile-time number
  *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:724-770`). */
-function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof numericSpec>>): number | bigint {
+function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof numericSpec>>): number | bigint | BigDecimal {
   const overflow = (): never => { throw new ValueParseError(`Can't convert number of type ${a.cls} to ${spec.disp} due to overflow.`); };
   // A source already of the target class is returned AS IS.
   if (a.cls === spec.disp) {
-    if (a.cls === 'BigDecimal') return a.real;
+    if (a.cls === 'BigDecimal') return a.decimal !== undefined ? BigDecimal.fromText(a.decimal) : a.real;
     return a.int !== undefined && a.cls !== 'Float' && a.cls !== 'Double' ? exactInteger(a.int) : a.real;
   }
   if (spec.as === 'bigdecimal') {
     // The exact decimal carrier for a wide integral source is a different encoding; decline it.
     if (a.int !== undefined && a.decimal === undefined && exactInteger(a.int) !== Number(a.int)) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a wide integer');
+    // `bigDecimalValue` widens a Float through `Float.toString` and a Double through `BigDecimal.valueOf`
+    // (`Double.toString`) — the PRINTED decimal, not the exact value — held as an exact BigDecimal carrier.
+    // A widening of scale ≤ 0 (an integral magnitude at or past 10^7, which `Double.toString` writes in
+    // E-notation) has no plain decimal TEXT to ride as, so it rides as the number itself — the run-time
+    // widening's carrier for the same value (`doubleDecimalText`, `src/compiler/rel/float.ts`) — which the
+    // ONE carrier authority reads back (`bigDecimalOfCarrier`): a whole number below 10^21 is scale 0, a
+    // REAL past it `BigDecimal.valueOf`'s own. A NEGATIVE scale below 10^21 (`1.0E7` is (10, −6)) has no
+    // carrier the framer can tell from an integral source's scale-0 INTEGER, so it declines.
+    if (a.cls === 'Float' || a.cls === 'Double') {
+      const decimal = floatingDecimal(a.real, a.cls === 'Float');
+      if (decimal === null) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a NaN or an infinity');
+      if (decimal.scale > 0) return decimal;
+      if (decimal.scale < 0 && Math.abs(a.real) < 1e21) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a whole Double whose BigDecimal has a negative scale');
+      return a.real;
+    }
+    // An integral source is `BigDecimal.valueOf(long)`, scale 0 — the INTEGER carrier (`constLit`).
     return a.real;
   }
   if (spec.as === 'long') return exactInteger(longValue(a, spec.disp));
@@ -279,14 +401,46 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
   if (typeof v === 'number')
     return { val: v, as: (subtype ?? (!Number.isInteger(v) ? 'double' : Math.abs(v) <= 2147483647 ? 'int' : 'long')) as ValueType };
   if (typeof v === 'string') {
-    const t = v.trim();
-    if (t === '' || Number.isNaN(Number(t))) throw new ValueParseError(`Can't parse string '${v}' as number.`);
-    // int vs double is decided by the STRING's form (a '.'/'e'/'E' → floating point),
-    // like AsNumberStep — NOT by whether the value is whole ("5.0" is double, not int).
-    return { val: Number(t), as: /[.eE]/.test(t) ? 'double' : 'int' };
+    // `javaNumber` is the ONE parse (`createNumber`, above — the typed `asNumber(GType)` fold reads the
+    // same), so the two cannot disagree on a class. An integral spelling — decimal, octal or HEX — is
+    // the Integer → Long → BigInteger ladder, held EXACTLY: read through a double, '9007199254740993'
+    // lost its last digit, and '2147483648' / '0x80000000' were tagged an Integer the GraphBinary Int
+    // writer cannot frame — an internal RangeError at the user.
+    const n = javaNumber(v, null);
+    if (n.int !== undefined && n.decimal === undefined) return { val: exactInteger(n.int), as: n.cls === 'Integer' ? 'int' : n.cls === 'Long' ? 'long' : 'bigint' };
+    // A decimal is `createNumber`'s class EXACTLY (§6·7: the class is exact) — a Float, a Double, or the
+    // BigDecimal carried as its canonical TEXT.
+    if (n.cls === 'BigDecimal') return { val: BigDecimal.fromText(n.decimal!), as: 'bigdecimal' };
+    return { val: n.real, as: n.cls === 'Float' ? 'float' : 'double' };
   }
   throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : javaTypeName(v)} as number.`);
 }
+
+/** The Java simple class name of each Gremlin type a STORED value carries that `AsNumberStep.map` neither
+ *  parses (a String) nor returns as-is (a Number) nor converts (a Date) — so it raises `Can't parse type
+ *  <name> as number.` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsNumberStep.java:55-71`). */
+export const UNPARSEABLE_TAGS: Readonly<Record<string, string>> = { boolean: 'Boolean', duration: 'Duration', uuid: 'UUID', char: 'Character' };
+
+/**
+ * Bare `asNumber()` over a RUN-TIME value whose Gremlin TYPE rides beside it (a stored `vtype`, a branch's
+ * arm tag). The value arrives in its STORAGE class — a Boolean as 0/1, a Date as epoch millis, a UUID as
+ * text — so `asNumberBare` alone would answer `1` for `true` and parse a UUID as a string. The tag decides
+ * first: a Boolean/Duration/UUID/Character raises the reference's message, a Date is its epoch millis
+ * (`toInstant().toEpochMilli()`, which IS the stored value), and everything else is `asNumberBare`.
+ */
+export function asNumberTagged(v: unknown, tag: string | null | undefined): { val: any; as: ValueType } {
+  if (v === null || v === undefined || !tag) return asNumberBare(v, null);
+  const javaName = UNPARSEABLE_TAGS[tag];
+  if (javaName) throw new ValueParseError(`Can't parse type ${javaName} as number.`);
+  // A Date is `getTime()` — its epoch-millis LONG (`AsNumberStep.java:62-65`), at the root as at any depth.
+  if (tag === 'datetime') return { val: v instanceof Date ? v.getTime() : Number(v), as: 'long' };
+  // A Number keeps its OWN class (`AsNumberStep.map` returns it as is), so a numeric tag IS the subtype:
+  // a Double stored whole (the INTEGER 1) stays the Double 1.0.
+  return asNumberBare(v, NUMBER_TAGS.has(tag) ? tag : null);
+}
+
+/** The Gremlin number classes, by tag. */
+const NUMBER_TAGS: ReadonlySet<string> = new Set(['byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal']);
 
 // ---------- date casts (asDate / dateAdd / dateDiff) ----------
 //
@@ -382,7 +536,7 @@ export const asDateSql = (e: Expression): Expression =>
  *  32-bit precision, so `fold(0, Operator.sum)` over an undeclared `0.1f, 0.2f` would add doubles.
  *  Everything else is recoverable from the value, so declaring it buys nothing. */
 const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
-  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean', 'byte', 'short', 'float',
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean', 'byte', 'short', 'float', 'double',
 ]);
 
 /** The declared framing tag of EACH of a bare inject's first `count` arguments — `null` where the
@@ -416,6 +570,10 @@ export function uniformInjectType(steps: readonly Step[], count: number): ValueT
 
 /** The coercion steps that fold at COMPILE TIME when their input is still a JS constant. */
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
+/** Does `steps[at]` sit in an `inject()`'s LEADING coercion prefix — the run `foldConstantCoercions` folds
+ *  at compile time while the values are still constants? */
+export const inLeadingCoercionPrefix = (steps: readonly Step[], at: number): boolean =>
+  steps[0]?.name === 'inject' && at >= 1 && steps.slice(1, at + 1).every((step) => CONST_COERCIONS.has(step.name));
 
 /**
  * Apply the leading coercion prefix while the values are still JS constants, returning the index of
@@ -474,7 +632,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
           // A null object stays null (`AsNumberStep.map` returns null before parsing), and contributes
           // no subtype to the uniform decision — it frames as null whatever tag the stream settles on.
           if (vals[i] === null || vals[i] === undefined) { subtypes.push(null); continue; }
-          const out = asNumberBare(vals[i], flatType(argTypes[i]));
+          const out = asNumberTagged(vals[i], flatType(argTypes[i]));
           vals[i] = out.val;
           subtypes.push(out.as);
         }

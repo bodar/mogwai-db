@@ -1,3 +1,4 @@
+import { stringifyExactOrRefuse } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
@@ -13,7 +14,7 @@ import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { beginsWithSource, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
-import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
@@ -28,11 +29,11 @@ import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
-import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, ValueParseError } from '../../gremlin/coerce.ts';
+import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderingTerms, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
-    labelSetArgs, meta, minter,
+    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
+    labelSetArgs, scalarFramedValue, meta, minter,
     payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, BRANCH_KEY_PREFIX,
     type Minter
@@ -40,15 +41,16 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence, relHostTag, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
-import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { ALWAYS_PRODUCTIVE, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
+import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource, type FloatSource } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
-import { CLASS_MASK, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
-import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { deferralExpr, raiseExpr, raiseInRow } from '../../rel/raise.ts';
+import { promotedExtremum, resultIsDecimal, widensDoubleToDecimal } from './float.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listLiteralBlob, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -792,14 +794,14 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
   // (`unfold()`, `count(Scope.local)`, a local slice/reducer, a member predicate, `as()`/`select()`)
   // composes over it — the list analogue of the map arm above, framed `{kind:'list', of: BARE_LIST}`.
   if (Array.isArray(arg.value)) {
-    const blob = listLiteralBlob(arg, arg.value);
-    if (!blob) return null;
+    const literal = listLiteralBlob(arg, arg.value);
+    if (!literal) return null;
     const rel = make.project({
       id: fresh('cl'), input, channels: input.channels,
       type: typeOf(meta(LIST_COL, 'json', true), ...carriedCols(input.channels)),
-      exprs: [[LIST_COL, blob], ...input.channels.map((ch) => [ch.col, col(input.id, ch.col)] as const)],
+      exprs: [[LIST_COL, literal.blob], ...input.channels.map((ch) => [ch.col, col(input.id, ch.col)] as const)],
     });
-    return { rel, framing: { kind: 'list', of: BARE_LIST } };
+    return { rel, framing: { kind: 'list', of: literal.of } };
   }
   const literal = constLit(arg);
   const tail = literal ? null : exactTailConst(arg);
@@ -1206,7 +1208,11 @@ function sortTerms(
   for (const modulation of parsed) {
     const key = byProjection(modulation, host, ctx.source, fresh, true, childSeam(ctx, fresh));
     if (!key) return null;
-    terms.push({ expr: key.value, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
+    const dir = modulation.order === 'desc' ? 'desc' : 'asc';
+    // A scalar traverser ordered by ITSELF orders its zero's sign (`orderingTerms`, read off the value
+    // column). A key PROJECTED by a `by()` — a property read, a child body — is not re-spelled for it.
+    const self = host.kind === 'scalar' && modulation.key.kind === 'identity';
+    terms.push(...(self ? orderingTerms(key.value, dir, host.value, host.vtype) : [{ expr: key.value, dir } as const]));
     // "only add the traverser if the comparator traversal was productive" — a productive NULL sorts
     // (`OrderGlobalStep.java:82-85,183-184`), so the drop reads PRESENCE, not the key's nullness.
     const drop = productivityFilter(step, key.present);
@@ -1889,13 +1895,12 @@ function scalarTail(
     // A PER-ROW tag column (a mixed `inject`, a min/max winner's stored vtype, a merged branch arm's
     // `vtype`) is the row's Gremlin type where it names one; a NULL tag means "read the value", so the
     // storage class stands in for it — `perRowSubject`, the one constructor, so `vtype` reads a NULL the
-    // way `vt` does.
-    // A reducer result's `vt` holds a Gremlin type or a STORAGE class; `reducedVtype` keeps only the former.
-    const reducerTag = out.kind === 'scalar' && out.result === 'number' && carries('vt');
-    const tagCol = carries('vtype') ? 'vtype' : reducerTag ? 'vt' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+    // way `vt` does. A reducer result's `vt` is one of these (`REDUCED_TYPE`): a Gremlin type name, never
+    // a storage class.
+    const tagCol = carries('vtype') ? 'vtype' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
     if (tagCol && carries(tagCol)) {
       const tag = col(at.id, tagCol);
-      return perRowSubject(reducerTag && tagCol === 'vt' ? reducedVtype(tag) : tag, col(at.id, 'v'));
+      return perRowSubject(tag, col(at.id, 'v'));
     }
     return SUBJECT_UNKNOWN;
   };
@@ -1910,9 +1915,16 @@ function scalarTail(
     return known.kind === 'static' ? { kind: 'static', tag: known.type as ValueType }
       : known.kind === 'perRow' ? { kind: 'tag', tag: known.vtype } : { kind: 'storage' };
   };
+  /** THE ROW'S OWN GREMLIN TYPE as a host carries it (`hostTag`) — over `streamRowTag`, the ONE reading of
+   *  the tag column: the stored `vtype`, a per-row tag column (a reducer's `vt`, the sack's tag, a merged
+   *  arm's tag), else the static tag. A host that read only the `vtype` column dropped a reducer's class,
+   *  and a `by()` child, a group key or a member over it re-framed it by inference. */
+  const rowTag = (at: Rel = rel): { readonly vtype?: Expr } => {
+    const tag = hostTag(out.kind === 'scalar' ? out.type : undefined, streamRowTag(at, out) ?? undefined);
+    return tag ? { vtype: tag } : {};
+  };
   const scalarSubject = (): Subject => ({
-    kind: 'scalar', value: col(rel.id, 'v'), rel, type: subjectType(),
-    ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+    kind: 'scalar', value: col(rel.id, 'v'), rel, type: subjectType(), ...rowTag(),
   });
 
   // A BOUNDARY before a CLAUSE-POSITION READER, and it is not cosmetic. Fusing a `Filter` or a
@@ -1985,11 +1997,7 @@ function scalarTail(
     // off was not neutral: `byNode` tags an untagged value NULL, and NULL means "infer from the JS
     // value", which cannot tell a BigInt from an Int, a BigDecimal from an Int, or a datetime from a
     // long. §6·7's rule at one more carrier — what is KNOWN is carried, never re-guessed downstream.
-    const hostVtype = relHostTag(rel, out.kind === 'scalar' ? out.type : undefined);
-    const host: ChildHost = {
-      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
-      ...(hostVtype ? { vtype: hostVtype } : {}),
-    };
+    const host: ChildHost = { kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels }, ...rowTag() };
 
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
@@ -2000,10 +2008,7 @@ function scalarTail(
       const bound = bindAliases(step, rel, labels, {
         kind: 'value', value: col(rel.id, 'v'),
         type: out.kind === 'scalar' ? out.type : UNKNOWN,
-        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') }
-          // A per-row tag in another column (a min/max winner's `vt`) is recorded the same way.
-          : out.kind === 'scalar' && perRowColumnOf(out.type) && carries(perRowColumnOf(out.type)!)
-            ? { vtype: col(rel.id, perRowColumnOf(out.type)!) } : {}),
+        ...rowTag(),
       }, fresh);
       if (!bound) return null;
       rel = bound.rel;
@@ -2157,7 +2162,27 @@ function scalarTail(
     // numeric — and the cast subfamily's literal-decline would refuse it, since `seed.kind==='values'`
     // stays true past the reducer though the value is no longer a compile-time literal. State it here:
     // the value and its `vt`-carried type ride through unchanged. (§6·7 — carry the fact, don't re-derive.)
-    if (step.name === 'asNumber' && !args.length && out.kind === 'scalar' && out.result === 'number') continue;
+    // Except that a min/max WINNER is not always a Number: its `vt` is the winner's own tag, and a Boolean
+    // (`constant(true).max()`) is stored as 1 — `AsNumberStep.map` raises `Can't parse type Boolean as
+    // number.` and converts a Date to its epoch-milli Long (`AsNumberStep.java:55-71`). The tag decides it
+    // per row, the same rule the run-time cast applies (`asNumberTagged`, `coerce.ts`).
+    if (step.name === 'asNumber' && !args.length && out.kind === 'scalar' && out.result === 'number') {
+      if (!carries('vt')) continue;
+      const vt = col(rel.id, 'vt');
+      const carried = rel.channels;
+      const tagIs = (tag: string): Expr => ({ kind: 'binary', op: '=', left: vt, right: compilerText(tag) });
+      rel = make.project({
+        id: fresh('ant'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), meta('vt', 'text', true), ...carriedCols(carried)),
+        exprs: [
+          ['v', { kind: 'case', whens: Object.entries(UNPARSEABLE_TAGS).map(([tag, java]) =>
+            [tagIs(tag), raiseInRow(`Can't parse type ${java} as number.`)] as const), else: col(rel.id, 'v') }],
+          ['vt', { kind: 'case', whens: [[tagIs('datetime'), compilerText('long')]], else: vt }],
+          ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
+        ],
+      });
+      continue;
+    }
 
     // `asNumber(GType.X)` over a stream ALREADY numeric (a reducer result) is a runtime NARROWING. Over a
     // compile-time literal this const-folds and raises on overflow (`asNumberConst`); over a runtime value
@@ -2174,17 +2199,20 @@ function scalarTail(
       // `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT. Both are
       // a WHERE for the reason the transform family's is (`raisingRows`): an existence position never
       // reads the value.
-      const { refuse } = asNumberParts(value, spec, true);
+      // A Float result PRINTS into a Double or BigDecimal target (`floatPrinted`), read off its class.
+      const isFloat = (tag: Expr | null): FloatSource => (tag === null ? false : { isFloat: { kind: 'binary', op: '=', left: tag, right: compilerText('float') }, fresh });
+      const decimal = (tag: Expr | null): DecimalSource => ({ fresh, floating: tag === null ? false : floatingTag(tag) });
+      const { refuse } = asNumberParts(value, spec, true, false, isFloat(streamRowTag(rel, out)), decimal(streamRowTag(rel, out)));
       const overflow = spec.min === undefined ? [] : [narrowingOverflow(value, spec.min, spec.max!, spec.disp)];
       const source = raisingRows(rel, overflow, fresh, refuse ? asNumberFilter(value, refuse) : undefined);
-      const cast = asNumberParts(col(source.id, 'v'), spec, true).value;
+      const cast = asNumberParts(col(source.id, 'v'), spec, true, false, isFloat(streamRowTag(source, out)), decimal(streamRowTag(source, out))).value;
       const carried = rel.channels;
       rel = make.project({
         id: fresh('an'), input: source, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', cast], ...carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)],
       });
-      out = { kind: 'scalar', type: STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint') };
+      out = { kind: 'scalar', type: asNumberType(spec) };
       continue;
     }
 
@@ -2208,7 +2236,7 @@ function scalarTail(
       if (step.name === 'asNumber' && step.args.length && rel.kind === 'project') rel = fenced(rel, fresh);
       const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
       if (!offences) return null;
-      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence());
+      const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', fresh, transformInput(out), receiverEvidence());
       if (!transformed) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
@@ -2230,7 +2258,7 @@ function scalarTail(
       const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter, defer) : rel;
       const carried = source.channels;
       const plain = raises
-        ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence(source))
+        ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', fresh, transformInput(out), receiverEvidence(source))
         : transformed;
       if (!plain) return null;
       const tx = { ...plain, expr: plain.fenced?.value ?? plain.expr };
@@ -2359,7 +2387,7 @@ function scalarTail(
       // the reference's one null traverser into an empty result. Written once, above all three arms,
       // because writing it three times is how two of them would come to disagree.
       const numeric = {
-        kind: 'scalar', type: UNKNOWN, result: 'number',
+        kind: 'scalar', type: REDUCED_TYPE, result: 'number',
         ...(out.kind === 'scalar' && out.productiveNull ? { productiveNull: true } : {}),
       } as const satisfies RelFraming;
       if (step.name === 'min' || step.name === 'max') {
@@ -2378,9 +2406,8 @@ function scalarTail(
         // is the winner's own GREMLIN vtype (`int`/`long`/`string`, from the per-row column or the
         // source's static tag), which the `result:'number'` framer reads through `vtypeToValueType`
         // so a text-carried long frames as a `long` — the vocabulary `values()` frames on. Only the
-        // UNKNOWN case (a heterogeneous stream, no vtype) falls back to `typeof`, whose storage-class
-        // value the framer routes to `sumBuffer`; there the reference's cross-type error cannot be
-        // raised, so this is the documented divergence (§6·7n).
+        // UNKNOWN case (a heterogeneous stream, no vtype) falls back to the class the wire infers from
+        // the value (`inferredVtype`).
         const rank = 'red_rank';
         // NULL is SKIPPED by min/max — `NumberHelper.max/min` return the non-null side — so it never
         // WINS. It must not be FILTERED, though, and that distinction cost four conformance
@@ -2401,32 +2428,79 @@ function scalarTail(
           id: fresh('rc'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta('red_cls', 'text', true)),
           exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ['red_cls', cls]],
         }), fresh);
-        const ranked = cls === null
-          ? rowNumberWindow(present, rank, present.channels,
-            { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') }, fresh)
+        // THE RESULT'S CLASS is the stream's highest common number class, not the winner's own
+        // (`NumberHelper.max(Comparable, Comparable)` promotes both sides, `NumberHelper.java:639-655`):
+        // `inject(5, 2.0d).max()` is the Double 5.0. A stream statically of ONE class is already it;
+        // otherwise every row's `[width, floating]` pair is windowed (`reducer.ts` `commonNumberClass`).
+        const whole = { partitionBy: [], orderBy: [] };
+        const rowTag = staticTypeOf(out.kind === 'scalar' ? out.type : UNKNOWN) !== undefined ? undefined : streamRowTag(present, out);
+        const classSpecs = rowTag === undefined ? [] : [
+          ['red_w', { kind: 'window-expr', fn: 'max', args: [numberWidth(col(present.id, 'v'), rowTag)], spec: whole }],
+          ['red_fp', { kind: 'window-expr', fn: 'max', args: [numberFloating(col(present.id, 'v'), rowTag)], spec: whole }],
+        ] as const;
+        // THE TIE at the winner (`reducer.ts` `tieRepresentation`): the winner's PEERS under the compare
+        // order alone — the default window frame over `ORDER BY <null-last, key>` is, at the first row, exactly
+        // the rows tied with it — and where they hold two representations the reference's first-traverser
+        // pick is not one this stream can name, so the winner defers.
+        const order = minMaxOrder(present, out, step.name === 'min');
+        const repr = tieRepresentation(col(present.id, 'v'), streamRowTag(present, out));
+        const peers = { partitionBy: [], orderBy: order.slice(0, MIN_MAX_COMPARE_TERMS) };
+        const tieSpecs = repr === null ? [] : [
+          ['red_tlo', { kind: 'window-expr', fn: 'min', args: [repr], spec: peers }],
+          ['red_thi', { kind: 'window-expr', fn: 'max', args: [repr], spec: peers }],
+        ] as const;
+        const ranked = cls === null && !classSpecs.length && !tieSpecs.length
+          ? rowNumberWindow(present, rank, present.channels, { partitionBy: [], orderBy: order }, fresh)
           : make.window({
             id: fresh('rn'), input: present, channels: present.channels,
-            type: typeOf(...present.type.cols, meta(rank, 'int'), meta('red_lo', 'text', true), meta('red_hi', 'text', true)),
+            type: typeOf(...present.type.cols, meta(rank, 'int'),
+              ...(cls === null ? [] : [meta('red_lo', 'text', true), meta('red_hi', 'text', true)]),
+              ...classSpecs.map(([name]) => meta(name, 'int', true)),
+              ...tieSpecs.map(([name]) => meta(name, 'any', true))),
             specs: [
-              [rank, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') } }],
-              ['red_lo', { kind: 'window-expr', fn: 'min', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
-              ['red_hi', { kind: 'window-expr', fn: 'max', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
+              [rank, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: order } }],
+              ...(cls === null ? [] : [
+                ['red_lo', { kind: 'window-expr', fn: 'min', args: [col(present.id, 'red_cls')], spec: whole }],
+                ['red_hi', { kind: 'window-expr', fn: 'max', args: [col(present.id, 'red_cls')], spec: whole }],
+              ] as const),
+              ...classSpecs,
+              ...tieSpecs,
             ],
           });
         // The rank filter reads a windowed column, so fence it (a window may not sit inside another
         // SELECT's WHERE without re-inlining — the rule `sample` obeys and §11 records).
         const frame = make.materialize({ id: fresh('rm'), input: ranked, channels: ranked.channels, type: ranked.type });
         const first: Expr = { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) };
+        const differ = (lo: string, hi: string): Expr => ({ kind: 'binary', op: 'is not', left: col(frame.id, lo), right: col(frame.id, hi) });
+        const refusals: (readonly [Expr, Expr])[] = [
+          ...(cls === null ? [] : [[differ('red_lo', 'red_hi'), raiseExpr(MIXED_COMPARABLES, col(frame.id, 'red_lo'))] as const]),
+          // Only the WINNER's frame is its peers (a later row's spans every group before it), so the test
+          // is gated on the winner inside the condition, never left to the order a WHERE evaluates in.
+          ...(tieSpecs.length ? [[and(first, differ('red_tlo', 'red_thi')), raiseExpr(TIED_REPRESENTATIONS, col(frame.id, 'red_tlo'))] as const] : []),
+        ];
         const winner = make.filter({
           id: fresh('rk'), input: frame, channels: frame.channels, type: frame.type,
-          pred: cls === null ? first : and(first, { kind: 'case', whens: [[
-            { kind: 'binary', op: 'is not', left: col(frame.id, 'red_lo'), right: col(frame.id, 'red_hi') },
-            raiseExpr(MIXED_COMPARABLES, col(frame.id, 'red_lo'))]], else: compilerInt(1) }),
+          pred: refusals.length ? and(first, { kind: 'case', whens: refusals, else: compilerInt(1) }) : first,
         });
-        rel = make.project({
-          id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', col(winner.id, 'v')], ['vt', minMaxWinnerVt(winner, out)]],
-        });
+        // A promoted winner IS its widening to the common class (`float.ts` `promotedExtremum`); a stream
+        // statically of one class never promotes.
+        // The class and the winner's own class are each NAMED ONCE (fenced), so the widening and the framer
+        // read columns rather than re-inlining the class expression at every read.
+        const own = minMaxWinnerVt(winner, out);
+        const resultCols = typeOf(meta('v', 'any', true), meta('vt', 'text', true));
+        if (classSpecs.length) {
+          const classed = fenced(make.project({
+            id: fresh('rdc'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true), meta('own', 'text', true)),
+            exprs: [['v', col(winner.id, 'v')],
+              ['vt', commonNumberClass(col(winner.id, 'red_w'), col(winner.id, 'red_fp'), col(winner.id, 'v'), own)], ['own', own]],
+          }), fresh);
+          rel = fenced(make.project({
+            id: fresh('red'), input: classed, channels: [], type: resultCols,
+            exprs: [['v', promotedExtremum(col(classed.id, 'v'), col(classed.id, 'own'), resultIsDecimal(col(classed.id, 'vt')), fresh)], ['vt', col(classed.id, 'vt')]],
+          }), fresh);
+        } else {
+          rel = make.project({ id: fresh('red'), input: winner, channels: [], type: resultCols, exprs: [['v', col(winner.id, 'v')], ['vt', own]] });
+        }
         // A min/max NULL result is ALWAYS productive — unconditionally, not only when the INPUT stream
         // already was (`ProductiveByStrategy`). `ReducingBarrierStep.processAllStarts` emits whenever it
         // has seen ANY start (`MaxGlobalStep.java:43-46`), and the argmax window above yields exactly one
@@ -2439,8 +2513,7 @@ function scalarTail(
         // stated statically for the `sumTower` arm's reason below (`wideClassOf`).
         // A winner off a STORED vtype names its Gremlin type in `vt`, so a later predicate reads it per row
         // (`subjectType`) — a wide `long` carried as TEXT orders as the number it is.
-        const winnerTagged = present.type.cols.some((column) => column.name === 'vtype');
-        out = { ...numeric, ...(winnerTagged ? { type: PER_ROW('vt') } : {}), ...wideClassOf(out), productiveNull: true };
+        out = { ...numeric, ...wideClassOf(out), productiveNull: true };
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
@@ -2454,7 +2527,7 @@ function scalarTail(
         // `long`/`bigint` takes this path; every other stream keeps the storage-class form below, which is
         // correct for the corpus's `values().sum()`/bare-int cases. (The byte/short/int PROMOTION tower —
         // `Sum.feature`'s `d[128].s` — needs those classes tagged at the source, a separate increment.)
-        const casted = storedCompareOn(compilerText(staticSumVt))(col(rel.id, 'v'));
+        const casted = towerOperand(col(rel.id, 'v'), staticSumVt);
         const weighted = bulk ? { kind: 'binary', op: '*', left: casted, right: col(rel.id, bulk.col) } as Expr : casted;
         const tower = sumTower({ kind: 'agg', fn: 'sum', args: [weighted] }, staticSumVt);
         rel = nonEmptyReducer(rel, [['v', tower.value], ['vt', tower.type]], fresh);
@@ -2466,50 +2539,42 @@ function scalarTail(
       }
       // A sum/mean over a value whose TYPE is not a Number (a Boolean or a Date, both stored as INTEGER) is
       // the reference's `ClassCastException` (`SumGlobalStep` adds through `NumberHelper.add(Number, Number)`),
-      // where SQLite would add the storage. A static non-number declines here; a per-row tag refuses per row.
+      // where SQLite would add the storage. A static non-number declines here; a per-row tag refuses per row
+      // (`reducerAggregate`'s row tag — the one authority every reducer site states its tag to).
       const knownType = staticTypeOf(out.kind === 'scalar' ? out.type : UNKNOWN);
       if (knownType !== undefined && !NUMERIC_VTYPES.includes(knownType)) return null;
       const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
       const rowTag = carries('vtype') ? col(rel.id, 'vtype') : tagCol && carries(tagCol) ? col(rel.id, tagCol) : undefined;
-      const nonNumber: Expr | undefined = rowTag === undefined ? undefined : {
-        kind: 'binary', op: 'and', left: { kind: 'binary', op: 'is not', left: col(rel.id, 'v'), right: compilerNull() },
-        right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [rowTag, compilerText('double')] }, values: NUMERIC_VTYPES.map(compilerText) } },
-      };
-      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col), nonNumber);
+      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, rowTag ?? (knownType ? compilerText(knownType) : null), bulk && col(rel.id, bulk.col));
+      if (!reduced) return null;
       // Where the rows carry their OWN Gremlin type — the per-row column, or the stream's static tag — a
-      // `sum`'s class is theirs (`numberClass`): the storage class alone frames a Double stored integral
+      // `sum`'s class is theirs (`commonNumberClass`): the storage class alone frames a Double stored integral
       // as an Int. Two more aggregate columns, and the class named over them AFTER the reduction, so the
       // per-row reading is spelled once per part rather than once per class test.
       const tag = tagCol && carries(tagCol) ? col(rel.id, tagCol) : staticSumVt ? compilerText(staticSumVt) : undefined;
       if (step.name === 'sum' && tag) {
-        const summed = nonEmptyReducer(rel, [['v', reduced.value], [CLASS_MASK, numberClassMask(col(rel.id, 'v'), tag)]], fresh,
-          [meta('v', 'any', true), meta(CLASS_MASK, 'int', true)]);
+        const summed = nonEmptyReducer(rel, [['v', reduced.value], ...numberClassAggs(col(rel.id, 'v'), tag, 'not-a-number')], fresh,
+          [meta('v', 'any', true), meta(CLASS_WIDTH_COL, 'int', true), meta(CLASS_FLOATING_COL, 'int', true)]);
         const v = col(summed.id, 'v');
         rel = make.project({
           id: fresh('rc'), input: summed, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', v], ['vt', numberClass(col(summed.id, CLASS_MASK), v, { kind: 'call', fn: 'typeof', args: [v] })]],
+          exprs: [['v', v], ['vt', reducedNumberClass(summed.id, v, inferredVtype(v))]],
         });
         out = { ...numeric, productiveNull: true };
         continue;
       }
-      // A `mean`'s class is its result's storage class ('real', or 'null' for an all-null stream —
-      // `reducerAggregate`'s rule), read off the reduced COLUMN rather than by spelling the weighted
-      // mean a second time.
-      if (step.name === 'mean') {
-        const meaned = nonEmptyReducer(rel, [['v', reduced.value]], fresh, [meta('v', 'any', true)]);
-        const v = col(meaned.id, 'v');
-        rel = make.project({
-          id: fresh('rc'), input: meaned, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', v], ['vt', { kind: 'call', fn: 'typeof', args: [v] }]],
-        });
-        out = { ...numeric, productiveNull: true };
-        continue;
-      }
-      rel = nonEmptyReducer(rel, [['v', reduced.value], ['vt', reduced.type]], fresh);
-      // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
-      // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
-      // give and `UNKNOWN` would throw the second column away. `productiveNull` because a non-empty
-      // all-null sum/mean reduces to null and MUST emit it (the empty case is dropped by the guard).
+      // UNTAGGED rows: the class is what the wire infers from the reduced value (`inferredVtype`) — a sum of
+      // integers is an Int or a Long, of reals a Double — and a `mean` is always a Double (`MeanGlobalStep`'s
+      // `div(sum, count, true)`, so SQLite's REAL), or a NULL over an all-null stream whose tag must name no
+      // number (`MeanGlobalStep.java:50-58,80-84`; `math()` raises on it). Named over the reduced COLUMN.
+      // `productiveNull` because a non-empty all-null sum/mean reduces to null and MUST emit it (the empty
+      // case is dropped by the guard).
+      const untagged = nonEmptyReducer(rel, [['v', reduced.value]], fresh, [meta('v', 'any', true)]);
+      const uv = col(untagged.id, 'v');
+      rel = make.project({
+        id: fresh('rc'), input: untagged, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+        exprs: [['v', uv], ['vt', inferredVtype(uv)]],
+      });
       out = { ...numeric, productiveNull: true };
       continue;
     }
@@ -2804,8 +2869,11 @@ function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; 
   const args = step.args.map((a) => a.value);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
-  const blobs = args.map((values, ai) => listLiteralBlob(step.args[ai]!, values));
-  if (blobs.some((blob) => !blob)) return null;
+  const literals = args.map((values, ai) => listLiteralBlob(step.args[ai]!, values));
+  if (literals.some((literal) => !literal)) return null;
+  const blobs = literals.map((literal) => literal!.blob);
+  // A typed list admits bare members beside its envelopes, so ONE enveloped member types the stream.
+  const of = literals.some((literal) => literal!.of === TYPED_MEMBERS) ? TYPED_MEMBERS : BARE_LIST;
   // The ENCOUNTER ordinal — `injectMap`'s rule, and the fix for a real order bug: `inject([…],[…]).fold()`
   // folds SEVERAL list traversers into a list-of-lists, and `foldLists` orders the members by this channel;
   // WITHOUT it the fallback ordered by the list VALUE and returned them SORTED rather than in inject order.
@@ -2814,10 +2882,10 @@ function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; 
   // (`inject([…]).toLower(Scope.local)` — the explode dropped the extra channel).
   const wantOrder = ordered && blobs.length > 1;
   const channels = wantOrder ? withChannel([], ENCOUNTER) : [];
-  const rows = (blobs as Expr[]).map((blob, i) => (wantOrder ? [blob, compilerInt(i + 1)] : [blob]));
+  const rows = blobs.map((blob, i) => (wantOrder ? [blob, compilerInt(i + 1)] : [blob]));
   return {
     rel: make.values({ id: fresh('inl'), rows, channels, type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(channels)) }),
-    framing: { kind: 'list', of: BARE_LIST },
+    framing: { kind: 'list', of },
   };
 }
 
@@ -3772,7 +3840,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
 const carriesMultiplicity = (chain: Tail): boolean =>
   chain.bulked && chain.rel.channels.some((channel) => channel.role === 'bulk');
 
-const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElements: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
+const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElements: boolean, fresh: Minter, realDecimals = false): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
   // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
   // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
@@ -3799,7 +3867,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElem
       }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
-    case 'scalar': return scalarPayload(chain.rel, framing, fresh);
+    case 'scalar': return scalarPayload(chain.rel, framing, fresh, realDecimals);
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, source, fresh, rawListElements);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.valOf, source, fresh);
@@ -3812,7 +3880,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElem
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
     // further, which is exactly what every other arm here now also means.
-    case 'variant': return variantPayload(chain.rel, framing.arms, source, fresh);
+    case 'variant': return variantPayload(chain.rel, framing.arms, source, fresh, realDecimals);
     // A per-row TYPED NODE is already ONE self-describing envelope per row in `NODE_COL`; the wire
     // parses and frames each with `frameTypedNode`, so the payload is that column in emission order.
     case 'typedNode': {
@@ -3838,10 +3906,14 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElem
  * than a real value — and breaks ties on the raw value so the survivor is deterministic under a
  * reversed scan (`test:perturbed`).
  */
+/** How many leading terms of `minMaxOrder` are the COMPARE order — the rest is the deterministic tie-break,
+ *  so the rows equal on these are a winner's tied peers (`reducer.ts` `tieRepresentation`). */
+export const MIN_MAX_COMPARE_TERMS = 2;
+
 export function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): readonly SortTerm[] {
-  const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
-  const carries = rel.type.cols.some((column) => column.name === 'vtype');
-  const vtypeExpr = carries ? col(rel.id, 'vtype') : staticVt ? compilerText(staticVt) : undefined;
+  // The row's own tag through the ONE reading (`streamRowTag`) — a per-row tag column (a reducer's `vt`)
+  // included, so a BigDecimal carried as decimal TEXT orders as the number it is.
+  const vtypeExpr = streamRowTag(rel, framing);
   const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
   const dir: 'asc' | 'desc' = isMin ? 'asc' : 'desc';
   const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
@@ -3853,17 +3925,23 @@ export function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): read
  *  statically ONE type and so cannot mix. The twin of `minMaxOrder`. */
 export function comparableClass(rel: Rel, framing: RelFraming): Expr | null {
   if (framing.kind === 'scalar' && staticTypeOf(framing.type) !== undefined) return null;
-  const value = col(rel.id, 'v');
-  const storage: Expr = { kind: 'call', fn: 'typeof', args: [value] };
-  const has = (name: string) => rel.type.cols.some((column) => column.name === name);
-  const tagCol = has('vtype') ? 'vtype'
-    : framing.kind === 'scalar' && perRowColumnOf(framing.type) && has(perRowColumnOf(framing.type)!) ? perRowColumnOf(framing.type)! : undefined;
-  return comparabilityClass(tagCol ? { kind: 'call', fn: 'coalesce', args: [col(rel.id, tagCol), storage] } : storage);
+  const storage: Expr = { kind: 'call', fn: 'typeof', args: [col(rel.id, 'v')] };
+  const tag = streamRowTag(rel, framing);
+  return comparabilityClass(tag ? { kind: 'call', fn: 'coalesce', args: [tag, storage] } : storage);
 }
 
-/** The winner row's own GREMLIN vtype — `int`/`long`/`string` from the stored `vtype` column or the
- *  source's static tag, else `typeof` (whose storage-class value the `result:'number'` framer routes to
- *  `sumBuffer`). The twin of `minMaxOrder`: the same authority, read off the SURVIVING row. */
+/** A scalar stream row's OWN Gremlin type, where the stream carries one — the stored `vtype` column, a
+ *  per-row tag column, else the stream's static tag — or `null` where the rows are untagged and their
+ *  storage class is all there is (`reducer.ts` `inferredVtype`). One reading for every reducer site. */
+export function streamRowTag(rel: Rel, framing: RelFraming): Expr | null {
+  const has = (name: string) => rel.type.cols.some((column) => column.name === name);
+  if (has('vtype')) return col(rel.id, 'vtype');
+  const perRow = framing.kind === 'scalar' ? perRowColumnOf(framing.type) : undefined;
+  if (perRow && has(perRow)) return col(rel.id, perRow);
+  const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
+  return staticVt ? compilerText(staticVt) : null;
+}
+
 /**
  * A REDUCER RESULT's static class, where the input's is a known `long`/`bigint`: the class `sum` keeps
  * (`sumTower`) and the one a `min`/`max` winner already has. Stated as a TEXT-carried static — the
@@ -3886,11 +3964,15 @@ export function wideClassOf(framing: RelFraming): { readonly type?: ScalarType }
 const transformInput = (framing: RelFraming): ScalarType | undefined =>
   framing.kind !== 'scalar' ? undefined : framing.result === 'number' ? UNKNOWN : framing.type;
 
+/** The winner row's own GREMLIN class — `int`/`long`/`string` from the stored `vtype` column, a per-row
+ *  tag or the source's static tag, else the class the wire infers from its value (`inferredVtype`). The
+ *  twin of `minMaxOrder`: the same authority, read off the SURVIVING row. */
 export function minMaxWinnerVt(rel: Rel, framing: RelFraming): Expr {
-  const staticVt = framing.kind === 'scalar' ? staticTypeOf(framing.type) : undefined;
-  return rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype')
-    : staticVt ? compilerText(staticVt)
-    : { kind: 'call', fn: 'typeof', args: [col(rel.id, 'v')] };
+  const inferred = inferredVtype(col(rel.id, 'v'));
+  const tag = streamRowTag(rel, framing);
+  // A per-row tag column NULL on a row that declared nothing (a partly-typed inject) reads as the class
+  // the wire infers for it — the reducer's `vt` vocabulary is a Gremlin type name alone (`REDUCED_TYPE`).
+  return tag === null ? inferred : tag.kind === 'col' ? { kind: 'call', fn: 'coalesce', args: [tag, inferred] } : tag;
 }
 
 /**
@@ -3915,15 +3997,22 @@ export function minMaxWinnerVt(rel: Rel, framing: RelFraming): Expr {
  * dropped field.
  */
 const scalarPayload = (
-  rel: Rel, framing: Extract<RelFraming, { readonly kind: 'scalar' }>, fresh: Minter,
+  rel: Rel, framing: Extract<RelFraming, { readonly kind: 'scalar' }>, fresh: Minter, realDecimals: boolean,
 ): { readonly rel: Rel; readonly shape: Shape } | null => {
   const ordered = byEncounter(rel, fresh);
   const typeCol = framing.result === 'number' ? 'vt' : perRowColumnOf(framing.type);
   const cols: readonly ColMeta[] = [meta('v', 'any', true), ...(typeCol ? [meta(typeCol, 'text', true)] : [])];
+  // A BigDecimal row frames off its carrier (`scalarFramedValue`) where the plan can hold a REAL one at all
+  // (`realDecimals`): the static tag says so, else the per-row one.
+  const staticTag = staticTypeOf(framing.type);
+  const decimal: Expr | null = !realDecimals ? null : framing.result !== 'number' && staticTag !== undefined
+    ? (staticTag === 'bigdecimal' ? CONSTANT.true : null)
+    : typeCol ? { kind: 'binary', op: '=', left: col(ordered.id, typeCol), right: compilerText('bigdecimal') } : null;
+  const framedValue = scalarFramedValue(col(ordered.id, 'v'), decimal);
   return {
     rel: make.project({
       id: fresh('vw'), input: ordered, channels: [], type: typeOf(...cols),
-      exprs: cols.map((column) => [column.name, col(ordered.id, column.name)] as const),
+      exprs: cols.map((column) => [column.name, column.name === 'v' ? framedValue : col(ordered.id, column.name)] as const),
     }),
     shape: framing.result === 'number'
       ? { kind: 'scalar', productiveNull: !!framing.productiveNull }
@@ -3931,8 +4020,14 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter, rawListElements = false): RelLowering | null => {
-  const wire = framed(chain, source, detached, rawListElements, fresh);
+const lowered = (
+  chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter,
+  rawListElements = false, reinjected = false,
+): RelLowering | null => {
+  // A REAL-carried BigDecimal of negative scale exists only where the plan widens a Double at run time, or
+  // where a barrier RE-INJECTS values computed by an earlier statement (a resume, whose head may have) —
+  // only there does a scalar frame spell its carrier (`scalarFramedValue`).
+  const wire = framed(chain, source, detached, rawListElements, fresh, reinjected || widensDoubleToDecimal(chain.rel));
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
@@ -4005,7 +4100,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh, true);
-  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.rawListElements);
+  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.rawListElements, settled.seed !== null);
 }
 
 /**
@@ -4158,7 +4253,7 @@ export function lowerForeignResume(
       exprs: [['id', col(rejoined.id, 'id')]],
     });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
-  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, false, true);
 }
 
 /**
@@ -4186,7 +4281,7 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // `count` is the ONE monoid — it installs an explicit `ConstantSupplier(0L)`, so empty count is `0`
   // (arriving here as `v:0`, emitted), while an empty semigroup fold arrives as `v:null` and is dropped.
   const empty = value != null && typeof value === 'object' && 't' in value && (value as { v?: unknown }).v == null;
-  const node: Expr = compilerText(JSON.stringify(value));
+  const node: Expr = compilerText(stringifyExactOrRefuse(value));
   const one = make.values({
     id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
     rows: [[jsonOf(node)]],
@@ -4217,7 +4312,7 @@ export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: numb
   // `Values` REFUSES an empty relation (`checkValuesShape`), so an empty stream is a one-row `Values`
   // FILTERED to nothing — the same honest `Filter(false)` `lowerScalarResume` uses for the empty aggregate
   // (§3.3). A non-empty stream is one `Values` row per node.
-  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(JSON.stringify(node)))]);
+  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(stringifyExactOrRefuse(node)))]);
   const one = make.values({ id: fresh('tnv'), channels: [], type, rows: nodes.length > 0 ? rowsOf(nodes) : [[jsonOf(compilerText('null'))]] });
   // MID-TRAVERSAL CONSTANT SCATTER: a `V().call(federate, <constant sub>)` runs the sibling ONCE and each
   // of the P parents re-emits the WHOLE pool — the value-stream analogue of the element rejoin's CROSS join
@@ -4282,7 +4377,7 @@ export function lowerReduceCombine(
     : reduce.combine === 'sum' ? contribs.reduce((a, b) => a + b, 0)
     : reduce.combine === 'min' ? Math.min(...contribs)
     : Math.max(...contribs);
-  const node: Expr = compilerText(JSON.stringify({ t: partialT, v: folded } as ValueNode));
+  const node: Expr = compilerText(stringifyExactOrRefuse({ t: partialT, v: folded } as ValueNode));
   const one = make.values({ id: fresh('rcv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)), rows: [[jsonOf(node)]] });
   // A null fold (an all-empty semigroup) frames as NO traverser — `Values` refuses the empty relation, so
   // it is the honest `Filter(false)` (§3.3), matching `lowerScalarResume`'s empty-aggregate spelling.
@@ -4307,7 +4402,7 @@ export function lowerPathResume(
   const built = shortestPathReconstruct(run, round, cfg, ctx.source, childSeam(ctx, fresh), fresh);
   if (!built) return null;
   const tail = continueAs(built.rel, { kind: 'path', of: built.of, scalars: built.scalars }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
-  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, false, true);
 }
 
 /**
@@ -4346,7 +4441,7 @@ export function lowerPairResume(
     exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [blob] }]],
   });
   const tail = continueAs(rel, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
-  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, false, true);
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
@@ -4385,7 +4480,7 @@ function valueResume(
   if (facts.tracksPath) return null;
   const seeded = seedOf(fresh);
   const chain = tail(seeded.rel, seeded.framing, ctx, fresh);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, false, true);
 }
 
 /** The column a re-inject binds each value's array index (stream position) to — threaded as an encounter
@@ -4413,6 +4508,33 @@ export const valueSeed = (values: readonly unknown[]) => (fresh: Minter): Framed
     framing: { kind: 'scalar', type: UNKNOWN },
   };
 };
+
+/** A re-injected datum whose Gremlin TYPE travels with it: the value as JSON carries it (a number, or the
+ *  exact TEXT of a wide Long/BigInteger/BigDecimal), and its tag. */
+export type TypedDatum = readonly [value: number | string | null, tag: string | null];
+
+/** The TYPED value re-injected source — `valueSeed` with each datum's tag riding PER ROW in a `vtype`
+ *  column, exactly as a stored property's does (§6·7: what a barrier computed is CARRIED, never re-guessed
+ *  from the JSON number it crossed as — a Float, a Double held whole, a Long past 2^53 and a BigDecimal all
+ *  arrive as a JS number or a string). */
+export const typedValueSeed = (data: readonly TypedDatum[]) => (fresh: Minter): FramedRel => {
+  const exploded = jsonEachSet(VALUE_RESUME_PARAM, data, fresh, undefined, RESUME_ORD);
+  const part = (path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'sv'), compilerText(path)] });
+  return {
+    rel: make.project({
+      id: fresh('vrp'), input: exploded, channels: [ENCOUNTER],
+      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta(ENCOUNTER.col, 'int')),
+      exprs: [['v', part('$[0]')], ['vtype', part('$[1]')], [ENCOUNTER.col, col(exploded.id, RESUME_ORD)]],
+    }),
+    framing: { kind: 'scalar', type: PER_ROW('vtype') },
+  };
+};
+
+/** `lowerValueResume` over TYPED data (`typedValueSeed`). */
+export function lowerTypedValueResume(data: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+  return valueResume(steps, from, opts, typedValueSeed(data as readonly TypedDatum[]),
+    (rel, framing, ctx, fresh) => scalarTail(rel, framing, steps, from, false, ctx, fresh));
+}
 
 /** The list re-injected source — each datum a `LIST_COL`, `json()`-wrapped for a nested member (a `list`/
  *  `map` member is itself a JSON collection json_each hands back as TEXT; a flat scalar member needs none). */

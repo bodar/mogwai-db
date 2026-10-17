@@ -2,6 +2,7 @@ import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } f
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
 import { fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
+import { javaFloatOf } from './float.ts';
 
 // ---------- parsing ----------
 //
@@ -277,6 +278,8 @@ export function integerLiteralValue(text: string): { value: number | bigint; typ
 export function floatLiteralValue(text: string): { value: number | BigDecimal; type: CanonicalType } {
   const type = floatLitType(text);
   if (type === 'bigdecimal') return { value: BigDecimal.fromText(text.replace(/[mM]$/, '')), type };
+  // A Float is carried as its EXACT value, rounded once from the decimal (`src/gremlin/float.ts`).
+  if (type === 'float') return { value: javaFloatOf(text.replace(/[fF]$/, '')), type };
   return { value: parseFloat(text), type };
 }
 

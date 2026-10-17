@@ -2,7 +2,7 @@ import type { Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { perRowColumnOf, TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep, PathPositionKind } from '../ir/step.ts';
 import { SHAPE_K, type AliasMap } from '../alias.ts';
 import { byEncounter, carriedCols, jsonField, jsonOf, meta, typeOf, type Minter } from './build.ts';
@@ -174,7 +174,9 @@ export function appendPathLabel(rel: Rel, label: string, fresh: Minter): Rel {
  */
 export function appendValuePosition(rel: Rel, type: ScalarType, fresh: Minter): Rel {
   if (!pathCarried(rel)) return rel;
-  const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+  // The row's own tag column — the stored `vtype`, else the type's PER-ROW one (a reducer's `vt`).
+  const tagCol = ['vtype', perRowColumnOf(type)].find((name) => name && rel.type.cols.some((column) => column.name === name));
+  const vtype = tagCol ? col(rel.id, tagCol) : undefined;
   const entry = objectEntry({ kind: 'value', value: col(rel.id, 'v'), type, ...(vtype ? { vtype } : {}) });
   return make.project({
     id: fresh('pav'), input: rel, channels: rel.channels, type: rel.type,
