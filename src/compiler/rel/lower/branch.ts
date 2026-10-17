@@ -14,7 +14,7 @@ import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
 import { ALWAYS_PRODUCTIVE, knownPresence } from '../child.ts';
-import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { AliasEntry, AliasMap } from '../../alias.ts';
@@ -499,7 +499,12 @@ export function mergeArms(
   if (first.framing.kind === 'scalar') {
     const met = meetScalarArms(arms);
     if (met && met.kind === 'perRow') {
-      const framing = { kind: 'scalar', type: met } as const;
+      // The framing names the column `withMergedVtype` PROJECTS — always `MERGED_VTYPE` — never the
+      // met type's own: arms that AGREE on a per-row type carried under another column (an inject that
+      // mixes declared types rides `vt`) meet to that type unchanged, and framing the re-projected union
+      // by it named a column the union no longer has — an internal error on `inject(1, 1L).union(…)`,
+      // and, where a narrowing reader degraded the missing column to UNKNOWN, an Int framed for a Long.
+      const framing = { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } as const;
       // `meetScalarArms` returned non-null, so EVERY arm is a scalar without a `result` marker.
       const retyped = arms.map((arm) => ({
         ...arm, framing,
@@ -722,7 +727,7 @@ export function chooseOptions(
   const choice = { expr: col(scoped.id, CHOICE), present: col(scoped.id, PRESENT), vtype: produced.vtype && col(scoped.id, 'ovtype') };
   // THE CHOICE's own type, not the traverser's: the option KEYS are compared against the projected
   // choice, so this is the `SubjectType` of that column and is unrelated to `subject` above.
-  const choiceType: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
+  const choiceType: SubjectType = choice.vtype ? perRowSubject(choice.vtype, choice.expr)
     : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
       ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
       : SUBJECT_UNKNOWN;

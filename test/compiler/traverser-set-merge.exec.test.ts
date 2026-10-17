@@ -328,6 +328,45 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
     expect(typed('g.inject([1], [2], [1]).limit(2)')).toEqual(['[1i]', '[1i]']);
   });
 
+  test('a typed inject payload crosses a branch and the slice after it — the merged arm frames by MERGED_VTYPE', () => {
+    // The per-row `vt` an inject carries is re-projected to `vtype` by the branch merge (`withMergedVtype`);
+    // framing the union by `vt` raised `RelIR: relation … has no declared column 'vt'` at every depth below.
+    const cases: [string, string[]][] = [
+      ['g.inject(1, 2, 1.0).union(__.identity(), __.identity()).limit(3)', ['1i', '1i', '2i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).limit(3)', ['1d', '1d', '2i']],
+      ['g.inject(1, 2, 1.0).choose(__.is(1), __.identity(), __.identity()).limit(2)', ['1i', '2i']],
+      ['g.inject(1, 2, 1.0).optional(__.identity()).limit(2)', ['1i', '2i']],
+      ['g.inject(1.0, 2).optional(__.identity()).limit(3)', ['1d', '2i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).dedup().limit(3)', ['1d', '2i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).is(P.gt(0)).limit(3)', ['1d', '1d', '2i']],
+      ['g.inject(1, 2, 1.0).union(__.identity(), __.identity()).tail(2)', ['1d', '1d']],
+      ['g.inject(1, 2, 1.0).union(__.identity(), __.identity()).range(1, 3)', ['1i', '2i']],
+      ['g.inject(-0.0, 2, 0.0).union(__.identity(), __.identity()).limit(3)', ['-0d', '-0d', '2i']],
+      ['g.inject(1, 1L).union(__.identity(), __.identity()).limit(3)', ['1i', '1i', '1L']],
+      ['g.inject(1, 1L).union(__.identity(), __.identity())', ['1i', '1L', '1i', '1L']],
+      ['g.inject(1, 1L).union(__.identity(), __.identity()).fold()', ['[1i,1i,1L,1L]']],
+      ['g.inject(1, 1L).optional(__.identity())', ['1i', '1L']],
+      ['g.inject(1, 1L).coalesce(__.identity(), __.identity())', ['1i', '1L']],
+    ];
+    for (const [q, expected] of cases) expect(typed(q), q).toEqual(expected);
+  });
+
+  test('a NULL per-row tag reads the value at every predicate subject — perRowSubject', () => {
+    // `inject(1.0, 2)` declares only the Double; the 2's NULL tag is "read the value", an Integer.
+    const cases: [string, string[]][] = [
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).is(P.gt(0))', ['1d', '2i', '1d', '2i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.constant(3)).is(P.gt(0))', ['1d', '2i', '3i', '3i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).where(__.is(P.gt(1)))', ['2i', '2i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).choose(__.is(P.gt(0)), __.constant("y"), __.constant("n"))', ['"y"', '"y"', '"y"', '"y"']],
+      ['g.inject(1.5, 2).union(__.identity(), __.constant(3L)).choose(__.is(P.gt(0)), __.constant("y"), __.constant("n"))', ['"y"', '"y"', '"y"', '"y"']],
+      // the inference is the framer's: an INTEGER inside int32 is an Int, beyond it a Long
+      ['g.inject(1, 1L).is(P.typeOf(GType.INT))', ['1i']],
+      ['g.inject(1.0, 2).union(__.identity(), __.identity()).is(P.typeOf(GType.INT))', ['2i', '2i']],
+      ['g.inject(1, 3000000000).union(__.identity(), __.constant(2.5)).is(P.typeOf(GType.LONG))', ['3000000000L']],
+    ];
+    for (const [q, expected] of cases) expect(typed(q), q).toEqual(expected);
+  });
+
   test('a collection property keeps a negative zero member — the stored tree is spelled by `stringifyExact`', () => {
     expect(typed("g.addV('q').property('x', [-0.0, 1.0]).values('x')")).toEqual(['[-0d,1d]']);
     expect(typed("g.addV('q').property('x', [a:-0.0]).values('x')")).toEqual(['{"a":-0d}']);

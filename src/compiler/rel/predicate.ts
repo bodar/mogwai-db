@@ -149,6 +149,46 @@ export type SubjectType =
 
 export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
 
+const typeofIs = (value: Expr, storageClass: string): Expr =>
+  ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText(storageClass) });
+
+/**
+ * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
+ * inference the wire would apply to an untagged value,
+ * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
+ * bare, which is exactly what `typed` means) hand every member a type without a second channel.
+ */
+export const inferredVtype = (value: Expr): Expr => ({
+  kind: 'case',
+  whens: [
+    [typeofIs(value, 'text'), compilerText('string')],
+    [typeofIs(value, 'real'), compilerText('double')],
+    [typeofIs(value, 'null'), compilerNull()],
+    [typeofIs(value, 'integer'), {
+      kind: 'case',
+      whens: [[{ kind: 'binary', op: 'and',
+        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
+        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
+      else: compilerText('long'),
+    }],
+  ],
+  else: compilerText('string'),
+});
+
+/**
+ * A PER-ROW subject: the row's own tag where it names a Gremlin type, and the value's own inference
+ * (`inferredVtype`) where the tag is NULL. A NULL tag means "read the value" in EVERY per-row column —
+ * a mixed `inject`'s undeclared argument (`inject(1.0, 2)` tags only the Double), a merged branch arm
+ * that could not say (`withMergedVtype`) — and the framer already reads it that way; a predicate that
+ * compared the bare NULL put an `int` in no number class, so `inject(1.0, 2).union(identity(),
+ * identity()).is(gt(0))` dropped the 2s and `choose(is(gt(0)), …)` routed them to the false arm. The
+ * inference is the framer's own (an INTEGER is an `int` inside int32, else a `long`), so
+ * `is(typeOf(GType.INT))` agrees with the class the value is framed as. THE one constructor, so no
+ * per-row subject can be built that reads a NULL tag differently.
+ */
+export const perRowSubject = (vtype: Expr, value: Expr): SubjectType =>
+  ({ kind: 'perRow', vtype: { kind: 'call', fn: 'coalesce', args: [vtype, inferredVtype(value)] } });
+
 /**
  * A Gremlin `Number` class as `NumberHelper.getHighestCommonNumberInfo` reads it — bit width and
  * floating-ness — collapsed to the distinctions a comparison can observe. `int32` is byte/short/int.

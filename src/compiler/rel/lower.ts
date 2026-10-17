@@ -28,7 +28,7 @@ import { constLit, declaredScalarType, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
-import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
@@ -1873,22 +1873,17 @@ function scalarTail(
   // heterogeneous or untagged type is honestly `unknown`. Same three cases `predicateSql` calls
   // `TypeCtx`, in the algebra's own expression vocabulary.
   const subjectType = (at: Rel = rel): SubjectType => {
-    if (carries('vtype')) return { kind: 'perRow', vtype: col(at.id, 'vtype') };
-    if (out.kind === 'scalar' && out.type.kind === 'static') return { kind: 'static', type: out.type.type, text: out.type.text };
-    // A PER-ROW tag column (a mixed `inject`, a min/max winner's stored vtype) is the row's Gremlin type
-    // where it names one; a NULL tag means "read the value", so the storage class stands in for it.
+    if (out.kind === 'scalar' && out.type.kind === 'static' && !carries('vtype')) return { kind: 'static', type: out.type.type, text: out.type.text };
+    // A PER-ROW tag column (a mixed `inject`, a min/max winner's stored vtype, a merged branch arm's
+    // `vtype`) is the row's Gremlin type where it names one; a NULL tag means "read the value", so the
+    // storage class stands in for it — `perRowSubject`, the one constructor, so `vtype` reads a NULL the
+    // way `vt` does.
     // A reducer result's `vt` holds a Gremlin type or a STORAGE class; `reducedVtype` keeps only the former.
     const reducerTag = out.kind === 'scalar' && out.result === 'number' && carries('vt');
-    const tagCol = reducerTag ? 'vt' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+    const tagCol = carries('vtype') ? 'vtype' : reducerTag ? 'vt' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
     if (tagCol && carries(tagCol)) {
-      const value = col(at.id, 'v');
-      const inferred: Expr = { kind: 'case', whens: [
-        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('integer') }, compilerText('long')],
-        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, compilerText('double')],
-        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('text') }, compilerText('string')],
-      ] };
       const tag = col(at.id, tagCol);
-      return { kind: 'perRow', vtype: { kind: 'call', fn: 'coalesce', args: [reducerTag ? reducedVtype(tag) : tag, inferred] } };
+      return perRowSubject(reducerTag && tagCol === 'vt' ? reducedVtype(tag) : tag, col(at.id, 'v'));
     }
     return SUBJECT_UNKNOWN;
   };

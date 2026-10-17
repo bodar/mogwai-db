@@ -765,3 +765,105 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
     Then the result should be unordered
       | result |
       | d[60].i |
+
+  # A typed inject payload (a whole Double, a signed zero, a Long beside an Integer) rides a per-row
+  # type column through a branch and the slice after it. The merged branch frames by the column it
+  # projects (`MERGED_VTYPE`), so every branch-then-slice form answers rather than raising an internal
+  # error — and the type survives: Integer(1) is not Double(1.0) (AbstractTraverser.java:185-188).
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1dX_unionXidentity_identityX_limitX3X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1.0).union(__.identity(), __.identity()).limit(3)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[2].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1d_2X_optionalXidentityX_limitX3X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1.0, 2).optional(__.identity()).limit(3)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1.0].d |
+      | d[2].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1dX_chooseXisX1X_identity_identityX_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1.0).choose(__.is(1), __.identity(), __.identity()).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1].i |
+      | d[2].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_1LX_unionXidentity_identityX_limitX3X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 1L).union(__.identity(), __.identity()).limit(3)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[1].l |
+
+  # A NULL per-row tag means "read the value" (`perRowSubject`): the undeclared 2 beside a declared
+  # Double is an Integer, so it passes is(gt(0)) and routes to choose()'s true arm.
+  @gap:traverser-set-merge
+  Scenario: g_injectX1d_2X_unionXidentity_identityX_isXgtX0XX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1.0, 2).union(__.identity(), __.identity()).is(P.gt(0))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1.0].d |
+      | d[1.0].d |
+      | d[2].i |
+      | d[2].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1d_2X_unionXidentity_identityX_chooseXisXgtX0XX_constantXyX_constantXnXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1.0, 2).union(__.identity(), __.identity()).choose(__.is(P.gt(0)), __.constant("y"), __.constant("n"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | y |
+      | y |
+      | y |
+      | y |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_1LX_isXtypeOfXGType_INTXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 1L).is(P.typeOf(GType.INT))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |

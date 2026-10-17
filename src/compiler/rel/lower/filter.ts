@@ -8,7 +8,7 @@ import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, knownPresence, raisingPresence, type ChildHost, type ChildValue, type Subject } from '../child.ts';
-import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -277,7 +277,7 @@ function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, 
     const vtype = proj.payload[1]?.[1];
     return {
       kind: 'scalar', value: proj.payload[0]![1]!, rel: subject.rel,
-      type: vtype ? { kind: 'perRow', vtype }
+      type: vtype ? perRowSubject(vtype, proj.payload[0]![1]!)
         : proj.read.type.kind === 'static' ? { kind: 'static', type: proj.read.type.type, text: proj.read.type.text }
           : SUBJECT_UNKNOWN,
       ...(vtype ? { vtype } : {}),
@@ -380,7 +380,7 @@ function valueClause(
   const type: SubjectType = produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'perRow' && produced.vtype
-      ? { kind: 'perRow', vtype: produced.vtype }
+      ? perRowSubject(produced.vtype, produced.expr)
       : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
     (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
@@ -469,7 +469,7 @@ export function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
   const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
   return {
     kind: 'scalar', value: col(rel.id, 'v'), rel,
-    type: vtype ? { kind: 'perRow', vtype }
+    type: vtype ? perRowSubject(vtype, col(rel.id, 'v'))
       : framing.type.kind === 'static' ? { kind: 'static', type: framing.type.type, text: framing.type.text }
         : SUBJECT_UNKNOWN,
     ...(vtype ? { vtype } : {}),

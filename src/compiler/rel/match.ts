@@ -12,7 +12,7 @@ import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
 import type { ChildHost, Subject } from './child.ts';
-import { SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { perRowSubject, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 import type { GraphSource } from './source.ts';
@@ -622,7 +622,7 @@ function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>,
   const t = sproj.read.type;
   const vtype = t.kind === 'perRow' ? aliasTypeAt(col(rel.id, sproj.entry.col), 'last') : undefined;
   const type: SubjectType = t.kind === 'static' ? { kind: 'static', type: t.type, text: t.text }
-    : vtype ? { kind: 'perRow', vtype } : SUBJECT_UNKNOWN;
+    : vtype ? perRowSubject(vtype, value) : SUBJECT_UNKNOWN;
   return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}) };
 }
 

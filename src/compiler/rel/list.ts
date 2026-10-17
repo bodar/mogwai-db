@@ -12,7 +12,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
-import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { comparabilityClass, inferredVtype, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -229,28 +229,6 @@ const isTypedList = hasTypedMembers;
  *  rowids and sub-lists respectively and need their own expansion. */
 export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
 
-/**
- * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
- * inference the wire would apply to an untagged value,
- * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
- * bare, which is exactly what `typed` means) hand every member a type without a second channel.
- */
-export const inferredVtype = (value: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), compilerText('string')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'real'), compilerText('double')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'null'), compilerNull()],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'integer'), {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
-        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
-      else: compilerText('long'),
-    }],
-  ],
-  else: compilerText('string'),
-});
 
 /**
  * ONE member predicate for `all`/`any`/`none`, null-aware.

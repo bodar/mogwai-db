@@ -291,8 +291,8 @@ describe('repeat / path SQL', () => {
       expect(p.sql).toMatch(/CAST\(w\d+\.sack AS INT\) >= 50/);
       // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED by the sack's own per-row
       // tag rather than assuming a number. The tag is TOTAL (the seed's `long`, then each sum's storage
-      // class) — a NULL tag would match no arm and the until() would never fire.
-      expect(p.sql).toMatch(/WHEN w\d+\.sackt IN \('byte', 'short', 'int', 'long', 'bigint'\)/);
+      // class); a NULL tag reads the value (`perRowSubject`), so it can never match no arm.
+      expect(p.sql).toMatch(/WHEN coalesce\(w\d+\.sackt, CASE WHEN \(typeof\(w\d+\.sack\) = 'text'\)[^]*?\) IN \('byte', 'short', 'int', 'long', 'bigint'\)/);
       expect(p.sql).toContain("'long' AS sackt");
     
   });

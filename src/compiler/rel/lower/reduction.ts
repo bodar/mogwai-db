@@ -31,7 +31,7 @@ import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
-import { mixedClassesRefused, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
@@ -1175,7 +1175,7 @@ export function hostSubject(host: ChildHost): Subject | null {
   if (host.kind === 'property') return { kind: 'property', id: host.id, ownerElem: host.ownerElem, rel };
   if (host.kind === 'scalar')
     return { kind: 'scalar', value: host.value, ...(host.vtype ? { vtype: host.vtype } : {}), rel,
-      type: host.vtype ? { kind: 'perRow', vtype: host.vtype } : SUBJECT_UNKNOWN };
+      type: host.vtype ? perRowSubject(host.vtype, host.value) : SUBJECT_UNKNOWN };
   return null;
 }
 

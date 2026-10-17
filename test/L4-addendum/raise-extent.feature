@@ -748,7 +748,10 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
-  @Unsupported
+  # …but NOT past math(): a MathStep is an always-bound MapStep, so EarlyLimitStrategy (a default) moves the
+  # zero-width slice IN FRONT of it — the reference runs inject("x").limit(0).math("_+1"), the limit pulls
+  # "x" and discards it, and math() never meets a value (EarlyLimitStrategy.java `apply`/`isMapStepMovable`,
+  # StepOutputArityPredictor's DEFINITELY_SINGULAR list; `src/compiler/ir/early-limit.ts`).
   Scenario: g_injectXxX_mathX_plus_1X_limitX0X
     Given the empty graph
     And the traversal of
@@ -756,7 +759,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       g.inject("x").math("_+1").limit(0)
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+    Then the result should be empty
 
   # Nothing below the zero-width slice can raise: it still answers.
   Scenario: g_V_valuesXnameX_limitX0X
