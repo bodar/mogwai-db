@@ -761,7 +761,7 @@ authorities.
   between writer and site" becomes a property of that count. Stopgap: decline a multi-row creating merge with
   an onMatch arm or match-dependent tail; `sequentialGuard` refuses a non-single-row upstream writer via ONE
   `isOneRowSeed` shared with `writeSnapshot` (unifying the duplicated checks). Size: stopgap S; full M, ~300 LOC.
-- 🚧 **G — label scope into nested arms; internal errors past the decline contract.** Authority:
+- ✅ **G — label scope into nested arms; internal errors past the decline contract.** Authority:
   `step/util/Scoping.java` + `TraversalSelectStep` (a local child keeps the parent path),
   `strategy/optimization/IdentityRemovalStrategy.java` (copyLabels). Seams: the union arm merge (`mergeArms`
   via `lower/branch.ts`) must compare arm column/channel sets and return `null` instead of leaving
@@ -772,6 +772,13 @@ authorities.
   it; make it total over every IR child position (args, modulators, `repeatRegion`, `optionArms`) and route
   all of them through it (fixes the `order().by(addV…)` leak); `mergeStepLabels` (`ir/passes.ts`) folds labels
   as IdentityRemovalStrategy does. Size: S–M, ~200 LOC. Do this FIRST — cheap, and every later branch re-trips it.
+  ✅ LANDED 2026-10-17 (`1ad88ccf`, `fec9e97c`): ONE total walker `src/compiler/ir/walk.ts` (`eachChildChain` over
+  args incl. predicate operands/maps, modulators, with() options, repeatRegion/optionArms; callers choose
+  `ChildPositions`) with `someStepDeep`/`nondeterministic`/`lowerRankHead`/write/label walkers routed through it
+  (`order().by(addV…)` now declines); a scope read of a hidden host label declines; `mergeStepLabels` seeds a
+  branch body with the host's path entry; federate fails closed at every seam (`test/support/fail-closed.ts` is
+  the positive no-internal-error contract). Residue: threading alias channels through `childSeam` (the full fix)
+  is still open.
 - 🚧 **H — reference strategy/step facts copied by hand.** emit-first `times(n)` unroll drops the last level
   (`step/branch/RepeatStep.java` RepeatEndStep emits on `doUntil`; seam `tryUnroll` in `ir/strategies.ts` —
   emit it or decline emit-first; check `l3-state.json` for `g_V_emit_repeatXoutX_timesX2X_path`) — ✅ LANDED
@@ -791,7 +798,7 @@ authorities.
 | Step | Substrate | Size | Why here |
 |---|---|---|---|
 | 0 | Trunk stopgap declines: A slice/barrier, B `branchResult`+`tagArm`, C `kindOf`/eligibility/asNumber-fp/`vt` carry, D null-pool, E `receiverProvably`, F merge/guard single-row, G arm-column decline + total `someStepDeep`, H unroll + `PLAIN_FOLD` | S–M total | removes every confirmed trunk wrong answer; L3 only moves DOWN where a wrong pass declines |
-| 1 | G — one IR walker, arm column decline, alias into arms | S–M | cheapest; every later branch re-trips it |
+| 1 | ✅ G — one IR walker, arm column decline, alias into arms (landed `1ad88ccf`/`fec9e97c`; alias-channel threading open) | S–M | cheapest; every later branch re-trips it |
 | 2 | C — number-class authority (after the §6·7 decision) | M | `asNumber`, orderability, reducers are all consumers |
 | 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
 | 4 | D — required `present` | M | small once E adds the third `ChildValue` field in the same pass |
