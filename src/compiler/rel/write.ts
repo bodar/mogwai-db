@@ -2453,8 +2453,8 @@ export function elementAddV(
   // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
   // evaluate before the first insert. The snapshot makes the source `json_each(?)`, so the question
   // "which traversers were there" is answered once and cannot be changed by the answer.
-  // A `Values` source is one literal row and has nothing to snapshot.
-  const seeded = input.kind === 'values' ? null : orderedInput(input, fresh);
+  // A ONE-ROW `Values` source has nothing to snapshot (`writeSnapshot`); a multi-row one is snapshotted.
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   // BEFORE the creation, because a check after the insert has nothing left to refuse.
   if (tokens.id !== null) { const check = elementIdGuard(tokens.id, 'vertex', fresh); guard(check.node, check.guard); }
@@ -2749,11 +2749,26 @@ function labelGuards(label: RuntimeLabel, guard: Guarder, fresh: Minter): void {
   }
 }
 
-/** A creation's input rows: the identity plus the emission order, and nothing else — `addV` reads no
- *  other column of what it is inserting from. The ORDER is load-bearing: a write assigns ids as it
- *  goes and those ids are OBSERVABLE, so which row it sees first is part of the answer. */
-function orderedInput(input: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
-  return inputRows(input, writeInputCols(input), fresh);
+/**
+ * A write's INPUT SNAPSHOT — its identity, emission order and aliases (`writeInputCols`), positioned —
+ * or `null` for the one input that needs none: a literal `Values` of AT MOST ONE row.
+ *
+ * **THE EXEMPTION IS BY ROW COUNT, NOT BY NODE KIND, and that is the whole rule.** Every write host reads
+ * an input WITHOUT an `ord` column as "one traverser" — `elementMergeE` stamps every pair with the
+ * literal position `1`, `crossed` falls back to a CROSS join, the computed merges drop their per-driver
+ * correlation — which is exactly right for `g.mergeE(…)`'s one-row source seed and exactly wrong for
+ * `g.inject(1,2,3)`, a three-row `Values`: every pair shared position 1, so each of the three found rows
+ * re-joined all three traversers and `mergeE` emitted NINE where `MergeEdgeStep` (one `flatMap` per
+ * incoming traverser, `vendor/tinkerpop/gremlin-core/.../step/map/MergeEdgeStep.java`) emits three. A
+ * multi-row `Values` is therefore snapshotted like any mid-chain input, so the "no position ⇒ one row"
+ * reading every host makes is TRUE by construction rather than by each host remembering a caveat.
+ * One function for every write host, because the defect was the same predicate copied six times.
+ *
+ * The ORDER is load-bearing: a write assigns ids as it goes and those ids are OBSERVABLE, so which row
+ * it sees first is part of the answer.
+ */
+function writeSnapshot(input: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } | null {
+  return input.kind === 'values' && input.rows.length <= 1 ? null : inputRows(input, writeInputCols(input), fresh);
 }
 
 /**
@@ -2906,7 +2921,7 @@ export function elementAddE(
   if (!writes) return null;
 
   const carried = input.channels.filter((channel) => channel.role === 'alias');
-  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
 
@@ -3291,7 +3306,7 @@ function mergeVComputed(
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
-  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carriedCh) : input;
   const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
@@ -4028,7 +4043,7 @@ export function elementMergeV(
 
   const carried = writeInputChannels(input);
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
-  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carried) : input;
 
@@ -4151,7 +4166,7 @@ function mergeEComputed(
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
-  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carriedCh) : input;
   const hasOrd = incoming.type.cols.some((column) => column.name === ORD);
@@ -4490,7 +4505,7 @@ export function elementMergeE(
   // as evidence that it could.
   const carried = writeInputChannels(input);
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
-  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const seeded = writeSnapshot(input, fresh);
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carried) : input;
 
