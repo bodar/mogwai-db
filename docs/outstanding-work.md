@@ -87,8 +87,8 @@ lowered.
   A compiler literal is spelled as an exact product (`exactRealSpelling`, `rel/emit.ts`), so a top-level
   value is exact; every JSON entry (`asExactReal`), the BigDecimal digits (`doubleDecimalText`) and the JS
   writer of a tree headed into SQLite (`stringifyExact`) defer. Open: an EXACT carrier there instead of the
-  deferral — today an element holding such a property defers every payload that frames its properties
-  (`g.V()`), a `fold()`/`project()`/`select()` of one defers, and a bulk load of one refuses. Also open: a
+  deferral — an element payload and a bulk load now carry it exactly (ff-double-range,
+  ff-double-carrier-json, 2026-10-17), but `valueMap()`/`elementMap()`/`values().fold()` of one still defer. Also open: a
   BigDecimal's decimal TEXT carrier is still `CAST` to REAL where it compares against a Double, which is the
   same reader at a magnitude outside the range. DO's SQLite build is unmeasured.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).

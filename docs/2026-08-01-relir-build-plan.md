@@ -831,6 +831,15 @@ authorities.
   `test/compiler/double-range.exec.test.ts`. Baseline moved: sql-hygiene (+389 bytes per element payload, the
   carrier CASE; re-recorded on trunk). Residue: valueMap()/elementMap()/values().fold() of an out-of-range
   Double still defer.
+  ✅ **Fix-forward LANDED ON TRUNK 2026-10-17 (`2c602783`, `6e027a28`, `6fd4a7dc`, ff-double-carrier-json).**
+  `parseElementJson` is total (every framer parse of an element-bearing payload, so the untyped-JSON tail no
+  longer leaks the `<w>p<n>` carrier); `asNumber` over an untyped JS number asks `numberClassOf`; a bulk
+  load carries an out-of-range Double as its exact `[w, n]` pair; a STREAMING load (`io()` read) is all or
+  nothing via the `bulk_journal` undo (`GraphStore.rollbackBulkLoads`, orphan swept at construction);
+  replication apply is one atomic unit; the untyped-JSON map key is ONE total authority (`untypedMapKey`,
+  `GraphSONSerializersV4.java:371-376`) — an unspellable key raises `UnspellableJson` → GraphBinary fallback,
+  a write's run+render one atomic unit. Pinned in `untyped-response.test.ts`, `io-streaming.test.ts`,
+  `replicate-apply`. No baseline moved. Residue unchanged (valueMap/elementMap/values().fold() still defer).
   ✅ **Reducing choose arms + ONE variant vocabulary LANDED ON TRUNK 2026-10-17 (`5bf66cf4`, `5732f4cb`,
   ff-choose-arm-channels).** Reducing `choose`/option arms merge arm-to-arm at ONE door (`variantMerge`,
   `src/compiler/rel/lower/branch.ts`), a reducing option gated per start. Every union/choose/coalesce/optional
