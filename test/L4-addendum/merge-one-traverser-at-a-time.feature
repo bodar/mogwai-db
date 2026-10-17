@@ -363,3 +363,141 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[2].l |
     And the graph should return 2 for count of "g.E().hasLabel(\"self\")"
     And the graph should return 0 for count of "g.E().hasLabel(\"self\").has(\"w\")"
+
+  # ANOTHER WRITE IN THE PROGRAM interleaves too (guardMergeInterleaving rule (0), mergeObservesOtherWrites).
+  # The reference pipeline is lazy: a merge is a FlatMapStep, LazyBarrierStrategy inserts no NoOpBarrierStep
+  # after the first flat-map and none at all in a traversal holding a DropStep
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java,
+  # the hasStepOfAssignableClass(DropStep.class, …) early return in apply), and a single-arm union hands its
+  # arm one start at a time (…/process/traversal/step/branch/BranchStep.java, standardAlgorithm). So traverser
+  # 1 runs every LATER write before traverser 2 searches, and traverser 2 runs every EARLIER write after
+  # traverser 1 merged. Here each later search misses once the earlier traverser dropped the searched key.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_propertiesXnameX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).properties("name").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 9 for count of "g.V()"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_properties_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).properties().drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 9 for count of "g.V()"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_VX1_2X_mergeVXname_zzX_propertiesXnameX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).mergeV([name:"zz"]).properties("name").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 8 for count of "g.V()"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXmergeVXname_zzXX_propertiesXnameX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.mergeV([name:"zz"])).properties("name").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 9 for count of "g.V()"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeEXzz_1_2_w_1X_propertiesXwX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2,w:1]).properties("w").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 3 for count of "g.E().hasLabel(\"zz\")"
+
+  # An EARLIER write: traverser 1 adds and merges (finds 1), traverser 2 adds and merges (finds 2).
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_addVXpX_propertyXname_zzX_mergeVXname_zzX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).addV("p").property("name","zz").mergeV([name:"zz"]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 2 for count of "g.V().has(\"name\",\"zz\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2X_addEXzzX_fromXV1X_toXV2X_mergeEXzz_1_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2).addE("zz").from(__.V(1)).to(__.V(2)).mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 2 for count of "g.E().hasLabel(\"zz\")"
+
+  # Controls: a later write the search cannot observe (an edge creation under a VERTEX search, a vertex
+  # property under an EDGE search), and one traverser, keep answering.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_addEXkX_toXV1X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).addE("k").to(__.V(1)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
+    And the graph should return 3 for count of "g.E().hasLabel(\"k\")"
+
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeEXzz_1_2X_inV_propertyXname_yyX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).inV().property(single,"name","yy").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\")"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"yy\")"
+
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_VX1X_mergeVXname_zzX_propertiesXnameX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).mergeV([name:"zz"]).properties("name").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 7 for count of "g.V()"

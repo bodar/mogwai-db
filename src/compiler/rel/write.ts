@@ -956,6 +956,10 @@ const readsLabelToken = (values: readonly unknown[]): boolean => values.some(fun
  */
 export interface ProgramWrites {
   readonly writers: readonly KeyWriter[];
+  /** EVERY write step in the program, one entry per step (any depth), classified by `writeSiteOf` — what
+   *  a merge counts to ask whether a write OTHER than its own cluster exists (`mergeObservesOtherWrites`).
+   *  `'unknown'` when the walk could not read a body (`everythingWritten`). */
+  readonly sites: readonly WriteSite[] | 'unknown';
   readonly runOf: ReadonlyMap<IRStep, number>;
   readonly anyKey: boolean;
   readonly labels: boolean;
@@ -975,13 +979,36 @@ interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> |
 interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string | null; used: boolean }
 
 const everythingWritten = (): ProgramWrites =>
-  ({ writers: [], runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [] });
+  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [] });
+
+/** One write step of the program — WHAT it writes, at the grain a merge's search can be observed by. */
+interface WriteSite {
+  readonly op: 'addV' | 'addE' | 'mergeV' | 'mergeE' | 'drop' | 'label' | 'property';
+  /** A `property()` write's key; `'all'` when it is only known at run time (or the map form). */
+  readonly keys: ReadonlySet<string> | 'all';
+}
+
+/** THE ONE CLASSIFIER of a step as a write site — `programWrites` and a merge's own cluster
+ *  (`mergeObservesOtherWrites`) both read a step through it, so the merge's subtraction of itself cannot
+ *  disagree with the program's count. `null` = not a write. */
+function writeSiteOf(step: IRStep): WriteSite | null {
+  switch (step.name) {
+    case 'addV': case 'addE': case 'mergeV': case 'mergeE': case 'drop': return { op: step.name, keys: 'all' };
+    case 'addLabel': case 'dropLabel': case 'dropLabels': return { op: 'label', keys: 'all' };
+    case 'property': {
+      const key = readCardinality(step.args.map((a) => a.value)).rest[0];
+      return { op: 'property', keys: typeof key === 'string' ? new Set([key]) : 'all' };
+    }
+    default: return null;
+  }
+}
 
 /** Steps after which the traverser is still the element an `addV`/`addE` just made. */
 const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
 
 export function programWrites(steps: readonly IRStep[], params: Record<string, any>): ProgramWrites {
   const writers: KeyWriter[] = [];
+  const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
   let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false;
   const nested = (value: unknown): void => {
@@ -1002,6 +1029,8 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     for (const step of chain) {
       const args = step.args.map((a) => a.value);
       if (step.name !== 'property') run = -1;
+      const site = writeSiteOf(step);
+      if (site) sites.push(site);
       switch (step.name) {
         case 'addV': creates = true; break;
         case 'addE': creates = true; edges = true; break;
@@ -1033,7 +1062,7 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     }
   };
   walk(steps, true);
-  return unreadable ? everythingWritten() : { writers, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [] };
+  return unreadable ? everythingWritten() : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [] };
 }
 
 /**
@@ -2885,6 +2914,12 @@ function writeSnapshot(input: Rel, fresh: Minter): { readonly bindings: readonly
  *    — so that common case still runs.
  *  - **(3) a PER-DRIVER search whose `onMatch` or tail writes a searched key** — one driver's write can make an
  *    element newly match another driver's different search, which no pairwise test over the snapshot sees.
+ *  - **(0) ANY OTHER write in the program the search could observe** (`othersObserved`,
+ *    `mergeObservesOtherWrites`) — refused over a second driver outright. The loop interleaves the WHOLE
+ *    pipeline per traverser, not just this step: traverser 1 runs every later step (a `drop()`, an `addV`)
+ *    before traverser 2 is pulled into the merge, and every EARLIER step for traverser 2 runs after
+ *    traverser 1's merge. Nothing outside this merge's own cluster is visible to the guards above, so the
+ *    one fact they cannot model is the one that refuses.
  *
  * Runtime rather than compile-time because the answer is the DATA's: `g.V().mergeE(m).option(onMatch, …)`
  * over an existing edge is the loop exactly, and only a miss (or a match) shared by two drivers is not. An
@@ -2919,6 +2954,12 @@ function guardMergeInterleaving(
     type: typeOf(...left.type.cols, ...right.type.cols.map((c) => meta(`b_${c.name}`, c.type, true))),
   });
 
+  // (0) — ANOTHER write in the program, earlier or later in the pipeline, that a later driver's search could
+  // observe: the one test that needs no pairwise reading, because the loop interleaves it with every driver.
+  if (facts.othersObserved) {
+    raiseOnRows(second(), 'in a traversal with another write (an addV/addE/merge, a drop, a label, or a property() write to a searched key) that a later traverser\'s search would observe');
+    return;
+  }
   // (3) — a per-driver search the onMatch or the tail can redirect.
   if (facts.perDriverSearch && facts.mutatesSearch) {
     raiseOnRows(second(), 'with an onMatch or property() write to a key a per-traverser search reads');
@@ -3007,6 +3048,8 @@ interface MergeWriteFacts {
   readonly repeats: boolean;
   /** The `onMatch` OR the tail writes (or drops) a property key the search reads. */
   readonly mutatesSearch: boolean;
+  /** A write OUTSIDE this merge's own cluster could change what the search finds (`mergeObservesOtherWrites`). */
+  readonly othersObserved: boolean;
 }
 
 /** `MergeWriteFacts` from a host's parsed writes. `searched` is the set of property keys the search reads,
@@ -3032,6 +3075,7 @@ interface MergeWriteFacts {
 function mergeWriteFacts(
   element: 'vertex' | 'edge',
   onMatch: readonly PropertyWrite[], appended: readonly string[], tail: readonly PropertyWrite[], searched: ReadonlySet<string> | null,
+  propertySteps: readonly IRStep[], program: ProgramWrites,
 ): MergeWriteFacts {
   const perTraverser = (write: PropertyWrite): boolean => write.kind === 'runtime' || write.kind === 'map'
     || (write.kind === 'set' && (write.cardinality === 'list' || (element === 'vertex' && write.cardinality === null)));
@@ -3041,7 +3085,51 @@ function mergeWriteFacts(
     acts: onMatch.length > 0 || appended.length > 0,
     repeats: onMatch.some(perTraverser) || tail.some(perTraverser),
     mutatesSearch: onMatch.some(writesSearched) || tail.some(writesSearched),
+    othersObserved: mergeObservesOtherWrites(element, propertySteps, searched, program),
   };
+}
+
+/**
+ * **DOES A WRITE OUTSIDE THIS MERGE'S OWN CLUSTER CHANGE WHAT ITS SEARCH FINDS?** The reference pipeline is
+ * lazy: a merge is a `FlatMapStep` and `LazyBarrierStrategy` puts no `NoOpBarrierStep` after the FIRST
+ * flat-map, nor anywhere in a traversal holding a `DropStep` (its early `return` on
+ * `hasStepOfAssignableClass(DropStep.class, …)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`),
+ * and `AddVertexStep`/`AddEdgeStep` are map steps. So traverser 1 runs EVERY later step before traverser 2
+ * is pulled into the merge's `flatMap` search (`MergeVertexStep.java:78-177`, `MergeEdgeStep.java:255-338`):
+ * `g.inject(1,2,3).mergeV([name:'zz']).properties('name').drop()` leaves three new vertices there (each
+ * later search misses), and `….addV('p').property('name','zz')` lets traverser 2's search find two. An
+ * EARLIER write interleaves the same way, from the other side. The plan writes each step for every driver
+ * at once, so it answers those only when no other write can touch what the search reads — and the
+ * pipeline's extent is not decided here (a branch arm, a nested body), so this reads the whole PROGRAM
+ * (`ProgramWrites.sites`), the reading `sequentialGuard` already makes for a value body.
+ *
+ * Counted, not matched by identity: a nested body is normalized afresh, so this merge's own step need not
+ * be the one the program walk saw. The program's sites the search can observe, minus this merge's own
+ * (itself, plus each of its `property()` tail steps that writes a searched key — the tail the guards
+ * above already read), must be none. The classification over-approximates and refuses rather than answers:
+ *  - a `drop()` (an element or a property, of any kind — dropping a vertex drops its edges): always;
+ *  - a creation of the merge's own element kind (`addV`/`mergeV` for a vertex search, `addE`/`mergeE`
+ *    for an edge search); a vertex creation counts for an edge search too, since an endpoint resolves by
+ *    vertex (`MergeEdgeStep.resolveVertex`) — fail closed;
+ *  - a label mutation, for a vertex search (an edge's label is immutable);
+ *  - a `property()` write whose key the search reads (`searched`; `null` = any key may be searched).
+ * An `'unknown'` program (an unreadable body) always observes.
+ */
+function mergeObservesOtherWrites(
+  element: 'vertex' | 'edge', propertySteps: readonly IRStep[], searched: ReadonlySet<string> | null, program: ProgramWrites,
+): boolean {
+  if (program.sites === 'unknown') return true;
+  const observes = (site: WriteSite): boolean => {
+    switch (site.op) {
+      case 'drop': case 'addV': case 'mergeV': return true;
+      case 'addE': case 'mergeE': return element === 'edge';
+      case 'label': return element === 'vertex';
+      case 'property': return site.keys === 'all' || searched === null || [...site.keys].some((key) => searched.has(key));
+    }
+  };
+  const own = 1 + propertySteps.map(writeSiteOf).filter((site): site is WriteSite => site !== null && observes(site)).length;
+  return program.sites.filter(observes).length !== own;
 }
 
 /**
@@ -3668,7 +3756,7 @@ function mergeVComputed(
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`).
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: tupleKey, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol) },
-    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set([...cKeys, ...Object.keys(match.props)])), perDriverSearch: true },
+    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set([...cKeys, ...Object.keys(match.props)]), propertySteps, child.writes), perDriverSearch: true },
     bind, guard, fresh);
   // `onMatch` over the MATCHED vertices — shared with the constant path; the per-driver runtime write
   // (`armValueWriteCorrelated`, correlated by `ord`) is the one host difference. Empty on the create path.
@@ -3870,7 +3958,7 @@ export function mergeVFromMap(
   // creation — `mapCouldMatch`.
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh) },
-    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
+    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
   // reached). Shared with the other vertex-merge paths.
   if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites, () => false, bind, guard, fresh, child)) return null;
@@ -4160,7 +4248,7 @@ export function mergeEFromMap(
     rel: unmatched,
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [col(rel, 'src'), col(rel, 'tgt'), jsonText(col(rel, MAP_COL))] }),
     couldMatch: (earlier, later) => and(mapCould(earlier, later), and(sameSide(earlier, later, 'hasOut', 'src'), sameSide(earlier, later, 'hasIn', 'tgt'))),
-  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
+  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
   if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));
@@ -4351,7 +4439,7 @@ export function elementMergeV(
       input: make.project({ id: fresh('p'), input: incoming, channels: [], type: typeOf(meta(ORD, 'int')), exprs: [[ORD, col(incoming.id, ORD)]] }),
     }),
     createKey: null, couldMatch: null,
-  } : null, { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
+  } : null, { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes), perDriverSearch: false }, bind, guard, fresh);
   // IS THE CREATE ID STILL FREE — but only WHEN a create happens, which is `mergeV`'s whole difference
   // from `addV`'s unconditional guard. The search is by id (`hasId` above), so a MATCH already owns that
   // id and no collision is possible; a create runs only where the search came back empty, and collides
@@ -4563,7 +4651,7 @@ function mergeEComputed(
   guardMergeInterleaving('mergeE', incoming, matched, {
     rel: unmatched, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol),
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [...(src ? [col(rel, 'src')] : []), ...(tgt ? [col(rel, 'tgt')] : []), tupleKey(rel)] }),
-  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(cKeys)), perDriverSearch: true }, bind, guard, fresh);
+  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(cKeys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the matched edges whenever onMatch or the tail mutated them (created edges are born
   // dirty); an empty matched is a no-op. Before the create branch, so it covers the tail over `matched`.
@@ -4865,7 +4953,7 @@ export function elementMergeE(
     couldMatch: searchSides.length
       ? (earlier, later) => searchSides.map((side) => eq(col(earlier, side), col(later, side))).reduce((a, b) => and(a, b))
       : null,
-  } : null, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
+  } : null, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes), perDriverSearch: false }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the MATCHED (existing) edges whenever onMatch or the tail `property()` run mutated
   // them (§5·1); created edges are born dirty, and an empty `matched` is a no-op. Placed before the
