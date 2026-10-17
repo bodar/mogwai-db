@@ -802,6 +802,12 @@ authorities.
   `mayYieldNull` stopgap is removed; `coalesce()` as a child value is a CASE on arm presence. Open residue:
   order()/dedup()/groupCount() by()-KEY productivity still reads the key's nullness (`productivityFilter`) —
   `g.inject([null,1]).order().by(unfold())` answers `[]`; the key consumers must read byTyped's presence.
+  ✅ **Required-present fix-forward LANDED 2026-10-17 (`da957253`..`3275d454`):** the residue above is closed —
+  `productivityFilter(step, present)` (`rel/modulator.ts`) is the ONE by()-productivity drop authority (decline on
+  'unknown'), and order/dedup/sack/aggregate/where/group/project/select all route through it; group value
+  barriers pool per key or decline; a record's map states its value side at one authority (`RecordField.presentCol`);
+  an absent map key falls through to the side effect / path label of the same name (every map-scope reader
+  declines or raises); a reducer's null seed reaches every container as null (`asExactReal`, `sumBuffer`).
 - 🚧 **E — per-row runtime raises and evaluation extent.** Authority: `step/map/MathStep.java`,
   `ToUpperGlobalStep` / `ConcatStep` (`IllegalArgumentException`), `RangeGlobalStep` (stops pulling at high)
   vs `CollectingBarrierStep` (drains everything), `NumberHelper` (`/ by zero`, overflow). Seam: THREE
@@ -967,7 +973,7 @@ authorities.
 | 1 | ✅ G — one IR walker, arm column decline, alias into arms (landed `1ad88ccf`/`fec9e97c`; alias-channel threading open) | S–M | cheapest; every later branch re-trips it |
 | 2 | C — number-class authority (after the §6·7 decision) | M | `asNumber`, orderability, reducers are all consumers |
 | 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
-| 4 | ✅ D — required `present` (landed `2b0b1e27`; by()-key productivity open) | M | small once E adds the third `ChildValue` field in the same pass |
+| 4 | ✅ D — required `present` (landed `2b0b1e27`; fix-forward `da957253`..`3275d454`) | M | small once E adds the third `ChildValue` field in the same pass |
 | 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
 | 6 | B — the `EmissionKey` stack | L | needs A |
 | 7 | F — set-based merge interleave + writer-stream guard | M | independent; can run alongside 3–6 |
