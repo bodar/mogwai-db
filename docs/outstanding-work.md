@@ -177,7 +177,9 @@ lowered.
   ([archived](./archive/2026-08-30-browser-port-feasibility.md)). Low-priority, non-blocking: wire
   `navigator.storage.estimate()` (the DO-ceiling analog, no consumer yet), and a write **exactly-once**
   tail (a committed-but-unacked write lost to a hard kill is retried at-least-once; needs write
-  idempotency keys).
+  idempotency keys). The OPFS teardown flake (destroy racing a live owner's access handles) is FIXED
+  (`edef10be`): one bounded teardown authority (`destroyGraphWorker`), one handle-release retry
+  (`src/browser/opfs-release.ts`).
 - **GraphQL front end — Phases 0–3 live; additive tail open.** A deployable, conformance-tested
   GraphQL-over-HTTP surface exists (`src/graphql/`, [plan](./2026-08-07-graphql-front-end-plan.md)).
   Open, none blocked: **interfaces/unions** (engine substrate landed; needs union minting in reflection
