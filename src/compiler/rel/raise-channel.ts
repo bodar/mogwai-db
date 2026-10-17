@@ -1,13 +1,14 @@
 import { withChannel, type Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { exprMayRaise, raiseCarried } from '../../rel/raise.ts';
+import { exprMayRaise, mayRaise, raiseCarried, raiseTest } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { RelId } from '../../rel/types.ts';
-import { exprRels, forEachExpr, relChildren, relExprs } from '../../rel/walk.ts';
+import { exprRels, forEachExpr, forEachRel, relChildren, relExprs } from '../../rel/walk.ts';
 import { meta, typeOf, type Minter } from './build.ts';
 import { isLocalScope, sliceOf, SLICE_STEPS, type IRStep } from '../ir/step.ts';
-import { isScopeArg } from '../../gremlin/frontend.ts';
+import { isNested, isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import { eachChildChain, rawBodies } from '../ir/walk.ts';
 
 /**
  * THE PENDING RAISE — a row whose evaluation RAISED, carried as DATA to the step that decides whether the
@@ -442,6 +443,191 @@ export function raiseContained(plan: Rel): boolean {
     }
   }
   return true;
+}
+
+/**
+ * DOES `FilterRankingStrategy` MOVE THE FILTER AT `steps[at]` — past a neighbour in its run of ranked
+ * filters, either way?
+ *
+ * The reference does not run filters in the order they are written: the optimization bubbles each filter
+ * ahead of a directly preceding filter of higher rank (`is` 1, `has` 2, `where(P)` 3, a traversal filter /
+ * `not` 4, a scoped `where` 5, `or` 6, `and` 7, `where(P).by()` 8, `dedup` 9, `order` 10 — a parent takes
+ * the highest rank among its children's steps), at every depth
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/FilterRankingStrategy.java`
+ * `apply`, `getStepRank`, `getMaxStepRank`). Order among filters is invisible in the ANSWER — but not in
+ * where a filter's RAISE is met: `g.V().where(values('age').toUpper().fold()).hasId(3)` is `[v[3]]`, the
+ * `hasId` having run first. A caller lowering a filter that may raise asks this and DECLINES where the
+ * reference reorders it, rather than raise on traversers the reference filtered out first (or answer
+ * where it raised). Conservative: the strategy's label guard (no swap past a step reading the labels of
+ * the one before) is not modelled, so a swap it would skip still counts.
+ */
+export function filterRankingMoves(steps: readonly IRStep[], at: number): boolean {
+  const rank = (index: number): number => filterRank(steps[index]!);
+  const own = rank(at);
+  if (own === 0) return false;
+  const labelled = (step: IRStep | undefined): boolean => step?.name === 'as' || step?.name === 'identity';
+  for (let i = at - 1; i >= 0 && (labelled(steps[i]) || rank(i) > 0); i--) if (!labelled(steps[i]) && rank(i) > own) return true;
+  for (let i = at + 1; i < steps.length && (labelled(steps[i]) || rank(i) > 0); i++) if (!labelled(steps[i]) && rank(i) < own) return true;
+  return false;
+}
+
+const RANK_READER = rawBodies({});
+
+/** `FilterRankingStrategy.getStepRank` over an IR step — 0 for anything it does not rank. */
+function filterRank(step: IRStep): number {
+  const own = baseFilterRank(step);
+  if (own === 0) return 0;
+  let max = own;
+  eachChildChain(step as Step, RANK_READER, (chain) => { for (const child of chain) max = Math.max(max, filterRank(child as IRStep)); });
+  return max;
+}
+
+function baseFilterRank(step: IRStep): number {
+  switch (step.name) {
+    case 'is': return 1;
+    case 'has': case 'hasLabel': case 'hasId': case 'hasKey': case 'hasValue': return 2;
+    case 'where': {
+      const nested = step.args.find((a) => isNested(a.value))?.value as { readonly nested: unknown } | undefined;
+      if (!nested) return step.modulators?.length ? 8 : 3;
+      const body = RANK_READER(nested.nested);
+      // `where(traversal)` is a `WhereTraversalStep` where its body starts or ends on a label, else a
+      // `TraversalFilterStep` (`GraphTraversal.where(Traversal)`).
+      return body && (body[0]?.name === 'as' || body[body.length - 1]?.name === 'as') ? 5 : 4;
+    }
+    case 'filter': case 'not': case 'hasNot': return 4;
+    case 'or': return 6;
+    case 'and': return 7;
+    case 'dedup': return isLocalScope(step) ? 0 : 9;
+    case 'order': return isLocalScope(step) ? 0 : 10;
+    default: return 0;
+  }
+}
+
+/** The filters a SLICE built (`sliceRows`) — a rank, a sample draw: each drops a row by its POSITION,
+ *  which the slice's own extent rule (`pullExtent`, `settlesExactly`) already answers for. */
+const POSITIONAL = new WeakSet<Rel>();
+
+/** Register every filter between a slice's result `top` and its `input` as positional. */
+export function markPositional(top: Rel, input: Rel): void {
+  const seen = new Set<Rel>();
+  const stack = [top];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node === input || seen.has(node)) continue;
+    seen.add(node);
+    if (node.kind === 'filter') POSITIONAL.add(node);
+    stack.push(...relChildren(node));
+  }
+}
+
+/**
+ * IS EVERY IN-STATEMENT RAISE EVALUATED WHEREVER THE REFERENCE MEETS IT, whatever order SQLite evaluates
+ * the statement in — the finished-plan check beside `raiseContained`, and the decline when it fails.
+ *
+ * An eager raise is a FILTER whose predicate is a raise test (`raiseTest`, `src/rel/raise.ts`) — a receiver's offence
+ * test, a carried test column, a pending raise's settle, a correlated body that raises — and it fires only
+ * when SQLite EVALUATES that predicate on the row. SQL fixes no evaluation order inside a statement: the
+ * flattener merges a filter into the block beneath it and splits the `WHERE` on `AND`, a term it finds
+ * constant (a statically empty `within()`, a comparison over a one-row `VALUES`) is coded once before the
+ * scan and a false one skips the scan outright, and the planner may run either side of a join as the outer
+ * loop. So a filter that can DROP a row, above a raising one, may drop it before the raise is evaluated, and
+ * the plan answers where the reference — which evaluates a step on each traverser BEFORE the step after it
+ * sees it (`FilterStep.processNextStart`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/FilterStep.java`)
+ * — raises: `g.inject(1).toUpper().is('x')` answered `[]`.
+ *
+ * The ONE place that order is fixed is where two filters become one `WHERE`: the emitter fuses a filter
+ * over a raising one IN ORDER, as one `CASE` term (`conjoinInOrder`, `src/rel/emit.ts`), and renders a CTE
+ * whose block holds a raise test `AS MATERIALIZED`, so SQLite cannot flatten it back into the query that
+ * reads it. This check declines every plan that ordering cannot reach:
+ * - a dropping filter over a raise test beneath an `explode` (the filter is tied to the member, so the row
+ *   of an empty collection is never visited) or inside a union arm (a pushed-down term joins the arm's own
+ *   `WHERE`, unordered);
+ * - a filter whose predicate reads no column at all and is not plainly true (constant — a false one skips
+ *   the whole scan) over ANYTHING that may raise, barriers included.
+ * Not covered, and stated rather than hidden: an INNER JOIN above a raise test (the planner may run the
+ * other side as the outer loop and never visit a raising row it has no match for) — declining it would
+ * refuse every `where(<raising body>).values(k)`.
+ *
+ * Exact routes stay open. A raise riding as DATA (the pending channel, `poisonRows`) is no raise arm until
+ * it is settled, and every filter it passes keeps a raising row (`keepingRaise`). A BARRIER block — an
+ * aggregate, a window, a LIMIT subquery, a recursive term — is evaluated whole whenever it is read, so a
+ * raise inside one has fired before anything above it drops a row of its output. A filter that cannot be
+ * false (a raise test, a forced read) drops nothing, and a slice's POSITIONAL filters (`markPositional`)
+ * drop by a position the slice's own extent rule answers for. A DEFERRAL (`deferralExpr`) belongs to the
+ * read and is not counted. A `Binding` is another statement (a `ref`).
+ */
+export function raiseOrdered(plan: Rel): boolean {
+  const below = new Map<Rel, boolean>();
+  // Does the block `rel` heads — down to the barriers beneath it — hold a raise test?
+  const raisesIn = (rel: Rel): boolean => {
+    const known = below.get(rel);
+    if (known !== undefined) return known;
+    below.set(rel, false);
+    const raises = !EVALUATION_BARRIERS.has(rel.kind) && (raiseTest(rel) || relChildren(rel).some(raisesIn));
+    below.set(rel, raises);
+    return raises;
+  };
+  // Is a raise test beneath a dropping filter out of the emitter's in-order reach? The emitter orders a
+  // filter after every raise test FUSED beneath it in its block, whatever joins the block holds (a raise on
+  // one SIDE of a join is the join rule's, below). An `explode` ties the filter above it to the member, so
+  // an empty collection's row — and a raise on it — is never visited; a union arm takes a pushed-down term
+  // of its own. A `Materialize` fuses into the block when it is not bound, and a bound one that raises is
+  // rendered `AS MATERIALIZED` (`src/rel/emit.ts`), evaluated whole once read.
+  const unordered = (rel: Rel): boolean => {
+    switch (rel.kind) {
+      case 'filter': case 'project': case 'sort': case 'distinct': case 'materialize': return unordered(rel.input);
+      case 'join': return rel.join === 'semi' || rel.join === 'anti' ? unordered(rel.left) : unordered(rel.left) || unordered(rel.right);
+      case 'explode': case 'union': return raisesIn(rel);
+      default: return false;
+    }
+  };
+  let ordered = true;
+  forEachRel(plan, (rel) => {
+    if (!ordered) return;
+    const input = dropsRows(rel);
+    if (input && (constantPredicate(rel) ? mayRaise(input) : unordered(input))) ordered = false;
+  });
+  return ordered;
+}
+
+const EVALUATION_BARRIERS: ReadonlySet<Rel['kind']> = new Set(['aggregate', 'window', 'limit', 'recursive']);
+
+/** The input a node may DROP rows of by their values — a filter that can be false, or an `EXISTS`
+ *  (semi/anti join) — or `null`. */
+function dropsRows(rel: Rel): Rel | null {
+  if (rel.kind === 'filter') return POSITIONAL.has(rel) || neverFalse(rel.pred) || plainlyTrue(rel.pred) ? null : rel.input;
+  if (rel.kind === 'join' && (rel.join === 'semi' || rel.join === 'anti')) return rel.left;
+  return null;
+}
+
+/** A dropping node whose condition reads NO column and is not plainly true — SQLite codes it once, before
+ *  the scan, and a false one skips the scan beneath it outright. */
+function constantPredicate(rel: Rel): boolean {
+  if (rel.kind !== 'filter') return false;
+  let reads = false;
+  forEachExpr(rel.pred, (node) => { if (node.kind === 'col' || exprRels(node).length) reads = true; });
+  return !reads && !plainlyTrue(rel.pred);
+}
+
+/** A constant the compiler spelled as TRUE — a truthy literal, or `lit = lit` of one value (an `is()` over
+ *  a folded constant). Anything else that reads no column may be false. */
+function plainlyTrue(e: Expr): boolean {
+  if (e.kind === 'lit') return e.value === true || (typeof e.value === 'number' && e.value !== 0);
+  if (e.kind === 'binary' && e.op === 'and') return plainlyTrue(e.left) && plainlyTrue(e.right);
+  return e.kind === 'binary' && e.op === '=' && e.left.kind === 'lit' && e.right.kind === 'lit'
+    && e.left.value !== null && e.left.value === e.right.value;
+}
+
+/** A predicate that is TRUE unless it raises — a conjunction of forced reads, `typeof(x) IS NOT 'raise'`
+ *  (`typeof` never answers `'raise'`). It drops no row, so nothing beneath it is skipped. */
+function neverFalse(pred: Expr): boolean {
+  if (pred.kind === 'binary' && pred.op === 'and') return neverFalse(pred.left) && neverFalse(pred.right);
+  // A RAISE TEST (`raisingWhen`, a settle): every arm raises, and otherwise the row passes.
+  if (pred.kind === 'case') return pred.whens.every(([, then]) => exprMayRaise(then))
+    && pred.else?.kind === 'lit' && (pred.else.value === 1 || pred.else.value === true);
+  return pred.kind === 'binary' && pred.op === 'is not' && pred.left.kind === 'call' && pred.left.fn === 'typeof'
+    && pred.right.kind === 'lit' && pred.right.value === 'raise';
 }
 
 /**

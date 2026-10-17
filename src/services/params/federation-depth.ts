@@ -1,3 +1,4 @@
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 // ---------- federation recursion guard (shared, runtime-agnostic) ----------
 //
 // A sibling graph runs the SAME engine, so a federated sub-traversal may itself contain a
@@ -26,5 +27,5 @@ export const MAX_FEDERATION_DEPTH = 4;
  *  message. Shared by both runtimes so the bound + error are identical (parity is structural). */
 export function guardFederationDepth(depth: number, id: string): void {
   if (depth > MAX_FEDERATION_DEPTH)
-    throw new Error(`federation depth exceeded (${MAX_FEDERATION_DEPTH}) reaching graph "${id}" — a cyclic or too-deep federated traversal`);
+    throw new UnsupportedTraversal(`federation depth exceeded (${MAX_FEDERATION_DEPTH}) reaching graph "${id}" — a cyclic or too-deep federated traversal`);
 }

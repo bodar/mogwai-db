@@ -175,7 +175,25 @@ describe('call/with fold + param resolution', () => {
 describe('call() routing (seedCall)', () => {
   test('an unknown service throws a clear error (end-to-end parse→fold→spec→registry)', () => {
     // defaultRegistry is empty until services land, so --list is unknown here.
-    expect(() => compile('g.call("--list")', {})).toThrow(/unknown service '--list'/);
+    expect(() => compile('g.call("--list")', {})).toThrow('Unrecognized service: --list');
+  });
+
+  // A bad call() is a QUERY failure of a named class — the argument's own error (`ValueParseError`, the
+  // reference's `IllegalArgumentException` family) or a deferral (`UnsupportedTraversal`) — never a bare
+  // internal Error, whichever service validates it.
+  test('a service rejects its input as a classed query failure, never a bare Error', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const g of MODERN_SEED) executeQuery(store, g, {});
+    const failure = (q: string): string | undefined => {
+      try { executeQuery(store, q, {}, {}, standardRegistry); } catch (e) { return (e as Error).name; }
+      return undefined;
+    };
+    expect(failure('g.call("nope")')).toBe('ValueParseError');
+    expect(failure('g.call("tinker.search")')).toBe('ValueParseError');
+    expect(failure('g.call("tinker.search").with("search", "ab")')).toBe('UnsupportedTraversal');
+    expect(failure('g.call("tinker.search").with("search", "mar").with("type", "nope")')).toBe('ValueParseError');
+    expect(failure('g.call("tinker.degree.centrality")')).toBe('UnsupportedTraversal');
+    expect(failure('g.V().call("tinker.degree.centrality").with("direction", "sideways")')).toBe('ValueParseError');
   });
 
   test('a registered service is reached with its resolved params', () => {

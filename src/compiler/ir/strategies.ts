@@ -7,7 +7,8 @@ import { type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
-import { ValueParseError } from '../../gremlin/coerce.ts';
+import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../unsupported.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -152,7 +153,7 @@ export function markProductiveBy(steps: Step[]): Step[] {
     if (BY_HOSTS.has(s.name) || isAliasCompareWhere(s)) host = s.name;
     else if (s.name === 'by') {
       if (!host || !PRODUCTIVE_BY_HOSTS.has(host))
-        throw new Error(`ProductiveByStrategy with ${host ?? 'unattached'} by() is not yet supported`);
+        throw new UnsupportedTraversal(`ProductiveByStrategy with ${host ?? 'unattached'} by() is not yet supported`);
     } else host = undefined;
   }
   return steps.map((s) => PRODUCTIVE_BY_HOSTS.has(s.name) || isAliasCompareWhere(s) || s.name === 'local'
@@ -295,17 +296,17 @@ function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (
  */
 export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   if (spec.config.vertexProperties !== undefined)
-    throw new Error('SubgraphStrategy(vertexProperties) criterion not yet supported');
+    throw new UnsupportedTraversal('SubgraphStrategy(vertexProperties) criterion not yet supported');
   const vArg = spec.config.vertices;
   const eArg = spec.config.edges;
   if (vArg !== undefined && !isNested(vArg))
-    throw new Error('SubgraphStrategy requires a vertices criterion traversal');
+    throw new ValueParseError('SubgraphStrategy requires a vertices criterion traversal');
   if (eArg !== undefined && !isNested(eArg))
-    throw new Error('SubgraphStrategy requires an edges criterion traversal');
+    throw new ValueParseError('SubgraphStrategy requires an edges criterion traversal');
   if (vArg === undefined && eArg === undefined)
-    throw new Error('SubgraphStrategy requires a vertices or edges criterion');
+    throw new ValueParseError('SubgraphStrategy requires a vertices or edges criterion');
   if (writesAnywhere(steps, params))
-    throw new Error('SubgraphStrategy over a mutating traversal (addV/addE/mergeV/mergeE/property/drop) is not yet supported');
+    throw new UnsupportedTraversal('SubgraphStrategy over a mutating traversal (addV/addE/mergeV/mergeE/property/drop) is not yet supported');
   // Resolve criterion bodies ONCE; reused by reference at every injection site and never
   // fed back through recurseInject (the strategy never subgraph-filters its own criteria).
   const vCrit: Step[] | null = vArg ? stepChain(vArg.nested, params) : null;
@@ -355,11 +356,11 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
 export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   const key = spec.config.partitionKey;
   if (typeof key !== 'string')
-    throw new Error('PartitionStrategy requires a string partitionKey');
+    throw new ValueParseError('PartitionStrategy requires a string partitionKey');
   if (spec.config.includeMetaProperties === true)
-    throw new Error('PartitionStrategy(includeMetaProperties) not yet supported');
+    throw new UnsupportedTraversal('PartitionStrategy(includeMetaProperties) not yet supported');
   if (someStepDeep(steps, params, (s) => s.name === 'mergeV' || s.name === 'mergeE', true))
-    throw new Error('PartitionStrategy with mergeV()/mergeE() not yet supported (partition-aware upsert)');
+    throw new UnsupportedTraversal('PartitionStrategy with mergeV()/mergeE() not yet supported (partition-aware upsert)');
   // readPartitions defaults to EMPTY, and the read filter is injected UNCONDITIONALLY
   // (matching TinkerPop's PartitionStrategy.Builder default + apply()): an omitted
   // readPartitions means "see nothing" (has(key, within([])) → 0 rows), NOT "see
@@ -387,7 +388,7 @@ export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Re
 export function verify(spec: StrategySpec, steps: Step[]): void {
   if (spec.name === 'ReadOnlyStrategy') {
     const m = steps.find((s) => MUTATING_STEPS.has(s.name));
-    if (m) throw new Error(`The provided traversal has a mutating step and thus is not read only: ${m.name}`);
+    if (m) throw new VerificationException(`The provided traversal has a mutating step and thus is not read only: ${m.name}`);
   } else if (spec.name === 'EdgeLabelVerificationStrategy') {
     if (spec.config.throwException !== true) return; // default warns only → no-op
     const bad = steps.find((s) => {
@@ -398,7 +399,7 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
       if (s.name === 'to') return s.args.some((a) => isDirectionArg(a.value));
       return true;
     });
-    if (bad) throw new Error(`The provided traversal contains a vertex step without any specified edge label: ${bad.name}()`);
+    if (bad) throw new VerificationException(`The provided traversal contains a vertex step without any specified edge label: ${bad.name}()`);
   } else if (spec.name === 'ReservedKeysVerificationStrategy') {
     if (spec.config.throwException !== true) return; // default warns only → no-op
     const k = spec.config.keys;
@@ -407,7 +408,7 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
     const reserved = new Set<string>(k == null ? ['id', 'label'] : k instanceof Set ? [...k] as string[] : Array.isArray(k) ? k : [k]);
     for (const s of steps)
       if (s.name === 'property' && typeof s.args[0]?.value === 'string' && reserved.has(s.args[0].value))
-        throw new Error(`The provided traversal is setting a property key to a reserved word: ${s.args[0].value}`);
+        throw new VerificationException(`The provided traversal is setting a property key to a reserved word: ${s.args[0].value}`);
   }
 }
 
@@ -509,14 +510,14 @@ export function desugarIo(steps: IRStep[]): IRStep[] {
     if (s.name !== 'io') { out.push(s); continue; }
     const path = s.args[0].value;
     if (typeof path !== 'string')
-      throw new Error('io() takes a string path (the document to read or write)');
+      throw new ValueParseError('io() takes a string path (the document to read or write)');
     // The direction step is the first NON-with step after io() — with() modulates the call, so it
     // may legally sit between them (g.io(p).with(k,v).read()).
     let j = i + 1;
     while (j < steps.length && steps[j].name === 'with') j++;
     const direction = steps[j]?.name;
     if (direction !== 'read' && direction !== 'write')
-      throw new Error(`io("${path}") must be followed by read() or write()`);
+      throw new ValueParseError(`io("${path}") must be followed by read() or write()`);
     out.push({ ...s, name: 'call', args: [arg(IO_SERVICE_NAME), arg(new Map<string, any>([['path', path], ['direction', direction]]))] });
     // Re-emit the with() steps AFTER the call so absorbCallWith folds them, and drop the
     // read()/write() itself — it was the direction, and it is now a param.
@@ -561,12 +562,12 @@ export function desugarGraphAlgos(steps: IRStep[]): IRStep[] {
       if (s.args.length > 0) {
         const damping = s.args[0]?.value;
         if (typeof damping !== 'number')
-          throw new Error('pageRank(α) takes a numeric damping factor');
+          throw new ValueParseError('pageRank(α) takes a numeric damping factor');
         config.set('dampingFactor', damping);
       }
     } else if (s.args.length > 0) {
       // connectedComponent/peerPressure/shortestPath are `_Empty` overloads — all config is via with().
-      throw new Error(`${s.name}() takes no positional arguments; configure it with .with("~tinkerpop.${s.name}.<key>", …)`);
+      throw new ValueParseError(`${s.name}() takes no positional arguments; configure it with .with("~tinkerpop.${s.name}.<key>", …)`);
     }
     config.set('mode', s.name === 'shortestPath' ? 'path' : 'decorate');
     return { ...s, name: 'call', args: [arg(serviceName), arg(config)] };
@@ -582,7 +583,7 @@ export function absorbCallWith(steps: IRStep[]): IRStep[] {
     let j = i + 1;
     for (; j < steps.length && steps[j].name === 'with'; j++) {
       const [k, v] = steps[j].args.map((a) => a.value);
-      if (typeof k !== 'string') throw new Error('call().with() key must be a string');
+      if (typeof k !== 'string') throw new ValueParseError('call().with() key must be a string');
       withArgs.push([k, v]);
     }
     out.push(withArgs.length ? { ...s, withArgs } : s);
@@ -845,21 +846,38 @@ const READONLY_CHILD_HOSTS: Record<string, (args: readonly any[]) => readonly nu
 };
 
 /** Every nested traversal sitting in a VALUE-argument slot of `s` — the operand slots shared with
- *  the constant fold, plus the id/property hosts above, plus operands nested inside a P. */
-function valueArgTraversals(s: Step): any[] {
+ *  the constant fold, plus the id/property hosts above, plus operands nested inside a P — each with WHEN
+ *  the reference validates it (`ReadOnlyCheck`). */
+function valueArgTraversals(s: Step): { readonly nested: any; readonly check: ReadOnlyCheck }[] {
   const slots = [
     ...(VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? []),
     ...(READONLY_CHILD_HOSTS[s.name]?.(s.args ?? []) ?? []),
   ];
-  const out: any[] = [];
+  const out: { readonly nested: any; readonly check: ReadOnlyCheck }[] = [];
+  // A predicate operand is checked inside `P`'s own constructor (`P.java`) wherever it stands.
+  const direct: ReadOnlyCheck = s.name === 'property' ? 'verification' : 'construction';
   (s.args ?? []).forEach((arg, i) => {
     const a = arg.value;
-    if (slots.includes(i) && isNested(a)) out.push(a.nested);
+    if (slots.includes(i) && isNested(a)) out.push({ nested: a.nested, check: direct });
     // …and operands wrapped in a predicate, at any depth: has("name", P.eq(__.addV(…))).
-    if (isPred(a)) for (const n of valueNodes(a)) if (isNested(n)) out.push(n.nested);
+    if (isPred(a)) for (const n of valueNodes(a)) if (isNested(n)) out.push({ nested: n.nested, check: 'construction' });
   });
   return out;
 }
+
+/**
+ * WHEN THE REFERENCE CHECKS A VALUE CHILD IS READ-ONLY, which decides both the exception and the class
+ * name it prints. `has(k, <traversal>)`/`P.eq(<traversal>)`/`V(<traversal>)` run `ReadOnlyChildValidator`
+ * at CONSTRUCTION and throw its `IllegalArgumentException` while the child still holds its `GValueHolder`
+ * PLACEHOLDER steps. `property(k, <traversal>)` and a traversal KEY are NOT validated at construction
+ * (`GraphTraversal.property` has no validator call): only `StandardVerificationStrategy` checks them
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/verification/StandardVerificationStrategy.java:87-101`),
+ * re-thrown as a `VerificationException`. Strategies run one at a time over the WHOLE tree
+ * (`TraversalHelper.applyTraversalRecursively` per strategy, `util/DefaultTraversal.applyStrategies`), so
+ * the optimization `GValueReductionStrategy` has already reduced every placeholder in the child to its
+ * concrete step (`AddVertexStepPlaceholder.asConcreteStep` → `AddVertexStep`) by then.
+ */
+type ReadOnlyCheck = 'construction' | 'verification';
 
 /**
  * TinkerPop's `StandardVerificationStrategy`, as much of it as our language surface can violate.
@@ -888,12 +906,10 @@ function valueArgTraversals(s: Step): any[] {
  */
 /**
  * The class name the reference's `Mutating` step for each of our write steps carries WHEN THE CHILD IS
- * VALIDATED — the `%s` `ReadOnlyChildValidator` prints. `has(k, <traversal>)`/`P.eq(<traversal>)`/
- * `V(<traversal>)` validate at CONSTRUCTION (`GraphTraversal.has`/`V`, `P.java`), and a `property()`'s
- * child at `StandardVerificationStrategy`, before strategies reach the child — so in both cases the
- * write is still its `GValueHolder` PLACEHOLDER (`GraphTraversal.addV` adds `AddVertexStepPlaceholder`,
- * reduced only by `GValueReductionStrategy`, an optimization applied to the child after its parent's
- * verification).
+ * VALIDATED AT CONSTRUCTION — the `%s` `ReadOnlyChildValidator` prints for `has(k, <traversal>)`/
+ * `P.eq(<traversal>)`/`V(<traversal>)` (`GraphTraversal.has`/`V`, `P.java`), where the write is still its
+ * `GValueHolder` PLACEHOLDER (`GraphTraversal.addV` adds `AddVertexStepPlaceholder`). A `property()`'s
+ * child is checked later, at verification, under its REDUCED class (`ReadOnlyCheck`, `reducedClass`).
  */
 const MUTATING_STEP_CLASS: Readonly<Record<string, string>> = {
   addV: 'AddVertexStepPlaceholder', addE: 'AddEdgeStepPlaceholder', property: 'AddPropertyStepPlaceholder',
@@ -919,23 +935,35 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
  *  A `ValueParseError` because it is the traversal's ANSWER, not a deferral. The child is printed as its
  *  Gremlin source — the reference prints its `StringFactory.traversalString`, a Java step-object
  *  rendering this compiler has no counterpart of. */
-function readOnlyChildViolation(step: Step, nested: unknown): ValueParseError {
+function readOnlyChildViolation(step: Step, nested: unknown, check: ReadOnlyCheck): ValueParseError {
   const text = typeof (nested as { getText?: unknown })?.getText === 'function' ? (nested as { getText(): string }).getText() : '';
-  return new ValueParseError(
-    `Child traversal contains a mutating step '${MUTATING_STEP_CLASS[step.name] ?? step.name}' in '${text}'. `
-    + 'Mutating steps are not allowed in child traversals.');
+  const placeholder = MUTATING_STEP_CLASS[step.name] ?? step.name;
+  const message = `Child traversal contains a mutating step '${check === 'verification' ? reducedClass(placeholder) : placeholder}' in '${text}'. `
+    + 'Mutating steps are not allowed in child traversals.';
+  return check === 'verification' ? new VerificationException(message) : new ValueParseError(message);
 }
 
+/** The concrete step a `GValueHolder` placeholder reduces to — `AddVertexStepPlaceholder` → `AddVertexStep`
+ *  (each `*Placeholder.asConcreteStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/{map,sideEffect}/`). */
+const reducedClass = (placeholder: string): string => placeholder.replace(/Placeholder$/, '');
+
 export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
-  const scan = (chain: readonly Step[], underRepeat: boolean) => {
+  // TWO walks, in the reference's order: every check made while the traversal is CONSTRUCTED has run,
+  // at any depth, before the first strategy does — so `property('k', is(gt(__.addV())))` is the inner
+  // `P`'s construction-time error, not the property child's verification one (`ReadOnlyCheck`).
+  // A construction check is POST-order: a step's argument traversals (and the `P` around one) are built
+  // before the step that takes them, so the innermost offender is the one named.
+  const scan = (chain: readonly Step[], underRepeat: boolean, phase: ReadOnlyCheck) => {
     for (const s of chain) {
-      if (underRepeat && s.name === 'inject')
-        throw new Error('The parent of inject()-step can not be repeat()-step');
-      for (const nested of valueArgTraversals(s)) {
+      if (phase === 'verification' && underRepeat && s.name === 'inject')
+        throw new VerificationException('The parent of inject()-step can not be repeat()-step');
+      if (phase === 'construction') eachChildChain(s, read, (body) => scan(body, false, phase));
+      for (const { nested, check } of valueArgTraversals(s)) {
+        if (check !== phase) continue;
         const body = read(nested);
         if (body === null) continue;
         const m = firstMutatingStep(body, read);
-        if (m) throw readOnlyChildViolation(m, nested);
+        if (m) throw readOnlyChildViolation(m, nested, check);
       }
       // recurse into every OTHER nested body so a bad operand nested deep still trips. The flag is
       // STICKY once set, mirroring the ancestor walk: a body two branches inside a repeat is still
@@ -943,11 +971,12 @@ export function verifyStandard(steps: IRStep[], params: Record<string, any>): vo
       // parent walk, and they are arguments of the same cluster here.
       const repeatHost = underRepeat || REPEAT_CLUSTER.has(s.name);
       // Every child position (`eachChildChain`); a body unparseable without params is skipped.
-      eachChildChain(s, read, (body) => scan(body, repeatHost));
+      if (phase === 'verification') eachChildChain(s, read, (body) => scan(body, repeatHost, phase));
     }
   };
   const read = rawBodies(params);
-  scan(steps as Step[], false);
+  scan(steps as Step[], false, 'construction');
+  scan(steps as Step[], false, 'verification');
 }
 
 /**
@@ -1001,7 +1030,7 @@ export function verifyByModulatorArity(steps: IRStep[], params: Record<string, a
       if (rule && !isLocalScope(s as IRStep)) {
         let n = 0;
         while (chain[i + 1 + n]?.name === 'by') n++;
-        if (n > rule.max) throw new Error(rule.message);
+        if (n > rule.max) throw new ValueParseError(rule.message);
       }
       for (const { value: a } of s.args ?? []) {
         if (!isNested(a)) continue;
@@ -1161,7 +1190,7 @@ function canonicalizeConnectivesLevel(steps: Step[]): Step[] {
   const split = splitOnConnective(steps.slice(a));
   if (!split) return steps;
   if (split.segments.some((seg) => seg.length === 0))
-    throw new Error('malformed infix .and()/.or() connector (empty operand)');
+    throw new ValueParseError('malformed infix .and()/.or() connector (empty operand)');
   // Each segment may still hold a higher-precedence connective — recurse before wrapping.
   const args = split.segments.map((seg) => nestedArg(canonicalizeConnectivesLevel(seg)));
   return [...anchors, synth(split.name, args, split.at.ctx)];
@@ -1978,7 +2007,7 @@ function rewriteStartLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
   // end-label rule exists to prevent, and previously it only threw when the fast path happened
   // to be on.
   if (!bound.has(labels[0]))
-    throw new Error(`where(__.as("${labels[0]}")): no such label — as("${labels[0]}") was not seen`);
+    throw new ValueParseError(`where(__.as("${labels[0]}")): no such label — as("${labels[0]}") was not seen`);
   return [{ ...head, name: 'select' }, ...body.slice(1)];
 }
 

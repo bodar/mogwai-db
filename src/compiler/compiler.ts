@@ -13,6 +13,7 @@ import { compileViaRel, loweringOptions } from './rel/spine.ts';
 import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
+import { UnsupportedTraversal } from './unsupported.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, perRowColumn, hasTypedMembers, memberTypeOf, withMemberType, isPerRow, SCALAR_MEMBERS, TYPED_MEMBERS, PER_ROW, PER_ROW_ENVELOPE, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -128,20 +129,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   return { kind: 'sql', compiled: discard ? applyDiscard(compiled) : compiled };
 }
 
-/**
- * A traversal the compiler cannot lower to SQL — a step, or a COMBINATION of steps, that has no
- * lowering yet.
- *
- * Its own class rather than a bare `Error` so a caller can tell an unsupported query from a broken
- * one: this is the user's traversal being outside what we compile, which is a deferral, while
- * anything else escaping a compile is a defect. Same distinction the Pass tier draws with `Deferral`.
- */
-export class UnsupportedTraversal extends Error {
-  constructor(readonly gremlin: string) {
-    super(`this traversal is not supported yet: no lowering covers ${gremlin}`);
-    this.name = 'UnsupportedTraversal';
-  }
-}
+export { UnsupportedTraversal };
 
 export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Executable {
   const plan = compilePlan(gremlin, params, options, paramTypes);

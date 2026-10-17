@@ -71,7 +71,7 @@ import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowO
 import { childHostOf, sourceFilter, type RaiseSink } from './lower/filter.ts';
 import { childRows, childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild, selfCollapses } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
-import { defersRaise, keepingRaise, pendingRaise, pullAt, pullExtent, raiseContained, RAISE, raisesWherePulled, settlesExactly, type PullPosition } from './raise-channel.ts';
+import { defersRaise, filterRankingMoves, keepingRaise, pendingRaise, pullAt, pullExtent, raiseContained, raiseOrdered, RAISE, raisesWherePulled, settlesExactly, type PullPosition } from './raise-channel.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -1489,6 +1489,9 @@ function hostFilter(
   // A clause that raises IN-STATEMENT is evaluated on every row SQL scans: exact only where the reference
   // pulls every row too (`settlesExactly`), and never where a slice the raise could have ridden to follows.
   if (exprMayRaise(clause) && (sink || !settlesExactly(steps, at + 1, ctx))) return 'decline';
+  // A clause that may raise meets exactly the traversers the reference hands it only where
+  // `FilterRankingStrategy` leaves it where it is written (`filterRankingMoves`).
+  if ((exprMayRaise(clause) || sink?.raise) && filterRankingMoves(steps, at)) return 'decline';
   const prior = pendingRaise(rel);
   if (!sink?.raise && !prior) return make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
   // A raising row — one this body raised on, or one a raise earlier in the run already rides (the
@@ -3958,6 +3961,9 @@ const lowered = (chain: Tail, source: GraphSource, propertySeek: boolean, ftsSub
   // carrier or a consumer would have dropped the raise and answered, so the plan declines instead.
   const effectRoots = (chain.effects ?? []).flatMap((binding) => (isRel(binding.node) ? [binding.node] : stmtChildren(binding.node)));
   if (![wire.rel, ...effectRoots].every(raiseContained)) return null;
+  // EVERY IN-STATEMENT RAISE EVALUATED IN THE REFERENCE'S ORDER (`raiseOrdered`): a filter or join over a
+  // raise in one statement may drop the row before SQLite evaluates it, so such a plan declines.
+  if (![wire.rel, ...effectRoots].every(raiseOrdered)) return null;
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
   // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
@@ -4755,7 +4761,10 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     const here = pullAt(readCtx, steps, at);
     const sink: RaiseSink | undefined = raiseDefersTo(steps, at + 1, here) ? {} : undefined;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, here, NO_ALIASES, sink);
-    if (!clause || sink?.raise || (exprMayRaise(clause) && (sink || !settlesExactly(steps, at + 1, here)))) break;
+    // A clause that may raise is the fold's too: `and` fixes no evaluation order against the clauses fused
+    // beside it, while the fold's filter over this scan is conjoined IN ORDER (`conjoinInOrder`) and asks
+    // whether `FilterRankingStrategy` moves it (`filterRankingMoves`).
+    if (!clause || sink?.raise || exprMayRaise(clause)) break;
     pred = and(pred, clause);
   }
 

@@ -3,6 +3,8 @@ import { SHORTEST_PATH_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
 import { edgeScopeOf, parseAnonBodyIR, relaxShortestPath, syncBarrier } from './kernel.ts';
+import { ValueParseError } from '../../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 
 // ---------- shortestPath — shortestPath(), a recursive-CTE path walk (Template B) ----------
 //
@@ -30,7 +32,7 @@ const SP_MAX_DISTANCE = '~tinkerpop.shortestPath.maxDistance';
 function targetBody(value: unknown): readonly IRStep[] | undefined {
   if (value === undefined) return undefined;
   return parseAnonBodyIR(value, (_kind, g) => {
-    throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${g}`);
+    throw new UnsupportedTraversal(`${SHORTEST_PATH_SERVICE_NAME}: target must be an anonymous vertex traversal, got ${g}`);
   }).steps;
 }
 
@@ -57,22 +59,22 @@ export function createShortestPathService(store: GraphStore | undefined): Servic
     resolve: (site) => {
       const mode = site.params.mode;
       if (mode !== undefined && mode !== 'path')
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: only the native shortestPath() (path mode) is implemented yet, not "${String(mode)}"`);
+        throw new UnsupportedTraversal(`${SHORTEST_PATH_SERVICE_NAME}: only the native shortestPath() (path mode) is implemented yet, not "${String(mode)}"`);
       const scope = edgeScopeOf(site.params[SP_EDGES], 'both', SHORTEST_PATH_SERVICE_NAME);
       const includeEdges = SP_INCLUDE_EDGES in site.params;
       const target = targetBody(site.params[SP_TARGET]);
       const distanceKey = site.params[SP_DISTANCE];
       if (distanceKey !== undefined && typeof distanceKey !== 'string')
-        throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(distanceKey)}`);
+        throw new ValueParseError(`${SHORTEST_PATH_SERVICE_NAME}: distance must be a weight property name, got ${String(distanceKey)}`);
       // maxDistance caps the FINAL shortest distance per pair — a hop cap (integer) unweighted, a weight
       // cap (any number) weighted. Applied at reconstruction, not as a walk prune (a weight may be negative).
       let maxWeight: number | undefined;
       if (SP_MAX_DISTANCE in site.params) {
         const md = site.params[SP_MAX_DISTANCE];
         if (typeof md !== 'number')
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
+          throw new ValueParseError(`${SHORTEST_PATH_SERVICE_NAME}: maxDistance must be a number, got ${String(md)}`);
         if (distanceKey === undefined && !Number.isInteger(md))
-          throw new Error(`${SHORTEST_PATH_SERVICE_NAME}: an unweighted maxDistance must be an integer hop count, got ${md}`);
+          throw new ValueParseError(`${SHORTEST_PATH_SERVICE_NAME}: an unweighted maxDistance must be an integer hop count, got ${md}`);
         maxWeight = md;
       }
       const path: PathSpec = { direction: scope.direction, labels: scope.labels, includeEdges, distanceKey, maxWeight, target };

@@ -9,6 +9,7 @@ import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
 import { exprChildren, forEachExpr } from './walk.ts';
+import { blockRaiseTest, RAISE_SENTINEL } from './raise.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -164,6 +165,23 @@ const mergeScopes = (...scopes: readonly Scope[]): Scope => new Map(scopes.flatM
 const colsOf = (alias: string, r: Rel): Cols => new Map(r.type.cols.map((column) => [column.name, qualified(alias, column.name)]));
 const conjoin = (left: Expression | undefined, right: Expression | undefined): Expression | undefined =>
   left && right ? q`(${left} AND ${right})` : left ?? right;
+
+/**
+ * A FILTER FUSED OVER A FILTER, in the order the algebra applies them, wherever either one RAISES.
+ *
+ * `a AND b` fixes no evaluation order: SQLite splits a `WHERE` on `AND`, codes a term it finds constant
+ * once before the scan (a false one skips the scan outright) and evaluates the rest in whatever order its
+ * planner picks. A raise arm (`raiseExpr`, `raise.ts`) fires only when evaluated, so the filter ABOVE a
+ * raising one could drop the row first — `g.inject(1).toUpper().is('x')` answered `[]` — and a raising
+ * filter above a dropping one could raise on a row the one beneath had dropped. One `CASE` is one term,
+ * and a `CASE` evaluates its arms in order: the lower filter decides first, and only a row it passes
+ * reaches the one above. (Within one expression SQLite codes `AND` left to right, so a raise test spliced
+ * in with a join side keeps its place too.) What this cannot order — a filter tied by a join or an
+ * `explode` to rows a raise beneath never reaches — `raiseOrdered` (`compiler/rel/raise-channel.ts`) declines.
+ */
+const conjoinInOrder = (left: Expression | undefined, right: Expression | undefined): Expression | undefined =>
+  left && right && (holdsRaise(left) || holdsRaise(right)) ? q`CASE WHEN ${left} THEN ${right} ELSE 0 END` : conjoin(left, right);
+const holdsRaise = (e: Expression): boolean => render(e).sql.includes(RAISE_SENTINEL);
 const concat = (parts: readonly Expression[]): Expression => (parts.length ? list(parts, '') : empty);
 
 interface Side {
@@ -432,7 +450,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // Over an aggregate this IS `HAVING` — one of §3's declared collapses, not a second node.
         const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.filter(b, r));
         const pred = expr(r.pred, b.scope);
-        const placed = grouped(b) ? { having: conjoin(b.having, pred) } : { where: conjoin(b.where, pred) };
+        const placed = grouped(b) ? { having: conjoin(b.having, pred) }
+          : { where: conjoinInOrder(b.where, pred) };
         return { ...b, ...placed, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -530,7 +549,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           const right = side(r.right, left.scope, false, taken);
           const exists = q`${r.join === 'anti' ? raw('NOT ') : empty}EXISTS (SELECT 1 FROM ${fromText(right.from)}${r.on ? q` WHERE ${expr(r.on, right.scope)}` : empty})`;
           const select = r.type.cols.map((column, i) => [column.name, left.cols[i]!] as const);
-          return { kind: 'block', select, from: left.from, joins: left.joins, where: conjoin(left.where, exists), distinct: false, windowed: false, scope: withRel(left.scope, r.id, new Map(select)) };
+          return { kind: 'block', select, from: left.from, joins: left.joins, where: conjoinInOrder(left.where, exists), distinct: false, windowed: false, scope: withRel(left.scope, r.id, new Map(select)) };
         }
         // Only an inner/cross join may splice its right side: a LEFT join's right-side predicate
         // must stay inside the subquery, or an unmatched row is filtered instead of null-padded.
@@ -685,8 +704,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         continue;
       }
       // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
-      // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
-      const materialized = binding.node.kind === 'materialize' && binding.node.fenced ? raw('MATERIALIZED ') : empty;
+      // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`) —
+      // except one whose own block holds a RAISE TEST (`blockRaiseTest`): flattened into the query that
+      // reads it, the test would become one more `WHERE` term beside that query's own filters, in no fixed
+      // order (`conjoinInOrder`); materialized, it is evaluated whole the first time it is read. (A raise in
+      // a select-list VALUE is not a test: it is evaluated where the value is read, which a slice above
+      // may bound, so fencing that would evaluate rows the reference never pulls.)
+      const raises = !isStmt(binding.node) && blockRaiseTest(binding.node);
+      const materialized = (binding.node.kind === 'materialize' && binding.node.fenced) || raises ? raw('MATERIALIZED ') : empty;
       ctes.push(q`${ident(binding.name)} AS ${materialized}(${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
     if (lastRetained) return { effects };

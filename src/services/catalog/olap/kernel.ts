@@ -3,6 +3,7 @@ import type { GraphStore } from '../../../storage.ts';
 import type { IRStep } from '../../../compiler/ir/step.ts';
 import { isTraversalParam } from '../../params/call-params.ts';
 import { empty, execute, q, textLiteral, value, type Expression } from '../../../sql/kernel/q.ts';
+import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 
 // The shared OLAP BARRIER KERNEL — the substrate every graph algorithm in `olap/` builds on: the edge
 // message scope, the `barrier_state` scratch fragments + the in-SQL fixpoint driver (`iterateInSql`),
@@ -47,13 +48,13 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
     if (d === 'out' || d === 'in' || d === 'both') return { direction: d, labels: [] };
   }
   const { steps, gremlin } = parseAnonBodyIR(value, (_kind, g) => {
-    throw new Error(`${algo}: unsupported edges scope ${g}`);
+    throw new UnsupportedTraversal(`${algo}: unsupported edges scope ${g}`);
   });
   const dir = steps.length === 1
     ? ({ outE: 'out', inE: 'in', bothE: 'both' } as const)[steps[0].name as 'outE' | 'inE' | 'bothE']
     : undefined;
   if (!dir)
-    throw new Error(`${algo}: only a single outE/inE/bothE(labels?) edges scope is supported yet, got "${gremlin}"`);
+    throw new UnsupportedTraversal(`${algo}: only a single outE/inE/bothE(labels?) edges scope is supported yet, got "${gremlin}"`);
   return { direction: dir, labels: steps[0].args.map((a) => a.value).filter((v): v is string => typeof v === 'string') };
 }
 
@@ -166,7 +167,7 @@ export interface DecoratePlan {
 function requireDecorateMode(params: CallParams, name: string): void {
   const mode = params.mode;
   if (mode !== undefined && mode !== 'decorate')
-    throw new Error(`${name}: only decorate mode is implemented yet, not "${String(mode)}"`);
+    throw new UnsupportedTraversal(`${name}: only decorate mode is implemented yet, not "${String(mode)}"`);
 }
 
 /** Build a DECORATE barrier `Service` from its name, its `describeParams`, the app-scope store, and a

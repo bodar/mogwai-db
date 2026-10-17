@@ -37,6 +37,27 @@ describe('Double Infinity frames exactly', () => {
   ])('%s', async (q, want) => {
     expect(await values(q, [])).toEqual([want]);
   });
+
+  // …and INSIDE a collection, where it crosses a JSON text that cannot spell it: a compile-time tree is
+  // written by `stringifyExact` (`json-exact.ts`) as SQLite's own overflow spelling `9.0e+999`, never
+  // `JSON.stringify`'s `null` — a map literal, a constant, a side-effect seed, a stored map or list, an
+  // operand list.
+  test.each([
+    ["g.inject(['a':Infinity])", new Map([['a', Infinity]])],
+    ["g.inject(['a':-Infinity])", new Map([['a', -Infinity]])],
+    ["g.inject(1).constant(['a':Infinity])", new Map([['a', Infinity]])],
+    ["g.withSideEffect('x',['a':Infinity]).inject(1).select('x')", new Map([['a', Infinity]])],
+    ["g.inject(['a':[Infinity]])", new Map([['a', [Infinity]]])],
+    ["g.inject([1]).combine([Infinity])", [1, Infinity]],
+  ])('%s', async (q, want) => {
+    expect(await values(q, [])).toEqual([want]);
+  });
+  test.each([
+    ["g.V().values('m')", "g.addV('x').property('m',['a':Infinity])", new Map([['a', Infinity]])],
+    ["g.V().values('l')", "g.addV('x').property('l',[Infinity, -Infinity])", [Infinity, -Infinity]],
+  ])('stored: %s', async (q, seed, want) => {
+    expect(await values(q, [seed])).toEqual([want]);
+  });
 });
 
 describe('exact BigDecimal round-trip', () => {

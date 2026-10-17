@@ -3,6 +3,7 @@ import { BETWEENNESS_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, adjacencyCte, decorateBarrier, edgeScopeOf, nodeCount, stringParam } from './kernel.ts';
 import { execute, q, value } from '../../../sql/kernel/q.ts';
+import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 
 // ---------- betweenness — Brandes betweenness centrality ----------------------------------------
 //
@@ -46,7 +47,7 @@ export function createBetweennessService(store: GraphStore | undefined): Service
       // silently-doubled score.
       const scope = edgeScopeOf(params[BE_EDGES], 'out', BETWEENNESS_SERVICE_NAME);
       if (scope.direction === 'both')
-        throw new Error(`${BETWEENNESS_SERVICE_NAME}: only a directed (outE/inE) edge scope is supported yet, not bothE (undirected betweenness halves the score)`);
+        throw new UnsupportedTraversal(`${BETWEENNESS_SERVICE_NAME}: only a directed (outE/inE) edge scope is supported yet, not bothE (undirected betweenness halves the score)`);
       return {
         channels: [{ key, channel: 0, vtype: 'double' }],
         core: (store, run): number => {

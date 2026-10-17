@@ -13,9 +13,20 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
   # settles it over exactly the rows the reference pulled; a reducing barrier in a child body escalates it
   # into the child value's raise, which the host carries in turn. Where a raise cannot be carried exactly
   # the traversal declines.
+  #
+  # FilterRankingStrategy REORDERS a run of filters before any of this applies: it bubbles each filter
+  # ahead of a directly preceding filter of higher rank, and order() is ranked 10 against a traversal
+  # filter's 4 and has()'s 2 (strategy/optimization/FilterRankingStrategy.java getStepRank). So in
+  # `g.V().order().by(T.label, Order.desc).where(<raising body>)…` the where() runs FIRST, over every
+  # vertex, before the order() barrier — it meets marko whatever slice follows. Every scenario below that
+  # puts a raising filter body behind order(), or a has()/where() behind a raising where(), is therefore
+  # @Unsupported: the lowering declines a raising filter the strategy moves (filterRankingMoves,
+  # src/compiler/rel/raise-channel.ts) rather than settle its raise in the written order. The expectations
+  # are the written-order ones and stay as the record of what the extent machinery computes.
 
   # lop has no age, so its fold is []; ripple is the one traverser the limit pulls past lop, and it is
   # clean; marko, whose age would raise, is never pulled.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -28,6 +39,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | lop |
 
   # limit(2) holds lop and ripple and then pulls marko through the where() body: it raises.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -37,6 +49,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_countX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -48,6 +61,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_filterXvaluesXageX_toUpper_foldX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -60,6 +74,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | lop |
 
   # not() of an always-productive body drops lop and ripple, so the limit pulls on to marko.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_notXvaluesXageX_toUpper_foldX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -69,6 +84,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_count_isX0XX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -80,6 +96,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpperX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -91,6 +108,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
 
   # A FILTER between the raise and the limit keeps a raising traverser: the reference raised before the
   # filter ever saw it.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_hasXnameX_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -102,6 +120,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_hasLabelXpersonX_limitX1X
     Given the modern graph
     And the traversal of
@@ -111,6 +130,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_whereXvaluesXnameXX_limitX1X
     Given the modern graph
     And the traversal of
@@ -125,6 +145,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
   # A connective evaluates an arm only where the arms before it left the answer open (AndStep stops at the
   # first failure, OrStep at the first success): marko has no lang, so and() never reaches the raising
   # arm for him, and or() does.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXandXvaluesXlangX_valuesXageX_toUpper_foldXX_limitX3X
     Given the modern graph
     And the traversal of
@@ -137,6 +158,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | lop |
       | ripple |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXorXvaluesXlangX_valuesXageX_toUpper_foldXX_limitX3X
     Given the modern graph
     And the traversal of
@@ -146,6 +168,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXandXvaluesXageX_toUpper_fold_valuesXnameXX_limitX1X
     Given the modern graph
     And the traversal of
@@ -223,6 +246,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     Then the traversal will raise an error with message containing text of "sack(sum): an operand that is not a Number is not supported yet"
 
   # A DRAINING consumer meets every traverser: skip() pulls the ones it discards, tail() and count() all.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_skipX1X
     Given the modern graph
     And the traversal of
@@ -232,6 +256,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_tailX1X
     Given the modern graph
     And the traversal of
@@ -241,6 +266,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_count
     Given the modern graph
     And the traversal of
@@ -253,6 +279,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
   # A body that MOVES: its raise is not one the reference meets on every row under the limit, so the
   # eager EXISTS form is refused there and the body's raise is escalated as data like any other — lop and
   # ripple have no out(), so their fold is []; marko's out() reaches vadas' age only under limit(2).
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXout_valuesXageX_toUpper_foldX_limitX1X
     Given the modern graph
     And the traversal of
@@ -264,6 +291,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXout_valuesXageX_toUpper_foldX_limitX2X
     Given the modern graph
     And the traversal of
@@ -276,6 +304,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
   # A RUN of head slices: the outer one stops asking first, so limit(a).limit(b) pulls min(a, b) + 1
   # (with k requests a limit(a) pulls min(k, a + 1)), which is also what EarlyLimitStrategy's merge of
   # adjacent RangeGlobalSteps gives. limit(2).limit(1) pulls lop and ripple; marko is never reached.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -287,6 +316,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX5X_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -298,6 +328,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_rangeX0_2X_limitX1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -309,6 +340,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX2X_rangeX0_1X_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -321,6 +353,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | lop |
 
   # The composed run still pulls one past ITS bound: limit(3).limit(2) pulls three.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_limitX3X_limitX2X
     Given the modern graph
     And the traversal of
@@ -354,6 +387,7 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | RIPPLE |
 
   # A label is no step of the reference's: it neither stops the raise riding to the slice nor the run.
+  @Unsupported
   Scenario: g_V_orderXbyXlabel_descXX_whereXvaluesXageX_toUpper_foldX_asXaX_limitX1X_selectXaX_valuesXnameX
     Given the modern graph
     And the traversal of

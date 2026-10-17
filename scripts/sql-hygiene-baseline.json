@@ -55,7 +55,7 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 4337,
+    "bytes": 4363,
     "compiler": 122,
     "bound": 0
   },
@@ -103,7 +103,7 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 5444,
+    "bytes": 5464,
     "compiler": 97,
     "bound": 0
   },
@@ -295,7 +295,7 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 2756,
+    "bytes": 2769,
     "compiler": 80,
     "bound": 0
   },
@@ -355,7 +355,7 @@
   },
   "math": {
     "binds": 0,
-    "bytes": 19903,
+    "bytes": 19923,
     "compiler": 74,
     "bound": 0
   },
@@ -451,7 +451,7 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 4062,
+    "bytes": 4075,
     "compiler": 101,
     "bound": 0
   },
@@ -505,7 +505,7 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 14504,
+    "bytes": 14537,
     "compiler": 165,
     "bound": 0
   },

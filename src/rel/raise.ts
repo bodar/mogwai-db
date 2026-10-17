@@ -56,7 +56,9 @@ function sentinelRaise(open: string, message: string, dependsOn: Expr): Expr {
  */
 export const raiseInRow = (message: string): Expr => raiseExpr(message, { kind: 'call', fn: 'random', args: [] });
 
-const OPEN = '$!raise:';
+/** The text every `raiseExpr` arm's path opens with — what the emitter reads to tell a raising term. */
+export const RAISE_SENTINEL = '$!raise:';
+const OPEN = RAISE_SENTINEL;
 const CLOSE = '!$';
 const OPEN_DEFERRAL = '$!defer:';
 const RAISED = /\$!(?:raise|defer):(.*?)!\$/;
@@ -128,4 +130,38 @@ export function exprMayRaise(e: Expr): boolean {
     if (!found && (isRaise(node) || exprRels(node).some(mayRaise))) found = true;
   });
   return found;
+}
+/**
+ * IS THIS NODE A RAISE TEST — a filter whose predicate raises when evaluated (a raise arm in it, or a
+ * predicate that IS a carried test column — a projected expression holding one, which the flattener inlines
+ * into the predicate), or an `EXISTS` (semi/anti join) whose condition or body may raise. A filter that
+ * merely READS a raising value (a productivity test, a drain) evaluates that value whichever `WHERE` term
+ * SQLite takes first, so it is no ordering hazard of its own. Read by the emitter (`conjoinInOrder`, a
+ * raising CTE's fence) and by `raiseOrdered` (`compiler/rel/raise-channel.ts`).
+ */
+export function raiseTest(rel: Rel): boolean {
+  if (rel.kind === 'filter') return exprMayRaise(rel.pred) || (rel.pred.kind === 'col' && columnRaises(rel.input, rel.pred.rel, rel.pred.name));
+  if (rel.kind === 'join') return (rel.on !== undefined && exprMayRaise(rel.on)) || ((rel.join === 'semi' || rel.join === 'anti') && mayRaise(rel.right));
+  return false;
+}
+
+function columnRaises(rel: Rel, id: string, name: string): boolean {
+  if (rel.id !== id || rel.kind !== 'project') return false;
+  const expr = rel.exprs.find(([column]) => column === name)?.[1];
+  if (!expr) return false;
+  if (exprMayRaise(expr)) return true;
+  return expr.kind === 'col' && columnRaises(rel.input, expr.rel, expr.name);
+}
+
+/** Does the SELECT block `rel` heads hold a raise test — through every node the emitter fuses into one
+ *  block (a projection, a filter, a sort, a DISTINCT, an unbound materialize, a join's sides, an explode's
+ *  input), stopping where a block closes (an aggregate, a window, a LIMIT, a union, a recursive term). */
+export function blockRaiseTest(rel: Rel): boolean {
+  switch (rel.kind) {
+    case 'filter': return raiseTest(rel) || blockRaiseTest(rel.input);
+    case 'project': case 'sort': case 'distinct': case 'materialize': return blockRaiseTest(rel.input);
+    case 'join': return raiseTest(rel) || blockRaiseTest(rel.left) || (rel.join !== 'semi' && rel.join !== 'anti' && blockRaiseTest(rel.right));
+    case 'explode': return rel.input !== undefined && blockRaiseTest(rel.input);
+    default: return false;
+  }
 }

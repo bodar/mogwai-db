@@ -4,6 +4,8 @@ import { and, eq, meta, typeOf } from '../../compiler/rel/build.ts';
 import { propertyJoin } from '../../compiler/rel/property.ts';
 import { sqlElem, type Elem } from '../../compiler/elem.ts';
 import type { Service, RelCallSite, RelContribution, CallParams } from '../spi/types.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
 //
@@ -39,19 +41,19 @@ function ownerScopeOf(params: CallParams): Elem | 'vertexproperty' {
   if (raw === 'vertex') return 'vertex';
   if (raw === 'edge') return 'edge';
   if (raw === 'vertexproperty') return 'vertexproperty';
-  throw new Error(`tinker.search: unsupported type '${raw}' (expected Vertex, Edge, or VertexProperty)`);
+  throw new ValueParseError(`tinker.search: unsupported type '${raw}' (expected Vertex, Edge, or VertexProperty)`);
 }
 
 /** The `search` term — a required string param. A `regex` param fails closed (no index-only
  *  path). Below the trigram floor also fails closed. Returns the LIKE-escaped `%term%`. */
 function searchPattern(params: CallParams): string {
   if (params.regex !== undefined)
-    throw new Error('tinker.search: regex matching is not supported (no index-only implementation; not scanned or evaluated in JS)');
+    throw new UnsupportedTraversal('tinker.search: regex matching is not supported (no index-only implementation; not scanned or evaluated in JS)');
   const term = params.search;
   if (typeof term !== 'string' || term.length === 0)
-    throw new Error('tinker.search requires a non-empty string `search` param');
+    throw new ValueParseError('tinker.search requires a non-empty string `search` param');
   if (term.length < TRIGRAM_FLOOR)
-    throw new Error(`tinker.search: a term shorter than ${TRIGRAM_FLOOR} characters cannot be served by the trigram index (fails closed — no table scan)`);
+    throw new UnsupportedTraversal(`tinker.search: a term shorter than ${TRIGRAM_FLOOR} characters cannot be served by the trigram index (fails closed — no table scan)`);
   // LIKE-escape %/_/\ in the user term, then wrap %…% for a substring match.
   return `%${term.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
 }

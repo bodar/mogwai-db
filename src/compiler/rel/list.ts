@@ -14,6 +14,7 @@ import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, inferredVtype, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
+import { stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
@@ -1369,11 +1370,15 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   // The operand's JSON crosses as ONE value. A `$param` list (`combine($x)`, the WHOLE list IS the
   // parameter's value) binds under its name; a literal array INLINES (the Golden Rule) — the old
   // `lit()` bound every literal collection.
-  const literal = (members: readonly unknown[], name: string | null) => ({
-    expr: { kind: 'call', fn: 'jsonb',
-      args: [name != null ? param(JSON.stringify(members), name, 'text') : compilerText(JSON.stringify(members))] } as Expr,
-    of: BARE_LIST,
-  });
+  // `stringifyExact` (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null` and a `-0.0`
+  // as `0`, another value; a runtime that cannot spell one declines.
+  const literal = (members: readonly unknown[], name: string | null) => {
+    const json = stringifyExact(members);
+    return json === null ? null : {
+      expr: { kind: 'call', fn: 'jsonb', args: [name != null ? param(json, name, 'text') : compilerText(json)] } as Expr,
+      of: BARE_LIST,
+    };
+  };
   if (Array.isArray(arg)) return literal(arg, step.args[0]?.name ?? null);
   // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
   // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,

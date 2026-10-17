@@ -2,6 +2,7 @@ import { stepChain, isNested } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, Service, ServiceRegistry } from '../spi/types.ts';
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
 /** A call() param VALUE that is a nested sub-traversal (`.with('traversal', __.V().out('x'))` or a
  *  map entry) — the sub-traversal a barrier/OLAP service runs (federate's `traversal`, an OLAP
@@ -56,7 +57,7 @@ function constFromValueTraversal(nested: any, params: Record<string, any>): unkn
   const body = stepChain(nested, params);
   if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
     return body[0].args[0].value;
-  throw new Error('call() parameter value traversal must be __.constant(literal) — richer per-traverser params are not yet supported');
+  throw new UnsupportedTraversal('call() parameter value traversal must be __.constant(literal) — richer per-traverser params are not yet supported');
 }
 
 /** Resolve a nested `{nested}` traversal used as the PARAM MAP
@@ -68,7 +69,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
   const chain = stepChain(nested, params);
   const proj = chain[0];
   if (!proj || proj.name !== 'project' || chain.slice(1).some((s) => s.name !== 'by'))
-    throw new Error('call() map traversal must be __.project(...).by(__.constant(...)) — richer forms are not yet supported');
+    throw new UnsupportedTraversal('call() map traversal must be __.project(...).by(__.constant(...)) — richer forms are not yet supported');
   const keys = proj.args.map((a) => a.value).filter((a): a is string => typeof a === 'string');
   const byBodies = chain.slice(1).map((s) => s.args[0]?.value);
   const out: CallParams = {};
@@ -76,7 +77,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
     const by = byBodies[i];
     if (isNested(by)) out[k] = constFromValueTraversal(by.nested, params);
     else if (by !== undefined) out[k] = by; // by(literal) — uncommon but valid
-    else throw new Error(`call() map traversal field "${k}" needs a by(__.constant(...))`);
+    else throw new UnsupportedTraversal(`call() map traversal field "${k}" needs a by(__.constant(...))`);
   });
   return out;
 }

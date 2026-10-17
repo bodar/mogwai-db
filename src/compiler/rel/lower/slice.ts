@@ -28,7 +28,7 @@ import { withChannel } from '../../../channels.ts';
 import { barrierRows, dropPath, orderRows } from '../lower.ts';
 import { streamDistinctAt } from '../../ir/bulk.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
-import { pendingRaise, pullExtent, pulledBy, settledSlice, settleRaise, trustSlice, type PullPosition } from '../raise-channel.ts';
+import { markPositional, pendingRaise, pullExtent, pulledBy, settledSlice, settleRaise, trustSlice, type PullPosition } from '../raise-channel.ts';
 
 /**
  * THE SLICE — and the consumer of a PENDING RAISE (`raise-channel.ts`) the step before it deferred.
@@ -54,7 +54,14 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   return settled && sliceRows(step, settled, bulked, fresh);
 }
 
+/** A slice's rows, its filters registered as POSITIONAL (`markPositional`, `raiseOrdered`). */
 function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
+  const sliced = slicedRows(step, input, bulked, fresh);
+  if (sliced) markPositional(sliced, input);
+  return sliced;
+}
+
+function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
   if (!SLICE_STEPS.has(step.name)) return null;
   const encounter = encounterOf(input.channels);

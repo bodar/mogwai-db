@@ -27,6 +27,7 @@ import { buildCastSegment, castBarrierIn } from './cast-barrier.ts';
 import type { Elem } from '../elem.ts';
 import { UnsupportedTraversal } from '../compiler.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 
 // ---------- barrier call() — the segment boundary, on the RelIR route ----------
 //
@@ -170,9 +171,10 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // AN UNREGISTERED NAME IS AN ERROR, not a decline — the user named something that does not exist,
     // and no other route is going to answer it (§6·5: two facts wear one `null`, and this is the
     // permanent one). Raised here rather than inside the fold because the fold's contract is `null`
-    // and a name that resolves to nothing is a question about the traversal's own text.
+    // and a name that resolves to nothing is a question about the traversal's own text. The reference's own
+    // IllegalArgumentException text (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/service/ServiceRegistry.java:71`).
     const service = request.services.get(spec.serviceName);
-    if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
+    if (!service) throw new ValueParseError(`Unrecognized service: ${spec.serviceName}`);
     // PUSHDOWN (win 2a): the ARG-LESS federate form (`call(federate,{graph}).V()…`, no `traversal` arg)
     // INFERS what runs on the sibling. `pushableTailPrefix` finds the longest remote-safe prefix of the
     // tail; the sibling Gremlin is that prefix's OWN SOURCE TEXT (`ctx.getText()` per step — no un-parser,

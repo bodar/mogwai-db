@@ -33,6 +33,20 @@ export class ValueParseError extends Error {
   }
 }
 
+/**
+ * A VERIFICATION STRATEGY'S REFUSAL — the reference's `VerificationException`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/verification/VerificationException.java`),
+ * thrown by `StandardVerificationStrategy` and the opt-in verification strategies. Like a
+ * `ValueParseError` it is the traversal's ANSWER, which is why it is one: every caller that tells an
+ * answer from a decline keeps doing so, and the class names the reference's exception.
+ */
+export class VerificationException extends ValueParseError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VerificationException';
+  }
+}
+
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
 // The compile-time const-fold helpers (over inject() literals) and the runtime SQL

@@ -4,6 +4,8 @@ import type { IoSink, IoStore } from '../../iostore.ts';
 import type { GraphStore } from '../../storage.ts';
 import { loadGraphsonStreaming, writeGraphsonToSink } from '../../formats/graphson.ts';
 import { csvPaths, loadCsvStreaming, writeCsvEdgesToSink, writeCsvVerticesToSink } from '../../formats/csv.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
 // ---------- io — what io() desugars to (async, Barrier, INTERNAL) ----------
 //
@@ -34,13 +36,13 @@ export type IoDirection = 'read' | 'write';
 function directionOf(params: CallParams): IoDirection {
   const d = params.direction;
   if (d === 'read' || d === 'write') return d;
-  throw new Error(`${IO_SERVICE_NAME}: a "direction" param of "read" or "write" is required`);
+  throw new ValueParseError(`${IO_SERVICE_NAME}: a "direction" param of "read" or "write" is required`);
 }
 
 function pathOf(params: CallParams): string {
   const p = params.path;
   if (typeof p !== 'string' || p.length === 0)
-    throw new Error(`${IO_SERVICE_NAME}: a "path" param (the document to read or write) is required`);
+    throw new ValueParseError(`${IO_SERVICE_NAME}: a "path" param (the document to read or write) is required`);
   return p;
 }
 
@@ -62,7 +64,7 @@ function formatOf(path: string): string {
   if (ext === '.csv') return 'csv';
   if (ext === '.xml') return 'graphml';
   if (ext === '.kryo') return 'gryo';
-  throw new Error(`io("${path}"): unrecognized format "${ext}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
+  throw new ValueParseError(`io("${path}"): unrecognized format "${ext}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
 }
 
 /** Which codec serves this call: the DECLARED format if `.with(IO.reader|IO.writer, …)` named one,
@@ -79,10 +81,10 @@ function codecFor(path: string, params: CallParams, direction: IoDirection): Cod
   if (format === 'graphson') return 'graphson';
   if (format === 'csv') return 'csv';
   if (format === 'graphml')
-    throw new Error(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
+    throw new UnsupportedTraversal(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
   if (format === 'gryo')
-    throw new Error(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
-  throw new Error(`io("${path}"): unrecognized format "${format}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
+    throw new UnsupportedTraversal(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
+  throw new ValueParseError(`io("${path}"): unrecognized format "${format}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
 }
 
 /** Open a write sink, run `drain` into it, and COMMIT on success or ABORT on failure — so a drain

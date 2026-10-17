@@ -1,5 +1,7 @@
 import type { IRStep } from '../../compiler/ir/step.ts';
 import type { RelCallSite, RelContribution, Service } from '../spi/types.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
 // ---------- tinker.degree.centrality — per-vertex edge count (pure, Streaming) ----------
 //
@@ -24,7 +26,7 @@ function directionOf(params: Record<string, unknown>): 'out' | 'in' | 'both' {
     : typeof d === 'string' ? d
     : 'in').toLowerCase();
   if (raw === 'out' || raw === 'in' || raw === 'both') return raw;
-  throw new Error(`tinker.degree.centrality: unsupported direction '${raw}'`);
+  throw new ValueParseError(`tinker.degree.centrality: unsupported direction '${raw}'`);
 }
 
 /** The edge-movement step for a direction, used by the WEIGHTED body (which hops to edges to read a
@@ -59,9 +61,9 @@ export const degreeCentralityService: Service = {
       // position for a `streaming` service is not a shape to decline; it is invalid Gremlin, and the
       // compiler is the only thing that can raise it.
       if (!site.host || !site.child)
-        throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
+        throw new UnsupportedTraversal('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
       if (site.host.kind !== 'element')
-        throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
+        throw new UnsupportedTraversal('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
       const rw = site.params.relationshipWeightProperty;
       const weightKey = typeof rw === 'string' && rw.length > 0 ? rw : undefined;
       const value = site.child.scalar(degreeBody(directionOf(site.params), weightKey), site.host);

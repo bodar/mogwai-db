@@ -163,6 +163,16 @@ describe('io() fails closed', () => {
     await expect(ex.framedAsync('g.io("x.parquet").read()', {})).rejects.toThrow(/unrecognized format "\.parquet"/);
   });
 
+  // A refusal is a QUERY failure of a named class — a deferral (`UnsupportedTraversal`) for a format we
+  // do not serve, an argument error (`ValueParseError`) for one that names nothing — never a bare Error.
+  test('as a classed query failure, never a bare Error', async () => {
+    const ex = managerOn(ioDir()).executor('g');
+    await expect(ex.framedAsync('g.io("x.xml").read()', {})).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
+    await expect(ex.framedAsync('g.io("x.kryo").read()', {})).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
+    await expect(ex.framedAsync('g.io("x.foo").read()', {})).rejects.toMatchObject({ name: 'ValueParseError' });
+    await expect(ex.framedAsync('g.call("io")', {})).rejects.toMatchObject({ name: 'ValueParseError' });
+  });
+
   test('a DECLARED reader overrides the extension, in both directions', async () => {
     const ex = managerOn(ioDir()).executor('g');
     // .with(IO.reader, IO.gryo) on a .json path: the declaration wins, and Gryo is a wall.

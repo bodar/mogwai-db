@@ -1,7 +1,7 @@
 import type { Executor as ExecutorApi, ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
-import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
@@ -1063,9 +1063,9 @@ export class Executor implements ExecutorApi {
   filterVertexIds(gremlin: string, params: Record<string, any> = {}): (string | number)[] {
     const plan = this.runSync(gremlin, params, {});
     if (plan.kind !== 'read')
-      throw new Error('a replication filter must be a read that yields a vertex stream, not a write');
+      throw new UnsupportedTraversal('a replication filter must be a read that yields a vertex stream, not a write');
     if (plan.shape.kind !== 'vertex')
-      throw new Error(`a replication filter must yield a vertex stream, not a ${plan.shape.kind} result`);
+      throw new UnsupportedTraversal(`a replication filter must yield a vertex stream, not a ${plan.shape.kind} result`);
     return (this.store.query(plan.sql, plan.binds) as { id: string | number }[]).map((r) => r.id);
   }
 
@@ -1102,7 +1102,7 @@ export class Executor implements ExecutorApi {
     // facts a landed element needs to reconstruct a full detached form — property ids and meta-properties.
     const plan = await this.drive(gremlin, params, paramTypes, depth, true);
     if (plan.kind !== 'read')
-      throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
+      throw new UnsupportedTraversal('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     // An element row may carry a COLLAPSED multiplicity (`bulk`, the movementCollapse `SUM(bulk)` — the
     // same column `framedResults` reads via `bulkOf`). The transfer is a FLAT traverser stream, exactly
@@ -1156,7 +1156,7 @@ export class Executor implements ExecutorApi {
     // closed naming itself rather than silently mis-framing.
     const nodes = foreignValueNodes(plan.shape, rows);
     if (nodes) return { kind: 'values', values: nodes };
-    throw new Error(`federated traversal must yield vertices, edges, a reduced scalar, a keyed map, or a value stream, not a ${plan.shape.kind} result`);
+    throw new UnsupportedTraversal(`federated traversal must yield vertices, edges, a reduced scalar, a keyed map, or a value stream, not a ${plan.shape.kind} result`);
   }
 
   /** Compile SYNCHRONOUSLY and reject a barrier. A non-federated traversal is ONE SQL statement —

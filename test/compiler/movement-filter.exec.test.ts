@@ -91,15 +91,29 @@ test('a mutating step in a VALUE-argument child traversal is rejected (StandardV
 
   // The reference's own IllegalArgumentException text (ReadOnlyChildValidator.java:47), naming the
   // FIRST mutating step in pre-order by its (still placeholder) class, as a value-error ANSWER — not
-  // our own wording, and not a bare Error.
-  const exact = (q: string, cls: string, child: string) => {
+  // our own wording, and not a bare Error. has()/P/V() validate at CONSTRUCTION.
+  const exact = (q: string, cls: string, child: string, name = 'ValueParseError') => {
     let err: any;
     try { compile(q, {}); } catch (e) { err = e; }
-    expect(err?.name).toBe('ValueParseError');
+    expect(err?.name).toBe(name);
     expect(err?.message).toBe(`Child traversal contains a mutating step '${cls}' in '${child}'. Mutating steps are not allowed in child traversals.`);
   };
-  exact('g.V().property("k", __.addV().count())', 'AddVertexStepPlaceholder', '__.addV().count()');
+  // property(k, <traversal>) and a traversal KEY are validated only by StandardVerificationStrategy
+  // (StandardVerificationStrategy.java:87-101), which re-throws as a VerificationException — after the
+  // optimization GValueReductionStrategy reduced the child's placeholders, so the REDUCED class is named.
+  const verified = (q: string, cls: string, child: string) => exact(q, cls, child, 'VerificationException');
+  verified('g.V().property("k", __.addV().count())', 'AddVertexStep', '__.addV().count()');
+  verified('g.V().property(__.addV().count(), 1)', 'AddVertexStep', '__.addV().count()');
+  verified('g.V().property("k", __.V(1).property("z", 1).count())', 'AddPropertyStep', '__.V(1).property("z",1).count()');
+  verified('g.V().property("k", __.mergeV([name: "x"]).count())', 'MergeVertexStep', '__.mergeV([name:"x"]).count()');
+  verified('g.V().property("k", __.V(1).addE("x").to(__.V(2)).count())', 'AddEdgeStep', '__.V(1).addE("x").to(__.V(2)).count()');
+  verified('g.V().local(__.property("k", __.addV().count()))', 'AddVertexStep', '__.addV().count()');
+  verified('g.V().sideEffect(__.property("k", __.addV().count()))', 'AddVertexStep', '__.addV().count()');
+  // …but a P INSIDE a property() child is still built — and checked — at construction, first.
+  exact('g.V().property("k", __.is(P.gt(__.addV().count())))', 'AddVertexStepPlaceholder', '__.addV().count()');
   exact('g.V().has("k", __.addV().count())', 'AddVertexStepPlaceholder', '__.addV().count()');
+  // The INNERMOST offender is named: P.gt(<traversal>) is constructed before the is() that takes it.
+  exact('g.V().has("age", __.is(P.gt(__.addV().count())))', 'AddVertexStepPlaceholder', '__.addV().count()');
   exact('g.V().values("age").is(P.gt(__.addV().count()))', 'AddVertexStepPlaceholder', '__.addV().count()');
   exact('g.V().has("name", __.V().drop().constant("x"))', 'DropStep', '__.V().drop().constant("x")');
   exact('g.V().has("name", __.V().map(__.addE("x").to(__.V())).values("name"))', 'AddEdgeStepPlaceholder', '__.V().map(__.addE("x").to(__.V())).values("name")');

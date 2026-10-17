@@ -389,6 +389,8 @@ describe('federation fails closed', () => {
       'g.call("federate").with("graph","crew").out()',
       'g.call("federate").with("graph","crew").with("traversal", __.inject(1))',
       'g.V().call("federate",["graph":"crew","traversal":__.values("name")])',
+      // a WRITE sub-traversal (`runForeign`'s read-only check, `src/execute.ts`)
+      'g.call("federate").with("graph","crew").with("traversal", __.V().addV("x"))',
     ]) await expect(mgr.executor('home').framedAsync(q, {})).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
   });
 

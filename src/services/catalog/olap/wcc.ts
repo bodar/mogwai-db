@@ -3,6 +3,8 @@ import { WCC_SERVICE_NAME } from '../../spi/types.ts';
 import type { GraphStore } from '../../../storage.ts';
 import { STATE_INSERT, adjacencyCte, changedCount, decorateBarrier, edgeScopeOf, iterateInSql, nodeCount, stringParam, vec, weightedAdjacencyCte, type Slot } from './kernel.ts';
 import { empty, execute, q, value } from '../../../sql/kernel/q.ts';
+import { ValueParseError } from '../../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 
 // ---------- wcc — connectedComponent(), a DECORATE barrier ----------
 //
@@ -43,7 +45,7 @@ export function createWccService(store: GraphStore | undefined): Service {
       // not model yet — fail closed rather than answer the undirected question for a directed scope.
       const scope = edgeScopeOf(params[CC_EDGES], 'both', WCC_SERVICE_NAME);
       if (scope.direction !== 'both')
-        throw new Error(`${WCC_SERVICE_NAME}: only an undirected (bothE) edge scope is supported yet, not ${scope.direction}E`);
+        throw new UnsupportedTraversal(`${WCC_SERVICE_NAME}: only an undirected (bothE) edge scope is supported yet, not ${scope.direction}E`);
       const key = stringParam(params, CC_PROPERTY_NAME, CC_COMPONENT_KEY);
       // relationshipWeightProperty + threshold (GDS): union only across edges with weight > threshold —
       // a weight-filtered adjacency. `threshold` defaults 0; GDS validates threshold > 0 requires the
@@ -52,7 +54,7 @@ export function createWccService(store: GraphStore | undefined): Service {
       const weightKey = typeof rw === 'string' && rw.length > 0 ? rw : undefined;
       const threshold = typeof params.threshold === 'number' ? params.threshold : 0;
       if (threshold > 0 && !weightKey)
-        throw new Error(`${WCC_SERVICE_NAME}: a threshold > 0 requires relationshipWeightProperty`);
+        throw new ValueParseError(`${WCC_SERVICE_NAME}: a threshold > 0 requires relationshipWeightProperty`);
       return {
         channels: [{ key, channel: 0, vtype: 'string' }], // a component id is the min external-id STRING
         core: (store, run): number => {

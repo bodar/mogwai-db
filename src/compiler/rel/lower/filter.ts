@@ -3,6 +3,7 @@ import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts'
 import { exprMayRaise } from '../../../rel/raise.ts';
 import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import { filterRankingMoves } from '../raise-channel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
@@ -33,6 +34,22 @@ import { foldedListSet, nestedFirstValue, scalarChild, scalarChildDeferred } fro
  * one. Absent, every raise stays an in-statement arm of the clause.
  */
 export interface RaiseSink { raise?: Expr }
+
+/**
+ * A CONNECTIVE THAT EVALUATES ITS ARMS IN ORDER wherever one of them may raise. `AndStep` stops at the
+ * first arm that fails and `OrStep` at the first that holds (`…/step/filter/{And,Or}Step.java`), and a run
+ * of filters stops at the first that drops the traverser — so a later arm's raise is met only where the
+ * earlier ones left the answer open, and an earlier arm's raise is met first. SQL's `AND`/`OR` fix no
+ * evaluation order (SQLite may take either operand first), so a raising pair is spelled as one `CASE`,
+ * which does. A NULL arm (unproductive) is a failed test either way; the null-safe negation a `not()`
+ * applies (`notProduced`) cannot tell the `CASE`'s 0 from SQL's NULL.
+ */
+function inOrder(op: string, left: Expr | undefined, right: Expr): Expr {
+  if (!left || !(exprMayRaise(left) || exprMayRaise(right))) return op === 'and' ? and(left, right) : or(left, right);
+  return op === 'and'
+    ? { kind: 'case', whens: [[left, right]], else: compilerInt(0) }
+    : { kind: 'case', whens: [[left, compilerInt(1)]], else: right };
+}
 
 /**
  * A SUB-TRAVERSAL AS A BOOLEAN — `EXISTS (<the body, rooted at the current row>)`.
@@ -158,17 +175,21 @@ export function bodyPredicate(
   // A filter step's raise is the row's only where the steps before it PASSED the traverser on — the
   // `and` connective's rule, since a run of filters is one (`sourceFilter`'s connective arm).
   let raise: Expr | undefined;
-  for (const step of body) {
+  for (const [at, step] of body.entries()) {
     const stepSink: RaiseSink | undefined = sink ? {} : undefined;
     const filter = sourceFilter(step, subject, fresh, ctx, aliases, stepSink);
     if (!filter) return correlatedExists(body, subject, fresh, ctx, false)
       ?? valuePredicate(body, subject, fresh, ctx, false, aliases, sink)
       ?? projectionProductive(body, subject, fresh, ctx, aliases, sink);
+    // A filter that may raise meets the traversers the reference hands it only where
+    // `FilterRankingStrategy` leaves it in place (`filterRankingMoves`), and only after the filters
+    // before it in the run have passed the row (`inOrder`).
+    if ((exprMayRaise(filter) || stepSink?.raise) && filterRankingMoves(body, at)) return null;
     if (stepSink?.raise) {
       const reached: Expr = clause ? { kind: 'case', whens: [[clause, stepSink.raise]], else: compilerNull('text') } : stepSink.raise;
       raise = raise ? { kind: 'call', fn: 'COALESCE', args: [raise, reached] } : reached;
     }
-    clause = and(clause, filter);
+    clause = inOrder('and', clause, filter);
   }
   if (clause && sink && raise) sink.raise = raise;
   return clause ?? null;
@@ -590,7 +611,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
         const armRaise: Expr = reached ? { kind: 'case', whens: [[reached, armSink.raise]], else: compilerNull('text') } : armSink.raise;
         raise = raise ? { kind: 'call', fn: 'COALESCE', args: [raise, armRaise] } : armRaise;
       }
-      clause = step.name === 'and' ? and(clause, pred) : or(clause, pred);
+      clause = inOrder(step.name, clause, pred);
     }
     if (clause && sink && raise) sink.raise = raise;
     return clause ?? null;

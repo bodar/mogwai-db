@@ -64,10 +64,23 @@ export function parseExactJson(text: string): any {
 export function stringifyExact(value: unknown): string | null {
   let lost = false;
   const text = JSON.stringify(value, (_key, member: unknown) => {
-    if (typeof member !== 'number' || !Object.is(member, -0)) return member;
-    if (rawJson.rawJSON) return rawJson.rawJSON('-0.0');
+    const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
+    if (spelled === undefined) return member;
+    if (rawJson.rawJSON) return rawJson.rawJSON(spelled);
     lost = true;
     return member;
   });
   return lost ? null : text;
+}
+
+/** The JSON spelling of a number `JSON.stringify` cannot write — a negative zero (`0`, the sign lost) and
+ *  `±Infinity` (`null`, the value lost) — as SQLite's own JSON writer spells it: `-0.0`, and the overflow
+ *  literal `9.0e+999` that SQLite's JSON parser reads back as `+Inf` and `json_array(9e999)` itself
+ *  writes, so a compile-time tree and a SQL-built one compare equal. A NaN has no JSON spelling at all
+ *  (SQLite carries it as NULL — `compiler/rel/const.ts`), so it stays `JSON.stringify`'s. */
+function exactSpelling(member: number): string | undefined {
+  if (Object.is(member, -0)) return '-0.0';
+  if (member === Infinity) return '9.0e+999';
+  if (member === -Infinity) return '-9.0e+999';
+  return undefined;
 }
