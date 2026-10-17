@@ -750,6 +750,12 @@ authorities.
   `inject(9,5,9).union(identity().barrier()).fold()`. Residue, B's and pre-existing on trunk: an order() over
   a DISTINCT branch stream (`union(…).dedup().order().by(constant(0))`) and a keyed `dedup().by(x)` still read
   the branch order.
+  ✅ **r4–r6 + whole item ON TRUNK 2026-10-17 (`9b8e878b..8f561d0a`):** the merge keys on the reference's TYPED
+  equality (`typedEquality`, build.ts — storage class + zero sign; `AbstractTraverser.java:185-188`), an
+  unmergeable `withSack(seed)` merges nothing (`mergesNothing`); a collection keeps `-0.0`/a whole Double
+  (`src/json-exact.ts` spelling rule) and a map merges by `mapIdentity` (no entry order); a merged branch frames
+  by the column it projects (`mergeArms`) and a NULL per-row tag reads the value at every subject
+  (`perRowSubject`, predicate.ts). Residue stays indexed in `docs/outstanding-work.md` (TraverserSet merge).
 - 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`
