@@ -979,6 +979,12 @@ authorities.
   declines; an escape reads a whole code point) and the trigram prefilter never reads a group or half an
   escape as a mandatory run. Pinned in `test/error-surface.test.ts` + the randomized differential in
   `test/regex.test.ts`. Baseline moved: sql-hygiene bytes (run-time NaN/infinity guard, Infinity arms).
+  ✅ **Text-literal residue LANDED ON TRUNK 2026-10-17 (`2f788c24`, ff-text-literals).** `textLiteral`
+  (`src/sql/kernel/q.ts`) is total: a NUL or unpaired surrogate declines (SQLite text functions stop at a NUL, so
+  a `char(0)` spelling would be a wrong answer); a Gremlin string literal decodes as `unescapeJava`
+  (`src/gremlin/frontend.ts`, per `GenericLiteralVisitor.java`) incl. octal / `\u+XXXX` / line-join, the
+  `'s'`-suffix and one-unit char literals; chained regex `within` barriers bind apart. Pinned in
+  `test/text-literal.test.ts`. No baseline moved.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
