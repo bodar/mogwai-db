@@ -599,3 +599,115 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
     Then the result should be ordered
       | result |
       | l[josh,josh,josh,lop,lop,lop,marko,marko,marko,peter,ripple,vadas] |
+
+  # EQUALITY IS TYPED: `AbstractTraverser.equals` is `Objects.equals(t, other.t)`
+  # (vendor/tinkerpop/gremlin-core/.../traverser/util/AbstractTraverser.java:185-188), and an unsuffixed
+  # `1.0` is a Double (GenericLiteralVisitor.java:490-511), so Integer 1 and Double 1.0 never share a slot
+  # — at any merge (`typedEquality`, src/compiler/rel/build.ts). SQLite's PARTITION BY alone merged them.
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1dX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1.0).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[2].i,d[1.0].d] |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1d_2_1X_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1.0, 2, 1).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1.0].d |
+      | d[2].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1dX_barrier_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1.0).barrier().fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[2].i,d[1.0].d] |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1dX_order_byXconstantX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1.0).order().by(__.constant(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[2].i,d[1.0].d] |
+
+  # `Double.equals(-0.0, 0.0)` is false (it compares doubleToLongBits), so a signed zero keeps its slot.
+  @gap:traverser-set-merge
+  Scenario: g_injectXneg0d_2_0dX_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(-0.0, 2, 0.0).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[-0.0].d |
+      | d[2].i |
+
+  # `List.equals` compares MEMBERS with `equals`, so `[1]` and `[1L]` are different traversers. A bare list
+  # carries an Integer and a Long alike (its member type is inferred from the storage class), so a `[1L]`
+  # literal declines rather than frame — and merge — as `[1]`.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_injectXl1_l2_l1LX_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1], [2], [1L]).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i] |
+      | l[d[2].i] |
+
+  # A sack with no merge operator makes every traverser unequal to every other
+  # (B_O_S_SE_SL_Traverser.java:131-156 `carriesUnmergeableSack`), so nothing merges, at any position.
+  @gap:traverser-set-merge
+  Scenario: g_withSackX1X_V_both_both_limitX4X_sack
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().both().both().limit(4).sack()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+
+  @gap:traverser-set-merge
+  Scenario: g_withSackX1X_V_both_both_sackXsumX_byXconstantX1XX_sack_sum
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().both().both().sack(sum).by(__.constant(1)).sack().sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[60].i |

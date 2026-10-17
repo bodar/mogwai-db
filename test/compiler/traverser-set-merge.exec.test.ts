@@ -258,3 +258,57 @@ describe('a merge never reads a branch emission order', () => {
     expect(await run('g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).union(__.identity(), __.identity()).sum()')).toEqual([4]);
   });
 });
+
+describe('traverser equality is the reference’s TYPED equals — AbstractTraverser.java:185-188', () => {
+  // Integer(1) is not Double(1.0), and Double.equals(-0.0, 0.0) is false: SQLite's PARTITION BY says both
+  // are equal, so every merge key term is widened by `typedEquality` (src/compiler/rel/build.ts).
+  test('an Integer and a Double never share a slot, at any merge', async () => {
+    for (const q of [
+      'g.inject(1, 2, 1.0).fold()',
+      'g.inject(1, 2, 1.0).barrier().fold()',
+      'g.inject(1, 2, 1.0).order().by(__.constant(0)).fold()',
+      'g.inject(1, 2, 1.0).local(__.identity()).barrier().fold()',
+      'g.inject(1, 2, 1.0).aggregate("a").fold()',
+    ]) expect(await run(q), q).toEqual([[1, 2, 1]]);
+    expect(await run('g.inject(1, 2, 1.0).limit(2)')).toEqual([1, 2]);
+    expect(await run('g.inject(1.0, 2, 1).limit(2)')).toEqual([1, 2]);
+    // equal TYPES still merge: two Doubles, two Integers
+    expect(await run('g.inject(1.0d, 2, 1.0).limit(2)')).toEqual([1, 1]);
+    expect(await run('g.inject(1, 2, 1).limit(2)')).toEqual([1, 1]);
+  });
+
+  test('a signed zero keeps its own slot', async () => {
+    const answer = await run('g.inject(-0.0, 2, 0.0).limit(2)');
+    expect(answer).toEqual([-0, 2]);
+    expect(Object.is(answer[0], -0)).toBe(true);
+    const barrier = await run('g.inject(-0.0, 0.0, -0.0).barrier()');
+    expect(barrier.map((v: number) => Object.is(v, -0))).toEqual([true, true, false]);
+  });
+
+  test('two different traversers tying on an order() key behind a branch still raise', async () => {
+    await expect(run('g.inject(1.0, 1).union(__.identity()).order().by(__.constant(0)).fold()')).rejects.toThrow();
+  });
+
+  test('a list member the bare encoding cannot type declines rather than merge as another', async () => {
+    // List.equals compares members with equals: [1] and [1L] differ, as do [0.0] and [-0.0].
+    for (const q of ['g.inject([1], [2], [1L]).limit(2)', 'g.inject([1.0f], [2]).limit(2)', 'g.inject([-0.0], [2]).limit(2)', 'g.V().constant([1L]).limit(1)']) {
+      await expect(run(q), q).rejects.toThrow(/not supported/);
+    }
+    expect(await run('g.inject([1.0], [2], [1]).limit(2)')).toEqual([[1], [2]]);
+    expect(await run('g.inject([1], [2], [1]).limit(2)')).toEqual([[1], [1]]);
+  });
+});
+
+describe('a sack with no merge operator merges nothing — B_O_S_SE_SL_Traverser.java:131-156', () => {
+  test('so the traversal answers unmerged rather than declining', async () => {
+    expect(await run('g.withSack(1).V().both().both().sack().fold()')).toEqual([Array(30).fill(1)]);
+    expect(await run('g.withSack(1).V().both().both().sack(sum).by(__.constant(1)).sack().fold()')).toEqual([Array(30).fill(2)]);
+    expect(await run('g.withSack(1).V().both().both().limit(4).sack()')).toEqual([1, 1, 1, 1]);
+    // unmerged: the arrival order, not the merged slots' [1,1,1,1]
+    expect(await run('g.withSack(1).V().both().both().limit(4).id()')).toEqual([1, 1, 4, 6]);
+  });
+
+  test('a sack WITH a merge operator combines sacks on merge, which declines', async () => {
+    await expect(run('g.withSack(1, sum).V().both().both().limit(4).sack()')).rejects.toThrow(/not supported/);
+  });
+});

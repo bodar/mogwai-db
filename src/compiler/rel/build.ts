@@ -822,7 +822,7 @@ export function regroupFirstOccurrence(
   const encounter = rel.channels.find((channel) => channel.role === 'encounter');
   if (!encounter) throw new Error('RelIR lowering: regroupFirstOccurrence() needs an encounter channel to merge');
   const carried = rel.channels.filter((channel) => channel.role !== 'encounter' && channel.role !== 'bulk');
-  const partitionBy = [...key, ...carried.map((channel) => col(rel.id, channel.col))];
+  const partitionBy = typedEquality(rel, [...key, ...carried.map((channel) => col(rel.id, channel.col))]);
   const FIRST = 'rg_first';
   const first = make.window({
     id: fresh('rg'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(FIRST, 'int')),
@@ -861,6 +861,35 @@ export function regroupFirstOccurrence(
 }
 
 /**
+ * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
+ * which is TYPED: `Integer(1).equals(Double(1.0))` and `Double.equals(-0.0, 0.0)` (it compares
+ * `doubleToLongBits`) are both false. SQLite's `PARTITION BY` compares by VALUE across storage classes
+ * (INTEGER 1 = REAL 1.0) and cannot see a zero's sign, so every key term a value can sit in is widened
+ * here, ONCE, for every merge and tie guard: by its storage class (`typeof`, which tells an Integer from
+ * a Double where no type tag does — a tag, where carried, is already a key column of its own) and, for a
+ * zero, by its sign (`atan2(±0, -1)` is ±π, the comparison `receiver.ts`'s `floatingText` reads the sign
+ * bit with). A term declared `text`/`int`/`json`/`blob` has one storage class and no signed zero, so it
+ * keys as itself: a JSONB collection compares by its BYTES, which carry each member's numeric form
+ * (`1` vs `1.0`) — a member type the bare encoding cannot carry is refused where the list is BUILT
+ * (`listLiteralBlob`), so equal bytes are equal typed lists.
+ */
+export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
+  const declared = (term: Expr): SqlType =>
+    term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any' : 'any';
+  return terms.flatMap((term): Expr[] => {
+    const type = declared(term);
+    if (type !== 'any' && type !== 'real') return [term];
+    const signOfZero: Expr = {
+      kind: 'case',
+      whens: [[{ kind: 'binary', op: '=', left: term, right: compilerInt(0) }, { kind: 'call', fn: 'atan2', args: [term, compilerInt(-1)] }]],
+      else: compilerNull(),
+    };
+    return type === 'real' ? [term, signOfZero] : [term, { kind: 'call', fn: 'typeof', args: [term] }, signOfZero];
+  });
+}
+
+/**
  * THE TIE GUARD — a stable sort's tie-break reads the ARRIVAL position only among rows whose sort keys are
  * EQUAL (`…/step/map/OrderGlobalStep.java:78`), so where that position cannot be vouched for (`mergeEqual`)
  * the sort is still exact wherever no two DIFFERENT traversers tie: equal traversers sit together whatever
@@ -875,6 +904,8 @@ export function guardTies(
   const encounter = rel.channels.find((channel) => channel.role === 'encounter');
   if (!encounter) throw new Error('RelIR lowering: guardTies() needs an encounter channel to guard');
   const spec: WindowSpec = { partitionBy: ties, orderBy: [] };
+  // Two traversers differ by the merge's TYPED equality, not SQLite's: `MIN`/`MAX` of 1 and 1.0 agree.
+  identity = typedEquality(rel, identity);
   const name = (kind: string, i: number): string => `tg_${kind}${i}`;
   const specs = identity.flatMap((expr, i) => [
     [name('lo', i), { kind: 'window-expr', fn: 'min', args: [expr], spec }],

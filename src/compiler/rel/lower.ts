@@ -283,7 +283,18 @@ export const BORD_ARM: Channel = { col: 'bord_a', role: 'origin' };
  *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
  *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
 export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
-  ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted);
+  mergesNothing(ctx) || (ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted));
+
+/** Does the reference merge NO two traversers anywhere in this traversal? A `withSack(seed)` with a
+ *  non-null seed and no merge operator puts a sack on every traverser from the start, and a traverser
+ *  that `carriesUnmergeableSack` equals no other
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java:131-156`),
+ *  so every `TraverserSet` it reaches keeps one slot per traverser — at every bulking position and every
+ *  depth. Asked here, once, rather than by the scan (`ir/bulk.ts` reads steps, and the sack is a SOURCE
+ *  declaration). With a merge operator the set COMBINES sacks (`merge`, same file), which `mergeEqual`
+ *  declines. */
+export const mergesNothing = (ctx: ChainCtx): boolean =>
+  !!ctx.sack && !ctx.sack.operator && ctx.sack.seed.value !== null;
 
 /** The traversal `steps` is known to BEGIN, for merge placement — `ChainCtx.traversal` (or a nested
  *  rooted read's `ChainCtx.mergeScope`) itself, or a PREFIX of it a lowering sliced off to lower apart from
@@ -423,7 +434,7 @@ export function armStartMerge(
 export function mergedAt(
   ctx: ChainCtx, steps: readonly IRStep[], at: number, rel: Rel, key: (rel: Rel) => readonly Expr[], fresh: Minter,
 ): Rel | null {
-  if (at === 0) return rel;
+  if (at === 0 || mergesNothing(ctx)) return rel;
   // A stream with NO emission order cannot carry a merge (the copies' shared position IS the bulk), and
   // every reader of it but one folds in a canonical order no merge can move. The one is a SLICE, whose
   // membership the merged slots decide (`slicedAfter`) — so there, a merge the scan places (or may place)
@@ -2768,6 +2779,12 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
   // framed as `1` and `asString(local)` rendered `'1'` (the reference's `[true, 1]` frames a Boolean and
   // stringifies `'true'`). The member list stays BARE (untagged) here, so decline rather than retype it.
   if (values.some((value) => typeof value === 'boolean')) return null;
+  // The same holds for every NUMERIC member a bare member's storage class does not name back
+  // (`inferredVtype`, list.ts: INTEGER → int/long by range, REAL → double): `[1L]` wrote `1` and framed an
+  // Integer, `[1.0f]` a Double, and SQLite's JSON drops a zero's sign, so `[-0.0]` framed `0.0`. The bytes
+  // are also the list's merge key (`typedEquality`, build.ts), so `inject([1],[2],[1L])` merged `[1L]` into
+  // `[1]` — `List.equals` compares members with `equals`, and `Integer(1)` is not `Long(1)`. Decline.
+  if (values.some((value, mi) => !bareMemberRoundTrips(value, members ? members[mi]!.type : itemTypeAt(listArg.type ?? null, mi)))) return null;
   const items = values.map((value, mi) => {
     const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
     // A NON-WHOLE real literal needs the JSON channel's 17-digit form or it comes back a bit short
@@ -2776,6 +2793,20 @@ function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): Expr | null
     return item && typeof value === 'number' && !Number.isInteger(value) ? jsonMemberByTypeof(item) : item;
   });
   return items.some((item) => !item) ? null : { kind: 'json-array', items: items as Expr[], binary: true };
+}
+
+/** Does a NUMERIC literal member keep its declared type in a BARE list — does the storage class it is
+ *  written in infer back to that type (`inferredVtype`, list.ts)? A member with no declared type is
+ *  inferred by definition; a non-number is another rule's (`constLit` declines what it cannot spell). */
+function bareMemberRoundTrips(value: ArgValue, type: TypeNode | null | undefined): boolean {
+  if (typeof value !== 'number' || Number.isNaN(value)) return true;
+  if (Object.is(value, -0)) return false;
+  const flat = flatType(type);
+  if (flat == null) return true;
+  const integral = Number.isSafeInteger(value) && flat !== 'double' && flat !== 'float' && flat !== 'bigdecimal';
+  if (!integral) return flat === 'double';
+  const fitsInt = value >= -2147483648 && value <= 2147483647;
+  return fitsInt ? flat === 'int' : flat === 'long';
 }
 
 function injectList(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {

@@ -77,6 +77,12 @@ lowered.
   emission key (cluster B) lands; the reads that bypass a merge stay B's residue on trunk: an order() over a
   pairwise-DISTINCT branch stream (`g.V().union(out(),in()).dedup().order().by(constant(0))` answers id order,
   not the arms' order) and a keyed `dedup().by(label)` after a branch (keeps the first by id, not by arm).
+  (6) **merge equality vs `Map.equals`**: a map payload keys on its JSONB bytes, so two maps equal in Java but
+  built in different key orders would not merge (no lowered traversal is known to reach it — `inject([…map…])`
+  with repeats declines). Typed equality otherwise holds (`typedEquality`, build.ts; a bare-list member whose
+  type the encoding cannot carry — `[1L]`, `[1.0f]`, `[-0.0]` — declines at `listLiteralBlob`).
+  (7) **a folded `-0.0` loses its sign** (pre-existing, not a merge defect): SQLite's JSON writer spells it
+  `0.0`, so `inject(-0.0).fold()` answers `[0.0]`; the scalar stream keeps it.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`
