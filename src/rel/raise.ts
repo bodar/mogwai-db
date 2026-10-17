@@ -51,6 +51,9 @@ export function raisedMessage(error: unknown): string | null {
   return match ? match[1]!.replaceAll("''", "'") : null;
 }
 
+/** The deferral an int64 overflow in SQLite's own arithmetic (`sum()`) becomes (`GraphStore.query`). */
+export const INTEGER_OVERFLOW = 'integer arithmetic past 64 bits is not supported';
+
 /** A query whose answer is an error the DATA decided — the reference's own message, raised mid-statement
  *  by a `raiseExpr` arm. A distinct class so a caller can tell an answer that IS an error from a failure. */
 export class RaisedByQuery extends Error {

@@ -1,5 +1,6 @@
 import { isNested, isPickArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from './step.ts';
+import type { TypeNode } from '../../gremlin/types.ts';
 
 /**
  * THE OPTION-MAP `choose()` DECODE — `choose(<key>).option(k, body)…`, read once.
@@ -37,6 +38,8 @@ export type OptionPick = 'key' | 'none' | 'unproductive';
 export interface OptionArm {
   /** The matched value, or `undefined` for the two `Pick` arms. */
   readonly key: unknown;
+  /** The key's declared type — a `9007199254740992.0d` key is a Double, which the comparison reads. */
+  readonly keyType: TypeNode | null;
   readonly nested: unknown;
   readonly pick: OptionPick;
   /** A `__.discard()` body: those rows are dropped, so this option contributes no merge arm. */
@@ -61,7 +64,8 @@ export function optionArms(step: IRStep, body: BodyOf): OptionArm[] | null {
   for (const opt of step.optionArms ?? []) {
     const bodyArg = opt.args.find((a) => isNested(a.value))?.value;
     if (!bodyArg || !isNested(bodyArg)) return null;
-    const keyArg = opt.args.find((a) => a.value !== bodyArg)?.value;
+    const keyEntry = opt.args.find((a) => a.value !== bodyArg);
+    const keyArg = keyEntry?.value;
     const token = isPickArg(keyArg) ? keyArg.pick : undefined;
     if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
     const pick: OptionPick = keyArg === undefined ? 'none' : token ?? 'key';
@@ -73,6 +77,7 @@ export function optionArms(step: IRStep, body: BodyOf): OptionArm[] | null {
     if (!steps) return null;
     out.push({
       key: pick === 'key' ? keyArg : undefined,
+      keyType: pick === 'key' ? keyEntry?.type ?? null : null,
       nested: bodyArg.nested,
       pick,
       discard: steps.length === 1 && steps[0]!.name === 'discard',

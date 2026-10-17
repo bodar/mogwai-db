@@ -12,7 +12,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
-import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -756,7 +756,7 @@ export function listRetype(
       // family's statement from 1,250 bytes to 4,108, against a platform that caps a statement at
       // 100 KB. So the pick projects a `{v,t}` pair as ONE value and the payload columns read its
       // two fields, which is the same trick the member ENVELOPE already is.
-      const picked: Expr = {
+      const pickedRaw: Expr = {
         kind: 'scalar',
         plan: make.project({
           id: fresh('mp'), input: winner, channels: [], type: typeOf(meta('w', 'json')),
@@ -767,6 +767,10 @@ export function listRetype(
           }]],
         }),
       };
+      // Members that may mix comparability classes refuse rather than let SQLite's class order pick
+      // (`comparabilityClass`); a statically-typed list cannot mix.
+      const picked = memberType?.kind === 'static' ? pickedRaw
+        : mixedClassesRefused(pickedRaw, present, comparabilityClass(memberTypeTag(of, present)), fresh);
       // FENCED, and that is the whole point of naming it: without a materialization boundary the
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
@@ -778,7 +782,8 @@ export function listRetype(
           [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
         // A known `long`/`bigint` member class is the winner's, stated as the row-level arm states it
         // (`wideClassOf`, `lower.ts`) so a later predicate casts the decimal TEXT before ordering.
-        type: wideClass ?? UNKNOWN, result: 'number' as const, ...productive,
+        // Otherwise the winner's own member tag rides PER ROW in `vt` (`subjectType`, `lower.ts`).
+        type: wideClass ?? PER_ROW('vt'), result: 'number' as const, ...productive,
       };
     }
 

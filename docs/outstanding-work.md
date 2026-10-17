@@ -43,15 +43,11 @@ lowered.
   BigInteger Double (ref BigDecimal); an UNTAGGED stored integer counts as an Int whatever its size; and an
   intermediate overflow the final total cannot show is not widened.
   An EXACT-TAIL value held as decimal TEXT (a BigDecimal — `1.5m` is stored `'1.5'` — a BigInteger, or a
-  Long past 2^53) is left out of every SQL `sum` (the eligibility test admits `integer`/`real` only), so
-  `values('p').sum()` over `1.5m` and `2` is the Int 2 (ref BigDecimal 3.5), `10000000000000000000n` + `1`
-  the Int 1, `project('a').by(values('p').sum())` drops the `1.5m` vertex's key and
-  `local(values('p').sum())` answers null. Such a row no longer NAMES the total's class (`reducer.ts`
-  `exactTailText` reads it as no number class), but the total itself is wrong. A run-time decline was
-  tried and backed out: a guard binding at the scalar `sum` makes every tagged `sum` a program, which a
-  nested body (`local(values('age').sum())`) cannot carry, so it declined common traversals. Needs a
-  decline that rides inside one read (a guard channel out of a reducer), or exact decimal arithmetic.
-  See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
+  Long past 2^53) cannot be added by a SQL `sum`. Every `sum`/`mean` over such a row now DEFERS in-statement
+  (`reducer.ts` `arithmeticArg`, a raising arm of the aggregate inside the read, so a nested body carries it). The answer it
+  owes is exact decimal arithmetic, which remains open: `values('p').sum()` over `1.5m` and `2` is a
+  deferral, where the reference gives BigDecimal 3.5. A sum over a KNOWN `long`/`bigint` stream is exact
+  (`sumTower`). See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
   ([archived](./archive/2026-09-05-fan-out-rejoin-authority-plan.md)). Remaining are PATH-as-a-VALUE

@@ -1,4 +1,5 @@
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
+import { SCALAR_TRANSFORMS } from './step.ts';
 
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
 //
@@ -68,6 +69,13 @@ const isSideEffecting = (s: Step): boolean => {
   return rule === true || (typeof rule === 'function' && rule(s));
 };
 
+/** A step whose evaluation can THROW over the data it meets — a value transform (`asNumber(GType.BYTE)`
+ *  overflows, `toUpper()` rejects a non-String: `NumberHelper.java:724-800`, the `*GlobalStep.map`s) or
+ *  `math()`. The reference evaluates a filter body whether or not the filter could reject
+ *  (`TraversalFilterStep` calls `hasNext()`), so removing the body skips its error: the answer becomes
+ *  the input stream where the reference throws. */
+const mayRaise = (s: Step): boolean => SCALAR_TRANSFORMS.has(s.name) || s.name === 'math';
+
 /** Does this chain (or anything nested inside it) write a side effect, or bind an `as()` label?
  *  Both make a filter step unsafe to REMOVE even when its body always produces a traverser: the
  *  side effect would be skipped, and — although a filter consumer confines its body's binds today
@@ -75,7 +83,7 @@ const isSideEffecting = (s: Step): boolean => {
  *  depending on that asymmetry holding. Fail closed: an unrecognisable arg counts as impure. */
 function isImpure(steps: readonly Step[], params: Record<string, any>): boolean {
   return steps.some((s) => {
-    if (isSideEffecting(s) || s.name === 'as') return true;
+    if (isSideEffecting(s) || s.name === 'as' || mayRaise(s)) return true;
     return s.args.some((a) => isNested(a.value) && isImpure(stepChain(a.value.nested, params), params));
   });
 }

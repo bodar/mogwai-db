@@ -186,3 +186,142 @@ describe('a constant inside a body keeps its declared type', () => {
     expect(await typed(q)).toEqual(want as [unknown, number][]);
   });
 });
+
+// Review round 3. Each case below is a value a probe found wrong (or an internal error) at the parent.
+const X = "g.V(1).property('x', 9007199254740993L) ;; ";
+
+describe('a number compares in the reference common class, at every depth', () => {
+  // NumberHelper.compare converts both sides to getHighestCommonNumberClass first: a Long against a Double
+  // is a DOUBLE compare (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-398,670-681;
+  // Compare.java:66-69), where SQLite compares an INTEGER and a REAL exactly.
+  test.each([
+    // 9007199254741021 is 9007199254741020.0 as a double, so it is not greater.
+    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.0d))', []],
+    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.5d))', []],
+    ['g.inject(9007199254740992L,29L).fold().sum(local).is(P.gt(9007199254741020.0d))', []],
+    ['g.inject(9007199254740993L,1L).max().is(P.gt(9007199254740992.0d))', []],
+    ['g.inject(9007199254741021L).is(P.gt(9007199254741020.0d))', []],
+    ['g.inject(9007199254740992L,2L).sum().is(P.eq(9007199254740994.0d))', [[9007199254740994n, T.long]]],
+    ['g.inject(9007199254740993L).is(P.eq(9007199254740992.0d))', [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254740993L).is(P.within(9007199254740992.0d, 1.5d))', [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254740993L).is(P.neq(9007199254740992.0d))', []],
+    ['g.inject(9007199254740992.0d).is(P.eq(9007199254740993L))', [[9007199254740992, T.double]]],
+    ['g.inject(9007199254740992.0d).is(P.gte(9007199254740993L))', [[9007199254740992, T.double]]],
+    ['g.inject(9007199254740992L,29L).sum().is(P.gt(28.5d))', [[9007199254741021n, T.long]]],
+    // A Long is never equal to a String, however it is spelled (GremlinValueComparator.java:71-74).
+    ["g.inject(9007199254740992L,2L).sum().is(P.eq('9007199254740994'))", []],
+    ["g.inject(9007199254740994L).is(P.eq('9007199254740994'))", []],
+    // A Boolean is not a Number, so a numeric bound never matches it.
+    ['g.inject(true, 1).is(P.gt(0))', [[1, T.int]]],
+    [`${X}g.V().has('x', 9007199254740992.0d).values('name')`, [['marko', T.string]]],
+    [`${X}g.V().has('x', P.gt(9007199254740992.0d)).values('name')`, []],
+    [`${X}g.V().has('x', '9007199254740993').values('name')`, []],
+    [`${X}g.V().where(__.values('x').is(P.eq(9007199254740992.0d))).values('name')`, [['marko', T.string]]],
+    [`${X}g.V().values('x').as('a').select('a').is(P.gt(9007199254740992.0d))`, []],
+    [`${X}g.V().union(__.values('x'), __.values('age')).is(P.eq(9007199254740992.0d))`, [[9007199254740993n, T.long]]],
+    ["g.V().has('age', 29.0d).values('name')", [['marko', T.string]]],
+  ])('%s', async (q, want) => {
+    expect(await typed(q)).toEqual(want as [unknown, number][]);
+  });
+
+  // An Integer against a Float is a FLOAT compare; past 2^24 SQLite cannot round like one, so it defers.
+  test('an int past 2^24 against a float bound defers', () =>
+    expect(typed('g.inject(16777217).is(P.eq(16777216.0f))')).rejects.toThrow(RaisedByQuery));
+});
+
+describe('a min/max winner off a stored vtype compares as its own type', () => {
+  test.each([
+    `${X}g.V().values('x','age').max().is(P.gt(100))`,
+    `${X}g.V().values('x','age').fold().max(local).is(P.gt(100))`,
+    `${X}g.V().values('x','age').max().as('a').select('a').is(P.gt(100))`,
+    `${X}g.V().project('a').by(__.values('x','age').max()).select('a').is(P.gt(100))`,
+  ])('%s', async (q) => {
+    expect(await typed(q)).toEqual([[9007199254740993n, T.long]]);
+  });
+  test('a where() over it', async () => {
+    expect(await values(`${X}g.V().where(__.values('x','age').max().is(P.gt(100))).values('name')`)).toEqual(['marko']);
+  });
+});
+
+describe('min/max over values of different types defers at every reducer site', () => {
+  // compareTo across classes throws (NumberHelper.java:582-597).
+  for (const q of [
+    "g.V().values('age','name').max()",
+    "g.V().values('age','name').min()",
+    "g.V().local(__.values('name','age').max())",
+    "g.V().project('m').by(__.values('name','age').max())",
+    "g.V().values('age','name').fold().max(local)",
+    "g.inject(datetime('2020-01-01'), 1).max()",
+    'g.inject(true, 1).min()',
+  ]) test(`defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+
+  test('one type still answers', async () => {
+    expect(await typed("g.V().values('age').max()")).toEqual([[35, T.int]]);
+    expect(await typed("g.V().values('name').min()")).toEqual([['josh', T.string]]);
+    expect(await typed('g.inject(1, 2.5d).max()')).toEqual([[2.5, T.double]]);
+  });
+});
+
+describe('a sum over a non-Number, or past 64 bits, defers', () => {
+  // SumGlobalStep adds through NumberHelper.add(Number, Number); a Long past 2^63 promotes to a BigInteger
+  // (NumberHelper.java:430-452), which this store cannot carry.
+  for (const q of [
+    'g.inject(true, 1).sum()',
+    "g.inject(datetime('2020-01-01'), 1).sum()",
+    'g.inject(9223372036854775807L, 1L).sum()',
+  ]) test(`defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+  test('a static non-Number stream declines', () => expect(typed('g.inject(true, false).sum()')).rejects.toThrow(UnsupportedTraversal));
+});
+
+describe('a raising asNumber raises where only its existence is read', () => {
+  // TraversalFilterStep/ChooseStep evaluate the body (hasNext()), so the conversion throws there too.
+  for (const q of [
+    "g.V().where(__.values('age').math('_*10').asNumber(GType.BYTE))",
+    "g.V().filter(__.values('age').math('_*10').asNumber(GType.BYTE))",
+    "g.V().not(__.values('age').math('_*10').asNumber(GType.BYTE))",
+    "g.V().where(__.values('age').math('_*1e300').asNumber(GType.LONG))",
+    "g.V().where(__.values('name').asNumber(GType.INT))",
+    "g.V().choose(__.values('name').asNumber(GType.INT), __.constant(1), __.constant(2))",
+    "g.V().values('name').asNumber(GType.INT).count()",
+    "g.V().coalesce(__.values('name').asNumber(GType.INT), __.constant(0))",
+  ]) test(`defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+  test('a body the filter could drop as inert is not dropped', () =>
+    expect(typed("g.V().where(__.values('age').math('_*10').asNumber(GType.BYTE).count())")).rejects.toThrow(UnsupportedTraversal));
+  test('a converting body still filters', async () => {
+    expect(await values("g.V().where(__.values('age').asNumber(GType.BYTE)).values('name')")).toEqual(['marko', 'vadas', 'josh', 'peter']);
+  });
+});
+
+describe('asNumber keeps a wide long exact, and a literal converts as performConversion does', () => {
+  test.each([
+    ['g.inject(9007199254740992L,29L).sum().asNumber(GType.LONG)', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254740992L,29L).sum().asNumber(GType.BIGINT)', [[9007199254741021n, T.bigint]]],
+    ['g.inject(9007199254740992L,29L).fold().sum(local).asNumber(GType.LONG)', [[9007199254741021n, T.long]]],
+    [`${X}g.V().values('x').asNumber(GType.LONG)`, [[9007199254740993n, T.long]]],
+    [`${X}g.V().values('x').asNumber(GType.LONG).is(P.gt(9007199254740992L))`, [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254740993L,1L).max().asNumber(GType.LONG)', [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254741021L).asNumber(GType.LONG)', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254741021L).asNumber(GType.BIGINT)', [[9007199254741021n, T.bigint]]],
+    ['g.inject(9007199254741021L).asNumber()', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254741021L).asNumber(GType.DOUBLE)', [[9007199254741020, T.double]]],
+    ['g.inject(1.1f).asNumber(GType.DOUBLE)', [[1.1, T.double]]],
+    ['g.inject(1.5m).asNumber(GType.INT)', [[1, T.int]]],
+    ['g.inject(9.223372036854775807E18d).asNumber(GType.LONG)', [[9223372036854775807n, T.long]]],
+  ])('%s', async (q, want) => {
+    expect(await typed(q)).toEqual(want as [unknown, number][]);
+  });
+
+  // NumberHelper.performConversion / longValue, at the pin (NumberHelper.java:724-805): the message names
+  // the SOURCE class.
+  test.each([
+    ['g.inject(1.0e300d).asNumber(GType.FLOAT)', "Can't convert number of type Double to Float due to overflow."],
+    ['g.inject(1.0e300d).asNumber(GType.LONG)', "Can't convert number of type Double to Long due to overflow."],
+    ['g.inject(-1.0e300d).asNumber(GType.LONG)', "Can't convert number of type Double to Long due to underflow."],
+    ['g.inject(9007199254741021L).asNumber(GType.INT)', "Can't convert number of type Long to Integer due to overflow."],
+    ["g.inject('300.5').asNumber(GType.BYTE)", "Can't convert number of type Float to Byte due to overflow."],
+  ])('%s', (q, message) => expect(typed(q)).rejects.toThrow(message));
+
+  test('a wide integral double property is stored, not an internal error', async () => {
+    expect(await typed("g.V(1).property('w', 1.0e20d) ;; g.V(1).values('w')")).toEqual([[1e20, T.double]]);
+  });
+});

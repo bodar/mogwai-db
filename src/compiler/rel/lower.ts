@@ -27,10 +27,10 @@ import { constLit, itemTypeAt } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
-import { comparableTheta, CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
+    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload,
@@ -40,10 +40,11 @@ import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liv
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
-import { asNumberCast, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
-import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
+import { CLASS_MASK, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
+import { raiseExpr } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
@@ -1555,10 +1556,26 @@ function scalarTail(
   // `count().is(P.typeOf(GType.LONG))` constant-fold without touching a row; an injected value with a
   // heterogeneous or untagged type is honestly `unknown`. Same three cases `predicateSql` calls
   // `TypeCtx`, in the algebra's own expression vocabulary.
-  const subjectType = (): SubjectType =>
-    carries('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
-      : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type, text: out.type.text }
-        : SUBJECT_UNKNOWN;
+  const subjectType = (): SubjectType => {
+    if (carries('vtype')) return { kind: 'perRow', vtype: col(rel.id, 'vtype') };
+    if (out.kind === 'scalar' && out.type.kind === 'static') return { kind: 'static', type: out.type.type, text: out.type.text };
+    // A PER-ROW tag column (a mixed `inject`, a min/max winner's stored vtype) is the row's Gremlin type
+    // where it names one; a NULL tag means "read the value", so the storage class stands in for it.
+    // A reducer result's `vt` holds a Gremlin type or a STORAGE class; `reducedVtype` keeps only the former.
+    const reducerTag = out.kind === 'scalar' && out.result === 'number' && carries('vt');
+    const tagCol = reducerTag ? 'vt' : out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+    if (tagCol && carries(tagCol)) {
+      const value = col(rel.id, 'v');
+      const inferred: Expr = { kind: 'case', whens: [
+        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('integer') }, compilerText('long')],
+        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, compilerText('double')],
+        [{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('text') }, compilerText('string')],
+      ] };
+      const tag = col(rel.id, tagCol);
+      return { kind: 'perRow', vtype: { kind: 'call', fn: 'coalesce', args: [reducerTag ? reducedVtype(tag) : tag, inferred] } };
+    }
+    return SUBJECT_UNKNOWN;
+  };
   /** This stream's traverser as a filter SUBJECT — the value, the type column where there is one, and
    *  the row the clause is correlated to. Read off `rel` at the moment it is asked for, like every
    *  other fact here, so a step that reshaped the relation cannot leave it stale. */
@@ -1649,7 +1666,10 @@ function scalarTail(
       const bound = bindAliases(step, rel, labels, {
         kind: 'value', value: col(rel.id, 'v'),
         type: out.kind === 'scalar' ? out.type : UNKNOWN,
-        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') }
+          // A per-row tag in another column (a min/max winner's `vt`) is recorded the same way.
+          : out.kind === 'scalar' && perRowColumnOf(out.type) && carries(perRowColumnOf(out.type)!)
+            ? { vtype: col(rel.id, perRowColumnOf(out.type)!) } : {}),
       }, fresh);
       if (!bound) return null;
       rel = bound.rel;
@@ -1848,14 +1868,20 @@ function scalarTail(
       // The overflow guard below raises the reference's message for an INTEGER result; a REAL one (a
       // `mean`, a sum of doubles) is fenced inline, as every runtime `asNumber` is (`asNumberCast`).
       // Not `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT.
-      const cast = asNumberCast(value, spec, true);
+      // The fence is a WHERE for the reason the transform family's is (`asNumberFilter`): an existence
+      // position never reads the value.
+      const { refuse } = asNumberParts(value, spec, true);
+      const source = refuse
+        ? make.filter({ id: fresh('anf'), input: rel, channels: rel.channels, type: rel.type, pred: asNumberFilter(value, refuse) })
+        : rel;
+      const cast = asNumberParts(col(source.id, 'v'), spec, true).value;
       const carried = rel.channels;
       const projected = make.project({
-        id: fresh('an'), input: rel, channels: carried,
+        id: fresh('an'), input: source, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', cast], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+        exprs: [['v', cast], ...carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)],
       });
-      const framing: RelFraming = { kind: 'scalar', type: STATIC(spec.as) };
+      const framing: RelFraming = { kind: 'scalar', type: STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint') };
       if (spec.min === undefined) { rel = projected; out = framing; continue; }
       const guard = asNumberOverflowGuard(rel, value, spec.min, spec.max!, spec.disp, fresh);
       const tail = scalarTail(projected, framing, steps, at + 1, bulked, ctx, fresh, labels);
@@ -1900,7 +1926,6 @@ function scalarTail(
       if (!offences) return null;
       const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out));
       if (!transformed) return null;
-      const tx = { ...transformed, expr: raisingWhen(offences, transformed.expr) };
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
       // carrying the column would reframe the RESULT as the INPUT's type. The framing type becomes
@@ -1909,10 +1934,22 @@ function scalarTail(
       // stops asking for an ordering key the value no longer has one for, which is correct: the
       // transformed value is a native SQLite value and compares directly.
       const carried = rel.channels;
+      // Every RAISE the transform owes — the receiver's offences and a runtime `asNumber(GType.X)`'s fence
+      // — is a WHERE, not part of the value: a position that consumes only existence (`where`/`not`/
+      // `filter`, a `choose` condition, `count()`) never reads the value, and the reference raises there
+      // all the same (`asNumberFilter`). The value is then the plain conversion over the filter's rows.
+      const raises = offences.length > 0 || transformed.fenced !== undefined;
+      const source = raises
+        ? make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type,
+          pred: raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1)) })
+        : rel;
+      const plain = raises ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', transformInput(out)) : transformed;
+      if (!plain) return null;
+      const tx = { ...plain, expr: plain.fenced?.value ?? plain.expr };
       const projected = make.project({
-        id: fresh('tx'), input: rel, channels: carried,
+        id: fresh('tx'), input: source, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+        exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)],
       });
       // A runtime `asNumber(GType.X)` is a FENCED cast (`asNumberCast`) that spells its input several
       // times, so it is materialized rather than re-inlined at every later read of `v` — a reducer reads
@@ -2066,17 +2103,37 @@ function scalarTail(
         // `ProductiveByStrategy` collection put nulls in a stream. So nulls sort LAST instead, in
         // both directions: SQLite orders NULLs first ascending and last descending, which is why the
         // `IS NULL` term is explicit rather than left to the direction.
-        const present = rel;
         // The single-type-space order + a total raw-value tie-break, shared with the correlated
         // by()-reducer arm (`minMaxOrder`) so the two positions cannot drift.
-        const ranked = rowNumberWindow(present, rank, present.channels,
-          { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') }, fresh);
+        const cls = comparableClass(rel, out);
+        // A stream that may MIX comparability classes carries each row's class as a column (materialized,
+        // so the value is spelled once rather than once per window), and windows the least and greatest
+        // class over every row, so the winner can refuse when they differ (`comparableClass`).
+        const present = cls === null ? rel : fenced(make.project({
+          id: fresh('rc'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta('red_cls', 'text', true)),
+          exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ['red_cls', cls]],
+        }), fresh);
+        const ranked = cls === null
+          ? rowNumberWindow(present, rank, present.channels,
+            { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') }, fresh)
+          : make.window({
+            id: fresh('rn'), input: present, channels: present.channels,
+            type: typeOf(...present.type.cols, meta(rank, 'int'), meta('red_lo', 'text', true), meta('red_hi', 'text', true)),
+            specs: [
+              [rank, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: minMaxOrder(present, out, step.name === 'min') } }],
+              ['red_lo', { kind: 'window-expr', fn: 'min', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
+              ['red_hi', { kind: 'window-expr', fn: 'max', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
+            ],
+          });
         // The rank filter reads a windowed column, so fence it (a window may not sit inside another
         // SELECT's WHERE without re-inlining — the rule `sample` obeys and §11 records).
         const frame = make.materialize({ id: fresh('rm'), input: ranked, channels: ranked.channels, type: ranked.type });
+        const first: Expr = { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) };
         const winner = make.filter({
           id: fresh('rk'), input: frame, channels: frame.channels, type: frame.type,
-          pred: { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) },
+          pred: cls === null ? first : and(first, { kind: 'case', whens: [[
+            { kind: 'binary', op: 'is not', left: col(frame.id, 'red_lo'), right: col(frame.id, 'red_hi') },
+            raiseExpr(MIXED_COMPARABLES, col(frame.id, 'red_lo'))]], else: compilerInt(1) }),
         });
         rel = make.project({
           id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
@@ -2092,7 +2149,10 @@ function scalarTail(
         // an EMPTY input, which those must SKIP — `SumGlobalStep` yields nothing over zero starts.)
         // The winner of a known `long`/`bigint` stream is of that class, possibly decimal TEXT past 2^53 —
         // stated statically for the `sumTower` arm's reason below (`wideClassOf`).
-        out = { ...numeric, ...wideClassOf(out), productiveNull: true };
+        // A winner off a STORED vtype names its Gremlin type in `vt`, so a later predicate reads it per row
+        // (`subjectType`) — a wide `long` carried as TEXT orders as the number it is.
+        const winnerTagged = present.type.cols.some((column) => column.name === 'vtype');
+        out = { ...numeric, ...(winnerTagged ? { type: PER_ROW('vt') } : {}), ...wideClassOf(out), productiveNull: true };
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
@@ -2116,12 +2176,22 @@ function scalarTail(
         out = { ...numeric, ...wideClassOf(out), productiveNull: true };
         continue;
       }
-      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
+      // A sum/mean over a value whose TYPE is not a Number (a Boolean or a Date, both stored as INTEGER) is
+      // the reference's `ClassCastException` (`SumGlobalStep` adds through `NumberHelper.add(Number, Number)`),
+      // where SQLite would add the storage. A static non-number declines here; a per-row tag refuses per row.
+      const knownType = staticTypeOf(out.kind === 'scalar' ? out.type : UNKNOWN);
+      if (knownType !== undefined && !NUMERIC_VTYPES.includes(knownType)) return null;
+      const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+      const rowTag = carries('vtype') ? col(rel.id, 'vtype') : tagCol && carries(tagCol) ? col(rel.id, tagCol) : undefined;
+      const nonNumber: Expr | undefined = rowTag === undefined ? undefined : {
+        kind: 'binary', op: 'and', left: { kind: 'binary', op: 'is not', left: col(rel.id, 'v'), right: compilerNull() },
+        right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [rowTag, compilerText('double')] }, values: NUMERIC_VTYPES.map(compilerText) } },
+      };
+      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col), nonNumber);
       // Where the rows carry their OWN Gremlin type — the per-row column, or the stream's static tag — a
       // `sum`'s class is theirs (`numberClass`): the storage class alone frames a Double stored integral
       // as an Int. Two more aggregate columns, and the class named over them AFTER the reduction, so the
       // per-row reading is spelled once per part rather than once per class test.
-      const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
       const tag = tagCol && carries(tagCol) ? col(rel.id, tagCol) : staticSumVt ? compilerText(staticSumVt) : undefined;
       if (step.name === 'sum' && tag) {
         const summed = nonEmptyReducer(rel, [['v', reduced.value], [CLASS_MASK, numberClassMask(col(rel.id, 'v'), tag)]], fresh,
@@ -3425,6 +3495,19 @@ export function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): read
   const dir: 'asc' | 'desc' = isMin ? 'asc' : 'desc';
   const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
   return [{ expr: nullsLast, dir: 'asc' }, { expr: key, dir }, { expr: col(rel.id, 'v'), dir }];
+}
+
+/** A min/max input row's comparability class (`comparabilityClass`), read off the row's own type carrier
+ *  — the stored `vtype`, a per-row tag column, else the storage class — or `null` where the stream is
+ *  statically ONE type and so cannot mix. The twin of `minMaxOrder`. */
+export function comparableClass(rel: Rel, framing: RelFraming): Expr | null {
+  if (framing.kind === 'scalar' && staticTypeOf(framing.type) !== undefined) return null;
+  const value = col(rel.id, 'v');
+  const storage: Expr = { kind: 'call', fn: 'typeof', args: [value] };
+  const has = (name: string) => rel.type.cols.some((column) => column.name === name);
+  const tagCol = has('vtype') ? 'vtype'
+    : framing.kind === 'scalar' && perRowColumnOf(framing.type) && has(perRowColumnOf(framing.type)!) ? perRowColumnOf(framing.type)! : undefined;
+  return comparabilityClass(tagCol ? { kind: 'call', fn: 'coalesce', args: [col(rel.id, tagCol), storage] } : storage);
 }
 
 /** The winner row's own GREMLIN vtype — `int`/`long`/`string` from the stored `vtype` column or the

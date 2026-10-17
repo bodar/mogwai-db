@@ -743,7 +743,7 @@ export function chooseOptions(
     ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
     : [];
   for (const [at, arm] of keyed.entries()) {
-    const pred = predicateExpr(choice.expr, arm.key, choiceType, null, null, fresh);
+    const pred = predicateExpr(choice.expr, arm.key, choiceType, arm.keyType, null, fresh);
     if (!pred) return null;
     whens.push([pred, compilerInt(at)]);
   }

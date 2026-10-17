@@ -1,5 +1,8 @@
-import { and, col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { jsonEachSet, type Minter } from './build.ts';
+import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+import * as make from '../../rel/factory.ts';
+import { raiseExpr } from '../../rel/raise.ts';
+import { MIXED_COMPARABLES } from './reducer.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
@@ -146,6 +149,98 @@ export type SubjectType =
 
 export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
 
+/**
+ * A Gremlin `Number` class as `NumberHelper.getHighestCommonNumberInfo` reads it — bit width and
+ * floating-ness — collapsed to the distinctions a comparison can observe. `int32` is byte/short/int.
+ */
+type NumClass = 'int32' | 'long' | 'bigint' | 'float' | 'double' | 'bigdecimal';
+const NUM_CLASS: Readonly<Record<string, NumClass>> = {
+  byte: 'int32', short: 'int32', int: 'int32', long: 'long', bigint: 'bigint', float: 'float', double: 'double', bigdecimal: 'bigdecimal',
+};
+const TWO_53 = 2 ** 53;
+const TWO_24 = 2 ** 24;
+
+/** The bound's class: its declared type, else its value's own shape. */
+function boundClass(value: unknown, boundType: TypeNode | null): NumClass | null {
+  const declared = flatType(boundType);
+  if (declared !== null && NUM_CLASS[declared]) return NUM_CLASS[declared]!;
+  if (typeof value === 'bigint') return value >= -(2n ** 63n) && value < 2n ** 63n ? 'long' : 'bigint';
+  if (value instanceof BigDecimal) return 'bigdecimal';
+  if (typeof value === 'number') return !Number.isInteger(value) ? 'double' : Math.abs(value) <= 2147483647 ? 'int32' : 'long';
+  return null;
+}
+const magnitude = (value: unknown): number =>
+  typeof value === 'bigint' ? Math.abs(Number(value)) : typeof value === 'number' ? Math.abs(value) : Math.abs(Number(String(value)));
+
+/**
+ * HOW A SUBJECT OF CLASS `subject` MEETS THIS BOUND so SQLite's comparison is the reference's.
+ *
+ * SQLite compares an INTEGER and a REAL EXACTLY. `NumberHelper.compare` does not: it converts both sides
+ * to their highest common class first (`getHighestCommonNumberClass`), so a Long against a Double is
+ * `Double.compare(a.doubleValue(), b.doubleValue())` and an Integer against a Float is a FLOAT compare
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-398,670-681`;
+ * `Compare.java:66-69` routes every ordering and `eq` through it). The two agree except where the
+ * conversion ROUNDS, and that happens in exactly two places:
+ *
+ * - a `long` past 2^53 against a `double`/`float` — the long rounds to a double. Only a bound at or past
+ *   2^53 can tell (rounding is monotone, and every long below 2^53 converts exactly), so the subject is
+ *   compared as `CAST(… AS REAL)` — which IS `Long.doubleValue()`, round-to-nearest — only then. The
+ *   other direction, a `double`/`float` subject against a `long` bound past 2^53, rounds the BOUND, which
+ *   the compiler holds, so it is converted here (`Number(bigint)` is round-to-nearest too).
+ * - an `int` past 2^24 against a `float` — a FLOAT compare. A float bound that large against an `int`
+ *   subject is exact only while the subject is within 2^24 (every such int is a float), and SQLite has no
+ *   single precision to do the rest, so the comparison is `guarded`: it RAISES a deferral for a subject
+ *   past 2^24 (`guardedCompare`). An int bound that large against a `float` subject rounds the bound
+ *   here (`Math.fround`).
+ *
+ * A `BigInteger`/`BigDecimal` against anything widens to an EXACT class (`BigDecimal`), which is SQLite's
+ * own compare.
+ */
+interface NumericPair { readonly real: boolean; readonly bound: Expr; readonly guarded?: true }
+function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBound: Expr): NumericPair {
+  const big = subject === 'bigint' || subject === 'bigdecimal' || bound === 'bigint' || bound === 'bigdecimal';
+  if (big) return { real: false, bound: castBound };
+  const m = magnitude(value);
+  const fpBound = bound === 'float' || bound === 'double';
+  if (subject === 'long' && fpBound && m >= TWO_53) return { real: true, bound: castBound };
+  if (subject === 'int32' && bound === 'float' && m >= TWO_24) return { real: false, bound: castBound, guarded: true };
+  if ((subject === 'double' || subject === 'float') && bound === 'long' && m >= TWO_53)
+    return { real: false, bound: compilerReal(Number(value as bigint | number)) };
+  if (subject === 'float' && bound === 'int32' && m > TWO_24) return { real: false, bound: compilerReal(Math.fround(Number(value))) };
+  return { real: false, bound: castBound };
+}
+
+/** The deferral a `guarded` comparison raises (`numericPair`). */
+const FLOAT_ROUNDED = 'comparing an int past 2^24 with a float is not supported';
+
+/** `op` over the pair, keyed as it says (`real`), and raising past 2^24 where it is `guarded`. */
+function guardedCompare(op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, keyed: Expr, pair: NumericPair): Expr {
+  const compared = binary(op, pair.real ? { kind: 'cast', arg: subject, to: 'real' } : keyed, pair.bound);
+  return pair.guarded
+    ? { kind: 'case', whens: [[binary('>', { kind: 'call', fn: 'abs', args: [subject] }, compilerInt(TWO_24)), raiseExpr(FLOAT_ROUNDED, subject)]], else: compared }
+    : compared;
+}
+
+/** The vtype names of each class, in the order the per-row CASE has always listed them. */
+const CLASS_VTYPES: readonly (readonly [NumClass, string])[] =
+  [['int32', 'byte'], ['int32', 'short'], ['int32', 'int'], ['long', 'long'], ['bigint', 'bigint'], ['float', 'float'], ['double', 'double'], ['bigdecimal', 'bigdecimal']];
+
+/** A CASE's arms grouped by identical outcome, in first-seen order — so a comparison with no rounding
+ *  hazard renders the two arms it always has, and a hazard splits off only the class it touches. */
+function groupedArms(entries: readonly (readonly [string, Expr])[]): [string[], Expr][] {
+  const arms: [string[], Expr, string][] = [];
+  for (const [vtype, outcome] of entries) {
+    const key = JSON.stringify(outcome);
+    const arm = arms.find((a) => a[2] === key);
+    if (arm) arm[0].push(vtype); else arms.push([[vtype], outcome, key]);
+  }
+  return arms.map(([vtypes, outcome]) => [vtypes, outcome]);
+}
+
+/** Does a STRING operand spell something a number may be carried as (decimal or total-nanos TEXT)? Only
+ *  then can raw TEXT equality confuse a String with a Number. */
+const numberSpelling = (value: string): boolean => /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(value);
+
 /** Comparability is confined to one Gremlin type space. Each CASE combines the guard and comparison
  * so its type vocabulary is emitted once; a stored vtype outranks SQLite's storage class because an
  * exact numeric value may deliberately be stored as decimal TEXT. */
@@ -188,8 +283,16 @@ const ordered = (
     // int as if it were comparable.
     return compilerFalse;
   }
+  const boundCls = numericBound && !temporal ? boundClass(value, boundType) : null;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
+    // A NUMBER subject against a NUMBER bound: the common-class rule (`numericPair`).
+    const subjectCls = canonical !== null ? NUM_CLASS[canonical] : undefined;
+    if (boundCls && subjectCls) {
+      const subjectCast = STATIC_SUBJECT_CAST[canonical!];
+      const keyed: Expr = type.text && subjectCast ? { kind: 'cast', arg: subject, to: subjectCast } : subject;
+      return guardedCompare(op, subject, keyed, numericPair(subjectCls, boundCls, value, castBound));
+    }
     // A TEXT-stored exact-tail subject (`inject(9.99m)`, a bound big long/Duration — `type.text`) rides as
     // decimal/total-nanos TEXT, so ordering casts it to its numeric class. The SAME cast is identity on the
     // NATIVE form of the same tag (`count()`→INTEGER, `asNumber(BIGDECIMAL)`→REAL), which is why the flag —
@@ -211,6 +314,17 @@ const ordered = (
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
   if (type.kind === 'perRow') {
+    if (boundCls) {
+      // One arm per class whose comparison differs — normally the two (cast INTEGER, cast REAL) it has
+      // always had; a rounding hazard (`numericPair`) splits off only the class it touches.
+      const entries: [string, Expr][] = [];
+      for (const [cls, vtype] of CLASS_VTYPES) {
+        const to: SqlType = CAST_TO_REAL.includes(vtype) ? 'real' : 'int';
+        entries.push([vtype, guardedCompare(op, subject, { kind: 'cast', arg: subject, to }, numericPair(cls, boundCls, value, castBound))]);
+      }
+      return { kind: 'case', whens: groupedArms(entries).map(([vtypes, outcome]) =>
+        [{ kind: 'in-list', expr: type.vtype, values: vtypes.map(compilerText) }, outcome] as const), else: compilerFalse };
+    }
     return numericBound
       ? { kind: 'case', whens: [
         [{ kind: 'in-list', expr: type.vtype, values: intVtypes.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound)],
@@ -221,11 +335,74 @@ const ordered = (
       : { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse };
   }
   const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
+  if (boundCls) {
+    // No vtype: a REAL is a `double`, and an INTEGER a `long` (a native int64) or an `int` — which only a
+    // float bound past 2^24 can tell apart, so there it takes the int's guard too (`numericPair`).
+    const entries: [string, Expr][] = [];
+    for (const [cls, storageClass] of [['long', 'integer'], ['double', 'real']] as const) {
+      const pair = numericPair(cls, boundCls, value, castBound);
+      const asInt = cls === 'long' && numericPair('int32', boundCls, value, castBound).guarded ? { ...pair, guarded: true as const } : pair;
+      entries.push([storageClass, guardedCompare(op, subject, subject, asInt)]);
+    }
+    return { kind: 'case', whens: groupedArms(entries).map(([classes, outcome]) =>
+      [{ kind: 'in-list', expr: storage, values: classes.map(compilerText) }, outcome] as const), else: compilerFalse };
+  }
   return numericBound
     ? { kind: 'case', whens: [[
       { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, subject, castBound),
     ]], else: compilerFalse }
     : { kind: 'case', whens: [[binary('=', storage, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
+};
+
+/**
+ * VALUE EQUALITY — `eq`, and `neq` as its negation. A RAW compare where that is the reference's answer,
+ * which is the common case and keeps the value index usable; widened only where raw SQLite equality and
+ * `Compare.eq` (`NumberHelper.compare` for two numbers, `false` across type spaces — `Compare.java:66-69`,
+ * `GremlinValueComparator.java:71-74`) disagree:
+ *
+ * - a NUMBER bound whose comparison ROUNDS for some class (`numericPair`): the raw compare stays (an exact
+ *   match is also a rounded one) and the rounded form is OR-ed in for the class it touches;
+ * - a STRING bound that spells a number, against a subject that may be a number carried as decimal TEXT:
+ *   raw TEXT equality would call `'9007199254740994'` equal to the Long — restrict it to String rows.
+ */
+const equality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
+  const raw = binary('=', subject, bound);
+  if (typeof value === 'string') {
+    if (type.kind === 'static') {
+      const canonical = normalizeTypeName(type.type);
+      return canonical !== null && (NUM_CLASS[canonical] || canonical === 'duration') ? CONSTANT.false : raw;
+    }
+    // A NULL vtype is "read the value", and a TEXT value read that way is a String.
+    if (type.kind === 'perRow' && numberSpelling(value))
+      return binary('and', raw, binary('=', { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('string')] }, compilerText('string')));
+    return raw;
+  }
+  const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
+  const boundCls = typeof value === 'number' || isExactTail(value) ? temporal ? null : boundClass(value, boundType) : null;
+  if (!boundCls) return raw;
+  const tailCast = exactTailCast(value);
+  const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
+  const rounded = (cls: NumClass, intToo = false): Expr | undefined => {
+    const own = numericPair(cls, boundCls, value, castBound);
+    // Without a vtype an INTEGER may be an `int` too, so it takes the int's guard as well (see `ordered`).
+    const pair = intToo && numericPair('int32', boundCls, value, castBound).guarded ? { ...own, guarded: true as const } : own;
+    return pair.real || pair.guarded || pair.bound !== castBound ? guardedCompare('=', subject, subject, pair) : undefined;
+  };
+  if (type.kind === 'static') {
+    const canonical = normalizeTypeName(type.type);
+    const cls = canonical !== null ? NUM_CLASS[canonical] : undefined;
+    return (cls && rounded(cls)) ?? raw;
+  }
+  const classes: readonly (readonly [NumClass, string])[] = type.kind === 'perRow'
+    ? CLASS_VTYPES : [['long', 'integer'], ['double', 'real']];
+  const tag: Expr = type.kind === 'perRow' ? type.vtype : { kind: 'call', fn: 'typeof', args: [subject] };
+  const entries: [string, Expr][] = [];
+  for (const [cls, name] of classes) {
+    const widened = rounded(cls, type.kind !== 'perRow' && name === 'integer');
+    if (widened) entries.push([name, widened]);
+  }
+  return groupedArms(entries).reduce<Expr>((acc, [names, outcome]) =>
+    binary('or', acc, binary('and', { kind: 'in-list', expr: tag, values: names.map(compilerText) }, outcome)), raw);
 };
 
 /**
@@ -510,7 +687,7 @@ export function predicateExpr(
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
     // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
     const value = operand(pred, opType, opParam);
-    return value && binary('=', subject, value);
+    return value && equality(subject, value, pred, type, opType);
   }
 
   const { op, operands } = pred;
@@ -571,8 +748,8 @@ export function predicateExpr(
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
     if (ORDERING.has(op)) return ordered(comparison, subject, bound, operands[0].value, type, operands[0].type);
-    const inner = binary(comparison, subject, bound);
-    return op === 'neq' ? negated(binary('=', subject, bound)) : inner;
+    const equal = equality(subject, bound, operands[0].value, type, operands[0].type);
+    return equal && (op === 'neq' ? negated(equal) : equal);
   }
 
   if (op === 'within' || op === 'without') {
@@ -618,6 +795,15 @@ export function predicateExpr(
     const members = memberArgs.map((o) =>
       isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
+    // Membership is `eq` per member (`Contains.within`), so a literal member whose equality is not the
+    // raw compare (`equality` — a rounding class, a String spelling a number) cannot ride an `IN` list.
+    // Such a set is the disjunction of its members' equalities instead.
+    const equalities = memberArgs.map((o, i) => isNested(o.value) ? binary('=', subject, members[i]!) : equality(subject, members[i]!, o.value, type, o.type));
+    if (equalities.some((e) => !e)) return null;
+    if (equalities.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {
+      const any = (equalities as Expr[]).reduce((acc, e) => binary('or', acc, e));
+      return op === 'within' ? any : negated(any);
+    }
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);
   }
@@ -661,4 +847,37 @@ export function predicateExpr(
   // something this module does not have — a regex function, or a run-time member list — so each
   // declines rather than being half-answered.
   return null;
+}
+
+/**
+ * A min/max operand's COMPARABILITY class — `'number'` for every Number class, else the type's own name —
+ * from its Gremlin type `tag` (a vtype, or SQLite's `typeof` where nothing better is known). The
+ * reference compares two Numbers numerically and anything else with `compareTo`, which THROWS across
+ * classes (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597`):
+ * `max()` over a name and an age is a `ClassCastException`, where SQLite orders every number before every
+ * text and simply answered the text. A NULL is skipped by min/max, so it has no class. A storage-class
+ * TEXT among numbers may be a wide `long`, but `'string'` differs from `'number'` either way, so that
+ * stream refuses rather than guess.
+ */
+export function comparabilityClass(tag: Expr): Expr {
+  // `tag` is spelled twice, not once per arm: `'null'` (a null, which min/max skip) has no class, and a
+  // storage-class `'text'` is a String.
+  const numberOrTag: Expr = {
+    kind: 'case', whens: [[{ kind: 'in-list', expr: tag, values: [...NUMERIC_VTYPES, 'integer', 'real'].map(compilerText) }, compilerText('number')]],
+    else: tag,
+  };
+  return { kind: 'call', fn: 'nullif', args: [{ kind: 'call', fn: 'replace', args: [numberOrTag, compilerText('text'), compilerText('string')] }, compilerText('null')] };
+}
+
+/** `value`, unless the classes `cls` takes over `members` differ — then a deferral. One aggregate over the
+ *  members, read as a scalar subquery, for a min/max that picks its winner by sort rather than by window. */
+export function mixedClassesRefused(value: Expr, members: Rel, cls: Expr, fresh: Minter): Expr {
+  // The refusal is INSIDE the aggregate — it raises there or yields 0 — so neither it nor `value` is
+  // spelled twice: `coalesce(nullif(<0 or raise>, 0), value)`.
+  const count: Expr = { kind: 'agg', fn: 'count', args: [cls], distinct: true };
+  const verdict = make.aggregate({
+    id: fresh('mxc'), input: members, channels: [], type: typeOf(meta('n', 'int')),
+    groupBy: [], aggs: [['n', { kind: 'case', whens: [[binary('>', count, compilerInt(1)), raiseExpr(MIXED_COMPARABLES, { kind: 'agg', fn: 'count', args: [] })]], else: compilerInt(0) }]],
+  });
+  return { kind: 'call', fn: 'coalesce', args: [{ kind: 'call', fn: 'nullif', args: [{ kind: 'scalar', plan: verdict }, compilerInt(0)] }, value] };
 }

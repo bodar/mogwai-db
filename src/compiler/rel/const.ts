@@ -62,7 +62,9 @@ export const constLit = (a: Arg): Expr | null => {
       return compilerReal(value);
     }
     if (paramName != null) return param(value, paramName);
-    if (!Number.isInteger(value)) return compilerReal(value);
+    // Past 2^53 a JS number is a Double whatever it was declared (a wider integral literal parses to a
+    // `bigint`), and no exact SQLite integer can be written for it — so it is a REAL.
+    if (!Number.isSafeInteger(value)) return compilerReal(value);
     const flat = flatType(type);
     return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
       ? compilerReal(value) : compilerInt(value);

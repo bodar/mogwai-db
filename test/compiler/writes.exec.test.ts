@@ -10,6 +10,7 @@ import { isRowsBind } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
 import type { RunStep } from '../../src/program.ts';
+import { RaisedByQuery } from '../../src/rel/raise.ts';
 
 // A SNAPSHOT read on the rendered steps: a retained READ (not a mutation) whose rows a LATER step
 // references via a json_each RowsBind — the pre-mutation read a cascade/merge depends on. A mutation's
@@ -739,13 +740,11 @@ describe('a sum takes its values’ common number class', () => {
   });
 
   // An exact-tail value (a BigDecimal, a BigInteger or Long past 2^53) is held as decimal TEXT, which the
-  // SQL sum leaves out (an open wrong answer, docs/outstanding-work.md). Its class must not then be claimed
-  // for the total — `values('p').sum()` over `1.5m` and `2` answered the BigDecimal 2 — so such a row
-  // reads as no number class and the total keeps its storage class.
-  test('an exact-tail value held as text does not name the sum’s class', () => {
-    const vt = (q: string) => run(seededStore(), q).map((r) => r.vt ?? r.vtype);
-    expect(vt("g.addV('n').property('p',1.5m).addV('n').property('p',2).V().hasLabel('n').values('p').sum()")).toEqual(['integer']);
-    expect(vt("g.addV('n').property('p',10000000000000000000n).addV('n').property('p',1).V().hasLabel('n').values('p').sum()")).toEqual(['integer']);
+  // SQL sum cannot add, and the reference adds it exactly — so the sum DEFERS rather than leave it out
+  // (`reducer.ts` `arithmeticArg`; NumberHelper.java:452). It used to answer the other values' total.
+  test('an exact-tail value held as text defers the sum rather than drop it', () => {
+    expect(() => run(seededStore(), "g.addV('n').property('p',1.5m).addV('n').property('p',2).V().hasLabel('n').values('p').sum()")).toThrow(RaisedByQuery);
+    expect(() => run(seededStore(), "g.addV('n').property('p',10000000000000000000n).addV('n').property('p',1).V().hasLabel('n').values('p').sum()")).toThrow(RaisedByQuery);
     // An exact class held as an INTEGER sums exactly, and keeps its class.
     expect(run(seededStore(), "g.addV('n').property('p',5n).addV('n').property('p',1).V().hasLabel('n').values('p').sum()")).toEqual([{ v: 6, vt: 'bigint' }]);
   });

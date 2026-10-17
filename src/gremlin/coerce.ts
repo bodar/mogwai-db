@@ -1,7 +1,7 @@
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
-import { flatType, type CanonicalType } from './types.ts';
+import { BigDecimal, flatType, type CanonicalType } from './types.ts';
 
 /**
  * NOT LEARNED YET, raised from inside the fold — the front-end twin of the compiler's `Deferral`.
@@ -109,24 +109,138 @@ export function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: 
 /** asNumber(GType.X) over a compile-time constant: parse/convert + overflow-check,
  *  raising TinkerPop's exact messages (SQL can't raise these; inject inputs are
  *  literals). Integer targets truncate toward zero. */
-export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>): number | null {
+export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>, sourceType: string | null = null): number | bigint | null {
   // A null object returns null — no parse, no throw (`AsNumberStep.map`, line 55:
   // `if (object == null) return null;`, before the token branch). `g.inject(null).asNumber(GType.INT)`
   // is the empty result `null`, not the parse error a non-null unparseable value raises.
   if (v === null || v === undefined) return null;
-  let n: number;
-  if (typeof v === 'number') n = v;
-  else if (typeof v === 'bigint') n = Number(v);
-  // Number('') / Number('  ') are 0, not NaN — reject blank strings explicitly so they
-  // raise the parse error like any other non-numeric string rather than becoming 0.
-  else if (typeof v === 'string') { n = v.trim() === '' ? NaN : Number(v); if (Number.isNaN(n)) throw new ValueParseError(`Can't parse string '${v}' as number.`); }
-  else throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : javaTypeName(v)} as number.`);
-  if (spec.int) {
-    n = Math.trunc(n);
-    if (spec.min !== undefined && (n < spec.min || n > spec.max!))
-      throw new ValueParseError(`Can't convert number of type ${Number.isInteger(v) ? 'Integer' : 'Double'} to ${spec.disp} due to overflow.`);
+  return performConversion(javaNumber(v, sourceType), spec);
+}
+
+/** A compile-time number as the reference holds it: its Java class, and its value — EXACT (`int`) for
+ *  an integral class or a BigDecimal's integer part, a double (`real`) otherwise. */
+interface JavaNumber { readonly cls: 'Byte' | 'Short' | 'Integer' | 'Long' | 'BigInteger' | 'Float' | 'Double' | 'BigDecimal'; readonly real: number; readonly int?: bigint; readonly decimal?: string }
+const CLASS_NAME: Readonly<Record<string, JavaNumber['cls']>> = {
+  byte: 'Byte', short: 'Short', int: 'Integer', long: 'Long', bigint: 'BigInteger', float: 'Float', double: 'Double', bigdecimal: 'BigDecimal',
+};
+const LONG_MIN = -(2n ** 63n);
+const LONG_MAX = 2n ** 63n - 1n;
+const FLOAT_MAX = 3.4028234663852886e38;
+const integralClass = (n: bigint): JavaNumber['cls'] =>
+  n >= -2147483648n && n <= 2147483647n ? 'Integer' : n >= LONG_MIN && n <= LONG_MAX ? 'Long' : 'BigInteger';
+/** The integer part of a plain decimal string, exactly (`BigDecimal.setScale(0, DOWN)`). */
+const truncatedDecimal = (text: string): bigint => BigInt(text.split('.')[0]!.replace(/^([-+]?)$/, '$10'));
+
+/** `v` as the reference's `Number`: a literal's declared class, else its value's own shape; a String is
+ *  PARSED as `NumberUtils.createNumber` does for the forms a number spells (an integer → the narrowest of
+ *  Integer/Long/BigInteger; a decimal → a Float when the Float prints as the Double does, else a Double),
+ *  and an unparseable one raises (`AsNumberStep.parseNumber`). */
+function javaNumber(v: any, sourceType: string | null): JavaNumber {
+  if (v instanceof BigDecimal) {
+    const decimal = v.toString();
+    return { cls: 'BigDecimal', real: Number(decimal), int: truncatedDecimal(decimal), decimal };
   }
-  return n;
+  if (typeof v === 'bigint') return { cls: CLASS_NAME[sourceType ?? ''] ?? integralClass(v), real: Number(v), int: v };
+  if (typeof v === 'number') {
+    const declared = CLASS_NAME[sourceType ?? ''];
+    const cls = declared ?? (Number.isInteger(v) ? integralClass(BigInt(v)) : 'Double');
+    return cls === 'Float' || cls === 'Double' ? { cls, real: v } : { cls, real: v, int: BigInt(Math.trunc(v)) };
+  }
+  if (typeof v === 'string') {
+    const t = v.trim();
+    // Number('') / Number('  ') are 0, not NaN — a blank string raises the parse error like any other.
+    if (t === '' || Number.isNaN(Number(t))) throw new ValueParseError(`Can't parse string '${v}' as number.`);
+    if (/^[-+]?\d+$/.test(t)) { const n = BigInt(t); return { cls: integralClass(n), real: Number(n), int: n }; }
+    const d = Number(t);
+    return { cls: Number.isFinite(Math.fround(d)) && Number(floatText(Math.fround(d))) === d ? 'Float' : 'Double', real: d };
+  }
+  throw new ValueParseError(`Can't parse type ${javaTypeName(v)} as number.`);
+}
+
+/** `Float.toString` — the shortest decimal that reads back as the same float. */
+function floatText(f: number): string {
+  for (let p = 1; p <= 9; p++) { const s = f.toPrecision(p); if (Math.fround(Number(s)) === f) return String(Number(s)); }
+  return String(f);
+}
+
+/** `(float) n` for an exact integer, rounded ONCE (round-half-even), as Java's `long → float` is. */
+function integerToFloat(n: bigint): number {
+  const neg = n < 0n;
+  let m = neg ? -n : n;
+  if (m <= 2n ** 53n) return Math.fround(Number(n));
+  const shift = BigInt(m.toString(2).length - 24);
+  let q = m >> shift;
+  const r = m - (q << shift);
+  const half = 1n << (shift - 1n);
+  if (r > half || (r === half && (q & 1n) === 1n)) q += 1n;
+  m = q << shift;
+  return neg ? -Number(m) : Number(m);
+}
+
+const exactInteger = (n: bigint): number | bigint => (n >= -(2n ** 53n) + 1n && n <= 2n ** 53n - 1n ? Number(n) : n);
+
+/** `Number.longValue` the way `NumberHelper.longValue` guards it
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:771-805`). */
+function longValue(a: JavaNumber, target: string): bigint {
+  const overflow = `Can't convert number of type ${a.cls} to ${target} due to overflow.`;
+  if (a.int === undefined) {
+    if (Number.isNaN(a.real)) throw new ValueParseError(`Can't convert NaN to ${target}.`);
+    if (!Number.isFinite(a.real)) throw new ValueParseError(`Can't convert floating point infinity to ${target}.`);
+    if (a.real > 2 ** 63) throw new ValueParseError(overflow);
+    if (a.real < -(2 ** 63)) throw new ValueParseError(`Can't convert number of type ${a.cls} to ${target} due to underflow.`);
+    // `num.longValue()` SATURATES, so exactly 2^63 (which passes the `>` test) is Long.MAX_VALUE.
+    const t = BigInt(Math.trunc(a.real));
+    return t > LONG_MAX ? LONG_MAX : t;
+  }
+  if (a.int < LONG_MIN || a.int > LONG_MAX) throw new ValueParseError(overflow);
+  return a.int;
+}
+
+/** `NumberHelper.performConversion`, over a compile-time number
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:724-770`). */
+function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof numericSpec>>): number | bigint {
+  const overflow = (): never => { throw new ValueParseError(`Can't convert number of type ${a.cls} to ${spec.disp} due to overflow.`); };
+  // A source already of the target class is returned AS IS.
+  if (a.cls === spec.disp) {
+    if (a.cls === 'BigDecimal') return a.real;
+    return a.int !== undefined && a.cls !== 'Float' && a.cls !== 'Double' ? exactInteger(a.int) : a.real;
+  }
+  if (spec.as === 'bigdecimal') {
+    // The exact decimal carrier for a wide integral source is a different encoding; decline it.
+    if (a.int !== undefined && a.decimal === undefined && exactInteger(a.int) !== Number(a.int)) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a wide integer');
+    return a.real;
+  }
+  if (spec.as === 'long') return exactInteger(longValue(a, spec.disp));
+  if (spec.int && spec.min !== undefined) {
+    const n = longValue(a, spec.disp);
+    if (n < BigInt(spec.min) || n > BigInt(spec.max!)) overflow();
+    return Number(n);
+  }
+  if (spec.as === 'bigint') {
+    // `bigIntegerValue`: a Double through its `toString` digits, any other non-integral through `longValue`.
+    if (a.int !== undefined) return exactInteger(a.int);
+    if (!Number.isFinite(a.real)) throw new CoercionDeferral('asNumber(BIGINT) of a non-finite number');
+    if (a.cls === 'Float') {
+      // `BigInteger.valueOf(number.longValue())` — Java's own SATURATING float-to-long.
+      const t = BigInt(Math.trunc(a.real));
+      return exactInteger(t > LONG_MAX ? LONG_MAX : t < LONG_MIN ? LONG_MIN : t);
+    }
+    // `BigDecimal.valueOf(d)` reads `Double.toString(d)`: the shortest digits, not the exact binary value.
+    const [mantissa, exponent] = a.real.toExponential().split('e') as [string, string];
+    const digits = mantissa.replace('.', '');
+    const scale = Number(exponent) - (digits.replace('-', '').length - 1);
+    return exactInteger(scale >= 0 ? BigInt(digits) * 10n ** BigInt(scale) : truncatedDecimal(
+      `${digits.startsWith('-') ? '-' : ''}${digits.replace('-', '').padStart(-scale + 1, '0').slice(0, scale)}`));
+  }
+  if (spec.as === 'float') {
+    if (Number.isNaN(a.real) || (a.int === undefined && !Number.isFinite(a.real))) return Math.fround(a.real);
+    if (Math.abs(a.real) > FLOAT_MAX) overflow();
+    return a.int !== undefined && a.decimal === undefined ? integerToFloat(a.int) : Math.fround(a.real);
+  }
+  // double
+  if (a.int === undefined && !Number.isFinite(a.real)) return a.real;
+  if (!Number.isFinite(a.real)) overflow();
+  return a.cls === 'Float' ? Number(floatText(a.real)) : a.real;
 }
 
 /** asNumber(GType.X) over a runtime scalar: a SQL CAST to the target's storage class
@@ -146,10 +260,10 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
   // A bigdecimal input keeps its exact carrier (a BigDecimal instance / decimal text) —
   // framed via the BigDecimal serializer's canonical text, no lossy numeric coercion.
   if (subtype === 'bigdecimal') return { val: v, as: 'bigdecimal' };
-  if (typeof v === 'number' || typeof v === 'bigint') {
-    const n = Number(v);
-    return { val: n, as: (subtype ?? (Number.isInteger(n) ? 'int' : 'double')) as ValueType };
-  }
+  // A Number is returned UNCHANGED (`AsNumberStep.map`), so a wide integral keeps every digit.
+  if (typeof v === 'bigint') return { val: exactInteger(v), as: (subtype ?? (v >= LONG_MIN && v <= LONG_MAX ? 'long' : 'bigint')) as ValueType };
+  if (typeof v === 'number')
+    return { val: v, as: (subtype ?? (!Number.isInteger(v) ? 'double' : Math.abs(v) <= 2147483647 ? 'int' : 'long')) as ValueType };
   if (typeof v === 'string') {
     const t = v.trim();
     if (t === '' || Number.isNaN(Number(t))) throw new ValueParseError(`Can't parse string '${v}' as number.`);
@@ -312,6 +426,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     const step = steps[at];
     // Cleared each iteration: `perRow` is meaningful only when the asNumber-mixed arm is the LAST
     // coercion in the prefix — any following uniform coercion re-coerces every value and supersedes it.
+    const previousRow = perRow;
     perRow = undefined;
     // A traversal date is an apply-style child value, not a constant coercion. Leave it
     // for the scalar dispatcher, which provisions the correlated child scope.
@@ -324,7 +439,11 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     if (step.name === 'asNumber') {
       const spec = numericSpec(step.args[0]?.value);
       if (spec) {
-        for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
+        // Each value's Java class is what the conversion and its message read: the literal's declared
+        // type at the source, else the class the previous coercion left (a Date's epoch is a Long).
+        const sourceType = (i: number): string | null =>
+          at === 1 ? flatType(steps[0].args[i]?.type) : previousRow?.[i] ?? (as === 'datetime' ? 'long' : as ?? null);
+        for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec, sourceType(i));
         as = spec.as;
       } else {
         if (as === 'datetime') {

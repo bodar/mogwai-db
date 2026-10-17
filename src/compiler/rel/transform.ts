@@ -2,6 +2,7 @@ import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { raiseExpr } from '../../rel/raise.ts';
+import { SAFE_INT } from './reducer.ts';
 import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -78,6 +79,9 @@ const JAVA_WHITESPACE = [
 export interface Transformed {
   readonly expr: Expr;
   readonly type?: ScalarType;
+  /** Where `expr` carries an inline raising fence (`asNumberCast`): the unfenced value and the fence as a
+   *  filter predicate, for a host that can apply it as a WHERE (`asNumberFilter`). */
+  readonly fenced?: { readonly value: Expr; readonly filter: Expr };
 }
 
 const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
@@ -129,6 +133,19 @@ const DOUBLE_MAX = Number.MAX_VALUE;
  * makes the TEXT arm unreachable, so it is not spelled.
  */
 export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false): Expr {
+  const { value, refuse } = asNumberParts(v, spec, integersGuarded, nativeNumber);
+  return refuse ? { kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: value } : value;
+}
+
+/** The same fence as a FILTER predicate: true where the row converts exactly, a raise where it does not.
+ *  A position that consumes only a value's EXISTENCE — an `EXISTS` body (`where`/`not`/`filter`, a
+ *  `choose` condition) or a `count()` — never reads the value, so SQLite never evaluates an inline fence
+ *  there; a WHERE is evaluated for every row it admits, so the fence holds at every depth. */
+export const asNumberFilter = (v: Expr, refuse: Expr): Expr =>
+  ({ kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: compilerInt(1) });
+
+/** The two halves of `asNumberCast`: the converted `value`, and the `refuse` condition (or null). */
+export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false): { readonly value: Expr; readonly refuse: Expr | null } {
   const cast: Expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' };
   const notInteger = bin('!=', call('typeof', v), held('integer'));
   const abs = call('abs', { kind: 'cast', arg: v, to: 'real' });
@@ -145,7 +162,15 @@ export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false
       : spec.as === 'float' ? bin('and', bin('>', abs, compilerReal(FLOAT_MAX)), bin('<=', abs, compilerReal(DOUBLE_MAX)))
         : null;
   const refuse = nativeNumber ? range : range ? bin('or', notANumber, range) : notANumber;
-  return refuse ? { kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: cast } : cast;
+  // A `long`/`bigint` target past 2^53 rides as decimal TEXT, the carrier every wide long has: a native
+  // int64 that wide is read back through a JS number and loses its low bits, where `performConversion`
+  // returns a Long source unchanged (`NumberHelper.java:725-727`).
+  const value: Expr = spec.as === 'long' || spec.as === 'bigint'
+    ? { kind: 'case', whens: [[
+      { kind: 'unary', op: 'not', arg: bin('and', bin('>=', cast, compilerInt(-SAFE_INT)), bin('<=', cast, compilerInt(SAFE_INT))) },
+      { kind: 'cast', arg: cast, to: 'text' }]], else: cast }
+    : cast;
+  return { value, refuse };
 }
 
 /**
@@ -347,7 +372,12 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
     // target is fenced where the cast and the reference disagree (`asNumberCast`).
     const known = staticTypeOf(incoming);
     const native = !!known && NUMBER_FAMILY.has(known) && !staticIsText(incoming);
-    return { expr: asNumberCast(v, spec, false, native), type: STATIC(spec.as) };
+    const { value, refuse } = asNumberParts(v, spec, false, native);
+    // A wide `long`/`bigint` result is decimal TEXT (`asNumberParts`), so its class is TEXT-carried.
+    const type = STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint');
+    return refuse
+      ? { expr: asNumberCast(v, spec, false, native), type, fenced: { value, filter: asNumberFilter(v, refuse) } }
+      : { expr: value, type };
   }
 
   if (step.name === 'asBool') {

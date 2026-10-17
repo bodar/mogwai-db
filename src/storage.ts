@@ -6,7 +6,7 @@
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
 import { type Sql } from './api.ts';
-import { raisedMessage, RaisedByQuery } from './rel/raise.ts';
+import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery } from './rel/raise.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -243,7 +243,12 @@ export class GraphStore {
       return this.sql.query<T>(sql, binds.map(coerceBindValue));
     } catch (error) {
       const raised = raisedMessage(error);
-      throw raised === null ? error : new RaisedByQuery(raised);
+      if (raised !== null) throw new RaisedByQuery(raised);
+      // SQLite's int64 `sum()` overflowing is not a crash but a number the reference PROMOTES past 64
+      // bits (`NumberHelper.add` → BigInteger, `NumberHelper.java:430-452`), which this store cannot
+      // carry: a deferral the query answers with, not an internal error.
+      if (error instanceof Error && /^integer overflow$/.test(error.message)) throw new RaisedByQuery(INTEGER_OVERFLOW);
+      throw error;
     }
   }
 

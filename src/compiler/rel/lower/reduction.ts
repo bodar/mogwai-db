@@ -31,10 +31,10 @@ import { PATH_CHANNEL, PATH_COL, extendPath, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, originOf, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
 import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
-import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { mixedClassesRefused, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { continueAs, declaredScalarType, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { comparableClass, continueAs, declaredScalarType, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -990,11 +990,16 @@ export function correlatedReduce(
       if (valueColIsSubquery(values.rel, 'v')) return null;
       const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
       const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
-      const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(winner.id, 'v')]] });
+      // A stream that may mix comparability classes refuses rather than let SQLite's class order pick.
+      const cls = comparableClass(values.rel, values.framing);
+      const picked = cls ? mixedClassesRefused(col(winner.id, 'v'), values.rel, cls, fresh) : col(winner.id, 'v');
+      const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', picked]] });
       const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
       return {
         expr: { kind: 'scalar', plan: vExpr },
-        framing: { kind: 'scalar', type: UNKNOWN, result: 'number' },
+        // A winner off a STORED vtype names its Gremlin type, so a predicate on it reads that per row —
+        // a wide `long` carried as TEXT then orders as the number it is (`valuePredicate`).
+        framing: { kind: 'scalar', type: values.rel.type.cols.some((c) => c.name === 'vtype') ? PER_ROW('vtype') : UNKNOWN, result: 'number' },
         vtype: { kind: 'scalar', plan: vtExpr },
         present: existsAny(values.rel, fresh)!,
         yields: 'one',
@@ -1192,7 +1197,7 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   };
   const keyed: { readonly when: Expr; readonly cv: ChildValue }[] = [];
   for (const arm of arms.filter((a) => a.pick === 'key')) {
-    const when = predicateExpr(choice.expr, arm.key, choiceType, null, null, fresh);
+    const when = predicateExpr(choice.expr, arm.key, choiceType, arm.keyType, null, fresh);
     const cv = armValue(arm);
     if (!when || !cv) return null;
     keyed.push({ when, cv });
@@ -1876,6 +1881,14 @@ export function valueRun(
     if (!offences) return null;
     const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
+    // A RAISING transform (a runtime `asNumber(GType.X)`) still produces iff its input did — but a host
+    // that asks only WHETHER the run produced (`where`/`not`/`choose`) never reads the fenced value, so
+    // the fence rides on the productivity claim too, where SQLite must evaluate it (`asNumberFilter`).
+    // The receiver's offences are the same kind of raise, so they ride there as well.
+    if ((transformed.fenced || offences.length) && present !== undefined) {
+      const raises = raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1));
+      present = present === ALWAYS_PRODUCTIVE ? raises : and(present, raises);
+    }
     value = raisingWhen(offences, transformed.expr);
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
