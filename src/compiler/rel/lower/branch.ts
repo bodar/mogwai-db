@@ -18,7 +18,7 @@ import { ALWAYS_PRODUCTIVE, knownPresence } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
-import type { AliasEntry, AliasMap } from '../../alias.ts';
+import { joinAliasEntry, type AliasEntry, type AliasMap } from '../../alias.ts';
 import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantHasList, type VariantArm } from '../variant.ts';
@@ -617,14 +617,23 @@ function remapArmAliases(
   arms: readonly Tail[], incoming: AliasMap, fresh: Minter,
 ): { readonly arms: readonly Tail[]; readonly aliases: AliasMap } | null {
   const body = new Map<string, AliasEntry>();
+  // An INCOMING label an arm REBINDS keeps its column — the arm appended to the history it was handed —
+  // but not its description: after the merge the column holds whatever each arm left there, so the
+  // label is the JOIN of every arm's entry. Keeping the incoming entry framed `inject(3L).as('a')
+  // .union(constant(1).as('a'), …).select(all,'a')` by the Long alone (`[3L,1L]`) and read a
+  // `Pop.mixed` over a sometimes-rebound label as one entry.
+  const rebound = new Map<string, AliasEntry>();
   for (const arm of arms) {
     for (const [label, entry] of liveAliases(arm.aliases, arm.rel)) {
       if (!incoming.has(label)) body.set(label, mergeAliasEntry(body.get(label), entry));
+      else rebound.set(label, mergeAliasEntry(rebound.get(label), entry));
     }
   }
-  if (!body.size) return { arms, aliases: incoming };
+  const joined = new Map(incoming);
+  for (const [label, entry] of rebound) joined.set(label, { ...entry, col: incoming.get(label)!.col });
+  if (!body.size) return { arms, aliases: joined };
 
-  const aliases = new Map(incoming);
+  const aliases = new Map(joined);
   for (const [label, entry] of body) {
     // An arm is a dynamic choice, so its path-length summary is not linear. The first arm supplies
     // the homogeneous shape descriptor; a disagreeing shape remains fail-closed at alias re-entry.
@@ -661,21 +670,19 @@ function remapArmAliases(
   return { arms: reprojected, aliases };
 }
 
-/** Merge only the compile-time description of a branch-local binding. A heterogeneous binding is
- * deliberately less specific: `select()` then declines through its ordinary alias-shape machinery. */
+/** Merge the compile-time description of one label across arms — the description through
+ * `joinAliasEntry`, the ONE join a rebind uses too, so a disagreeing scalar class becomes each entry's
+ * own tag and an untagged disagreement a conflict every reader declines on. The linear summaries survive
+ * only where every arm agrees: an arm that rebinds a label lengthens its history, so the count is then
+ * dynamic and `Pop.mixed` must not read it as one entry. */
 function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): AliasEntry {
   if (!left) return right;
-  const same = <T>(a: T | undefined, b: T | undefined): T | undefined =>
-    JSON.stringify(a) === JSON.stringify(b) ? a : undefined;
+  const same = <T>(a: T | undefined, b: T | undefined): T | undefined => (a === b ? a : undefined);
+  const binds = same(left.binds, right.binds);
+  const pathPos = same(left.pathPos, right.pathPos);
   return {
-    ...left,
-    shapes: new Set([...left.shapes, ...right.shapes]),
-    scalarType: same(left.scalarType, right.scalarType),
-    listOf: same(left.listOf, right.listOf),
-    mapOf: same(left.mapOf, right.mapOf),
-    propertyElem: same(left.propertyElem, right.propertyElem),
-    binds: undefined,
-    pathPos: undefined,
+    ...joinAliasEntry(left, right), col: left.col,
+    ...(binds !== undefined ? { binds } : {}), ...(pathPos !== undefined ? { pathPos } : {}),
   };
 }
 

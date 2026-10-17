@@ -70,6 +70,52 @@ export type AliasMap = ReadonlyMap<string, AliasEntry>;
 export const aliasScalarTypeOf = (type: ScalarType): ScalarType =>
   type.kind === 'perRow' ? PER_ROW_ENVELOPE : type;
 
-/** Merge a shape into a label's shape set (rebind may add a new shape). */
-export const withShape = (prev: ReadonlySet<AliasShape> | undefined, shape: AliasShape): Set<AliasShape> =>
-  new Set([...(prev ?? []), shape]);
+/**
+ * ONE JOIN FOR A LABEL'S COMPILE-TIME DESCRIPTION — what a history that holds BOTH sides' entries may
+ * claim about all of them. The two callers are the two ways one label comes to hold entries from more
+ * than one binding: a REBIND appends to the history (`as('a')…as('a')`, `bindAliases`), and a BRANCH
+ * merge unions arms that may each have bound it (`remapArmAliases`). Both ask the same question, so they
+ * share this answer rather than each spelling its own (the rebind used to OVERWRITE the descriptor with
+ * the last binding's, and the branch merge used to keep the INCOMING one, so `inject(3.5d).as('a')
+ * .constant(1).as('a').select(first,'a')` framed the Double as an Integer — `[3i]`).
+ *
+ * The reference keeps each OBJECT as it was bound: `select(Pop.first/all, 'a')` reads it back off the
+ * `Path` unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectOneStep.java`
+ * via `Scoping.getScopeValue` → `Path.get(Pop, label)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ImmutablePath.java`).
+ * So where the bindings DISAGREE on a scalar class the authority is each ENTRY's own recorded `t`
+ * (`objectEntry`, `rel/history.ts`) — `PER_ROW_ENVELOPE`, the type a value states inside its own JSON —
+ * which every reader (`select` first/last/all/mixed, a `by()` slot, a `where`/`order`/`groupCount` key)
+ * already honours. An entry with NO tag (an `unknown` binding) is read the way a lone `unknown` binding
+ * is — its class inferred from its own value, by the framer (`execute.ts` `vtypeToValueType(null)`) and by
+ * every key alike (`valueClass`, `rel/build.ts`) — so the per-entry read never asks an entry to speak
+ * for another.
+ *
+ * THE INVARIANT readers rely on: a shape the label holds whose descriptor is absent (`list` without
+ * `listOf`, `map` without `mapOf`; `value` without `scalarType` is the same rule, though a scalar join is
+ * always total) is a CONFLICT, and every reader DECLINES on it. Absence is sticky by construction — a
+ * side that holds the shape with no descriptor joins to none — so a later rebind cannot restore an
+ * authority the history no longer has.
+ */
+export function joinAliasEntry(left: AliasEntry, right: AliasEntry): Omit<AliasEntry, 'col' | 'binds' | 'pathPos'> {
+  const same = <T>(a: T | undefined, b: T | undefined): T | undefined =>
+    a !== undefined && JSON.stringify(a) === JSON.stringify(b) ? a : undefined;
+  const scalar = (a: ScalarType | undefined, b: ScalarType | undefined): ScalarType | undefined =>
+    !a || !b ? undefined : JSON.stringify(a) === JSON.stringify(b) ? a : PER_ROW_ENVELOPE;
+  /** One descriptor, keyed by the shape it describes: joined where both sides hold that shape, the
+   *  holder's own where one does. */
+  const field = <T>(shape: AliasShape, a: T | undefined, b: T | undefined, join: (a: T | undefined, b: T | undefined) => T | undefined): T | undefined =>
+    left.shapes.has(shape) && right.shapes.has(shape) ? join(a, b)
+      : left.shapes.has(shape) ? a : right.shapes.has(shape) ? b : undefined;
+  const scalarType = field('value', left.scalarType, right.scalarType, scalar);
+  const listOf = field('list', left.listOf, right.listOf, same);
+  const mapOf = field('map', left.mapOf, right.mapOf, same);
+  const propertyElem = field('property', left.propertyElem, right.propertyElem, same);
+  return {
+    shapes: new Set([...left.shapes, ...right.shapes]),
+    ...(scalarType ? { scalarType } : {}),
+    ...(listOf ? { listOf } : {}),
+    ...(mapOf ? { mapOf } : {}),
+    ...(propertyElem ? { propertyElem } : {}),
+  };
+}

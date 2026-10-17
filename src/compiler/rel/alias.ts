@@ -7,7 +7,7 @@ import type { ColMeta } from '../../rel/types.ts';
 import { PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, withMemberType, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
-import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../alias.ts';
+import { aliasScalarTypeOf, joinAliasEntry, type AliasEntry, type AliasMap } from '../alias.ts';
 import { MAP_COL } from './map.ts';
 import { carriedCols, classedKey, collectedOf, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
@@ -166,14 +166,20 @@ export function bindAliases(
   for (const label of labels as readonly string[]) {
     const existing = next.get(label);
     const column = existing?.col ?? `a${next.size}`;
-    next.set(label, {
+    const binding: AliasEntry = {
       col: column,
-      shapes: withShape(existing?.shapes, shape),
-      binds: (existing?.binds ?? 0) + 1,
+      shapes: new Set([shape]),
       ...(bound.kind === 'value' ? { scalarType: aliasScalarTypeOf(bound.type) } : {}),
       ...(bound.kind === 'list' ? { listOf: bound.of } : {}),
       ...(bound.kind === 'map' ? { mapOf: { keyOf: bound.keyOf, valOf: bound.valOf, ...(bound.keys ? { keys: bound.keys } : {}) } } : {}),
-    });
+    };
+    // A REBIND APPENDS, so the label's description is the JOIN of what it held and this binding —
+    // never this binding alone, which re-framed every earlier entry by the LAST bind's class
+    // (`joinAliasEntry`). A dynamic count (a label first bound in a branch arm) stays dynamic: one more
+    // entry on an unknown number is still an unknown number, and `Pop.mixed` must not read it as one.
+    next.set(label, existing
+      ? { ...joinAliasEntry(existing, binding), col: column, ...(existing.binds !== undefined ? { binds: existing.binds + 1 } : {}) }
+      : { ...binding, binds: 1 });
     if (!existing) channels = withChannel(channels, { col: column, role: 'alias' });
     set.set(column, existing ? historyAppend(col(rel.id, column), entry) : historySeed(entry));
   }
@@ -213,7 +219,9 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
   const [shape] = entry.shapes;
   switch (shape) {
     case 'vertex': case 'edge': return { kind: 'element', elem: shape };
-    case 'value': return { kind: 'value', type: scalarTypeOfAlias(entry, vtype) };
+    // No `scalarType` on a value-shaped history is the CONFLICT `joinAliasEntry` leaves (an untagged
+    // entry beside a differently-typed one): there is no single class to frame by, so the read declines.
+    case 'value': return entry.scalarType ? { kind: 'value', type: scalarTypeOfAlias(entry.scalarType, vtype) } : null;
     case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
     case 'map': return entry.mapOf ? { kind: 'map', keyOf: entry.mapOf.keyOf, valOf: entry.mapOf.valOf, ...(entry.mapOf.keys ? { keys: entry.mapOf.keys } : {}) } : null;
     default: return null;
@@ -222,10 +230,8 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
 
 /** An alias history's scalar type, restored onto the projection that reads it. A `perRow` type names
  *  the NEW column (the entry's `t` field lands there), never the source relation's vanished one. */
-const scalarTypeOfAlias = (entry: AliasEntry, vtype: string): ScalarType =>
-  entry.scalarType?.kind === 'static' ? STATIC(entry.scalarType.type)
-    : entry.scalarType?.kind === 'perRow' ? PER_ROW(vtype)
-      : { kind: 'unknown' };
+const scalarTypeOfAlias = (type: ScalarType, vtype: string): ScalarType =>
+  type.kind === 'static' ? STATIC(type.type) : type.kind === 'perRow' ? PER_ROW(vtype) : type;
 
 /** A Pop that returns a history LIST has the same member descriptor as the binding it reads, except
  * that a per-row scalar tag now rides inside each `{t,v}` member rather than a relation column. */
@@ -235,8 +241,10 @@ const historyListOf = (entry: AliasEntry): ListOf | null => {
   switch (shape) {
     case 'vertex': case 'edge': return { kind: 'elem', elem: shape };
     case 'value': {
-      const type = entry.scalarType ?? { kind: 'unknown' } as ScalarType;
-      return withMemberType(SCALAR_MEMBERS, type.kind === 'perRow' ? PER_ROW_ENVELOPE : type);
+      // A conflict (no `scalarType`, see `readOf`) declines here too — Pop.all over it is the same
+      // unanswerable question, asked of every entry at once.
+      const type = entry.scalarType;
+      return type ? withMemberType(SCALAR_MEMBERS, type.kind === 'perRow' ? PER_ROW_ENVELOPE : type) : null;
     }
     case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
     default: return null;
