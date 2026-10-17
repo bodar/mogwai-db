@@ -352,6 +352,13 @@ INSIDE the family changes no answer Gremlin can be asked — cited, not assumed:
   …sum().next()` is a CCE); 128-bit arithmetic DECLINES (no arbitrary precision, no UDFs — do NOT
   raise, since `!fp && bits ≥ 64` is Long's rule); int64 overflow raises natively at upstream's own
   rethrow point; 32-bit float arithmetic is not expressible (SQLite REAL is always a double).
+- ✅ **Number CLASS is exact — §11's promotion closure is REOPENED (decided 2026-10-17).** The
+  closure assumed the Int/Long/Double tag was invisible; it is not: `Max.feature` pins `d[1.0].d`, and
+  Python decodes Int vs Double as `int` vs `float`. So every result reproduces the reference class
+  (`NumberHelper.getHighestCommonNumberInfo` for sum/min/max/arithmetic, `MeanGlobalStep` always
+  Double, literal and stored classes carried) through ONE `numericClassOf` authority (§10 cluster C).
+  The cost the closure cited (a sort + O(N) sorter on narrow sums) is accepted; the four deviations
+  above still stand.
 
 ---
 
@@ -721,8 +728,7 @@ authorities.
   messages); `write.ts`'s runtime property insert writing `NULL AS vt` (carry the source vtype, §6·7); the
   coalesce/flatMap arm-type merge stamping one arm's static tag onto another (apply the §6·7 lattice). Design:
   ONE total `numericClassOf(vtypeExpr, valueExpr)` for reducer eligibility, reducer result type, orderability
-  and casts. 🔴 Gated on a policy decision recorded in §6·7 first: §11 closed promotion as unobservable, but
-  `d[1.0].d` and Python's int/float split make Int-vs-Double observable for some GLVs. Size: stopgaps S
+  and casts. Policy DECIDED (§6·7, 2026-10-17): the class is exact — build the full authority. Size: stopgaps S
   (~60 LOC); full authority M (~300 LOC).
   ✅ **Stopgap LANDED 2026-10-17 (`56473649`, `f7b964cb`, `a34c4df6`):** every seam above fails closed —
   `kindOf` throws on `unknown`, reducer eligibility no longer drops a TEXT-held wide long, a write carries
@@ -730,8 +736,7 @@ authorities.
   in the reference common class (`predicate.ts` `numericPair`, per `NumberHelper.compare`); `asNumber` is a
   WHERE fence (`transform.ts` `asNumberFilter`) so it raises at every existence depth, and its constant
   fold is `NumberHelper.performConversion` (`coerce.ts`). Pinned in
-  `test/compiler/number-class-fail-closed.exec.test.ts`. The FULL one-`numericClassOf` authority and the
-  §6·7 promotion policy decision are still open.
+  `test/compiler/number-class-fail-closed.exec.test.ts`. The FULL one-`numericClassOf` authority is still open (policy now decided: exact).
 - 🚧 **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
@@ -858,8 +863,8 @@ through branches: mergeE/mergeV onMatch (`55a47cd8`) → F; ranked-order `{t:nul
 Live ones sit beside the work they gate — §10's three-answer label coercion, and §9's
 unbounded-plus-barrier wall.
 
-Closed and recorded as law: exact-type literal framing and the numeric-tower PROMOTION rule both
-resolved into §6·7 — the second by NOT building it, since reproducing
+Closed and recorded as law: exact-type literal framing resolved into §6·7. The numeric-tower PROMOTION rule
+was REOPENED on evidence (2026-10-17, see §6·7: exact class) — it had been closed by NOT building it, since reproducing
 `NumberHelper.getHighestCommonNumberInfo` changes no answer Gremlin can be asked while costing a sort
 plus an O(N) sorter on every sum narrower than 64 bits. Re-open one only with evidence, not a
 preference.
