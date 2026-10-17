@@ -212,11 +212,37 @@ export interface ChildValue {
    * same signal a modulation's `present` column carries, so it is carriage rather than semantics —
    * §6·7's rule at a third seam.
    *
-   * ABSENT means the arm CANNOT SAY, and a consumer that needs it must then decline: an unknown
-   * productivity is not "always productive". A body that is always productive says so with a true
-   * literal, which is a claim rather than a silence.
+   * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
+   * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence (§6·7's
+   * defect generator). `'unknown'` is that second answer stated — a consumer that needs presence
+   * DECLINES on it, because an unknown productivity is neither "always productive" nor "a NULL means
+   * nothing came". A body that is always productive says so with `ALWAYS_PRODUCTIVE`, a claim rather
+   * than a silence. Presence is carried APART from the value (a `COUNT(*) > 0`/row-exists, never
+   * `expr IS NOT NULL`), so a NULL first result is PRODUCTIVE exactly where `TraversalUtil.produce`
+   * makes it one (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:108-123`;
+   * `ProjectStep.java:66` reads `TraversalProduct.isProductive`, not the value's nullness).
    */
-  readonly present?: Expr;
+  readonly present: Presence;
+}
+
+/** A child body's PRODUCTIVITY — a per-row boolean expression (`ALWAYS_PRODUCTIVE` for "always"), or
+ *  `'unknown'` where the producing arm cannot say. Never absent: see `ChildValue.present`. */
+export type Presence = Expr | 'unknown';
+
+/** The presence a consumer that NEEDS one reads — the expression, or `null` to DECLINE on `'unknown'`.
+ *  One function so "decline on unknown" is spelled once rather than as a truthiness test per consumer
+ *  (the optional field's `!produced.present` was exactly that, and it conflated `undefined` with every
+ *  other falsy thing a refactor could put there). */
+export const knownPresence = (present: Presence): Expr | null => (present === 'unknown' ? null : present);
+
+/** The presence of a CASE over arms — the chosen arm's presence. Every arm always productive ⟹ always;
+ *  any arm `'unknown'` ⟹ `'unknown'` (the CASE cannot say for the rows that arm answers); otherwise the
+ *  CASE of the arms' presences, following the SAME conditions as the value's CASE. */
+export function casePresence(whens: readonly (readonly [Expr, Presence])[], otherwise: Presence): Presence {
+  const all = [...whens.map(([, p]) => p), otherwise];
+  if (all.every((p) => p === ALWAYS_PRODUCTIVE)) return ALWAYS_PRODUCTIVE;
+  if (all.some((p) => p === 'unknown')) return 'unknown';
+  return { kind: 'case', whens: whens.map(([when, p]) => [when, p as Expr] as const), else: otherwise as Expr };
 }
 
 /** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where

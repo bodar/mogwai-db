@@ -39,7 +39,7 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -1772,11 +1772,12 @@ function scalarTail(
         if (operand === false) return null;
         if (operand) operandOffences.push(operand);
         parts.push(cv.expr);
-        // Where the seam cannot say productivity at all (`present` undefined) there is nothing to guard on
+        // Where the seam cannot say productivity at all (`'unknown'`) there is nothing to guard on
         // — decline rather than risk a silent skip; otherwise collect a concrete "did it produce" predicate.
         if (cv.present !== ALWAYS_PRODUCTIVE) {
-          if (!cv.present) return null;
-          mayBeEmpty.push(cv.present);
+          const present = knownPresence(cv.present);
+          if (!present) return null;
+          mayBeEmpty.push(present);
         }
       }
       // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
@@ -1841,8 +1842,9 @@ function scalarTail(
       // does (`TraversalUtil.apply` — the same guard message). A provably-productive operand (the inject
       // degeneracy, a live alias) continues the fold; otherwise the guard rides on the tail's effects.
       if (cv.present === ALWAYS_PRODUCTIVE) { rel = projected; out = { kind: 'scalar', type: STATIC('long') }; continue; }
-      if (!cv.present) return null;
-      const guard = concatEmptyGuard(rel, [cv.present], fresh);
+      const present = knownPresence(cv.present);
+      if (!present) return null;
+      const guard = concatEmptyGuard(rel, [present], fresh);
       const tail = scalarTail(projected, { kind: 'scalar', type: STATIC('long') }, steps, at + 1, bulked, ctx, fresh, labels);
       return tail && { ...tail, effects: [guard, ...(tail.effects ?? [])] };
     }

@@ -6,7 +6,7 @@ import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
@@ -166,7 +166,7 @@ export function bodyPredicate(
  * present, which is a different question from its value's nullness only for a property (a stored value
  * is never null) and identical for a token (always).
  *
- * Declines where the seam CANNOT SAY (`present` undefined) rather than guessing — a projection whose
+ * Declines where the seam CANNOT SAY (`present` is `'unknown'`) rather than guessing — a projection whose
  * absence is not cheaply expressible (a numeric reducer's NULL, which is also its all-null answer) must
  * not be read as unproductive. A FALLBACK, so every body the two above answer keeps the SQL it has.
  */
@@ -174,8 +174,9 @@ function projectionProductive(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   const produced = scalarChild(body, childHostOf(subject, aliases), ctx, fresh);
-  if (!produced?.present) return null;
-  return produced.present === ALWAYS_PRODUCTIVE ? CONSTANT.true : produced.present;
+  const present = produced && knownPresence(produced.present);
+  if (!present) return null;
+  return present === ALWAYS_PRODUCTIVE ? CONSTANT.true : present;
 }
 
 /**
@@ -324,7 +325,7 @@ export function valuePredicate(
   // `predicateExpr`'s `perRow` arm casts by. Dropping the second was the bug this seam already fixed
   // for `project`/`aggregate`/`store`: `where(__.values('age').is(P.gt(30)))` over a big long compared
   // lexically. A numeric REDUCER (`result:'number'`) needs neither — its value is a native SQL number —
-  // so it stays `SUBJECT_UNKNOWN`, which is also where the `!produced.present` guard below expects it.
+  // so it stays `SUBJECT_UNKNOWN`, which is also where the unknown-presence guard below expects it.
   const type: SubjectType = produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'perRow' && produced.vtype
@@ -348,7 +349,8 @@ export function valuePredicate(
    * `g.V().not(__.values('age').is(P.neq(29)))` dropped them. So the fix is not another null-safe
    * predicate — it is asking the question the seam already answers.
    */
-  if (!produced.present) {
+  const present = knownPresence(produced.present);
+  if (!present) {
     // The seam CANNOT SAY, and `ChildValue.present` is explicit that this is not "always productive".
     // It is safe to proceed only where the value cannot be absent-but-non-null: a numeric REDUCER over
     // an empty child is exactly that shape, and `correlatedExists` fails closed on the identical fact
@@ -358,7 +360,7 @@ export function valuePredicate(
   }
   // A body that says it is ALWAYS productive contributes no clause — the conjunct would be a literal
   // `1 = 1` in every emitted statement, which is bytes in the hottest filter position there is.
-  const tested = produced.present === ALWAYS_PRODUCTIVE ? pred : and(produced.present, pred);
+  const tested = present === ALWAYS_PRODUCTIVE ? pred : and(present, pred);
   // NEGATION IS NULL-SAFE AND `NOT` IS NOT — see `notProduced` (`build.ts`), which carries the second
   // measured wrong answer this line produced. `NOT NULL` is NULL, so a traverser whose body produced
   // nothing was dropped from BOTH sides of the negation.

@@ -23,7 +23,7 @@ import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { typedValueEq } from './predicate.ts';
-import type { ChildValue } from './child.ts';
+import { knownPresence, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
@@ -32,6 +32,13 @@ import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerT
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
+
+/** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
+ *  below refuse an unknown presence before they reach here, so this is that admission read back. */
+const presenceOf = (cv: ChildValue): Expr => {
+  if (cv.present === 'unknown') throw new Error('RelIR lowering: a merge value reached its carrier with an unknown presence');
+  return cv.present;
+};
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -1557,7 +1564,8 @@ function resolveValueRows(
   }
   const host: ChildHost = { kind: 'element', id: col(site.host.id, 'id'), elem: site.hostElem, row: { rel: site.host, aliases: site.aliases } };
   const produced = child.scalar(body, host);
-  if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !produced.present) return null;
+  const present = produced && knownPresence(produced.present);
+  if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !present) return null;
   // A NUMERIC reducer's `vt` is either a Gremlin type or a storage class (`reducedVtype` says which).
   const vt = (produced.framing.result === 'number' ? (produced.vtype && reducedVtype(produced.vtype)) : produced.vtype)
     ?? scalarVtype(produced.framing, asKey);
@@ -1565,7 +1573,7 @@ function resolveValueRows(
   const valued = make.project({
     id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('present', 'int', true)),
     exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt],
-      ['sq', compilerInt(0)], ['present', produced.present]],
+      ['sq', compilerInt(0)], ['present', present]],
   });
   const kept = make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: col(valued.id, 'present') });
   return {
@@ -2106,13 +2114,14 @@ function armValueWriteCorrelated(
   const key = propertyKeyExpr(write.key, write.keyName);
   const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
   const produced = child.scalar(write.value.body, host);
-  if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return false;
+  const present = produced && knownPresence(produced.present);
+  if (!produced || produced.framing.kind !== 'scalar' || !present) return false;
   // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
   // unproductive driver is filtered out (the reference's 0-result skip), the same shape the carrier uses.
   const valsAll = make.project({
     id: fresh('av'), input: incoming, channels: [],
     type: typeOf(...(hasOrd ? [meta('vord', 'int')] : []), meta('v', 'any', true), meta('vtype', 'text', true), meta('present', 'int', true)),
-    exprs: [...(hasOrd ? [['vord', col(incoming.id, ORD)] as const] : []), ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')], ['present', produced.present]],
+    exprs: [...(hasOrd ? [['vord', col(incoming.id, ORD)] as const] : []), ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')], ['present', present]],
   });
   const vals = make.filter({ id: fresh('af'), input: valsAll, channels: [], type: valsAll.type, pred: col(valsAll.id, 'present') });
   const joined = make.join({
@@ -3989,7 +3998,7 @@ function mergeVComputed(
   const pts: Expr[] = [];
   for (const key of cKeys) {
     const produced = child.scalar(match.computed[key]!, host);
-    if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return null;
+    if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown') return null;
     const pt = produced.vtype
       ?? (produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static' ? compilerText(String(produced.framing.type.type)) : null)
       ?? (litVtype(produced.expr) ? compilerText(litVtype(produced.expr)!) : null);
@@ -4007,9 +4016,9 @@ function mergeVComputed(
     exprs: [
       ...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []),
       ...cKeys.flatMap((_, i) => [
-        [ppCol(i), { kind: 'case', whens: [[values[i]!.present!, compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
-        [cvCol(i), gate(values[i]!.present!, values[i]!.expr)] as const,
-        [ptCol(i), gate(values[i]!.present!, pts[i]!)] as const,
+        [ppCol(i), { kind: 'case', whens: [[presenceOf(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(presenceOf(values[i]!), values[i]!.expr)] as const,
+        [ptCol(i), gate(presenceOf(values[i]!), pts[i]!)] as const,
       ]),
     ],
   }), true);
@@ -4873,7 +4882,7 @@ function mergeEComputed(
   const pts: Expr[] = [];
   for (const key of cKeys) {
     const produced = child.scalar(match.computed[key]!, host);
-    if (!produced || produced.framing.kind !== 'scalar' || produced.present === undefined) return null;
+    if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown') return null;
     const pt = produced.vtype
       ?? (produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static' ? compilerText(String(produced.framing.type.type)) : null)
       ?? (litVtype(produced.expr) ? compilerText(litVtype(produced.expr)!) : null);
@@ -4892,9 +4901,9 @@ function mergeEComputed(
       ...(src ? [['src', src] as const] : []),
       ...(tgt ? [['tgt', tgt] as const] : []),
       ...cKeys.flatMap((_, i) => [
-        [ppCol(i), { kind: 'case', whens: [[values[i]!.present!, compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
-        [cvCol(i), gate(values[i]!.present!, values[i]!.expr)] as const,
-        [ptCol(i), gate(values[i]!.present!, pts[i]!)] as const,
+        [ppCol(i), { kind: 'case', whens: [[presenceOf(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(presenceOf(values[i]!), values[i]!.expr)] as const,
+        [ptCol(i), gate(presenceOf(values[i]!), pts[i]!)] as const,
       ]),
     ],
   }), true);

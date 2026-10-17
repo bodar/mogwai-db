@@ -12,7 +12,7 @@ import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
-import { ALWAYS_PRODUCTIVE } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence } from '../child.ts';
 import { CONSTANT, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
@@ -676,7 +676,8 @@ export function chooseOptions(
       : null;
   // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
   // told apart from a productive NULL — decline rather than answer one of them for the other.
-  if (!produced || !produced.present) return null;
+  const present = produced && knownPresence(produced.present);
+  if (!produced || !present) return null;
 
   // THE CHOICE IS PROJECTED TO COLUMNS FIRST, and this is a plan-quality requirement rather than a
   // tidiness one — `groupBarrier` records the same rule for the same reason. The choice is a
@@ -696,7 +697,7 @@ export function chooseOptions(
     type: typeOf(...input.type.cols, meta(CHOICE, 'any', true), meta(PRESENT, 'int', true), ...vtypeCol),
     exprs: [
       ...input.type.cols.map((column) => [column.name, col(input.id, column.name)] as const),
-      [CHOICE, produced.expr], [PRESENT, produced.present],
+      [CHOICE, produced.expr], [PRESENT, present],
       ...(produced.vtype ? [['ovtype', produced.vtype] as const] : []),
     ],
   });
@@ -738,7 +739,7 @@ export function chooseOptions(
    * .option(1, __.values('name')).option(Pick.none, __.discard())` became a VARIANT of scalar and
    * element where the reference gives a plain value stream. Right arity, wrong shape.
    */
-  const canBeUnproductive = produced.present !== ALWAYS_PRODUCTIVE;
+  const canBeUnproductive = present !== ALWAYS_PRODUCTIVE;
   const whens: (readonly [Expr, Expr])[] = canBeUnproductive
     ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
     : [];

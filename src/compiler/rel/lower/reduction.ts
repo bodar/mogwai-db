@@ -15,7 +15,7 @@ import { constLit } from '../const.ts';
 import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, casePresence, knownPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -156,7 +156,7 @@ export function collapseInput(rel: Rel): Rel | null {
  * answer, and answering it by scan luck is the one thing the decline contract exists to prevent.
  *
  * PRODUCTIVITY is required, never assumed: `map` must drop an unproductive traverser, so a body whose
- * productivity the seam cannot state (`ChildValue.present` absent — a numeric reducer over an empty
+ * productivity the seam cannot state (`ChildValue.present` `'unknown'` — a numeric reducer over an empty
  * child, which `correlatedExists` fails closed on for the same reason) declines here too.
  */
 /** The child HOST for a per-traverser body over an element or scalar stream — the subject `scalarChild`
@@ -186,7 +186,7 @@ export function reductionHost(
  * SELECT. See `perTraverserChild`'s §3.3 note on why the filter is a sibling projection, not nested.
  */
 export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, labels: AliasMap, bulked: boolean): Tail | null {
-  const present = produced.present;
+  const present = knownPresence(produced.present);
   if (!present) return null;
   const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
     if (produced.framing.kind === 'elements')
@@ -286,7 +286,7 @@ export function perTraverserChild(
   // An unproductive body DROPS the traverser at all three hosts (`map` by the citation above;
   // `local`/`flatMap` because a body with no results contributes none), so the signal is required
   // rather than assumed — `ChildValue.present`'s own contract.
-  if (!produced.present) return null;
+  if (!knownPresence(produced.present)) return null;
 
   // The body's ONE result framed as this stream's payload, presence filtered and shed — see
   // `reductionTail`, shared with the `coalesce`/`optional` reduction arm. The tail then continues.
@@ -1185,7 +1185,9 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   if (!isNested(choiceArg)) return null;
   const choiceBody = bodyOf(choiceArg.nested, ctx.params);
   const choice = choiceBody?.length ? scalarChild(choiceBody, host, ctx, fresh) : null;
-  if (!choice || choice.framing.kind !== 'scalar' || choice.framing.result === 'value' || !choice.present) return null;
+  if (!choice || choice.framing.kind !== 'scalar' || choice.framing.result === 'value') return null;
+  const choicePresent = knownPresence(choice.present);
+  if (!choicePresent) return null;
   const choiceType: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
     : choice.framing.type.kind === 'static' ? { kind: 'static', type: choice.framing.type.type, text: choice.framing.type.text }
     : SUBJECT_UNKNOWN;
@@ -1211,15 +1213,13 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   if (!elseCV) return null;
 
   const guard: { readonly when: Expr; readonly cv: ChildValue } | null =
-    unproductiveCV && choice.present !== ALWAYS_PRODUCTIVE
-      ? { when: { kind: 'unary', op: 'not', arg: choice.present }, cv: unproductiveCV } : null;
+    unproductiveCV && choicePresent !== ALWAYS_PRODUCTIVE
+      ? { when: { kind: 'unary', op: 'not', arg: choicePresent }, cv: unproductiveCV } : null;
   const branches = [...(guard ? [guard] : []), ...keyed];
 
   const value: Expr = { kind: 'case', whens: branches.map((b) => [b.when, b.cv.expr] as const), else: elseCV.expr };
   const all = [...branches.map((b) => b.cv), elseCV];
-  const present: Expr | undefined = all.every((cv) => cv.present === ALWAYS_PRODUCTIVE) ? ALWAYS_PRODUCTIVE
-    : all.some((cv) => cv.present === undefined) ? undefined
-    : { kind: 'case', whens: branches.map((b) => [b.when, b.cv.present!] as const), else: elseCV.present! };
+  const present = casePresence(branches.map((b) => [b.when, b.cv.present] as const), elseCV.present);
 
   const staticTypes = all.map((cv) => cv.framing.kind === 'scalar' && cv.framing.result === undefined && !cv.vtype ? cv.framing.type : null);
   if (staticTypes.every((t): t is ScalarType => t !== null)) {
@@ -1258,9 +1258,7 @@ function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: 
   const value: Expr = { kind: 'case', whens: [[pred, thenCV.expr]], else: elseCV.expr };
   // The chosen arm's productivity is the whole's: the THEN arm's where the condition produced, the ELSE
   // arm's otherwise. Both always-productive ⟹ always; a stated pair ⟹ the CASE of the two; else silence.
-  const present: Expr | undefined = thenCV.present === ALWAYS_PRODUCTIVE && elseCV.present === ALWAYS_PRODUCTIVE
-    ? ALWAYS_PRODUCTIVE
-    : thenCV.present && elseCV.present ? { kind: 'case', whens: [[pred, thenCV.present]], else: elseCV.present } : undefined;
+  const present = casePresence([[pred, thenCV.present]], elseCV.present);
 
   // TYPE — a shared STATIC type stays static (one column); otherwise a per-row `vtype` whose value
   // follows the SAME branch as the value (a `CASE`, because the type must track WHICH arm the value came
@@ -1326,27 +1324,44 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
     arms.push(cv);
   }
   // Every NON-FINAL arm must STATE its productivity — else we cannot know when to fall to the next arm.
-  if (arms.slice(0, -1).some((a) => a.present === undefined)) return null;
-  const value: Expr = { kind: 'call', fn: 'COALESCE', args: arms.map((a) => a.expr) };
+  const stated = arms.slice(0, -1).map((a) => knownPresence(a.present));
+  if (stated.some((p) => !p)) return null;
+  // The FIRST PRODUCTIVE arm answers — by its PRESENCE, never by its value's nullness, because a
+  // productive NULL is that arm's answer (`CoalesceStep` returns the first child with `hasNext()`,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:56-64`;
+  // `TraversalProduct`): `g.withSack(null)…by(coalesce(__.sack(), __.constant(1)))` is null, not 1. So
+  // the value is a CASE on each arm's stated presence, not SQL `COALESCE` (which tests the VALUE). An
+  // always-productive non-final arm ends the CASE: nothing after it can answer.
+  const pick = arms.slice(0, -1).map((a, i) => [stated[i]!, a] as const);
+  const firstAlways = arms.findIndex((a) => a.present === ALWAYS_PRODUCTIVE);
+  const decisive = firstAlways >= 0 && firstAlways < arms.length - 1 ? firstAlways : arms.length - 1;
+  const caseArms = pick.slice(0, decisive);
+  const final = arms[decisive]!;
+  const value: Expr = caseArms.length
+    ? { kind: 'case', whens: caseArms.map(([p, a]) => [p, a.expr] as const), else: final.expr }
+    : final.expr;
   // The whole coalesce produces iff ANY arm does; a `constant`/token fallback makes it ALWAYS productive.
-  const present: Expr | undefined = arms.some((a) => a.present === ALWAYS_PRODUCTIVE) ? ALWAYS_PRODUCTIVE
-    : arms.every((a) => a.present !== undefined)
-      ? arms.map((a) => a.present!).reduce((l, r) => ({ kind: 'binary', op: 'or', left: l, right: r }))
-      : undefined;
+  const answering = [...caseArms.map(([, a]) => a), final];
+  const present: Presence = answering.some((a) => a.present === ALWAYS_PRODUCTIVE) ? ALWAYS_PRODUCTIVE
+    : answering.every((a) => a.present !== 'unknown')
+      ? answering.map((a) => a.present as Expr).reduce((l, r) => ({ kind: 'binary', op: 'or', left: l, right: r }))
+      : 'unknown';
   // A single shared STATIC type stays static (one column); otherwise a per-row tag whose column is the
   // COALESCE of each arm's own vtype — a reducer's `vt` expr, else the arm's static-type literal (the
   // expression-level twin of `withMergedVtype`, `build.ts`).
-  const staticTypes = arms.map((a) => a.framing.kind === 'scalar' && a.framing.result === undefined && !a.vtype ? a.framing.type : null);
+  const staticTypes = answering.map((a) => a.framing.kind === 'scalar' && a.framing.result === undefined && !a.vtype ? a.framing.type : null);
   if (staticTypes.every((t): t is ScalarType => t !== null)) {
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  // THE TAG OF THE ARM THAT ANSWERED — the same non-null test the value's `COALESCE` makes, arm for
-  // arm. A `COALESCE` of the tags instead picks the first arm that HAS a tag, which is not the arm that
+  // THE TAG OF THE ARM THAT ANSWERED — the same presence test the value's CASE makes, arm for arm. A
+  // `COALESCE` of the tags instead picks the first arm that HAS a tag, which is not the arm that
   // produced: `coalesce(__.constant('x'), __.out().count())` paired `'x'` (an untagged constant, NULL)
   // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization. The raw `vt` is
   // kept (`armTag(…, false)`) because this framing stays `result: 'number'`, which reads both vocabularies.
-  const vtype: Expr = { kind: 'case', whens: arms.map((a) => [isNot(a.expr, compilerNull('text')), armTag(a, false)] as const) };
+  const vtype: Expr = caseArms.length
+    ? { kind: 'case', whens: caseArms.map(([p, a]) => [p, armTag(a, false)] as const), else: armTag(final, false) }
+    : armTag(final, false);
   return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
 }
 
@@ -1428,7 +1443,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
     const self = hostSelf(host);
     const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     // `project()` is a `ScalarMapStep` — one map per traverser, never several.
-    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, yields: 'one' };
+    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
   }
 
   // `valueMap()`/`elementMap()` are the other per-traverser map producers. Reuse the ordinary map
@@ -1452,7 +1467,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
       id: fresh('vn'), input: mapped.rel, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
       exprs: [[MAP_COL, col(mapped.rel.id, MAP_COL)]],
     });
-    return { expr: jsonOf({ kind: 'scalar', plan: scalar }), framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf }, yields: 'one' };
+    return { expr: jsonOf({ kind: 'scalar', plan: scalar }), framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
   }
 
   // THE RE-ROOTING ARM — a step that turns this traverser into exactly ONE other traverser, so the
@@ -1578,8 +1593,8 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
 
   let value: Expr = host.id;
   // WHETHER THIS BODY PRODUCES anything for the host row, where the leading step can say precisely.
-  // `undefined` is "cannot say", which is not the same as "always" — see `ChildValue.present`.
-  let present: Expr | undefined;
+  // `'unknown'` is "cannot say", which is not the same as "always" — see `ChildValue.present`.
+  let present: Presence = 'unknown';
   // What a NULL means to the RECEIVER checks alone (`valueRun`'s `productive`) where `present` stays
   // withheld from the host — a leading projector, whose productivity no consumer was given.
   let productive: Expr | undefined;
@@ -1814,7 +1829,7 @@ const droppedWhenNull = (present: Expr, value: Expr): Expr => {
  */
 export function valueRun(
   body: readonly IRStep[], from: number,
-  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr; readonly productive?: Expr; readonly yields: ChildValue['yields'] },
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present: Presence; readonly productive?: Expr; readonly yields: ChildValue['yields'] },
   row: HostRow | undefined, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): ChildValue | null {
   let value = seed.value;
@@ -1828,7 +1843,7 @@ export function valueRun(
   let present = seed.present;
   // The same fact for the RECEIVER checks alone: `present`, or where the seed withholds that from its
   // host, what it can still say about a NULL (`seed.productive`). Narrowed in step with `present`.
-  let productive = seed.present ?? seed.productive;
+  let productive = knownPresence(seed.present) ?? seed.productive;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     if (REL_PROJECTORS.has(step.name)) {
@@ -1846,7 +1861,7 @@ export function valueRun(
       vtype = undefined;
       // A projector whose NULL is UNPRODUCTIVE (`drop`: `math()` over an unproductive `by()` FILTERS —
       // `MathStep.java:75-78`) narrows `present` exactly as an `is()` does, for the same consumers.
-      if (projected.drop && present) present = droppedWhenNull(present, value);
+      if (projected.drop && present !== 'unknown') present = droppedWhenNull(present, value);
       if (projected.drop && productive) productive = droppedWhenNull(productive, value);
       continue;
     }
@@ -1867,8 +1882,8 @@ export function valueRun(
       value = { kind: 'case', whens: [[test, value]], else: compilerNull() };
       // `present := present AND test`, a NULL test (SQL's unknown) counting as a failed filter —
       // `FilterStep` keeps a traverser only where the predicate is TRUE. A seed that cannot say stays
-      // unable to (`ChildValue.present` absent), so its consumers keep declining.
-      if (present) present = { kind: 'case', whens: [[test, present]], else: compilerInt(0) };
+      // unable to (`ChildValue.present` is `'unknown'`), so its consumers keep declining.
+      if (present !== 'unknown') present = { kind: 'case', whens: [[test, present]], else: compilerInt(0) };
       if (productive) productive = { kind: 'case', whens: [[test, productive]], else: compilerInt(0) };
       continue;
     }
@@ -1885,7 +1900,7 @@ export function valueRun(
     // that asks only WHETHER the run produced (`where`/`not`/`choose`) never reads the fenced value, so
     // the fence rides on the productivity claim too, where SQLite must evaluate it (`asNumberFilter`).
     // The receiver's offences are the same kind of raise, so they ride there as well.
-    if ((transformed.fenced || offences.length) && present !== undefined) {
+    if ((transformed.fenced || offences.length) && present !== 'unknown') {
       const raises = raisingWhen(offences, transformed.fenced?.filter ?? compilerInt(1));
       present = present === ALWAYS_PRODUCTIVE ? raises : and(present, raises);
     }
@@ -1893,7 +1908,7 @@ export function valueRun(
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
-  const produced = present ? { present } : {};
+  const produced = { present };
   // A TRANSFORM RUN PRESERVES CARDINALITY — one value in, one value out at every member — so the
   // seed's claim rides to the end unchanged. What decided it is the LEADING step: `values(k)` picks
   // the first of a possibly multi-valued property, everything else names exactly one.
@@ -1939,7 +1954,7 @@ export function scalarHostChild(
   // The value IS the traverser (or a constant replacing it), so a NULL is a productive null unless the
   // host says otherwise — told to the receiver checks only (`productive`), since `present` was never
   // claimed here and claiming it now would admit consumers that decline today.
-  return valueRun(body, at, { value, type, vtype, productive: host.present ?? ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, child, source, fresh);
+  return valueRun(body, at, { value, type, vtype, present: 'unknown', productive: host.present ?? ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, child, source, fresh);
 }
 
 /**
@@ -2000,7 +2015,7 @@ function mapHostChild(
   // Thread the key's presence onto the recursed value: an absent key means the whole child produced
   // nothing. `ALWAYS_PRODUCTIVE` on the tail collapses to just the key's presence; a real tail predicate
   // ANDs; a tail that cannot say leaves the key's presence as the honest floor.
-  const present2 = rerooted.present === ALWAYS_PRODUCTIVE || !rerooted.present ? present : and(present, rerooted.present);
+  const present2 = rerooted.present === ALWAYS_PRODUCTIVE || rerooted.present === 'unknown' ? present : and(present, rerooted.present);
   return { ...rerooted, present: present2 };
 }
 

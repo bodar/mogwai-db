@@ -256,33 +256,6 @@ const synth = (name: string, args: any[], ctx: StrategySpec['ctx']): Step => ({ 
  *  idempotent on a Step[], so the synthetic body flows through every consumer verbatim). */
 const nestedArg = (steps: Step[]): any => ({ nested: steps });
 
-/** A literal that IS a null, or a list/set literal that holds one at any depth (an `unfold()` of it
- *  emits the null as a traverser). A map literal's null VALUE is inside a non-null map, so it is not. */
-const holdsNull = (value: unknown): boolean =>
-  value === null || (Array.isArray(value) ? value.some(holdsNull) : value instanceof Set ? [...value].some(holdsNull) : false);
-
-/** The steps whose ARGUMENT becomes a traverser — a null-holding literal there is a null result. */
-const LITERAL_EMITTERS: ReadonlySet<string> = new Set(['constant', 'inject']);
-
-/**
- * MAY THIS BODY YIELD A NULL TRAVERSER — the static, conservative "may be null" test: a `constant()`/
- * `inject()` whose literal is, or holds, a null, anywhere in the body, its nested arms
- * (`coalesce`/`union`/`choose`/`optional`/…) and its option arms included. `true` where a nested body
- * cannot even be read.
- *
- * It exists for the consumers that still express a body's PRODUCTIVITY through its value's NULLNESS — a
- * pooled `group().by(…).by(<body>.fold())`, a per-member child value — where a productive null (which
- * `TraversalProduct` calls a value, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalProduct.java`)
- * would be dropped as if the body had produced nothing. Such a consumer DECLINES on `true` until
- * presence is carried apart from the value; over-approximating costs a decline, never an answer.
- */
-export function mayYieldNull(steps: readonly Step[], params: Record<string, any>): boolean {
-  // A whole-tree question, so a predicate on THE walker (`walk.ts`) — every child position (args,
-  // folded by()/with(), repeat/option clusters); an unreadable body answers `true` (fail closed).
-  return someStepDeep(steps, params,
-    (s) => LITERAL_EMITTERS.has(s.name) && s.args.some((a) => !isNested(a.value) && holdsNull(a.value)), true);
-}
-
 /** Apply a per-chain injection rule at EVERY nesting depth. Postorder: each step's nested
  *  bodies are rewritten first (recursing, re-wrapped as `{nested: Step[]}`), THEN the rule
  *  runs on the current chain. This mirrors TinkerPop's strategy model — apply() runs once

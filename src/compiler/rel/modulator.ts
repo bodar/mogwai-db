@@ -5,7 +5,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type ChildSeam, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -342,7 +342,7 @@ export function byTyped(
     return {
       value: produced.expr,
       evidence: evidenceOf(produced.framing.type, produced.vtype),
-      productiveNull: produced.present === ALWAYS_PRODUCTIVE ? true : produced.present ?? false,
+      productiveNull: produced.present === ALWAYS_PRODUCTIVE ? true : knownPresence(produced.present) ?? false,
     };
   }
   const value = byExpr(modulation, host, source, fresh, false, child);
@@ -477,10 +477,24 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * as the member node the typed tree frames at any depth. An ELEMENT rowid becomes `{t:'vertex', v:{…}}`,
  * a MAP its pairs array, a scalar its `{t,v}` node tagged where the type is STATIC (a literal `t`, no
  * correlated read duplicated) and untagged where it is per-row (a stored value's tag is a second read a
- * member position has no room for). The `null`-preserving CASE outside the node is how the shared
- * productivity filter tells a child that yielded nothing from a value worth collecting.
+ * member position has no room for).
+ *
+ * THE SQL NULL OUTSIDE THE NODE MEANS "PRODUCED NOTHING", and nothing else — it is how the shared
+ * productivity filter (`productivityFilter`) tells a child that yielded nothing from a value worth
+ * collecting. So it is decided by the body's PRESENCE, never by its value's nullness: a PRODUCTIVE null
+ * is a member like any other — its node `{t:<tag>, v:null}` (`TraversalUtil.produce` →
+ * `TraversalProduct`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:108-123`;
+ * `Grouping.doFinalReduction` pools it). `group().by().by(__.constant([1,null,2]).unfold().fold())` is
+ * `[1,null,2]`, not `[1,2]`.
+ *
+ * `present` is `ChildValue.present`, or `ALWAYS_PRODUCTIVE` for a pooled STREAM row (a row exists ⟹ a
+ * traverser was produced). Where the producer cannot say (`'unknown'`) the only reading left is the
+ * value's nullness — every producer that can yield a productive null states its presence (the
+ * `constant(null)` leading step declines in `scalarChild` until it does), so the unknown arm keeps the
+ * NULL ⟹ unproductive reading those producers' values were built for. Only a SCALAR can be a productive
+ * null; an element/map/list framing's NULL is always "no value".
  */
-export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter): Expr | null {
+export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence): Expr | null {
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
       : framing.kind === 'list' ? (() => {
@@ -490,11 +504,13 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
       : framing.kind === 'scalar' ? typedNode(value, staticTagExpr(framing.type))
         : null;
   if (!member) return null;
-  return {
-    kind: 'case',
-    whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
-    else: member,
-  };
+  // A scalar's node over a NULL value is `{t:<tag>, v:null}` — a non-NULL JSON object, which IS the
+  // productive null (`frameValue` frames a null `v` as null whatever its tag, `src/execute.ts`). So a
+  // known presence needs no nullness test at all: the node as-is where the body always produces, and
+  // gated on the presence otherwise.
+  if (present === 'unknown' || framing.kind !== 'scalar')
+    return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]], else: member };
+  return present === ALWAYS_PRODUCTIVE ? member : { kind: 'case', whens: [[present, member]], else: compilerNull() };
 }
 
 export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {
@@ -521,7 +537,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
     // ALIAS arm below gives — a child body and a labelled read are the same question about a different
     // scope, so they must not encode their results two ways.
-    return producedMemberNode(produced.expr, produced.framing, source, fresh);
+    return producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present);
   }
 
   if (key.kind === 'alias') {

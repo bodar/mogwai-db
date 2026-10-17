@@ -2,7 +2,6 @@ import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { mayYieldNull } from '../ir/strategies.ts';
 import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
@@ -16,7 +15,7 @@ import { inferredVtype, LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
-import type { ChildHost, ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_MASK, isReducer, numberClass, numberClassMask, reducerAggregate } from './reducer.ts';
 
@@ -326,14 +325,6 @@ export function groupRows(
   // (`gremlin-core/.../step/Grouping.java`). So it collapses to that arm rather than reaching
   // `groupCollected`, whose pool exists for a NON-empty pre-fold body.
   const valueBy = bareFold(named(bys[1]));
-  // A VALUE BODY THAT MAY YIELD A NULL declines (`mayYieldNull`). Every value arm below reads a NULL
-  // member as an UNPRODUCTIVE one — the pooled `fold()` drops it with the seed, the per-member child
-  // drops it as an absent value — where the reference pools a productive null like any other value
-  // (`Grouping.doFinalReduction`; `util/TraversalProduct.java`): `group().by().by(__.constant([1,null,2])
-  // .unfold().fold())` answered `[1,2]` for `[1,null,2]`. A terminal `count()` counts the null and
-  // stays exact, so it is the one form kept.
-  if (valueBy?.key.kind === 'child' && valueBy.key.body.at(-1)?.name !== 'count'
-    && mayYieldNull(valueBy.key.body, child.params)) return null;
   /**
    * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
    * arm with one extraction rather than a value projection.
@@ -427,10 +418,10 @@ export function groupRows(
         // The entry's list is the member of the new collecting group, like `by(Column.values)`.
         // Its typed-tree copy expands the retained rowids, while the entry relation remains suitable
         // for a following `unfold()` child body.
-        ? producedMemberNode(produced.expr, produced.framing, source, fresh)
+        ? producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present)
         : produced.framing.kind === 'list'
           ? listNode(produced.expr)
-          : producedMemberNode(produced.expr, produced.framing, source, fresh);
+          : producedMemberNode(produced.expr, produced.framing, source, fresh, produced.present);
       if (!node) return null;
       member = node;
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
@@ -988,10 +979,14 @@ function groupCollected(
   if (!rows) return null;
   // The MEMBER, encoded exactly as a value `by()` member is: an element row's rowid → `{t:'vertex',…}`,
   // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
-  const valueCol = rows.framing.kind === 'elements' ? col(rows.rel.id, 'id') : col(rows.rel.id, 'v');
+  // The payload column is the framing's own (`framingCols`) — a LIST row carries `list`, not `v`, and
+  // naming `v` for it was an internal error (`by(__.constant([0,1]).fold())`) rather than an answer.
+  const payload = framingCols(rows.framing)?.[0];
+  if (!payload) return null;
+  const valueCol = col(rows.rel.id, payload.name);
   const member = rows.framing.kind === 'elements'
     ? valueCol
-    : producedMemberNode(valueCol, rows.framing, source, fresh);
+    : producedMemberNode(valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE);
   if (!member) return null;
 
   const elementKey = !keyBy;
