@@ -17,6 +17,7 @@
 //    as an Int.
 import { describe, expect, test } from 'bun:test';
 import { bare, run, seededStore } from './support/harness.ts';
+import { executeQuery } from './support/executor.ts';
 
 const SEQUENTIAL = /may read what another traverser writes/;
 
@@ -108,7 +109,59 @@ describe('property(k, <numeric reducer>) stores the reference type', () => {
     expect(stored(`g.V(1).property('n', __.values('age').mean())`)).toEqual({ v: 29, vtype: 'double' });
     expect(stored(`g.V(1).property('n', __.values('age').fold().mean(local))`)).toEqual({ v: 29, vtype: 'double' });
   });
-  test('sum() of Doubles is a Double', () => {
+  // A FRACTIONAL sum of Doubles only: a WHOLE-number one (`has('weight',1.0)`) is still an Int on the read
+  // side and so here — `typeof(sum)` of an integral Double the store keeps as INTEGER is `integer`. Not
+  // this fix's (max/min/mean); recorded in docs/outstanding-work.md (Value carriage).
+  test('a fractional sum() of Doubles is a Double', () => {
     expect(stored(`g.V(1).property('n', __.outE().values('weight').sum())`)).toEqual({ v: 1.9, vtype: 'double' });
+  });
+  test('sum() of Ints stays untyped (framed Int/Long by magnitude)', () => {
+    expect(stored(`g.V(1).property('n', __.values('age').sum())`)).toEqual({ v: 29, vtype: null });
+    expect(stored(`g.V(1).property('n', __.local(__.values('age').sum()))`)).toEqual({ v: 29, vtype: null });
+  });
+  // The reducer's type one level deeper in the body: a `local`/`map`/`flatMap` wrapper, a `choose` arm
+  // (both forms), a `coalesce` arm. Each stored `vtype: 'real'` — a storage class, not a Gremlin type —
+  // and read back an Int 29 (`reductionTail` renamed the reducer's `vt` to a per-row `vtype`; a choose
+  // tagged its rows with the arm's raw `vt`).
+  for (const body of [
+    `__.local(__.values('age').mean())`,
+    `__.map(__.values('age').mean())`,
+    `__.flatMap(__.values('age').mean())`,
+    `__.choose(__.has('age'), __.values('age').mean(), __.constant(0))`,
+    `__.choose(__.values('age')).option(29, __.values('age').mean()).option(none, __.constant(0))`,
+    `__.coalesce(__.values('age').mean(), __.constant(0))`,
+  ]) test(`mean() under ${body} is a Double`, () => {
+    expect(stored(`g.V(1).property('n', ${body})`)).toEqual({ v: 29, vtype: 'double' });
+  });
+  test('max() under a wrapper keeps the winner\'s type', () => {
+    expect(stored(`g.V(1).property('n', __.local(__.outE().values('weight').max()))`)).toEqual({ v: 1, vtype: 'double' });
+    expect(stored(`g.V(1).property('n', __.choose(__.has('age'), __.outE().values('weight').max(), __.constant(0)))`)).toEqual({ v: 1, vtype: 'double' });
+  });
+});
+
+// THE READ SIDE answers the same type the write stores — property() stores what the read answers, so
+// both were wrong together. Asserted on the GraphBinary TYPE CODE, since a decoded JS number cannot tell
+// an Int 29 from a Double 29.0 (L4's typed notation compares numbers, so it cannot pin this either).
+describe('a numeric reducer under a wrapper answers its reference type on the wire', () => {
+  const INT = 0x01, DOUBLE = 0x07;
+  const codes = (traversal: string): number[] => executeQuery(seededStore(), traversal).map((buffer) => buffer[0]!);
+  const cases: readonly (readonly [string, readonly number[]])[] = [
+    // mean is always floating point (MeanGlobalStep.java:175-177, div(sum, count, true); Mean.feature d[..].d)
+    [`g.V(1).values('age').mean()`, [DOUBLE]],
+    [`g.V(1).local(__.values('age').mean())`, [DOUBLE]],
+    [`g.V(1).map(__.values('age').mean())`, [DOUBLE]],
+    [`g.V(1).flatMap(__.values('age').mean())`, [DOUBLE]],
+    [`g.V(1).union(__.values('age').mean(), __.constant(1))`, [DOUBLE, INT]],
+    // max keeps the winning Number (Max.feature d[1.0].d), under a wrapper too
+    [`g.V(1).local(__.outE().values('weight').max())`, [DOUBLE]],
+    [`g.V(1).union(__.outE().values('weight').max(), __.constant(1))`, [DOUBLE, INT]],
+    // a sum of Ints is an Int, under a wrapper too (its `'integer'` storage class crosses as untyped)
+    [`g.V(1).values('age').sum()`, [INT]],
+    [`g.V(1).local(__.values('age').sum())`, [INT]],
+    [`g.V(1).outE().values('weight').sum()`, [DOUBLE]],
+    [`g.V(1).local(__.outE().values('weight').sum())`, [DOUBLE]],
+  ];
+  for (const [traversal, expected] of cases) test(traversal, () => {
+    expect(codes(traversal)).toEqual([...expected]);
   });
 });

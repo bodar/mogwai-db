@@ -35,7 +35,11 @@ lowered.
   `max`/`min` at :613 widen too), we answer the winner's own type (`max`/`min`) or the aggregate's storage
   class (`sum`/`mean`). Wrong today: `inject(2, 1.0d).max()` Int (ref Double), `inject(2, 1L).max()` Int
   (ref Long), `inject(2f, 1f).sum()` Double (ref Float), byte/short `sum()` untyped, `mean()` of
-  BigInteger Double (ref BigDecimal). Needs a per-input class rank aggregated beside the value.
+  BigInteger Double (ref BigDecimal), and a WHOLE-number `sum()` of Doubles Int — `g.V(1).outE().has('weight',1.0).values('weight').sum()`
+  answers Int 1 (ref Double 1.0) because `typeof(sum)` of an integral Double stored INTEGER is `integer`;
+  the input's stored `vtype` must vote (a floating term forces `real`). That one also moves the census
+  (`local(aggregate("a").by(__.inE("created").values("weight").sum()))…cap("a")` → `[…, 1.0, 1.0]`).
+  Needs a per-input class rank aggregated beside the value.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
@@ -66,6 +70,14 @@ lowered.
   to compute every guard's host from the pre-write snapshot (an `addV` host is one row per INPUT
   traverser, so its count is the input's) and emit all guards before the plan's first statement. The real
   feature behind the refusals is a per-traverser write driver, which is the general driver above.
+  **A barrier between an UPSTREAM write and the site over-refuses.** `afterWrite` keeps every mutating
+  step on `ProgramWrites.upstream` for its whole tail, so a body observing it refuses when >1 traverser
+  ran through the write — even where a full barrier in between (`fold().unfold()`, `barrier()`,
+  `order()`, `count()`) has drained the write before the site runs and one statement IS the reference:
+  `g.V(1,2).addLabel('z').fold().unfold().has('name','marko').property('n', __.V().hasLabel('z').count())`
+  (ref 2), and the single-arm source union `g.union(__.addV('x')).property('n', __.V().hasLabel('x').count())`
+  (ref 1). Both answered correctly before the upstream guard landed; the fix is a barrier lowering that
+  pops (resets) the upstream entries it drains.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP

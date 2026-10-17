@@ -17,7 +17,7 @@ import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, t
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, meta, or, reducedVtype, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
@@ -780,32 +780,6 @@ const STATED_VTYPES: ReadonlySet<string> = new Set(['long', 'int', 'double', 'fl
 const scalarVtype = (framing: RelFraming): Expr =>
   framing.kind === 'scalar' && framing.type.kind === 'static' && !framing.type.text && STATED_VTYPES.has(framing.type.type)
     ? compilerText(framing.type.type) : compilerNull('text');
-
-/** SQLite storage classes — what `typeof(…)` answers, never a Gremlin type a reader frames by. */
-const STORAGE_CLASSES: readonly string[] = ['integer', 'text', 'blob', 'null'];
-/**
- * THE STORED TYPE OF A NUMERIC REDUCER'S RESULT — its `vt` (`framingCols`), which is ONE of two
- * vocabularies, decided per row: `min()`/`max()` hand on the WINNING row's own Gremlin `vtype`
- * (`minMaxWinnerVt`), while `sum()`/`mean()` carry the aggregate's storage class (`typeof(…)`, or the
- * literal `'real'` that `mean` always is). Stored untyped, the value frames by its storage class, and an
- * integral Double the store keeps as INTEGER (`1.0`) comes back an Int — where the reference keeps the
- * input's type for `max`/`min` (`MaxGlobalStep`/`MinGlobalStep` return the winning `Number` itself; `Max.feature`
- * pins `d[1.0].d`) and always answers a floating point for `mean` (`MeanNumber.getFinal` is
- * `div(sum, count, true)`, forced floating point —
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`;
- * `Mean.feature:70` pins `d[1.0].d`).
- * So: a Gremlin name is kept, `real` IS a Double, and any other storage class stays untyped, which is
- * what it framed as before.
- *
- * Spelled as ONE evaluation of `vt` — `nullif(…nullif(replace(vt, 'real', 'double'), 'integer')…)` —
- * rather than a `CASE` that names it three times, because `vt` is the reducer's own correlated subquery
- * and a fused projection would run it once per mention. `replace` is exact here: no Gremlin type name
- * contains `real`, so only the storage class itself is rewritten.
- */
-const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
-  (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, text(storageClass)] }),
-  { kind: 'call', fn: 'replace', args: [vt, text('real'), text('double')] },
-);
 
 /** The site of an ORDINARY `property()` step over `owners` — the body reads the element it writes. The
  *  traverser is the snapshot's position where the owners carry one, else the element id itself. */

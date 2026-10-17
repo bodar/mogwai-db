@@ -564,6 +564,38 @@ export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson
   binary: false,
 });
 
+/** SQLite storage classes — what `typeof(…)` answers, never a Gremlin type a reader frames by. */
+const STORAGE_CLASSES: readonly string[] = ['integer', 'text', 'blob', 'null'];
+/**
+ * THE STORED TYPE OF A NUMERIC REDUCER'S RESULT — its `vt` (`framingCols`), which is ONE of two
+ * vocabularies, decided per row: `min()`/`max()` hand on the WINNING row's own Gremlin `vtype`
+ * (`minMaxWinnerVt`), while `sum()`/`mean()` carry the aggregate's storage class (`typeof(…)`, or the
+ * literal `'real'` that `mean` always is). Stored untyped, the value frames by its storage class, and an
+ * integral Double the store keeps as INTEGER (`1.0`) comes back an Int — where the reference keeps the
+ * input's type for `max`/`min` (`MaxGlobalStep`/`MinGlobalStep` return the winning `Number` itself; `Max.feature`
+ * pins `d[1.0].d`) and always answers a floating point for `mean` (`MeanNumber.getFinal` is
+ * `div(sum, count, true)`, forced floating point —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`;
+ * `Mean.feature:70` pins `d[1.0].d`).
+ * So: a Gremlin name is kept, `real` IS a Double, and any other storage class stays untyped, which is
+ * what it framed as before.
+ *
+ * THE ONE CROSSING from the `vt` vocabulary into a `vtype` one. Only a `result: 'number'` framing reads
+ * a storage class (the wire's `sumBuffer`); every per-row `vtype` column — a stored property, a
+ * `choose`'s per-branch tag, a merged branch arm (`withMergedVtype`) — is read as a Gremlin type alone,
+ * so a reducer's `vt` that lands in one goes through here, or `'real'` names nothing and the Double is
+ * framed by inference as an Int.
+ *
+ * Spelled as ONE evaluation of `vt` — `nullif(…nullif(replace(vt, 'real', 'double'), 'integer')…)` —
+ * rather than a `CASE` that names it three times, because `vt` is the reducer's own correlated subquery
+ * and a fused projection would run it once per mention. `replace` is exact here: no Gremlin type name
+ * contains `real`, so only the storage class itself is rewritten.
+ */
+export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
+  (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(storageClass)] }),
+  { kind: 'call', fn: 'replace', args: [vt, compilerText('real'), compilerText('double')] },
+);
+
 /**
  * A SCALAR RELATION RE-PROJECTED ONTO THE MET TYPE's per-row column — its own per-row tag where it
  * has one, its static tag as a literal where it has one, and SQL NULL where it genuinely cannot say.

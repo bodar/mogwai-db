@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, reducedVtype, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -193,9 +193,16 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
     if (produced.framing.kind === 'list')
       return { cols: [[meta(LIST_COL, 'json'), produced.expr]], framing: produced.framing };
     if (produced.framing.kind !== 'scalar') return null;
-    return produced.vtype
+    // The body's type becomes a per-row `vtype` — a Gremlin type alone. A NUMERIC REDUCER's `vt` is EITHER a
+    // Gremlin vtype (`min`/`max`'s winner) OR the aggregate's storage class (`sum`'s `typeof`, `mean`'s
+    // `'real'`), so it crosses through `reducedVtype` (build.ts): carried raw, `'real'` named no type and
+    // `local(__.values('age').mean())` framed by inference as an Int, where `MeanGlobalStep` always answers a
+    // Double (`div(sum, count, true)` —
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`).
+    const vtype = produced.vtype && produced.framing.result === 'number' ? reducedVtype(produced.vtype) : produced.vtype;
+    return vtype
       ? {
-        cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), produced.vtype]],
+        cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), vtype]],
         framing: { kind: 'scalar', type: PER_ROW('vtype') },
       }
       : { cols: [[meta('v', 'any', true), produced.expr]], framing: produced.framing };
@@ -1138,6 +1145,19 @@ const scalarHostIdentity = (host: Extract<ChildHost, { kind: 'scalar' }>): Child
     ...(host.vtype ? { vtype: host.vtype } : {}), present: ALWAYS_PRODUCTIVE, yields: 'one' });
 
 /**
+ * One scalar ARM's per-row type tag, for a branch that tags each row by the arm it came from: its own
+ * `vtype` where it has one, its static tag as a literal, else NULL. `asVtype` says which vocabulary the
+ * branch's OWN framing reads — a `choose` frames `PER_ROW('vtype')`, a Gremlin type alone, so a numeric
+ * reducer arm's `vt` crosses through `reducedVtype` there (`choose(…, __.values('age').mean(), …)` is a
+ * Double, `MeanGlobalStep.java:175-177`); a `coalesce` keeps `result: 'number'`, which reads both.
+ */
+const armTag = (cv: ChildValue, asVtype: boolean): Expr => {
+  if (cv.vtype) return asVtype && cv.framing.kind === 'scalar' && cv.framing.result === 'number' ? reducedVtype(cv.vtype) : cv.vtype;
+  const tag = cv.framing.kind === 'scalar' ? staticTypeOf(cv.framing.type) : undefined;
+  return tag ? compilerText(tag) : compilerNull('text');
+};
+
+/**
  * `by(__.choose(<key>).option(k, s)…)` over SCALAR arms → one per-row SQL `CASE` — the OPTION-MAP twin of
  * `scalarChooseChild`, exactly as `chooseOptions` is `chooseArms`' twin in the relational world.
  *
@@ -1200,12 +1220,7 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  const tagOf = (cv: ChildValue): Expr => {
-    if (cv.vtype) return cv.vtype;
-    const tag = cv.framing.kind === 'scalar' ? staticTypeOf(cv.framing.type) : undefined;
-    return tag ? compilerText(tag) : compilerNull('text');
-  };
-  const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, tagOf(b.cv)] as const), else: tagOf(elseCV) };
+  const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, armTag(b.cv, true)] as const), else: armTag(elseCV, true) };
   return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
@@ -1250,12 +1265,7 @@ function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: 
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  const tagOf = (a: ChildValue): Expr => {
-    if (a.vtype) return a.vtype;
-    const tag = a.framing.kind === 'scalar' ? staticTypeOf(a.framing.type) : undefined;
-    return tag ? compilerText(tag) : compilerNull('text');
-  };
-  const vtype: Expr = { kind: 'case', whens: [[pred, tagOf(thenCV)]], else: tagOf(elseCV) };
+  const vtype: Expr = { kind: 'case', whens: [[pred, armTag(thenCV, true)]], else: armTag(elseCV, true) };
   return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
@@ -1325,16 +1335,12 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
     const met = meetScalarTypes(staticTypes);
     if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
   }
-  const tagOf = (a: ChildValue): Expr => {
-    if (a.vtype) return a.vtype;
-    const tag = a.framing.kind === 'scalar' ? staticTypeOf(a.framing.type) : undefined;
-    return tag ? compilerText(tag) : compilerNull('text');
-  };
   // THE TAG OF THE ARM THAT ANSWERED — the same non-null test the value's `COALESCE` makes, arm for
   // arm. A `COALESCE` of the tags instead picks the first arm that HAS a tag, which is not the arm that
   // produced: `coalesce(__.constant('x'), __.out().count())` paired `'x'` (an untagged constant, NULL)
-  // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization.
-  const vtype: Expr = { kind: 'case', whens: arms.map((a) => [isNot(a.expr, compilerNull('text')), tagOf(a)] as const) };
+  // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization. The raw `vt` is
+  // kept (`armTag(…, false)`) because this framing stays `result: 'number'`, which reads both vocabularies.
+  const vtype: Expr = { kind: 'case', whens: arms.map((a) => [isNot(a.expr, compilerNull('text')), armTag(a, false)] as const) };
   return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
 }
 
