@@ -231,3 +231,8 @@ lowered.
   would collapse the predict/construct separation the gate depends on — it would be wrong, not deferred.
 - **map-LITERAL `[k:__.trav]` as a merge argument** — a candidate-rooted `P.eq` on a per-driver value;
   permanent decline (correlated merge search), distinct from the map-VALUED driver that landed.
+- **Per-traverser `fold(seed, Operator)` with a list/set/map seed** — declines (`38160293`,
+  `src/compiler/ir/fold-seed.ts`): TinkerPop wraps the one seed in a `ConstantSupplier`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java:1300`)
+  and `Operator.addAll` mutates it in place, so every parent folds into ONE aliased collection; only a
+  root-chain fold is admitted. Exact aliasing semantics are not worth a lowering.
