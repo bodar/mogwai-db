@@ -6245,9 +6245,12 @@ function mergedElements(
     const effects = mergeFromTraversal(input, maps, op, tail, driverElem, aliases, ctx, fresh);
     return effects && { effects, at: end };
   }
+  // Does each input row stand for ONE reference traverser at the merge — none merged into a bulked slot
+  // before it? The merge's `onMatch` over a creation later drivers share counts them (`shareOnMatch`).
+  const unbulked = unbulkedAt(ctx, steps, at);
   const effects = op === 'mergeE'
-    ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh)
-    : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh);
+    ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh, unbulked)
+    : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh, unbulked);
   return effects && { effects, at: end };
 }
 

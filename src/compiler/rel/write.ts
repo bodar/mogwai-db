@@ -898,19 +898,32 @@ const KNOWN_READS: ReadonlySet<string> = unionOf(KEY_READING_STEPS, GRAPH_SOURCE
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:188-208`). */
 const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'atan', 'cbrt', 'ceil', 'cos', 'cosh', 'exp', 'floor', 'log', 'log10', 'log2', 'signum', 'sin', 'sinh', 'sqrt', 'tan', 'tanh']);
 
-function bodyReach(steps: readonly IRStep[], child: ChildSeam): BodyReach {
+/** The write steps a PROGRAM-level reach (`ProgramWrites.reads`) reads nothing through by themselves —
+ *  their value/endpoint bodies are still walked. Inside a runtime BODY the same steps stay `OPAQUE_STEPS`. */
+const WRITES_READING_NOTHING: ReadonlySet<string> = new Set(['addV', 'addE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
+
+/** `program` — the reach of a whole PROGRAM (`ProgramWrites.reads`) rather than of a runtime body: a write
+ *  step is read through its bodies, and a merge reads what its SEARCH reads. */
+function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false): BodyReach {
   const keys = new Set<string>();
   const vertexIds = new Set<number | string>();
   let all = false, leaves = false, sources = false, vertexSources = false, labels = false, edges = false;
   const strings = (value: unknown, into: (s: string) => void): void => {
     for (const n of valueNodes(value)) if (typeof n === 'string') into(n);
   };
-  const read: BodyReader = (nested) => child.body(nested, 'child');
   const opaque = (): void => { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edges = true; };
   const walk = (body: readonly IRStep[]): void => {
     for (const step of body) {
       const args = step.args.map((a) => a.value);
-      if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edges = true; }
+      if (program && WRITES_READING_NOTHING.has(step.name)) {
+        // A write reads nothing by itself; only its bodies (walked below) do.
+      } else if (program && (step.name === 'mergeV' || step.name === 'mergeE')) {
+        // A merge's SEARCH reads its map's keys and `T.label` and finds any element; a map that is not a
+        // literal (the driver's own map, a traversal) may name any key.
+        labels = true; leaves = true; sources = true; vertexSources = true; edges = true;
+        if (!args.length || args.some((a) => [...valueNodes(a)].some(isNested))) all = true;
+        else strings(args, (s) => keys.add(s));
+      } else if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) opaque();
       if (GRAPH_SOURCES.has(step.name)) {
         sources = true; leaves = true;
         if (!VERTEX_SOURCE.has(step.name)) edges = true;
@@ -1023,6 +1036,14 @@ export interface ProgramWrites {
    * `by()` body, or spliced out of one (`ranPerTraverser`) — since a later `cap`/`select` observes it.
    */
   readonly truncated: boolean;
+  /**
+   * WHAT THE WHOLE PROGRAM CAN READ, at any depth (`bodyReach` in its `program` mode: a write step reads
+   * through its bodies only, a merge reads what its search reads). A write no step reads cannot be
+   * observed BETWEEN two traversers, so where the reference applies it once per traverser and the plan
+   * once per element, only the final state differs — and an idempotent write leaves one final state
+   * (`MergeWriteFacts.onMatchShareable`). `keys: 'all'` for an unreadable body.
+   */
+  readonly reads: { readonly keys: KeySet; readonly labels: boolean };
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
 interface PreCheck { readonly name: string; readonly ids: readonly (number | string)[] }
@@ -1035,7 +1056,7 @@ interface PreCheck { readonly name: string; readonly ids: readonly (number | str
 interface UpstreamWrite { readonly effect: ProgramWrites; readonly count: string | null; used: boolean }
 
 const everythingWritten = (truncated: boolean): ProgramWrites =>
-  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [], preChecks: [], truncated });
+  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [], preChecks: [], truncated, reads: { keys: 'all', labels: true } });
 
 /** One write step of the program — WHAT it writes, at the grain a merge's search can be observed by. */
 interface WriteSite {
@@ -1201,8 +1222,10 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     return { effects, lazy, growing, collects };
   };
   walk(steps, true, false);
-  return unreadable ? everythingWritten(truncated)
-    : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated };
+  if (unreadable) return everythingWritten(truncated);
+  const reach = bodyReach(steps, (body) => { try { return childSteps(body, params); } catch { return null; } }, true);
+  return { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated,
+    reads: { keys: reach.keys, labels: reach.labels } };
 }
 
 /**
@@ -1523,7 +1546,7 @@ function sequentialGuard(
     else if (run !== undefined && writer.run === run) own = unite(own, writer.keys);
     else elsewhere = unite(elsewhere, writer.keys);
   }
-  const reaches = bodies.map((body) => bodyReach(body, child));
+  const reaches = bodies.map((body) => bodyReach(body, (nested) => child.body(nested, 'child')));
   const leaves = reaches.some((reach) => reach.leaves);
   const readsOwn = reaches.some((reach) => meets(reach.keys, own));
   const readsElsewhere = reaches.some((reach) => meets(reach.keys, elsewhere) || (program.labels && reach.labels));
@@ -3344,6 +3367,10 @@ function guardMergeInterleaving(
     readonly createKey: ((rel: RelId) => Expr) | null;
     /** Could the LATER driver's search find the EARLIER one's creation? `null` = always. */
     readonly couldMatch: ((earlier: RelId, later: RelId) => Expr) | null;
+    /** The HOST applies `onMatch` to a creation two or more drivers share (`shareOnMatch`) — so a later
+     *  driver matching an earlier one's creation is answered, not refused, for an `onMatch` that is
+     *  `onMatchShareable`. Only a host that does so may pass `true`. */
+    readonly sharesOnMatch?: boolean;
   } | null,
   facts: MergeWriteFacts & { readonly perDriverSearch: boolean },
   bind: Binder, guard: Guarder, fresh: Minter,
@@ -3387,15 +3414,21 @@ function guardMergeInterleaving(
       raiseOnRows(make.filter({ id: fresh('f'), input: two, channels: two.channels, type: two.type, pred: { kind: 'exists', plan: matched, negated: false } }), why);
     }
   }
-  // (2) — a creation a later driver would have matched.
-  if (!unmatched || (!facts.acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null)) return;
+  // (2) — a creation a later driver would have matched. An `onMatch` the host applies to every SHARED
+  // creation (`sharesOnMatch`) is answered: the later driver's match of the earlier one's creation is
+  // exactly that write, run once where the loop runs it per later driver — one final state, since it is
+  // idempotent and nothing reads it in between (`onMatchShareable`). What stays refused is a pair that
+  // would NOT share the creation (`createKey` differs) or a write that repeats or redirects the search.
+  if (!unmatched) return;
+  const acts = facts.acts && !(unmatched.sharesOnMatch && facts.onMatchShareable);
+  if (!acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null) return;
   const u = unmatched.rel;
   const earlier = bind(make.project({
     id: fresh('p'), input: u, channels: [], type: u.type, exprs: u.type.cols.map((column) => [column.name, col(u.id, column.name)] as const),
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
   const { createKey, couldMatch } = unmatched;
-  const observable: Expr = facts.acts || facts.repeats || facts.mutatesSearch || !createKey ? always
+  const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
     : isNot(createKey(earlier.id), createKey(later.id));
   raiseOnRows(selfJoin(earlier, later, and(and(lt(col(earlier.id, ORD), col(later.id, ORD)),
     couldMatch ? couldMatch(earlier.id, later.id) : always), observable)),
@@ -3460,6 +3493,20 @@ interface MergeWriteFacts {
   readonly mutatesSearch: boolean;
   /** A write OUTSIDE this merge's own cluster could change what the search finds (`mergeObservesOtherWrites`). */
   readonly othersObserved: boolean;
+  /**
+   * **The `onMatch` may run ONCE per shared creation where the loop runs it once per LATER driver.**
+   * `MergeVertexStep.flatMap`/`MergeEdgeStep.flatMap` hand driver 1 the creation and every later driver
+   * whose search finds it the `onMatch` over it (`MergeVertexStep.java:94-116`, `MergeEdgeStep.java:270-292`).
+   * Running that write once over the creation, after the create and before the tail, leaves the reference's
+   * final state exactly when
+   *  - every `onMatch` write is IDEMPOTENT per element — a constant `single` (any edge write; a vertex
+   *    write with a stated `single`/`set`) or a removal; no appended label, no per-traverser value;
+   *  - it neither redirects a search (`mutatesSearch`) nor meets another write (`othersObserved`); and
+   *  - NO STEP OF THE PROGRAM READS A KEY IT WRITES (`ProgramWrites.reads`) — the one observation that would
+   *    tell driver 1 (which passes every later step before driver 2 merges: no `NoOpBarrierStep` follows a
+   *    first flat-map, `LazyBarrierStrategy.java:73,112-114`) from the plan, which wrote it already.
+   */
+  readonly onMatchShareable: boolean;
 }
 
 /** `MergeWriteFacts` from a host's parsed writes. `searched` is the set of property keys the search reads,
@@ -3491,11 +3538,14 @@ function mergeWriteFacts(
     || (write.kind === 'set' && (write.cardinality === 'list' || (element === 'vertex' && write.cardinality === null)));
   const writesSearched = (write: PropertyWrite): boolean => write.kind === 'map' || searched === null
     || (write.kind === 'runtime' ? typeof write.key !== 'string' || searched.has(write.key) : searched.has(write.key));
+  const repeats = onMatch.some(perTraverser) || tail.some(perTraverser);
+  const mutatesSearch = onMatch.some(writesSearched) || tail.some(writesSearched);
+  const othersObserved = mergeObservesOtherWrites(element, propertySteps, searched, program);
+  const written: KeySet = new Set(onMatch.map((write) => (write.kind === 'set' || write.kind === 'remove' ? write.key : '')));
   return {
-    acts: onMatch.length > 0 || appended.length > 0,
-    repeats: onMatch.some(perTraverser) || tail.some(perTraverser),
-    mutatesSearch: onMatch.some(writesSearched) || tail.some(writesSearched),
-    othersObserved: mergeObservesOtherWrites(element, propertySteps, searched, program),
+    acts: onMatch.length > 0 || appended.length > 0, repeats, mutatesSearch, othersObserved,
+    onMatchShareable: !appended.length && !repeats && !mutatesSearch && !othersObserved
+      && onMatch.every((write) => write.kind === 'set' || write.kind === 'remove') && !meets(program.reads.keys, written),
   };
 }
 
@@ -4004,6 +4054,34 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * — `addV`'s unconditional guard would wrongly raise on a match, because a search-by-id match already
  * owns that id. A non-scalar id (a shape no vertex id can be) declines, as it does on `addV`.
  */
+
+/**
+ * **`onMatch` OVER THE CREATIONS TWO OR MORE DRIVERS SHARE — the merge loop's later iterations, set-based.**
+ * `MergeVertexStep.flatMap` / `MergeEdgeStep.flatMap` search per traverser against the graph every EARLIER
+ * traverser left (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java:78-116`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:255-292`):
+ * among the drivers that share one creation, the FIRST (by `ord`) creates and every later one MATCHES it and
+ * runs `onMatch` over it. Partitioned by the creation and ranked by `ord`, that is "rank one creates, rank two
+ * and up match" — and for an `onMatch` that is `onMatchShareable` (idempotent, unread in between) the ranks
+ * above one collapse to ONE application over each creation whose partition holds a second driver. `shared` is
+ * those creations' ids; the host runs this after the create and before the `property()` tail, the loop's
+ * order. The pairs that would not share a creation stay `guardMergeInterleaving`'s to refuse.
+ *
+ * A host passes `sharesOnMatch` only where EVERY INPUT ROW IS ONE OF THE REFERENCE'S TRAVERSERS: this counts drivers by rows, and the
+ * reference's `flatMap` runs once per TRAVERSER, a merged slot included: `g.inject(1,1,1)` drains into ONE
+ * bulk-3 traverser (`StartStep` adds into a `TraverserSet`, `…/step/sideEffect/StartStep.java`), so its merge
+ * creates once and never runs `onMatch`. So only a stream the reference reaches unmerged (`driversUnbulked`,
+ * the host's `unbulkedAt`) qualifies; anything else keeps the refusal. Over such a stream every row of ours
+ * is at bulk 1: the lowering merges rows only where the reference does (`regroupFirstOccurrence` at a
+ * `bulkingPositions` merge, which `unbulkedAt` rules out) or under the movement collapse, which no chain
+ * holding a write takes (`chainCollapseSafe` admits a movement/filter prefix only).
+ */
+function shareOnMatch(
+  elem: Elem, shared: Rel, writes: readonly PropertyWrite[], bind: Binder, guard: Guarder, fresh: Minter, child: ChildSeam, aliases: AliasMap,
+): boolean {
+  const targets = bind(shared, true);
+  return writes.every((write) => propertyStatements(elem, targets, write, bind, fresh, child, aliases, guard));
+}
 
 /**
  * `onMatch` over the MATCHED vertices — the append-only labels first (their own table), then the property
@@ -4782,7 +4860,7 @@ export function mergeEFromMap(
 
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
+  driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter, driversUnbulked = false,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -4863,14 +4941,18 @@ export function elementMergeV(
   // already changed a property the search asked about.
   const matched = bind(idsOf(searched, fresh), true);
   // ONE TRAVERSER AT A TIME — the search is input-independent, so every driver misses together and a
-  // later one would match the one creation (`guardMergeInterleaving`).
-  guardMergeInterleaving('mergeV', incoming, matched, incoming.type.cols.some((column) => column.name === ORD) ? {
+  // later one would match the one creation (`guardMergeInterleaving`) — which `shareOnMatch` answers below
+  // for an `onMatch` that is `onMatchShareable`.
+  const multiDriver = incoming.type.cols.some((column) => column.name === ORD);
+  const facts = mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes);
+  const sharesOnMatch = multiDriver && facts.acts && facts.onMatchShareable && driversUnbulked;
+  guardMergeInterleaving('mergeV', incoming, matched, multiDriver ? {
     rel: make.filter({
       id: fresh('f'), channels: [], type: typeOf(meta(ORD, 'int')), pred: { kind: 'exists', plan: matched, negated: true },
       input: make.project({ id: fresh('p'), input: incoming, channels: [], type: typeOf(meta(ORD, 'int')), exprs: [[ORD, col(incoming.id, ORD)]] }),
     }),
-    createKey: null, couldMatch: null,
-  } : null, { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes), perDriverSearch: false }, bind, guard, fresh);
+    createKey: null, couldMatch: null, sharesOnMatch,
+  } : null, { ...facts, perDriverSearch: false }, bind, guard, fresh);
   // IS THE CREATE ID STILL FREE — but only WHEN a create happens, which is `mergeV`'s whole difference
   // from `addV`'s unconditional guard. The search is by id (`hasId` above), so a MATCH already owns that
   // id and no collision is possible; a create runs only where the search came back empty, and collides
@@ -4925,6 +5007,14 @@ export function elementMergeV(
   const created = addVertex(creating, createLabels.names, createId, createConst, false, bind, fresh, child, NO_ALIASES, guard);
   if (!created) return null;
   for (const write of createRuntime) if (!mergeArmValueWrite(created, incoming, write, driverElem, bind, fresh, child, NO_ALIASES)) return null;
+  // Every driver missed together (the search is input-independent), so with a SECOND driver every driver
+  // after the first matches the one creation (`shareOnMatch`).
+  if (sharesOnMatch) {
+    const createdIds = idsOf(created, fresh);
+    const second = make.limit({ id: fresh('li'), input: incoming, channels: incoming.channels, type: incoming.type, count: compilerInt(1), offset: compilerInt(1) });
+    const shared = make.filter({ id: fresh('f'), input: createdIds, channels: [], type: createdIds.type, pred: { kind: 'exists', plan: second, negated: false } });
+    if (!shareOnMatch('vertex', shared, matchWrites, bind, guard, fresh, child, NO_ALIASES)) return null;
+  }
 
   // THE MERGED ELEMENT(S) — the pre-write matches (`matched`) UNION the one creation, the tail run over
   // the union, the matched rev touched, and the whole crossed back onto the input. Shared with the
@@ -5251,7 +5341,7 @@ function mergeEComputed(
  */
 export function elementMergeE(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
+  aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter, driversUnbulked = false,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -5378,13 +5468,20 @@ export function elementMergeE(
   type Side = 'src' | 'tgt';
   const createSides: Side[] = [...(src ? ['src' as const] : []), ...(tgt ? ['tgt' as const] : [])];
   const searchSides: Side[] = [...(matchOut !== undefined ? ['src' as const] : []), ...(matchIn !== undefined ? ['tgt' as const] : [])];
+  // Two drivers naming one pair share its creation (`wanted` is DISTINCT), and the guard refuses every pair
+  // whose later search could find an earlier creation of a DIFFERENT pair — so a creation's sharers are
+  // exactly the drivers joined to it below, and `shareOnMatch` answers the rest.
+  const facts = mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes);
+  const sharesOnMatch = creating && incoming.type.cols.some((column) => column.name === ORD) && facts.acts && facts.onMatchShareable
+    && driversUnbulked;
   guardMergeInterleaving('mergeE', incoming, matched, creating ? {
     rel: unmatched,
     createKey: createSides.length ? (rel) => ({ kind: 'call', fn: 'json_array', args: createSides.map((side) => col(rel, side)) }) : null,
     couldMatch: searchSides.length
       ? (earlier, later) => searchSides.map((side) => eq(col(earlier, side), col(later, side))).reduce((a, b) => and(a, b))
       : null,
-  } : null, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes), perDriverSearch: false }, bind, guard, fresh);
+    sharesOnMatch,
+  } : null, { ...facts, perDriverSearch: false }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the MATCHED (existing) edges whenever onMatch or the tail `property()` run mutated
   // them (§5·1); created edges are born dirty, and an empty `matched` is a no-op. Placed before the
@@ -5483,6 +5580,15 @@ export function elementMergeE(
     type: typeOf(meta(ORD, 'int'), meta('src', 'int'), meta('tgt', 'int'), meta('id', 'int'), meta('csrc', 'int'), meta('ctgt', 'int')),
     on: and(eq(col(pairs.id, 'src'), col(created.id, 'src')), eq(col(pairs.id, 'tgt'), col(created.id, 'tgt'))),
   });
+  // A creation joined to a SECOND driver is matched by it (`shareOnMatch`).
+  if (sharesOnMatch) {
+    const sharers = make.aggregate({
+      id: fresh('ag'), input: createdFor, channels: [], type: typeOf(meta('id', 'int'), meta('n', 'int')),
+      groupBy: [col(createdFor.id, 'id')], aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
+    });
+    const shared = make.filter({ id: fresh('f'), input: sharers, channels: [], type: sharers.type, pred: { kind: 'binary', op: '>', left: col(sharers.id, 'n'), right: compilerInt(1) } });
+    if (!shareOnMatch('edge', idsOf(shared, fresh), matchWrites, bind, guard, fresh, child, aliases)) return null;
+  }
   // Exactly one branch produced any given (row, edge), so a UNION ALL states "whichever happened".
   const merged = make.union({
     id: fresh('u'), all: true, channels: [], type: typeOf(meta(ORD, 'int'), meta('id', 'int')),

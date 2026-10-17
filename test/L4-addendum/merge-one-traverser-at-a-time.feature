@@ -10,7 +10,8 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
   # traverser. The set-based merge searches once for every driver, so it cannot model that interleaving: each
   # scenario below states the REFERENCE answer and is @Unsupported — it must refuse (guardMergeInterleaving,
   # src/compiler/rel/write.ts), never answer the snapshot's question. The trailing scenarios are the cases
-  # that interleaving cannot change, which must keep answering.
+  # that interleaving cannot change, which must keep answering — and, last, the shared-creation onMatch the
+  # set-based form answers exactly (shareOnMatch).
 
   @gap:merge-one-traverser-at-a-time
   @Unsupported
@@ -501,3 +502,129 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
     When iterated to list
     Then the result should be empty
     And the graph should return 7 for count of "g.V()"
+
+  # A CREATION SHARED BY LATER TRAVERSERS, answered set-based (shareOnMatch, src/compiler/rel/write.ts): the
+  # first traverser creates, every later one whose search finds that creation runs onMatch over it
+  # (MergeVertexStep.java:78-116 / MergeEdgeStep.java:255-292). An IDEMPOTENT onMatch (a stated single, or any
+  # edge write) that NO step reads leaves one final state however many later traversers ran it, so it is applied
+  # once over each creation a second traverser shares. The lazy-read forms above (values("m") after the merge)
+  # stay refused: the first traverser reads before the second one matches.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 7 for count of "g.V()"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"c\",1).has(\"m\",2)"
+
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_VX1_2X_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"c\",1).has(\"m\",2)"
+
+  # One depth down — a union arm over a distinct, unbulked stream.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_unionXmergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_m_single_2XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[m:Cardinality.single(2)])).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"c\",1).has(\"m\",2)"
+
+  # onMatch BEFORE the property() tail, per traverser: the tail's single write is the last one each time.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_optionXonCreate_c_1X_optionXonMatch_c_single_2X_propertyXsingle_c_7X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).option(Merge.onCreate,[c:1]).option(Merge.onMatch,[c:Cardinality.single(2)]).property(single,"c",7).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"c\",7)"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").properties(\"c\")"
+
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeEXzz_1_2X_optionXonCreate_w_1X_optionXonMatch_w_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onCreate,[w:1]).option(Merge.onMatch,[w:2]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\")"
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",2)"
+
+  # Per-traverser pairs: lop (3) is reached three times and its self edge is matched twice; ripple (5) once.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_VX1_4_6X_outXcreatedX_asXvX_mergeEXself_outV_inVX_optionXonCreate_w_1X_optionXonMatch_w_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,4,6).out("created").as("v").mergeE([(T.label):"self",(Direction.OUT):Merge.outV,(Direction.IN):Merge.inV]).option(Merge.onCreate,[w:1]).option(Merge.onMatch,[w:2]).option(Merge.outV,__.select("v")).option(Merge.inV,__.select("v")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+    And the graph should return 2 for count of "g.E().hasLabel(\"self\")"
+    And the graph should return 1 for count of "g.V(3).outE(\"self\").has(\"w\",2)"
+    And the graph should return 1 for count of "g.V(5).outE(\"self\").has(\"w\",1)"
+
+  # A MERGED SLOT is one traverser: inject(1,1,1) drains into ONE bulk-3 traverser (StartStep adds into a
+  # TraverserSet), so the merge's flatMap runs once — it creates and never runs onMatch. Rows are not
+  # traversers here, so the shared onMatch is refused (shareOnMatch needs an unbulked stream, unbulkedAt).
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_1_1X_mergeVXname_zzX_optionXonMatch_m_single_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,1,1).mergeV([name:"zz"]).option(Merge.onMatch,[m:Cardinality.single(2)]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+
+  # The onMatch key READ downstream: the first traverser passes has("m") (no m yet) before the second one
+  # matches — no barrier sits between a filter and the merge — so the shared onMatch is refused
+  # (ProgramWrites.reads).
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_optionXonMatch_m_single_2X_hasXmX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).option(Merge.onMatch,[m:Cardinality.single(2)]).has("m").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
