@@ -777,7 +777,7 @@ authorities.
   WHERE fence (`transform.ts` `asNumberFilter`) so it raises at every existence depth, and its constant
   fold is `NumberHelper.performConversion` (`coerce.ts`). Pinned in
   `test/compiler/number-class-fail-closed.exec.test.ts`. The FULL one-`numericClassOf` authority is still open (policy now decided: exact).
-- 🚧 **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
+- ✅ **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
   `ChildValue.present` is OPTIONAL ("absent means cannot say") — exactly the optional-field defect generator
@@ -788,7 +788,13 @@ authorities.
   null, null-literal `coalesce`/`union` arms). Size: M, ~200 LOC, mostly typing churn.
   ✅ **Stopgap LANDED 2026-10-17 (`888affc3`):** `mayYieldNull` (`ir/strategies.ts`, a predicate on the total
   walker `ir/walk.ts`) — a group value by() whose body may yield a null (null-holding `constant`/`inject`
-  literal at any depth) declines. The required-`present` design is still open.
+  literal at any depth) declines.
+  ✅ **Required `present` LANDED 2026-10-17 (`2b0b1e27`):** `ChildValue.present: Expr | 'unknown'` is
+  REQUIRED (`rel/child.ts`, one decline authority `knownPresence`, one `casePresence`); pooled regroup decides
+  a member's outer NULL by presence (`producedMemberNode`), so a productive null is a pool member; the
+  `mayYieldNull` stopgap is removed; `coalesce()` as a child value is a CASE on arm presence. Open residue:
+  order()/dedup()/groupCount() by()-KEY productivity still reads the key's nullness (`productivityFilter`) —
+  `g.inject([null,1]).order().by(unfold())` answers `[]`; the key consumers must read byTyped's presence.
 - 🚧 **E — per-row runtime raises and evaluation extent.** Authority: `step/map/MathStep.java`,
   `ToUpperGlobalStep` / `ConcatStep` (`IllegalArgumentException`), `RangeGlobalStep` (stops pulling at high)
   vs `CollectingBarrierStep` (drains everything), `NumberHelper` (`/ by zero`, overflow). Seam: THREE
@@ -932,7 +938,7 @@ authorities.
 | 1 | ✅ G — one IR walker, arm column decline, alias into arms (landed `1ad88ccf`/`fec9e97c`; alias-channel threading open) | S–M | cheapest; every later branch re-trips it |
 | 2 | C — number-class authority (after the §6·7 decision) | M | `asNumber`, orderability, reducers are all consumers |
 | 3 | E — the `raise` channel role | M–L | replaces three mechanisms; unblocks four branches |
-| 4 | D — required `present` | M | small once E adds the third `ChildValue` field in the same pass |
+| 4 | ✅ D — required `present` (landed `2b0b1e27`; by()-key productivity open) | M | small once E adds the third `ChildValue` field in the same pass |
 | 5 | A — `bulkingPositions` + `regroupFirstOccurrence` | L | the biggest unlock |
 | 6 | B — the `EmissionKey` stack | L | needs A |
 | 7 | F — set-based merge interleave + writer-stream guard | M | independent; can run alongside 3–6 |
