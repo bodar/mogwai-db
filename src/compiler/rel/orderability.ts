@@ -20,6 +20,7 @@
 
 import { UnsupportedTraversal } from '../compiler.ts';
 import { exactNumberOf, isExactNumber, parseExactJson } from '../../json-exact.ts';
+import { RaisedByQuery } from '../../rel/raise.ts';
 
 /** ORDERABILITY's type-priority ladder (`Type` enum order). A cross-type compare is decided by these
  *  alone; same-type falls to the per-type comparator below. */
@@ -212,7 +213,7 @@ function cmpFloating(x: number, y: number): number {
  *  names the first non-numeric character, `I` either way — this raises that same message rather than
  *  inventing an order. */
 function decimalOfFloating(value: number, bits: number): Decimal {
-  if (!Number.isFinite(value)) throw new Error('Character I is neither a decimal digit number, decimal point, nor "e" notation exponential mark.');
+  if (!Number.isFinite(value)) throw new RaisedByQuery('Character I is neither a decimal digit number, decimal point, nor "e" notation exponential mark.');
   if (bits <= 32) {
     for (let p = 1; p <= 9; p++) {
       const text = value.toPrecision(p);

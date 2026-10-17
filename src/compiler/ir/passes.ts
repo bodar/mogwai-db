@@ -13,6 +13,7 @@ import {
 import { verifyLabelMutationTarget, verifyWriteArgs } from './write-args.ts';
 import { LABEL_MUTATIONS, SLICE_STEPS } from './step.ts';
 import { earlyLimit } from './early-limit.ts';
+import { UnsupportedTraversal } from '../unsupported.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
 //
@@ -396,7 +397,7 @@ export function runPasses(
 ): { steps: IRStep[]; discard: boolean } {
   for (const name of use.without)
     if (ALWAYS_ON_STRATEGIES.has(name))
-      throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
+      throw UnsupportedTraversal.because(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
   const removed = new Set(use.without);
   const active = use.with.filter((s) => !removed.has(s.name) && !NO_OP_STRATEGIES.has(s.name));
   const ctx: PassContext = { params, sideEffects, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false }, nested };
@@ -406,7 +407,7 @@ export function runPasses(
   // change results if silently ignored (the old ladder's catch-all `else throw`, now an invariant).
   for (const spec of active)
     if (!PASSES.some((p) => (p.category === 'decoration' || p.category === 'verify') && p.name === spec.name))
-      throw new Error(rejectMsg(spec.name));
+      throw UnsupportedTraversal.because(rejectMsg(spec.name));
 
   let chain = steps as IRStep[];
   let lastOrdinal = -1;

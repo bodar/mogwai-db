@@ -271,7 +271,7 @@ const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bi
  *
  * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
  */
-export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter): Expr | null {
+export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, step = 'asString()'): Expr | null {
   const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
   const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
   const nullable = (rendered: Expr): Expr => ({ kind: 'case', whens: [[isNull(value), compilerNull()]], else: rendered });
@@ -280,7 +280,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter):
     if (tag === 'string') return value;
     if (INTEGRAL_TAGS.includes(tag)) return cast;
     if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh));
+    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh, step));
     return null;
   }
   // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
@@ -293,8 +293,8 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter):
     ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
     // ONE floating arm for a Double and a Float: a Float prints its shortest decimal, per row.
     [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]),
-      floatingText(value, tagged ? inList(type, ['float']) : false, fresh)],
-  ], else: raise(deferral('asString(): rendering this value at run time')) };
+      floatingText(value, tagged ? inList(type, ['float']) : false, fresh, step)],
+  ], else: raise(deferral(`${step}: rendering this value at run time`)) };
 }
 
 /**
@@ -309,7 +309,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter):
  * reads several times, so it is spelled once, in a one-row LET carrying its exact digits (`%!.17g`; JSON's
  * own REAL keeps only 15).
  */
-function floatingText(value: Expr, float: boolean | Expr, fresh: Minter): Expr {
+function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, step = 'asString()'): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
   // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
@@ -317,11 +317,17 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter): Expr {
   // sign bit. `printf` drops it too, so it is read before the Float's LET.
   const negative = signBit(real);
   const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
+  // `Double.toString`/`Float.toString` of an infinity is `Infinity`/`-Infinity`; SQLite prints `Inf`.
+  // Read before the Float's LET, whose `printf` would spell it `Inf` too.
+  const infinite: [Expr, Expr][] = [
+    [{ kind: 'binary', op: '>', left: real, right: compilerReal(Number.MAX_VALUE) }, text('Infinity')],
+    [{ kind: 'binary', op: '<', left: real, right: compilerReal(-Number.MAX_VALUE) }, text('-Infinity')],
+  ];
   if (float !== false) {
     const shortest = floatShortest(real, fresh);
     const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
       float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
-    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero]],
+    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero], ...infinite],
       else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh), fresh) };
   }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
@@ -329,8 +335,8 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter): Expr {
   const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
   const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
-  return { kind: 'case', whens: [[zero, signedZero], [and(plain, exact), shown]],
-    else: raise(deferral('asString(): a floating-point Number outside the plain shortest form')) };
+  return { kind: 'case', whens: [[zero, signedZero], ...infinite, [and(plain, exact), shown]],
+    else: raise(deferral(`${step}: a floating-point Number outside the plain shortest form`)) };
 }
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to

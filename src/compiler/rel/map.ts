@@ -5,7 +5,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
-import { isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
+import { countOf, isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -361,7 +361,7 @@ export function groupRows(
    */
   const lastOnly = valueBy?.key.kind === 'child' && valueBy.key.body.length === 1
     && valueBy.key.body[0]!.name === 'tail'
-    && !valueBy.key.body[0]!.args.some((a) => typeof a.value === 'number' && a.value !== 1);
+    && countOf(valueBy.key.body[0]!) === 1;
   // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
   // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
   // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
@@ -1614,7 +1614,7 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
  */
 export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
   const window = step.name === 'tail'
-    ? { offset: 0, limit: Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1) }
+    ? { offset: 0, limit: countOf(step) }
     : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
   if (!window) return null;
   const rel = fenced(input, fresh);

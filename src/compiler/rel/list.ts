@@ -7,7 +7,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
-import { GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
+import { countOf, GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import { asStringOf, raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
@@ -597,7 +597,7 @@ export function listMemberOp(
 
   if (LIST_LOCAL_TX.has(step.name) && isLocalScope(step)) {
     const window = step.name === 'tail'
-      ? { offset: 0, limit: Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1) }
+      ? { offset: 0, limit: countOf(step) }
       // An illegal `range(Scope.local, 2, 1)` is a `ValueParseError` answer that PROPAGATES (§6·5);
       // only the "not a slice step" routing throw declines. Mirror of `sliceOp`.
       : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();

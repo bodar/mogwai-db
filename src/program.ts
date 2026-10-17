@@ -1,6 +1,7 @@
 import { stringifyExactOrRefuse } from './json-exact.ts';
 import { emit, emitProgram, isRowsBind, type Emitted } from './rel/emit.ts';
 import type { Guard, Plan } from './rel/plan.ts';
+import { RaisedByQuery } from './rel/raise.ts';
 
 /** The one thing a program needs of a store: run a statement, get rows back. Deliberately not
  * `GraphStore` — a program is relational, and nothing here knows what a vertex is. */
@@ -85,7 +86,7 @@ export function runSteps(store: RowSource, { steps, columns }: RenderedProgram):
         // `valueColumn` appends the OFFENDING VALUE, for the reference sentences that name it. Only a
         // `'rows'` guard can have one — an `'empty'` guard has no row to read it from — and the append
         // is the first row's, which is the row the message is about.
-        throw new Error(guard.valueColumn !== undefined && rows.length
+        throw new RaisedByQuery(guard.valueColumn !== undefined && rows.length
           ? `${guard.message}${(rows[0] as Record<string, unknown>)[guard.valueColumn]}${guard.tail ?? ''}`
           : guard.message);
     }

@@ -14,4 +14,12 @@ export class UnsupportedTraversal extends Error {
     super(`this traversal is not supported yet: no lowering covers ${gremlin}`);
     this.name = 'UnsupportedTraversal';
   }
+
+  /** A decline whose reason is a whole SENTENCE rather than the traversal (or a noun phrase naming what
+   *  is uncovered) — `no lowering covers withStrategies(...) is not supported: …` read as garbled. */
+  static because(sentence: string): UnsupportedTraversal {
+    const declined = new UnsupportedTraversal(sentence);
+    declined.message = `this traversal is not supported yet: ${sentence}`;
+    return declined;
+  }
 }

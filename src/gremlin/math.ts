@@ -27,6 +27,7 @@
 // So the layer supplies only PRIMITIVES and `FN` stays ONE table. The `conditional`
 // primitive is what makes that possible at all, and it is exactly what an ops record
 // has and an AST does not.
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
  * The target algebra's primitives — everything the builder below needs to CONSTRUCT
@@ -97,6 +98,16 @@ const FN: Record<string, MathFn> = {
 
 type Tok = { t: 'num' | 'id' | 'op' | 'lp' | 'rp'; v: string };
 
+/**
+ * A formula this parser cannot read DECLINES. The reference parses with exp4j (`MathStep`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java`),
+ * whose refusal of a malformed formula is its own `IllegalArgumentException` wording — not something this
+ * parser reproduces — and this parser reads a SUBSET of exp4j's grammar, so a formula it cannot read may be
+ * one exp4j evaluates. Neither is ours to answer with a bare `Error`.
+ */
+const unreadable = (formula: string, why: string): UnsupportedTraversal =>
+  new UnsupportedTraversal(`the math() formula ${JSON.stringify(formula)} (${why})`);
+
 const NUM = /[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/y;
 const ID = /[A-Za-z_][A-Za-z0-9_]*/y;
 
@@ -117,7 +128,7 @@ function lex(s: string): Tok[] {
       ID.lastIndex = i; const m = ID.exec(s)!;
       toks.push({ t: 'id', v: m[0] }); i = ID.lastIndex; continue;
     }
-    throw new Error(`math(): unexpected character '${c}' in "${s}"`);
+    throw unreadable(s, `unexpected character '${c}'`);
   }
   return toks;
 }
@@ -147,7 +158,7 @@ export function compileMath<T>(formula: string, ops: MathOps<T>): T {
   let pos = 0;
   const peek = () => toks[pos];
   const next = () => toks[pos++];
-  const expect = (t: Tok['t']) => { const k = next(); if (!k || k.t !== t) throw new Error(`math("${formula}"): expected '${t}'`); };
+  const expect = (t: Tok['t']) => { const k = next(); if (!k || k.t !== t) throw unreadable(formula, `expected '${t}'`); };
 
   const parseExpr = (): T => {                  // + -
     let e = parseTerm();
@@ -176,7 +187,7 @@ export function compileMath<T>(formula: string, ops: MathOps<T>): T {
   };
   const parsePrimary = (): T => {
     const tk = peek();
-    if (!tk) throw new Error(`math("${formula}"): unexpected end of expression`);
+    if (!tk) throw unreadable(formula, 'unexpected end of expression');
     if (tk.t === 'lp') { next(); const e = parseExpr(); expect('rp'); return e; }
     if (tk.t === 'num') { next(); return ops.real(tk.v); }
     if (tk.t === 'id') {
@@ -189,10 +200,10 @@ export function compileMath<T>(formula: string, ops: MathOps<T>): T {
       }
       return ops.variable(tk.v);
     }
-    throw new Error(`math("${formula}"): unexpected '${tk.v}'`);
+    throw unreadable(formula, `unexpected '${tk.v}'`);
   };
 
   const e = parseExpr();
-  if (pos !== toks.length) throw new Error(`math("${formula}"): unexpected trailing input`);
+  if (pos !== toks.length) throw unreadable(formula, 'unexpected trailing input');
   return e;
 }

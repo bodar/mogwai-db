@@ -320,10 +320,19 @@ export const BaseGraph: GraphSource = {
       } else return null; // a bound id of another shape declines, as its inline sibling does
     }
 
-    // Inline lists first so a param-free `V(...)` renders byte-for-byte as before; `constLit` never
-    // declines a number/string, so its assertion cannot fire.
+    // Inline lists first so a param-free `V(...)` renders byte-for-byte as before. `constLit` may DECLINE a
+    // value it cannot spell (`null`), and that decline is honoured HERE, at the one site, rather than asserted
+    // away: the whole id route declines. (A NaN id never reaches it: `ir/uncarried-literal.ts` declines first.)
     const clauses: Expr[] = [];
-    if (inlineNums.length) clauses.push({ kind: 'in-list', expr: idCol, values: inlineNums.map((n) => constLit(arg(n, 'long'))!) });
+    if (inlineNums.length) {
+      const values: Expr[] = [];
+      for (const n of inlineNums) {
+        const v = constLit(arg(n, 'long'));
+        if (v == null) return null;
+        values.push(v);
+      }
+      clauses.push({ kind: 'in-list', expr: idCol, values });
+    }
     if (inlineStrs.length) clauses.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
     clauses.push(...paramClauses);
     const pred = clauses.reduce<Expr | undefined>((left, right) =>

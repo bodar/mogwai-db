@@ -55,14 +55,14 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 6642,
-    "compiler": 191,
+    "bytes": 7456,
+    "compiler": 201,
     "bound": 0
   },
   "asString": {
     "binds": 0,
-    "bytes": 9089,
-    "compiler": 201,
+    "bytes": 10069,
+    "compiler": 215,
     "bound": 0
   },
   "both": {
@@ -79,8 +79,8 @@
   },
   "cap": {
     "binds": 0,
-    "bytes": 16510,
-    "compiler": 301,
+    "bytes": 17173,
+    "compiler": 305,
     "bound": 0
   },
   "choose": {
@@ -103,14 +103,14 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 9448,
-    "compiler": 148,
+    "bytes": 11076,
+    "compiler": 158,
     "bound": 0
   },
   "conjoin": {
     "binds": 0,
-    "bytes": 9887,
-    "compiler": 207,
+    "bytes": 10867,
+    "compiler": 221,
     "bound": 0
   },
   "constant": {
@@ -218,7 +218,7 @@
   "group": {
     "binds": 0,
     "bytes": 6760,
-    "compiler": 149,
+    "compiler": 151,
     "bound": 0
   },
   "groupCount": {
@@ -295,8 +295,8 @@
   },
   "is": {
     "binds": 0,
-    "bytes": 9301,
-    "compiler": 272,
+    "bytes": 9504,
+    "compiler": 274,
     "bound": 0
   },
   "key": {
@@ -355,8 +355,8 @@
   },
   "math": {
     "binds": 0,
-    "bytes": 24717,
-    "compiler": 261,
+    "bytes": 28391,
+    "compiler": 265,
     "bound": 0
   },
   "max": {
@@ -367,8 +367,8 @@
   },
   "mean": {
     "binds": 0,
-    "bytes": 5169,
-    "compiler": 122,
+    "bytes": 5391,
+    "compiler": 126,
     "bound": 0
   },
   "merge": {
@@ -421,8 +421,8 @@
   },
   "order": {
     "binds": 0,
-    "bytes": 28515,
-    "compiler": 318,
+    "bytes": 28737,
+    "compiler": 322,
     "bound": 0
   },
   "out": {
@@ -451,8 +451,8 @@
   },
   "project": {
     "binds": 0,
-    "bytes": 11194,
-    "compiler": 311,
+    "bytes": 11573,
+    "compiler": 315,
     "bound": 0
   },
   "properties": {
@@ -463,7 +463,7 @@
   },
   "property": {
     "binds": 20,
-    "bytes": 19251,
+    "bytes": 20135,
     "compiler": 311,
     "bound": 0
   },
@@ -523,8 +523,8 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 10646,
-    "compiler": 313,
+    "bytes": 10986,
+    "compiler": 317,
     "bound": 0
   },
   "tail": {

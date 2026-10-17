@@ -3,6 +3,7 @@ import { isLocalScope } from '../ir/step.ts';
 import type { SegmentPlan } from '../segment.ts';
 import { lowerListResume, lowerToRel, type Lowering } from './lower.ts';
 import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
+import { RaisedByQuery } from '../../rel/raise.ts';
 
 // ---------- split() as a value-transform BARRIER — substrate A ----------
 //
@@ -36,7 +37,7 @@ const JAVA_WHITESPACE = /\s+/;
 const splitValue = (value: unknown, separator: string | null): unknown => {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string')
-    throw new Error(`The split() step can only take string as argument, encountered ${value}.`);
+    throw new RaisedByQuery(`The split() step can only take string as argument, encountered ${value}.`);
   if (separator === '') return value.split('');
   if (separator === null) return value.split(JAVA_WHITESPACE).filter((t) => t !== '');
   return value.split(separator).filter((t) => t !== '');

@@ -13,6 +13,7 @@
 
 import { stringifyExact } from '../json-exact.ts';
 import { ioc } from '../io.ts';
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -60,6 +61,11 @@ export class BigDecimal {
    *  (neither our stored form nor a `m`-suffixed literal ever uses it). */
   static fromText(str: string): BigDecimal {
     str = str.trim();
+    // `Infinity`/`NaN` (a non-finite REAL's `String(v)`) is no BigDecimal: `BigDecimal.valueOf(±∞)` is the
+    // reference's NumberFormatException (`NumberHelper.bigDecimalValue`). DECLINE rather than leak `BigInt`'s
+    // SyntaxError from a framer (`inject(1n, Infinity).sum()`, `asNumber(GType.BIGDECIMAL)` of an infinity).
+    if (!/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(str))
+      throw UnsupportedTraversal.because(`the number ${JSON.stringify(str)} cannot be framed as a BigDecimal`);
     // An EXPONENT spelling (`1.4e-45`, `1e+21`, Java's `1.0E-5`) — what a run-time REAL reaches the
     // BigDecimal framer as through `String(v)`: `new BigDecimal(s)`'s scale is the fraction's length
     // minus the exponent.
@@ -79,7 +85,9 @@ export class BigDecimal {
     if (neg) unscaled = -unscaled;
     return new BigDecimal(unscaled, scale);
   }
-  /** Accept an instance, a decimal string, a bigint, or a number. */
+  /** Accept an instance, a decimal string, a bigint, or a number. A number whose JS spelling is
+   *  exponential (`1e-7`, `1e+21`) declines: `BigDecimal.valueOf(double)` reads `Double.toString`, whose
+   *  digits AND scale this cannot yet promise to match outside JS's plain range. */
   static from(x: BigDecimal | string | bigint | number): BigDecimal {
     if (x instanceof BigDecimal) return x;
     if (typeof x === 'bigint') return new BigDecimal(x, 0);
@@ -371,7 +379,7 @@ export function propertyValueBind(
   // `stringifyExact` (`json-exact.ts`): a member `-0.0` spelled by `JSON.stringify` is `0`, a stored zero
   // that lost its sign. A runtime that cannot spell it refuses the write rather than store the other value.
   const stored = stringifyExact(valueNodeOf(val, typeNode ?? null).v);
-  if (stored == null) throw new Error('a collection holding -0.0 cannot be stored on this runtime: its JSON would drop the sign');
+  if (stored == null) throw new UnsupportedTraversal('storing a collection holding a NaN, or a -0.0 this runtime\'s JSON would drop the sign of');
   return { collection, stored };
 }
 

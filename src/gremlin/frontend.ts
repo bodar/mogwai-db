@@ -3,6 +3,8 @@ import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
 import { fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 import { javaFloatOf } from './float.ts';
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
+import { ValueParseError } from './coerce.ts';
 
 // ---------- parsing ----------
 //
@@ -25,7 +27,7 @@ function parseGremlinUncached(query: string) {
   lexer.removeErrorListeners(); parser.removeErrorListeners();
   lexer.addErrorListener(errs); parser.addErrorListener(errs);
   const tree = parser.queryList();
-  if (errs.errors.length) throw new Error(`Gremlin parse error: ${errs.errors.join('; ')}`);
+  if (errs.errors.length) throw new ValueParseError(`Gremlin parse error: ${errs.errors.join('; ')}`);
   return tree;
 }
 
@@ -245,7 +247,7 @@ const intLitType = (text: string): CanonicalType => {
   if (explicit) {
     if (explicit !== 'bigint') {
       const [min, max] = INT_RANGES[explicit as keyof typeof INT_RANGES];
-      if (n < min || n > max) throw new Error(`${explicit} literal out of range: ${text}`);
+      if (n < min || n > max) throw new ValueParseError(`${explicit} literal out of range: ${text}`);
     }
     return explicit;
   }
@@ -422,7 +424,7 @@ export function extractSack(tree: any, params: Record<string, any>): MergePolicy
   const w = descendants(tree, 'TraversalSourceSelfMethod_withSackContext')[0];
   if (!w) return null;
   const gl = descendants(w, 'GenericLiteralContext')[0];
-  if (!gl) throw new Error('withSack() requires an initial value');
+  if (!gl) throw new ValueParseError('withSack() requires an initial value');
   const out: Arg[] = [];
   walkArgs(gl, out, params);
   return { seed: out[0]!, operator: operatorNamed(w) };
@@ -598,7 +600,7 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
   if (cls === 'NullLiteralContext') { emit(null); return; }
   if (cls === 'VariableContext') {
     const name = node.getText();
-    if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
+    if (!(name in params)) throw new ValueParseError(`Unbound parameter '${name}'`);
     // The param's canonical type is the wire DataType the client serialized it as
     // (paramTypes) — the truth a JS value can't carry; null when the channel said
     // nothing (JSON request path), so the write seam infers from the JS value. The NAME rides
@@ -759,7 +761,7 @@ function literalItems(nodes: any[], params: Record<string, any>): Arg[] {
 function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
   const m = new Map<any, any>();
   for (const entry of node.mapEntry()) {
-    m.set(mapKeyOf(entry.mapKey()), argOf(entry.genericLiteral(), params));
+    m.set(mapKeyOf(entry.mapKey()).key, argOf(entry.genericLiteral(), params));
   }
   return m;
 }
@@ -779,24 +781,56 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
     // (unusual) → null (infer at use). A literal map key is a string/identifier (or a
     // T/Direction token → not a stored scalar), so its type is 'string' or null; a typed
     // client's non-string keys arrive typed via the wire's decodeTyped instead.
-    const key = mapKeyOf(entry.mapKey());
-    entries[String(key)] = {
-      key: typeof key === 'string' ? 'string' : null,
+    const { key, type: keyType } = mapKeyOf(entry.mapKey());
+    const slot = String(key);
+    const prior = entries[slot];
+    if (prior !== undefined && typeof key !== 'object' && prior?.key !== keyType) {
+      // `[1:'a', 1L:'b']` / `[1:'a', '1':'b']`: two keys the reference keeps apart that one JS number
+      // (or this String-keyed record) cannot — decline rather than merge them.
+      throw new UnsupportedTraversal(`map-literal keys ${slot} of two types`);
+    }
+    entries[slot] = {
+      key: keyType,
       value: out.length === 1 ? (out[0].type ?? null) : null,
     };
   }
   return { t: 'map', entries };
 }
 
-/** Classify a map key: T token → {token}, Direction → {direction}, else the
- *  literal/naked string. */
-function mapKeyOf(mk: any): any {
+/** Classify a map key: T token → {token}, Direction → {direction}, a string → itself, an Integer or
+ *  Long → the number it spells, a keyword / naked key → its text.
+ *
+ *  The reference visits a key AS THE LITERAL IT IS, unwrapping the parentheses
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/grammar/GenericLiteralVisitor.java`
+ *  `visitGenericMapLiteral`; the grammar's `mapKey` lists `numericLiteral` before `keyword | nakedKey`),
+ *  so `[1:'a']` is keyed by Integer 1 and `[1L:'a']` by Long 1. Falling through to the source text keyed
+ *  them by the STRING `"1"` / `"1L"` / `"(1)"` — a different map, silently. What a JS `Map` key cannot
+ *  carry faithfully DECLINES rather than answering a different question: a collection/set/map key (an
+ *  object key compares by identity, never by value), a `null` keyword key (the reference's null key), and
+ *  any numeric key that is not an Integer/Long (a float's key identity — `1.0d` vs Integer `1`, NaN,
+ *  ±Infinity — is not a JS number's). Two keys one JS `Map` cannot tell apart (`[1:'a', 1L:'b']`,
+ *  `[1:'a', '1':'b']` in the per-key type record) decline in `mapLiteralType`. */
+function mapKeyOf(mk: any): { key: any; type: CanonicalType | null } {
   const tok = mk.traversalT?.() ?? mk.traversalTLong?.() ?? mk.traversalTShort?.();
-  if (tok) return { token: enumSuffix(tok) };
+  if (tok) return { key: { token: enumSuffix(tok) }, type: null };
   const dir = mk.traversalDirection?.() ?? mk.traversalDirectionLong?.() ?? mk.traversalDirectionShort?.();
-  if (dir) return { direction: enumSuffix(dir) };
-  if (mk.stringLiteral?.()) return unquote(mk.stringLiteral().getText());
-  return mk.getText();
+  if (dir) return { key: { direction: enumSuffix(dir) }, type: null };
+  if (mk.stringLiteral?.()) return { key: unquote(mk.stringLiteral().getText()), type: 'string' };
+  if (mk.genericSetLiteral?.() || mk.genericCollectionLiteral?.() || mk.genericMapLiteral?.()) {
+    throw new UnsupportedTraversal(`a collection, set or map as a map-literal key (${mk.getText()})`);
+  }
+  const num = mk.numericLiteral?.();
+  if (num) {
+    const out: Arg[] = [];
+    walkArgs(num, out, {});
+    const only = out.length === 1 ? out[0]! : null;
+    if (!only || (only.type !== 'int' && only.type !== 'long') || typeof only.value !== 'number') {
+      throw new UnsupportedTraversal(`the numeric map-literal key ${mk.getText()}`);
+    }
+    return { key: only.value, type: only.type };
+  }
+  if (mk.keyword?.()?.getText() === 'null') throw new UnsupportedTraversal('a null map-literal key');
+  return { key: mk.getText(), type: 'string' };
 }
 
 /** A parsed `P`/`TextP` predicate. Its `operands` are `Arg`s — each an operand's value + canonical

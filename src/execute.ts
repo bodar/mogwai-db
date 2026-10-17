@@ -2,6 +2,7 @@ import type { Executor as ExecutorApi, ForeignResult, ForeignRow, ForeignTermina
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
+import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
@@ -481,7 +482,7 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     case 'double': return ioc.doubleSerializer.serialize(Number(v), true);
     // Datetime is carried as epoch-millis (INTEGER); the client's DateTimeSerializer
     // takes a JS Date (GraphBinary DATETIME 0x04, UTC wire), so reconstruct it here.
-    case 'datetime': return ioc.dateTimeSerializer.serialize(new Date(Number(v)), true);
+    case 'datetime': return ioc.dateTimeSerializer.serialize(dateOfMillis(v), true);
     // A stored TEXT value framed by its true type: uuid via UuidSerializer (16-byte
     // GraphBinary UUID from the string), string explicitly (anySerializer would also
     // pick String, but the stored vtype lets uuid win over a look-alike string).
@@ -511,7 +512,13 @@ function exactNumberBuffer(x: ExactNumber): Buffer {
 // variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
 // (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
 function listItemBuffers(json: string, of: ListOf): Buffer[] {
-  const items = parseExactJson(json);
+  return parsedItemBuffers(parseExactJson(json), of);
+}
+
+// The PARSED members — a nested list recurses on its parsed members rather than re-stringifying them, which
+// wrote a member `±Infinity` as `null` (`JSON.stringify` has no spelling for it), so
+// `inject([Infinity,2]).product([1])` framed `[[null,1],[2,1]]`.
+function parsedItemBuffers(items: any[], of: ListOf): Buffer[] {
   if (of.kind === 'elem') return items.map(of.elem === 'edge' ? rowEdge : rowVertex);
   if (of.kind === 'property') return items.map(framePropertyRow);
   if (of.kind === 'scalar') {
@@ -536,13 +543,13 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
   // A list of PATHS (path().fold(), a Path in a group value): each member is a path's own positions
   // array, so it frames as a PATH (labels + objects) rather than a bare list — the SAME `framePath` the
   // top-level path uses, over the member's positions decoded by the position descriptor `of.of`.
-  if (of.kind === 'path') return items.map((inner: any) => framePath(listItemBuffers(JSON.stringify(inner), of.of)));
+  if (of.kind === 'path') return items.map((inner: any) => framePath(parsedItemBuffers(inner, of.of)));
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the
   // leaf rowids into element payload objects (materialize.nestedListResult); recursing
   // here descends the same nesting the descriptor records.
-  return items.map((inner: any) => frameListOf(JSON.stringify(inner), of.of));
+  return items.map((inner: any) => (inner == null ? frameValue(null, undefined) : listBuffer(parsedItemBuffers(inner, of.of))));
 }
 
 function frameListOf(json: string, of: ListOf): Buffer {
@@ -812,7 +819,10 @@ const foreignElementNode = (raw: any, elem: Elem): FrameNode =>
  *  envelope-typed member is already a `{t,v}` node, a mixed/map member self-describes; a nested list
  *  recurses. */
 function foreignListNodes(json: string, of: ListOf): FrameNode[] {
-  const items = JSON.parse(json);
+  return foreignItemNodes(JSON.parse(json), of);
+}
+
+function foreignItemNodes(items: any[], of: ListOf): FrameNode[] {
   if (of.kind === 'elem') return items.map((it: any) => foreignElementNode(it, of.elem));
   if (of.kind === 'property') return items.map((it: any) => ({ t: 'property' as const, v: it }));
   if (of.kind === 'scalar') {
@@ -823,7 +833,7 @@ function foreignListNodes(json: string, of: ListOf): FrameNode[] {
   if (of.kind === 'mixed') return items;   // each member a self-describing {t,v} envelope
   if (of.kind === 'map') return items.map((pairs: any) => ({ t: 'map' as const, v: pairs }));
   // list-of-lists: recurse per inner descriptor.
-  return items.map((inner: any) => ({ t: 'list' as const, v: foreignListNodes(JSON.stringify(inner), of.of) }));
+  return items.map((inner: any) => ({ t: 'list' as const, v: foreignItemNodes(inner, of.of) }));
 }
 
 /** A sibling's VALUE-shaped result as one `{t,v}` node per row, or `null` if the shape is not a value

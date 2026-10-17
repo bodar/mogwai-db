@@ -1,3 +1,5 @@
+import { ValueParseError } from './coerce.ts';
+
 // ---------- the element-identifier rules every write must satisfy ----------
 //
 // TinkerPop enforces these in `ElementHelper.validateProperty`/`validateLabel` and
@@ -21,18 +23,18 @@ export const isHiddenKey = (key: string): boolean => key.startsWith('~');
 
 /** `ElementHelper.validateProperty`'s key half. Returns the key so a caller can validate inline. */
 export function validatePropertyKey(key: unknown): string {
-  if (key === null || key === undefined) throw new Error('Property key can not be null');
+  if (key === null || key === undefined) throw new ValueParseError('Property key can not be null');
   const k = String(key);
-  if (k === '') throw new Error('Property key can not be the empty string');
-  if (isHiddenKey(k)) throw new Error(`Property key can not be a hidden key: ${k}`);
+  if (k === '') throw new ValueParseError('Property key can not be the empty string');
+  if (isHiddenKey(k)) throw new ValueParseError(`Property key can not be a hidden key: ${k}`);
   return k;
 }
 
 /** `ElementHelper.validateLabel`. Returns the label so a caller can validate inline. */
 export function validateLabel(label: unknown): string {
-  if (label === null || label === undefined) throw new Error('Label can not be null');
+  if (label === null || label === undefined) throw new ValueParseError('Label can not be null');
   const l = String(label);
-  if (l === '') throw new Error('Label can not be empty');
-  if (isHiddenKey(l)) throw new Error(`Label can not be a hidden key: ${l}`);
+  if (l === '') throw new ValueParseError('Label can not be empty');
+  if (isHiddenKey(l)) throw new ValueParseError(`Label can not be a hidden key: ${l}`);
   return l;
 }

@@ -43,6 +43,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
 import { floatText, javaFloatOf } from '../gremlin/float.ts';
+import { dateOfMillis } from '../gremlin/coerce.ts';
 import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 import { execute, identifier, q, type Expression } from '../sql/kernel/q.ts';
 
@@ -502,7 +503,7 @@ function csvText(vtype: CanonicalType | null, stored: unknown): string {
     case 'boolean': return stored === 1 || stored === true ? 'true' : 'false';
     // A Float is written as `Float.toString` writes it — its shortest decimal, not its exact carrier.
     case 'float': return floatText(Math.fround(Number(stored)));
-    case 'datetime': return new Date(Number(stored)).toISOString();
+    case 'datetime': return dateOfMillis(stored).toISOString();
     // Stored as total nanos; every external format spells a duration ISO-8601.
     case 'duration': return Duration.from(String(stored)).toIso();
     default: return String(stored);

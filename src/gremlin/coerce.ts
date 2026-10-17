@@ -3,6 +3,7 @@ import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
 import { BigDecimal, flatType, type CanonicalType } from './types.ts';
 import { decimalCompare, decimalOf, doubleText, floatingDecimal, floatText, javaFloatOf, javaNumberText } from './float.ts';
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
  * NOT LEARNED YET, raised from inside the fold — the front-end twin of the compiler's `Deferral`.
@@ -326,6 +327,9 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
     return a.int !== undefined && a.cls !== 'Float' && a.cls !== 'Double' ? exactInteger(a.int) : a.real;
   }
   if (spec.as === 'bigdecimal') {
+    // `bigDecimalValue` of a non-finite Double/Float is `BigDecimal.valueOf`/`new BigDecimal(toString)`,
+    // a NumberFormatException (`NumberHelper.java` bigDecimalValue); its text is not ours to reproduce.
+    if (!Number.isFinite(a.real) && a.decimal === undefined && a.int === undefined) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a non-finite number');
     // The exact decimal carrier for a wide integral source is a different encoding; decline it.
     if (a.int !== undefined && a.decimal === undefined && exactInteger(a.int) !== Number(a.int)) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a wide integer');
     // `bigDecimalValue` widens a Float through `Float.toString` and a Double through `BigDecimal.valueOf`
@@ -457,6 +461,39 @@ export function dtFactor(arg: any): number {
   const f = u ? DT_MS[u] : undefined;
   if (!f) throw new ValueParseError(`dateAdd() requires a DT unit (second/minute/hour/day), got ${u ?? arg}`);
   return f;
+}
+
+/**
+ * THE decode of `dateAdd(DT, n)`'s millisecond delta — every dateAdd lowering (the constant fold and the
+ * per-row transform) reads it, so neither re-derives it with a lossy `Number()`. The reference's count is
+ * a Java `int` (`DateAddStep(…, final DT dateToken, final int value)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/DateAddStep.java:45`):
+ * a literal past it is narrowed with a wrap-around this engine does not model, so it DECLINES. So does a
+ * delta past 2^53 ms (`Integer.MAX_VALUE` days is ~1.9e17): JS arithmetic is no longer exact there, and
+ * every instant it could reach is outside what a date frames anyway (`dateOfMillis`).
+ */
+export function dateAddDeltaMs(unit: unknown, count: unknown): number {
+  const factor = dtFactor(unit);
+  const n = typeof count === 'bigint' ? count : typeof count === 'number' && Number.isInteger(count) ? BigInt(count) : null;
+  if (n === null || n < -(2n ** 31n) || n >= 2n ** 31n) throw new UnsupportedTraversal('dateAdd() with a count past a 32-bit int');
+  const delta = n * BigInt(factor);
+  if (delta > BigInt(Number.MAX_SAFE_INTEGER) || delta < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new UnsupportedTraversal('dateAdd() past the instants a date carries');
+  }
+  return Number(delta);
+}
+
+/**
+ * An epoch-millisecond instant as the JS `Date` every date serializer takes — THE one decode, so no
+ * framer meets an `Invalid Date` (whose serialization leaked a raw `RangeError: Not an integer`). A JS
+ * `Date` spans ±8.64e15 ms (~±275,000 years); a Java `OffsetDateTime` spans ±999,999,999 years, so an
+ * instant between the two is one the reference answers and this engine cannot frame — a DECLINE, not an
+ * error the reference would raise.
+ */
+export function dateOfMillis(ms: unknown): Date {
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) throw UnsupportedTraversal.because('a date outside ±8.64e15 ms of the epoch cannot be framed');
+  return d;
 }
 
 /** asDate() over a compile-time constant → epoch-millis. An ISO-8601 string (offset
@@ -665,7 +702,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     // second, not the first), so the message names the value that offends.
     const datetimeSubject = (i: number): boolean => as === 'datetime' || (at === 1 && steps[0].args[i]?.type === 'datetime');
     if (step.name === 'dateAdd') {
-      const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
+      const delta = dateAddDeltaMs(step.args[0].value, step.args[1].value);
       for (let i = 0; i < vals.length; i++) {
         if (!datetimeSubject(i)) throw new ValueParseError('dateAdd() accept only OffsetDateTime or Date (deprecated).');
         vals[i] = Number(vals[i]) + delta;

@@ -50,6 +50,16 @@ function typedValue(b: Buffer, at: number): [string, number] {
       const kv = items(n * 2);
       return [`{${Array.from({ length: n }, (_, i) => `${kv[2 * i]}:${kv[2 * i + 1]}`).join(',')}}`, o];
     }
-    default: return [`<0x${code.toString(16)}>`, b.length];
+    // An ENUM (Direction / T / Merge): its element name is a fully-qualified String — `T.id` renders `T.id`.
+    case 0x18: case 0x20: case 0x2e: {
+      const [name, next] = typedValue(b, o);
+      return [`${code === 0x18 ? 'Direction' : code === 0x20 ? 'T' : 'Merge'}.${JSON.parse(name)}`, next];
+    }
+    // Any other code has no width this renderer knows, so the rest of the buffer is unreadable: say so
+    // as the whole result rather than hand the cursor past the end to the next item, which read an
+    // `undefined` type code and threw a TypeError that looked like a SERVER fault (an elementMap's T keys).
+    default:
+      if (at !== 0) throw new Error(`typedAll: no renderer for GraphBinary code 0x${code.toString(16)} inside a container`);
+      return [`<0x${code.toString(16)}>`, b.length];
   }
 }

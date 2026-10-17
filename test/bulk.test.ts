@@ -105,9 +105,9 @@ describe('the bulk loader lands what the write path lands', () => {
         { key: 'big', value: 9007199254740993n, vtype: 'long' },
         { key: 'when', value: new Duration(90n, 500_000_000), vtype: 'duration' },
         { key: 'tags', value: ['a', 'brave'], vtype: 'list' },
-        // A STRING key here, matching what the Gremlin map literal below parses to; the typed-key
-        // case is asserted directly against the stored tree in the next test, because the grammar has
-        // no spelling that reaches it.
+        // A STRING key here, matching the quoted key of the Gremlin map literal below (an unquoted `1`
+        // is the Integer key 1 — `GenericLiteralVisitor` visits it as a number); the typed-key case is
+        // asserted directly against the stored tree in the next test.
         { key: 'scores', value: new Map<unknown, unknown>([['1', 'one'], ['k', 2]]), vtype: 'map' },
       ] },
     ];
@@ -123,7 +123,7 @@ describe('the bulk loader lands what the write path lands', () => {
     executeQuery(viaWrites, 'g.V(1).property(Cardinality.list,"big", 9007199254740993)', {});
     executeQuery(viaWrites, 'g.V(1).property(Cardinality.list,"when", Duration(90, 500000000))', {});
     executeQuery(viaWrites, 'g.V(1).property(Cardinality.list,"tags", ["a","brave"])', {});
-    executeQuery(viaWrites, 'g.V(1).property(Cardinality.list,"scores", [1:"one","k":2])', {});
+    executeQuery(viaWrites, 'g.V(1).property(Cardinality.list,"scores", ["1":"one","k":2])', {});
 
     const [bulk, writes] = [dump(viaBulk), dump(viaWrites)];
     expect(bulk.vertex_properties).toEqual(writes.vertex_properties);

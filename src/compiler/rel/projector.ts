@@ -12,7 +12,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byExpr, byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
 import { mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
-import { raiseInRow } from '../../rel/raise.ts';
+import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import { keepingRaise, pendingRaise, RAISE, raiseMessage } from './raise-channel.ts';
 import { withChannel } from '../../channels.ts';
 import type { GraphSource } from './source.ts';
@@ -179,8 +179,31 @@ function mathParts(
     resolved.set(name, typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
-  return { value: compileMath(formula, relMathOps((name) => resolved.get(name)!)), offences };
+  return { value: nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()]), offences };
 }
+
+/** The deferral a formula whose answer SQLite leaves NULL raises (`nanDeferred`) — a NaN, or an infinity
+ *  SQLite does not compute (`log(0)` is `-Infinity` in exp4j, NULL in SQLite). */
+export const MATH_NAN = 'math() producing NaN or an infinity SQLite does not compute is not supported';
+
+/**
+ * A FORMULA WHOSE ANSWER IS NaN DECLINES. exp4j evaluates in Java `double`s, so `math('_ - _')` over
+ * `Infinity`, `sqrt(-1)`, `log(-1)` and `0 * Infinity` are each the Double `NaN` (`MathStep.map`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:89`);
+ * SQLite has no NaN and answers NULL, which the productivity filter then DROPPED as if the formula had
+ * produced nothing — a row silently missing. A NULL formula is a NaN exactly when every variable it
+ * reads is non-NULL (a NULL variable is an unproductive `by()`, the drop the filter is for), so that
+ * arm raises a deferral instead. `COALESCE` spells the formula ONCE: its second argument is evaluated
+ * only where the formula is NULL.
+ */
+const nanDeferred = (value: Expr, variables: readonly Expr[]): Expr => {
+  const present = variables.map((v): Expr => ({ kind: 'binary', op: 'is not', left: v, right: compilerNull() }));
+  const raise = deferralExpr(MATH_NAN, { kind: 'call', fn: 'random', args: [] });
+  const nan: Expr = present.length
+    ? { kind: 'case', whens: [[present.reduce((acc, p) => ({ kind: 'binary', op: 'and', left: acc, right: p })), raise]] }
+    : raise;
+  return { kind: 'call', fn: 'COALESCE', args: [value, nan] };
+};
 
 
 /**

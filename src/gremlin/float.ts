@@ -1,5 +1,6 @@
 import { BigDecimal } from './types.ts';
 import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from '../json-exact.ts';
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
  * THE FLOAT AUTHORITY, compile-time half — what a Java `Float` IS, read from text or from a double.
@@ -184,7 +185,8 @@ export function bigDecimalOfCarrier(v: BigDecimal | string | bigint | number | E
 
 const realDecimal = (d: number): BigDecimal => {
   const decimal = floatingDecimal(d);
-  if (decimal === null) throw new Error(`a BigDecimal carrier holds a non-finite REAL (${d})`);
+  // `BigDecimal.valueOf(±∞)` is the reference's NumberFormatException: a clear decline, never a bare Error.
+  if (decimal === null) throw UnsupportedTraversal.because(`a non-finite number (${d}) cannot be framed as a BigDecimal`);
   return decimal;
 };
 

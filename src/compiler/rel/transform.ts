@@ -5,7 +5,7 @@ import { raiseExpr } from '../../rel/raise.ts';
 import { SAFE_INT } from './reducer.ts';
 import type { Minter } from './build.ts';
 import { doubleDecimalText, FLOAT_MAX, floatRoundedOf, floatShortest } from './float.ts';
-import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
+import { dateAddDeltaMs, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -221,7 +221,11 @@ export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = fals
       // the float grid exactly (`floatRoundedOf`).
       : spec.as === 'float' ? bin('or', bin('and', bin('>', abs, compilerReal(FLOAT_MAX)), bin('<=', abs, compilerReal(DOUBLE_MAX))),
         bin('and', notFloating, bin('>=', abs, compilerReal(2 ** 53))))
-        : null;
+        // `bigDecimalValue` of a non-finite Double is `BigDecimal.valueOf`'s NumberFormatException
+        // (`NumberHelper.java`); the BigDecimal framer cannot spell one either (it leaked a JS SyntaxError).
+        // Only a native REAL: an exact decimal TEXT carrier is returned unchanged, however wide.
+        : spec.as === 'bigdecimal' ? bin('and', bin('=', call('typeof', v), held('real')), bin('>', abs, compilerReal(DOUBLE_MAX)))
+          : null;
   const refuse = nativeNumber ? range : range ? bin('or', notANumber, range) : notANumber;
   // A `long`/`bigint` target past 2^53 rides as decimal TEXT, the carrier every wide long has: a native
   // int64 that wide is read back through a JS number and loses its low bits, where `performConversion`
@@ -492,10 +496,9 @@ export function transformExpr(
   if (step.name === 'dateAdd') {
     // second/minute/hour/day are FIXED-WIDTH, so date arithmetic is pure integer millis — no SQLite
     // date functions, and no calendar to get wrong.
-    if (typeof args[1] !== 'number') return null;
-    let factor;
-    try { factor = dtFactor(args[0]); } catch { return null; }
-    return { expr: { kind: 'binary', op: '+', left: v, right: heldInt(args[1] * factor) }, type: STATIC('datetime') };
+    if (typeof args[1] !== 'number' && typeof args[1] !== 'bigint') return null;
+    try { dtFactor(args[0]); } catch { return null; }
+    return { expr: { kind: 'binary', op: '+', left: v, right: heldInt(dateAddDeltaMs(args[0], args[1])) }, type: STATIC('datetime') };
   }
 
   if (step.name === 'dateDiff') {

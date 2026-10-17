@@ -149,8 +149,8 @@ describe('the writeArguments verify Pass — a text-level refusal is not the low
     // so the census counted a traversal TinkerPop itself REFUSES as an uncovered gap forever.
     // Asserted against runPasses directly: no engine, no store, no lowering reached yet.
     for (const [gremlin, message] of [
-      ['g.addV().property("k","v","acl")', /meta-properties must be key\/value pairs/],
-      ['g.addV().property("k","v",1,"x")', /meta-property key must be a string/],
+      ['g.addV().property("k","v","acl")', /The provided key\/value array length must be a multiple of two/],
+      ['g.addV().property("k","v",1,"x")', /must have a String, T, or Traversal on even array indices/],
       ['g.mergeV(["name":"marko"]).option(Merge.onCreate, ["name":"stephen"])', /cannot override values from merge/],
     ] as const) {
       expect(() => passes(gremlin), gremlin).toThrow(message);
@@ -166,9 +166,10 @@ describe('the writeArguments verify Pass — a text-level refusal is not the low
     // compile already holds.
     const gremlin = 'g.withSideEffect("c", [(T.label):"person","name":"marko"]).mergeV(__.select("c"))';
     expect(() => compile(gremlin, {})).not.toThrow();
-    // …and without the declaration the very same text is a refusal, from the same place.
+    // …and without the declaration the very same text DECLINES: the reference resolves `select("c")` per
+    // traverser, which this compiler does not model without a declared constant.
     expect(() => compile('g.mergeV(__.select("c"))', {}))
-      .toThrow(/needs a withSideEffect/);
+      .toThrow(/not supported yet/);
   });
 });
 

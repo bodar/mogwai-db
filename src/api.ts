@@ -14,6 +14,7 @@
 
 import type { Framed } from './execute.ts';
 import type { FrameNode, TypeNode, ValueNode } from './gremlin/types.ts';
+import { ValueParseError } from './gremlin/coerce.ts';
 
 // ---- HTTP transport ----
 
@@ -105,7 +106,7 @@ export const SINGLELABEL_OPTION = 'singlelabel';
 export function labelRegime(sourceOptions: ReadonlyMap<string, any>): LabelRegime {
   const multi = sourceOptions.has(MULTILABEL_OPTION), single = sourceOptions.has(SINGLELABEL_OPTION);
   if (multi && single)
-    throw new Error(`with("${MULTILABEL_OPTION}") and with("${SINGLELABEL_OPTION}") are mutually exclusive`);
+    throw new ValueParseError(`with("${MULTILABEL_OPTION}") and with("${SINGLELABEL_OPTION}") are mutually exclusive`);
   if (multi) return 'set';
   if (single) return 'single';
   return 'single';

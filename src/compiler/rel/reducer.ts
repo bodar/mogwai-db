@@ -218,12 +218,32 @@ export const MIXED_COMPARABLES = 'min/max over values of different types is not 
 export const NON_NUMBER_ORDER = 'min/max over a Boolean, Date or Duration value is not supported';
 export const EXACT_TAIL = 'sum/mean/min/max over a number past 2^53 is not supported';
 export const DECIMAL_SCALE = 'sum/mean/min/max in BigDecimal scale arithmetic is not supported';
+export const NAN_RESULT = 'a NaN result is not supported';
 
 /** `reduced`, unless `refuse` holds over the group — then a deferral. Each test is an AGGREGATE over the
  *  rows (so it spells the value once, not once per arm of the guard), and the raise reads `count(*)`
  *  only so it is not a constant expression (`raiseExpr`). */
 const refusedWhen = (refuse: Expr, message: string, reduced: Expr): Expr =>
   ({ kind: 'case', whens: [[refuse, raiseExpr(message, { kind: 'agg', fn: 'count', args: [] })]], else: reduced });
+
+/**
+ * A `sum`/`mean` whose total is NaN DECLINES. The reference adds Doubles with Java `+`, so
+ * `inject(Infinity, -Infinity).sum()` is `NaN` (`NumberHelper.add`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452`);
+ * SQLite has no NaN and answers NULL, which framed as a `null` total — a different answer. Only a REAL
+ * operand can make one, and a NULL total over a group holding a REAL is exactly that NaN (a group of only
+ * nulls is the honest NULL), so it raises a deferral rather than answer. `COALESCE` spells the total once:
+ * the test is evaluated only where the total is NULL. One guard here covers every site `reducerAggregate`
+ * serves (global, correlated, a group value, `sum(local)`).
+ */
+const nanRefused = (reduced: Expr, value: Expr): Expr => ({
+  kind: 'call', fn: 'COALESCE',
+  args: [reduced, {
+    kind: 'case',
+    whens: [[agg('max', { kind: 'binary', op: '=', left: call('typeof', value), right: compilerText('real') }),
+      raiseExpr(NAN_RESULT, { kind: 'agg', fn: 'count', args: [] })]],
+  }],
+});
 
 /**
  * A `sum`/`mean` over a group holding TEXT declines. Dropping the text (the eligibility guard's NULL)
@@ -299,7 +319,8 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
   const inexact = reducer === 'sum' || reducer === 'mean' ? floatInexact(value, tag === SCREENED ? screenedTag ?? null : tag, reducer, bulk) : null;
   const widened = reducer === 'sum' ? decimalWidened(value, tag === SCREENED ? screenedTag ?? null : tag) : null;
   const guarded = (reduced: Expr): Expr => {
-    const exact = widened ? refusedWhen(widened, DECIMAL_SCALE, reduced) : reduced;
+    const total0 = nanRefused(reduced, value);
+    const exact = widened ? refusedWhen(widened, DECIMAL_SCALE, total0) : total0;
     if (!inexact) return exact;
     const total: Expr = inexact.rounds ? { kind: 'case', whens: [[inexact.rounds, floatValueOf(exact)]], else: exact } : exact;
     return refusedWhen(inexact.refuse, FLOAT_SUM_INEXACT, total);

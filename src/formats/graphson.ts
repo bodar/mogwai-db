@@ -31,6 +31,7 @@
 import { BatchingLoader, BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
+import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
     BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
@@ -427,7 +428,7 @@ function leafJson(type: CanonicalType | null, stored: unknown): unknown {
     case 'long': return typeof stored === 'string' ? stored : stored;
     // Stored as total nanos (TEXT) / epoch millis; GraphSON wants ISO-8601 for both.
     case 'duration': return Duration.from(String(stored)).toIso();
-    case 'datetime': return new Date(Number(stored)).toISOString();
+    case 'datetime': return dateOfMillis(stored).toISOString();
     default: return stored;
   }
 }

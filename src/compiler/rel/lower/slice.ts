@@ -9,7 +9,7 @@ import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
-import { isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
+import { countOf, isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
 import { countLit, sliceBound } from '../const.ts';
 import { byEqualityKey, modulations, productivityFilter, type Modulation } from '../modulator.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -83,7 +83,7 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
     // `reverseCollation` falls back to the payload when the body minted no `encounter` (no `order()`),
     // so an unordered per-origin tail is a deterministic impl-defined pick rather than a decline — unlike
     // a GLOBAL tail, which has no position to read and declines below.
-    if (step.name === 'tail') return perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countArg(step) }, fresh);
+    if (step.name === 'tail') return perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countOf(step) }, fresh);
     if (sliceParamNames(step).some((name) => name != null)) return null;
     let w; try { w = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
     return perOriginWindow(input, col(input.id, origin.col), [], w, fresh);
@@ -112,7 +112,7 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
     });
     const sampled = make.filter({
       id: fresh('sf'), input: frame, channels: frame.channels, type: frame.type,
-      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: countLit(countArg(step)) },
+      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: countLit(countOf(step)) },
     });
     return make.project({
       id: fresh('sp'), input: sampled, channels: input.channels, type: input.type,
@@ -128,9 +128,9 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
   // It NEEDS a carried position, and that is not a limitation to work around — "last" is a question
   // ABOUT emission order, so a relation carrying none has no last, and the traversal declines.
   if (step.name === 'tail') {
-    if (countArg(step) === 0 && evaluationMayRaise(input)) return null;
+    if (countOf(step) === 0 && evaluationMayRaise(input)) return null;
     if (!encounter) return null;
-    const last = { offset: 0, limit: countArg(step) };
+    const last = { offset: 0, limit: countOf(step) };
     if (bulked && bulk) return bulkSlice(input, last, encounter, bulk, 'desc', fresh);
     return slice(input, last, encounter, 'desc', fresh);
   }
@@ -193,10 +193,6 @@ export const ROW_OPS: ReadonlySet<string> = new Set(['identity', 'barrier', 'ord
  *  them — `perTraverserChild` is where that policy is written down. */
 export const PER_TRAVERSER_HOSTS = new Set(['map', 'flatMap', 'local']);
 
-/** `tail(n)`/`sample(n)`'s count. Both default to 1, and neither takes a range, so the numeric
- *  argument is the whole decode — `sliceOf` deliberately refuses `tail` (see `sliceOp`). */
-const countArg = (step: IRStep): number =>
-  Number(step.args.find((a) => typeof a.value === 'number')?.value ?? 1);
 
 /** `ORDER BY <position> [DESC] LIMIT/OFFSET` — the plain slice, where a row IS one traverser. An
  *  unordered relation stays unordered rather than inventing a SQLite scan order: a slice with no

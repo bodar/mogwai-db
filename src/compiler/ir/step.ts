@@ -1,6 +1,7 @@
 import { gtypeName, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
 import { normalizeTypeName } from '../../gremlin/types.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
+import { UnsupportedTraversal } from '../unsupported.ts';
 
 // ---------- the compiler's step node ----------
 //
@@ -296,22 +297,75 @@ export interface Slice {
  *  and differs only in `scope`. Rejects an illegal range with TinkerPop's own wording. */
 export function sliceOf(step: IRStep): Slice {
   const scope = isLocalScope(step) ? 'local' : 'global';
-  const nums = (step.args ?? []).filter((a) => !isScopeArg(a.value)).map((a) => Number(a.value));
+  const nums = (step.args ?? []).filter((a) => !isScopeArg(a.value)).map((a) => exactCount(step, a.value));
   switch (step.name) {
-    case 'limit': return { scope, offset: 0, limit: nums[0] };
-    case 'skip': return { scope, offset: nums[0], limit: null };
-    case 'range': {
-      const [lo, hi] = nums;
-      // `RangeGlobalStep`/`RangeLocalStep` throw `IllegalArgumentException("Not a legal range: [lo, hi]")`
-      // in their CONSTRUCTOR when `lo > hi` (both != -1) — the traversal's ANSWER is that error, so it is
-      // a `ValueParseError` that PROPAGATES (§6·5), NOT the plain `Error` the `default` case throws as an
-      // internal "not a slice step" routing signal. A caller catches the latter to decline; it must NOT
-      // catch this one, which is why the two are different classes.
-      if (hi >= 0 && lo > hi) throw new ValueParseError(`Not a legal range: [${lo}, ${hi}]`);
-      return { scope, offset: lo, limit: hi < 0 ? null : hi - lo };
-    }
+    case 'limit': return rangeWindow(scope, 0n, nums[0]!);
+    case 'skip': return rangeWindow(scope, nums[0]!, -1n);
+    case 'range': return rangeWindow(scope, nums[0]!, nums[1]!);
     default: throw new Error(`${step.name}() is not a slice step`);
   }
+}
+
+/** The largest count a window ever needs: no stream and no collection holds 2^53 members, so a bound
+ *  past it selects exactly what `Number.MAX_SAFE_INTEGER` does — and it is an exact JS number and a
+ *  legal SQLite `LIMIT`/`OFFSET`, where a `Number()` of a `long` past 2^53 has already lost precision
+ *  (it rounds `Long.MAX_VALUE` to 2^63, a REAL SQLite refuses with `datatype mismatch`). */
+const clampCount = (n: bigint): number => (n > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(n));
+
+const LONG_MIN = -(2n ** 63n);
+const LONG_MAX = 2n ** 63n - 1n;
+
+/**
+ * THE decode of a slice/tail/sample COUNT argument, EXACT — every count consumer reads through it
+ * (`sliceOf`, `countOf`), so no host can re-derive one with a lossy `Number()` or skip a `bigint` it
+ * does not recognise (`tail(9007199254740992)` answered `tail(1)` because its decoder only looked for a
+ * `number`). The reference's parameter is a `long` (`GraphTraversal.limit/skip/range/tail(long)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java:3371,3446,3525`);
+ * a literal past it is a `BigInteger` the grammar narrows with `longValue()` — a wrap-around this engine
+ * does not model, so it DECLINES rather than answer for a different count.
+ */
+function exactCount(step: IRStep, v: unknown): bigint {
+  const n = typeof v === 'bigint' ? v : typeof v === 'number' && Number.isInteger(v) ? BigInt(v) : null;
+  if (n === null || n < LONG_MIN || n > LONG_MAX || (typeof v === 'number' && !Number.isSafeInteger(v))) {
+    throw new UnsupportedTraversal(`${step.name}() with a count that is not an exact 64-bit long`);
+  }
+  return n;
+}
+
+/**
+ * `RangeGlobalStep`/`RangeLocalStep`'s `[low, high)` as a window, every negative case included.
+ * The constructors throw `IllegalArgumentException("Not a legal range: [low, high]")` when
+ * `low != -1 && high != -1 && low > high` — so `limit(-2)` (`range(0,-2)`) is that error, not "no
+ * limit" — and the traversal's ANSWER is that error: a `ValueParseError` that PROPAGATES (§6·5), not the
+ * plain `Error` `sliceOf` throws as an internal routing signal. Otherwise `high == -1` is "to the end", a
+ * NEGATIVE `low` counts from the first member (`counter >= low` / `c >= low` holds from the start), and a
+ * negative `high` other than -1 is empty (`counter >= high` stops before the first one). References:
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:63-104`,
+ * `.../step/map/RangeLocalStep.java:44-51,117-129`.
+ */
+function rangeWindow(scope: Slice['scope'], lo: bigint, hi: bigint): Slice {
+  if (lo !== -1n && hi !== -1n && lo > hi) throw new ValueParseError(`Not a legal range: [${lo}, ${hi}]`);
+  const offset = lo < 0n ? 0 : clampCount(lo);
+  if (hi === -1n) return { scope, offset, limit: null };
+  if (hi < 0n) return { scope, offset: 0, limit: 0 };
+  return { scope, offset, limit: Math.max(0, clampCount(hi) - offset) };
+}
+
+/**
+ * `tail(n)`/`sample(n)`'s count, through the same exact decode as `sliceOf` (both default to 1 and take
+ * no range). A NEGATIVE tail declines: `TailGlobalStep` evicts against a negative limit into a trimmed
+ * last traverser (`.../step/filter/TailGlobalStep.java:62-77,112-123`) that no window spells. `sample`'s
+ * parameter is an `int` (`GraphTraversal.java:3621`), so a count past it declines too.
+ */
+export function countOf(step: IRStep): number {
+  const a = (step.args ?? []).find((x) => typeof x.value === 'number' || typeof x.value === 'bigint');
+  if (!a) return 1;
+  const n = exactCount(step, a.value);
+  if (step.name === 'sample' && (n < -(2n ** 31n) || n >= 2n ** 31n)) {
+    throw new UnsupportedTraversal('sample() with a count past a 32-bit int');
+  }
+  if (step.name === 'tail' && n < 0n) throw new UnsupportedTraversal('tail() with a negative count');
+  return n < 0n ? Number(n) : clampCount(n);
 }
 
 /** The user PARAMETER names of a slice step's NUMERIC arguments, scope tokens skipped — aligned

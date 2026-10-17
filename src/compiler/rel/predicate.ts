@@ -1117,6 +1117,14 @@ export function predicateExpr(
         default: return null;
       }
     }
+    // A NaN OPERAND compares as NO value does: `neq` holds for every subject and every other comparison
+    // fails (`semantics/Comparability.feature`, the `InjectX1dX_*XNaNX` and `InjectXnullX_*XNaNX`
+    // scenarios). SQLite has no NaN, so the operand never reaches `operand()` — `constLit` declines a NaN
+    // VALUE — and the predicate is its constant truth value. A NaN SUBJECT cannot reach here: every seam a
+    // NaN value would enter the stream through declines.
+    if (typeof operands[0].value === 'number' && Number.isNaN(operands[0].value)) {
+      return op === 'neq' ? CONSTANT.true : CONSTANT.false;
+    }
     // A NESTED-traversal operand — the predicate compares against the operand's FIRST produced value
     // (`P.resolve`, `vendor/tinkerpop/gremlin-core/.../P.java:328-373`). Its runtime TYPE is unknown, so
     // this is a DIRECT compare (SQLite's storage-class order, which matches `GremlinValueComparator` for
@@ -1186,7 +1194,9 @@ export function predicateExpr(
     // not, and `inject(null).is(within(0,null))` keeps the null.
     const allArgs = coll ? collectionMembers(coll) : operands;
     const nullMember = allArgs.some((o) => o.value === null);
-    const memberArgs = allArgs.filter((o) => o.value !== null);
+    // A NaN member is inert: NaN equals nothing, itself included, so it can neither add a match to
+    // `within` nor remove one from `without`.
+    const memberArgs = allArgs.filter((o) => o.value !== null && !(typeof o.value === 'number' && Number.isNaN(o.value)));
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
     // nothing is never, without nothing is always (an all-null set is `IS [NOT] NULL` through `settle`).
     if (!memberArgs.length) return nullMember ? settle(CONSTANT.false, true) : op === 'within' ? CONSTANT.false : CONSTANT.true;

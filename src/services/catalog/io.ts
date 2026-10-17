@@ -6,6 +6,7 @@ import { loadGraphsonStreaming, writeGraphsonToSink } from '../../formats/graphs
 import { csvPaths, loadCsvStreaming, writeCsvEdgesToSink, writeCsvVerticesToSink } from '../../formats/csv.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
+import { RaisedByQuery } from '../../rel/raise.ts';
 
 // ---------- io — what io() desugars to (async, Barrier, INTERNAL) ----------
 //
@@ -125,21 +126,38 @@ export const createIoService = (io: IoStore, store: GraphStore | undefined): Ser
       // STREAMING both ways (iostore.ts): a graph up to a Durable Object's 10 GB ceiling never
       // materializes in the ~128 MB isolate. A read drains the object's byte stream; a write drains
       // the graph into a byte sink (R2 multipart / a file writer).
-      if (direction === 'read') {
-        // GraphSON needs TWO passes over the bytes (vertices then edges — an edge's target may be a
-        // later line), so it takes a re-openable stream THUNK; CSV is already two files, so one stream.
-        if (codec === 'graphson') await loadGraphsonStreaming(store, () => io.readStream(path));
-        else await loadCsvStreaming(store, await io.readStream(path));
-      } else if (codec === 'graphson') {
-        await drainTo(io, path, (sink) => writeGraphsonToSink(store, sink));
-      } else {
-        // A CSV WRITE produces BOTH halves, at the two derived keys `csvPaths` names — ordinary
-        // readable paths, so the round trip is two `read()`s (vertices first, then edges).
-        const keys = csvPaths(path);
-        await drainTo(io, keys.vertices, (sink) => writeCsvVerticesToSink(store, sink));
-        await drainTo(io, keys.edges, (sink) => writeCsvEdgesToSink(store, sink));
+      try {
+        await transfer(io, store, path, direction, codec);
+      } catch (error) {
+        // THE DOCUMENT'S OWN REFUSALS ARE THE QUERY'S ANSWER, at this one boundary: a missing io binding,
+        // a path outside the io directory, a missing document, a malformed GraphSON line or CSV cell, an
+        // edge naming an unknown vertex. Each is raised deep in a store or a format adapter as a plain
+        // `Error`, which read as an internal fault; the store and the document decided them, so they cross
+        // as `RaisedByQuery` with the message (and the original as its cause) unchanged.
+        if (error instanceof UnsupportedTraversal || error instanceof ValueParseError || error instanceof RaisedByQuery) throw error;
+        const raised = new RaisedByQuery(error instanceof Error ? error.message : String(error));
+        (raised as Error & { cause?: unknown }).cause = error;
+        throw raised;
       }
       return [];
     },
   }),
 });
+
+/** One io() transfer, in the direction and format already decided. */
+async function transfer(io: IoStore, store: GraphStore, path: string, direction: IoDirection, codec: Codec): Promise<void> {
+  if (direction === 'read') {
+    // GraphSON needs TWO passes over the bytes (vertices then edges — an edge's target may be a
+    // later line), so it takes a re-openable stream THUNK; CSV is already two files, so one stream.
+    if (codec === 'graphson') await loadGraphsonStreaming(store, () => io.readStream(path));
+    else await loadCsvStreaming(store, await io.readStream(path));
+  } else if (codec === 'graphson') {
+    await drainTo(io, path, (sink) => writeGraphsonToSink(store, sink));
+  } else {
+    // A CSV WRITE produces BOTH halves, at the two derived keys `csvPaths` names — ordinary
+    // readable paths, so the round trip is two `read()`s (vertices first, then edges).
+    const keys = csvPaths(path);
+    await drainTo(io, keys.vertices, (sink) => writeCsvVerticesToSink(store, sink));
+    await drainTo(io, keys.edges, (sink) => writeCsvEdgesToSink(store, sink));
+  }
+}

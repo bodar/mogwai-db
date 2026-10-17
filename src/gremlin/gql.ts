@@ -23,6 +23,8 @@ import { GQLLexer } from '../../parser/gql/GQLLexer.ts';
 import { GQLParser } from '../../parser/gql/GQLParser.ts';
 import { integerLiteralValue, floatLiteralValue, arg, type Step } from './frontend.ts';
 import { type TypeNode } from './types.ts';
+import { UnsupportedTraversal } from '../compiler/unsupported.ts';
+import { ValueParseError } from './coerce.ts';
 
 // ---------- parse ----------
 
@@ -42,7 +44,7 @@ function parseGql(text: string) {
   lexer.removeErrorListeners(); parser.removeErrorListeners();
   lexer.addErrorListener(errs); parser.addErrorListener(errs);
   const tree = parser.matchClause();
-  if (errs.errors.length) throw new Error(`MATCH pattern parse error: ${errs.errors.join('; ')}`);
+  if (errs.errors.length) throw new ValueParseError(`MATCH pattern parse error: ${errs.errors.join('; ')}`);
   return tree;
 }
 
@@ -89,7 +91,7 @@ function patternGraph(tree: any, params: Record<string, any>): { nodes: PatNode[
         // Re-mentioning a variable CONSTRAINS it further; `(b:person)` twice is one node with the
         // label stated twice, and `(b)` after `(b:person)` keeps the label.
         if (label && existing.label && existing.label !== label)
-          throw new Error(`MATCH variable "${declared}" is given two labels ("${existing.label}" and "${label}")`);
+          throw UnsupportedTraversal.because(`MATCH variable "${declared}" is given two labels ("${existing.label}" and "${label}")`);
         existing.label ??= label;
         existing.props.push(...props);
         return existing;
@@ -121,7 +123,7 @@ function edgeSpec(ep: any, params: Record<string, any>): { dir: PatEdge['dir']; 
   const directed = ep.directedEdge?.();
   const reverse = ep.reverseDirectedEdge?.();
   const inner = directed ?? reverse ?? ep.undirectedEdge?.();
-  if (!inner) throw new Error('MATCH edge pattern has no recognised form');
+  if (!inner) throw UnsupportedTraversal.because('MATCH edge pattern has no recognised form');
   const filler = inner.elementPatternFiller();
   return {
     dir: directed ? 'out' : reverse ? 'in' : 'both',
@@ -143,7 +145,7 @@ function propFilters(pf: any, params: Record<string, any>): PropFilter[] {
     const ref = pv.paramRef?.();
     if (ref) {
       const name = ref.IDENTIFIER().getText();
-      if (!(name in params)) throw new Error(`MATCH pattern references unbound parameter $${name}`);
+      if (!(name in params)) throw new ValueParseError(`MATCH pattern references unbound parameter $${name}`);
       const value = params[name];
       return value === null ? { key, absent: true } : { key, value };
     }
@@ -165,7 +167,7 @@ function literalValue(lit: any): { value?: any; type?: TypeNode | null; absent?:
     return { value: lit.getText().startsWith('-') ? -Infinity : Infinity, type: 'double' };
   if (lit.FLOAT_LITERAL?.()) { const r = floatLiteralValue(lit.getText()); return { value: r.value, type: r.type }; }
   if (lit.INTEGER_LITERAL?.()) { const r = integerLiteralValue(lit.getText()); return { value: r.value, type: r.type }; }
-  throw new Error(`MATCH property value not recognised: ${lit.getText()}`);
+  throw UnsupportedTraversal.because(`MATCH property value not recognised: ${lit.getText()}`);
 }
 
 /** GQL string escapes are a SUPERSET of what the Gremlin front end's `unquote` handles — `GQL.g4`'s
@@ -219,7 +221,7 @@ function edgeBodies(ctx: ParserRuleContext, e: PatEdge, from: PatNode, to: PatNo
 
   if (e.var !== undefined) {
     if (dir === 'both')
-      throw new Error(`MATCH undirected edge with a variable ("${e.var}") not yet supported (the far endpoint has no entering-vertex context to read)`);
+      throw UnsupportedTraversal.because(`MATCH undirected edge with a variable ("${e.var}") not yet supported (the far endpoint has no entering-vertex context to read)`);
     return [
       [step(ctx, 'as', [from.var], ['string']), step(ctx, edgeStep, ...labelArgs), ...edgeProps, step(ctx, 'as', [e.var], ['string'])],
       [step(ctx, 'as', [e.var], ['string']), step(ctx, farStep), ...nodeConstraints, step(ctx, 'as', [to.var], ['string'])],
@@ -255,7 +257,7 @@ export function gqlMatchSteps(
   terminal: boolean,
 ): Step[] {
   const { nodes, edges } = patternGraph(parseGql(text), params);
-  if (!nodes.length) throw new Error('MATCH pattern has no node patterns');
+  if (!nodes.length) throw UnsupportedTraversal.because('MATCH pattern has no node patterns');
 
   // ONE BFS does three jobs: pick the seed (first in textual order — no cost model, see above),
   // ORIENT each edge so its start is already bound, and detect disconnected components. Orientation
@@ -286,7 +288,7 @@ export function gqlMatchSteps(
   }
   if (pending.length) {
     const unreached = [...new Set(pending.flatMap((e) => [e.left, e.right]))].filter((n) => !visited.has(n));
-    throw new Error(
+    throw UnsupportedTraversal.because(
       'MATCH pattern contains disconnected components — every path pattern must share at least one '
       + `variable with another. Unconnected: ${unreached.map((n) => `(${n.declared ?? 'anonymous'})`).join(', ')}`);
   }
@@ -321,5 +323,5 @@ function terminalProjection(ctx: ParserRuleContext, nodes: readonly PatNode[]): 
       step(ctx, 'project', [declared[0]], ['string']),
       { ...step(ctx, 'by', []), name: 'by', args: [arg({ nested: [step(ctx, 'select', [declared[0]], ['string'])] })] },
     ];
-  throw new Error('a terminal MATCH pattern declaring no variables has no binding map to emit (add a variable, or a select())');
+  throw UnsupportedTraversal.because('a terminal MATCH pattern declaring no variables has no binding map to emit (add a variable, or a select())');
 }

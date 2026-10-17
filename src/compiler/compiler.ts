@@ -58,7 +58,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // route drops is indistinguishable from a lowering that cannot express it, in every counter).
   const sideEffectPolicies = extractSideEffectPolicies(tree, params);
   const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
-  if (steps.length === 0) throw new Error('empty traversal');
+  if (steps.length === 0) throw new UnsupportedTraversal('a traversal source with no steps');
   // A path label a SIDE EFFECT shadows is read as the side effect by every `Scoping` step, and every
   // label reader the lowering has reads the alias map instead — so the traversal declines here, once,
   // for all of them (`sideEffectShadowedLabel`).

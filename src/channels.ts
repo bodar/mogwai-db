@@ -1,3 +1,4 @@
+import { UnsupportedTraversal } from './compiler/unsupported.ts';
 /**
  * THE CHANNEL CORE — the neutral vocabulary for per-traverser carried state.
  *
@@ -288,13 +289,13 @@ export function mergeChannels(seed: Channels, arms: readonly Channels[], opts: {
     const want = rigidChannels(seed);
     for (const arm of arms) {
       if (!sameChannels(rigidChannels(arm), want))
-        throw new Error('branch arms disagree on carried channels (a step binding new rigid state inside an arm is not supported)');
+        throw UnsupportedTraversal.because('branch arms disagree on carried channels (a step binding new rigid state inside an arm is not supported)');
     }
   }
   const longest = (role: ChannelRole): Channels =>
     [seed, ...arms].map((channels) => withRole(channels, role)).reduce((best, candidate) => {
       const [shorter, longer] = best.length <= candidate.length ? [best, candidate] : [candidate, best];
-      if (!prefixOf(shorter, longer)) throw new Error(`branch arms disagree on the '${role}' channels they carry`);
+      if (!prefixOf(shorter, longer)) throw UnsupportedTraversal.because(`branch arms disagree on the '${role}' channels they carry`);
       return longer;
     }, [] as Channels);
   return ROLE_ORDER.flatMap((role) => (forkable(role) ? longest(role) : withRole(seed, role)));

@@ -412,6 +412,10 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
       deferral(`${what}: a Float result past Float.MAX_VALUE`)],
     [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('and', bin('<', call('abs', result), compilerReal(1.2e-38)), bin('!=', result, compilerInt(0)))),
       deferral(`${what}: a subnormal Float result`)],
+    // A NULL result from two non-NULL operands is a NaN (`Infinity + -Infinity`, `Infinity * 0`), which the
+    // reference carries as the Double NaN and SQLite cannot: it answered a `null` sack.
+    [bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), isNull(result)),
+      deferral(`${what}: a NaN result`)],
   ];
 }
 

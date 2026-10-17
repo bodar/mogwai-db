@@ -67,7 +67,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | Predicate | | Notes |
 |---|:--:|---|
 | `containing`, `startingWith`, `endingWith` + negations | ✅ | |
-| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY (a batched barrier, JS `RegExp` semantics — divergence on Java-only constructs documented in `src/compiler/rel/regex.ts`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) — a fail-closed deferral, `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY (a batched barrier; the pattern is read as Java's `Pattern` reads it and a construct the two dialects read differently — `\p{…}`, `\Q…\E`, lookbehind, `\b`, class set algebra, … — declines, `src/compiler/rel/regex.ts` `javaPatternAsJs`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) — a fail-closed deferral, `docs/2026-08-12-regex-as-a-barrier-research.md` |
 
 ## 3. Projections & element data
 
@@ -196,7 +196,7 @@ heterogeneous stream frames each value by its own tag.
 | 128-bit arithmetic declines | |
 | int64 overflow raises natively | |
 | 32-bit float arithmetic is not expressible | SQLite REAL is always a double |
-| **`NaN` has no carrier — a NaN VALUE declines** | SQLite has no NaN (stores one as `NULL` however it arrives), so a NaN literal in a VALUE position (`inject`, `constant`, a list/map member, a property value) DECLINES at every depth (`compiler/ir/uncarried-literal.ts`) rather than answer for a null (`inject(NaN,1,NaN).fold()` was `[null,null,1]`, `inject(NaN,1).sum()` was 1). Exempt: a predicate OPERAND (`is(P.lt(NaN))`), and a NaN the very next step drops as it drops a null (`is(P.eq/lt/gt(x))`, `lte`/`gte` of a non-null, an `inject`'s `asBool()`). A negative-scale BigDecimal literal (`1e7m`) declines the same way — plain decimal text cannot spell its scale. `±Infinity` is unaffected (SQLite represents it via `9e999`/`-9e999`), inlined as a constant — never a bind |
+| **`NaN` has no carrier — a NaN VALUE declines** | SQLite has no NaN (stores one as `NULL` however it arrives), so a NaN literal in a VALUE position (`inject`, `constant`, a list/map member, a property value) DECLINES at every depth (`compiler/ir/uncarried-literal.ts`) rather than answer for a null (`inject(NaN,1,NaN).fold()` was `[null,null,1]`, `inject(NaN,1).sum()` was 1). Exempt: a predicate OPERAND (`is(P.lt(NaN))`), and a NaN the very next step drops as it drops a null (`is(P.eq/lt/gt(x))`, `lte`/`gte` of a non-null, an `inject`'s `asBool()`). A negative-scale BigDecimal literal (`1e7m`) declines the same way — plain decimal text cannot spell its scale. `±Infinity` is unaffected (SQLite represents it via `9e999`/`-9e999`), inlined as a constant — never a bind — and prints `Infinity`/`-Infinity` under `asString()`/`conjoin()` (`Double.toString`). A run-time NaN (`Infinity - Infinity` in `sum()`/`mean()`, a `math()` domain error, a sack fold) raises a deferral rather than answer `null` |
 
 ## 11. Writes
 

@@ -7,6 +7,7 @@ import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
 import type { IRStep } from './strategies.ts';
 import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 
 /**
  * WHAT A WRITE STEP'S ARGUMENTS MEAN — the ONE authority, above the lowering (§6·5).
@@ -200,8 +201,8 @@ export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined
  *  meta-properties (it is single-valued by spec — the `UNIQUE(edge,key)` constraint is the same
  *  rule at the schema level), so both are refusals wherever an edge property is written. */
 export function assertEdgePropertySpec(sp: PropSpec): void {
-  if (sp.cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
-  if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
+  if (sp.cardinality !== null) throw new ValueParseError('Cardinality is not valid on an edge property');
+  if (sp.meta) throw new Deferral('meta-properties on an edge property (the reference writes the property and drops them)');
 }
 
 /** A run of `property()` steps → their specs, for a host on an element that ALREADY EXISTS (a
@@ -220,16 +221,28 @@ export function parsePropertyTail(steps: readonly Step[], what: string, sideEffe
 
 // Trailing property() args after (key, value) are meta-property key/value pairs
 // (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
-// meta-of-meta).
+// meta-of-meta). The refusals are `Parameters.set`'s, in its order
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/Parameters.java:205-210`):
+// an odd count is `Element.Exceptions.providedKeyValuesMustBeAMultipleOfTwo`
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Element.java:200-202`),
+// then a key that is no String, T or Traversal. A T or Traversal key, and a Traversal value, are legal
+// there and unmodelled here, so they decline.
+const metaKeyRefusal = (key: unknown): Error =>
+  isTokenArg(key) || isNested(key)
+    ? new Deferral('a property() meta-property key that is a T token or a traversal')
+    : new ValueParseError('The provided key/value array must have a String, T, or Traversal on even array indices');
+
 function metaOf(metaArgs: readonly Arg[]): readonly MetaPropSpec[] | null {
   if (!metaArgs.length) return null;
-  if (metaArgs.length % 2 !== 0) throw new Error('property() meta-properties must be key/value pairs');
+  if (metaArgs.length % 2 !== 0) throw new ValueParseError('The provided key/value array length must be a multiple of two');
   const m: MetaPropSpec[] = [];
   for (let i = 0; i < metaArgs.length; i += 2) {
     const mk = metaArgs[i]!;
-    if (typeof mk.value !== 'string') throw new Error('property() meta-property key must be a string');
+    if (typeof mk.value !== 'string') throw metaKeyRefusal(mk.value);
     const mv = metaArgs[i + 1]!;
-    if (isNested(mv.value)) throw new Error('property() meta-property value must be a scalar');
+    if (isNested(mv.value)) throw new Deferral('a property() meta-property value that is a traversal');
+    // SQLite has no NaN (`constLit` declines one): a NaN meta value is not ours to store as null.
+    if (typeof mv.value === 'number' && Number.isNaN(mv.value)) throw new Deferral('a NaN meta-property value');
     m.push({ key: mk.value, keyName: mk.name, value: mv.value, valueName: mv.name,
       vtype: gremlinTypeOf(mv.value, mv.type), typeNode: mv.type });
   }
@@ -320,7 +333,7 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
   if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string') {
     const k = inner[0].args[0].value;
     if (sideEffects?.has(k)) return sideEffects.get(k);
-    throw new Error(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
+    throw new Deferral(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
   }
   const names = inner.map((s) => s.name).join('.');
   if (inner[0].name === 'identity' || inner.some((s) => s.name === 'select'))
@@ -400,27 +413,48 @@ function parseComputedMergeArg(raw: any, params: Record<string, any>): Record<st
  * on the RESOLVED spec instead — a nested map key produces its string per driver, so a compile-time
  * check would see a traversal, not `~id`.
  */
-function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<typeof classifyMergeKey>['kind']): void {
+function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<typeof classifyMergeKey>['kind'], keyType: string | null): void {
   // A STATIC string key is decidable from the TEXT, so `MergeElementStep.validate`'s
   // `ElementHelper.validateProperty` call (gremlin-core
   // `.../step/map/MergeElementStep.java:278,314-316`) belongs HERE — in the shared parse, which the
   // `writeArguments` verify Pass runs above the lowering (§6·5). Running it here makes
   // `g.mergeV([:]).option(onCreate, ['~label':'vertex'])` a refusal answered once rather than only
   // deep in a per-driver check. A NESTED key is not decidable here and stays that per-driver check.
-  if (kind === 'prop') { if (typeof k === 'string') validatePropertyKey(k); return; }
-  const token = kind === 'label' ? 'T.label' : kind === 'id' ? 'T.id' : kind === 'outV' ? 'Direction.OUT' : 'Direction.IN';
+  //
+  // The messages are `MergeElementStep.validate`'s, IN ITS ORDER
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:249-300`):
+  // each `%s` formats the KEY with `toString`, which for an enum is its NAME — `T.id` prints `id`,
+  // `Direction.OUT` prints `OUT` — and the allowed set is the step's `LinkedHashSet` (`[id, label]` for
+  // `mergeV`, `[id, label, IN, OUT]` for `mergeE`).
+  const notString = (shown: string): never => {
+    if (role.kind === 'onMatch') throw new ValueParseError(`option(onMatch) expects keys in Map to be of String - check: ${shown}`);
+    const allowed = role.op === 'mergeV' ? '[id, label]' : '[id, label, IN, OUT]';
+    throw new ValueParseError(`${role.op}() and option(onCreate) args expect keys in Map to be either String or ${allowed} - check: ${shown}`);
+  };
+  if (kind === 'prop') {
+    if (typeof k === 'string') { validatePropertyKey(k); return; }
+    // A non-String, non-token key (`mergeV([1:'a'])`): the reference refuses it by its `toString`, which
+    // this can spell only for an integral Number and a Boolean — a Double's (`1.0`) is not JS's.
+    const integral = typeof k === 'bigint' || (typeof k === 'number' && Number.isSafeInteger(k) && keyType !== null && INTEGRAL_KEY.has(keyType));
+    if (integral || typeof k === 'boolean') notString(String(k));
+    throw new Deferral(`a ${role.op}() map key that is neither a String nor a token`);
+  }
+  const token = kind === 'label' ? 'label' : kind === 'id' ? 'id' : kind === 'outV' ? 'OUT' : 'IN';
   if (role.kind === 'onMatch') {
     // T.label survives: onMatch replaces/extends an element's labels where the graph allows it.
-    if (kind !== 'label')
-      throw new Error(`option(onMatch) expects keys in Map to be of String - check: ${token}`);
-  } else {
-    const allowed = role.op === 'mergeV' ? kind === 'label' || kind === 'id' : true;
-    if (!allowed)
-      throw new Error(`${role.op}() and option(onCreate) args expect keys in Map to be either String or [id, label] - check: ${token}`);
+    if (kind !== 'label') notString(token);
+    // The reference's null T.label here reaches `v.getClass()` — a NullPointerException, no message to
+    // reproduce — so it declines.
+    if (v === null || v === undefined) throw new Deferral('option(onMatch) with a null T.label value');
+    return;
   }
-  if (v === null || v === undefined)
-    throw new Error(`${role.op}() does not allow null Map values - check: ${String(k && typeof k === 'object' && 'elementName' in k ? k.elementName : token)}`);
+  // The null test precedes the allowed-token test in the reference.
+  if (v === null || v === undefined) throw new ValueParseError(`${role.op}() does not allow null Map values - check: ${token}`);
+  if (role.op === 'mergeV' && kind !== 'label' && kind !== 'id') notString(token);
 }
+
+/** The integral key types whose `toString` is JS's `String` (`validateMergeKey`). */
+const INTEGRAL_KEY: ReadonlySet<string> = new Set(['byte', 'short', 'int', 'long', 'bigint']);
 
 /**
  * The element-identifier rules over a RESOLVED merge map's property keys.
@@ -446,12 +480,25 @@ export function validateResolvedMergeSpec(spec: MergeSpec): void {
  * after classification. A slot still holding a nested traversal is skipped — two traversals are not
  * comparable, and the create-branch call sees them resolved.
  */
+/** The onCreate VALUE as `MergeElementStep.validateNoOverrides` formats it — `%s`, its `toString`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:330-331`):
+ *  a String bare, not JSON-quoted; a one-label list its label; a Collection `[a, b]`. What JS cannot
+ *  spell as Java does (a Double, a map) keeps the JSON rendering — the message's corpus-asserted prefix is
+ *  the same either way. */
+const javaString = (value: unknown): string => {
+  if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+  if (Array.isArray(value) && value.every((v) => typeof v === 'string'))
+    return value.length === 1 ? value[0]! : `[${value.join(', ')}]`;
+  return JSON.stringify(value);
+};
+
 export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
   const clash = (token: string, a: any, b: any) => {
     if (a === undefined || a === null || b === undefined || b === null) return;
     if (isNested(a) || isNested(b)) return;
     if (JSON.stringify(a) !== JSON.stringify(b))
-      throw new Error(`option(onCreate) cannot override values from merge() argument: (${token}, ${JSON.stringify(b)})`);
+      throw new ValueParseError(`option(onCreate) cannot override values from merge() argument: (${token}, ${javaString(b)})`);
   };
   clash('label', merge.label, onCreate.label);
   clash('id', merge.id, onCreate.id);
@@ -481,7 +528,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
   raw = resolveMergeArg(raw, sideEffects, params);
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
-    throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
+    throw new Deferral('a merge argument that is not a map ([k:v] / bound Map), null, or empty ([:])');
   for (const [k, v] of raw) {
     // Parameters resolves map KEYS with TraversalUtil.apply as well as values. A
     // traversal key cannot be classified until it has the incoming driver, so retain it
@@ -496,7 +543,8 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       continue;
     }
     const c = classifyMergeKey(k);
-    validateMergeKey(role, k, v, c.kind);
+    const entryKey = typeNode && typeof typeNode === 'object' && typeNode.t === 'map' ? typeNode.entries[String(k)]?.key : null;
+    validateMergeKey(role, k, v, c.kind, typeof entryKey === 'string' ? entryKey : null);
     // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
     // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
     if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, true, 'mergeV');
@@ -508,7 +556,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       const value = cardinalityValue ? cardinalityValue.value : v;
       const cardinality = cardinalityValue?.cardinality ?? defaultCardinality;
       if (cardinality !== null && cardinality !== 'single' && cardinality !== 'list' && cardinality !== 'set')
-        throw new Error(`unsupported merge property cardinality '${cardinality}'`);
+        throw new Deferral(`merge property cardinality '${cardinality}'`);
       spec.props[c.name!] = value;
       spec.propKeys[c.name!] = c.name!;
       // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
@@ -648,18 +696,18 @@ export function mergeMaps(
     if (s.name !== 'option') throw new Deferral(`step not implemented after ${op}(): ${s.name}()`);
     const sel = s.args[0]?.value, mapArg = s.args[1]?.value, cardinalityArg = s.args[2]?.value;
     if (!isMergeArg(sel))
-      throw new Error(`${op} option() selector must be Merge.onCreate/onMatch`);
+      throw new Deferral(`${op} option() with a selector other than Merge.onCreate/onMatch/outV/inV`);
     if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
-      throw new Error(`${op} option() third argument must be Cardinality.single/list/set`);
+      throw new Deferral(`${op} option() with a third argument that is not Cardinality.single/list/set`);
     const defaultCardinality = cardinalityArg?.cardinality ?? null;
     if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
-      throw new Error(`${op} option() has unsupported cardinality '${defaultCardinality}'`);
+      throw new Deferral(`${op} option() with cardinality '${defaultCardinality}'`);
     // `Merge.outV`/`Merge.inV` name an ENDPOINT rather than an arm: the option supplies the vertex a
     // `Direction` slot holding that token resolves to. Kept raw (see `MergeMaps.outV`), and only for
     // `mergeE` — a vertex merge has no endpoints, so the selector there is the reference's own error.
     if (sel.merge === 'outv' || sel.merge === 'inv') {
-      if (op !== 'mergeE') throw new Error(`${op} option(Merge.${sel.merge}) is not valid — only an edge has endpoints`);
-      if (cardinalityArg != null) throw new Error(`${op} option(Merge.${sel.merge}) does not take a cardinality`);
+      if (op !== 'mergeE') throw new Deferral(`${op} option(Merge.${sel.merge}) — only an edge has endpoints`);
+      if (cardinalityArg != null) throw new Deferral(`${op} option(Merge.${sel.merge}) with a cardinality`);
       if (sel.merge === 'outv') outV = mapArg; else inV = mapArg;
       continue;
     }
@@ -692,7 +740,7 @@ function requireEndpointOption(
     return slot !== null && typeof slot === 'object' && (slot as { incoming?: unknown }).incoming === token;
   };
   if (uses(match) || uses(onCreate))
-    throw new Error(`option(${side}) must be specified if it is used for ${side === 'outV' ? 'OUT' : 'IN'}`);
+    throw new ValueParseError(`option(${side}) must be specified if it is used for ${side === 'outV' ? 'OUT' : 'IN'}`);
 }
 
 /** A label value in a merge map / an addV() argument is a string OR a list of strings; a list is
@@ -705,7 +753,7 @@ export function labelNames(v: any, sole: boolean, step: string): string[] {
   // Upstream words the two rejections differently and the scenarios match on the text, so this
   // is not one shared message: AddVertex asserts "must produce a scalar String when multiple
   // traversals are provided", AddLabel asserts "Collection".
-  if (!sole) throw new Error(step === 'addV'
+  if (!sole) throw new ValueParseError(step === 'addV'
     ? `${step}(): a label traversal must produce a scalar String when multiple traversals are provided`
     : `${step}(): a Collection argument must be the only argument`);
   return v.map(validateLabel);
@@ -774,6 +822,6 @@ export function verifyLabelMutationTarget(steps: readonly IRStep[]): void {
     const step = steps[at]!;
     if (!LABEL_MUTATIONS.has(step.name)) continue;
     if (elementKindAt(steps, at) === 'edge')
-      throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
+      throw new ValueParseError(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
   }
 }
