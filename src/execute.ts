@@ -1,4 +1,4 @@
-import type { Executor as ExecutorApi, ForeignResult, ForeignTerminal } from './api.ts';
+import type { Executor as ExecutorApi, ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
@@ -1100,10 +1100,19 @@ export class Executor implements ExecutorApi {
     if (plan.kind !== 'read')
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
+    // An element row may carry a COLLAPSED multiplicity (`bulk`, the movementCollapse `SUM(bulk)` — the
+    // same column `framedResults` reads via `bulkOf`). The transfer is a FLAT traverser stream, exactly
+    // what an HTTP peer receives (`foreign-decode.ts` requests `bulkResults=false`), so each row lands
+    // `bulk` times. Dropping it landed the DISTINCT elements, and a local `fold().count(local)` counted those.
+    const flat = (one: (r: any) => ForeignRow): ForeignRow[] => rows.flatMap((r) => {
+      const n = Number(bulkOf(r));
+      const el = one(r);
+      return n === 1 ? [el] : Array.from({ length: n }, () => el);
+    });
     if (plan.shape.kind === 'vertex')
-      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) })) };
+      return { kind: 'elements', rows: flat((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) })) };
     if (plan.shape.kind === 'edge')
-      return { kind: 'elements', rows: rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) })) };
+      return { kind: 'elements', rows: flat((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) })) };
     // A pushed-down REDUCER collapses the whole stream to ONE value. `count()` is `value` (static
     // ScalarType — a Long); sum/max/min/mean are `scalar` (per-row `vt`). It arrives here ONLY when the
     // caller flagged the pushed terminal `'reduce'`, which is the ONE fact that disambiguates a `value`

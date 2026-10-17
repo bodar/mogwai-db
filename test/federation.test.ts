@@ -1086,7 +1086,12 @@ describe('federate — fails closed, never a different answer', () => {
   const ARGLESS = 'g.call("federate").with("graph","crew")';
   const canon = (v: unknown): string => JSON.stringify(v, (_, x) => x instanceof Map ? [...x] : x instanceof Set ? [...x] : typeof x === 'bigint' ? `${x}n` : x);
   const outcome = async (graph: string, g: string): Promise<{ rows: string[] } | { error: unknown }> => {
-    try { return { rows: (await Promise.all((await mgr.executor(graph).framedAsync(g, {})).map(dec))).map(canon) }; }
+    // A frame carries its traverser `bulk` (a collapsed (element, N) row); the multiset is the expansion.
+    try {
+      const framed = await mgr.executor(graph).framedAsync(g, {});
+      const rows = (await Promise.all(framed.map(dec))).map(canon);
+      return { rows: rows.flatMap((row, i) => Array.from({ length: Number(framed[i]!.bulk ?? 1n) }, () => row)) };
+    }
     catch (error) { return { error }; }
   };
   const declines = async (g: string) => {
@@ -1140,6 +1145,15 @@ describe('federate — fails closed, never a different answer', () => {
     expect(await outcome('home', `${twice}.values("name")`)).toEqual({ rows: ['"daniel"', '"daniel"'] });
     // A branch arm re-enters as a scan of distinct landed elements, so there it declines.
     await declines('g.union(__.call("federate").with("graph","crew").with("traversal", __.V().hasId(9).union(__.identity(), __.identity())), __.V(1)).id()');
+  });
+
+  // A sibling's movement collapse merges convergent walks into one (element, bulk) row; the transfer is
+  // a FLAT traverser stream, so the landed elements keep that multiplicity — `E().inV()` on crew is 14
+  // traversers over 2 distinct vertices, and a local `fold().count(local)` counts 14, not 2.
+  test('a collapsed sibling element row lands with its bulk', async () => {
+    for (const tail of ['.E().inV().fold().count(local)', '.V().out().fold().count(local)'])
+      expect(await outcome('home', `${ARGLESS}${tail}`)).toEqual(await outcome('crew', `g${tail}`));
+    expect(await outcome('home', `${ARGLESS}.E().inV().fold().count(local)`)).toEqual({ rows: ['14'] });
   });
 
   // THE SWEEP: L5's generated traversals as federate tails, arg-less and as a per-parent injection (each
