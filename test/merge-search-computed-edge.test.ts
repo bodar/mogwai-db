@@ -110,14 +110,25 @@ describe('mergeE(__.project(k).by(body)) — correlated edge search', () => {
     expect(await run(s, "g.E().has('weight',9).count()")).toEqual([1]); // exactly one created
   });
 
-  test('DISTINCT create — different endpoints (per driver) make different edges', async () => {
+  test('SAME map, different per-driver endpoints — the second driver would MATCH the first creation: refused', async () => {
     const s = store(seed);
     // Two drivers, the SAME computed map (weight 9) but per-driver create endpoints (each a self loop on
-    // the driver, via option(Merge.outV/inV, __.select('d'))) -> two edges, one per driver. Proves the
-    // distinct key is (src, tgt, map), not the map alone.
-    const out = await run(s, "g.V().hasLabel('person').limit(2).as('d').mergeE(__.project('weight').by(__.constant(9))).option(Merge.onCreate,[T.label:'self',Direction.from:Merge.outV,Direction.to:Merge.inV]).option(Merge.outV,__.select('d')).option(Merge.inV,__.select('d')).count()");
+    // the driver, via option(Merge.outV/inV, __.select('d'))). The search reads the merge map ALONE —
+    // never the endpoints (`MergeEdgeStep.flatMap` → `searchEdges(mergeMap)`,
+    // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:264)
+    // — and the loop runs one traverser at a time, so the second driver FINDS the first's weight-9 edge:
+    // the reference answers count 2 with ONE edge. This used to assert two edges (a wrong answer); the set-
+    // based merge cannot model the interleaving, so it now refuses (`guardMergeInterleaving`) and nothing is written.
+    await expect(run(s, "g.V().hasLabel('person').limit(2).as('d').mergeE(__.project('weight').by(__.constant(9))).option(Merge.onCreate,[T.label:'self',Direction.from:Merge.outV,Direction.to:Merge.inV]).option(Merge.outV,__.select('d')).option(Merge.inV,__.select('d')).count()"))
+      .rejects.toThrow(/not supported yet: mergeE\(\) over several traversers where a later traverser would match/);
+    expect(await run(s, "g.E().hasLabel('self').count()")).toEqual([0]);
+  });
+
+  test('DIFFERENT maps per driver make different edges — no driver can find another one\'s creation', async () => {
+    const s = store(seed);
+    const out = await run(s, "g.V().hasLabel('person').limit(2).as('d').mergeE(__.project('weight').by(__.values('age'))).option(Merge.onCreate,[T.label:'self',Direction.from:Merge.outV,Direction.to:Merge.inV]).option(Merge.outV,__.select('d')).option(Merge.inV,__.select('d')).count()");
     expect(out).toEqual([2]);
-    expect(await run(s, "g.E().hasLabel('self').has('weight',9).count()")).toEqual([2]);
+    expect(await run(s, "g.E().hasLabel('self').count()")).toEqual([2]);
   });
 
   test('onMatch CONSTANT arm writes on the matched edge', async () => {

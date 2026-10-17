@@ -101,9 +101,14 @@ Feature: mogwai addendum — a CORRELATED mergeE search (a computed criterion pe
       | result |
       | m |
 
-  # DISTINCT create — two drivers, the SAME computed map but PER-DRIVER endpoints (a self loop each, via
-  # option(Merge.outV/inV, __.select('d'))) create two edges: the distinct key is (src, tgt, map).
+  # Two drivers, the SAME computed map but PER-DRIVER endpoints (a self loop each, via
+  # option(Merge.outV/inV, __.select('d'))). The search reads the merge map ALONE, never the endpoints
+  # (MergeEdgeStep.flatMap → searchEdges(mergeMap), vendor/tinkerpop/gremlin-core/src/main/java/org/apache/
+  # tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:264), one traverser at a time — so the
+  # second driver FINDS the first driver's weight-9.9 edge: two results, ONE edge. This scenario used to
+  # assert two edges, which was the set-based merge's wrong answer; it now refuses (guardMergeInterleaving).
   @gap:merge-search-computed-edge
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_limitX2X_mergeEXproject_weightX_per_driver_self_edges
     Given the modern graph
     And the traversal of
@@ -114,7 +119,7 @@ Feature: mogwai addendum — a CORRELATED mergeE search (a computed criterion pe
     Then the result should be unordered
       | result |
       | d[2].l |
-    And the graph should return 2 for count of "g.E().hasLabel(\"self\")"
+    And the graph should return 1 for count of "g.E().hasLabel(\"self\")"
 
   # A RUNTIME edge arm value is a separate deferred feature (AddPropertyStep take-first, no cardinality),
   # so a computed mergeE whose onMatch holds a __.trav value REFUSES — never mis-executes.
