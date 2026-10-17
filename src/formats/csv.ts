@@ -38,7 +38,7 @@
 // and detects which it is from the header; `io("x.csv").write()` emits BOTH, at the derived keys
 // `csvPaths` names — and those derived keys are ordinary readable paths, so the round trip is two
 // reads with nothing magic in between.
-import { BatchingLoader, BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
+import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
@@ -370,9 +370,9 @@ interface CsvReadState { columns?: Column[]; kind?: CsvKind; n: number }
 
 /**
  * Decode ONE record into this file's loader. The first record is the header (columns + vertex-vs-edge
- * decided from it); every later record is an element. Fails closed with the RECORD NUMBER, for the
- * same reason the GraphSON reader does: a partially loaded graph is only diagnosable if the failure
- * says where it stopped. Shared by `loadCsv` and `loadCsvStreaming` so they cannot diverge.
+ * decided from it); every later record is an element. Fails closed with the RECORD NUMBER, as the
+ * GraphSON reader does with its line, so the failure says where the document was refused (the load
+ * itself is all or nothing — `loadStreaming`, src/bulk.ts). Shared by `loadCsv` and `loadCsvStreaming` so they cannot diverge.
  */
 function feedCsvRecord(loader: RecordLoader, state: CsvReadState, record: CsvField[]): void {
   state.n++;
@@ -430,21 +430,22 @@ export function loadCsv(store: GraphStore, document: string, options?: BulkOptio
 export async function loadCsvStreaming(
   store: GraphStore, stream: ReadableStream<Uint8Array>, options?: BulkOptions,
 ): Promise<BulkStats> {
-  const loader = new BatchingLoader(store, options);
-  const state: CsvReadState = { n: 0 };
-  const scanner = new CsvScanner();
-  const decoder = new TextDecoder();
-  const reader = stream.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    for (const record of scanner.push(decoder.decode(value, { stream: true }))) feedCsvRecord(loader, state, record);
-  }
-  const tail = decoder.decode();
-  if (tail) for (const record of scanner.push(tail)) feedCsvRecord(loader, state, record);
-  for (const record of scanner.end()) feedCsvRecord(loader, state, record);
-  if (!state.columns) throw new Error('CSV: empty document (no header)');
-  return loader.done();
+  // All or nothing (`loadStreaming`): a bad record past the first batch undoes the batches before it.
+  return loadStreaming(store, options, async (loader) => {
+    const state: CsvReadState = { n: 0 };
+    const scanner = new CsvScanner();
+    const decoder = new TextDecoder();
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const record of scanner.push(decoder.decode(value, { stream: true }))) feedCsvRecord(loader, state, record);
+    }
+    const tail = decoder.decode();
+    if (tail) for (const record of scanner.push(tail)) feedCsvRecord(loader, state, record);
+    for (const record of scanner.end()) feedCsvRecord(loader, state, record);
+    if (!state.columns) throw new Error('CSV: empty document (no header)');
+  });
 }
 
 // ---------- the writer ----------

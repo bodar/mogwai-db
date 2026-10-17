@@ -184,6 +184,23 @@ describe('io() fails closed', () => {
     expect(Number(await decode(count.buf))).toBe(6);
   });
 
+  // A read is ALL OR NOTHING (`loadStreaming`, src/bulk.ts): a refusal in the EDGE pass leaves no vertex
+  // the vertex pass read behind it. The batch-crossing cases are pinned in io-streaming.test.ts.
+  test('a read the document refuses part-way leaves the graph as it was', async () => {
+    const dir = ioDir();
+    const doc = readFileSync(join(dir, 'modern.json'), 'utf8');
+    writeFileSync(join(dir, 'bad-edge-value.json'), doc.replace('"properties":{"weight"',
+      '"properties":{"zz":{"@type":"g:List","@value":[{"@type":"g:Double","@value":1.5e300}]},"weight"'));
+    writeFileSync(join(dir, 'bad-endpoint.json'), doc.replace('"inV":{"@type":"g:Int32","@value":2}', '"inV":{"@type":"g:Int32","@value":77}'));
+    const ex = managerOn(dir).executor('g');
+    await expect(ex.framedAsync('g.io("bad-edge-value.json").read()', {})).rejects.toMatchObject({ name: 'RaisedByQuery' });
+    await expect(ex.framedAsync('g.io("bad-endpoint.json").read()', {})).rejects.toThrow('unknown vertex 77');
+    for (const q of ['g.V().count()', 'g.E().count()']) {
+      const [count] = await ex.framedAsync(q, {});
+      expect(Number(await decode(count.buf))).toBe(0);
+    }
+  });
+
   test('the format check happens BEFORE any io — an unsupported format costs no read', async () => {
     // NO_IO_STORE would report the missing binding; the format error winning proves the order.
     const mgr = new BunGraphManager(undefined, standardRegistry);

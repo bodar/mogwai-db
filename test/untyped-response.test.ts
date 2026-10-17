@@ -110,6 +110,19 @@ describe('untyped JSON is opt-in and readable WITH properties', () => {
     expect(typeof weighted.properties.weight[0]).toBe('number');
   });
 
+  // An ELEMENT map key is its id (`GraphSONKeySerializer`, GraphSONSerializersV4.java:371-376), never the
+  // stringified object (`[object Object]`, under which every vertex collapsed into ONE entry).
+  test('an element-keyed map renders each key as the element id', async () => {
+    const ids = (await jsonResults(await post('g.V().id()', JSON_MT))).map(String).sort();
+    for (const q of ['g.V().groupCount()', 'g.V().group().by(identity()).by(count())', 'g.V().groupCount().by(identity())']) {
+      const [counts] = await jsonResults(await post(q, JSON_MT));
+      expect(Object.keys(counts).sort()).toEqual(ids);
+    }
+    const edgeIds = (await jsonResults(await post('g.E().id()', JSON_MT))).map(String).sort();
+    const [byEdge] = await jsonResults(await post('g.E().groupCount()', JSON_MT));
+    expect(Object.keys(byEdge).sort()).toEqual(edgeIds);
+  });
+
   test('a bulked result expands: the JSON array matches the flat GraphBinary multiset', async () => {
     // g.V().both() fans out and may RLE-collapse convergent traversers into (value, N) rows; the JSON
     // renderer expands the bulk exactly as the flat (un-bulked) GraphBinary frame does, so the two agree.

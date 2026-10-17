@@ -208,6 +208,16 @@ const SCHEMA = [
      run INTEGER NOT NULL, round INTEGER NOT NULL, scope INTEGER NOT NULL,
      id INTEGER NOT NULL, channel INTEGER NOT NULL, cval,
      PRIMARY KEY (run, round, scope, id, channel)) WITHOUT ROWID`,
+  // The STREAMING BULK LOAD's undo journal (`BatchingLoader`, src/bulk.ts). A streaming load (an `io()`
+  // read) awaits its byte stream between batches, so no one SQLite transaction can hold it — a DO's
+  // `transactionSync` is synchronous and `sql.exec` refuses `BEGIN`/`SAVEPOINT`. Each batch therefore
+  // records the rowids it CREATED here, in the same atomic unit as the rows themselves, under the load's
+  // token; a load that fails part-way is undone from this journal (`GraphStore.rollbackBulkLoads`) rather
+  // than left committed behind its failure, and a load that completes clears it with its last batch. Set
+  // based in SQL end to end, so neither the journal nor its undo is held in the isolate's memory.
+  `CREATE TABLE IF NOT EXISTS bulk_journal(
+     load TEXT NOT NULL, kind TEXT NOT NULL, id INTEGER NOT NULL,
+     PRIMARY KEY (load, kind, id)) WITHOUT ROWID`,
 ];
 
 export class GraphStore {
@@ -220,6 +230,41 @@ export class GraphStore {
     // the drive's drop-on-throw nor the framer's cleanup fired). Clearing it here reclaims them. The
     // in-isolate leak (a chain that throws) is closed precisely by the drive's `dropRuns`.
     this.sql.exec('DELETE FROM barrier_state');
+    // ORPHANED-LOAD SWEEP, the same belt for the bulk journal: a streaming load lives inside one request
+    // on the store that serves it, so at construction none is live and a surviving journal is a load
+    // whose isolate died between two batches. Undoing it leaves the graph as it was before that load,
+    // exactly as a load that fails with its isolate alive does.
+    if (this.query('SELECT 1 FROM bulk_journal LIMIT 1').length) this.atomically(() => this.rollbackBulkLoads(null));
+  }
+
+  /**
+   * UNDO a streaming bulk load from its journal (the `bulk_journal` schema note): delete every element
+   * it created — with each one's labels, properties, cardinality declarations and FTS text — and then the
+   * journal rows. `load` names one load's token; `null` undoes every journaled load (the construction
+   * sweep). Every statement reads the journal inside SQL, so undoing a graph-sized load holds nothing in
+   * memory. An edge another writer attached to a loaded vertex between two batches goes with it, since a
+   * removed vertex cannot keep an edge. No tombstone is recorded: a rolled-back load is a write that did
+   * not happen, not a delete — and a document may carry its elements' gids, so a tombstone would delete
+   * those elements on every peer this graph replicates to.
+   */
+  rollbackBulkLoads(load: string | null): void {
+    const scope = load === null ? '' : ' AND load = ?';
+    const journaled = (kind: 'node' | 'edge') => `SELECT id FROM bulk_journal WHERE kind = '${kind}'${scope}`;
+    const binds = (n: number): unknown[] => (load === null ? [] : new Array<unknown>(n).fill(load));
+    const touches = `id IN (${journaled('edge')}) OR src IN (${journaled('node')}) OR tgt IN (${journaled('node')})`;
+    this.query(`DELETE FROM property_fts WHERE owner_elem = 'edge' AND owner IN (SELECT id FROM edges WHERE ${touches})`, binds(3));
+    this.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE ${touches})`, binds(3));
+    this.query(`DELETE FROM edges WHERE ${touches}`, binds(3));
+    this.query(`DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (${journaled('node')})`, binds(1));
+    for (const table of ['vertex_properties', 'vertex_labels', 'vertex_property_cardinality'])
+      this.query(`DELETE FROM ${table} WHERE node IN (${journaled('node')})`, binds(1));
+    this.query(`DELETE FROM nodes WHERE id IN (${journaled('node')})`, binds(1));
+    this.query(`DELETE FROM bulk_journal WHERE 1${scope}`, binds(1));
+  }
+
+  /** Forget a COMPLETED streaming load's journal — its elements stay. */
+  clearBulkJournal(load: string): void {
+    this.query('DELETE FROM bulk_journal WHERE load = ?', [load]);
   }
 
   /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`). Called

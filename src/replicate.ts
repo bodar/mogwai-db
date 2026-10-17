@@ -90,8 +90,16 @@ const maxId = (store: GraphStore, table: 'nodes' | 'edges'): number =>
  * Apply a batch of replicated changes to `store`, idempotently and keyed by GID. Deletes first, then the
  * live upserts (whose `loadBulk` flush refreshes gid/rev/seq and assigns the delete tombstones' seqs); an
  * all-delete batch triggers the refresh itself.
+ *
+ * ONE atomic unit (`GraphStore.atomically`): the deletes, the upsert flush and the uid post-pass are
+ * several writes, and a change set refused part-way (a value the store cannot carry, a malformed body)
+ * must leave the graph as it was — never its deletes applied without its upserts.
  */
 export function applyChanges(store: GraphStore, cs: ChangeSet): void {
+  store.atomically(() => applyChangeSet(store, cs));
+}
+
+function applyChangeSet(store: GraphStore, cs: ChangeSet): void {
   const vertices = cs.vertices ?? [], edges = cs.edges ?? [], deletes = cs.deletes ?? [];
 
   applyDeletes(store, deletes);
@@ -404,11 +412,15 @@ function classifyWire<W extends { gid: string; rev: string }, R>(
 const reminted = (props: readonly BulkProperty[]): BulkProperty[] => props.map(({ id: _id, ...p }) => p);
 
 export function applyWire(store: GraphStore, ws: WireChangeSet): void {
-  const vertices = classifyWire(store, 'nodes', 'vertex', ws.vertices ?? [],
-    (v) => ({ gid: v.gid, rev: v.rev, uid: v.uid, labels: v.labels, properties: reminted(vertexProperties(v.properties)) }));
-  const edges = classifyWire(store, 'edges', 'edge', ws.edges ?? [],
-    (e) => ({ gid: e.gid, rev: e.rev, uid: e.uid, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: reminted(edgeProperties(e.properties)) }));
-  applyChanges(store, { vertices, edges, deletes: ws.deletes ?? [] });
+  // ONE atomic unit, as `applyChanges`: classifying shadows conflict losers (a write) before the apply,
+  // so a change set the apply then refuses must not leave those shadows behind it.
+  store.atomically(() => {
+    const vertices = classifyWire(store, 'nodes', 'vertex', ws.vertices ?? [],
+      (v) => ({ gid: v.gid, rev: v.rev, uid: v.uid, labels: v.labels, properties: reminted(vertexProperties(v.properties)) }));
+    const edges = classifyWire(store, 'edges', 'edge', ws.edges ?? [],
+      (e) => ({ gid: e.gid, rev: e.rev, uid: e.uid, label: e.label, srcGid: e.srcGid, tgtGid: e.tgtGid, properties: reminted(edgeProperties(e.properties)) }));
+    applyChanges(store, { vertices, edges, deletes: ws.deletes ?? [] });
+  });
 }
 
 /** The conflict LOSERS shadowed for an element (§6·3) — the conflict-aware read a surfacing query needs

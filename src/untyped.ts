@@ -77,9 +77,17 @@ function untypedMap(pairs: [FrameNode, FrameNode][]): Record<string, unknown> {
   return out;
 }
 
-/** A map KEY as a string — a `T`/`Direction` token by its name, anything else by its rendered value. */
+/** A map KEY as a string — a `T`/`Direction` token by its name, an ELEMENT by its id (a vertex, an edge,
+ *  a vertex property — `GraphSONKeySerializer.ser`, vendor/tinkerpop/gremlin-core/src/main/java/org/
+ *  apache/tinkerpop/gremlin/structure/io/graphson/GraphSONSerializersV4.java:371-376, writes
+ *  `element.id().toString()`; stringifying the rendered object printed `[object Object]`), anything else
+ *  by its rendered value. */
 function untypedMapKey(k: FrameNode): string {
-  if (k !== null && typeof k === 'object' && !Array.isArray(k) && (k.t === 'T' || k.t === 'D')) return String(k.v);
+  if (k !== null && typeof k === 'object' && !Array.isArray(k)) {
+    if (k.t === 'T' || k.t === 'D') return String(k.v);
+    if (k.t === 'vertex' || k.t === 'edge') return String(untyped((k.v as Record<string, FrameNode>).id));
+    if (k.t === 'property' && (k.v as Record<string, unknown>).vpid != null) return String((k.v as Record<string, unknown>).vpid);
+  }
   return String(untyped(k));
 }
 

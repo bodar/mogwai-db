@@ -47,6 +47,10 @@ import { execute, identifier, q, value } from './sql/kernel/q.ts';
  *  as its `{gen, hash}` JSON text wrapped in `jsonb()`, and dirty=3 tells the refresh to keep it. */
 const BULK_REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
 const BULK_DIRTY: SetColumn = { name: 'dirty', type: 'any' };
+/** A streaming load's undo journal row — `[load, kind, id]` (the `bulk_journal` schema note, storage.ts). */
+const BULK_JOURNAL: readonly SetColumn[] = [
+  { name: 'load', type: 'any' }, { name: 'kind', type: 'any' }, { name: 'id', type: 'any' },
+];
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -212,7 +216,9 @@ export class BulkLoader {
   private readonly policy: IdPolicy;
   private readonly onCollision: CollisionPolicy;
 
-  constructor(private store: GraphStore, options: BulkOptions = {}) {
+  /** `journal` is a STREAMING load's token (`BatchingLoader`): each flush records the rowids it created in
+   *  `bulk_journal` under it, inside the same atomic unit, so the whole load can be undone. */
+  constructor(private store: GraphStore, options: BulkOptions = {}, private readonly journal: string | null = null) {
     this.policy = options.idPolicy ?? 'preserve';
     this.onCollision = options.onCollision ?? 'error';
     // One query per table, not per row (invariant 4). `max(id)` of an empty table is NULL → start 1.
@@ -346,10 +352,15 @@ export class BulkLoader {
    * ONE atomic unit (`GraphStore.atomically`): a batch that fails part-way — an edge naming an unknown
    * vertex after the vertices landed, a value the JSON transport refuses — leaves the graph as it was
    * rather than committed behind the failure. A whole-document load (`loadGraphson`, `loadCsv`) flushes
-   * once, so it is atomic end to end; a streaming load is atomic per batch.
+   * once, so it is atomic end to end; a streaming load journals each batch (`journal`) and is undone
+   * whole on failure (`BatchingLoader`). `then` runs inside the same unit, after the batch landed.
    */
-  flush(): BulkStats {
-    return this.store.atomically(() => this.landBatch());
+  flush(then?: () => void): BulkStats {
+    return this.store.atomically(() => {
+      const stats = this.landBatch();
+      then?.();
+      return stats;
+    });
   }
 
   private landBatch(): BulkStats {
@@ -372,6 +383,15 @@ export class BulkLoader {
     }
     this.pendingEdges = [];
     this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'rev', 'dirty'], this.edgeRows);
+    if (this.journal !== null) {
+      // Append-only (a streaming load refuses `'replace'`), so every row landed here was CREATED by this
+      // load and is exactly what its undo removes.
+      const journaled = [
+        ...this.nodeRows.map((r) => [this.journal, 'node', r[0]]),
+        ...this.edgeRows.map((r) => [this.journal, 'edge', r[0]]),
+      ];
+      this.counts.statements += insertSet(this.store, 'bulk_journal', BULK_JOURNAL, journaled);
+    }
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.scalar);
     this.land('edge_properties', EDGE_PROP_COLUMNS, this.edgeProps.collection, true);
     const fts = this.ftsRows.length;
@@ -620,11 +640,21 @@ export function loadBulk(
  * `onCollision:'replace'` is refused: last-write-wins is a WHOLE-BATCH resolution (dedup by key, one
  * batched existence read, wipe-then-reland) that cannot span independently-flushed batches. A
  * caller that needs replace holds the document in memory and uses `BulkLoader`/`loadBulk` directly.
+ *
+ * ALL OR NOTHING across its batches. Each batch is one atomic unit, but the load as a whole cannot be one
+ * transaction: it awaits its byte stream between batches, and a Durable Object offers only a synchronous
+ * one. So every batch JOURNALS the rowids it created (`bulk_journal`, storage.ts) inside its own unit, the
+ * last batch clears the journal inside ITS unit (`done`), and a load that fails anywhere — a malformed
+ * line, a value the store refuses, an edge naming an unknown vertex, a collision in a later batch — is
+ * undone from the journal (`abort`), so it leaves the graph as it found it rather than committed up to
+ * the failure. `loadStreaming` is the form that cannot forget to abort.
  */
 export class BatchingLoader {
   private loader: BulkLoader;
   private pending = 0;
   private finished = false;
+  /** This load's `bulk_journal` token. */
+  private readonly journal = mintGid();
   private readonly totals = { vertices: 0, edges: 0, properties: 0, ftsRows: 0, statements: 0 };
 
   constructor(
@@ -635,7 +665,7 @@ export class BatchingLoader {
     if (options.onCollision === 'replace')
       throw new Error('BatchingLoader does not support onCollision:"replace" — a whole-batch '
         + 'last-write-wins cannot span streamed batches; load an in-memory document with loadBulk for replace');
-    this.loader = new BulkLoader(store, options);
+    this.loader = new BulkLoader(store, options, this.journal);
   }
 
   vertex(v: BulkVertex): void { this.loader.vertex(v); this.tick(); }
@@ -648,7 +678,7 @@ export class BatchingLoader {
   /** Land the current batch and start a fresh loader. */
   private cut(): void {
     this.accumulate(this.loader.flush());
-    this.loader = new BulkLoader(this.store, this.options);
+    this.loader = new BulkLoader(this.store, this.options, this.journal);
     this.pending = 0;
   }
 
@@ -664,9 +694,33 @@ export class BatchingLoader {
    *  nothing (the loader's `counts` are cumulative, so re-accumulating them would double-count). */
   done(): BulkStats {
     if (!this.finished) {
-      this.accumulate(this.loader.flush());
+      this.accumulate(this.loader.flush(() => this.store.clearBulkJournal(this.journal)));
       this.finished = true;
     }
     return { ...this.totals };
+  }
+
+  /** Undo every batch this load landed (the journal) — the graph is left as it was before the load. A
+   *  no-op once `done` has committed the load. */
+  abort(): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.store.atomically(() => this.store.rollbackBulkLoads(this.journal));
+  }
+}
+
+/** Run a streaming load ALL OR NOTHING: `feed` drives a `BatchingLoader` (awaiting its source as it
+ *  likes); success commits the load (`done`), any failure undoes every batch already landed (`abort`)
+ *  and rethrows the original error. */
+export async function loadStreaming(
+  store: GraphStore, options: BulkOptions | undefined, feed: (loader: BatchingLoader) => Promise<void>, batchSize?: number,
+): Promise<BulkStats> {
+  const loader = new BatchingLoader(store, options, batchSize);
+  try {
+    await feed(loader);
+    return loader.done();
+  } catch (error) {
+    loader.abort();
+    throw error;
   }
 }

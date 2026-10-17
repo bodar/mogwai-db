@@ -1,7 +1,11 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { BatchingLoader } from '../src/bulk.ts';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { BatchingLoader, loadStreaming } from '../src/bulk.ts';
+import { INEXACT_DECIMAL } from '../src/rel/exact-decimal.ts';
 import { loadGraphsonStreaming, writeGraphson, writeGraphsonToSink } from '../src/formats/graphson.ts';
 import { loadCsvStreaming } from '../src/formats/csv.ts';
 import { linesOf } from '../src/formats/drain.ts';
@@ -117,6 +121,119 @@ describe('BatchingLoader lands in bounded batches and resolves endpoints across 
 
   test('onCollision:"replace" is refused — it cannot span streamed batches', () => {
     expect(() => new BatchingLoader(fresh(), { onCollision: 'replace' })).toThrow(/does not support onCollision/);
+  });
+});
+
+// A streaming load spans awaits, so no single transaction holds it; it is ALL OR NOTHING through its undo
+// journal instead (`bulk_journal`, `BatchingLoader.abort`). Every failure below lands in a batch AFTER
+// earlier ones committed — the case a per-batch atomic unit alone leaves half-written.
+describe('a streaming load is all or nothing across its batches', () => {
+  /** Everything a load can write, as one comparable snapshot. */
+  const snapshot = (store: GraphStore) => ['nodes', 'vertex_labels', 'vertex_properties', 'edges', 'edge_properties', 'property_fts', 'bulk_journal']
+    .map((t) => [t, store.query<{ c: number }>(`SELECT count(*) AS c FROM ${t}`)[0].c]);
+  /** A graph that already holds data, so the undo must remove the load's rows and nothing else. */
+  const preloaded = () => {
+    const store = fresh();
+    const bl = new BatchingLoader(store, {}, 100);
+    bl.vertex({ id: 100, labels: ['old'], properties: [{ key: 'name', value: 'kept' }] });
+    bl.vertex({ id: 101, labels: ['old'] });
+    bl.edge({ id: 100, label: 'was', src: 100, tgt: 101, properties: [{ key: 'w', value: 1 }] });
+    bl.done();
+    return store;
+  };
+  const feedVertices = (bl: BatchingLoader, ids: readonly number[]) => {
+    for (const id of ids) bl.vertex({ id, labels: ['n'], properties: [{ key: 'name', value: `v${id}` }] });
+  };
+
+  test('an edge naming an unknown vertex in a later batch undoes every earlier batch', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    const failing = loadStreaming(store, {}, async (bl) => {
+      feedVertices(bl, [1, 2, 3, 4, 5]);                     // two batches commit before the edges
+      bl.edge({ id: 1, label: 'e', src: 1, tgt: 100 });       // an edge onto a PRE-EXISTING vertex
+      bl.edge({ id: 2, label: 'e', src: 2, tgt: 3 });
+      bl.edge({ id: 3, label: 'e', src: 4, tgt: 999 });       // no vertex 999
+    }, 2);
+    await expect(failing).rejects.toThrow('unknown vertex 999');
+    expect(snapshot(store)).toEqual(before);
+    expect(store.query('SELECT id FROM nodes ORDER BY id')).toEqual([{ id: 100 }, { id: 101 }]);
+  });
+
+  test('a collision in a later batch undoes the earlier ones', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    await expect(loadStreaming(store, {}, async (bl) => feedVertices(bl, [1, 2, 3, 100]), 2)).rejects.toThrow('already exists');
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  test('a failure raised by the SOURCE between batches undoes them too', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    await expect(loadStreaming(store, {}, async (bl) => { feedVertices(bl, [1, 2, 3]); throw new Error('stream broke'); }, 2))
+      .rejects.toThrow('stream broke');
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  test('an edge another writer attached to a loaded vertex goes with it', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    await expect(loadStreaming(store, {}, async (bl) => {
+      feedVertices(bl, [1, 2]);
+      store.query("INSERT INTO edges(id, src, label, tgt) VALUES (50, 100, (SELECT id FROM labels WHERE name = 'was'), 1)");
+      bl.edge({ label: 'e', src: 1, tgt: 999 });
+    }, 2)).rejects.toThrow('unknown vertex');
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  test('a load that completes keeps every batch and leaves no journal', async () => {
+    const store = preloaded();
+    const stats = await loadStreaming(store, {}, async (bl) => { feedVertices(bl, [1, 2, 3]); bl.edge({ label: 'e', src: 1, tgt: 3 }); }, 2);
+    expect(stats.vertices).toBe(3);
+    expect(store.query<{ c: number }>('SELECT count(*) AS c FROM nodes')[0].c).toBe(5);
+    expect(store.query<{ c: number }>('SELECT count(*) AS c FROM bulk_journal')[0].c).toBe(0);
+  });
+
+  test('a load whose isolate died between batches is undone when the store next opens', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mogwai-journal-')), 'g.sqlite');
+    const store = new GraphStore(new BunSqlite(file));
+    const bl = new BatchingLoader(store, {}, 2);
+    feedVertices(bl, [1, 2, 3, 4, 5]);                       // two batches committed, never done/aborted
+    expect(store.query<{ c: number }>('SELECT count(*) AS c FROM nodes')[0].c).toBe(4);
+    const reopened = new GraphStore(new BunSqlite(file));
+    expect(reopened.query<{ c: number }>('SELECT count(*) AS c FROM nodes')[0].c).toBe(0);
+    expect(reopened.query<{ c: number }>('SELECT count(*) AS c FROM bulk_journal')[0].c).toBe(0);
+  });
+
+  test('loadGraphsonStreaming: an edge-pass failure undoes the vertex pass', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    const doc = [
+      JSON.stringify({ id: gInt(1), label: ['person'], outE: { knows: [{ id: gInt(10), inV: gInt(2) }] } }),
+      JSON.stringify({ id: gInt(2), label: ['person'], outE: { knows: [{ id: gInt(11), inV: gInt(77) }] } }),
+    ].join('\n');
+    await expect(loadGraphsonStreaming(store, async () => stringStream(doc, 8))).rejects.toThrow('unknown vertex 77');
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  test('loadGraphsonStreaming: a refused meta-property past the first batch undoes the batches before it', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    const line = (id: number, meta?: unknown) => JSON.stringify({
+      id: gInt(id), label: ['n'],
+      properties: { name: [{ id: gInt(id), value: `v${id}`, ...(meta === undefined ? {} : { properties: { m: meta } }) }] },
+    });
+    const lines = Array.from({ length: 5001 }, (_, i) => line(1000 + i));
+    lines.push(line(9999, { '@type': 'g:Double', '@value': 1.5e300 }));
+    await expect(loadGraphsonStreaming(store, async () => stringStream(lines.join('\n'), 1 << 16))).rejects.toThrow(INEXACT_DECIMAL);
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  test('loadCsvStreaming: a malformed record undoes what landed before it', async () => {
+    const store = preloaded();
+    const before = snapshot(store);
+    const csv = ['~id,~label,~from,~to', '1,e,100,101', '2,e,100,999'].join('\n');
+    await expect(loadCsvStreaming(store, stringStream(csv, 4))).rejects.toThrow('unknown vertex');
+    expect(snapshot(store)).toEqual(before);
   });
 });
 

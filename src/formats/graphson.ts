@@ -28,7 +28,7 @@
 // v3. Endpoint labels are NOT part of the adjacency form in either version (`inV` is a bare id, and
 // structurally has to be — each vertex is its own line, so a reader resolves the id against that
 // vertex's own entry).
-import { BatchingLoader, BulkLoader, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
+import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
@@ -344,26 +344,20 @@ export function loadGraphson(store: GraphStore, document: string, options?: Bulk
  * store lookup. Re-reading the object is cheap (R2 egress is free; a file re-opens) next to holding
  * the graph — and it needs no scratch table.
  *
- * Fails closed with the line number on a malformed line, per pass — a partially loaded graph is only
- * diagnosable if the failure names where it stopped.
+ * Fails closed with the line number on a malformed line, per pass, and ALL OR NOTHING: whatever fails,
+ * at any line of either pass, the batches already landed are undone (`loadStreaming`, src/bulk.ts).
  */
 export async function loadGraphsonStreaming(
   store: GraphStore, open: () => Promise<ReadableStream<Uint8Array>>, options?: BulkOptions,
 ): Promise<BulkStats> {
-  const vertices = new BatchingLoader(store, options);
-  await eachLine(await open(), (raw) => vertices.vertex(vertexFromRaw(raw)));
-  const vStats = vertices.done();
-
-  const edges = new BatchingLoader(store, options);
-  await eachLine(await open(), (raw) => { for (const e of edgesFromRaw(raw)) edges.edge(e); });
-  const eStats = edges.done();
-
-  return {
-    vertices: vStats.vertices, edges: eStats.edges,
-    properties: vStats.properties + eStats.properties,
-    ftsRows: vStats.ftsRows + eStats.ftsRows,
-    statements: vStats.statements + eStats.statements,
-  };
+  // ONE load across both passes, so it is all or nothing (`loadStreaming`): an edge-pass failure — an
+  // unknown endpoint, a refused value — undoes the vertices the first pass landed too. The vertex pass
+  // runs to the end before the edge pass reads a line, so every endpoint is already in the store or in
+  // the loader's current batch when an edge resolves.
+  return loadStreaming(store, options, async (loader) => {
+    await eachLine(await open(), (raw) => loader.vertex(vertexFromRaw(raw)));
+    await eachLine(await open(), (raw) => { for (const e of edgesFromRaw(raw)) loader.edge(e); });
+  });
 }
 
 /** Drain a stream line by line, parsing each non-blank line and handing the raw adjacency object to

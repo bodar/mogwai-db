@@ -87,6 +87,19 @@ describe('applyChanges — landing a peer\'s changes by gid', () => {
     expect(s.query<{ n: number }>('SELECT count(*) AS n FROM tombstones')[0]!.n).toBe(1); // deduped
   });
 
+  test('a change set refused part-way applies none of it — its deletes stay unapplied', () => {
+    const s = store();
+    applyChanges(s, { vertices: [v(A, rev(1, 'aa'), ['person'])] });
+    const del = JSON.stringify({ gen: 2, hash: 'del', ids: ['del', 'aa'] });
+    // The upsert's meta-property holds a Double no JSON text SQLite reads carries exactly — refused AFTER
+    // the delete ran, inside the same unit.
+    const refused: ReplVertex = { gid: B, rev: rev(1, 'bb'), labels: ['person'], properties: [{ key: 'k', value: 1, meta: { m: 1.5e300 } }] };
+    expect(() => applyChanges(s, { vertices: [refused], deletes: [{ gid: A, rev: del, kind: 'vertex' }] })).toThrow('not supported yet');
+    expect(counts(s)).toEqual({ v: 1, e: 0 });
+    expect(storedRev(s, 'nodes', A)).toBe(rev(1, 'aa'));
+    expect(s.query<{ n: number }>('SELECT count(*) AS n FROM tombstones')[0]!.n).toBe(0);
+  });
+
   test('edge endpoints resolve by gid ACROSS batches (vertices landed earlier)', () => {
     const s = store();
     applyChanges(s, { vertices: [v(A, rev(1, 'aa'), ['person'], { name: 'a' }), v(B, rev(1, 'bb'), ['person'], { name: 'b' })] });
