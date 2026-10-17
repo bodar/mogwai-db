@@ -821,6 +821,16 @@ authorities.
   `typedValueBuffer`) instead of value inference; an envelope-carried per-row scalar declines. Reference:
   `Scoping.getScopeValue`/`Path.get(Pop, label)`, `step/branch/BranchStep.java`. Pinned in
   `test/compiler/alias-rebind-class.exec.test.ts`, `variant-scalar-class.exec.test.ts`. No baseline moved.
+  ✅ **Double range at the wire LANDED ON TRUNK 2026-10-17 (`c34a090d`, `204e997a`, ff-double-range).** One stored
+  out-of-range Double no longer breaks every element read: an element payload (read only by the framer) carries
+  it as the exact `<w>p<n>` binary64 carrier (`rel/exact-decimal.ts` CARRIER_BANDS, `rel/build.ts`
+  `binary64Carrier`, read back by `parseElementJson` in `json-exact.ts`); a JSON member SQL re-reads still defers.
+  A write program is ONE atomic unit (`program.ts` `runSteps` → `Sql.atomically`), so a step that raises after
+  a write rolls it back. An untyped JS number is classed by `numberClassOf` (`gremlin/types.ts`, the reference
+  GLV's `NumberSerializationStrategy.js` rule: Int/Long within 2^53/Double). Pinned in
+  `test/compiler/double-range.exec.test.ts`. Baseline moved: sql-hygiene (+389 bytes per element payload, the
+  carrier CASE; re-recorded on trunk). Residue: valueMap()/elementMap()/values().fold() of an out-of-range
+  Double still defer.
 - ✅ **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
