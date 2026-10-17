@@ -161,6 +161,34 @@ describe('a tagged and an untagged row of one class are one value at every typed
   });
 });
 
+// A stored whole Double is kept as INTEGER under a 'double' tag, so SQLite's JSON writer spelled it `1`
+// where a computed 1.0 is `1.0` — and every site that compares a JSON TEXT (a label's history entry, a
+// map key node) split one Double into two. `asExactReal` (build.ts) writes a floating-tagged value as the
+// REAL it is, so `Double.equals(1.0, 1.0)` holds at each (DedupGlobalStep.java:80-88; a HashMap key).
+describe('a stored whole Double and a computed one are one value at every JSON-text equality site', () => {
+  const W = "g.V().outE().values('weight')";
+  test('label-keyed dedup', () => {
+    expect(typed(`${W}.union(identity(), constant(1.0)).as('a').dedup('a').count()`)).toEqual(['4L']);
+    expect(typed(`${W}.union(identity(), constant(1.0)).as('a').dedup().by(select('a')).count()`)).toEqual(['4L']);
+    expect(typed(`${W}.as('a').union(identity(), constant(1.0)).as('b').dedup('a', 'b').count()`)).toEqual(['7L']);
+    expect(typed(`${W}.as('a').select('a').union(identity(), constant(1.0)).as('b').dedup('b').count()`)).toEqual(['4L']);
+  });
+
+  test('groupCount()/group() keys', () => {
+    const KEYS = ['{0.2d:1L,0.4d:2L,0.5d:1L,1d:8L}'];
+    expect(typed(`${W}.union(identity(), constant(1.0)).groupCount()`)).toEqual(KEYS);
+    expect(typed(`${W}.union(identity(), constant(1.0)).group().by(identity()).by(count())`)).toEqual(KEYS);
+    expect(typed(`${W}.union(identity(), constant(1.0)).as('a').groupCount().by(select('a'))`)).toEqual(KEYS);
+    expect(typed(`${W}.union(identity(), constant(1.0)).groupCount('m').cap('m')`)).toEqual(KEYS);
+    expect(typed(`${W}.union(identity(), constant(1.0)).fold().unfold().groupCount()`)).toEqual(KEYS);
+  });
+
+  test('a negative zero and an Integer stay apart', () => {
+    expect(typed("g.inject(-0.0, 0.0).groupCount()")).toEqual(['{-0d:1L,0d:1L}']);
+    expect(typed("g.inject(1, 1.0).as('a').dedup('a').fold()")).toEqual(['[1i,1d]']);
+  });
+});
+
 describe('a label keeps a negative zero — the history entry is the JSON writer\'s, repaired', () => {
   test('select/dedup(label) read the signed zero back', () => {
     expect(typed("g.inject(-0.0, 0.0).as('a').select('a').fold()")).toEqual(['[-0d,0d]']);

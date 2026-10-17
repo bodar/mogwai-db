@@ -492,7 +492,11 @@ const asExactReal = (value: Expr): Expr => ({
     jsonCall(compilerText('-0.0'))],
     [{ kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value }, jsonCall(printf('%!.17g', value))],
   ],
-  else: value,
+  // A WHOLE Double the store keeps as INTEGER (a stored `1.0` weight under 'double') is spelled as the REAL
+  // it is, so it writes `1.0` exactly as a computed `1.0` does. Every JSON TEXT that is compared — a
+  // label's history entry (`dedup('a')`), a map key node (`groupCount()`) — is then one text for one
+  // Double: `Double.equals(1.0, 1.0)` (DedupGlobalStep.java:80-88, a HashMap key). `CAST(NULL)` is NULL.
+  else: { kind: 'cast', arg: value, to: 'real' },
 });
 /** A wide integer as decimal TEXT past 2^53, reconstructed via `BigInt` at the wire; smaller values
  *  stay numbers. The same `SAFE_INT` boundary `sumTower` uses, so the two cannot disagree. */
