@@ -831,6 +831,16 @@ authorities.
   `test/compiler/double-range.exec.test.ts`. Baseline moved: sql-hygiene (+389 bytes per element payload, the
   carrier CASE; re-recorded on trunk). Residue: valueMap()/elementMap()/values().fold() of an out-of-range
   Double still defer.
+  ✅ **Reducing choose arms + ONE variant vocabulary LANDED ON TRUNK 2026-10-17 (`5bf66cf4`, `5732f4cb`,
+  ff-choose-arm-channels).** Reducing `choose`/option arms merge arm-to-arm at ONE door (`variantMerge`,
+  `src/compiler/rel/lower/branch.ts`), a reducing option gated per start. Every union/choose/coalesce/optional
+  variant declares ONE arm per wire tag through `variantVocabulary` (`src/compiler/rel/variant.ts`): scalar
+  arms MEET (`meetScalarTypes`) onto one per-row `MERGED_VTYPE` column (supersedes 7d8ce995's `vkt`/
+  `dedupeArms`; framed through ONE `scalarCellBuffer` in `execute.ts`), list arms share ONE member
+  descriptor (`listMembersMeet`) or DECLINE. Internal framer TypeErrors on mixed list arms → 0. Pinned in
+  `test/compiler/branch-arm-channels.exec.test.ts`, `test/L4-addendum/branch-arm-reduction-channels.feature`
+  (the envelope-vs-bare names/id fold pair is @Unsupported, reference answer kept). Residue: a per-row LIST
+  MEMBER descriptor on the variant wire (would un-decline mixed-member list arms). No baseline moved.
 - ✅ **D — a null first result vs an absent one (productivity).** Authority: `util/TraversalUtil.java`
   `produce` (a null `next()` IS productive), `util/TraversalProduct.java`, `ProjectStep`, `TraversalMapStep`,
   `GroupStep`/`Grouping.doFinalReduction` (pools keep null traversers). Seam: `src/compiler/rel/child.ts`
