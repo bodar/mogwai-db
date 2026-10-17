@@ -300,3 +300,24 @@ export function mergeChannels(seed: Channels, arms: readonly Channels[], opts: {
     }, [] as Channels);
   return ROLE_ORDER.flatMap((role) => (forkable(role) ? longest(role) : withRole(seed, role)));
 }
+
+/**
+ * The SAME-SCOPE arm merge as a LOWERING asks it — the merged channel list, or `null` where the arms
+ * cannot be merged. `mergeChannels` THROWS on a disagreement because inside the core (and the checker)
+ * one is a bug; a lowering's contract is to decline, so this is the one door every branch lowering
+ * (`mergeArms`, `variantMerge`) goes through rather than each re-deriving what to compare against.
+ *
+ * The comparison is ARM-TO-ARM, never arm-to-seed. A channel every arm mints or drops UNIFORMLY is
+ * consistent — each row of a `UNION ALL` is its own traverser — so an arm ending in a reducing barrier
+ * (`fold()`/`count()`, which drops every channel: `CHANNEL_BARRIER_POLICY`) merges with a sibling that
+ * does the same even though the branch's INPUT carried rigid state. Comparing against the input instead
+ * is exactly how `choose(p, values('name').fold(), id().fold())` reached the user as the core's bare
+ * throw. What declines is a PARTIAL mint or drop — one arm's rows carrying a position, a sack, a
+ * multiplicity its sibling's rows do not — because the merged stream would then have a column meaning
+ * two different things.
+ */
+export function mergePeerArms(arms: readonly Channels[]): Channels | null {
+  const [first] = arms;
+  if (!first || arms.some((arm) => !sameChannels(first, arm))) return null;
+  return mergeChannels(first, arms, { rigid: 'peer' });
+}

@@ -400,7 +400,7 @@ export const tagArm = (rel: Rel, k: number, keys: BranchKeys, fresh: Minter, opt
  * THROW, not a decline.
  */
 export const mintBranchOrder = (
-  arms: readonly Tail[], base: Channels, keys: BranchKeys, major: 'traverser' | 'arm', scope: readonly Channel[],
+  arms: readonly Tail[], keys: BranchKeys, major: 'traverser' | 'arm', scope: readonly Channel[],
   labels: AliasMap, graph: GraphSource, fresh: Minter, single: (k: number) => boolean = () => false,
 ): BranchRel | null => {
   const tagged: Tail[] = [];
@@ -409,7 +409,7 @@ export const mintBranchOrder = (
     if (!rel) return null;
     tagged.push({ ...arm, rel });
   }
-  const merged = mergeArms(tagged, withChannel(withChannel(withoutEncounter(base), keys.arm), keys.seq), labels, graph, fresh);
+  const merged = mergeArms(tagged, labels, graph, fresh);
   if (!merged) return null;
   const rel = merged.rel;
   const owed = [...(major === 'traverser' ? [keys.parent] : scope), keys.arm, keys.seq];

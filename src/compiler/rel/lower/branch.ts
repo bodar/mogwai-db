@@ -1,7 +1,7 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
-import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
+import { groupableChannels, mergePeerArms, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { unionColumnsViolation } from '../../../rel/structure.ts';
@@ -92,7 +92,7 @@ export const mintArmMajor = (
 ): BranchRel | null => {
   const base = withoutEncounter(arms[0]!.rel.channels);
   if (arms.some((arm) => !sameChannels(base, withoutEncounter(arm.rel.channels)))) return null;
-  return mintBranchOrder(arms, base, keys, 'arm', scope, labels, graph, fresh, (k) => !owed || !!reduced[k]);
+  return mintBranchOrder(arms, keys, 'arm', scope, labels, graph, fresh, (k) => !owed || !!reduced[k]);
 };
 
 /**
@@ -258,12 +258,12 @@ export function emissionSource(
 /** The merge a branch returns: numbered by the emission key where the order is owed (`mintBranchOrder`),
  *  positionless otherwise — every arm's own position dropped, as a stream nobody reads in order carries none. */
 function emissionMerge(
-  arms: readonly Tail[], input: Rel, from: { readonly source: Rel; readonly scope: readonly Channel[] }, owed: boolean,
+  arms: readonly Tail[], from: { readonly source: Rel; readonly scope: readonly Channel[] }, owed: boolean,
   major: 'traverser' | 'arm', keys: BranchKeys, labels: AliasMap, ctx: ChainCtx, fresh: Minter, single?: (k: number) => boolean,
 ): BranchRel | null {
   return owed
-    ? mintBranchOrder(arms, from.source.channels, keys, major, from.scope, labels, ctx.source, fresh, single)
-    : mergeArms(arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) })), withoutEncounter(input.channels), labels, ctx.source, fresh);
+    ? mintBranchOrder(arms, keys, major, from.scope, labels, ctx.source, fresh, single)
+    : mergeArms(arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) })), labels, ctx.source, fresh);
 }
 
 export function unionArms(
@@ -332,7 +332,7 @@ export function unionArms(
       ? batchedBranch(streaming, input, order, ctx.source, fresh, labels)
       : mixedBranch(streaming, input, order, ctx.source, fresh, labels);
   }
-  return emissionMerge(arms, input, from, owed, major, keys, labels, ctx, fresh);
+  return emissionMerge(arms, from, owed, major, keys, labels, ctx, fresh);
 }
 
 /**
@@ -467,7 +467,7 @@ export function sourceUnion(
   if (arms.length === 1) return withEffects({ rel: arms[0]!.rel, framing: arms[0]!.framing, aliases: NO_ALIASES });
   // The arms carry no `effects` field here (collected above), so `mergeArms`' write-arm decline does not
   // fire — its union of the arm results is exactly what a source union owes.
-  return withEffects(mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, ctx.source, fresh));
+  return withEffects(mergeArms(arms, NO_ALIASES, ctx.source, fresh));
 }
 
 /**
@@ -487,7 +487,7 @@ export function sourceUnion(
  * with shape.
  */
 export function variantMerge(
-  arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
+  arms: readonly Tail[], labels: AliasMap, fresh: Minter,
 ): BranchRel | null {
   const shapes: VariantArm[] = [];
   for (const arm of arms) {
@@ -495,13 +495,18 @@ export function variantMerge(
     if (!shape) return null;
     shapes.push(shape);
   }
-  if (arms.some((arm) => !sameChannels(arms[0]!.rel.channels, arm.rel.channels))) return null;
+  if (!mergePeerArms(arms.map((arm) => arm.rel.channels))) return null;
   const hasList = variantHasList(shapes);
   const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, hasList, fresh));
   // The same column law the plain merge asks (`unionColumnsViolation`): the variant payload is uniform
   // by NAME, but an arm that lays its channels out differently in type or nullability is not a Union.
   if (unionColumnsViolation({ inputs: tagged, type: tagged[0]!.type })) return null;
-  const channels = mergeChannels(base, tagged.map((rel) => rel.channels), { rigid: 'peer' });
+  // ARM-TO-ARM, through the same door `mergeArms` uses (`mergePeerArms`) — never against the branch's
+  // input: arms that each end in a reducing barrier (`choose(p, values('name').fold(), id().fold())`)
+  // uniformly DROP the input's rigid channels, and comparing them to the input threw the core's bare
+  // error at the user.
+  const channels = mergePeerArms(tagged.map((rel) => rel.channels));
+  if (!channels) return null;
   return {
     rel: make.union({ id: fresh('vu'), inputs: tagged, all: true, channels, type: tagged[0]!.type }),
     // The DECLARED vocabulary is de-duplicated by shape, never by position: two arms of the same
@@ -526,7 +531,7 @@ export const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] =
 };
 
 export function mergeArms(
-  arms: readonly Tail[], base: Channels, labels: AliasMap, source: GraphSource, fresh: Minter,
+  arms: readonly Tail[], labels: AliasMap, source: GraphSource, fresh: Minter,
 ): BranchRel | null {
   // A WRITE in one of SEVERAL arms is not expressible: effects run before the result query, so a sibling
   // arm would observe the mutation (a graph read, a `mergeV` search, or its own re-snapshotted input) and
@@ -570,7 +575,7 @@ export function mergeArms(
   // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
   // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
   if (rest.some((arm) => !sameFraming(first.framing, arm.framing)))
-    return variantMerge(arms, base, remapped.aliases, fresh);
+    return variantMerge(arms, remapped.aliases, fresh);
   // …and on their declared COLUMNS, because a Union is positional — the checker's OWN law
   // (`unionColumnsViolation`): name, storage type and nullability, not names alone. A names-only test
   // here admitted `union(__.outV().labels(), __.constant('x'))` (one `v text NOT NULL`, one `v any NULL`,
@@ -586,14 +591,10 @@ export function mergeArms(
   // the merged stream would have two positions claiming to be one (`rel-sweep`,
   // `union(out(…).order().by(k).limit(2), …)`). The merge base becomes the arms' common set, so an added
   // rigid channel rides out; for arms that agree with `base` (every case before `otherV`) it is `base`.
-  const merged = arms[0]!.rel.channels;
-  if (arms.some((arm) => !sameChannels(merged, arm.rel.channels))) return null;
-
-  // The merged list, from the core rather than assembled here. Rooted at the arms' common channels so a
-  // uniformly-minted rigid channel is emitted; when the arms agree with `base` this is `base` exactly.
-  // It earns its keep for the FORKABLE alias role too — a label bound in one arm is what `union` merge
-  // policy exists for.
-  const channels = mergeChannels(merged, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
+  // The merged list, from the core's one lowering door (`mergePeerArms`) rather than assembled here —
+  // the arm-to-arm comparison above, made once for this route and the variant one.
+  const channels = mergePeerArms(arms.map((arm) => arm.rel.channels));
+  if (!channels) return null;
   return {
     rel: make.union({
       id: fresh('un'), inputs: arms.map((arm) => arm.rel), all: true,
@@ -747,7 +748,6 @@ export function chooseOptions(
   const keys = branchKeys(startMerged);
   const from = emissionSource(startMerged, owed, branchSliced(ctx, position), major, keys, fresh, input, optionBodies.some((body) => !!body && armCollectsInOrder(body)));
   if (!from) return null;
-  const unkeyed = input;
   input = from.source;
   const subject = branchSubject(input, framing);
   if (!subject) return null;
@@ -882,12 +882,7 @@ export function chooseOptions(
     // A REDUCING option emits only where a start was routed to it (`BranchStep.java:130-134` drains an
     // option once it `hasStarts()`), never its seed over nothing — `chooseArms`' gate, on this option's input.
     const reduced = isReductionArm(body);
-    const tail = !reduced ? lowered : {
-      ...lowered, rel: make.filter({
-        id: fresh('or'), input: lowered.rel, channels: lowered.rel.channels, type: lowered.rel.type,
-        pred: { kind: 'exists', plan: gate(takes(ordinal)), negated: false },
-      }),
-    };
+    const tail = reduced ? routedReduction(lowered, gate(takes(ordinal)), fresh) : lowered;
     built.push({ tail, rank: armRank(ordinal), reduced });
   }
   // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
@@ -913,7 +908,7 @@ export function chooseOptions(
   }
   if (built.length < 2) return null;
   const drained = owed ? [...built].sort((left, right) => left.rank - right.rank) : built;
-  return emissionMerge(drained.map((arm) => arm.tail), unkeyed, from, owed, major, keys, labels, ctx, fresh,
+  return emissionMerge(drained.map((arm) => arm.tail), from, owed, major, keys, labels, ctx, fresh,
     (k) => major === 'arm' && drained[k]!.reduced);
 }
 
@@ -1029,7 +1024,7 @@ export function coalesceMerge(
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
-  return emissionMerge(arms, input, from, owed, 'traverser', keys, labels, ctx, fresh);
+  return emissionMerge(arms, from, owed, 'traverser', keys, labels, ctx, fresh);
 }
 
 /** The slice barriers whose answer over the UNION of several traversers' sub-streams differs from the
@@ -1062,6 +1057,41 @@ function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>
     || (STREAM_CHILD_HOSTS.has(step.name) && (
       (step.args ?? []).some((arg) => nestedSlices(arg.value))
       || (!!step.optionArms && slicesAcrossStarts(step.optionArms, params)))));
+}
+
+/**
+ * A REDUCING option, gated to emit only where a start was ROUTED to it — the ONE gate both `choose` forms
+ * (`chooseArms`' if-then-else, `chooseOptions`' keyed options) put on a reduction arm. `BranchStep` drains
+ * an option only once `getStartStep().hasStarts()`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:130-134`,
+ * "a ReducingBarrierStep … will always return true for hasNext()"), so a `fold()`/`count()` option no start
+ * reached emits nothing, never its seed.
+ *
+ * The probe is PER SCOPE, not per branch. Inside a per-start child (`local(choose(p, fold, fold))`) the arm
+ * reduced once per start, and `LocalStep` runs the whole `ChooseStep` once per start
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:80-88`),
+ * so "was a start routed to this option" is asked of THAT start: the reduced rows keep the start's `origin`
+ * (a barrier drops the rest, `CHANNEL_BARRIER_POLICY`), and the probe is correlated on it. An uncorrelated EXISTS asked it of the whole input and emitted the else arm's
+ * `[]` seed beside every person's `[name]`. A global reduction keeps no channel, so its probe stays the
+ * uncorrelated one it always was.
+ */
+function routedReduction(arm: Tail, routedTo: Rel, fresh: Minter): Tail {
+  // Only the per-start KEY (`origin` — the role a rejoin groups children by, `ChannelRole`): an arm that
+  // re-streams after its reduction (`id().fold().unfold()`) mints its own `encounter`, which names a row of
+  // the ARM, not the start it came from, and correlating on it would drop every row.
+  const scope = arm.rel.channels.filter((channel) => channel.role === 'origin' && routedTo.channels.some((carried) => carried.col === channel.col));
+  const probe = scope.length
+    ? make.filter({
+      id: fresh('crs'), input: routedTo, channels: routedTo.channels, type: routedTo.type,
+      pred: scope.map((channel) => eq(col(routedTo.id, channel.col), col(arm.rel.id, channel.col))).reduce((all, one) => and(all, one)),
+    })
+    : routedTo;
+  return {
+    ...arm, rel: make.filter({
+      id: fresh('cr'), input: arm.rel, channels: arm.rel.channels, type: arm.rel.type,
+      pred: { kind: 'exists', plan: probe, negated: false },
+    }),
+  };
 }
 
 export function chooseArms(
@@ -1129,14 +1159,11 @@ export function chooseArms(
   // true for hasNext()"), so a `count()` arm no start reached emits nothing, never its seed — the gate
   // `batchedBranch` puts on a union's reducing arms, on this arm's own routed input.
   const reduced = [then, otherwise ?? []].map((body) => isReductionArm(body));
-  const routed = (arm: Tail, negated: boolean): Tail => ({
-    ...arm, rel: make.filter({
-      id: fresh('cr'), input: arm.rel, channels: arm.rel.channels, type: arm.rel.type,
-      pred: { kind: 'exists', plan: guarded(negated), negated: false },
-    }),
-  });
-  const arms = [reduced[0] ? routed(armThen, false) : armThen, reduced[1] ? routed(armElse, true) : armElse];
-  return emissionMerge(arms, input, from, owed, major, keys, labels, ctx, fresh, (k) => major === 'arm' && !!reduced[k]);
+  const arms = [
+    reduced[0] ? routedReduction(armThen, guarded(false), fresh) : armThen,
+    reduced[1] ? routedReduction(armElse, guarded(true), fresh) : armElse,
+  ];
+  return emissionMerge(arms, from, owed, major, keys, labels, ctx, fresh, (k) => major === 'arm' && !!reduced[k]);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which
