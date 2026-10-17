@@ -600,7 +600,13 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
   // 'x'c — a quoted single character with a `c` suffix. Strip the suffix, then unquote to
   // the 1-codepoint string. Tagged `char` so the write records vtype=char and framing
   // picks CharSerializer (a Char is storage-ambiguous with a String — vtype disambiguates).
-  if (cls === 'CharacterLiteralContext') { emit(unquote(node.getText().replace(/[cC]$/, '')), 'char'); return; }
+  if (cls === 'CharacterLiteralContext') {
+    const char = unquote(node.getText().replace(/[cC]$/, ''));
+    // The reference's own refusal, verbatim (`GenericLiteralVisitor.visitCharacterLiteral`): a Java
+    // `char` is ONE UTF-16 unit, so a line-join escape or an astral character is not one.
+    if (char.length !== 1) throw new ValueParseError('Character literal must contain exactly one character');
+    emit(char, 'char'); return;
+  }
   // Duration(seconds, nanos [, negatedBool]) — a java.time Duration literal. Build the
   // exact value (seconds carries the sign via total-nanos); normalized + tagged `duration`.
   if (cls === 'DurationLiteralContext') {
@@ -927,8 +933,29 @@ export const collectionMembers = (a: Arg): Arg[] =>
         arg(v, a.type != null && typeof a.type === 'object' && 'items' in a.type
           ? ((a.type as { items: readonly (TypeNode | null)[] }).items[i] ?? null) : null));
 
+/** A `stringLiteral` token's VALUE, exactly as the reference reads it: an optional `s` suffix
+ *  (`StringSuffixLiteral`/`EmptyStringSuffixLiteral`) dropped, the quotes stripped, then
+ *  `StringEscapeUtils.unescapeJava` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/
+ *  gremlin/language/grammar/GenericLiteralVisitor.java` `visitStringLiteral`, `visitCharacterLiteral`). */
 function unquote(s: string): string {
-  const body = s.slice(1, -1);
-  return body.replace(/\\(['"\\nrt])/g, (_, c) =>
-    c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c);
+  return unescapeJava((/['"]$/.test(s) ? s : s.slice(0, -1)).slice(1, -1));
+}
+
+/**
+ * commons-text `StringEscapeUtils.unescapeJava` over every escape the lexer admits — the grammar's
+ * `EscapeSequence` and `JoinLineEscape` (`vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4`):
+ * `\b \t \n \f \r \" \' \\`, an `OctalEscape` (`\o`, `\oo`, `\[0-3]oo` — a third digit only after a
+ * leading 0–3, as `OctalUnescaper` reads it), a `UnicodeEscape` (`\u`+ then four hex digits — ONE UTF-16
+ * code unit, so `\ud83d` alone is a lone surrogate, as in Java), and a backslash before a line break,
+ * which `unescapeJava`'s `"\\" → ""` entry drops while keeping the break. One left-to-right scan, the
+ * way `AggregateTranslator` walks the input, so `\\u0041` is a backslash then the text `u0041`.
+ */
+export function unescapeJava(body: string): string {
+  return body.replace(/\\(?:u+([0-9a-fA-F]{4})|([0-3][0-7]{2}|[0-7]{1,2})|([btnfr"'\\])|)/g,
+    (_m, hex: string | undefined, octal: string | undefined, c: string | undefined) => {
+      if (hex !== undefined) return String.fromCharCode(parseInt(hex, 16));
+      if (octal !== undefined) return String.fromCharCode(parseInt(octal, 8));
+      if (c === undefined) return '';
+      return ({ b: '\b', t: '\t', n: '\n', f: '\f', r: '\r' } as Record<string, string>)[c] ?? c;
+    });
 }

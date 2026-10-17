@@ -47,12 +47,15 @@ import { UnsupportedTraversal } from '../unsupported.ts';
 // `\uXXXX` — `Has.feature` `g_V_hasXname_regexX…X`). Bringing a Java-faithful engine would be a new
 // dependency (root working rules); declining the rest is what keeps the subset exact.
 
-/** The reserved bind name the resume's re-injected `within(<survivors>)` carries. Underscore-prefixed
- *  and mogwai-namespaced so it cannot collide with a user bound-param. It
- *  names the ONE `json_each` bind the survivor set crosses as; only one such `within` exists per
- *  resumed statement (a further regex in the tail becomes the NEXT segment), so there is nothing for
- *  the bind-dedup to conflate. */
-const REGEX_SURVIVORS_PARAM = '_mogwai_regex_survivors';
+/** The reserved bind name the resume's re-injected `within(<survivors>)` at chain position `at` carries.
+ *  Underscore-prefixed and mogwai-namespaced so it cannot collide with a user bound-param. It names the
+ *  ONE `json_each` bind that survivor set crosses as, and it is PER POSITION because a resumed statement
+ *  can hold SEVERAL re-injected `within`s: a further regex in the tail becomes the next segment, whose
+ *  resume re-injects into the chain that still carries the first barrier's `within`. A name is the
+ *  bind-dedup's REUSE KEY (`keyedValue`, `rel/emit.ts`), so one shared name made both `within`s read ONE
+ *  survivor set — `has(name, regex('marko')).out().has(name, regex('lop'))` answered `[]`. Positions in
+ *  one chain are distinct, so the names are too. */
+const regexSurvivorsParam = (at: number): string => `_mogwai_regex_survivors_${at}`;
 
 /** A `has(key, regex/notRegex(pattern))` occurrence in the chain — the ONLY position regex is lifted
  *  to a barrier. Every other position (`is(regex)`, `where(...regex)`, `match`, a composed predicate)
@@ -99,7 +102,7 @@ export function regexBarrierIn(steps: readonly Step[]): RegexBarrier | null {
  *  The rest of the chain is untouched: the prefix re-narrows the population and the tail continues,
  *  both in ordinary SQL. */
 function reinject(steps: readonly Step[], at: number, key: string, survivors: readonly string[]): Step[] {
-  const within = arg({ op: 'within', operands: [arg([...survivors], null, REGEX_SURVIVORS_PARAM)] });
+  const within = arg({ op: 'within', operands: [arg([...survivors], null, regexSurvivorsParam(at))] });
   const has: Step = { ...steps[at]!, args: [arg(key), within] };
   return steps.map((s, i) => (i === at ? has : s));
 }
@@ -217,7 +220,9 @@ function escapedLiteral(pattern: string, at: number, inClass: boolean): { char: 
   let code: number | null = null;
   if (n === 'x' || n === 'u') code = parseInt(pattern.slice(at + 2, escape.end + 1), 16);
   else if (!/[A-Za-z0-9]/.test(n)) code = n.codePointAt(0)!;   // the whole code point, astral included
-  const certain = code != null && !(code >= 0xd800 && code <= 0xdfff);
+  // A NUL is a real character of every match, but SQL text cannot carry it (`textLiteral` declines it), so
+  // it ends the run like an uncertain escape: the prefilter only NARROWS, so a shorter run stays exact.
+  const certain = code != null && code !== 0 && !(code >= 0xd800 && code <= 0xdfff);
   return { char: certain ? String.fromCodePoint(code!) : null, end: escape.end };
 }
 
@@ -280,6 +285,7 @@ export function extractMandatoryLiteral(pattern: string): string | null {
       case '*': case '?': cur.pop(); flush(); break;          // preceding atom optional
       case '+': flush(); break;                               // preceding atom mandatory, run ends
       case '{': cur.pop(); flush(); while (i < pattern.length && pattern[i] !== '}') i++; break;
+      case '\0': flush(); break;                              // unsayable in SQL text (`textLiteral`)
       default: cur.push(c);                                   // a literal character
     }
   }

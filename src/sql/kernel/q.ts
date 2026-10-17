@@ -23,6 +23,7 @@ import { sql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
+import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
 // Re-export the node types so no other module imports them from lazyrecords.
 export type { Expression, Sql };
@@ -157,8 +158,22 @@ export const identifier = (name: string): Text => raw(quote(name));
  * A value from the QUERY or the STORE is `value()` and must stay one: inlining data would make the
  * statement text a function of the data, which defeats both the statement cache and the 100 KB text
  * cap. Keeping the two spellings distinct is what keeps a bind count meaningful.
+ *
+ * TOTAL over every JS string: one the statement text cannot carry FAITHFULLY DECLINES here, the one
+ * authority every inlined string passes through, rather than reaching SQLite as a raw error or a
+ * different value. Two such strings exist. A NUL (U+0000) ends the statement text at `sqlite3_prepare`
+ * (`'ma` + "unrecognized token"); `char(0)` could spell it, but SQLite's own text functions stop at a NUL
+ * (`length('a'||char(0)||'b')` is 1, the reference's `"a\u0000b".length()` is 3), so a spelled NUL would
+ * trade the error for a wrong answer. A LONE SURROGATE has no UTF-8 encoding: the statement text carries
+ * U+FFFD in its place, which then EQUALS a stored U+FFFD the reference's string does not.
  */
-export const textLiteral = (text: string): Text => raw(`'${text.replace(/'/g, "''")}'`);
+export const textLiteral = (text: string): Text => {
+  if (UNSAYABLE.test(text))
+    throw UnsupportedTraversal.because(`the string constant ${JSON.stringify(text)} holds a NUL or an unpaired surrogate, which SQL statement text cannot carry`);
+  return raw(`'${text.replace(/'/g, "''")}'`);
+};
+/** A NUL, or a UTF-16 surrogate not in a well-formed pair — what `textLiteral` declines. */
+const UNSAYABLE = /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 /** A column reference `qualifier.name`, each part safe-quoted. A Text (no binds). */
 const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier)}.${quote(name)}`);

@@ -71,6 +71,27 @@ describe('regex barrier — at depth (the resume is the ordinary tail)', () => {
     expect(names(await run('g.V().has("name", TextP.regex("^m")).has("name", TextP.regex("rko$"))')))
       .toEqual(['marko']);
   });
+  test('TWO barriers with DIFFERENT survivor sets keep both — each re-injected within() has its own bind', async () => {
+    // The second segment's chain still carries the first barrier's `within`; one shared reserved bind
+    // name made the bind-dedup read ONE survivor set for both, and every one of these answered [] / 0.
+    expect(await run("g.V().has('name', regex('marko')).out().has('name', regex('lop')).values('name')")).toEqual(['lop']);
+    expect(await run("g.V().has('name', regex('m')).out().has('name', regex('l')).values('name')")).toEqual(['lop']);
+    expect(await run("g.V().has('name', regex('ma')).out().has('lang', regex('ja')).values('name')")).toEqual(['lop']);
+    expect((await run("g.V().has('name', regex('marko')).out().has('name', regex('lop')).count()")).map(Number)).toEqual([1]);
+    expect((await run("g.V().has('name', regex('^[mj]')).out().has('name', regex('^[lr]')).has('lang', regex('va$')).values('name')")).sort())
+      .toEqual(['lop', 'lop', 'ripple']);
+  });
+  test('a NUL in the pattern is matched by the regex, never inlined into the prefilter SQL', async () => {
+    // `\x00` decodes to a NUL the prefilter literal used to carry into `containing(...)`, whose SQL text
+    // SQLite truncates at the NUL — a raw `unrecognized token` reached the user.
+    expect(extractMandatoryLiteral('mar\\x00ko')).toBe('mar');
+    expect(extractMandatoryLiteral('ab\\u0000cd')).toBeNull();
+    expect(extractMandatoryLiteral('abc\u0000de')).toBe('abc');
+    expect(await run("g.V().has('name', regex('mar\\\\x00')).values('name')")).toEqual([]);
+    expect(await run("g.V().has('name', regex('ab\\\\u0000cd')).values('name')")).toEqual([]);
+    expect((await run("g.V().has('name', regex('mar\\\\x00ko')).count()")).map(Number)).toEqual([0]);
+    expect(await run("g.V().out().has('name', regex('lo\\\\x00p')).values('name')")).toEqual([]);
+  });
 });
 
 describe('regex barrier — trigram prefilter', () => {
