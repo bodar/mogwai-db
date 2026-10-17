@@ -76,7 +76,9 @@ lowered.
   (5) a merge over a BRANCH's emission order is no longer refused: the branch emission key (cluster B,
   `BranchKeys`/`mintBranchOrder`, `lower.ts`) presents the reference's order wherever a reader owes it, and
   declines only where the branch input's own order is unknown under a slice (`positioned`).
-  (6) **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
+  (6) ✅ **LANDED 2026-10-17 (`03eefba2`..`e56e9352`)** for dedup/dedup(local)/set ops/label- and by()-keyed
+  dedup/group keys (one authority, `typedEquality`/`classedKey`, build.ts); re-probe the remainder below.
+  **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
   on its entries in no order (`mapIdentity`, map.ts; a NESTED map raises at a merge). Siblings that read their
   own key and still equate what `equals` keeps apart: `dedup()` collapses `-0.0` into `0.0`
   (`inject(-0.0,0.0).dedup()` = `[-0.0]`, ref both) and keeps `[a:1,b:2]`/`[b:2,a:1]` apart (ref one);

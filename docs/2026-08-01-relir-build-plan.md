@@ -826,6 +826,14 @@ authorities.
   barriers pool per key or decline; a record's map states its value side at one authority (`RecordField.presentCol`);
   an absent map key falls through to the side effect / path label of the same name (every map-scope reader
   declines or raises); a reducer's null seed reaches every container as null (`asExactReal`, `sumBuffer`).
+  ✅ **Mean-null tag + typed equality LANDED ON TRUNK 2026-10-17 (`03eefba2`..`e56e9352`, ff-mean-null-tag).**
+  An all-null `mean()` is a NULL tagged at its producer (`typeof(<mean>)`, `rel/reducer.ts`, `list.ts`), so
+  `math()` raises (`MathStep.java:72-88`); `within`/`without` hold a null member (`predicate.ts`, null-safe
+  `IS NOT 1`); dedup, the list set ops, label-/by()-keyed dedup and group keys all key on TYPED equality at ONE
+  authority — `typedEquality`/`valueClass`/`classedKey`/`classedNode` (`rel/build.ts`), the class normalized as
+  `coalesce(reducedVtype(tag), inferredVtype(v))` (`DedupGlobalStep.java:74-88`); a floating-tagged value enters
+  JSON as `CAST(v AS REAL)` (`asExactReal`); a child subject reads a NULL per-row tag via `perRowSubject`.
+  Pinned in `test/compiler/typed-equality-sites.exec.test.ts` and `test/L4-addendum/null-membership-typed-sets.feature`.
 - 🚧 **E — per-row runtime raises and evaluation extent.** Authority: `step/map/MathStep.java`,
   `ToUpperGlobalStep` / `ConcatStep` (`IllegalArgumentException`), `RangeGlobalStep` (stops pulling at high)
   vs `CollectingBarrierStep` (drains everything), `NumberHelper` (`/ by zero`, overflow). Seam: THREE
