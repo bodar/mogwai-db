@@ -267,3 +267,10 @@ lowered.
   the child per traverser after each write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java`);
   a numeric reducer's `vt` now crosses into a per-row `vtype` through `reducedVtype` (`fb3b4703`, exact —
   `mean()` is a Double, `.../step/map/MeanGlobalStep.java:175-177`). Pinned in `test/property-traversal-sequencing.test.ts`.
+- **A merge over several traversers beside ANOTHER write its search could observe** — decline
+  (`guardMergeInterleaving` rule (0) via `mergeObservesOtherWrites`, plus the onMatch/tail per-traverser
+  rules): `g.inject(1,2,3).mergeV([name:'zz']).properties('name').drop()`, an earlier/later `addV`/`addE`,
+  a union-arm drop all answered from one snapshot; the reference runs the lazy pipeline one traverser at a
+  time (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`,
+  `.../step/map/MergeVertexStep.java`). Pinned in `test/L4-addendum/merge-one-traverser-at-a-time.feature`
+  and `test/merge-other-writes.test.ts`.
