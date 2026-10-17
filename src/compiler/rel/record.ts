@@ -455,8 +455,15 @@ export function selectKeys(
    * collection resolves where no `as()` bound anything, and treating those as empty would be a wrong
    * answer rather than a conservative one. A caller that does not pass a host keeps the old DECLINE,
    * which is why this is optional rather than a behaviour change at four call sites at once.
+   *
+   * The same ORDER decides a name BOTH scopes hold: the side effect WINS over an `as()` label
+   * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:126-131`
+   * returns the side effect before it ever asks `path.hasLabel`), so `withSideEffect('a',1).V().as('a')
+   * .select('a')` is `1` per traverser, not the vertex. This builder reads only the alias payload, so a
+   * named key DECLINES here — answering the alias would be the wrong scope.
    */
-  if (host && spec.labels.some((label) => !liveAliases(aliases, rel).has(label) && !host.named(label)))
+  if (host && spec.labels.some((label) => host.named(label))) return null;
+  if (host && spec.labels.some((label) => !liveAliases(aliases, rel).has(label)))
     return {
       // §3.3's spelling of the empty relation: `Values` refuses to express one, so it is a false
       // `Filter` — and the framing is the HOST's, because a stream with no rows has no shape of its

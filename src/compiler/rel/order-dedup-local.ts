@@ -1,18 +1,21 @@
-import { isScopeArg } from '../../gremlin/frontend.ts';
+import { isColumnArg, isOrderArg, isScopeArg } from '../../gremlin/frontend.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ListOf } from '../../sql/kernel/render.ts';
-import type { Plan, SegmentPlan } from '../segment.ts';
+import { ResumeGap, type Plan, type SegmentPlan } from '../segment.ts';
 import type { FramedRel } from './framing.ts';
 import type { Minter } from './build.ts';
-import { listSeed, lowerListResumeOf, lowerMapResumeOf, lowerToRel, mapSeed, type Lowering } from './lower.ts';
+import type { BarrierInput } from '../../services/spi/types.ts';
+import { listSeed, lowerListResumeOf, lowerMapResumeOf, lowerRankHead, lowerToRel, mapSeed, type Lowering } from './lower.ts';
 import { buildValueStreamTransformSegment, buildValueTransformSegment, mapHead, valueHead } from './barrier-value.ts';
+import { rankKeys } from './ranked-order.ts';
+import { finishLowering } from './spine.ts';
 
 /** Re-plan a value-transform barrier's resume TAIL as a nested segment rooted at the re-injected values
  *  (`Lowering.seed`) — supplied by `segmentPlan`, which holds the `SegmentRequest` `planOf` needs. `null`
  *  where the tail holds no further barrier or none covers it; the caller then raises its resume error. */
 export type PlanTail = (tail: readonly IRStep[], seed: (fresh: Minter) => FramedRel) => Plan | null;
-import { dedupLocalValue, orderLocalValue, orderMapStreamValue, orderStreamValue } from './orderability.ts';
+import { dedupLocalValue, orderLocalValue, orderMapLocalValue, orderMapStreamValue, orderStreamValue, type EntryComparator } from './orderability.ts';
 
 // ---------- order/dedup(Scope.local) over a NESTED list, as a value-transform BARRIER ----------
 //
@@ -64,25 +67,66 @@ function recoverableElements(of: ListOf): boolean {
   return true;
 }
 
-/** A bare `order`/`dedup(Scope.local)` step, and its position. Modulated or non-local forms are not this
- *  barrier's — they fall to the inline fold. Shape-agnostic here; the nested-vs-flat and scalar-vs-element
- *  decisions are the head's member descriptor, read at build time where the prefix is lowered. */
-export function orderDedupBarrierIn(steps: readonly IRStep[]): { at: number; op: 'order' | 'dedup' } | null {
-  for (let at = 0; at < steps.length; at++) {
+/** An `order(Scope.local)`'s `by()`s as MAP-ENTRY comparators — each `by(Column.keys|values[, asc|desc])`
+ *  or a bare direction — or `null` for any other modulator (a property key, a traversal, `shuffle`), which
+ *  is the inline fold's. The ENTRY vocabulary is the only one a map's own entries answer: `Column` reads a
+ *  `Map.Entry` side, and nothing else in a `by()` is meaningful over one. */
+function entryComparators(step: IRStep): readonly EntryComparator[] | null {
+  const comparators: EntryComparator[] = [];
+  for (const by of step.modulators ?? []) {
+    let side: EntryComparator['side'];
+    let dir: EntryComparator['dir'] | undefined;
+    for (const arg of by as readonly unknown[]) {
+      if (isColumnArg(arg) && side === undefined && (arg.column === 'keys' || arg.column === 'values')) side = arg.column;
+      else if (isOrderArg(arg) && dir === undefined && (arg.order === 'asc' || arg.order === 'desc')) dir = arg.order;
+      else return null;
+    }
+    comparators.push({ ...(side ? { side } : {}), dir: dir ?? 'asc' });
+  }
+  return comparators;
+}
+
+/** A bare `order`/`dedup(Scope.local)` step — or an `order(Scope.local)` modulated only by map-ENTRY
+ *  comparators (`by(Column.values)`) — and its position. Any other modulated or non-local form is not this
+ *  barrier's — it falls to the inline fold. Shape-agnostic here; the nested-vs-flat, scalar-vs-element and
+ *  list-vs-map decisions are the head's descriptor, read at build time where the prefix is lowered.
+ *
+ *  `from` skips the steps before it: an ENTRY-modulated `order(local)` is only CONDITIONALLY this
+ *  barrier's (a map head), so where its head turns out not to be a map the step is the inline fold's
+ *  after all, and `segmentPlan` resumes the scan past it — exactly where a scan that never claimed it
+ *  would have looked. */
+export function orderDedupBarrierIn(
+  steps: readonly IRStep[], from = 0,
+): { at: number; op: 'order' | 'dedup'; comparators: readonly EntryComparator[] } | null {
+  for (let at = from; at < steps.length; at++) {
     const step = steps[at]!;
     if ((step.name !== 'order' && step.name !== 'dedup') || !isLocalScope(step)) continue;
-    if (step.modulators?.length) continue;
+    const comparators = step.name === 'order' ? entryComparators(step) : step.modulators?.length ? null : [];
+    if (!comparators) continue;
     // `dedup(Scope.local)` carries only the scope arg; a LABEL tuple (`dedup('a','b')`) is a different
     // question this barrier does not serve.
     if (step.name === 'dedup' && step.args.some((a) => !isScopeArg(a.value))) continue;
-    return { at, op: step.name };
+    return { at, op: step.name, comparators };
   }
   return null;
 }
 
 export function buildOrderDedupSegment(
   steps: readonly IRStep[], at: number, op: 'order' | 'dedup', lowering: Lowering,
+  comparators: readonly EntryComparator[] = [], planTail?: PlanTail,
 ): SegmentPlan | null {
+  // A MAP traverser: `order(Scope.local)` re-sorts ITS ENTRIES (`orderMapLocalValue`) and the map
+  // re-enters under the self-describing map framing (`inject($map)`'s shape) — the per-row twin of the
+  // global map-stream sort below, reading the same `mapValue` head. `dedup(Scope.local)` over a map is not
+  // this barrier's (a `Map` is not the `Iterable` `DedupLocalStep` takes), so it declines.
+  if (op === 'order') {
+    const maps = buildValueTransformSegment(steps, at, lowering, orderMapLocalValue(comparators),
+      (pairs, s, from, opts) => lowerMapResumeOf(pairs, s, from, opts), op, mapHead, lowering,
+      planTail && ((sorted) => planTail(steps.slice(at + 1), mapSeed(sorted))));
+    if (maps) return maps;
+  }
+  // An ENTRY comparator over anything but a map is not this barrier's question.
+  if (comparators.length) return null;
   // The head decides nested-vs-flat and scalar-vs-element. A bare `value` head is a scalar stream (decline
   // → the inline path handles a scalar `order`/`dedup`); a `jsonbList` head whose MEMBERS are scalars is a
   // FLAT list (decline → inline). Only a `jsonbList` whose members are a `list`/`map` (a NESTED list) is
@@ -113,7 +157,71 @@ export function buildOrderDedupSegment(
   // movement re-reads them correctly, materializing at the edge. The resume uses the plain `lowering` (no
   // `rawListElements`) so that terminal read frames elements to objects for the wire.
   return buildValueTransformSegment(steps, at, lowering, transform,
-    (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), op, valueHead, headOpts);
+    (lists, s, from, opts) => lowerListResumeOf(of, lists, s, from, opts), op, valueHead, headOpts,
+    planTail && ((transformed) => planTail(steps.slice(at + 1), listSeed(of, transformed))));
+}
+
+// ---------- order() (GLOBAL) whose KEY SQL cannot compare, as a RANK barrier ----------
+//
+// The general form of the stream barrier below (`ranked-order.ts` holds the why): the head reads every
+// traverser's ORDERABILITY key, JS ranks the keys, and the resume re-lowers the WHOLE chain joining each
+// traverser to its rank — so a `by()` key and the carried channels (an alias, the path) both survive,
+// which a value re-inject cannot give. Asked only where the ordinary lowering already failed
+// (`rankedOrderPlan`), so no chain SQL could answer changes plan.
+
+/** A plan, or `null` where planning DECLINED — `planOf` raises `ResumeGap` for an uncoverable resume (its
+ *  callers have already run a head), which at compile time, before any head has run, is simply a decline.
+ *  ONLY that: any other throw is a defect in the lowering, and swallowing it into a decline would hide it
+ *  behind an `UnsupportedTraversal`. */
+function plansOrNull(plan: () => Plan | null): Plan | null {
+  try {
+    return plan();
+  } catch (error) {
+    if (error instanceof ResumeGap) return null;
+    throw error;
+  }
+}
+
+/**
+ * A ranked-order SEGMENT over the first top-level GLOBAL `order()` that `lowering` does not already rank
+ * and whose head finds a key SQL could not compare, or `null`. `planRest` plans the WHOLE chain under the
+ * extended ranking — itself possibly another ranked segment, so a chain with two such `order()`s ranks
+ * one per barrier. A resume `planRest` cannot cover RAISES: the head has already run.
+ */
+export function buildRankedOrderSegment(
+  steps: readonly IRStep[], lowering: Lowering, planRest: (lowering: Lowering) => Plan | null,
+): SegmentPlan | null {
+  const ranked = lowering.rankedOrders ?? new Map();
+  for (let at = 0; at < steps.length; at++) {
+    const step = steps[at]!;
+    if (step.name !== 'order' || isLocalScope(step) || ranked.has(step)) continue;
+    const keyed = lowerRankHead(steps.slice(0, at + 1), lowering, step);
+    if (!keyed) continue;
+    const head = finishLowering(keyed.head);
+    if (head.kind !== 'read') continue;
+    // One bind per ranked step, named by its position in the ranking so two ranked `order()`s in one
+    // plan never share a parameter.
+    const param = `_mogwai_order_rank_${ranked.size}`;
+    const under = (ranks: readonly (readonly [string, number])[]): Lowering =>
+      ({ ...lowering, rankedOrders: new Map([...ranked, [step, { kind: 'ranks', ranks, param }]]) });
+    // DECLINE NOW rather than raise after the head has run: the resume's plan does not depend on the
+    // rank VALUES (they are one bind), so planning the rest over an empty ranking is the same plan the
+    // resume will build. A chain whose rest cannot be planned (a step after the `order()` nothing lowers)
+    // stays the ordinary `UnsupportedTraversal` instead of a resume error.
+    if (!plansOrNull(() => planRest(under([])))) continue;
+    return {
+      kind: 'segment',
+      mode: 'sync',
+      head,
+      resume: (headRows: readonly BarrierInput[]): Plan => {
+        const ranks = rankKeys(headRows.map((row) => row.injectedValue), keyed.dirs);
+        const plan = planRest(under(ranks));
+        if (!plan) throw new ResumeGap('order() barrier resume: no lowering covers the traversal after order()');
+        return plan;
+      },
+    };
+  }
+  return null;
 }
 
 // ---------- order() (GLOBAL) over a STREAM OF LISTS, as a whole-stream value-transform BARRIER ----------

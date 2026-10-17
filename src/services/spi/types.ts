@@ -289,6 +289,12 @@ export interface BarrierInput {
  *  call names no injection (the sub-traversal is a constant), which is the case the rejoin answers with
  *  a cross join. */
   readonly injectedValue?: unknown;
+  /** The JSON TEXT `injectedValue` was parsed from, where the head delivered a collection (a `jsonbList`/
+   *  `mapValue` head). `JSON.parse` rounds an integer past 2^53, so a value-transform that COMPARES or
+   *  RENDERS members (ORDERABILITY, `asString`) re-reads this with `parseExactJson` (`orderability.ts`),
+   *  whose spelling tells a wide `Long` from a whole-valued `Double`; the parsed value stays what is
+   *  re-injected. A string, so it crosses the DO RPC boundary exactly as the head row did. */
+  readonly injectedText?: string;
 }
 
 // ---------- the `rel` arm: a contribution lowered into the RelIR fold ----------

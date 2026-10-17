@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
 step works. Anything unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,857<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,863<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -88,7 +88,7 @@ step works. Anything unsupported throws a clear error and never mis-executes.
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `fold(seed, Operator.x)`, `unfold()` | ✅ | ❌ `fold(seed, Operator.assign)`; a list seed other than `[]`; `and`/`or` over a stream with no boolean type channel; `sum`/`minus`/`mult`/`div` (and a map `addAll`) over a stream the reference may have BULKED — a flat-map after the first, a `math()`/`where()`/`simplePath()` not directly before the fold, bare or wrapped in an inlined `filter()`/`and()` (`PathRetractionStrategy`'s barrier; a `where()` over a still-distinct stream is fine), a `barrier()`/collecting step, duplicate `inject()`/`V()` arguments (`referenceUnbulkedAt`); a byte/short/float/BigInteger/BigDecimal seed or member (one found per row RAISES a deferral); a non-finite double result (raises a deferral). Raises the reference's `long overflow` / `/ by zero`, and a deferral naming `ClassCastException` where an operand is not a Number or a `min`/`max` pair is not comparable |
 | `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one); a value `by()` with steps AFTER its first reducing barrier (`by(__.values(k).sum().fold())` — the pool is cut there); a seeded `fold(seed, Operator.x)` value |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`), a base-graph ELEMENT-membered list by carrying member rowids through the barrier and re-sourcing at the edge. ❌ `Column`-keyed order forms; a FEDERATED element-membered list (its keys re-source via `BoundGraph`, not the resume's base default) |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`), a base-graph ELEMENT-membered list by carrying member rowids through the barrier and re-sourcing at the edge. Any other global `order()` whose key SQL cannot compare — a PATH stream (`path().order().by(desc)`, labels survive for a later `select`), a LIST/MAP-valued `by()` (`by(__.values('age').fold())`) — is a RANKED-ORDER barrier (`ranked-order.ts`: JS ranks the keys by ORDERABILITY, the resume joins each traverser to its rank, every channel carried). ❌ a ranked `order()` inside a child body/branch arm (top-level only); over a chain that WRITES; a FEDERATED element-membered list (its keys re-source via `BoundGraph`, not the resume's base default); `order().by(Column.keys)` over an unfolded map whose KEY is a collection compares the key's JSON text (a pre-existing divergence) |
 
 ## 5. Branching
 
@@ -159,7 +159,7 @@ Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-
 
 | Step | | Notes |
 |---|:--:|---|
-| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | a NESTED-list-member `order`/`dedup(Scope.local)` sorts/dedups by ORDERABILITY through the value-transform barrier — SCALAR members and base-graph ELEMENT members (carried as rowids, re-sourced at the edge). ❌ `dedup(local)` with a label tuple or a `by()` projection; a PROPERTY-member list; a FEDERATED element-membered list |
+| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | a NESTED-list-member `order`/`dedup(Scope.local)` sorts/dedups by ORDERABILITY through the value-transform barrier — SCALAR members and base-graph ELEMENT members (carried as rowids, re-sourced at the edge). `order(Scope.local)` over a MAP re-sorts its entries (bare, `by(Column.keys|values[, asc|desc])`, chained). ❌ a map `order(Scope.local).by(<key>|<traversal>)`; `dedup(local)` with a label tuple or a `by()` projection; a PROPERTY-member list; a FEDERATED element-membered list |
 | `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over a non-iterable SCALAR self |
 | `index()` | ❌ | |
 

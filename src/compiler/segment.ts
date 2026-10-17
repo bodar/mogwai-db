@@ -99,3 +99,16 @@ export type SegmentPlan = AsyncSegmentPlan | SyncSegmentPlan;
 export type Plan =
   | { readonly kind: 'sql'; readonly compiled: Executable }
   | SegmentPlan;
+
+/**
+ * A barrier's RESUME has a tail no lowering covers. Raised by the resume planner (`planOf`) — after a head
+ * has run there is nothing left to decline to. Its own class so a COMPILE-TIME probe of a resume (the
+ * ranked-order barrier plans its rest before any head runs) can turn exactly this into a decline, while
+ * every other throw — a lowering bug, a kernel invariant — still surfaces as the defect it is.
+ */
+export class ResumeGap extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResumeGap';
+  }
+}

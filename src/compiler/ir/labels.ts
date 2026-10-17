@@ -287,3 +287,150 @@ export function cardinalityOnlyTerminalAt(steps: readonly Step[], index: number,
   const last = steps[index];
   return index === steps.length - 1 && last.name === 'count' && (last.args?.length ?? 0) === 0;
 }
+
+/** The steps whose string arguments NAME a traversal side effect — the keyed `SideEffectCapable`
+ *  writers, each registering its key on the traversal's side effects when it is CONSTRUCTED (so the key
+ *  exists at EVERY step, not only after the writer — e.g.
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AggregateStep.java:57`,
+ *  and `GroupSideEffectStep`/`TreeSideEffectStep`/`SubgraphStep`/`ProfileSideEffectStep` beside it), and
+ *  `cap`, whose keys name one. A bare `group()`/`tree()` names nothing. */
+const SIDE_EFFECT_KEYED: ReadonlySet<string> = new Set(['aggregate', 'store', 'group', 'groupCount', 'tree', 'subgraph', 'profile', 'cap']);
+
+/** Visit every CHAIN at ANY depth — the chain itself, then each nested argument body (predicate
+ *  operands included, the shape `descend` walks), `by()` modulators, and the folded `repeat()`/`choose()`
+ *  clusters, each as a chain of its own. A body this scan cannot parse is skipped: the lowering parses
+ *  the same body and declines it on its own. */
+function eachChainDeep(chain: readonly Step[], params: Record<string, any>, visit: (chain: readonly Step[]) => void): void {
+  visit(chain);
+  const into = (value: any): void => {
+    if (isNested(value)) {
+      let body: Step[];
+      try { body = stepChain(value.nested, params); } catch { return; }
+      eachChainDeep(body, params, visit);
+      return;
+    }
+    if (value == null || typeof value !== 'object') return;
+    if (value instanceof Map) { for (const member of value.values()) into(member); return; }
+    if (Array.isArray(value)) { for (const v of value) into(v); return; }
+    if ('value' in value) into((value as any).value);
+    if ('operands' in value) into((value as any).operands);
+  };
+  for (const s of chain) {
+    const ir = s as IRStep;
+    for (const a of s.args ?? []) into(a.value);
+    for (const m of ir.modulators ?? []) for (const v of m) into(v);
+    if (ir.repeatRegion) eachChainDeep(ir.repeatRegion, params, visit);
+    if (ir.optionArms) eachChainDeep(ir.optionArms, params, visit);
+  }
+}
+
+/** Visit every step at ANY depth — `eachChainDeep`, a step at a time. */
+function eachStepDeep(chain: readonly Step[], params: Record<string, any>, visit: (s: Step) => void): void {
+  eachChainDeep(chain, params, (c) => { for (const s of c) visit(s); });
+}
+
+/**
+ * A PATH LABEL A SIDE EFFECT SHADOWS — a name the traversal binds with `as()` (or a `match()` pattern)
+ * AND names as a side effect (`withSideEffect`, or a keyed `aggregate`/`group`/… writer) — or `null`
+ * where the two namespaces are disjoint.
+ *
+ * `Scoping.getScopeValue` resolves a key against the traverser's own Map, then the SIDE EFFECTS, and
+ * only then the path labels
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-131`),
+ * so wherever such a name is read — `select`, `where(label, …)`, `by(__.select(…))`, `math`, `format` —
+ * the side effect wins. The lowering's scope readers resolve a key against the ALIAS MAP, which holds
+ * only path labels, so each of them answered with the labelled traverser instead (measured:
+ * `withSideEffect('x',100).V().values('age').as('x').math('_ + x')` added the age to itself). One
+ * whole-tree check, asked once before lowering, is what closes that at EVERY reader at once rather than a
+ * precedence guard per reader that the next reader forgets: the compile DECLINES. No corpus scenario
+ * overlaps the two namespaces, so the decline costs no conformance; answering it means teaching each
+ * scope reader the side-effect scope, which is a feature, not this guard's job.
+ */
+export function sideEffectShadowedLabel(
+  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+): string | null {
+  const named = new Set(declared);
+  const bound = new Set<string>();
+  eachStepDeep(steps, params, (s) => {
+    for (const l of asLabelsOf(s)) bound.add(l);
+    for (const l of matchLabelsOf(s, params)) bound.add(l);
+    if (SIDE_EFFECT_KEYED.has(s.name))
+      for (const a of s.args ?? []) if (typeof a.value === 'string') named.add(a.value);
+  });
+  for (const label of bound) if (named.has(label)) return label;
+  return null;
+}
+
+/** The barriers that hand on the traverser they were GIVEN — so its path, and every label on it, survives
+ *  them — rather than minting a new one. A filtering or reordering barrier emits (some of) the very
+ *  traversers it took: `DedupGlobalStep`/`RangeGlobalStep` are `FilterStep`s, `TailGlobalStep` pops its
+ *  tail buffer (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/`),
+ *  `OrderGlobalStep`/`SampleGlobalStep` are `CollectingBarrierStep`s re-emitting their `TraverserSet`
+ *  (`.../step/util/CollectingBarrierStep.java`) and `NoOpBarrierStep` (`barrier()`) likewise; a KEYED
+ *  side-effect writer (`aggregate('a')` — `AggregateStep`; `group('a')`/`groupCount('a')` —
+ *  `SideEffectBarrierStep`s) passes its traverser through (`.../step/sideEffect/`). Their `by()` keys
+ *  never touch the traverser. A REDUCING
+ *  barrier (`fold`, `count`, an unkeyed `group`, …) is not here: `ReducingBarrierStep` emits a traverser
+ *  it GENERATES, carrying no path (`.../step/util/ReducingBarrierStep.java`). */
+const PATH_PASSING_BARRIERS: ReadonlySet<string> = new Set(['dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier', 'aggregate', 'store']);
+const KEYED_SIDE_EFFECT_WRITERS: ReadonlySet<string> = new Set(['group', 'groupCount']);
+const passesTraverser = (s: Step): boolean =>
+  PATH_PASSING_BARRIERS.has(s.name)
+  || (KEYED_SIDE_EFFECT_WRITERS.has(s.name) && (s.args ?? []).some((a) => typeof a.value === 'string'));
+
+/**
+ * A SUB-PATH this compile cannot prove LOCATABLE — a `path()`/`simplePath()`/`cyclicPath()` whose
+ * `from(label)`/`to(label)` the traverser's path might not carry, or might carry in the wrong order —
+ * named by the offending label, or `null` when every one is provably locatable.
+ *
+ * `Path.subPath` THROWS on each of those (`couldNotLocatePathFromLabel`/`…ToLabel` when a label is
+ * absent, `couldNotIsolatedSubPath` when the from-label's last position is after the to-label's —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Path.java:259-292`,
+ * reached from `PathStep` (`step/map/PathStep.java:114`) and `PathFilterStep` (`step/filter/PathFilterStep.java:60`)),
+ * where the lowering's `subPathMembers` window leaves a NULL bound and keeps no position: an EMPTY
+ * path, or a vacuously simple one — a different answer, not the error. So the compile declines unless
+ * the sub-path is locatable on EVERY traverser:
+ *
+ * - each label is bound UNCONDITIONALLY before the step — a TOP-LEVEL `as()` of the same chain, not
+ *   cleared by a barrier since (`labelsBoundBefore`'s rule, `as()` only: a `match()` pattern's binds
+ *   are not positions this scan can order). A nested chain sees none of its host's labels here, so a
+ *   sub-path inside a nested body declines unless that body binds its own;
+ * - with both bounds, no bind of the from-label — at any depth — follows the to-label's last top-level
+ *   bind, so the from position can never land after the to position.
+ */
+export function unlocatableSubPath(steps: readonly Step[], params: Record<string, any>): string | null {
+  let found: string | null = null;
+  eachChainDeep(steps, params, (chain) => {
+    for (let i = 0; i < chain.length && found === null; i++) {
+      if (!PATH_FAMILY.has(chain[i]!.name)) continue;
+      // A passed chain carries the modulators folded onto the host (`absorbModulators`); a nested body
+      // re-read raw still spells them as the steps that follow it. Both are read.
+      let { from, to } = chain[i] as IRStep;
+      for (let j = i + 1; j < chain.length; j++) {
+        const m = chain[j]!;
+        if (m.name === 'by') continue;
+        if (m.name !== 'from' && m.name !== 'to') break;
+        const label = m.args?.[0]?.value;
+        if (typeof label !== 'string') { found = `${m.name}(…)`; break; }
+        if (m.name === 'from') from = label; else to = label;
+      }
+      if (found !== null || (from === undefined && to === undefined)) continue;
+      // The top-level binds before `i`, each at its LAST index; a barrier that mints a NEW traverser
+      // clears them all (`passesTraverser` names the ones that do not).
+      let last = new Map<string, number>();
+      for (let k = 0; k < i; k++) {
+        if (!passesTraverser(chain[k]!) && carriesBarrier(chain[k]!, params)) last = new Map();
+        for (const l of asLabelsOf(chain[k]!)) last.set(l, k);
+      }
+      for (const label of [from, to]) if (found === null && label !== undefined && !last.has(label)) found = label;
+      if (found !== null || from === undefined || to === undefined) continue;
+      const fromLabel = from;
+      let later = false;
+      eachStepDeep(chain.slice(last.get(to)! + 1, i), params, (s) => {
+        if (asLabelsOf(s).includes(fromLabel) || matchLabelsOf(s, params).includes(fromLabel)) later = true;
+      });
+      if (later) found = fromLabel;
+    }
+  });
+  return found;
+}

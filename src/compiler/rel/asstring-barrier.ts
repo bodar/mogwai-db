@@ -6,6 +6,7 @@ import { lowerToRel, lowerListResume, lowerValueResume, type Lowering } from './
 import { buildValueTransformSegment, mapHead, valueHead } from './barrier-value.ts';
 import { isBareList } from './list.ts';
 import { gremlinString } from './gremlin-string.ts';
+import { exactOf } from './orderability.ts';
 
 // ---------- asString() over a COLLECTION — a value-transform barrier ----------
 //
@@ -70,8 +71,10 @@ export function buildAsStringSegment(steps: readonly IRStep[], at: number, lower
   const lowered = lowerToRel(steps.slice(0, at), lowering);
   if (mapHead(lowered)) {
     if (local) return null;
+    // Rendered off the EXACT view of the head text (`exactOf`): `JSON.parse` would print a `sum()` past
+    // 2^53 as its rounding, a different number than the one the traverser holds.
     return buildValueTransformSegment(steps, at, lowering,
-      (pairs) => gremlinString({ t: 'map', v: pairs }), lowerValueResume, 'asString', mapHead);
+      (pairs, text) => gremlinString({ t: 'map', v: exactOf(pairs, text) }), lowerValueResume, 'asString', mapHead);
   }
   const head = valueHead(lowered);
   if (head?.shape.kind !== 'jsonbList' || (isBareList(head.shape.items) && local)) return null;
@@ -83,7 +86,7 @@ export function buildAsStringSegment(steps: readonly IRStep[], at: number, lower
     : (member: unknown): unknown => member;
   return local
     ? buildValueTransformSegment(steps, at, lowering,
-      (list) => (list as unknown[]).map((m) => asStringMember(nodeOf(m))), lowerListResume, 'asString')
+      (list, text) => (exactOf(list, text) as unknown[]).map((m) => asStringMember(nodeOf(m))), lowerListResume, 'asString')
     : buildValueTransformSegment(steps, at, lowering,
-      (list) => gremlinString((list as unknown[]).map(nodeOf)), lowerValueResume, 'asString');
+      (list, text) => gremlinString((exactOf(list, text) as unknown[]).map(nodeOf)), lowerValueResume, 'asString');
 }

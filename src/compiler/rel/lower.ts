@@ -56,6 +56,7 @@ import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
 import { ADD_ALL, BULK_INVARIANT_OPS, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
+import { keyProductive, nondeterministic, ORDER_KEY, ORDER_RANK, orderKeyTuple, rankJoin, type RankedOrders, type RankSink } from './ranked-order.ts';
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
@@ -983,7 +984,9 @@ export function orderRows(
   opts: { readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[] } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
-  if (!sort) return null;
+  // No SQL comparator (a LIST/MAP/PATH key): the ranked-order barrier's two statements answer it, where
+  // this step is one they rank; everywhere else it declines as before.
+  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie);
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
     : rel;
@@ -999,6 +1002,86 @@ export function orderRows(
     [...payloadCols(domain), ...carriedCols(channels)],
     channels, fresh,
   );
+}
+
+/**
+ * `order()` BY ORDERABILITY RANK — `orderRows`' answer where SQL has no comparator, for a step the
+ * ranked-order barrier names (`ranked-order.ts`), else `null`.
+ *
+ * Both statements build the SAME keyed relation — the traverser with its key TUPLE text projected into
+ * `ORDER_KEY` and MATERIALIZED (the key holds correlated reads; the head reads it DISTINCT and the
+ * resume's rank join reads it as a column) — and differ only in what they do with it. The HEAD deposits it in the sink and
+ * passes the stream through unsorted (the head reads keys, not order). The RESUME looks each key's rank
+ * up and re-mints the emission order on `(rank, arrival)` exactly as the SQL sort does, so the sort is
+ * stable and a later slice reads a real position. Every column and channel of the input rides through,
+ * which is what lets `as('head').path().order().select('head')` read its alias after the sort.
+ */
+function rankedRows(
+  step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter, tieOf?: (input: Rel) => readonly Expr[],
+): Rel | null {
+  const ranked = ctx.rankedOrders?.get(step);
+  if (!ranked || isLocalScope(step) || (step.args ?? []).length) return null;
+  const bys = modulations(step, (step.modulators ?? []).length, childSeam(ctx, fresh));
+  if (!bys) return null;
+  const tuple = orderKeyTuple(step, bys, host, ctx.source, fresh, childSeam(ctx, fresh));
+  if (!tuple) return null;
+  const keyType = typeOf(...rel.type.cols, meta(ORDER_KEY, 'text'));
+  const materialized = make.materialize({
+    id: fresh('okm'), channels: rel.channels, type: keyType,
+    input: make.project({
+      id: fresh('okp'), input: rel, channels: rel.channels, type: keyType,
+      exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), [ORDER_KEY, tuple.key]],
+    }),
+  });
+  const drop = keyProductive(col(materialized.id, ORDER_KEY), tuple.required);
+  const keyed = drop
+    ? make.filter({ id: fresh('f'), input: materialized, channels: materialized.channels, type: materialized.type, pred: drop })
+    : materialized;
+  if (ranked.kind === 'keys') {
+    ranked.sink.rel = keyed;
+    ranked.sink.dirs = tuple.dirs;
+    return rel;
+  }
+  const withRank = rankJoin(keyed, ranked, fresh);
+  const carried = encounterOf(withRank.channels);
+  const channels = carried ? withRank.channels : withChannel(withRank.channels, ENCOUNTER);
+  const tie: readonly Expr[] = carried ? [col(withRank.id, carried.col)] : (tieOf?.(withRank) ?? []);
+  return renumber(
+    withRank,
+    [{ expr: col(withRank.id, ORDER_RANK), dir: 'asc' }, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
+    [...payloadCols(rel), ...carriedCols(channels)],
+    channels, fresh,
+  );
+}
+
+/**
+ * THE HEAD of a ranked-order barrier — the chain through `steps[last]` (a GLOBAL `order()` SQL cannot
+ * compare) read as the DISTINCT key texts of its traversers, one scalar `v` per key, or `null` where the
+ * step is not one this lowering had to rank (SQL compared it after all, or the prefix does not lower).
+ *
+ * A chain that WRITES declines: the resume re-reads the prefix, and a key a mutation moved between the
+ * two statements would be ranked against the wrong graph. So do effects — a head is a pure read. So does
+ * a chain that DRAWS (`nondeterministic` — a `sample()`, a `coin()`, a `shuffle`, at any depth): its
+ * resume would meet traversers whose keys the head never read.
+ */
+export function lowerRankHead(
+  steps: readonly IRStep[], opts: Lowering, step: IRStep,
+): { readonly head: RelLowering; readonly dirs: readonly ('asc' | 'desc')[] } | null {
+  if (steps.some((s) => MUTATING_STEPS.has(s.name))) return null;
+  if (nondeterministic(steps, settle(opts).params)) return null;
+  const fresh = minter();
+  const sink: RankSink = {};
+  const settled = settle({ ...opts, rankedOrders: new Map([...(opts.rankedOrders ?? []), [step, { kind: 'keys', sink }]]) });
+  const chain = lowerChain(steps, settled, fresh);
+  if (!chain || chain.effects?.length || !sink.rel || !sink.dirs) return null;
+  const keyed = sink.rel;
+  const keys = make.distinct({
+    id: fresh('okd'), channels: [], type: typeOf(meta('v', 'text')),
+    input: make.project({ id: fresh('okv'), input: keyed, channels: [], type: typeOf(meta('v', 'text')), exprs: [['v', col(keyed.id, ORDER_KEY)]] }),
+  });
+  const head = lowered({ rel: keys, framing: { kind: 'scalar', type: STATIC('string') }, aliases: NO_ALIASES, bulked: false },
+    settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return head && { head, dirs: sink.dirs };
 }
 
 /**
@@ -2465,6 +2548,19 @@ function pathTail(
     const sliced = sliceOp(step, rel, false, fresh);
     if (sliced) { rel = sliced; continue; }
 
+    // `select(label)` over a PATH traverser reads the traverser's own LABELS, not the Path value:
+    // `Scoping.getScopeValue` tries the object as a `Map` (a Path is not one), then the side effects, then
+    // `traverser.path()` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-131`).
+    // `pathPositions` carries every non-path channel through for exactly this, so `as('head').path()
+    // .select('head')` is the same alias read the list tail makes — `selectKeys` re-roots by the label's
+    // shape and `continueAs` picks the loop. A named collection is `namedElsewhere`'s decline, as there.
+    if (step.name === 'select') {
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+        { framing: { kind: 'path', of, scalars }, named: namedElsewhere(ctx) });
+      if (!selected) return null;
+      return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
     // A GLOBAL row op over the STREAM of paths — `dedup()` (and, once it has a comparator, `order()`).
     // A Path is a payload shape exactly like a list: its `LIST_COL` json IS its identity, and two paths
     // are equal iff their ordered positions are (`GremlinValueComparator.Type.Path` compares element-wise,
@@ -2946,6 +3042,13 @@ export interface Lowering {
    * barrier, by which point every earlier write has run to completion.
    */
   readonly writes?: ProgramWrites | null;
+  /**
+   * The GLOBAL `order()` steps this lowering RANKS through JS rather than sorts in SQL — the two
+   * statements of a ranked-order barrier (`ranked-order.ts`). Absent everywhere but that barrier's head
+   * (`keys`) and resume (`ranks`); an `order()` it does not name keeps declining where SQL has no
+   * comparator.
+   */
+  readonly rankedOrders?: RankedOrders;
 }
 
 /**
@@ -2976,7 +3079,11 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   seed: opts.seed ?? null,
   rawListElements: opts.rawListElements ?? false,
   writes: opts.writes ?? null,
+  rankedOrders: opts.rankedOrders ?? NO_RANKED_ORDERS,
 });
+
+/** No `order()` ranked through JS — every lowering but a ranked-order barrier's two statements. */
+const NO_RANKED_ORDERS: RankedOrders = new Map();
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
@@ -3762,7 +3869,7 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, rankedOrders } = settle(opts);
   const facts = analyzeChain(steps as IRStep[]);
   return {
     facts,
@@ -3772,6 +3879,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
       writes: writes ?? programWrites(steps, params),
+      rankedOrders,
     },
   };
 }

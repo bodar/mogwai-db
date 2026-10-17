@@ -208,9 +208,10 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter, wit
  * `L` label array, recorded because `ChainFacts.demandsPathLabels` gated the labels on), keep only the
  * positions between the LAST position carrying `from` and the LAST carrying `to` (inclusive), which is
  * exactly the reference's backward scan. A null modulator defaults to the path's start / end. A
- * from-label that is never found leaves its bound NULL, so the `BETWEEN` excludes every row — an empty
- * sub-path rather than the reference's throw, which is fail-CLOSED (no corpus reaches the not-found case,
- * where every `from`/`to` names a bound `as()`).
+ * from-label that is never found would leave its bound NULL and keep no position — an EMPTY sub-path
+ * where the reference THROWS, as it does for a from-position after the to-position. Neither reaches
+ * here: `compilePlan` declines every sub-path it cannot prove locatable on every traverser
+ * (`unlocatableSubPath`, `ir/labels.ts`).
  */
 export function subPathMembers(members: Rel, from: string | undefined, to: string | undefined, fresh: Minter): Rel {
   const pv = col(members.id, 'pv');

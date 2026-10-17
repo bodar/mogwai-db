@@ -13,6 +13,7 @@ import { untyped } from './untyped.ts';
 import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
+import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from './json-exact.ts';
 
 // ---- GraphBinary v4 result framing ----
 // This module is CONCERN B — execute + frame. `executeQuery` compiles a traversal,
@@ -265,6 +266,8 @@ function setBuffer(items: Buffer[]): Buffer {
 
 function frameTypedNode(node: FrameNode): Buffer {
   if (node == null) return frameValue(null, undefined);
+  // An untagged number past 2^53 the list framer kept exact (`exactNumberBuffer`).
+  if (isExactNumber(node)) return exactNumberBuffer(node);
   // A BARE member: the producer omitted the envelope because the storage class already
   // determines the type (a fold whose members are all string/int/long/double — see
   // barrier.ts foldMember). Infer from the JS value, which is exactly what the envelope
@@ -307,9 +310,12 @@ function frameTypedNode(node: FrameNode): Buffer {
   // `real` so a whole-number mean (`30.0`) frames as a Double rather than the Int magnitude inference
   // would pick. A null tag infers, unchanged.
   const tag: string | null = node.t;
+  // A leaf value `parseExactJson` kept as its source text frames from that text — the tag names the class.
+  const value = isExactNumber(node.v) ? node.v.rawJSON : node.v;
   const as = vtypeToValueType(tag);
-  if (as !== undefined) return frameValue(node.v, as);
-  return tag != null ? sumBuffer(node.v, tag) : frameValue(node.v, undefined);
+  if (as !== undefined) return frameValue(value, as);
+  if (tag != null) return sumBuffer(value, tag);
+  return isExactNumber(node.v) ? exactNumberBuffer(node.v) : frameValue(value, undefined);
 }
 
 // A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed
@@ -402,8 +408,13 @@ function pathGroupedBuffers(rows: any[], elem: ElemShape, byKey?: boolean): Buff
 // typeof(): 'real' → Double even when whole, e.g. 1.0; 'integer' → Int/Long by
 // magnitude via NumberSerializationStrategy). Mirrors TinkerPop sum() typing —
 // int props sum to Int/Long (d[123].i), double props to Double (d[1.0].d).
-function sumBuffer(v: number, storageClass: string): Buffer {
-  return storageClass === 'real' ? ioc.doubleSerializer.serialize(v, true) : ioc.anySerializer.serialize(v);
+function sumBuffer(v: number | string, storageClass: string): Buffer {
+  if (storageClass === 'real') return ioc.doubleSerializer.serialize(Number(v), true);
+  // An INTEGER past 2^53 rides as decimal TEXT (`build.ts` `asExactWideInt` — a JS number would round it);
+  // SQLite's INTEGER is an int64, so it is a `Long`, reconstructed exactly. `anySerializer` would frame
+  // the text as a String (`local(…sum()).fold()` answered `["9007199254740997", …]`).
+  if (storageClass === 'integer' && typeof v === 'string') return ioc.longSerializer.serialize(BigInt(v), true);
+  return ioc.anySerializer.serialize(v);
 }
 
 // count()/groupCount() results are Java Longs → GraphBinary Int64 (0x02), which the client decodes
@@ -476,11 +487,21 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
   }
 }
 
+// A list member whose type the compile did not know rides SQLite's JSON bare, and past 2^53 `JSON.parse`
+// would round it (the wire then carries a number nobody stored). The list framer parses with
+// `parseExactJson` (`json-exact.ts`), which keeps such a number as its source text — re-stringifying
+// exactly through the nested-list arm's `JSON.stringify(inner)` — and each leaf frames it here: an
+// integral spelling is SQLite's INTEGER, an int64, so a `Long`; any other spelling a `Double`.
+function exactNumberBuffer(x: ExactNumber): Buffer {
+  const { integral, text } = exactNumberOf(x);
+  return integral ? ioc.longSerializer.serialize(BigInt(text), true) : ioc.doubleSerializer.serialize(Number(text), true);
+}
+
 // Frame one JSON list value by its item shape — shared by the list-VALUE shapes and a
 // variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
 // (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
 function listItemBuffers(json: string, of: ListOf): Buffer[] {
-  const items = JSON.parse(json);
+  const items = parseExactJson(json);
   if (of.kind === 'elem') return items.map(of.elem === 'edge' ? rowEdge : rowVertex);
   if (of.kind === 'property') return items.map(framePropertyRow);
   if (of.kind === 'scalar') {
@@ -489,8 +510,8 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
     // an unknown type infers from the JS value (correct for the storage-class-determined three).
     const as = staticTypeOf(of.type);
     return hasTypedMembers(of) ? items.map(frameTypedNode)
-      : as ? items.map((x: any) => frameValue(x, as))
-        : items.map((x: any) => ioc.anySerializer.serialize(x));
+      : as ? items.map((x: any) => frameValue(isExactNumber(x) ? x.rawJSON : x, as))
+        : items.map((x: any) => (isExactNumber(x) ? exactNumberBuffer(x) : ioc.anySerializer.serialize(x)));
   }
   // A MIXED list: every member is a self-describing {t,v} envelope (a vertex, an edge, a scalar leaf),
   // so the ONE typed-node rule frames each by its own tag — the same rule a typed scalar list's members
@@ -1174,10 +1195,10 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
   // materialized the whole parent tuple to reach the same one field.
   if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
-  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list) }));
+  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same
   // encoding the `map` column carries (a global `order()` over a map stream reads it, `orderMapStreamValue`).
-  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: JSON.parse(r.map) }));
+  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: JSON.parse(r.map), injectedText: r.map }));
   // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
   // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
   // not framed). `injVal` is absent on a source-form head (which never reaches this method).

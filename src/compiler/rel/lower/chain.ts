@@ -204,6 +204,9 @@ export interface ChainCtx extends FilterCtx {
    * different array, and the consumer declines.
    */
   readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
+   *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
+  readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;
 }
 
 /**

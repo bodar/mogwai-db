@@ -1,12 +1,13 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
+import { sideEffectShadowedLabel, unlocatableSubPath } from './ir/labels.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { labelRegime } from '../api.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { compileViaRel, loweringOptions } from './rel/spine.ts';
-import { segmentPlan } from './rel/segment.ts';
+import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
@@ -53,6 +54,15 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const sideEffectPolicies = extractSideEffectPolicies(tree, params);
   const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
   if (steps.length === 0) throw new Error('empty traversal');
+  // A path label a SIDE EFFECT shadows is read as the side effect by every `Scoping` step, and every
+  // label reader the lowering has reads the alias map instead — so the traversal declines here, once,
+  // for all of them (`sideEffectShadowedLabel`).
+  if (sideEffectShadowedLabel(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]) !== null)
+    throw new UnsupportedTraversal(gremlin);
+  // A `from()`/`to()` sub-path the reference may THROW on (an absent or misordered label) declines here,
+  // once, for every path-family host (`unlocatableSubPath`) — the lowering's sub-path would answer an
+  // empty path instead.
+  if (unlocatableSubPath(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
   // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,
@@ -82,13 +92,19 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // decline it — correctly, since there is nothing to lower at compile time — which would read as
   // uncovered vocabulary. What the algebra cannot express and what the executor has not yet fetched
   // are different facts, and only this one has a boundary to build.
-  const segment = segmentPlan(steps, {
+  const segmentRequest = {
     services: relRequest.services, params: request.params, federationDepth: request.federationDepth,
     lowering: loweringOptions(relRequest, request.params, sideEffects),
-  });
+  };
+  const segment = segmentPlan(steps, segmentRequest);
   if (segment) return segment;
 
   const compiled = compileViaRel(relRequest, steps, request.params, sideEffects);
+  // A GLOBAL `order()` whose key SQL has no comparator for (a list/map/path — TinkerPop 4 ORDERABILITY)
+  // is a ranked-order BARRIER, asked only now so no chain SQL already answers changes plan. A `discard()`
+  // is applied to a single statement, which a segment is not, so it keeps declining.
+  const ranked = compiled || discard ? null : rankedOrderPlan(steps, segmentRequest);
+  if (ranked) return ranked;
   // A DECLINE IS NOW THE ANSWER, not a route change. While two spines existed a `null` here meant
   // "the other one owns this"; with one spine it means the compiler cannot lower this traversal, and
   // saying so plainly is the only honest thing left to do with it. It is an ordinary query failure —

@@ -27,6 +27,13 @@ export const CF_MAX_BINDS = 100;
 /** Cloudflare DO SQLite: maximum length of a SQL statement, in BYTES (UTF-8). */
 export const CF_MAX_SQL_BYTES = 100 * 1024;
 
+/** Cloudflare DO SQLite: maximum size of one string or BLOB VALUE, in bytes (the documented "maximum
+ *  string, BLOB or table row size", 2 MB). The bind-count rule pushes every data-sized set into ONE
+ *  `json_each(?)` value, so that value's SIZE is the wall a large set meets next — a ranked-order
+ *  barrier's ranking (`compiler/rel/ranked-order.ts`), a federated landing, a `within()` set — and on
+ *  Bun, whose value cap is ~1 GB, it is as invisible as the bind cap was. */
+export const CF_MAX_VALUE_BYTES = 2 * 1024 * 1024;
+
 /** UTF-8 is at most 3 bytes per UTF-16 code unit (a 4-byte codepoint costs two units), so a string
  *  shorter than this cannot possibly exceed the byte cap and needs no encode. */
 const NO_ENCODE_BELOW = Math.floor(CF_MAX_SQL_BYTES / 3);
@@ -52,7 +59,20 @@ export function cfLimitViolation(sql: string, binds: readonly unknown[]): string
   const bytes = sqlBytes(sql);
   if (bytes > CF_MAX_SQL_BYTES)
     return `statement exceeds Cloudflare's ${CF_MAX_SQL_BYTES}-byte text limit: ${bytes} bytes in ${describe(sql)}`;
+  for (const [at, bind] of binds.entries()) {
+    const size = valueBytes(bind);
+    if (size > CF_MAX_VALUE_BYTES)
+      return `bind ${at + 1} exceeds Cloudflare's ${CF_MAX_VALUE_BYTES}-byte value limit: ${size} bytes in ${describe(sql)}`;
+  }
   return null;
+}
+
+/** A bind's stored size: a string's UTF-8 bytes (encoding only when the 3-bytes-per-unit bound cannot
+ *  settle it), a BLOB's length, and 0 for a number/null, which cannot approach the cap. */
+function valueBytes(bind: unknown): number {
+  if (typeof bind === 'string') return bind.length * 3 <= CF_MAX_VALUE_BYTES ? bind.length : encoder.encode(bind).length;
+  if (bind instanceof Uint8Array || bind instanceof ArrayBuffer) return bind.byteLength;
+  return 0;
 }
 
 const describe = (sql: string): string => (sql.length > 160 ? `${sql.slice(0, 160)}…` : sql);

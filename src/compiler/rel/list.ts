@@ -1043,7 +1043,13 @@ export function foldScalars(
   // CORRELATED fold (`scalarChild`'s list arm), whose `EXISTS`-shaped hop mints no encounter, so without
   // this its `json_group_array` is SCAN order — right by luck, wrong under `test:perturbed`. Only the
   // no-encounter branch is new, so an ordinary fold's SQL is byte-unchanged.
-  const order = foldOrder(flagged, opts.order, 'v');
+  // The VALUE order is a TOTAL order on the members only once the type breaks a tie: two members equal in
+  // storage (`1` an `int`, `1` a `long`) are different envelopes, and left to SQLite's scan they could
+  // fold in either order — a list two statements over one graph would spell two ways (the ranked-order
+  // barrier joins its head and its resume on exactly that text, `ranked-order.ts`).
+  const order = opts.order?.length || !vtypeCol
+    ? foldOrder(flagged, opts.order, 'v')
+    : [...foldOrder(flagged, opts.order, 'v'), { expr: col(flagged.id, vtypeCol), dir: 'asc' as const }];
   // A PER-ROW member envelopes when the whole list is lossy (any member's type does not survive its
   // storage class — now including `double`, whose whole-number members would infer back as Int and whose
   // 17-digit members would lose a bit), else stays bare (the remaining lossless types — `string`/`int` —

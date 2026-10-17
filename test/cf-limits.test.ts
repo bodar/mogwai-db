@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { CfLimitedSql, CF_MAX_BINDS, CF_MAX_SQL_BYTES, cfLimitViolation } from '../src/cf-limits.ts';
+import { CfLimitedSql, CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES, cfLimitViolation } from '../src/cf-limits.ts';
 import { executeQuery } from './support/executor.ts';
 import { compile } from '../src/compiler/compiler.ts';
 import { lowerForeignResume } from '../src/compiler/rel/lower.ts';
@@ -39,6 +39,17 @@ describe('cfLimitViolation — the DO statement contract', () => {
     expect(multibyte.length).toBeLessThan(CF_MAX_SQL_BYTES);
     expect(cfLimitViolation(multibyte, [])).toMatch(/exceeds Cloudflare's \d+-byte text limit/);
     expect(cfLimitViolation('SELECT 1', [])).toBeNull();
+  });
+
+  test('one bound VALUE is capped in bytes — the wall a single json_each(?) set meets next', () => {
+    // The ranked-order ranking, a federated landing and a data-sized within() each cross as ONE JSON
+    // bind, so the bind COUNT stays O(plan) and the value's SIZE is what can still grow with the data.
+    expect(cfLimitViolation('SELECT ?', ['x'.repeat(CF_MAX_VALUE_BYTES)])).toBeNull();
+    expect(cfLimitViolation('SELECT ?, ?', [1, 'x'.repeat(CF_MAX_VALUE_BYTES + 1)]))
+      .toMatch(/bind 2 exceeds Cloudflare's \d+-byte value limit/);
+    // Bytes, not characters: a multibyte string under the cap in units is over it in UTF-8.
+    expect(cfLimitViolation('SELECT ?', ['é'.repeat(CF_MAX_VALUE_BYTES / 2 + 1)])).toMatch(/value limit/);
+    expect(cfLimitViolation('SELECT ?', [new Uint8Array(CF_MAX_VALUE_BYTES + 1)])).toMatch(/value limit/);
   });
 
   test('the decorator gates query() and exec(), and passes ordinary traffic through', () => {

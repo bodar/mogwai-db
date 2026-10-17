@@ -1,7 +1,7 @@
 import type { Step } from '../../gremlin/frontend.ts';
 import type { BarrierInput } from '../../services/spi/types.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
-import type { Plan, SegmentPlan } from '../segment.ts';
+import { ResumeGap, type Plan, type SegmentPlan } from '../segment.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 import { finishLowering } from './spine.ts';
 
@@ -45,7 +45,9 @@ export function mapHead(lowered: RelLowering | null): Compiled | null {
  */
 export function buildValueTransformSegment(
   steps: readonly Step[], at: number, lowering: Lowering,
-  transform: (value: unknown) => unknown,
+  // `text` is the head's JSON text for a collection head (`BarrierInput.injectedText`) — a transform that
+  // COMPARES or RENDERS members reads it exactly (`parseExactJson`); one that only reshapes ignores it.
+  transform: (value: unknown, text?: string) => unknown,
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
@@ -53,18 +55,24 @@ export function buildValueTransformSegment(
   // its HEAD with an option the RESUME must not inherit — `order`/`dedup(Scope.local)`'s `rawListElements`,
   // which frames element members as rowids for the round-trip but must NOT reach the resume's wire read.
   headOpts: Lowering = lowering,
+  // Re-plan the tail as a NESTED segment rooted at the transformed values where the fold path cannot
+  // (the tail holds ANOTHER barrier — `order(local).by(values).order(local).by(keys)`). The stream
+  // shell's `nest`, for the per-row shell.
+  nest?: (transformed: readonly unknown[]) => Plan | null,
 ): SegmentPlan | null {
   const head = headOf(lowerToRel(steps.slice(0, at), headOpts));
-  if (!head) return null;
+  if (!head || !resumable(steps, at, lowering, resume, nest)) return null;
   return {
     kind: 'segment',
     mode: 'sync',
     head,
     resume: (headRows: readonly BarrierInput[]): Plan => {
-      const transformed = headRows.map((row) => transform(row.injectedValue));
+      const transformed = headRows.map((row) => transform(row.injectedValue, row.injectedText));
       const resumed = resume(transformed, steps, at + 1, lowering);
-      if (!resumed) throw new Error(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
-      return { kind: 'sql', compiled: finishLowering(resumed) };
+      if (resumed) return { kind: 'sql', compiled: finishLowering(resumed) };
+      const nested = nest?.(transformed);
+      if (nested) return nested;
+      throw new ResumeGap(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
     },
   };
 }
@@ -79,7 +87,8 @@ export function buildValueTransformSegment(
  */
 export function buildValueStreamTransformSegment(
   steps: readonly Step[], at: number, lowering: Lowering,
-  streamTransform: (values: readonly unknown[]) => readonly unknown[],
+  // `texts[i]` is `values[i]`'s head JSON text (`BarrierInput.injectedText`) — see the per-row shell.
+  streamTransform: (values: readonly unknown[], texts: readonly (string | undefined)[]) => readonly unknown[],
   resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
   label: string,
   headOf: (lowered: RelLowering | null) => Compiled | null = valueHead,
@@ -90,13 +99,13 @@ export function buildValueStreamTransformSegment(
   headOpts: Lowering = lowering,
 ): SegmentPlan | null {
   const head = headOf(lowerToRel(steps.slice(0, at), headOpts));
-  if (!head) return null;
+  if (!head || !resumable(steps, at, lowering, resume, nest)) return null;
   return {
     kind: 'segment',
     mode: 'sync',
     head,
     resume: (headRows: readonly BarrierInput[]): Plan => {
-      const transformed = streamTransform(headRows.map((row) => row.injectedValue));
+      const transformed = streamTransform(headRows.map((row) => row.injectedValue), headRows.map((row) => row.injectedText));
       // The fold path first (the common case — a plain SQL tail). It declines (null) only when the tail
       // holds ANOTHER barrier, which the ordinary fold cannot lower; `nest` then re-plans the tail as a
       // NESTED segment rooted at the re-injected values (§ Lowering.seed) — `order().fold().asString(local)`.
@@ -104,7 +113,29 @@ export function buildValueStreamTransformSegment(
       if (resumed) return { kind: 'sql', compiled: finishLowering(resumed) };
       const nested = nest?.(transformed);
       if (nested) return nested;
-      throw new Error(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
+      throw new ResumeGap(`${label}() barrier resume: no lowering covers the traversal after ${label}()`);
     },
   };
+}
+
+/**
+ * Can the resume be planned at all — asked at COMPILE time, before any head has run, so a tail no lowering
+ * covers DECLINES (the ordinary `UnsupportedTraversal`) instead of raising after the head's statement.
+ * Planning over ZERO values is the very plan the resume builds: every re-injected seed crosses as ONE
+ * `json_each` bind (`valueSeed`/`listSeed`/`mapSeed`, `lower.ts`), so the plan's shape is independent of
+ * the values the transform computes. The ranked-order barrier asks the same question of its rest
+ * (`buildRankedOrderSegment`). Only a `ResumeGap` is a decline; any other throw is a lowering defect.
+ */
+function resumable(
+  steps: readonly Step[], at: number, lowering: Lowering,
+  resume: (values: readonly unknown[], steps: readonly Step[], from: number, opts: Lowering) => RelLowering | null,
+  nest?: (transformed: readonly unknown[]) => Plan | null,
+): boolean {
+  if (resume([], steps, at + 1, lowering)) return true;
+  try {
+    return !!nest?.([]);
+  } catch (error) {
+    if (error instanceof ResumeGap) return false;
+    throw error;
+  }
 }

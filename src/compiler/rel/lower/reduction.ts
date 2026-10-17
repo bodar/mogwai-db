@@ -12,11 +12,11 @@ import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit } from '../const.ts';
-import { byExpr, propertyExists, propertyVtype } from '../modulator.ts';
+import { byExpr, propertyExists, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
-import { framingCols, type RelFraming } from '../framing.ts';
+import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
@@ -848,16 +848,28 @@ export function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extr
  * named, whatever the current host is.
  *
  * The mechanism is entirely `aliasProjection`'s: `Scoping.getScopeValue` resolves a label off the
- * traverser's scope, and for an element/scalar/property host that scope IS the `HostRow`'s alias map
- * (a record host's own MAP SCOPE beats the labels, so `recordTail` answers select there and this arm
- * declines it). An element alias becomes an element host, a value alias a scalar host carrying the
- * label's per-row type where it had one; a list/Pop history is a later phase and declines with the
- * same `null` an absent or non-live label gives — fail closed, never a guess off the wrong row.
+ * traverser's scope, and for an element/scalar/property host that scope IS the `HostRow`'s alias map.
+ * An element alias becomes an element host, a value alias a scalar host carrying the label's per-row
+ * type where it had one; a list/Pop history is a later phase and declines with the same `null` an absent
+ * or non-live label gives — fail closed, never a guess off the wrong row.
+ *
+ * A RECORD host's own MAP SCOPE beats the labels (`Scoping.getScopeValue` tries `traverser.get()` as a
+ * `Map` first — `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-131`),
+ * so `select("v","s").order().by(__.select("v").values("name"))` re-roots to the record's `v` FIELD. That
+ * resolution order is `scopedHost`'s (`modulator.ts`) — the one authority the `math`/`format` scope reads
+ * use too — so it is delegated, not restated. A field the record may LACK on some rows (`optional`, a
+ * non-productive `project().by()`) is a per-row map-vs-label decision this static re-root cannot make, so
+ * it declines; a Pop-qualified select names a path history a map key does not have, so it declines too.
  */
 export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): ChildHost | null {
-  if (host.kind === 'record' || !host.row || step.modulators?.length) return null;
+  if (!host.row || step.modulators?.length) return null;
   const spec = selectSpec(step);
   if (!spec || spec.labels.length !== 1) return null;
+  if (host.kind === 'record') {
+    const label = spec.labels[0]!;
+    if (spec.pop !== 'last' || fieldNamed(host.fields, label)?.optional) return null;
+    return scopedHost(label, host);
+  }
   const proj = aliasProjection(host.row.rel, host.row.aliases, spec.labels[0]!, spec.pop, fresh);
   if (!proj) return null;
   const row = { row: host.row } as const;

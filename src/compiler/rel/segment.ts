@@ -1,5 +1,5 @@
 import type { IRStep } from '../ir/strategies.ts';
-import type { AsyncSegmentPlan, Plan, SegmentPlan } from '../segment.ts';
+import { ResumeGap, type AsyncSegmentPlan, type Plan, type SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
 import { isTraversalParam, parseCallSpec } from '../../services/params/call-params.ts';
 import { contentDemand, pushableTailPrefix } from '../ir/content-demand.ts';
@@ -21,7 +21,7 @@ import { finishLowering } from './spine.ts';
 import { buildRegexSegment, regexBarrierIn } from './regex.ts';
 import { buildReverseSegment, reverseBarrierIn } from './reverse.ts';
 import { buildSplitSegment, splitBarrierIn } from './split.ts';
-import { buildOrderDedupSegment, buildOrderGlobalSegment, orderDedupBarrierIn, orderGlobalBarrierIn } from './order-dedup-local.ts';
+import { buildOrderDedupSegment, buildOrderGlobalSegment, buildRankedOrderSegment, orderDedupBarrierIn, orderGlobalBarrierIn } from './order-dedup-local.ts';
 import { asStringBarrierIn, buildAsStringSegment } from './asstring-barrier.ts';
 import { buildCastSegment, castBarrierIn } from './cast-barrier.ts';
 import type { Elem } from '../elem.ts';
@@ -417,13 +417,17 @@ function freshMapValuesParam(params: Record<string, any>): string {
  * (`BarrierInput`), so materializing each parent's id, label set and property bag to reach it was work
  * whose only consumer threw it away. What the resume needs from the parents is equally narrow: the
  * values to match on, and how many there are.
+ *
+ * `odFrom` is where the order/dedup(Scope.local) scan starts — past an ENTRY-modulated `order(local)`
+ * whose head turned out not to be a map (`orderDedupBarrierIn`), so that step is left to the inline fold
+ * and a LATER barrier is still found.
  */
-export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): SegmentPlan | null {
+export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest, odFrom = 0): SegmentPlan | null {
   const call = barrierIn(steps, request);
   const regex = regexBarrierIn(steps);
   const reverseAt = reverseBarrierIn(steps);
   const split = splitBarrierIn(steps);
-  const orderDedup = orderDedupBarrierIn(steps);
+  const orderDedup = orderDedupBarrierIn(steps, odFrom);
   const orderGlobal = orderGlobalBarrierIn(steps);
   const asStr = asStringBarrierIn(steps, request.lowering);
   const cast = castBarrierIn(steps, request.lowering);
@@ -453,7 +457,17 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   if (earliest === revAt) return buildReverseSegment(steps, reverseAt!, request.lowering);
   // order/dedup(Scope.local) over a NESTED scalar list — declines (→ inline fold) for a scalar/flat-list or
   // element-membered head.
-  if (earliest === odAt) return buildOrderDedupSegment(steps, orderDedup!.at, orderDedup!.op, request.lowering);
+  if (earliest === odAt) {
+    const built = buildOrderDedupSegment(steps, orderDedup!.at, orderDedup!.op, request.lowering, orderDedup!.comparators,
+      // The same nested re-plan the global order barrier below takes, so a second barrier in the tail
+      // (`order(local).by(values).order(local).by(keys)`) is reached rather than raised.
+      (tail, seed) => planOf(tail, { ...request, lowering: { ...request.lowering, seed } }));
+    // An ENTRY-modulated `order(local)` (`by(Order.desc)`, `by(Column.keys)`) is this barrier's only over a
+    // MAP head; over any other head it is the inline fold's, so the scan resumes PAST it rather than
+    // declining a chain whose later barrier (a `split()`, a nested-list `order(local)`) answers it.
+    if (built || !orderDedup!.comparators.length) return built;
+    return segmentPlan(steps, request, orderDedup!.at + 1);
+  }
   // A GLOBAL bare order() over a LIST stream — declines (→ inline SQL fold) for a scalar/element head, so a
   // scalar `values().order()` stays in SQL untouched.
   if (earliest === ogAt) return buildOrderGlobalSegment(steps, orderGlobal!.at, request.lowering,
@@ -474,6 +488,18 @@ export function segmentPlan(steps: readonly IRStep[], request: SegmentRequest): 
   return call!.at === 0 ? sourceSegment(steps, call!, request) : midSegment(steps, call!, request);
 }
 
+/**
+ * THE RANKED-ORDER FALLBACK — a chain the ordinary lowering could not cover, planned as a ranked-order
+ * barrier (`buildRankedOrderSegment`) where a GLOBAL `order()` in it had no SQL comparator; `null` where
+ * no such `order()` was the reason. Asked only AFTER the plain lowering failed, so it never changes the
+ * plan of a chain SQL already answers. Its resume is the WHOLE chain re-planned through `planOf` under
+ * the extended ranking, so a barrier AFTER the `order()` (a `reverse()`, a second ranked `order()`) is
+ * reached the ordinary way — its head now lowers, because the ranking travels in the lowering options.
+ */
+export function rankedOrderPlan(steps: readonly IRStep[], request: SegmentRequest): Plan | null {
+  return buildRankedOrderSegment(steps, request.lowering, (lowering) => planOf(steps, { ...request, lowering }));
+}
+
 /** A resumed chain to its `Plan` — another segment if the tail STILL holds a barrier (a second regex,
  *  a chained OLAP `call()` such as `pageRank().connectedComponent()`), else the SQL compile. A resume
  *  CANNOT decline: the prior barrier has already run, so a tail the lowering cannot cover RAISES rather
@@ -483,7 +509,9 @@ function planOf(steps: readonly IRStep[], request: SegmentRequest): Plan {
   const segment = segmentPlan(steps, request);
   if (segment) return segment;
   const lowered = lowerToRel(steps, request.lowering);
-  if (!lowered) throw new Error('barrier resume: no lowering covers the traversal after the barrier — push the unsupported step into the sub-traversal the service runs, or file it as a resume gap');
+  const ranked = lowered ? null : rankedOrderPlan(steps, request);
+  if (ranked) return ranked;
+  if (!lowered) throw new ResumeGap('barrier resume: no lowering covers the traversal after the barrier — push the unsupported step into the sub-traversal the service runs, or file it as a resume gap');
   return { kind: 'sql', compiled: finishLowering(lowered) };
 }
 

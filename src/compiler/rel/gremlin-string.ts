@@ -15,6 +15,8 @@
 // there — that is an allowed semantic-equivalence deviation, not a defect (the element/scalar/string/list
 // forms the corpus exercises are exact).
 
+import { exactNumberOf, isExactNumber } from '../../json-exact.ts';
+
 /** A vertex `v[<id>]`, an edge `e[<id>][<src>-<label>-><tgt>]` — `StringFactory.vertexString`/`edgeString`,
  *  off an expanded element object whose ids are already the OUTWARD ids. An edge is the one carrying
  *  endpoints; a vertex's multi-label array plays no part in its `toString`. */
@@ -49,6 +51,12 @@ export function gremlinString(node: unknown): string {
   if (node === null || node === undefined) return 'null';
   if (typeof node === 'string') return node;
   if (typeof node === 'number' || typeof node === 'bigint' || typeof node === 'boolean') return String(node);
+  // A number past 2^53 the barrier read exactly (`parseExactJson`, `json-exact.ts`): a `Long` prints its
+  // exact decimal text, a `Double` as JS renders the number (the whole-number-double deviation above).
+  if (isExactNumber(node)) {
+    const { integral, text } = exactNumberOf(node);
+    return integral ? text : String(Number(text));
+  }
   if (Array.isArray(node)) return `[${node.map(gremlinString).join(', ')}]`;
   if (typeof node === 'object') {
     const o = node as Record<string, unknown>;

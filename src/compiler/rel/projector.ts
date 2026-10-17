@@ -83,10 +83,9 @@ const CURRENT = '_';
  * this; the registry the front-end extracted rides on the seam (`ChildSeam.sideEffects`), and a
  * `withSideEffect` seed is a compile-time constant, so it inlines at zero bind cost.
  *
- * ⚠️ Called only after `scopedHost` misses, so a name that is BOTH a live path label and a side-effect
- * reads as the LABEL here where the reference would read the side-effect. No corpus scenario overlaps
- * the two namespaces; a strict pre-check would have to split `scopeValue`'s map/path lookup, which the
- * one pathological case does not earn.
+ * Called only after `scopedHost` misses, which is sound because a name that is BOTH a path label and a
+ * side effect never reaches a lowering: `compilePlan` declines it up front (`sideEffectShadowedLabel`,
+ * `ir/labels.ts`), for this reader and every other scope reader at once.
  */
 const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
   child.sideEffects.has(name) ? constLit(arg(child.sideEffects.get(name))) : null;

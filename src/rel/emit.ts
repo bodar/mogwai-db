@@ -8,6 +8,7 @@ import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
+import { exprChildren, forEachExpr } from './walk.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -49,6 +50,75 @@ export interface Step { readonly binding?: string; readonly result: boolean; rea
  */
 
 const ident = (name: string): Expression => identifier(name);
+
+/**
+ * Every relation QUALIFIER a rendered SQL fragment names — the `x` of each `x.col` (bare or
+ * double-quoted, as `identifier` spells it), in `identifier`'s own spelling.
+ *
+ * A TOKENIZER, not a pattern over the text: a qualifier is an IDENTIFIER token followed by `.`, and
+ * only SQLite's own lexical rules say which characters are an identifier. Above all a string literal
+ * is data — `concat("u17.")` inlines `'u17.'`, which a pattern read as a reference to the minted alias
+ * `u17` (and so mis-anchored an aggregate: `g.V().order().by(__.label().concat("u17.").fold())`
+ * collapsed six hosts into one). So the scan steps OVER every token SQLite does not resolve as a name
+ * — a `'…'` string (and the `X'…'` blob after its `X`), a number, a `--`/`/* … *​/` comment — and
+ * reads the three quoted-identifier forms (`"…"`, `[…]`, `` `…` ``) as identifiers
+ * (https://sqlite.org/lang_keywords.html). An identifier preceded by `.` is a COLUMN of a qualified
+ * name (`x.col.` cannot occur), never a qualifier.
+ */
+function qualifiers(sql: string): readonly string[] {
+  const out: string[] = [];
+  const n = sql.length;
+  let i = 0;
+  let afterDot = false;
+  const closing = (open: string): string => (open === '[' ? ']' : open);
+  while (i < n) {
+    const c = sql[i]!;
+    if (c === "'") {
+      // A string literal: `''` is an escaped quote, the first lone `'` closes it.
+      i++;
+      while (i < n) { if (sql[i] === "'") { if (sql[i + 1] === "'") { i += 2; continue; } i++; break; } i++; }
+      afterDot = false;
+      continue;
+    }
+    if (c === '-' && sql[i + 1] === '-') { const end = sql.indexOf('\n', i); i = end < 0 ? n : end + 1; continue; }
+    if (c === '/' && sql[i + 1] === '*') { const end = sql.indexOf('*/', i + 2); i = end < 0 ? n : end + 2; continue; }
+    if (c === '"' || c === '[' || c === '`') {
+      const close = closing(c);
+      const start = i;
+      i++;
+      while (i < n) {
+        if (sql[i] === close) { if (close !== ']' && sql[i + 1] === close) { i += 2; continue; } i++; break; }
+        i++;
+      }
+      const token = sql.slice(start, i);
+      if (!afterDot && sql[i] === '.') out.push(token);
+      afterDot = false;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const start = i;
+      while (i < n && /[A-Za-z0-9_$]/.test(sql[i]!)) i++;
+      const token = sql.slice(start, i);
+      if (!afterDot && sql[i] === '.') out.push(token);
+      afterDot = false;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(sql[i + 1] ?? ''))) {
+      // A numeric literal, its fraction and exponent included (`1.5e+10`, `0x1F`) — never a name.
+      i++;
+      while (i < n && /[0-9A-Za-z_.]/.test(sql[i]!)) {
+        if ((sql[i] === 'e' || sql[i] === 'E') && (sql[i + 1] === '+' || sql[i + 1] === '-')) i++;
+        i++;
+      }
+      afterDot = false;
+      continue;
+    }
+    // Any other character — an operator, punctuation, whitespace — ends the token in hand.
+    afterDot = c === '.';
+    i++;
+  }
+  return out;
+}
 const qualified = (alias: string, name: string): Expression => q`${ident(alias)}.${ident(name)}`;
 
 /** A FROM item: a table, a CTE name, a derived SELECT or a table-valued function, plus its alias. */
@@ -269,6 +339,35 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const outMap = (b: Block): Cols => new Map(b.select);
 
   /**
+   * Would SQL evaluate one of these aggregates in an ENCLOSING query rather than over this block's rows?
+   *
+   * SQL's rule: an aggregate belongs to the innermost query whose FROM supplies a column its arguments
+   * (its `ORDER BY` and `FILTER` included, and columns read inside a nested subquery too) reference. One
+   * whose argument is spelled entirely out of an OUTER query's columns is therefore that outer query's
+   * aggregate — measured on SQLite 3.51: `SELECT (SELECT json_group_array(t.a) FROM (VALUES (1)) u) FROM t`
+   * returns ONE row `[1,2,3]`, not one `[a]` per row. The algebra never means that: an `Aggregate`
+   * reduces its own input. So this is a SPELLING check, asked of the block as fusion actually assembled it
+   * (a fused projection inlines its expression, which is how an input column comes to read only the
+   * outer row): the aggregate is UNANCHORED when it names a column of an enclosing block and none of this
+   * block's FROM items. An aggregate naming no column at all (`count(*)`, `sum(1)`) belongs to this block
+   * already. Text over the rendered SQL, because that is exactly what SQLite resolves; every alias the
+   * emitter writes is a minted, plan-unique identifier, so a qualifier names one relation.
+   */
+  const unanchoredAggregate = (aggs: readonly (readonly [string, Expr])[], b: Block, outer: Scope): boolean => {
+    const nodes: Expr[] = [];
+    aggs.forEach(([, e]) => forEachExpr(e, (node) => { if (node.kind === 'agg' && exprChildren(node).length) nodes.push(node); }));
+    if (!nodes.length) return false;
+    const local = new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
+    let enclosing: ReadonlySet<string> | undefined;
+    return nodes.some((node) => {
+      const named = qualifiers(render(expr(node, b.scope)).sql);
+      if (named.some((alias) => local.has(alias))) return false;
+      enclosing ??= new Set([...outer.values()].flatMap((cols) => [...cols.values()].flatMap((e) => qualifiers(render(e).sql))));
+      return named.some((alias) => enclosing!.has(alias));
+    });
+  };
+
+  /**
    * One side of a join, as FROM items this join can carry directly.
    *
    * `taken` is the load-bearing argument. Splicing a side lifts ITS aliases into this join's FROM,
@@ -336,7 +435,18 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'aggregate': {
-        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.aggregate);
+        // A FUSED input can spell an aggregate's whole argument out of OUTER columns — a `fold()` over a
+        // one-row `VALUES` whose fused projection is the host's own id (`identity().fold()`), or a
+        // correlated scalar of it (`label().fold()`). SQL then evaluates that aggregate in the OUTER query
+        // (`unanchoredAggregate`), so a fold meant per host collapses the whole host stream into one row.
+        // Closing the input as a derived table makes every input column a column of THIS block's FROM,
+        // which anchors the aggregate here — the one spelling with the algebra's meaning.
+        let b = inputBlock(r.input, outer, NEEDS_SUBQUERY.aggregate);
+        if (unanchoredAggregate(r.aggs, b, outer)) {
+          b = inputBlock(r.input, outer, () => true);
+          if (unanchoredAggregate(r.aggs, b, outer))
+            throw new Error(`RelIR emitter: aggregate '${r.id}' reads no column of its own input, so SQL would evaluate it in the enclosing query`);
+        }
         const groupBy = r.groupBy.map((e) => expr(e, b.scope));
         const keys = r.type.cols.slice(0, groupBy.length).map((column) => column.name);
         const select = [
