@@ -778,10 +778,25 @@ const VALUE_ROW_COLS: readonly ColMeta[] = [meta('o', 'int'), meta('v', 'any', t
  * tail) names an encoding a computed value is not promised to be in, so it is left to inference rather
  * than asserted.
  */
-const STATED_VTYPES: ReadonlySet<string> = new Set(['long', 'int', 'double', 'float', 'string']);
-const scalarVtype = (framing: RelFraming): Expr =>
-  framing.kind === 'scalar' && framing.type.kind === 'static' && !framing.type.text && STATED_VTYPES.has(framing.type.type)
-    ? compilerText(framing.type.type) : compilerNull('text');
+const STATED_VTYPES: ReadonlySet<string> = new Set(['byte', 'short', 'int', 'long', 'bigint', 'double', 'float', 'string']);
+/** The classes whose decimal-TEXT carrier IS their stored form — a wide `long`/`BigInteger` literal
+ *  stores exactly that text beside its tag (`storedScalar`, `gremlin/types.ts`). */
+const STATED_TEXT_VTYPES: ReadonlySet<string> = new Set(['long', 'bigint']);
+/**
+ * ...and `null` — DECLINE — for any other static tag. Storing such a value untyped did not leave it to
+ * inference; it RETYPED it: a NULL `vtype` reads back by storage class, so a computed `Byte`/`Short`, a
+ * `Date` (epoch millis) or a `Boolean` (0/1) came back an `Integer`, and a wide `long` carried as decimal
+ * TEXT came back a `String` (`property('n', __.values('age').asNumber(GType.BYTE))`). The source's type
+ * is carried until something naturally changes it (§6·7), and a write is not such a thing. A runtime KEY
+ * (`asKey`) is never stored as a value — its type check reads the framing itself (`runtimeKeyRows`) — so
+ * it takes no tag rather than declining.
+ */
+const scalarVtype = (framing: RelFraming, asKey = false): Expr | null => {
+  if (framing.kind !== 'scalar' || framing.type.kind !== 'static') return compilerNull('text');
+  const { type, text } = framing.type;
+  if ((text ? STATED_TEXT_VTYPES : STATED_VTYPES).has(type)) return compilerText(type);
+  return asKey ? compilerNull('text') : null;
+};
 
 /** The site of an ORDINARY `property()` step over `owners` — the body reads the element it writes. The
  *  traverser is the snapshot's position where the owners carry one, else the element id itself. */
@@ -1484,18 +1499,20 @@ const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes t
  * row stores (`runtimeKeyRows`).
  */
 function resolveValueRows(
-  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, fresh: Minter,
+  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, fresh: Minter, asKey = false,
 ): { readonly rel: Rel; readonly mayBeMulti: boolean; readonly framing: RelFraming } | null {
   const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
   if (rows && rows.framing.kind === 'scalar') {
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
     const reduced = rows.framing.result === 'number' && rows.rel.type.cols.some((column) => column.name === 'vt');
     const encounter = rows.rel.channels.find((channel) => channel.role === 'encounter');
+    const vt = typed ? col(rows.rel.id, 'vtype') : reduced ? reducedVtype(col(rows.rel.id, 'vt')) : scalarVtype(rows.framing, asKey);
+    if (!vt) return null;
     return {
       rel: make.project({
         id: fresh('rv'), input: rows.rel, channels: [], type: typeOf(...VALUE_ROW_COLS),
         exprs: [['o', col(rows.rel.id, rows.origin)], ['v', col(rows.rel.id, 'v')],
-          ['vt', typed ? col(rows.rel.id, 'vtype') : reduced ? reducedVtype(col(rows.rel.id, 'vt')) : scalarVtype(rows.framing)],
+          ['vt', vt],
           ['sq', encounter ? col(rows.rel.id, encounter.col) : compilerInt(0)]],
       }),
       mayBeMulti: true,
@@ -1506,10 +1523,12 @@ function resolveValueRows(
   const produced = child.scalar(body, host);
   if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !produced.present) return null;
   // A NUMERIC reducer's `vt` is either a Gremlin type or a storage class (`reducedVtype` says which).
-  const vt = produced.framing.result === 'number' ? (produced.vtype && reducedVtype(produced.vtype)) : produced.vtype;
+  const vt = (produced.framing.result === 'number' ? (produced.vtype && reducedVtype(produced.vtype)) : produced.vtype)
+    ?? scalarVtype(produced.framing, asKey);
+  if (!vt) return null;
   const valued = make.project({
     id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('present', 'int', true)),
-    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt ?? scalarVtype(produced.framing)],
+    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt],
       ['sq', compilerInt(0)], ['present', produced.present]],
   });
   const kept = make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: col(valued.id, 'present') });
@@ -1579,7 +1598,7 @@ function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter
  * one (`structure/util/ElementHelper.java:98-105`); the second is the one with portable text, so it is the one raised.
  */
 function runtimeKeyRows(body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter): Rel | null {
-  const resolved = resolveValueRows(body, site, child, fresh);
+  const resolved = resolveValueRows(body, site, child, fresh, true);
   if (!resolved) return null;
   absentGuard(site, resolved.rel, guard, fresh);
   const first = firstPerTraverser(resolved.rel, guard, fresh);
@@ -1919,6 +1938,7 @@ function mapFormStatements(
     const value = col(rel.id, fieldCol(field.prefix, 'v'));
     const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype'))
       : typeCol && typeCol.name === 'vt' ? reducedVtype(col(rel.id, fieldCol(field.prefix, 'vt'))) : scalarVtype(field.framing);
+    if (!vt) return false;
     const entry = make.project({
       id: fresh('mf'), input: rel, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
       exprs: [['o', col(rel.id, rows.origin)], ['v', value], ['vt', vt],

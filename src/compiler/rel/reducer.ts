@@ -1,4 +1,5 @@
 import { compilerInt, compilerNull, compilerText, type AggFn, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { raiseExpr } from '../../rel/raise.ts';
 import { REDUCER_CLASSES } from '../../gremlin/types.ts';
 
 /**
@@ -67,7 +68,8 @@ export function sumTower(sum: Expr, inputClass: 'long' | 'bigint'): { value: Exp
   return { value, type: compilerText(inputClass) };
 }
 
-/** The eligibility guard: the value where its storage class qualifies, NULL otherwise. */
+/** The eligibility guard: the value where its storage class qualifies, NULL otherwise. A TEXT value an
+ *  ARITHMETIC reducer meets is not quietly ineligible, though — `textRefused` raises over it. */
 const eligible = (value: Expr, reducer: Reducer): Expr => ({
   kind: 'case',
   whens: [[{
@@ -78,11 +80,58 @@ const eligible = (value: Expr, reducer: Reducer): Expr => ({
   }, value]],
 });
 
+/** The deferrals a reducer raises mid-statement (`raiseExpr`) — an answer the storage class cannot
+ *  decide. Short, because each is inlined in the statement; no quote, which `raiseExpr` cannot carry. */
+export const TEXT_OPERAND = 'sum/mean over a text value is not supported';
+export const MIXED_COMPARABLES = 'min/max over text mixed with numbers is not supported';
+
+/** `reduced`, unless `refuse` holds over the group — then a deferral. Each test is an AGGREGATE over the
+ *  rows (so it spells the value once, not once per arm of the guard), and the raise reads `count(*)`
+ *  only so it is not a constant expression (`raiseExpr`). */
+const refusedWhen = (refuse: Expr, message: string, reduced: Expr): Expr =>
+  ({ kind: 'case', whens: [[refuse, raiseExpr(message, { kind: 'agg', fn: 'count', args: [] })]], else: reduced });
+
+/**
+ * A `sum`/`mean` over a group holding TEXT declines. Dropping the text (the eligibility guard's NULL)
+ * answered the sum of the OTHER values, and the TEXT a reducer meets is not only a `String`: an int64
+ * past 2^53 rides as decimal TEXT (`storedScalar`, a `long` literal, `sumTower`), and so does a
+ * `BigInteger`/`BigDecimal`. The reference ADDS those exactly and throws on a `String` (`NumberHelper.add`
+ * takes `Number`s —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452`),
+ * so neither is "contributes nothing": `inject(1).union(__.constant(9007199254740992L), __.constant(2)).sum()`
+ * answered `2`. The storage class cannot tell the cases apart, so this declines rather than pick one.
+ * Every reducer site shares it — the global and correlated reducer, a group value, `sum(local)` — so one
+ * guard covers every depth. A sum over a KNOWN `long`/`bigint` class never reaches it: `sumTower`'s
+ * callers cast through the class first.
+ */
+const textRefused = (reduced: Expr, value: Expr): Expr => refusedWhen(
+  agg('max', { kind: 'binary', op: '=', left: call('typeof', value), right: compilerText('text') }),
+  TEXT_OPERAND, reduced);
+
+/**
+ * A `min`/`max` whose group holds both TEXT and a number declines. SQLite orders every number before every
+ * text, so the text simply won (or lost) — but the reference either compares the two NUMERICALLY (the
+ * text was a wide `long` or a `BigDecimal`) or throws (`"a".compareTo(1)` across classes,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597`).
+ * Neither is SQLite's answer, and the storage class cannot say which applies. A row's class is its storage
+ * class with REAL folded onto INTEGER (one number space) and NULL/BLOB dropped, so "more than one class"
+ * is exactly "text among numbers".
+ */
+const mixedRefused = (reduced: Expr, value: Expr): Expr => {
+  const cls = ['null', 'blob'].reduce<Expr>((inner, drop) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(drop)] }),
+    { kind: 'call', fn: 'replace', args: [call('typeof', value), compilerText('real'), compilerText('integer')] });
+  return refusedWhen(
+    { kind: 'binary', op: '>', left: { kind: 'agg', fn: 'count', args: [cls], distinct: true }, right: compilerInt(1) },
+    MIXED_COMPARABLES, reduced);
+};
+
 /**
  * A reducer over `value`, weighted by `bulk` where one is carried: the result expression and the
  * expression naming its storage class, which the framing layer reads as the `vt` column.
  *
- * Never declines — every one of the four is expressible, and the caller has already checked membership.
+ * Never declines at compile time — every one of the four is expressible, and the caller has already
+ * checked membership. It DEFERS at run time where the storage class cannot decide (`textRefused`,
+ * `mixedRefused`).
  * A reducer over a stream whose SHAPE is not scalar is a different lowering and never reaches here.
  */
 export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { value: Expr; type: Expr } {
@@ -92,13 +141,13 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { 
     // The weighted mean: Σ(v·bulk) / Σ(bulk over ELIGIBLE rows). The denominator counts bulk only where
     // the guard passed, so an ineligible value neither contributes to the total nor dilutes it.
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
-    if (!bulk) return { value: agg('avg', arg), type: compilerText('real') };
+    if (!bulk) return { value: textRefused(agg('avg', arg), value), type: compilerText('real') };
     const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
     // A `Cast` and NOT a `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.
     return {
-      value: { kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator },
+      value: textRefused({ kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator }, value),
       type: compilerText('real'),
     };
   }
@@ -108,7 +157,9 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { 
   const reduced = reducer === 'sum' && bulk
     ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk })
     : agg(reducer, arg);
-  return { value: reduced, type: call('typeof', reduced) };
+  // The guard either raises or IS the aggregate, so the class is read off the aggregate itself.
+  const guarded = reducer === 'sum' ? textRefused(reduced, value) : mixedRefused(reduced, value);
+  return { value: guarded, type: call('typeof', reduced) };
 }
 
 const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });

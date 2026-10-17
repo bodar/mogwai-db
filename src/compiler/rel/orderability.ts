@@ -60,13 +60,50 @@ function kindOf(v: unknown): Kind {
       if (t === 'datetime') return 'date';
       if (t === 'uuid') return 'uuid';
       if (NUMERIC.has(t)) return 'number';
-      return 'unknown';
+      // A `T`/`Direction` TOKEN is a Java enum — none of the ladder's classes, so `Type.Unknown`
+      // (`GremlinValueComparator.java:243-255`, `type()` falls through to `Object.class`).
+      if (t in TOKEN_ORDINALS) return 'unknown';
+      throw unclassified(`a '${t}' member`);
     }
     // An expanded ELEMENT (`{id,label,props}`) — `out().fold()` inside a map value.
     if ('id' in o && 'label' in o) return Array.isArray((o as { label: unknown }).label) ? 'vertex' : 'edge';
-    return 'unknown';
   }
-  return 'unknown';
+  throw unclassified('a member of no recognised encoding');
+}
+
+/**
+ * The tokens whose `Type.Unknown` order this comparator CAN state, in DECLARATION order — `T` is
+ * `label, id, key, value`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/T.java:36-84`),
+ * `Direction` is `OUT, IN, BOTH` (`.../structure/Direction.java:42-56`). Lexical order is NOT that (`id`
+ * would sort before `label`); `tokenClass` says how the two enums interleave.
+ */
+const TOKEN_ORDINALS: Readonly<Record<string, readonly string[]>> = {
+  T: ['label', 'id', 'key', 'value'],
+  D: ['OUT', 'IN', 'BOTH'],
+};
+
+/** The decline for a member ORDERABILITY cannot place on its ladder — an `UnsupportedTraversal`, never a
+ *  silent tie (a tie keeps arrival order, which is a plausible WRONG order) and never an invented rung. */
+const unclassified = (what: string): UnsupportedTraversal =>
+  new UnsupportedTraversal(`an ORDERABILITY comparison of ${what}, whose GremlinValueComparator type this comparator cannot classify`);
+
+/**
+ * A member with its UNTAGGED envelope removed. A `{t:null, v}` node is a value whose producer did not
+ * know its type (a computed group KEY — `group().by(__.coalesce(__.values('age').sum(), __.values('name')))`
+ * writes `{t:null, v:27}` and `{t:null, v:'lop'}` side by side), and the null tag means exactly what it
+ * means to the framer: infer from `v` (`execute.ts` `frameTypedNode`, the `tag == null` arm). So the
+ * comparator classifies `v` as the BARE member it is — the same inference a bare fold member gets —
+ * rather than sending the node to a rung of its own.
+ */
+function untagged(v: unknown): unknown {
+  let member = v;
+  while (member !== null && typeof member === 'object' && !Array.isArray(member) && !isExactNumber(member)) {
+    const o = member as Record<string, unknown>;
+    if (!('t' in o && 'v' in o) || o.t != null) break;
+    member = o.v;
+  }
+  return member;
 }
 
 /** The comparable PAYLOAD of a member — the value its per-type comparator reads. A `{t,v}` node unwraps to
@@ -253,7 +290,9 @@ function cmpUnordered(a: readonly unknown[], b: readonly unknown[]): number {
  * (`ft != st ? ft.priority() - st.priority() : comparator(ft).compare(f, s)`) with the comparator table
  * inlined.
  */
-export function orderabilityCompare(f: unknown, s: unknown): number {
+export function orderabilityCompare(first: unknown, second: unknown): number {
+  const f = untagged(first);
+  const s = untagged(second);
   const fk = kindOf(f);
   const sk = kindOf(s);
   if (fk !== sk) return PRIORITY[fk] - PRIORITY[sk];
@@ -268,9 +307,29 @@ export function orderabilityCompare(f: unknown, s: unknown): number {
     case 'vertex': case 'edge': case 'vertexproperty': case 'property': return orderabilityCompare(fp, sp);
     case 'list': return cmpIterable(fp as unknown[], sp as unknown[]);
     case 'set': case 'map': return cmpUnordered(fp as unknown[], sp as unknown[]);
-    // Unknown: only naturally-comparable values have an order; otherwise treat as equal (stable).
-    default: return typeof fp === typeof sp && (typeof fp === 'number' || typeof fp === 'string') ? cmpNatural(fp, sp) : 0;
+    // Unknown: the only members `kindOf` lets onto this rung are TOKENS (`tokenClass`).
+    default: {
+      const a = tokenClass(f as { t: string }, fp);
+      const b = tokenClass(s as { t: string }, sp);
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : a.ordinal - b.ordinal;
+    }
   }
+}
+
+/**
+ * A token's place under `unknownTypeComparator` (`GremlinValueComparator.java:223-226`): two members of
+ * ONE class compare naturally — an enum by ordinal — and two of different classes by CLASS NAME (then
+ * `toString`). `Direction`'s constants share its class. `T`'s do NOT: each constant has a body, so each is
+ * its own anonymous class `T$1`…`T$4` in declaration order (`T.java:36-84`), which makes the class-name
+ * compare agree with the ordinal one. Every `Direction` therefore sorts before every `T`
+ * (`…structure.Direction` < `…structure.T$n`). An ordinal it does not know DECLINES.
+ */
+function tokenClass(node: { t: string }, value: unknown): { readonly name: string; readonly ordinal: number } {
+  const ordinal = TOKEN_ORDINALS[node.t]!.indexOf(String(value));
+  if (ordinal < 0) throw unclassified(`the token ${node.t}.${String(value)}`);
+  return node.t === 'T'
+    ? { name: `org.apache.tinkerpop.gremlin.structure.T$${ordinal + 1}`, ordinal }
+    : { name: 'org.apache.tinkerpop.gremlin.structure.Direction', ordinal };
 }
 
 /** ORDERABILITY equality — `dedup(Scope.local)`'s member identity (`DedupLocalStep`'s `LinkedHashSet`,

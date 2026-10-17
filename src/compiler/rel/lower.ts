@@ -30,7 +30,7 @@ import { contentDemand } from '../ir/content-demand.ts';
 import { comparableTheta, CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, elementCols, eq, jsonEachSet, jsonOf,
+    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload,
@@ -40,7 +40,7 @@ import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liv
 import type { AliasMap } from '../alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildValue, type Subject } from './child.ts';
-import { CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { asNumberCast, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { CLASS_MASK, isLongSumClass, isReducer, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
@@ -607,7 +607,7 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
  * — `constLit` has already declined it — so it cannot arrive here; `UNKNOWN` remains for a parameter
  * whose type the client did not send, where inference IS the honest answer.
  */
-function declaredScalarType(arg: Arg | undefined): ScalarType {
+export function declaredScalarType(arg: Arg | undefined): ScalarType {
   const declared = flatType(arg?.type ?? null);
   if (declared === null || declared === 'list' || declared === 'map' || declared === 'set') return UNKNOWN;
   return STATIC(declared);
@@ -1232,9 +1232,13 @@ function asStringNullGuard(rel: Rel, value: Expr, fresh: Minter): Binding {
  *  outside `[min, max]`. Only the bounded GTypes (byte/short/int) carry a range; long/bigint/real never
  *  overflow a 64-bit SQLite integer/real, so their callers pass no guard. */
 function asNumberOverflowGuard(rel: Rel, value: Expr, min: number, max: number, disp: string, fresh: Minter): Binding {
-  const outOfRange: Expr = { kind: 'binary', op: 'or',
-    left: { kind: 'binary', op: '<', left: value, right: compilerInt(min) },
-    right: { kind: 'binary', op: '>', left: value, right: compilerInt(max) } };
+  // INTEGER rows only: a REAL one truncates before its range test, which `asNumberCast` fences inline
+  // (`2147483647.5` is the Integer `2147483647`, not an overflow — `NumberHelper.java:724-800`).
+  const outOfRange: Expr = { kind: 'binary', op: 'and',
+    left: { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('integer') },
+    right: { kind: 'binary', op: 'or',
+      left: { kind: 'binary', op: '<', left: value, right: compilerInt(min) },
+      right: { kind: 'binary', op: '>', left: value, right: compilerInt(max) } } };
   const offenders = make.filter({ id: fresh('nof'), input: rel, channels: rel.channels, type: rel.type, pred: outOfRange });
   const one = make.project({ id: fresh('nop'), input: offenders, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   const node = make.limit({ id: fresh('nol'), input: one, channels: [], type: one.type, count: compilerInt(1) });
@@ -1833,7 +1837,9 @@ function scalarTail(
       let spec; try { spec = numericSpec(args[0]); } catch { return null; }
       if (!spec) return null;
       const value = col(rel.id, 'v');
-      const cast: Expr = spec.as === 'bigdecimal' ? value : { kind: 'cast', arg: value, to: spec.int ? 'int' : 'real' };
+      // The overflow guard below raises the reference's message for an INTEGER result; a REAL one (a
+      // `mean`, a sum of doubles) is fenced inline, as every runtime `asNumber` is (`asNumberCast`).
+      const cast = asNumberCast(value, spec, true, true);
       const carried = rel.channels;
       const projected = make.project({
         id: fresh('an'), input: rel, channels: carried,
@@ -1895,11 +1901,15 @@ function scalarTail(
       // stops asking for an ordering key the value no longer has one for, which is correct: the
       // transformed value is a native SQLite value and compares directly.
       const carried = rel.channels;
-      rel = make.project({
+      const projected = make.project({
         id: fresh('tx'), input: rel, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
+      // A runtime `asNumber(GType.X)` is a FENCED cast (`asNumberCast`) that spells its input several
+      // times, so it is materialized rather than re-inlined at every later read of `v` — a reducer reads
+      // it five times over.
+      rel = step.name === 'asNumber' && step.args.length ? fenced(projected, fresh) : projected;
       out = { kind: 'scalar', type: tx.type ?? UNKNOWN };
       continue;
     }
@@ -2090,7 +2100,13 @@ function scalarTail(
         const weighted = bulk ? { kind: 'binary', op: '*', left: casted, right: col(rel.id, bulk.col) } as Expr : casted;
         const tower = sumTower({ kind: 'agg', fn: 'sum', args: [weighted] }, staticSumVt);
         rel = nonEmptyReducer(rel, [['v', tower.value], ['vt', tower.type]], fresh);
-        out = { ...numeric, productiveNull: true };
+        // The class is KNOWN, so it is stated STATICALLY — and as a TEXT-carried static
+        // (`sumTower` rides a result past 2^53 as decimal TEXT), the same type an injected wide `long`
+        // has. Every later consumer then reads it through the class: a predicate casts it before
+        // ordering (`predicate.ts` `ordered`), and equality meets a wide literal's own decimal text.
+        // As `result: 'number'` the type rode only in a `vt` column no predicate reads, so the text
+        // compared as a STRING — `inject(9007199254740992L, 29L).sum().is(gt(100))` answered nothing.
+        out = { kind: 'scalar', type: STATIC(staticSumVt, true), productiveNull: true };
         continue;
       }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));

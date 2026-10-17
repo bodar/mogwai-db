@@ -1,0 +1,161 @@
+// The NUMBER/TYPE channel's wrong answers, each pinned either to the reference answer or to a deferral
+// (`UnsupportedTraversal` at compile time, a `RaisedByQuery` deferral mid-statement). Asserted through
+// the wire, because the defects are TYPE defects — an Int for a Long, a String for a Long — which only
+// the GraphBinary type code can see.
+//
+// 1. ORDERABILITY never ties silently: a `{t:null, v}` member (a computed group KEY) is classified by its
+//    `v`, a token orders by its enum's declaration order, and anything else declines.
+// 2. A reducer never DROPS a text value: a `sum`/`mean` over one, and a `min`/`max` over text among
+//    numbers, defer — at every depth, because every reducer site shares the one guard.
+// 3. A sum over a known `long` class is stated as one, so a predicate after it compares the number.
+// 4. A runtime `asNumber(GType.X)` defers where a SQLite CAST and `NumberHelper` disagree.
+// 5. A computed property value is stored with its type, or the write declines.
+// 6. A `constant()` inside a body keeps its declared type through a branch merge.
+import { test, expect, describe } from 'bun:test';
+import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
+import { RaisedByQuery } from '../../src/rel/raise.ts';
+import { orderabilityCompare } from '../../src/compiler/rel/orderability.ts';
+import { seededStore } from '../support/harness.ts';
+import { executeFramed } from '../support/executor.ts';
+import { decode } from '../support/decode.ts';
+
+/** GraphBinary type codes (`DataType` in the client) for the classes these tests tell apart. */
+const T = { int: 0x01, long: 0x02, string: 0x03, double: 0x07, float: 0x08, byte: 0x24, short: 0x26, bigint: 0x23, map: 0x0a } as const;
+
+/** Each result as `[value, type code]`; `;;`-separated statements run in order on one store and the last
+ *  one is returned. */
+async function typed(q: string): Promise<[unknown, number][]> {
+  const store = seededStore();
+  const parts = q.split(' ;; ');
+  for (const p of parts.slice(0, -1)) executeFramed(store, p);
+  const out: [unknown, number][] = [];
+  for (const f of executeFramed(store, parts.at(-1)!)) out.push([await decode(f.buf), f.buf[0]!]);
+  return out;
+}
+const values = async (q: string) => (await typed(q)).map(([v]) => v);
+
+describe('ORDERABILITY classifies or declines, never ties', () => {
+  // GremlinValueComparator.Type puts Number before String
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:243-255).
+  test('a computed group key {t:null,v} ranks by its value: numbers, then strings', async () => {
+    const [[map]] = await typed("g.V().group().by(__.coalesce(__.values('age').sum(), __.values('name'))).by(count()).order(local).by(keys)");
+    expect([...(map as Map<unknown, unknown>).keys()]).toEqual([27, 29, 32, 35, 'lop', 'ripple']);
+  });
+
+  test('tokens order by their enum: Direction before T, T by declaration (label, id)', async () => {
+    const [[map]] = await typed('g.E(7).elementMap().order(local).by(keys)');
+    expect([...(map as Map<any, unknown>).keys()].map((k) => (typeof k === 'string' ? k : k.elementName)))
+      .toEqual(['weight', 'OUT', 'IN', 'label', 'id']);
+  });
+
+  test('an unclassifiable member declines rather than tying', () => {
+    expect(() => orderabilityCompare({ t: 'mystery', v: 1 }, { t: 'mystery', v: 2 })).toThrow(UnsupportedTraversal);
+    expect(() => orderabilityCompare({ not: 'a member' }, 1)).toThrow(UnsupportedTraversal);
+    expect(orderabilityCompare({ t: null, v: 2 }, { t: null, v: 'a' })).toBeLessThan(0);
+  });
+});
+
+describe('a reducer never drops a text value', () => {
+  // NumberHelper adds a wide long exactly and throws on a String
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452);
+  // the storage class cannot tell the two apart, so both defer.
+  const deferred = [
+    "g.inject(1).union(__.constant(9007199254740992L), __.constant(2)).sum()",
+    "g.V(1).union(__.constant(9007199254740992L), __.values('age')).sum()",
+    "g.V(1).union(__.constant(9007199254740992L), __.values('age')).sum().is(9007199254741021L)",
+    "g.V(1).union(__.constant(9007199254740992L), __.values('age')).sum().is(P.neq(9007199254741021L))",
+    "g.V(1).union(__.constant(9007199254740992L), __.values('age')).mean()",
+    "g.V(1).local(__.union(__.constant(9007199254740992L), __.values('age')).sum())",
+    "g.V(1).union(__.constant(9007199254740992L), __.values('age')).fold().sum(local)",
+    "g.V().group().by('name').by(__.union(__.constant(9999999999999970L), __.values('age')).sum())",
+    "g.V().values('name').sum()",
+    "g.V(1).property('x', 9007199254740993L) ;; g.V().values('x').sum()",
+    "g.V(1).property('x', 9007199254740993L) ;; g.V().where(__.values('x').sum().is(9007199254740993L)).values('name')",
+  ];
+  for (const q of deferred) test(`sum/mean defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+
+  // NumberHelper.max/min compare across classes with compareTo, which throws
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597).
+  for (const q of [
+    "g.V().group().by('name').by(__.union(__.constant(9999999999999970L), __.values('age')).max())",
+    "g.V().group().by('name').by(__.union(__.constant(-9999999999999970L), __.values('age')).min())",
+  ]) test(`min/max over text among numbers defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+
+  test('single-class reducers answer as before', async () => {
+    expect(await typed("g.V().values('age').sum()")).toEqual([[123, T.int]]);
+    expect(await typed("g.V().values('age').mean()")).toEqual([[30.75, T.double]]);
+    expect(await values("g.V().group().by(label).by(__.values('name').max())"))
+      .toEqual([new Map([['person', 'vadas'], ['software', 'ripple']])]);
+  });
+});
+
+describe('a sum over a known long class compares as a number', () => {
+  const WIDE = 'g.inject(9007199254740992L, 29L).sum()';
+  test.each([
+    [`${WIDE}.is(P.gt(100))`, [9007199254741021n]],
+    [`${WIDE}.is(P.lt(10007199254741021L))`, [9007199254741021n]],
+    [`${WIDE}.is(P.gt(10007199254741021L))`, []],
+    [`${WIDE}.is(9007199254741021L)`, [9007199254741021n]],
+    [`${WIDE}.is(P.neq(9007199254741021L))`, []],
+    [`${WIDE}.is(P.within(9007199254741021L, 1L))`, [9007199254741021n]],
+    [`${WIDE}.where(__.is(P.gt(10007199254741021L)))`, []],
+    [`${WIDE}.as('a').where(__.select('a').is(P.lt(10007199254741021L))).select('a')`, [9007199254741021n]],
+    ['g.inject(-9007199254740992L, -29L).sum().is(P.lt(-100))', [-9007199254741021n]],
+    ['g.inject(9007199254740992L, 29L).fold().sum(local).is(P.lt(10007199254741021L))', [9007199254741021n]],
+  ])('%s', async (q, want) => {
+    expect(await typed(q)).toEqual(want.map((v) => [v, T.long]));
+  });
+});
+
+describe('a runtime asNumber defers where the cast and NumberHelper disagree', () => {
+  // NumberHelper.performConversion throws on overflow and on infinity
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:724-800).
+  for (const q of [
+    "g.V(1).values('age').math('_*100000000').asNumber(GType.INT)",
+    "g.V(1).values('age').math('_*10').asNumber(GType.BYTE)",
+    "g.V(1).values('age').math('_*1e30').asNumber(GType.LONG)",
+    "g.V(1).values('age').math('_*1e30').asNumber(GType.BIGINT)",
+    "g.V(1).values('age').math('_*1e300').asNumber(GType.FLOAT)",
+    "g.V(1).values('name').asNumber(GType.INT)",
+    "g.V(1).values('name').asNumber(GType.DOUBLE)",
+    "g.V().project('a').by(__.values('age').math('_*100000000').asNumber(GType.INT))",
+    "g.V().values('age').math('_*100000000').fold().unfold().asNumber(GType.INT)",
+    "g.V(1).values('age').math('_*1e300*1e300').asNumber(GType.LONG)",
+  ]) test(`defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+
+  test('inside the range the cast is the reference: truncation toward zero, the target class', async () => {
+    expect(await typed("g.V(1).values('age').math('_*1.5').asNumber(GType.INT)")).toEqual([[43, T.int]]);
+    expect(await typed("g.V(1).values('age').asNumber(GType.BYTE)")).toEqual([[29, T.byte]]);
+    expect(await typed("g.V().values('age').sum().asNumber(GType.BYTE)")).toEqual([[123, T.byte]]);
+    expect(await typed("g.V().values('age').mean().asNumber(GType.INT)")).toEqual([[30, T.int]]);
+  });
+});
+
+describe('a computed property value is stored with its type, or the write declines', () => {
+  test.each([
+    ["g.V(1).property('n', __.values('age').asNumber(GType.BYTE)) ;; g.V(1).values('n')", [[29, T.byte]]],
+    ["g.V(1).property('n', __.values('age').asNumber(GType.SHORT)) ;; g.V(1).values('n')", [[29, T.short]]],
+    ["g.V(1).property('n', __.values('age').asNumber(GType.BIGINT)) ;; g.V(1).values('n')", [[29n, T.bigint]]],
+    ["g.V(1).property('n', __.outE().values('weight').max()) ;; g.V(1).values('n')", [[1, T.double]]],
+  ])('%s', async (q, want) => {
+    expect(await typed(q)).toEqual(want as [unknown, number][]);
+  });
+
+  test('a type a NULL vtype would retype declines (a Date read back as an Int)', () => {
+    expect(typed("g.V(1).property('n', __.values('age').asDate())")).rejects.toThrow(UnsupportedTraversal);
+  });
+});
+
+describe('a constant inside a body keeps its declared type', () => {
+  test.each([
+    ["g.V(1).flatMap(__.coalesce(__.constant(1L), __.constant('x')))", [[1, T.long]]],
+    ["g.V(1).map(__.coalesce(__.constant(1L), __.constant('x')))", [[1, T.long]]],
+    ["g.V(1).local(__.coalesce(__.constant(1b), __.constant('x')))", [[1, T.byte]]],
+    ["g.V(1).flatMap(__.coalesce(__.constant(1.5f), __.constant(2.5d)))", [[1.5, T.float]]],
+    ["g.V(3).flatMap(__.choose(__.has('age'), __.constant(1L), __.constant('x')))", [['x', T.string]]],
+    ["g.V(1).flatMap(__.choose(__.has('age'), __.constant(1L), __.constant('x')))", [[1, T.long]]],
+    ["g.V(2).flatMap(__.coalesce(__.out().values('age').sum(), __.constant(1L)))", [[1, T.long]]],
+  ])('%s', async (q, want) => {
+    expect(await typed(q)).toEqual(want as [unknown, number][]);
+  });
+});

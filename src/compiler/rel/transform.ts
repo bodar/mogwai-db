@@ -1,6 +1,7 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
+import { raiseExpr } from '../../rel/raise.ts';
 import { dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -85,6 +86,67 @@ const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args })
  *  ratchet is what catches one of these leaking back into a bind, and it caught `dateAdd`'s. */
 const held = (value: string): Expr => compilerText(value);
 const heldInt = (value: number): Expr => compilerInt(value);
+
+/** The deferral a RUNTIME `asNumber(GType.X)` raises mid-statement (`raiseExpr`) where a SQLite `CAST`
+ *  would answer a value the reference does not. No quote — `raiseExpr` cannot carry one, which is one
+ *  reason this is a deferral and not `NumberHelper`'s own message. */
+export const AS_NUMBER_INEXACT = 'asNumber of a value it cannot convert exactly is not supported';
+
+type NumericSpec = NonNullable<ReturnType<typeof numericSpec>>;
+const bin = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+/** 2^63 as a double — the first magnitude `CAST(… AS INTEGER)` CLAMPS rather than converts. */
+const LONG_EDGE = 9223372036854775808;
+/** `Float.MAX_VALUE` / `Double.MAX_VALUE`. */
+const FLOAT_MAX = 3.4028234663852886e38;
+const DOUBLE_MAX = Number.MAX_VALUE;
+
+/**
+ * `asNumber(GType.X)` over a RUNTIME value — the `CAST`, fenced where a SQLite `CAST` and
+ * `NumberHelper.performConversion` disagree
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:724-800`).
+ * Inside the fence the cast IS the reference: an integral target truncates toward zero exactly as
+ * `longValue`/`intValue` do, and a floating target is the same double.
+ *
+ * - **OUT OF RANGE.** The reference THROWS (`Can't convert number of type … due to overflow.`, `:766`; an
+ *   infinity's `:775`), where the framer crashed on the unencodable value
+ *   (`math('_*100000000').asNumber(GType.INT)` reached the user as a Node `RangeError`), `CAST` CLAMPED a
+ *   double past 2^63 to `Long.MAX_VALUE`, or a double past `Float.MAX_VALUE` became `Infinity`. A
+ *   bounded target (byte/short/int, each `[-(m+1), m]`) is out of range once the TRUNCATED value `t` is,
+ *   i.e. `|2t + 1| > 2m + 1` — one spelling of the value, and exact because SQLite moves an overflowing
+ *   `2t` to REAL rather than wrapping it. An unbounded integral target is out of range only for a
+ *   NON-integer storage class at or past 2^63 (an INTEGER is an int64 by construction). A float target
+ *   past `Float.MAX_VALUE` and finite throws; an infinity passes through, as `:740` lets it.
+ * - **TEXT.** The reference PARSES a string, and throws when it cannot (`Can't parse string … as number.`);
+ *   `CAST('marko' AS INTEGER)` is `0`. A text that round-trips through `CAST AS INTEGER` is exactly an
+ *   integer spelling (a stored wide `long`, `"42"`), on which the two agree; any other non-number declines.
+ *
+ * The fence RAISES a deferral (`raiseExpr`) rather than the reference's message: that message names the
+ * value's Java class, which a storage class does not always know. Inline, so it covers every depth
+ * `transformExpr` reaches — the scalar tail, a `by()` body, a list member. `integersGuarded` is the one
+ * caller (a reducer result, `lower.ts`) that already raises the reference's exact message for an
+ * INTEGER out of a bounded range, so the fence leaves those rows to it. `nativeNumber` says the value is
+ * KNOWN to be a native INTEGER/REAL (a numeric static type not carried as text, a reducer result), which
+ * makes the TEXT arm unreachable, so it is not spelled.
+ */
+export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false): Expr {
+  const cast: Expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' };
+  const notInteger = bin('!=', call('typeof', v), held('integer'));
+  const abs = call('abs', { kind: 'cast', arg: v, to: 'real' });
+  const notANumber = bin('and',
+    { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: call('typeof', v), values: [held('integer'), held('real'), held('null')] } },
+    bin('is not', { kind: 'cast', arg: { kind: 'cast', arg: v, to: 'int' }, to: 'text' }, v));
+  const range: Expr | null = spec.int && spec.min !== undefined
+    ? ((): Expr => {
+      const twice = bin('+', bin('*', compilerInt(2), { kind: 'cast', arg: v, to: 'int' }), compilerInt(1));
+      const out = bin('>', call('abs', twice), compilerInt(2 * spec.max! + 1));
+      return integersGuarded ? bin('and', notInteger, out) : out;
+    })()
+    : spec.int ? bin('and', notInteger, bin('>=', abs, compilerReal(LONG_EDGE)))
+      : spec.as === 'float' ? bin('and', bin('>', abs, compilerReal(FLOAT_MAX)), bin('<=', abs, compilerReal(DOUBLE_MAX)))
+        : null;
+  const refuse = nativeNumber ? range : range ? bin('or', notANumber, range) : notANumber;
+  return refuse ? { kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: cast } : cast;
+}
 
 /**
  * The PURE value transforms — a SQLite scalar function over `v`, and nothing else.
@@ -281,9 +343,11 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, incoming?
       if (known === 'datetime') return { expr: v, type: STATIC('long') };
       return null;
     }
-    // A `bigdecimal` target keeps its exact TEXT carrier — casting would be the lossy answer.
-    const expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' } as Expr;
-    return { expr, type: STATIC(spec.as) };
+    // A `bigdecimal` target keeps its exact TEXT carrier — casting would be the lossy answer. Every
+    // target is fenced where the cast and the reference disagree (`asNumberCast`).
+    const known = staticTypeOf(incoming);
+    const native = !!known && NUMBER_FAMILY.has(known) && !staticIsText(incoming);
+    return { expr: asNumberCast(v, spec, false, native), type: STATIC(spec.as) };
   }
 
   if (step.name === 'asBool') {

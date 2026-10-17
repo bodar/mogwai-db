@@ -34,7 +34,7 @@ import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
 import { predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
+import { continueAs, declaredScalarType, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -1672,6 +1672,11 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
     const projected = constLit(leading.args[0]);
     if (!projected) return null;
     value = projected;
+    // The constant's OWN declared type — the chain-level `constant()`'s authority (`declaredScalarType`),
+    // so `constant(1L)` in a body is a Long there too. Left `UNKNOWN`, the framer inferred it from the
+    // storage class, and a branch merge had no tag to keep: `flatMap(coalesce(constant(1L),
+    // constant('x')))` answered Int 1.
+    type = declaredScalarType(leading.args[0]);
     present = ALWAYS_PRODUCTIVE;
     at = 1;
   }
@@ -1909,6 +1914,8 @@ export function scalarHostChild(
     if (!literal) return null;
     value = literal;
     vtype = undefined;
+    // Its declared type, as at the element host above.
+    type = declaredScalarType(leading.args[0]);
     at = 1;
   } else if (leading?.name === 'identity') {
     if (leading.args.length) return null;

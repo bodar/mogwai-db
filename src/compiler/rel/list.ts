@@ -720,10 +720,6 @@ export function listRetype(
     // The surviving null is ALWAYS a real value now (the empty-list case is filtered above), so
     // `productiveNull` is unconditional rather than read off the member shape's flag.
     const productive = { productiveNull: true } as const;
-    const asNumber = (value: readonly [string, Expr], vt: readonly [string, Expr]) => ({
-      rel: withPayload(host, [value, vt], [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-      type: UNKNOWN, result: 'number' as const, ...productive,
-    });
 
     // **`min`/`max` ORDER, so they take the ARGMIN/ARGMAX — the winning MEMBER, projected whole —
     // exactly as the row-level pair does.** Two things follow that a `MIN()`/`MAX()` over a cast key
@@ -792,7 +788,12 @@ export function listRetype(
     if (step.name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
       const casted = storedCompareOn(compilerText(memberType.type))(payload);
       const tower = sumTower({ kind: 'agg', fn: 'sum', args: [casted] }, memberType.type);
-      return asNumber(scalar(tower.value, 'v', 'any'), scalar(tower.type, 'vt', 'text'));
+      // The class is KNOWN, so it is stated statically as a TEXT-carried static — the row-level
+      // `sumTower` arm's framing (`lower.ts`), for the same reason: a later predicate must cast it.
+      return {
+        rel: withPayload(host, [scalar(tower.value, 'v', 'any')], [meta('v', 'any', true)], fresh),
+        type: STATIC(memberType.type, true), ...productive,
+      };
     }
 
     // `sum`/`mean` REDUCE rather than order, so the result is a fresh value whose storage class the
