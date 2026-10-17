@@ -2883,7 +2883,7 @@ function writeSnapshot(input: Rel, fresh: Minter): { readonly bindings: readonly
  *    (`createKey` differs — two creations where the loop makes one). Two misses with the SAME create key
  *    and an inert `onMatch` are what `Distinct` already answers correctly — one creation, carried by both
  *    — so that common case still runs.
- *  - **(3) a PER-DRIVER search whose `onMatch` writes a searched key** — one driver's write can make an
+ *  - **(3) a PER-DRIVER search whose `onMatch` or tail writes a searched key** — one driver's write can make an
  *    element newly match another driver's different search, which no pairwise test over the snapshot sees.
  *
  * Runtime rather than compile-time because the answer is the DATA's: `g.V().mergeE(m).option(onMatch, …)`
@@ -2919,9 +2919,9 @@ function guardMergeInterleaving(
     type: typeOf(...left.type.cols, ...right.type.cols.map((c) => meta(`b_${c.name}`, c.type, true))),
   });
 
-  // (3) — a per-driver search the onMatch can redirect.
+  // (3) — a per-driver search the onMatch or the tail can redirect.
   if (facts.perDriverSearch && facts.mutatesSearch) {
-    raiseOnRows(second(), 'with an onMatch that writes a key a per-traverser search reads');
+    raiseOnRows(second(), 'with an onMatch or property() write to a key a per-traverser search reads');
     return;
   }
   // (1) — one pre-existing element reached by two drivers. An input-independent search (`matched` with no
@@ -2937,14 +2937,14 @@ function guardMergeInterleaving(
     }
   }
   // (2) — a creation a later driver would have matched.
-  if (!unmatched || (!facts.acts && !facts.repeats && unmatched.createKey === null)) return;
+  if (!unmatched || (!facts.acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null)) return;
   const u = unmatched.rel;
   const earlier = bind(make.project({
     id: fresh('p'), input: u, channels: [], type: u.type, exprs: u.type.cols.map((column) => [column.name, col(u.id, column.name)] as const),
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
   const { createKey, couldMatch } = unmatched;
-  const observable: Expr = facts.acts || facts.repeats || !createKey ? always
+  const observable: Expr = facts.acts || facts.repeats || facts.mutatesSearch || !createKey ? always
     : isNot(createKey(earlier.id), createKey(later.id));
   raiseOnRows(selfJoin(earlier, later, and(and(lt(col(earlier.id, ORD), col(later.id, ORD)),
     couldMatch ? couldMatch(earlier.id, later.id) : always), observable)),
@@ -3001,26 +3001,46 @@ function mapCouldMatch(onCreate: MergeSpec | null, fresh: Minter): (earlier: Rel
 interface MergeWriteFacts {
   /** The `onMatch` changes the element at all (a write or an appended label). */
   readonly acts: boolean;
-  /** A write that is NOT idempotent per traverser — a `list` append, or a value/key/map computed per
-   *  traverser — on `onMatch` or the tail: each driver reaching an element writes its own. */
+  /** A write that is NOT idempotent per traverser — a `list` append (stated, or a VERTEX write that names
+   *  no cardinality), or a value/key/map computed per traverser — on `onMatch` or the tail: each driver
+   *  reaching an element writes its own. */
   readonly repeats: boolean;
-  /** The `onMatch` writes a property key the search reads. */
+  /** The `onMatch` OR the tail writes (or drops) a property key the search reads. */
   readonly mutatesSearch: boolean;
 }
 
 /** `MergeWriteFacts` from a host's parsed writes. `searched` is the set of property keys the search reads,
- *  `null` when that set is DATA (a map-valued driver) and so any written key may be one. A tail never
- *  re-searches (it runs after the merge), so only its non-idempotent writes count. */
+ *  `null` when that set is DATA (a map-valued driver) and so any written key may be one.
+ *
+ *  **A vertex write with NO stated cardinality repeats.** `cardinality === null` is "the traversal named
+ *  none", resolved only at the element (`PropertySet.cardinality`), and that resolution here APPENDS:
+ *  `g.addV('p').property('t','x').property('t','y').values('t')` is `[x,y]`. The reference's `onMatch`
+ *  writes `v.property(graph.features().vertex().getCardinality(key), key, val)` once per traverser
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java:129`)
+ *  and a tail is an `AddPropertyStep` per traverser
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java:94`),
+ *  so N drivers reaching one vertex append N times where the snapshot appends once. Nothing here proves a
+ *  key single, so the unstated form fails closed exactly like `list` — the two spellings of one query
+ *  (`[age:30]` and `[age:Cardinality.list(30)]`) now get one treatment. An edge property is single by spec
+ *  (its `cardinality` is always `null`), so only `element === 'vertex'` reads `null` as an append.
+ *
+ *  **A tail write to a SEARCHED key is `mutatesSearch` too.** The pipeline is lazy — `LazyBarrierStrategy`
+ *  puts no `NoOpBarrierStep` after a merge's `flatMap`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`)
+ *  — so traverser 1's `property()` tail runs BEFORE traverser 2 searches: `g.inject(1,2,3).mergeV([name:'zz'])
+ *  .property(single,'name','yy')` leaves three vertices in the reference, where the snapshot creates one. */
 function mergeWriteFacts(
+  element: 'vertex' | 'edge',
   onMatch: readonly PropertyWrite[], appended: readonly string[], tail: readonly PropertyWrite[], searched: ReadonlySet<string> | null,
 ): MergeWriteFacts {
   const perTraverser = (write: PropertyWrite): boolean => write.kind === 'runtime' || write.kind === 'map'
-    || (write.kind === 'set' && write.cardinality === 'list');
+    || (write.kind === 'set' && (write.cardinality === 'list' || (element === 'vertex' && write.cardinality === null)));
+  const writesSearched = (write: PropertyWrite): boolean => write.kind === 'map' || searched === null
+    || (write.kind === 'runtime' ? typeof write.key !== 'string' || searched.has(write.key) : searched.has(write.key));
   return {
     acts: onMatch.length > 0 || appended.length > 0,
     repeats: onMatch.some(perTraverser) || tail.some(perTraverser),
-    mutatesSearch: onMatch.some((write) => write.kind === 'map' || searched === null
-      || (write.kind === 'runtime' ? typeof write.key !== 'string' || searched.has(write.key) : searched.has(write.key))),
+    mutatesSearch: onMatch.some(writesSearched) || tail.some(writesSearched),
   };
 }
 
@@ -3648,7 +3668,7 @@ function mergeVComputed(
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`).
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: tupleKey, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol) },
-    { ...mergeWriteFacts(matchWrites, appended, tailWrites, new Set([...cKeys, ...Object.keys(match.props)])), perDriverSearch: true },
+    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set([...cKeys, ...Object.keys(match.props)])), perDriverSearch: true },
     bind, guard, fresh);
   // `onMatch` over the MATCHED vertices — shared with the constant path; the per-driver runtime write
   // (`armValueWriteCorrelated`, correlated by `ord`) is the one host difference. Empty on the create path.
@@ -3850,7 +3870,7 @@ export function mergeVFromMap(
   // creation — `mapCouldMatch`.
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh) },
-    { ...mergeWriteFacts(matchWrites, appended, tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
+    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
   // reached). Shared with the other vertex-merge paths.
   if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites, () => false, bind, guard, fresh, child)) return null;
@@ -4140,7 +4160,7 @@ export function mergeEFromMap(
     rel: unmatched,
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [col(rel, 'src'), col(rel, 'tgt'), jsonText(col(rel, MAP_COL))] }),
     couldMatch: (earlier, later) => and(mapCould(earlier, later), and(sameSide(earlier, later, 'hasOut', 'src'), sameSide(earlier, later, 'hasIn', 'tgt'))),
-  }, { ...mergeWriteFacts(matchWrites, [], tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
+  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, null), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
   if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));
@@ -4331,7 +4351,7 @@ export function elementMergeV(
       input: make.project({ id: fresh('p'), input: incoming, channels: [], type: typeOf(meta(ORD, 'int')), exprs: [[ORD, col(incoming.id, ORD)]] }),
     }),
     createKey: null, couldMatch: null,
-  } : null, { ...mergeWriteFacts(matchWrites, appended, tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
+  } : null, { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
   // IS THE CREATE ID STILL FREE — but only WHEN a create happens, which is `mergeV`'s whole difference
   // from `addV`'s unconditional guard. The search is by id (`hasId` above), so a MATCH already owns that
   // id and no collision is possible; a create runs only where the search came back empty, and collides
@@ -4543,7 +4563,7 @@ function mergeEComputed(
   guardMergeInterleaving('mergeE', incoming, matched, {
     rel: unmatched, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol),
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [...(src ? [col(rel, 'src')] : []), ...(tgt ? [col(rel, 'tgt')] : []), tupleKey(rel)] }),
-  }, { ...mergeWriteFacts(matchWrites, [], tailWrites, new Set(cKeys)), perDriverSearch: true }, bind, guard, fresh);
+  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(cKeys)), perDriverSearch: true }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the matched edges whenever onMatch or the tail mutated them (created edges are born
   // dirty); an empty matched is a no-op. Before the create branch, so it covers the tail over `matched`.
@@ -4845,7 +4865,7 @@ export function elementMergeE(
     couldMatch: searchSides.length
       ? (earlier, later) => searchSides.map((side) => eq(col(earlier, side), col(later, side))).reduce((a, b) => and(a, b))
       : null,
-  } : null, { ...mergeWriteFacts(matchWrites, [], tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
+  } : null, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props))), perDriverSearch: false }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
   // Touch the rev of the MATCHED (existing) edges whenever onMatch or the tail `property()` run mutated
   // them (§5·1); created edges are born dirty, and an empty `matched` is a no-op. Placed before the

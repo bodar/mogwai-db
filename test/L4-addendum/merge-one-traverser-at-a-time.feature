@@ -175,6 +175,116 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[3].l |
     And the graph should return 3 for count of "g.V().has(\"name\",\"marko\").properties(\"m\")"
 
+  # A vertex write that names NO cardinality APPENDS here (the element's default), so it repeats per traverser
+  # exactly like an explicit list write — onMatch (MergeVertexStep.java:129 writes per traverser through the
+  # default cardinality) and the property() tail (AddPropertyStep.java:94) alike. Traverser 1 creates zz,
+  # 2 and 3 match it, and the tail appends once per traverser.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_propertyXtag_xX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).property("tag","x").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
+    And the graph should return 3 for count of "g.V().has(\"name\",\"zz\").properties(\"tag\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_unionXmergeVXname_zzX_propertyXtag_xXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).union(__.mergeV([name:"zz"]).property("tag","x")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
+    And the graph should return 3 for count of "g.V().has(\"name\",\"zz\").properties(\"tag\")"
+
+  # The default-cardinality tail appends to the SEARCHED key; name stays multi-valued and still holds zz, so
+  # every later traverser matches the one vertex and appends again: [zz,yy,yy,yy].
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_propertyXname_yyX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).property("name","yy").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"yy\")"
+    And the graph should return 4 for count of "g.V().has(\"name\",\"yy\").properties(\"name\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_VX1_2X_mergeVXname_markoX_optionXonMatch_age_30X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2).mergeV([name:"marko"]).option(Merge.onMatch,[age:30]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+    And the graph should return 3 for count of "g.V().has(\"name\",\"marko\").properties(\"age\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_V_mergeVXname_markoX_optionXonMatch_m_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().mergeV([name:"marko"]).option(Merge.onMatch,[m:2]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+    And the graph should return 6 for count of "g.V().has(\"name\",\"marko\").properties(\"m\")"
+
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_markoX_optionXonMatch_m_2X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"marko"]).option(Merge.onMatch,[m:2]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 3 for count of "g.V().has(\"name\",\"marko\").properties(\"m\")"
+
+  # A SINGLE tail write to a searched key: the pipeline is lazy (LazyBarrierStrategy puts no NoOpBarrierStep
+  # after the merge), so traverser 1 renames zz to yy before traverser 2 searches, misses, and creates again.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_propertyXsingle_name_yyX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).property(single,"name","yy").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 3 for count of "g.V().has(\"name\",\"yy\")"
+    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\")"
+
   # ── What interleaving cannot change, which must keep answering ──
 
   # Three misses, ONE creation carried by all three, no onMatch to run on it.
@@ -193,13 +303,13 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[1].i |
     And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
 
-  # A pre-existing match and an idempotent onMatch: every traverser sees the same element and writes the same.
+  # A pre-existing match and an idempotent (SINGLE) onMatch: every traverser sees the same element and writes the same.
   @gap:merge-one-traverser-at-a-time
-  Scenario: g_injectX1_2_3X_mergeVXname_markoX_optionXonMatch_m_2X_values_m
+  Scenario: g_injectX1_2_3X_mergeVXname_markoX_optionXonMatch_m_single_2X_values_m
     Given the modern graph
     And the traversal of
       """
-      g.inject(1,2,3).mergeV([name:"marko"]).option(Merge.onMatch,[m:2]).values("m")
+      g.inject(1,2,3).mergeV([name:"marko"]).option(Merge.onMatch,[m:Cardinality.single(2)]).values("m")
       """
     When iterated to list
     Then the result should be unordered
@@ -207,6 +317,37 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[2].i |
       | d[2].i |
       | d[2].i |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").properties(\"m\")"
+
+  # A SINGLE tail write to an unsearched key: one creation, three idempotent writes.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeVXname_zzX_propertyXsingle_tag_xX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeV([name:"zz"]).property(single,"tag","x").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").properties(\"tag\")"
+
+  # An EDGE property is single by spec, so an unstated-cardinality edge tail is idempotent.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_injectX1_2_3X_mergeEXzz_1_2X_propertyXw_3X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject(1,2,3).mergeE([(T.label):"zz",(Direction.OUT):1,(Direction.IN):2]).property("w",3).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\")"
+    And the graph should return 1 for count of "g.E().hasLabel(\"zz\").has(\"w\",3)"
 
   # Per-driver endpoints in the search: no driver can find another's creation, so onMatch never runs.
   @gap:merge-one-traverser-at-a-time
