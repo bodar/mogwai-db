@@ -8,6 +8,7 @@ import { unionColumnsViolation } from '../../../rel/structure.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
 import { isReferenceBarrier, referenceDistinctAt } from '../../ir/bulk.ts';
+import { armCollectsInOrder } from '../../ir/analyze.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
@@ -236,11 +237,24 @@ const branchMajor = (bodies: readonly (readonly IRStep[] | null | undefined)[], 
  *  nothing reads the order; else the POSITIONED input (`positioned`) — with its parent frozen for a
  *  traverser-major merge (`augmentParent`), or scoped per start for an arm-major one (`armMajorScope`). `null`
  *  where the order is owed and cannot be named — a decline, never a different order. `arrived` is the stream as
- *  the branch RECEIVED it, before an arm-start merge re-positioned it: what proves a per-start scope. */
+ *  the branch RECEIVED it, before an arm-start merge re-positioned it: what proves a per-start scope.
+ *
+ *  An arm that COLLECTS in arrival order (`collects` — `armCollectsInOrder`) reads the INPUT's order even
+ *  where nobody reads the merge's: each arm's `fold` takes its members in the order the branch's starts
+ *  arrive, so two arms' lists line up (`V(1,2).union(values('name').fold(), values('age').fold())` is
+ *  `[[marko,vadas],[29,27]]`, `BranchStep.java:143-153`). The ONE order every arm reads is the input's
+ *  `encounter` — seeded at the source (`armCollectsInOrder` in `computeDemandsEncounter`) — or a TRIVIAL
+ *  position (`positioned`). An input with neither DECLINES: a fold without one would sort its members by its
+ *  OWN content, a different order per arm. */
 export function emissionSource(
   input: Rel, owed: boolean, slicing: boolean, major: 'traverser' | 'arm', keys: BranchKeys, fresh: Minter, arrived: Rel = input,
+  collects = false,
 ): { readonly source: Rel; readonly scope: readonly Channel[] } | null {
-  if (!owed) return { source: input, scope: [] };
+  if (!owed) {
+    if (!collects) return { source: input, scope: [] };
+    const at = positioned(input, fresh, true);
+    return at && { source: at, scope: [] };
+  }
   const at = positioned(input, fresh, slicing);
   if (!at) return null;
   if (major === 'traverser') return { source: augmentParent(at, keys, fresh), scope: [] };
@@ -304,7 +318,7 @@ export function unionArms(
   const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!merged) return null;
   const keys = branchKeys(merged);
-  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input, bodies.some((body) => armCollectsInOrder(body!)));
   if (!from) return null;
   const arms: Tail[] = [];
   for (const body of bodies) {
@@ -724,11 +738,12 @@ export function chooseOptions(
   // — `armRank` below. The two `Pick` options sit in a `HashMap`, so their order between THEMSELVES is the
   // JVM's; `unproductive` first is one realization of it.
   const owed = branchOrderOwed(ctx, position);
-  const major = branchMajor(arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child'))), ctx);
+  const optionBodies = arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child')));
+  const major = branchMajor(optionBodies, ctx);
   const startMerged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!startMerged) return null;
   const keys = branchKeys(startMerged);
-  const from = emissionSource(startMerged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  const from = emissionSource(startMerged, owed, branchSliced(ctx, position), major, keys, fresh, input, optionBodies.some((body) => !!body && armCollectsInOrder(body)));
   if (!from) return null;
   const unkeyed = input;
   input = from.source;
@@ -1079,7 +1094,7 @@ export function chooseArms(
   const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
   if (!merged) return null;
   const keys = branchKeys(merged);
-  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input);
+  const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input, [then, otherwise ?? []].some(armCollectsInOrder));
   if (!from) return null;
   const source = from.source;
   const subject = branchSubject(source, framing);

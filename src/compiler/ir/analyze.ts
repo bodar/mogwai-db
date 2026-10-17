@@ -166,6 +166,20 @@ function groupReducesItsValues(step: IRStep): boolean {
 
 const collectsInOrder = (step: IRStep): boolean =>
   COLLECTING_CONSUMERS.has(step.name) && !groupReducesItsValues(step);
+
+/** Does a branch ARM's body COLLECT its input in arrival order — a `fold`/`aggregate`/`cap`/`group` at
+ *  its own top level, or (recursively) inside a branch nested in it? Then the members the arm collects
+ *  come in the order the BRANCH INPUT arrives in, and every arm reads that ONE order: `BranchStep` drains
+ *  each option over the same starts (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:143-153`),
+ *  and `FoldStep`'s `addAll` keeps arrival order
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java`).
+ *  So `V(1,2).union(values('name').fold(), values('age').fold())` is `[[marko,vadas],[29,27]]` — the two
+ *  lists line up — never each arm's own content sort. The branch input must therefore be POSITIONED
+ *  (seeded at the source, or `positioned` at the branch) even where nothing reads the merge's order. */
+export function armCollectsInOrder(steps: readonly IRStep[]): boolean {
+  return steps.some((s) => collectsInOrder(s)
+    || (BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(armCollectsInOrder)));
+}
 /** The WRITE steps, which are order-sensitive for a reason none of the read consumers share: a
  *  write ASSIGNS ids, in the order it consumes its driver rows, and those ids are observable —
  *  `g.V().as("a").in("created").addE("createdBy").from("a")` creates the same four edges under a
@@ -239,6 +253,9 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // the flat scan above cannot see it. Seed the encounter so the stream feeding the branch is ordered
     // and the arm's slice is deterministic. An upstream order() already satisfies it (`ordered`).
     if (!ordered && BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)) return true;
+    // …and a COLLECTION inside an arm reads the incoming order as much as a top-level one does
+    // (`armCollectsInOrder`) — with no `!ordered` exemption, for the reason `collectsInOrder` has none.
+    if (BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(armCollectsInOrder)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
     if (sawFanout && s.name === 'dedup' && s.args.some((a) => typeof a.value === 'string')) return true;
