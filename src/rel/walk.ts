@@ -61,6 +61,12 @@ const specExprs = (spec: WindowSpec): readonly Expr[] => [
   ...(spec.frame ? [...boundExprs(spec.frame.start), ...boundExprs(spec.frame.end)] : []),
 ];
 
+/** Does an expression tree contain a SUBQUERY node (a correlated `scalar`/`exists`/`in-query`)? */
+export function exprHasSubquery(e: Expr): boolean {
+  if (e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query') return true;
+  return exprChildren(e).some(exprHasSubquery);
+}
+
 /** Sub-expressions, in declaration order. */
 export function exprChildren(e: Expr): readonly Expr[] {
   const some = (...maybe: readonly (Expr | undefined)[]): readonly Expr[] => maybe.filter((x): x is Expr => x !== undefined);

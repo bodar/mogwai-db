@@ -601,21 +601,23 @@ export const classedNode = (value: Expr, vtype: Expr): Expr => ({
 });
 
 /**
- * `typedNode` for a per-row tag that is EXPENSIVE to spell — a correlated read, which `jsonMember`'s
- * per-tag `CASE` would repeat (with the value) once per arm: measured, `group().by(values('name'))`
- * went 1,700 → 5,540 statement bytes. So the tag is spelled ONCE and the value ONCE: the node keeps the
- * tag only where the identity encoding is already right for it (`nullif` the rest, the same one-
- * evaluation spelling `reducedVtype` uses), and drops to "infer" for a collection, floating or wide
- * integer tag — exactly the untagged node every such member was before. What it gains is every tag
- * whose VALUE encodes as itself but whose storage class reads as something else: a Boolean is SQLite's
- * integer 1, so an untagged node keyed `group().by(values('b'))` by `1` where the reference keys `true`.
+ * `classedNode` for a value or tag that is EXPENSIVE to spell — a correlated read, which `classedNode`'s
+ * class term and `jsonMember`'s per-tag `CASE` would repeat once per mention (measured, spelling the
+ * full node inline took `group().by(values('name'))` from 1,700 to 5,540 statement bytes). So each is
+ * evaluated ONCE, as the one row of a `VALUES` the node is projected over, and the node itself is the
+ * full NORMALIZED one. The earlier one-mention spelling dropped a collection, floating or wide-integer
+ * tag to "infer", and that was not neutral for a map KEY compared by its JSON text: `Integer(3)`,
+ * `Long(3)` and a whole `Float`/`Double` all wrote an Int key, so
+ * `g.V().groupCount().by(values('p'))` over p = 3, 3L, 3.0f, 3.0d answered `{3:1, 3:3}` where
+ * `GroupCountStep` keys four classes apart (`Integer.equals(Long)` is false).
  */
-export const typedNodeOnce = (value: Expr, vtype: Expr): Expr => ({
-  kind: 'json-object',
-  entries: [['t', [...COLLECTION_VTYPES, ...FLOATING_VTYPES, ...WIDE_INT_VTYPES].reduce<Expr>(
-    (inner, tag) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(tag)] }), vtype)], ['v', value]],
-  binary: false,
-});
+export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr => {
+  const one = make.values({ id: fresh('tno'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[value, vtype]] });
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('tnp'), input: one, channels: [], type: typeOf(meta('n', 'json', true)),
+    exprs: [['n', classedNode(col(one.id, 'v'), col(one.id, 't'))]],
+  }) };
+};
 
 /**
  * The DETACHED-transfer member node — `{t, v, vpid, meta}`, the `{t,v}` node plus the two facts a

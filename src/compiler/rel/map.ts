@@ -17,7 +17,7 @@ import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, nodeProductivityFilter, producedMemberNode, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
-import { ALWAYS_PRODUCTIVE, type ChildHost, type ChildSeam } from './child.ts';
+import { ALWAYS_PRODUCTIVE, relHostTag, type ChildHost, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_MASK, isReducer, numberClass, numberClassMask, reducerAggregate } from './reducer.ts';
 import { raiseInRow } from '../../rel/raise.ts';
@@ -1067,7 +1067,8 @@ function groupCollected(
   const mapMember = rows.framing.kind === 'map' ? { kind: 'map', of: rows.framing.valOf } as const : undefined;
   const member = rows.framing.kind === 'elements' || mapMember
     ? valueCol
-    : producedMemberNode(valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE);
+    : producedMemberNode(valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE,
+      rows.framing.kind === 'scalar' ? relHostTag(rows.rel, rows.framing.type) : undefined);
   if (!member) return null;
 
   const elementKey = !keyBy;

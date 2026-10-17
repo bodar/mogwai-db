@@ -1,6 +1,7 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import * as make from '../../rel/factory.ts';
+import { exprHasSubquery } from '../../rel/walk.ts';
 import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
@@ -618,13 +619,17 @@ const staticTagExpr = (type: ScalarType): Expr => {
  * DECLINES: its NULL could be either, and reading it as "nothing" is the productive-null drop this seam
  * exists to end.
  */
-/** A scalar's `{t,v}` node from its per-row tag where it has one — the full `typedNode` where value and
- *  tag are both plain columns/literals (cheap to repeat), else `typedNodeOnce`, which spells a
- *  correlated read once — and from its static tag otherwise. */
-const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType): Expr => {
+/** A scalar's `{t,v}` node from its per-row tag where it has one, and from its static tag otherwise.
+ *
+ *  A per-row tag is always written as its NORMALIZED class (`classedNode`): this node may be a map KEY,
+ *  compared by its JSON text, and a NULL tag ("infer") or a dropped `long` keyed `Integer(3)` and
+ *  `Long(3)` as one — `inject(3, 3L).groupCount().by(is(gt(0)))` answered `{3:2}` where `GroupCountStep`
+ *  keys the two apart (`Integer.equals(Long)` is false). Inline where value and tag are free of a
+ *  correlated read (cheap to repeat), else `typedNodeOnce`, which evaluates each ONCE. */
+const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType, fresh: Minter): Expr => {
   if (!vtype) return typedNode(value, staticTagExpr(type));
-  const plain = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
-  return plain(value) && plain(vtype) ? typedNode(value, vtype) : typedNodeOnce(value, vtype);
+  if (vtype.kind === 'lit') return typedNode(value, vtype);
+  return exprHasSubquery(value) || exprHasSubquery(vtype) ? typedNodeOnce(value, vtype, fresh) : classedNode(value, vtype);
 };
 
 export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence, vtype?: Expr): Expr | null {
@@ -635,7 +640,7 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
         const members = listNodeExpr(value, framing.of, source, fresh);
         return members && listNode(members);
       })()
-      : framing.kind === 'scalar' ? scalarNode(value, vtype, framing.type)
+      : framing.kind === 'scalar' ? scalarNode(value, vtype, framing.type, fresh)
         : null;
   if (!member) return null;
   // A scalar's node over a NULL value is `{t:<tag>, v:null}` — a non-NULL JSON object, which IS the

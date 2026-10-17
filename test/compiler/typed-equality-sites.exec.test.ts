@@ -11,7 +11,7 @@
 //   (src/compiler/rel/build.ts): `Integer(1)` is not `Double(1.0)` and `Double.equals(-0.0, 0.0)` is false
 //   (DedupGlobalStep.java:59,78; IntersectStep.java:68-80).
 import { test, expect, describe } from 'bun:test';
-import { seededStore } from '../support/harness.ts';
+import { seededStore, storeSeededWith } from '../support/harness.ts';
 import { executeQuery } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
 
@@ -263,5 +263,62 @@ describe('a label- or by()-keyed dedup keeps Integer/Long and Float/Double apart
     expect(at("g.inject(3, 3L).groupCount().unfold().dedup().by(keys)")).toEqual(['{3i:1L}', '{3L:1L}']);
     expect(at("g.inject(3, 3L, 3).groupCount().unfold().dedup().by(values)")).toEqual(['{3i:2L}', '{3L:1L}']);
     expect(at("g.V().hasLabel('m', 'n').group().by(label).unfold().dedup().by(keys).count()")).toEqual(['2L']);
+  });
+});
+
+// A MIXED inject's per-row tag is NULL for an inferred member (`3`, an untagged `1.0d`'s INTEGER-free
+// REAL) — and a NULL tag means "read the value" (`perRowSubject`, predicate.ts). A child predicate that
+// dispatched on the raw tag took its never-true ELSE arm for every untagged row, so `map(is(gt(0)))`
+// dropped `3` and `4`. Every child subject now normalizes the tag through `perRowSubject`.
+describe('a child predicate over a mixed inject reads a NULL tag as the value\'s own class', () => {
+  test('map/local/order/project/dedup over is(gt(0))', () => {
+    expect(typed('g.inject(3, 3L, 4).order().by(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
+    expect(typed('g.inject(3, 3L, 4).map(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
+    expect(typed('g.inject(3, 3L, 4).local(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
+    expect(typed("g.inject(3, 3L, 4).project('x').by(is(gt(0))).fold()")).toEqual(['[{"x":3i},{"x":3L},{"x":4i}]']);
+    expect(typed('g.inject(1, 1.0d, 2).map(is(gt(0))).fold()')).toEqual(['[1i,1d,2i]']);
+    expect(typed('g.inject(3, 3L, 4).dedup().by(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
+    expect(typed('g.inject(3, 3L).union(dedup().by(is(gt(0)))).fold()')).toEqual(['[3i,3L]']);
+    expect(typed('g.inject(3, 3L, 4).map(is(gt(0)).is(lt(4))).fold()')).toEqual(['[3i,3L]']);
+    expect(typed("g.inject(3, 3L, 4).as('a').map(select('a').is(gt(0))).fold()")).toEqual(['[3i,3L,4i]']);
+    expect(typed("g.inject(3, 3L, 4).as('a').project('x').by(select('a').is(gt(0))).fold()")).toEqual(['[{"x":3i},{"x":3L},{"x":4i}]']);
+    expect(typed('g.inject(3, 3L, 4).union(identity(), constant(5)).map(is(gt(3))).fold()')).toEqual(['[5i,5i,4i,5i]']);
+  });
+});
+
+// A by() child's MEMBER NODE (`scalarNode`, modulator.ts) is a map KEY compared by its JSON text, so its
+// `t` must be the normalized class: GroupCountStep/GroupStep key on `Objects.equals`, under which
+// `Integer(3)`, `Long(3)`, `Float(3.0)` and `Double(3.0)` are four keys. A NULL tag, or a correlated
+// read's tag dropped to "infer" (`typedNodeOnce`), wrote them all as an Int. The same node is a pooled
+// group VALUE member (`by(values('p').fold())`), which read no tag at all.
+describe('a by() child keeps a value\'s class as a group key and as a pooled group member', () => {
+  const classes = storeSeededWith([
+    "g.addV('x').property('p', 3)", "g.addV('x').property('p', 3L)",
+    "g.addV('x').property('p', 3.0f)", "g.addV('x').property('p', 3.0d)",
+  ]);
+  const at = (q: string) => typedAll(executeQuery(classes, q, {}));
+  const FOUR = '{3d:1L,3f:1L,3i:1L,3L:1L}';
+
+  test('an inject key', () => {
+    expect(typed('g.inject(3, 3L, 4).groupCount().by(is(gt(0)))')).toEqual(['{3i:1L,4i:1L,3L:1L}']);
+    expect(typed('g.inject(3, 3L, 4).group().by(is(gt(0))).by(fold())')).toEqual(['{3i:[3i],4i:[4i],3L:[3L]}']);
+    expect(typed("g.inject(3, 3L, 4).as('a').groupCount().by(select('a').is(gt(0)))")).toEqual(['{3i:1L,4i:1L,3L:1L}']);
+  });
+
+  test('a stored key read through a child', () => {
+    for (const q of [
+      "g.V().groupCount().by(values('p'))",
+      "g.V().groupCount().by(values('p').is(gt(0)))",
+      "g.V().groupCount().by(coalesce(values('p'), constant(0)))",
+      "g.V().groupCount().by(choose(has('p'), values('p'), constant(0)))",
+      "g.V().properties('p').groupCount().by(value())",
+    ]) expect(at(q), q).toEqual([FOUR]);
+    expect(at("g.V().group().by(values('p').is(gt(0))).by(count())")).toEqual([FOUR]);
+  });
+
+  test('a pooled group value member', () => {
+    expect(at("g.V().group().by(label()).by(values('p').fold())")).toEqual(['{"x":[3i,3L,3f,3d]}']);
+    expect(at("g.V().group().by(label()).by(values('p').dedup().fold())")).toEqual(['{"x":[3i,3L,3f,3d]}']);
+    expect(at("g.V().group().by(constant(1)).by(values('p').order().fold())")).toEqual(['{1i:[3i,3L,3f,3d]}']);
   });
 });

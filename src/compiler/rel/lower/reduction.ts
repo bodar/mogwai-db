@@ -4,7 +4,7 @@ import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, met
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
-import { exprChildren, exprRels, forEachExpr, forEachRel } from '../../../rel/walk.ts';
+import { exprHasSubquery, exprRels, forEachExpr, forEachRel } from '../../../rel/walk.ts';
 import type { Elem } from '../../elem.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
@@ -917,11 +917,6 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
  * type, and a bare `label()` is a string. Recomputing any of that from the finished `Expr` is
  * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
  */
-/** Does an expression tree contain a SUBQUERY node (a correlated `scalar`/`exists`/`in-query`)? */
-export function exprHasSubquery(e: Expr): boolean {
-  if (e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query') return true;
-  return exprChildren(e).some(exprHasSubquery);
-}
 
 /** Does `rel`'s `name` column bottom out in a correlated SUBQUERY rather than a column off a table the
  *  relation scans? Follows only the projection chain (project/window/sort/limit/filter/distinct/
@@ -1238,7 +1233,7 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   if (!choice || choice.framing.kind !== 'scalar' || choice.framing.result === 'value') return null;
   const choicePresent = knownPresence(choice.present);
   if (!choicePresent) return null;
-  const choiceType: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
+  const choiceType: SubjectType = choice.vtype ? perRowSubject(choice.vtype, choice.expr)
     : choice.framing.type.kind === 'static' ? { kind: 'static', type: choice.framing.type.type, text: choice.framing.type.text }
     : SUBJECT_UNKNOWN;
 
@@ -1967,7 +1962,7 @@ export function valueRun(
     if (step.name === 'is' && !step.modulators?.length) {
       const pred = step.args[0]?.value;
       if (pred == null || isNested(pred)) return null;
-      const subjType: SubjectType = vtype ? { kind: 'perRow', vtype }
+      const subjType: SubjectType = vtype ? perRowSubject(vtype, value)
         : type.kind === 'static' ? { kind: 'static', type: type.type, text: type.text } : SUBJECT_UNKNOWN;
       const test = predicateExpr(value, pred, subjType, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
       if (!test) return null;
