@@ -7,7 +7,7 @@ import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, extractStrategies } from '../../src/gremlin/frontend.ts';
 import { runPasses } from '../../src/compiler/ir/passes.ts';
 import { bulkingPositions, MAX_BARRIER_SIZE, referenceUnbulkedAt } from '../../src/compiler/ir/bulk.ts';
-import { MERGE_WINDOW_EXCEEDED } from '../../src/compiler/rel/lower.ts';
+import { MERGE_WINDOW_EXCEEDED, mergeWindowExceeded } from '../../src/compiler/rel/lower.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { seededStore } from '../support/harness.ts';
 import { GraphStore } from '../../src/storage.ts';
@@ -32,7 +32,9 @@ describe('bulkingPositions — LazyBarrierStrategy.java:86-135, PathRetractionSt
     expect(merges('g.V().both().both().limit(4)')).toEqual(['1:lazy']);
     expect(merges('g.V().both().both().id()')).toEqual(['1:lazy', '2:lazy']);
     // V(1) names fewer than five ids, so it is no flat-map and the first out() is the first.
-    expect(merges('g.V(1).out().out().id()')).toEqual(['0:start=', '2:lazy']);
+    expect(merges('g.V(1).out().out().id()')).toEqual(['2:lazy']);
+    // A start GraphStep generates one traverser at a time (GraphStep.java:193-196): no set merges its ids.
+    expect(merges('g.V(1, 2, 1).out().id()')).toEqual([]);
   });
 
   test("properties() of distinct elements is distinct, so its barrier merges nothing", () => {
@@ -42,6 +44,15 @@ describe('bulkingPositions — LazyBarrierStrategy.java:86-135, PathRetractionSt
   test('a start step merges repeated literals; explicit and collecting barriers merge where they stand', () => {
     expect(merges('g.inject(1, 2, 1, 3).barrier().order().fold()')).toEqual(['0:start', '1:barrier=', '2:collecting=']);
     expect(merges('g.inject([1, 2, 1, 3]).unfold().math("_ % 2").is(P.gte(0)).limit(2)')).toEqual(['0:start=', '2:retraction']);
+    // A KEYED groupCount('x') is a side-effect barrier that passes the stream ON — not a reduction to one.
+    expect(merges('g.V().both().groupCount("x").id().fold()')).toEqual(['2:side-effect']);
+  });
+
+  test('a child handed ONE traverser merges nothing a one-to-one map of it makes', () => {
+    // `local(select('a').values('name'))`'s body: PathRetractionStrategy's barrier after select('a') holds
+    // the one traverser the local() run was handed.
+    const body = ir('g.V().select("a").values("name")').slice(1);
+    expect(bulkingPositions(body, false)).toEqual([{ after: 0, kind: 'retraction', window: MAX_BARRIER_SIZE, distinct: true }]);
   });
 
   test('RepeatUnrollStrategy puts a barrier after every unrolled body', () => {
@@ -108,5 +119,79 @@ describe('the merge, reproduced', () => {
     const unique = new GraphStore(new BunSqlite(':memory:'));
     loadCsv(unique, ['~id,~label,k:int', ...Array.from({ length: MAX_BARRIER_SIZE + 1 }, (_, i) => `${i + 1},n,${i}`)].join('\n'));
     expect((await decodeAll(executeQuery(unique, q('fold()'), {})))[0]).toHaveLength(MAX_BARRIER_SIZE + 1);
+  });
+
+  test('an explicit barrier(n) that cannot hold the stream says so in its own terms', async () => {
+    let thrown: unknown;
+    try { await run('g.V().both().both().barrier(2).id().fold()'); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(RaisedByQuery);
+    expect((thrown as Error).message).toBe(mergeWindowExceeded(2, true));
+  });
+});
+
+// `EarlyLimitStrategy` is a PRIOR of `LazyBarrierStrategy` (LazyBarrierStrategy.java:62-71): it moves a
+// `limit`/`range`/`skip` left past every always-bound `MapStep`, and the moved `RangeGlobalStep` is a
+// `Barrier` (`FilteringBarrier`, RangeGlobalStepContract.java:38), so no `NoOpBarrierStep` follows the
+// flat-map it now stands after. `….id().limit(n)` and `….limit(n).id()` are therefore ONE traversal.
+describe('the slice EarlyLimitStrategy moves decides where the merge is', () => {
+  const names = (q: string) => ir(q).map((s) => s.name).join('.');
+
+  test('a slice moves past the always-bound maps, and only those', () => {
+    expect(names('g.V().both().both().id().limit(9)')).toBe('V.both.both.limit.id');
+    expect(names('g.V().both().both().map(__.id()).project("a").by(__.label()).range(1, 3)')).toBe('V.both.both.range.map.project');
+    // `values()` is a flat-map, `inV()` an `EdgeVertexStep` (a `FlatMapStep`), `asString()` unlisted: none crossed.
+    expect(names('g.V().both().values("name").limit(2)')).toBe('V.both.values.limit');
+    expect(names('g.E().inV().limit(1)')).toBe('E.inV.limit');
+    expect(names('g.V().both().map(__.values("name")).limit(2)')).toBe('V.both.map.limit');
+    // `tail()` is a `TailGlobalStepContract`, never moved.
+    expect(names('g.V().both().id().tail(2)')).toBe('V.both.id.tail');
+  });
+
+  test('so the scan places no merge before a moved slice', () => {
+    expect(merges('g.V().both().both().id().limit(9)')).toEqual(['1:lazy']);
+    expect(merges('g.V().both().both().id().tail(9)')).toEqual(['1:lazy', '2:lazy']);
+  });
+
+  test('…and the two spellings answer alike, slot for slot', async () => {
+    for (const [moved, written] of [
+      ['g.V().both().both().id().limit(9)', 'g.V().both().both().limit(9).id()'],
+      ['g.V().both().both().id().skip(25)', 'g.V().both().both().skip(25).id()'],
+      ['g.V().both().both().id().range(5, 9)', 'g.V().both().both().range(5, 9).id()'],
+      ['g.V(1).both().both().id().limit(4)', 'g.V(1).both().both().limit(4).id()'],
+      ['g.V(1).both().both().constant(1).limit(4).fold()', 'g.V(1).both().both().limit(4).constant(1).fold()'],
+    ]) expect(await run(moved!)).toEqual(await run(written!));
+  });
+});
+
+// Every child traversal gets the strategies of its own (DefaultTraversal.java:144-148 →
+// TraversalHelper.applyTraversalRecursively), so a body merges at its OWN positions — the same ones the
+// root would, for a body handed one traverser.
+describe('a child traversal merges where its own strategies put the barriers', () => {
+  test('a per-traverser body answers as the root does over the same one start', async () => {
+    for (const body of [
+      "both().both().values('name').limit(4)",
+      "both().both().values('name').tail(4)",
+      'both().both().id().limit(4)',
+      'both().both().id().skip(2).limit(3)',
+    ]) {
+      const root = await run(`g.V(1).${body}`);
+      expect(await run(`g.V(1).local(__.${body})`)).toEqual(root);
+      expect(await run(`g.V(1).flatMap(__.${body})`)).toEqual(root);
+    }
+    // marko is reached three times; the merged slot carries all three before josh.
+    expect(await run("g.V(1).local(__.both().both().values('name').limit(4))")).toEqual(['marko', 'marko', 'marko', 'josh']);
+  });
+
+  test('a slice over a body with no emission order to merge on declines', async () => {
+    for (const q of [
+      "g.V(1).map(__.both().both().values('name').limit(4).fold())",
+      "g.V(1).project('a').by(__.both().both().values('name').limit(4).fold())",
+    ]) await expect(run(q)).rejects.toThrow(/not supported yet/);
+  });
+
+  test('a body handed ONE traverser merges nothing a map of it makes', async () => {
+    // The retraction barrier after `select('a')` holds a single traverser per `local()` run.
+    const rows = await run("g.V().as('a').out('knows').local(__.union(__.select('a').values('name'), __.values('name')).fold())");
+    expect(rows).toHaveLength(2);
   });
 });

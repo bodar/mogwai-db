@@ -718,6 +718,16 @@ authorities.
   forward bulk, and a bulk-nonlinear `optional` body after a possible merge declines (`bulkForwardingDiverges`).
   Residue: `'unknown'` positions (labels, a body unrolled past the strategy, a `RepeatStep`'s re-entry) leave
   the order unmerged unless the superset places a merge under a reader (`mayMergeAt` — then decline).
+  ✅ **r2 (wf7/substrate-bulking-positions-r2):** `EarlyLimitStrategy` (a prior of `LazyBarrierStrategy`) is now
+  applied over EVERY always-bound `MapStep` run, not only a side-effect one (`ir/early-limit.ts`, movable set
+  per `StepOutputArityPredictor` — `inV`/`outV` dropped, `project`/`count(local)`/`map(always-bound)` added),
+  so `….id().limit(n)` and `….limit(n).id()` are one chain and merge alike (a moved `RangeGlobalStep` is a
+  `Barrier`, so no `NoOpBarrierStep` precedes it). **Refuted at the pin:** "a slice right after the second
+  flat-map must see that flat-map's merge" — `RangeGlobalStepContract` is a `FilteringBarrier`, so the
+  strategy places none there (`LazyBarrierStrategy.java:117-120`). Child traversals merge at their own
+  positions (`DefaultTraversal.java:144-148`) with a single-traverser start tracked through the scan; a
+  slice over a child stream with no emission order declines; the merge window's raise is a DEFERRAL
+  (`deferralExpr`), which an unread side-effect drain does not force.
 - 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`

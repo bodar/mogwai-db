@@ -63,8 +63,13 @@ lowered.
   (`as()`, or a label `retractUnreadAlias` dropped), a `repeat` the unroll widened past `RepeatUnrollStrategy`
   (the reference's `RepeatStep` re-entry merges as evaluation interleaves), a merge step/service before the
   position, a sack anywhere. There the order is left unmerged unless the superset places a merge under an
-  order reader, which declines (`mayMergeAt`). (2) **merges inside a body** (a branch arm, a `local`/`by()`
-  child): `mergedAt` runs on the root traversal only; an explicit `barrier()`/`order()` merges at any depth.
+  order reader, which declines (`mayMergeAt`). (2) **lists `mergedAt` cannot place**: a child traversal is
+  placed (`ChainCtx.traversal`, a sliced prefix of it, a nested rooted read's `mergeScope`) and merges at its
+  own positions; a body the seam hands over unplaced (a `group()` value body, a non-distinct `union` arm)
+  declines only where a reader IN it observes a possible merge — a reader in its host is the host's to judge;
+  and a REWRITTEN list (a barrier service's resume, a federated arm — `ChainCtx.rewritten`) is not scanned at
+  all. A per-traverser child with no emission order folds in a canonical VALUE order (merge-invariant) and
+  only a slice in it declines (`slicedAfter`).
   (3) **writes after a merge**: `AddVertexStep` creates ONE element for a merged slot of k
   (`g.V().both().addV('x')` makes 6 vertices in the reference, 12 here) — the write lowering has no bulk notion.
   (4) the 2500-slot drain is reproduced only for ONE drain; a merging stream past it raises a deferral.

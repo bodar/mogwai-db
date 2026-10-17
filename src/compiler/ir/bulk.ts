@@ -203,9 +203,9 @@ export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel',
 // path for a path-carrying class (`…/traverser/B_LP_O_S_SE_SL_Traverser.java:113-125`) and never for one
 // carrying an unmergeable sack. The sets that do it:
 //
-// - **a start step's own iterator** — `ExpandableStepIterator.add(Iterator)` drains it INTO the
+// - **an `inject()` start's own iterator** — `StartStep` hands it to `ExpandableStepIterator.add(Iterator)`, which drains it INTO the
 //   `TraverserSet` (`…/step/util/ExpandableStepIterator.java:61-63`), so `inject(1, 2, 1)` reaches its next
-//   step as `1×2, 2`;
+//   step as `1×2, 2` (`…/step/sideEffect/StartStep.java:60-67`). A start `GraphStep` generates one traverser at a time and merges nothing;
 // - **`LazyBarrierStrategy`, a DEFAULT strategy**, which inserts a `NoOpBarrierStep(2500)` after every
 //   flat-map step but the FIRST (a `GraphStep` counting as one unless it names fewer than five ids or is
 //   followed by a `has()`), unless the next step is itself a `Barrier`, the traversal end, or a labelled
@@ -351,6 +351,9 @@ const knownStartStep = (start: IRStep | undefined): start is IRStep =>
   !!start && !start.landedSource && start.graphTag == null
   && (start.name === 'V' || start.name === 'E' || start.name === 'inject');
 
+/** Does `steps` open with a start step the scan can name — so it is scanned `rooted`? */
+export const beginsWithSource = (steps: readonly IRStep[]): boolean => knownStartStep(steps[0]);
+
 /** IR steps that are no step in the reference — a label rides the previous step, an `identity()` is
  *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
 const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity', 'by', 'with']);
@@ -427,17 +430,34 @@ const BULK_FORWARDING: ReadonlySet<string> = new Set(['local', 'union', 'choose'
 
 /** May a bulk-forwarding parent's body emit merged traversers — does its own (child, superset) scan hold
  *  a merge over a stream that may repeat? A folded `option()` cluster or an unreadable body answers `true`. */
-function bodiesMayBulk(step: IRStep): boolean {
+function bodiesMayBulk(step: IRStep, single: boolean): boolean {
   if (step.optionArms?.length) return true;
   for (const v of (step.args ?? []).map((a) => a.value)) {
     if (!isNested(v)) continue;
     let chain: readonly IRStep[];
     try { chain = stepChain(v.nested, {}); } catch { return true; }
-    const positions = scan(chain, false, 'superset');
-    if (positions === 'unknown' || positions.some((p) => !p.distinct)) return true;
+    // A body opening with its own start step is scanned by that step's rule; any other is handed the
+    // host's stream — ONE traverser where the host's input is one (`single`).
+    const positions = scan(chain, knownStartStep(chain[0] as IRStep | undefined), 'superset', chain.length, single);
+    // A `repeat` re-entry merge is the residue `IMPLICIT` already leaves to `'unknown'`, not a forwarded one.
+    if (positions === 'unknown' || positions.some((p) => !p.distinct && p.kind !== 'repeat')) return true;
   }
   return false;
 }
+
+/** Steps that keep a stream of AT MOST ONE traverser at most one — filters, slices, the one-to-one maps,
+ *  the pass-through side effects and the reorders. A flat-map, a branch or anything unlisted may fan out. */
+const SINGLE_PRESERVING: ReadonlySet<string> = new Set([
+  ...FILTERS, ...SLICES, 'dedup', 'barrier', 'order', 'sample', 'aggregate', 'group', 'groupCount', 'subgraph',
+  'id', 'label', 'key', 'value', 'constant', 'project', 'valueMap', 'elementMap', 'propertyMap', 'select', 'math', 'format', 'path',
+  'map', 'sideEffect', 'addV', 'addE',
+  'asString', 'toUpper', 'toLower', 'length', 'trim', 'lTrim', 'rTrim', 'reverse', 'concat', 'replace',
+  'substring', 'split', 'dateAdd', 'dateDiff', 'asDate', 'asNumber', 'asBool', 'index',
+  'conjoin', 'combine', 'difference', 'disjunct', 'intersect', 'merge', 'product', 'otherV',
+]);
+/** Does `s` keep a single-traverser stream single? (A global reduction MAKES one — the scan's own rule.) */
+const keepsSingle = (s: IRStep): boolean =>
+  s.perTraverser ? s.splicedHost !== 'flatMap' : (isLocalScope(s) && BARRIER_NAMES.has(s.name)) || SINGLE_PRESERVING.has(s.name);
 
 /** The steps whose `TraverserRequirement.PATH` switches `LazyBarrierStrategy` off for their traversal:
  *  `PathStep`, `PathFilterStep`, `TreeStep`/`TreeSideEffectStep`, `EdgeOtherVertexStep` (and a
@@ -458,7 +478,7 @@ type Mode = 'exact' | 'superset';
  * recording every merge. `upTo` stops the walk (the consumer at `upTo` is still read as a next step).
  * `'unknown'` where the mode cannot answer.
  */
-function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = steps.length): readonly BulkingPosition[] | 'unknown' {
+function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = steps.length, singleStart = !rooted): readonly BulkingPosition[] | 'unknown' {
   const exact = mode === 'exact';
   // A sack is on EVERY traverser once any step reads one, and it decides whether traversers merge at all;
   // everything else the exact scan cannot place matters only where it sits BEFORE the position asked about
@@ -482,21 +502,30 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
   // the flag at ANY path processor, which can only add barriers.
   let labeledPath = false;
   let distinct = true;
+  // Does the stream hold AT MOST ONE traverser? A child traversal is handed one parent traverser at a time
+  // (`singleStart`), and a set of at most one merges nothing, however its traverser was reached.
+  let single = singleStart;
   let from = 0;
   if (rooted) {
     const start = steps[0];
     if (!exact && start?.name === 'call') {
       foundFlatMap = true;
       distinct = false;
+      single = false;
       from = 1;
     } else {
     if (!knownStartStep(start)) return 'unknown';
     const ids = start.args ?? [];
-    if (ids.length) {
+    if (ids.length && start.name === 'inject') {
       positions.push({ after: 0, kind: 'start', window: Infinity, distinct: distinctLiterals(start) });
       // A drained set holds pairwise-distinct traversers.
       distinct = true;
+    } else if (ids.length) {
+      // A start `GraphStep` generates its traversers ONE AT A TIME (`…/step/map/GraphStep.java:193-196`) —
+      // no set holds them, so a repeated id is two traversers, unmerged.
+      distinct = distinctLiterals(start);
     } else if (start.name === 'inject') return 'unknown';
+    single = ids.length === 1;
     // A GraphStep counts as the first flat-map unless it names fewer than BIG_START_SIZE (5) ids, or names
     // none and is followed by a `HasStep` (`LazyBarrierStrategy.java:113-115`).
     if (start.name !== 'inject') {
@@ -519,8 +548,16 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
     const next = nextReferenceStep(steps, i);
     const realNextIsBarrier = !next || isReferenceBarrier(next);
     const nextIsBarrier = realNextIsBarrier || !!phaseEnd;
-    const verdict = visit(s, i, nextIsBarrier);
+    const placedBefore = positions.length;
+    const singleIn = single;
+    const verdict = visit(s, i, nextIsBarrier, singleIn);
     if (verdict === 'unknown') return 'unknown';
+    // A global reduction MAKES a single traverser — not its keyed side-effect form, which passes the stream on.
+    single = (singleIn && keepsSingle(s)) || (REDUCING.has(name) && !isLocalScope(s) && !((name === 'group' || name === 'groupCount') && sideEffectKey(s)));
+    if (single) {
+      distinct = true;
+      for (let k = placedBefore; k < positions.length; k++) positions[k] = { ...positions[k]!, distinct: true };
+    }
     if (phaseEnd && !(phaseEnd === 'last' && realNextIsBarrier)) {
       positions.push({ after: i, kind: 'lazy', window: MAX_BARRIER_SIZE, distinct });
       distinct = true;
@@ -530,7 +567,7 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
   return positions;
 
   /** One step's effect on the scan state — `'unknown'` where the mode cannot place its merges. */
-  function visit(s: IRStep, i: number, nextIsBarrier: boolean): 'unknown' | void {
+  function visit(s: IRStep, i: number, nextIsBarrier: boolean, single: boolean): 'unknown' | void {
     const name = s.name;
     const local = isLocalScope(s);
     const barrierAfter = foundFlatMap && !labeledPath && !lazyOff && !nextIsBarrier;
@@ -622,7 +659,7 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
       // A body whose OWN traversers may arrive merged forwards them merged: `LocalStep` and `BranchStep`
       // emit the child's traversers as they are, bulk and all. The exact scan cannot place that merge in
       // this traversal; the superset counts it as one.
-      if (BULK_FORWARDING.has(name) && bodiesMayBulk(s)) {
+      if (BULK_FORWARDING.has(name) && bodiesMayBulk(s, single)) {
         if (exact) return 'unknown';
         positions.push({ after: i, kind: 'lazy', window: MAX_BARRIER_SIZE, distinct: false });
       }
@@ -666,17 +703,50 @@ export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted
  * start step naming repeated literals merges them. (An explicit `barrier()`/`order()` merges in its own
  * step, `barrierRows`/`orderRows`.)
  */
-export function mayMergeAt(steps: readonly IRStep[], at: number): boolean {
-  if (at <= 0 || !readsStreamOrder(steps.slice(at))) return false;
-  const positions = scan(steps, true, 'superset', at);
+export function mayMergeAt(steps: readonly IRStep[], at: number, rooted = true, enclosingReads = false): boolean {
+  if (at <= 0 || !(enclosingReads || readsStreamOrder(steps.slice(at)))) return false;
+  const positions = scan(steps, rooted, 'superset', at);
   if (positions !== 'unknown') return positions.some((p) => p.after === at - 1 && !p.distinct && IMPLICIT.has(p.kind));
   const before = steps[at - 1]!;
-  if (at - 1 === 0) return knownStartStep(before) && !distinctLiterals(before);
+  if (at - 1 === 0 && rooted) return knownStartStep(before) && !distinctLiterals(before);
   const next = nextReferenceStep(steps, at - 1);
   if (before.perTraverser) return before.splicedHost === 'flatMap' && !!next && !isReferenceBarrier(next);
   if (before.name === 'aggregate') return true;
   if (!next || isReferenceBarrier(next) || before.unrolled === 'beyond') return false;
   return FLAT_MAPS.has(before.name) || OTHER_V.has(before.name) || SUPERSET_PATH_PROCESSORS.has(before.name);
+}
+
+/**
+ * `mayMergeAt` for a step list the lowering cannot place in its traversal (`ChainCtx.traversal` does not
+ * name it): scanned as the traversal it would begin — from its own start step's rule where it opens with
+ * one (a `GraphStep` counts by its own index in its own traversal, `LazyBarrierStrategy.java:113-115`),
+ * else as a child from its first step. Only a reader IN `steps` is weighed: an unplaced list cannot say
+ * how its host consumes it (a `group()` value body runs once per KEY, a `union()` arm per start or over
+ * all of them), so a reader beyond it is that host's to judge.
+ */
+/**
+ * Does a GLOBAL slice after `at` cut the stream reaching it — the one reader whose MEMBERSHIP a merge
+ * changes even where the stream carries no emission order: `RangeGlobalStep` trims a merged slot's bulk
+ * as one traverser (`…/step/filter/RangeGlobalStep.java:73-120`), so which k traversers survive depends on
+ * the slots, not on any order the rows happen to be read in. (An unordered stream's other readers fold in
+ * a canonical value order, which no merge can move.) A slice past a step that merges or collapses the
+ * WHOLE stream reads that step's output instead — and a whole-stream merge (`order()`, `barrier()`,
+ * `dedup()`, a reduction) answers the same whatever was merged before it, because a stable regroup keeps
+ * every value's first occurrence and its multiplicity.
+ */
+export function slicedAfter(steps: readonly IRStep[], at: number): boolean {
+  for (const s of steps.slice(at)) {
+    if (isLocalScope(s)) continue;
+    if (SLICES.has(s.name)) return true;
+    if (WHOLE_STREAM.has(s.name) && !(s.name === 'barrier' && (s.args ?? []).length) && !(s.name === 'dedup' && (s.args ?? []).length)) return false;
+  }
+  return false;
+}
+const WHOLE_STREAM: ReadonlySet<string> = new Set([...REDUCING, 'order', 'barrier', 'dedup']);
+
+export function mayMergeUnplaced(steps: readonly IRStep[], at: number): boolean {
+  // A `call()` start (a barrier service's resume) is the superset scan's own rooted case.
+  return mayMergeAt(steps, at, steps[0]?.name === 'call' || knownStartStep(steps[0]));
 }
 
 /** The merges a stream receives between two steps rather than in a step of its own. `repeat` is absent: a

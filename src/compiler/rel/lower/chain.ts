@@ -231,6 +231,16 @@ export interface ChainCtx extends FilterCtx {
    * a raise inside `optional(…)` under a later `limit()` is not one the reference meets on every row.
    */
   readonly pull?: PullPosition;
+  /**
+   * THE TRAVERSAL A NESTED ROOTED READ BEGINS, for merge placement only (`mergedAt`). A `rootedRead` /
+   * source-union arm is a whole child traversal the reference runs its own strategies over, so WHERE it
+   * merges is known — but it may run once per parent of a GLOBAL child, so it is not `traversal`, whose
+   * consumers also read its rows as the reference's traversers.
+   */
+  readonly mergeScope?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  /** This chain is a REWRITTEN list — a seeded resume or a re-sourced chain (`lowerChainOf`) — whose
+   *  positions are not the reference traversal's, so no merge can be placed in it by scanning it. */
+  readonly rewritten?: boolean;
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;

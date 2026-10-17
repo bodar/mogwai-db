@@ -655,8 +655,8 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
 });
 
 // A SLICE AFTER A SIDE EFFECT. `EarlyLimitStrategy`, a default, moves a `limit`/`range`/`skip` LEFT past every
-// `SideEffectStep` (`AddPropertyStep`, `AddLabelStep`) and always-bound map step (`AddVertexStep`, `IdentityStep`,
-// `EdgeVertexStep`…) to just after the last step that is neither
+// `SideEffectStep` (`AddPropertyStep`, `AddLabelStep`) and always-bound `MapStep` (`AddVertexStep`, `IdStep`,
+// `EdgeOtherVertexStep`…) to just after the last step that is neither
 // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java`
 // `apply`), so the reference writes for the sliced traversers ONLY — `ir/early-limit.ts` performs that move.
 // A slice it cannot move leaves the reference's LAZY pull (`RangeGlobalStep` stops pulling past its bound), and
@@ -679,7 +679,7 @@ describe('a slice after a side effect', () => {
     answers("g.V().property('x',1).limit(1).values('x')", [1], "g.V().has('x').count()", 1);
     answers("g.V().property('x',1).range(1,3).count()", [2], "g.V().has('x').count()", 2);
     answers("g.V().property('x',1).identity().limit(1).count()", [1], "g.V().has('x').count()", 1);
-    answers("g.E().property('x',1).inV().limit(1).count()", [1], "g.E().has('x').count()", 1);
+    answers("g.V().property('x',1).id().limit(2).count()", [2], "g.V().has('x').count()", 2);
     answers("g.V().addLabel('z').limit(2).count()", [2], "g.V().hasLabel('z').count()", 2);
     answers("g.inject(1,2,3).addV('n').limit(1).count()", [1], "g.V().hasLabel('n').count()", 1);
     // In a nested body too: the strategy applies to the child (`__.V()` is its `insertAfter`).
@@ -713,6 +713,8 @@ describe('a slice after a side effect', () => {
   test('a slice it cannot move declines, writing nothing', () => {
     // A movement between: marko is written, then his first neighbour fills the slice.
     refuses("g.V().property('x',1).out().limit(1)", "g.V().has('x').count()");
+    // `inV()` is an `EdgeVertexStep` — a `FlatMapStep` (`…/step/map/EdgeVertexStep.java`), so never crossed.
+    refuses("g.E().property('x',1).inV().limit(1).count()", "g.E().has('x').count()");
     // The user turned the strategy off: the lazy pull writes the slice plus one.
     refuses("g.withoutStrategies(EarlyLimitStrategy).V().property('x',1).limit(1)", "g.V().has('x').count()");
     // A nested writer whose body is emitted lazily, cut by a slice after it.

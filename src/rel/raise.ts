@@ -26,10 +26,26 @@ import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
  * travel verbatim.
  */
 export function raiseExpr(message: string, dependsOn: Expr): Expr {
+  return sentinelRaise(OPEN, message, dependsOn);
+}
+
+/**
+ * A DEFERRAL raised mid-statement — `raiseExpr`'s mechanism for a value only the data decides that THIS
+ * compiler cannot answer (a merge one barrier drain cannot hold), rather than an error the REFERENCE
+ * answers. The difference is when it may fire: a reference error is the answer whether or not anything
+ * reads the value (`mayRaise`'s consumers evaluate an unread site to reproduce it), while a deferral
+ * belongs to the READ — an unread value was never a question this compiler failed to answer. So
+ * `mayRaise` does not count one; `raisedMessage` reads both back.
+ */
+export function deferralExpr(message: string, dependsOn: Expr): Expr {
+  return sentinelRaise(OPEN_DEFERRAL, message, dependsOn);
+}
+
+function sentinelRaise(open: string, message: string, dependsOn: Expr): Expr {
   if (message.includes(CLOSE)) throw new Error(`raiseExpr: unrepresentable message ${JSON.stringify(message)}`);
   return {
     kind: 'call', fn: 'json_extract',
-    args: [{ kind: 'call', fn: 'json_quote', args: [dependsOn] }, compilerText(`${OPEN}${message}${CLOSE}`)],
+    args: [{ kind: 'call', fn: 'json_quote', args: [dependsOn] }, compilerText(`${open}${message}${CLOSE}`)],
   };
 }
 
@@ -42,7 +58,8 @@ export const raiseInRow = (message: string): Expr => raiseExpr(message, { kind: 
 
 const OPEN = '$!raise:';
 const CLOSE = '!$';
-const RAISED = /\$!raise:(.*?)!\$/;
+const OPEN_DEFERRAL = '$!defer:';
+const RAISED = /\$!(?:raise|defer):(.*?)!\$/;
 
 /** The message a `raiseExpr` arm aborted a statement with, or `null` for any other failure. */
 export function raisedMessage(error: unknown): string | null {

@@ -12,7 +12,7 @@ import { isRel, type Rel } from '../../rel/rel.ts';
 import { rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
+import { beginsWithSource, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -45,7 +45,7 @@ import { asNumberFilter, asNumberParts, CONSTANT_FOLDED, REL_TRANSFORMS, transfo
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { CLASS_MASK, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClass, numberClassMask, reducerAggregate, sumTower } from './reducer.ts';
-import { raiseExpr } from '../../rel/raise.ts';
+import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
@@ -285,6 +285,21 @@ export const BORD_ARM: Channel = { col: 'bord_a', role: 'origin' };
 export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
   ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted);
 
+/** The traversal `steps` is known to BEGIN, for merge placement — `ChainCtx.traversal` (or a nested
+ *  rooted read's `ChainCtx.mergeScope`) itself, or a PREFIX of it a lowering sliced off to lower apart from
+ *  the step it ends in (a `by()` body's trailing reducer, an argmax's `min`/`max`): the same step objects
+ *  from index 0, so position `i` of one is position `i` of the other and a merge placed in the whole
+ *  traversal before `steps.length` is placed in the prefix. Anything else is a different array and
+ *  answers `undefined`. */
+function placedIn(ctx: ChainCtx, steps: readonly IRStep[]): ChainCtx['traversal'] {
+  for (const traversal of [ctx.traversal, ctx.mergeScope]) {
+    if (!traversal) continue;
+    if (traversal.steps === steps) return traversal;
+    if (steps.length && steps.length <= traversal.steps.length && steps.every((s, i) => s === traversal.steps[i])) return traversal;
+  }
+  return undefined;
+}
+
 /**
  * May a BULK-FORWARDING parent at `steps[at]` answer differently than the reference because the reference
  * merged equal traversers before it? `OptionalStep` hands its child the traverser WITH its bulk
@@ -300,9 +315,15 @@ export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number):
 export const bulkForwardingDiverges = (ctx: ChainCtx, steps: readonly IRStep[] | undefined, at: number, bodies: readonly (readonly IRStep[])[]): boolean =>
   bodies.some(bulkNonlinear) && !(steps && unbulkedAt(ctx, steps, at));
 
-/** The deferral a merge raises where one `NoOpBarrierStep(2500)` drain would not hold the stream
- *  (`regroupFirstOccurrence`): the reference merges in successive drains, which one window cannot state. */
-export const MERGE_WINDOW_EXCEEDED = `a traversal whose implicit barrier holds more than ${MAX_BARRIER_SIZE} distinct traversers while its order is read is not supported`;
+/** The deferral a merge raises where one drain of a `NoOpBarrierStep(window)` would not hold the stream
+ *  (`regroupFirstOccurrence`): the reference merges in successive drains, which one window cannot state.
+ *  Worded by the barrier that owns the window — an explicit `barrier(n)` names its own `n`; the implicit
+ *  ones are `LazyBarrierStrategy`'s/`PathRetractionStrategy`'s `MAX_BARRIER_SIZE`. */
+export const mergeWindowExceeded = (window: number, explicit: boolean): string => explicit
+  ? `a barrier(${window}) that fills with more than ${window} distinct traversers while its order is read is not supported`
+  : `a traversal whose implicit barrier holds more than ${window} distinct traversers while its order is read is not supported`;
+/** The implicit barriers' deferral — `mergeWindowExceeded` at `MAX_BARRIER_SIZE`. */
+export const MERGE_WINDOW_EXCEEDED = mergeWindowExceeded(MAX_BARRIER_SIZE, false);
 
 /**
  * MERGE EQUAL TRAVERSERS into their first arrival's slot (`regroupFirstOccurrence`, `build.ts`) — the ONE
@@ -317,11 +338,12 @@ export const MERGE_WINDOW_EXCEEDED = `a traversal whose implicit barrier holds m
  * unmergeable, the set merges nothing; mergeable, it COMBINES sacks, which this cannot state — a decline.
  */
 export function mergeEqual(
-  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter,
+  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter, explicit = false,
 ): Rel | null {
   if (!encounterOf(rel.channels)) return rel;
   if (ctx.sack || rel.channels.some((channel) => channel.role === 'sack')) return ctx.sack?.operator ? null : rel;
-  return regroupFirstOccurrence(rel, key, window, (dependsOn) => raiseExpr(MERGE_WINDOW_EXCEEDED, dependsOn), fresh);
+  const deferral = mergeWindowExceeded(window, explicit);
+  return regroupFirstOccurrence(rel, key, window, (dependsOn) => deferralExpr(deferral, dependsOn), fresh);
 }
 
 /** The merge key of a shape whose identity IS its payload (a value, a list, a map, a record, a path). */
@@ -352,25 +374,57 @@ export function armStartMerge(input: Rel, framing: RelFraming, ctx: ChainCtx, fr
 /**
  * THE IMPLICIT MERGES on the stream reaching `steps[at]` — a start step's iterator, `LazyBarrierStrategy`'s
  * and `PathRetractionStrategy`'s `NoOpBarrierStep`s, a pass-through side-effect barrier — reproduced where
- * `bulkingPositions` (`ir/bulk.ts`) can place them: on the ROOT traversal, which `ctx.traversal` names by
- * identity. Every tail calls this at the head of each step, so the merge lands whichever tail holds the
- * stream there. The explicit merges (`barrier()`, `order()`) are their own steps' (`barrierRows`,
- * `orderRows`) and hold at any depth. Where the scan answers `'unknown'` it declines if the SUPERSET scan
+ * `bulkingPositions` (`ir/bulk.ts`) can place them: on the traversal `ctx.traversal` names (`placedIn`) —
+ * the root, or a CHILD traversal at any depth (`local`/`map`/`flatMap`/`by()`/a `union`/`choose` arm/a
+ * write's value traversal), each of which the reference runs its own strategies over. Every tail calls
+ * this at the head of each step, so the merge lands whichever tail holds the stream there. The explicit
+ * merges (`barrier()`, `order()`) are their own steps' (`barrierRows`, `orderRows`) and hold at any depth. Where the scan answers `'unknown'` it declines if the SUPERSET scan
  * places a merge here under a reader of the order (`mayMergeAt`), and otherwise leaves the stream as it is.
  */
 export function mergedAt(
   ctx: ChainCtx, steps: readonly IRStep[], at: number, rel: Rel, key: (rel: Rel) => readonly Expr[], fresh: Minter,
 ): Rel | null {
-  if (at === 0 || !encounterOf(rel.channels) || ctx.traversal?.steps !== steps || !ctx.traversal.rooted) return rel;
-  // The scan stops at `at`: what follows cannot move a merge that happens before it.
-  const positions = bulkingPositions(steps, true, at);
+  if (at === 0) return rel;
+  // A stream with NO emission order cannot carry a merge (the copies' shared position IS the bulk), and
+  // every reader of it but one folds in a canonical order no merge can move. The one is a SLICE, whose
+  // membership the merged slots decide (`slicedAfter`) — so there, a merge the scan places (or may place)
+  // here declines rather than slice the unmerged rows.
+  if (!encounterOf(rel.channels)) {
+    if (!slicedAfter(steps, at)) return rel;
+    const scope = placedIn(ctx, steps);
+    if (!scope) return ctx.rewritten || !mayMergeUnplaced(steps, at) ? rel : null;
+    const placed = bulkingPositions(scope.steps, scope.rooted, at);
+    if (placed === 'unknown') return referenceUnbulkedAt(scope.steps, at, scope.rooted) || !mayMergeAt(scope.steps, at, scope.rooted) ? rel : null;
+    return placed.some((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind) && !p.distinct) ? null : rel;
+  }
+  // A step list this scope does not KNOW begins a traversal (a resumed or rewritten chain, an arm handed
+  // a stream the reference may have merged) cannot place a merge. Every child traversal gets the
+  // strategies of its own (`DefaultTraversal.applyStrategies` → `TraversalHelper.applyTraversalRecursively`,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversal.java:144-148`),
+  // so wherever the superset scan places one here under a reader of the order, the traversal declines.
+  // A REWRITTEN list (`ChainCtx.rewritten` — a barrier service's resume, a federated arm) is not the
+  // reference's traversal at all, so scanning it would only guess; it keeps the stream as it is (open in
+  // `docs/outstanding-work.md`).
+  const traversal = placedIn(ctx, steps);
+  if (!traversal) return ctx.rewritten || !mayMergeUnplaced(steps, at) ? rel : null;
+  const rooted = traversal.rooted;
+  // The scan stops at `at`: what follows cannot move a merge that happens before it. A CHILD traversal
+  // (`rooted: false`) is scanned from its own first step — the strategy runs per traversal, and a
+  // per-traverser child's set is per parent, which the merge key's carried `origin` (or the correlated
+  // subquery the body lowers in) scopes.
+  const positions = bulkingPositions(traversal.steps, rooted, at);
   // Where the exact scan cannot place the merges (a label, a body unrolled past the strategy, a merge
   // step…), the SUPERSET scan still says whether one MAY land here; if it may and a reader observes the
   // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
   // answer the unmerged order.
-  if (positions === 'unknown') return referenceUnbulkedAt(steps, at, true) || !mayMergeAt(steps, at) ? rel : null;
+  if (positions === 'unknown') return referenceUnbulkedAt(traversal.steps, at, rooted) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered) ? rel : null;
   const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));
-  return !merge || merge.distinct ? rel : mergeEqual(rel, key(rel), merge.window, ctx, fresh);
+  if (!merge || merge.distinct) return rel;
+  // A child's traversers are the ROOT's class (`DefaultTraversal.getTraverserGenerator`, `…/util/DefaultTraversal.java:130-136`):
+  // under a root that tracks PATHS, `equals` compares the whole path (`B_LP_O_S_SE_SL_Traverser.java:113-125`),
+  // which a child stream not carrying it cannot state — decline rather than merge two different walks.
+  if (!rooted && ctx.tracksPath && !pathCarried(rel)) return null;
+  return mergeEqual(rel, key(rel), merge.window, ctx, fresh);
 }
 const IMPLICIT_MERGES: ReadonlySet<BulkingKind> = new Set<BulkingKind>(['start', 'lazy', 'retraction', 'side-effect']);
 
@@ -388,7 +442,7 @@ export function barrierRows(
   const n = args[0]?.value;
   const window = !args.length ? Infinity : typeof n === 'number' && Number.isInteger(n) && n > 0 && args.length === 1 ? n : undefined;
   if (window === undefined) return null;
-  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh);
+  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh, true);
   return unorderedBarrierMergeObservable(steps, at, ctx.traversal?.steps === steps ? ctx.traversal : undefined, ctx.ordered) ? null : rel;
 }
 
@@ -4438,10 +4492,14 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // (`rootedRead`, a source-union arm) may run once per parent traverser of a GLOBAL child; a seeded
   // resume (`opts.seed`) is a tail whose prefix ran elsewhere; and a re-sourced chain (a decorate
   // barrier's resume drops its `call()`, a federated arm reads a landed marker) is a REWRITTEN list.
+  // Merge placement (`mergedAt`) needs less: WHERE a whole traversal merges, which a nested rooted read
+  // states as well as the root does (`ChainCtx.mergeScope`); only a rewritten list cannot (`rewritten`).
   // Marked at the SOURCE step, so a source `union`'s arms (and any body a source step holds) read their
   // pull level off it; every tail re-marks at its own step.
-  const ctx: ChainCtx = pullAt(root && !opts.seed && analysed.ctx.source === BaseGraph
-    ? { ...analysed.ctx, traversal: { steps, rooted: true } } : analysed.ctx, steps, 0);
+  const placeable = !opts.seed && analysed.ctx.source === BaseGraph;
+  const ctx: ChainCtx = pullAt(!placeable ? { ...analysed.ctx, rewritten: true }
+    : root ? { ...analysed.ctx, traversal: { steps, rooted: true } }
+      : { ...analysed.ctx, mergeScope: { steps, rooted: beginsWithSource(steps) } }, steps, 0);
   const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;

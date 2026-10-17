@@ -452,6 +452,20 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
 
   # `PathRetractionStrategy` puts a `NoOpBarrierStep` after a `math()` whose next step is not a Barrier.
   @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_3_4X_unfold_mathX_mod_2X_isXgteX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 3, 4]).unfold().math("_ % 2").is(P.gte(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1.0].d,d[1.0].d,d[0.0].d,d[0.0].d] |
+
+  # …and under a slice: math()'s possible raise is carried past the is() filter to the limit, which the
+  # raise channel (`rel/raise-channel.ts`) cannot settle yet — a decline, never the unmerged [1.0, 0.0].
+  @gap:traverser-set-merge @Unsupported
   Scenario: g_injectXl1_2_3_4X_unfold_mathX_mod_2X_isXgteX0XX_limitX2X
     Given the empty graph
     And the traversal of

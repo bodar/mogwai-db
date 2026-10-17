@@ -492,8 +492,8 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       | result |
       | lop |
 
-  # The same at a by(): project() is pulled one traverser past the limit, never on to marko.
-  @Unsupported
+  # The same at a by(): a `ProjectStep` is an always-bound MapStep, so EarlyLimitStrategy moves the limit IN
+  # FRONT of it (`order().limit(1).project(…)`) — project() runs for lop alone, never on to marko.
   Scenario: g_V_orderXbyXlabel_descXX_projectXaX_byXvaluesXageX_toUpper_foldX_limitX1X
     Given the modern graph
     And the traversal of
@@ -633,8 +633,10 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
 
-  # math()'s variable must resolve to a Number (MathStep), and its raise rides the row to the slice like a
-  # transform's: limit(1) pulls 1 and 2, limit(2) pulls 'a'.
+  # math()'s variable must resolve to a Number (MathStep). But a `MathStep` is an always-bound `MapStep`
+  # (StepOutputArityPredictor's DEFINITELY_SINGULAR list), so EarlyLimitStrategy — a default — moves the
+  # slice IN FRONT of it (EarlyLimitStrategy.java `apply`/`isMapStepMovable`): the chain the reference runs
+  # is `inject(1, 2, "a").limit(n).math("_+1")`, and `"a"` never reaches math() for either bound.
   Scenario: g_injectX1_2_aX_mathX___plus_1X_limitX1X
     Given the empty graph
     And the traversal of
@@ -653,7 +655,10 @@ Feature: mogwai addendum — a per-traverser raise belongs to the traversers the
       g.inject(1, 2, "a").math("_+1").limit(2)
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+    Then the result should be ordered
+      | result |
+      | d[2.0].d |
+      | d[3.0].d |
 
   # The compile-time cast of an inject()'s values raises only for a value the reference casts: the limit
   # pulls "1" and "2" and stops, so "x" is never parsed; limit(2) pulls it.
