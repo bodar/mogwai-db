@@ -923,6 +923,11 @@ authorities.
   branch body with the host's path entry; federate fails closed at every seam (`test/support/fail-closed.ts` is
   the positive no-internal-error contract). Residue: threading alias channels through `childSeam` (the full fix)
   is still open.
+  ✅ Fix-forward LANDED 2026-10-17 (`08dac561`, `7f2d7835`): path entries follow the reference split
+  (`map`/`flatMap(identity())` open an entry; `union`/`optional`/`choose`/`local` do not — label set is the
+  arm intersection); ONE `writesAnywhere` authority consulted by `lowerRankHead` and `scalarChild`, so a write
+  in any correlated child value declines; a federated sibling's collapsed (element, bulk) row lands `bulk`
+  times (`runForeign` was dropping it — `fold().count(local)` over landed elements counted distinct).
 - 🚧 **H — reference strategy/step facts copied by hand.** emit-first `times(n)` unroll drops the last level
   (`step/branch/RepeatStep.java` RepeatEndStep emits on `doUntil`; seam `tryUnroll` in `ir/strategies.ts` —
   emit it or decline emit-first; check `l3-state.json` for `g_V_emit_repeatXoutX_timesX2X_path`) — ✅ LANDED
