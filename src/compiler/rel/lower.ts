@@ -1181,9 +1181,12 @@ type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
  * (`dropPath`/decline-on-path) are kept here because they are no-ops over a scalar stream (the scalar
  * loop drops any carried path before these arms). `reenter` is the caller's own fold, for the one arm
  * (`aggregate`'s snapshot) that prepends an effect and continues the SAME tail from `at + 1`.
+ *
+ * The host is a FUNCTION of the relation, not a value, because an arm may re-root the relation first
+ * (`dropPath`) and a host must name the relation the arm actually reads.
  */
 function collectionArm(
-  step: IRStep, rel: Rel, host: ChildHost, framing: RelFraming, bulked: boolean,
+  step: IRStep, rel: Rel, hostOf: (rel: Rel) => ChildHost, framing: RelFraming, bulked: boolean,
   steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   reenter: (at: number) => Tail | null,
 ): ArmOutcome {
@@ -1218,6 +1221,10 @@ function collectionArm(
     // scalar stream, which never carries a path here.
     if (step.args.length) { if (pathCarried(rel)) return { tail: null }; }
     else rel = dropPath(rel, fresh);
+    // …and the HOST is re-read off the relation that survived the drop: a host built over the pre-drop
+    // relation names columns of a relation the group no longer reads from, and the checker refused
+    // `g.V().simplePath().groupCount()` with "no relation 'spf…' is in scope" — an internal error.
+    const host = hostOf(rel);
     // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
     // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and the
     // reduction happens at the `cap`, which is where a label filled at N positions can be one grouping
@@ -1249,7 +1256,7 @@ function collectionArm(
     // `aggregate("a")` — fill a NAMED COLLECTION and pass the traversers through. Shape-preserving.
     // A carried path declines (the member rows would have to carry it — not built); no-op over a scalar.
     if (pathCarried(rel)) return { tail: null };
-    const snapshot = registerCollection(step, rel, host, framing,
+    const snapshot = registerCollection(step, rel, hostOf(rel), framing,
       ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), ctx.source, fresh, ctx.mutating);
     if (!snapshot) return { tail: null };
     // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the rest
@@ -1294,7 +1301,7 @@ function collectionArm(
     // A carried PATH declines: the record is a new traverser object and nothing here appends it as a
     // path position, so a later `path()` would report a history with a step missing. No-op over a scalar.
     if (pathCarried(rel)) return { tail: null };
-    const record = recordOf(rel, host, framing, step, childSeam(ctx, fresh), ctx.source, fresh);
+    const record = recordOf(rel, hostOf(rel), framing, step, childSeam(ctx, fresh), ctx.source, fresh);
     if (!record) return { tail: null };
     return { tail: continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels) };
   }
@@ -1526,7 +1533,7 @@ function scalarTail(
     // THE SHARED COLLECTION VOCABULARY — `select` (which may re-root to an ELEMENT, the whole reason
     // `elementTail` is a function), `group`/`groupCount`, `aggregate`, `cap`, `project` — all lowered by
     // the one helper both tails share, reading `by()` through this fold's scalar `host` and framing `out`.
-    const armed = collectionArm(step, rel, host, out, bulked, steps, at, ctx, fresh, labels,
+    const armed = collectionArm(step, rel, () => host, out, bulked, steps, at, ctx, fresh, labels,
       (nextAt) => scalarTail(rel, out, steps, nextAt, bulked, ctx, fresh, labels));
     if (armed === 'continue') continue;
     if (armed !== 'pass') return armed.tail;
@@ -4393,7 +4400,7 @@ function elementTail(
     // THE SHARED COLLECTION VOCABULARY — `select` (a re-root to an aliased object), `group`/`groupCount`,
     // `aggregate`, `cap`, `project` — the one helper both tails share, reading `by()` through this fold's
     // `elementHost` and framing the elements. Same lowering the scalar tail reaches (§6·6).
-    const armed = collectionArm(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, bulked, steps, at, ctx, fresh, labels,
+    const armed = collectionArm(step, rel, (from) => elementHost(from, elem, labels), { kind: 'elements', elem }, bulked, steps, at, ctx, fresh, labels,
       (nextAt) => elementTail(rel, elem, steps, nextAt, bulked, ctx, fresh, labels));
     if (armed === 'continue') continue;
     if (armed !== 'pass') return armed.tail;
@@ -4599,7 +4606,11 @@ function elementTail(
         continue;
       }
     }
-    const row = rowOp(step, rel, elementRowShape(rel, elem, labels), bulked, ctx, fresh);
+    // A `dedup` DROPS a carried path (`rowOp`'s rule), so the row shape — whose host a `by()` reads —
+    // is built over the relation AFTER the drop; built over the pre-drop one, `simplePath().dedup().by(k)`
+    // named a relation the dedup no longer reads and the checker threw "no relation 'spf…' is in scope".
+    const from = step.name === 'dedup' ? dropPath(rel, fresh) : rel;
+    const row = rowOp(step, from, elementRowShape(from, elem, labels), bulked, ctx, fresh);
     if (!row) break;
     // A `dedup()` THAT LOWERED RESET THE MULTIPLICITY, and the fold learns it. Every arm `rowOp`
     // admits projects `bulk` as the literal 1 — the unordered `Distinct`, the ordered

@@ -4,9 +4,9 @@ import { and, carriedCols, eq, meta, notProduced, payloadCols, renumber, typeOf,
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
-import type { ColMeta } from '../../../rel/types.ts';
+import { unionColumnsViolation } from '../../../rel/structure.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
-import { armBatches, isLocalScope } from '../../ir/step.ts';
+import { armBatches, isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
 import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
@@ -433,6 +433,9 @@ export function variantMerge(
   if (arms.some((arm) => !sameChannels(arms[0]!.rel.channels, arm.rel.channels))) return null;
   const hasList = variantHasList(shapes);
   const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, hasList, fresh));
+  // The same column law the plain merge asks (`unionColumnsViolation`): the variant payload is uniform
+  // by NAME, but an arm that lays its channels out differently in type or nullability is not a Union.
+  if (unionColumnsViolation({ inputs: tagged, type: tagged[0]!.type })) return null;
   const channels = mergeChannels(base, tagged.map((rel) => rel.channels), { rigid: 'peer' });
   return {
     rel: make.union({ id: fresh('vu'), inputs: tagged, all: true, channels, type: tagged[0]!.type }),
@@ -496,8 +499,12 @@ export function mergeArms(
   // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
   if (rest.some((arm) => !sameFraming(first.framing, arm.framing)))
     return variantMerge(arms, base, remapped.aliases, fresh);
-  // …and on their declared COLUMNS, name for name, because a Union is positional.
-  if (rest.some((arm) => !sameColumns(first.rel.type.cols, arm.rel.type.cols))) return null;
+  // …and on their declared COLUMNS, because a Union is positional — the checker's OWN law
+  // (`unionColumnsViolation`): name, storage type and nullability, not names alone. A names-only test
+  // here admitted `union(__.outV().labels(), __.constant('x'))` (one `v text NOT NULL`, one `v any NULL`,
+  // both framed `string`), and the checker then threw its internal error at the user. Laying such arms
+  // out alike is a common-layout lowering this branch does not have, so it DECLINES.
+  if (unionColumnsViolation({ inputs: arms.map((arm) => arm.rel), type: first.rel.type })) return null;
   // ARMS THAT DISAGREE ON RIGID STATE DECLINE, and this is the check the channel core would otherwise
   // make by THROWING — which is right inside the core and wrong here, where the contract is `null`.
   // The comparison is arm-TO-ARM, not arm-to-`base`: a channel EVERY arm mints uniformly (the `fromV`
@@ -869,8 +876,16 @@ export function coalesceMerge(
     // A per-traverser REDUCTION arm (`__.out().count()`, `__.values(k).fold()`) is CORRECT for `coalesce`
     // (a `FlatMapStep`, per-traverser) — routed through the child seam, one row per host carrying every
     // channel; a movement/transform arm returns null and stays the ordinary `continueAs`. See `reductionArm`.
-    const arm = reductionArm(domain, framing, body!, ctx, fresh, labels, bulked)
-      ?? continueAs(domain, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
+    const reduced = reductionArm(domain, framing, body!, ctx, fresh, labels, bulked);
+    // …but the ORDINARY route lowers the arm ONCE over every traverser's rows, so a step in it that
+    // selects a subset of its input (`limit`/`range`/`skip`/`tail`/`sample`/`dedup`) would select across
+    // ALL traversers where the reference selects within ONE — `CoalesceStep.flatMap` resets its arm per
+    // start (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-60`),
+    // as does `OptionalStep.processNextStart` (`…/step/branch/OptionalStep.java:47-57`).
+    // `g.V().coalesce(__.out().limit(1), __.constant('x')).count()` is 6 there; this route answered 4.
+    // A per-traverser slice is a per-origin lowering this route does not have, so it DECLINES.
+    if (!reduced && slicesAcrossStarts(body!, ctx.params)) return null;
+    const arm = reduced ?? continueAs(domain, framing, body!, 0, bulked, inArmBody(ctx), fresh, labels);
     if (!arm) return null;
     // The slice path keeps each arm's within-arm order for `mintTraverserMajor` to consume; every
     // other path drops it, as a fresh unordered stream carries none.
@@ -896,6 +911,38 @@ export function coalesceMerge(
   return slice
     ? mintTraverserMajor(arms, source, labels, ctx.source, fresh)
     : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, ctx.source, fresh), ctx, fresh);
+}
+
+/** The slice barriers whose answer over the UNION of several traversers' sub-streams differs from the
+ *  union of their per-traverser answers — `SLICE_BARRIERS` minus `order`, which only reorders and so
+ *  agrees within each traverser's rows once the parent position is the major key. */
+const SUBSET_SLICES: ReadonlySet<string> = new Set([...SLICE_BARRIERS].filter((name) => name !== 'order'));
+
+/** The hosts whose child sees its WHOLE input stream rather than being reset per start: `BranchStep`
+ *  (union/choose — `hasBarrier` drains every start into one option instance) and `RepeatStep`, whose
+ *  body is one traversal every looping traverser flows through. A child of any OTHER host (`local`,
+ *  `where`, `map`, `by`, `coalesce`, …) is applied per traverser (`TraversalUtil.apply`) and so cannot
+ *  select across starts. */
+const STREAM_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'repeat']);
+
+/**
+ * Does a PER-TRAVERSER arm body hold a step that would select ACROSS the traversers it is lowered over?
+ * A global-scope `SUBSET_SLICES` step at the top level, or one nested under a `STREAM_CHILD_HOSTS` child
+ * (which is global relative to the arm's input, so equally per-traverser in the reference). An
+ * unparseable nested body answers `true` — the conservative answer is a decline.
+ */
+function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>): boolean {
+  const nestedSlices = (value: unknown): boolean => {
+    if (!isNested(value)) return false;
+    const inner = bodyOf(value.nested, params);
+    return !inner || slicesAcrossStarts(inner, params);
+  };
+  return body.some((step) =>
+    (SUBSET_SLICES.has(step.name) && !isLocalScope(step))
+    || (!!step.repeatRegion && slicesAcrossStarts(step.repeatRegion, params))
+    || (STREAM_CHILD_HOSTS.has(step.name) && (
+      (step.args ?? []).some((arg) => nestedSlices(arg.value))
+      || (!!step.optionArms && slicesAcrossStarts(step.optionArms, params)))));
 }
 
 export function chooseArms(
@@ -1100,6 +1147,3 @@ export const sameRecordFields = (left: readonly RecordField[], right: readonly R
     return field.key === other.key && field.prefix === other.prefix
       && field.optional === other.optional && sameFraming(field.framing, other.framing);
   });
-
-export const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
-  left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

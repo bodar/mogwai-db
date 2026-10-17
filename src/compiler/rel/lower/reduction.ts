@@ -1,5 +1,5 @@
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, compilerText, eq, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -1330,7 +1330,11 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
     const tag = a.framing.kind === 'scalar' ? staticTypeOf(a.framing.type) : undefined;
     return tag ? compilerText(tag) : compilerNull('text');
   };
-  const vtype: Expr = { kind: 'call', fn: 'COALESCE', args: arms.map(tagOf) };
+  // THE TAG OF THE ARM THAT ANSWERED — the same non-null test the value's `COALESCE` makes, arm for
+  // arm. A `COALESCE` of the tags instead picks the first arm that HAS a tag, which is not the arm that
+  // produced: `coalesce(__.constant('x'), __.out().count())` paired `'x'` (an untagged constant, NULL)
+  // with the count arm's `'long'`, and framing `'x'` as a long threw at serialization.
+  const vtype: Expr = { kind: 'case', whens: arms.map((a) => [isNot(a.expr, compilerNull('text')), tagOf(a)] as const) };
   return { expr: value, framing: { kind: 'scalar', type: UNKNOWN, result: 'number' }, vtype, present, yields: 'one' };
 }
 

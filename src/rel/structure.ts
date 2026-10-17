@@ -1,4 +1,5 @@
 import type { RelNode } from './rel.ts';
+import { sameColumns } from './types.ts';
 
 // The CONSTRUCTION-TIME structural laws — the ones a node must satisfy the moment it is built, from its
 // own fields alone, independent of the scope/tree it later lands in. The factory enforces them at MINT
@@ -57,4 +58,22 @@ export function checkRecursiveHeader(r: Pick<RelNode<'recursive'>, 'cols' | 'typ
   const output = r.type.cols.map((column) => column.name);
   if (r.cols.length !== output.length || r.cols.some((name, i) => name !== output[i]))
     throw new Error('RelIR: Recursive CTE header must match its output columns');
+}
+
+/**
+ * A Union's COLUMN law — every input's columns identical to the output's (name, storage type AND
+ * nullability), because `UNION ALL` is positional and the declared type is what the parent reads.
+ *
+ * Asked by TWO callers with two different answers to a violation, the `recursiveViolation`
+ * arrangement: `check.ts` THROWS (a plan that reaches the checker in violation is a bug in whatever
+ * built it), and a lowering asks it BEFORE constructing a merge so that arms it cannot lay out alike
+ * DECLINE (`mergeArms`/`variantMerge`, `src/compiler/rel/lower/branch.ts`). A second, looser copy in
+ * the lowering (names only) is how `union(__.outV().labels(), __.constant('x'))` — two string arms, one
+ * `v text NOT NULL`, one `v any NULL` — escaped to the user as the checker's internal error.
+ */
+export function unionColumnsViolation(
+  u: { readonly inputs: readonly Pick<RelNode<'union'>, 'type'>[] } & Pick<RelNode<'union'>, 'type'>,
+): string | null {
+  return u.inputs.every((input) => sameColumns(input.type.cols, u.type.cols))
+    ? null : 'Union inputs and output must have identical columns';
 }

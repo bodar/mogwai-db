@@ -341,7 +341,9 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
  * injects every start at once when `hasBarrier` is set. `CoalesceStep extends FlatMapStep` and
  * `OptionalStep extends AbstractStep` take ONE traverser at a time unconditionally, so a barrier in
  * one of their arms genuinely reduces over that traverser's sub-stream and our per-origin lowering
- * of those two is CORRECT.
+ * of those two is CORRECT — for a REDUCING arm (`reductionArm`). A subset-selecting SLICE in such an
+ * arm (`limit`/`dedup`/`sample`/…) has no per-traverser lowering and declines (`slicesAcrossStarts`,
+ * `src/compiler/rel/lower/branch.ts`).
  *
  * Named separately from `BRANCH_KINDS` for exactly that reason — "fix all four branch kinds" would
  * break a dozen tests that are already right

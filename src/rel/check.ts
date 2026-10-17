@@ -1,6 +1,6 @@
 import { bindsAsParameter, type Expr } from './expr.ts';
 import { scan } from './factory.ts';
-import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape } from './structure.ts';
+import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape, unionColumnsViolation } from './structure.ts';
 import { checkChannels } from './obligations.ts';
 import { recursiveViolation } from './recursive.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
@@ -213,8 +213,9 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     },
     union: (node) => {
       if (node.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
-      for (const input of node.inputs) if (!sameColumns(input.type.cols, node.type.cols))
-        throw new Error('RelIR: Union inputs and output must have identical columns');
+      // THE SAME ANSWER THE LOWERING DECLINES ON (`unionColumnsViolation`, structure.ts).
+      const violation = unionColumnsViolation(node);
+      if (violation) throw new Error(`RelIR: ${violation}`);
     },
     recursive: (node) => {
       checkRecursiveHeader(node);
