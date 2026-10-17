@@ -886,6 +886,11 @@ authorities.
   resets its child, so a body slice's pull count is data-dependent (`step/branch/BranchStep.java`); a raise
   before a `union()`-body slice now declines (pinned in `test/L4-addendum/raise-extent.feature`). Census and
   L3 unchanged. Open: carrying a raise out of a branch arm / `optional()` / `local()` merge under a later slice.
+  ✅ **Residue LANDED ON TRUNK 2026-10-17 (`305af651`).** A zero-width global slice/tail over a pending
+  raise or `raiseExpr` arm declines at `sliceRows` (the one slice builder, every depth) — the reference still
+  pulls `low + 1` starts (`step/filter/RangeGlobalStep.java`, `FilterStep.processNextStart`), SQLite evaluates
+  nothing under `LIMIT 0`; a mutating value-argument child raises `ReadOnlyChildValidator`'s text; federate's
+  param validation throws `UnsupportedTraversal`. Double ±Infinity verified correct (pinned). No baseline moved.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
