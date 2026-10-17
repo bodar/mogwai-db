@@ -757,6 +757,7 @@ export function firstRootedValue(read: RootedRead, fresh: Minter): Expr | null {
  */
 export function renumber(
   rel: Rel, terms: readonly SortTerm[], cols: readonly ColMeta[], channels: Channels, fresh: Minter,
+  rank: 'row_number' | 'dense_rank' = 'row_number',
 ): Rel {
   const minted = 'rn';
   const encounter = channels.find((channel) => channel.role === 'encounter');
@@ -769,10 +770,88 @@ export function renumber(
   // minted one — not the output's. The two differ exactly when this is a MINT rather than a re-mint:
   // there `cols` names an emission-order column the input does not have yet, and the projection below
   // is where it comes into existence.
-  const windowed = rowNumberWindow(rel, minted, rel.channels, { partitionBy: [], orderBy: terms }, fresh);
+  // `dense_rank` is the MERGED form: rows that tie on every term — copies of one merged traverser, which
+  // `regroupFirstOccurrence` made share a position — keep sharing one, so a per-traverser consumer later
+  // still sees ONE traverser (`regroupFirstOccurrence`'s second paragraph).
+  const windowed = rank === 'row_number'
+    ? rowNumberWindow(rel, minted, rel.channels, { partitionBy: [], orderBy: terms }, fresh)
+    : make.window({
+      id: fresh('rn'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(minted, 'int')),
+      specs: [[minted, { kind: 'window-expr', fn: 'dense_rank', args: [], spec: { partitionBy: [], orderBy: terms } }]],
+    });
   return make.project({
     id: fresh('ro'), input: windowed, channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(windowed.id, column.name === encounter.col ? minted : column.name)] as const),
+  });
+}
+
+/**
+ * THE TRAVERSERSET MERGE, as a relational operator — every row EQUAL to an earlier one moves into the
+ * FIRST arrival's slot, which is what `TraverserSet.add` does with an equal traverser
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/TraverserSet.java:88-96`):
+ * the slot keeps its first-arrival position and its bulk grows. Our rows are traversers EXPANDED by bulk,
+ * so the merge is a re-POSITION, not a re-count: `encounter := MIN(encounter) OVER (PARTITION BY key)`.
+ * `1,2,1,3` at positions `1,2,3,4` becomes positions `1,2,1,4` — read in order, `1,1,2,3`.
+ *
+ * The copies SHARE the position rather than being numbered apart, and that is the bulk: a slot the
+ * reference holds as ONE traverser at bulk k is k identical rows with one position here, so every
+ * per-traverser consumer that keys on the position (a branch's traverser-major key, `augmentParent`; a
+ * stable `order()`'s `dense_rank`) treats them as the one traverser they are, and a slice — which trims
+ * a bulk as `RangeGlobalStep` does — takes any k of k identical rows.
+ *
+ * `key` is the caller's EQUALITY: the shape's identity (`AbstractTraverser.equals` is the object's,
+ * `…/traverser/util/AbstractTraverser.java:181-188`), to which every carried channel but the multiplicity
+ * and the position is added — a path, an alias, a graph tag, a per-parent origin all enter `equals` or
+ * scope the set (`…/traverser/B_LP_O_S_SE_SL_Traverser.java:113-125`; a child traversal runs per parent).
+ *
+ * `window` is the set's capacity in DISTINCT slots (`NoOpBarrierStep.processAllStarts`,
+ * `…/step/map/NoOpBarrierStep.java:70-76`): an implicit `NoOpBarrierStep(2500)` drains after 2500
+ * distinct traversers and merges the next ones in a fresh set. One drain is reproduced exactly; a stream
+ * that would need a second RAISES a deferral when its position is read (`raise`), never a merge across
+ * the boundary the reference does not make.
+ *
+ * Calcite has no merge-into-first operator; the nearest is the windowed aggregate it rewrites a
+ * `DISTINCT ON` to (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`),
+ * which is this shape with `MIN` over the position in place of `ROW_NUMBER`.
+ */
+export function regroupFirstOccurrence(
+  rel: Rel, key: readonly Expr[], window: number, raise: (dependsOn: Expr) => Expr, fresh: Minter,
+): Rel {
+  const encounter = rel.channels.find((channel) => channel.role === 'encounter');
+  if (!encounter) throw new Error('RelIR lowering: regroupFirstOccurrence() needs an encounter channel to merge');
+  const carried = rel.channels.filter((channel) => channel.role !== 'encounter' && channel.role !== 'bulk');
+  const partitionBy = [...key, ...carried.map((channel) => col(rel.id, channel.col))];
+  const FIRST = 'rg_first';
+  const first = make.window({
+    id: fresh('rg'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(FIRST, 'int')),
+    specs: [[FIRST, { kind: 'window-expr', fn: 'min', args: [col(rel.id, encounter.col)], spec: { partitionBy, orderBy: [] } }]],
+  });
+  let input: Rel = first;
+  let position: Expr = col(first.id, FIRST);
+  if (Number.isFinite(window)) {
+    // The DISTINCT slots one drain would hold, per set: a row opens a slot iff it is its slot's first
+    // arrival. A per-parent child traversal runs its own set per parent, so the count is per origin. Past
+    // the window the drains split — which changes nothing where no two rows are equal — so it is a row that
+    // JOINS an earlier slot of an overflowing set that raises: exactly the rows whose merge one drain
+    // cannot vouch for.
+    const SLOTS = 'rg_slots';
+    const origin = rel.channels.find((channel) => channel.role === 'origin');
+    const opens: Expr = { kind: 'case', whens: [[{ kind: 'binary', op: '=', left: col(first.id, encounter.col), right: col(first.id, FIRST) }, compilerInt(1)]], else: compilerInt(0) };
+    const slots = make.window({
+      id: fresh('rs'), input: first, channels: first.channels, type: typeOf(...first.type.cols, meta(SLOTS, 'int')),
+      specs: [[SLOTS, { kind: 'window-expr', fn: 'sum', args: [opens], spec: { partitionBy: origin ? [col(first.id, origin.col)] : [], orderBy: [] } }]],
+    });
+    input = slots;
+    const joinsAndOverflows: Expr = {
+      kind: 'binary', op: 'and',
+      left: { kind: 'binary', op: '!=', left: col(slots.id, encounter.col), right: col(slots.id, FIRST) },
+      right: { kind: 'binary', op: '>', left: col(slots.id, SLOTS), right: compilerInt(window) },
+    };
+    position = { kind: 'case', whens: [[joinsAndOverflows, raise(col(slots.id, FIRST))]], else: col(slots.id, FIRST) };
+  }
+  return make.project({
+    id: fresh('rp'), input, channels: rel.channels, type: rel.type,
+    exprs: rel.type.cols.map((column) => [column.name, column.name === encounter.col ? position : col(input.id, column.name)] as const),
   });
 }
 

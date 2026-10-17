@@ -279,9 +279,16 @@ export function perTraverserChild(
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
+  // The body BEGINS a child traversal handed one traverser at a time at bulk 1 — `map`/`flatMap` through
+  // `TraversalUtil.apply`, and `local` because `LocalStep.nextStart` SPLITS a merged slot into unit
+  // traversers and runs its body once per unit
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:80-88`)
+  // — so a bulk-sensitive consumer inside it may read its rows as the reference's traversers
+  // (`ChainCtx.traversal`), and a merge before the host changes nothing a per-row body answers.
+  const bodyCtx: ChainCtx = { ...ctx, traversal: { steps: body, rooted: false } };
 
-  const produced = scalarChild(body, reductionHost(rel, framing, labels), ctx, fresh);
-  if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels);
+  const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
+  if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
   // `map` takes the first by definition. The seam states which (`ChildValue.yields`) rather than this
@@ -339,6 +346,7 @@ export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold',
 export function flatMapRejoin(
   step: IRStep, rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>,
   body: readonly IRStep[], steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  bodyCtx: ChainCtx = ctx,
 ): Tail | null {
   if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
   // PATH: `local` and plain `flatMap` DIVERGE (`vendor/tinkerpop/gremlin-core`). `LocalStep` forwards
@@ -365,7 +373,7 @@ export function flatMapRejoin(
       exprs: [['porigin', col(numbered.id, origin.col)], [PATH_COL, col(numbered.id, PATH_COL)]],
     });
     // Run the body over the numbered input with PATH DROPPED — it appends nothing (`pathCarried` false).
-    const rows = childRows(body, dropPath(numbered, fresh), framing.elem, labels, ctx, fresh, true, ctx.needsFromV ?? false);
+    const rows = childRows(body, dropPath(numbered, fresh), framing.elem, labels, bodyCtx, fresh, true, ctx.needsFromV ?? false);
     if (!rows || rows.framing.kind !== 'elements') return null;
     const bodyChannels = rows.rel.channels; // element id + origin, no path
     const joined = make.join({
@@ -401,7 +409,7 @@ export function flatMapRejoin(
   // (framing-changing, and a reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE
   // — a wrong answer if run across all origins at once.
   if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
-  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh, true, ctx.needsFromV ?? false);
+  const rows = childRows(body, rel, framing.elem, labels, bodyCtx, fresh, true, ctx.needsFromV ?? false);
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
@@ -598,7 +606,11 @@ export function childRows(
   // THE ORIGIN DOMAIN rides in on the ctx so a SEEDED barrier in the body (`fold`→[], `group`→{}) can emit
   // its seed for an origin whose sub-stream is EMPTY — a `GROUP BY origin` over the post-fan-out stream
   // cannot, because a movement that fans out to zero drops that origin before the barrier sees it.
-  const baseCtx = needsFromV ? { ...inBody(ctx), needsFromV: true } : inBody(ctx);
+  // A body seeded from a traverser POSITION (`originFrom` — a write's value traversal) runs once per
+  // traverser at bulk 1 (`AddPropertyStep.handleTraversalValue` → `TraversalUtil.applyAll`), so it BEGINS a
+  // traversal (`ChainCtx.traversal`); a per-row `local`/`flatMap` body says so through its own `ctx`.
+  const scoped: ChainCtx = originFrom !== 'id' && ctx.traversal?.steps !== body ? { ...ctx, traversal: { steps: body, rooted: false } } : ctx;
+  const baseCtx = needsFromV ? { ...inBody(scoped), needsFromV: true } : inBody(scoped);
   const bodyCtx = { ...baseCtx, originDomain: originDomainOf(seeded, fresh) };
   const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, bodyCtx, fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
@@ -1422,8 +1434,12 @@ export function scalarChildDeferred(body: readonly IRStep[], host: ChildHost, ou
   return scalarChildValue(body, host, outer, fresh, true);
 }
 
-function scalarChildValue(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter, deferRaise = false): ChildValue | null {
+function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: ChainCtx, fresh: Minter, deferRaise = false): ChildValue | null {
   if (!body.length) return null;
+  // Every consumer of this seam applies its child as `TraversalUtil.apply` does — one host traverser at
+  // a time at bulk 1 (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:185-192`)
+  // — so the body BEGINS a traversal (`ChainCtx.traversal`).
+  const outer: ChainCtx = given.traversal?.steps === body ? given : { ...given, traversal: { steps: body, rooted: false } };
   // A child VALUE is a correlated per-row read; a write anywhere in it (an arm of a `choose`/`coalesce`,
   // a `by()` of a `by()`) is a statement it has nowhere to declare (`writesAnywhere`).
   if (writesAnywhere(body, outer.params)) return null;

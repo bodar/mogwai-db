@@ -25,7 +25,8 @@ import { pathCarried } from '../path.ts';
 import { mayRaise } from '../../../rel/raise.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
-import { dropPath, mergeObservableAt, orderRows } from '../lower.ts';
+import { barrierRows, dropPath, orderRows } from '../lower.ts';
+import { streamDistinctAt } from '../../ir/bulk.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
 import { pendingRaise, pullExtent, pulledBy, settledSlice, settleRaise, trustSlice, type PullPosition } from '../raise-channel.ts';
 
@@ -356,6 +357,11 @@ export type RowShape = {
    *  (`Distinct` / a grouped aggregate) instead of a ranked window. An element relation's payload IS its
    *  id; a property relation's is six columns of which the identity is one or three. */
   readonly identifiedByPayload: boolean;
+  /** The key a `TraverserSet` MERGES rows on (`mergeEqual`) — `equals` for the shape. An edge `Property`
+   *  is equal to another of the same key and value whatever edge holds it (`property.ts`), so its merged
+   *  slot is the FIRST arrival's property: re-positioning the rows states that for every read but the
+   *  owning element, which `element()` therefore declines after a possible merge (`propertyTail`). */
+  readonly mergeKey: (input: Rel) => readonly Expr[];
   readonly natural?: (input: Rel) => readonly Expr[];
 };
 
@@ -365,6 +371,7 @@ export const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowS
   tie: (rel) => [col(rel.id, 'id')],
   identity: (rel) => [col(rel.id, 'id')],
   identifiedByPayload: true,
+  mergeKey: (rel) => [col(rel.id, 'id')],
 });
 
 /** The PROPERTY shape. Both its order and its identity split on the owner kind, and both citations live
@@ -376,6 +383,7 @@ export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): Row
   tie: (rel) => [propertyRowId(rel)],
   identity: (rel) => propertyIdentityKey(rel, elem),
   identifiedByPayload: false,
+  mergeKey: (rel) => propertyIdentityKey(rel, elem),
   natural: (rel) => propertyOrderTerms(rel, elem),
 });
 
@@ -391,6 +399,7 @@ export const scalarRowShape = (host: ChildHost): RowShape => ({
   tie: (rel) => [col(rel.id, 'v')],
   identity: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
   identifiedByPayload: true,
+  mergeKey: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
 });
 
 /** A shape whose IDENTITY IS ITS WHOLE PAYLOAD — a RECORD's fields, a LIST's JSON, a MAP's JSON. Two
@@ -406,6 +415,7 @@ export const payloadRowShape = (host: ChildHost): RowShape => ({
   tie: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
   identity: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
   identifiedByPayload: true,
+  mergeKey: (rel) => payloadCols(rel).map((column) => col(rel.id, column.name)),
 });
 
 export function rowOp(
@@ -414,11 +424,16 @@ export function rowOp(
 ): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
-  // The reference MERGES equal traversers at an explicit `barrier()`/`order()`; where that is observable
-  // and this spine cannot vouch the stream is distinct, decline (`mergeObservableAt`).
-  if (mergeObservableAt(ctx, position.steps, position.at)) return null;
-  if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, shape);
+  if (step.name === 'identity') return (step.args ?? []).length ? null : input;
+  // An explicit `barrier()` and a global `order()` each drain a `TraverserSet`, so both MERGE equal
+  // traversers into the first arrival's slot (`barrierRows`, `orderRows`) — unless the stream reaching
+  // them is provably pairwise distinct, where the set folds nothing.
+  const distinct = streamDistinctAt(position.steps, position.at, ctx.traversal?.steps === position.steps ? ctx.traversal : undefined);
+  if (step.name === 'barrier') {
+    if (distinct) return (step.args ?? []).length > 1 ? null : input;
+    return barrierRows(step, input, shape.mergeKey, ctx, position.steps, position.at, fresh);
+  }
+  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, merge: !distinct && !isLocalScope(step) });
   const sliced = sliceOp(step, input, bulked, fresh, ctx.pull);
   if (sliced) return sliced;
   // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks

@@ -26,6 +26,19 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
  *    a body is normalized in isolation later and a root-only answer cannot reach it.
  *  - `earlyLimitSuppressed` — this slice sits under a `withoutStrategies(EarlyLimitStrategy)`
  *    (`markEarlyLimitSuppressed`), so `earlyLimit` leaves it where it was written. Same reason.
+ *  - `unrolled` — a step spliced out of an unrolled `repeat(…).times(n)` (`tryUnroll`): `'strategy'`
+ *    where the unroll IS `RepeatUnrollStrategy`'s, which places a `NoOpBarrierStep(2500)` after every
+ *    unrolled body (`unrolledPhaseEnd` marks that body's last step, `'last'` for the final one); `'beyond'`
+ *    where this pass widens past the strategy and the reference runs a `RepeatStep`, whose re-entry merges
+ *    depend on evaluation interleaving — so `bulkingPositions` (`ir/bulk.ts`) cannot place them.
+ *  - `splicedHost` — on the LAST step of a body `inlineIdentityHostBody` spliced out of its host, the
+ *    host's name: a spliced `flatMap()` still stood where a counted flat-map stands.
+ *  - `labelsRetracted` — an `as()` after this step was dropped because nothing reads it
+ *    (`retractUnreadAlias`). The reference still carries the label: it suppresses
+ *    `LazyBarrierStrategy`'s barriers and enters a traverser's `equals`, so `bulkingPositions` must see it.
+ *  - `bulkingSuppressed` — the traversal runs `withoutStrategies(LazyBarrierStrategy)` or
+ *    `withoutStrategies(PathRetractionStrategy)`, so the implicit barriers `bulkingPositions` models are
+ *    not all there.
  *  - `graphTag` — the graph-identity VALUE a synthesized `V()`/`E()` seeds into the `graph` channel
  *    (`channels.ts`), so a multi-graph merge keeps per-graph identity through `dedup`. The nested-branch
  *    federate segment stamps it on every arm of an identity-sensitive merge: a landed arm gets its
@@ -40,7 +53,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; earlyLimitSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; earlyLimitSuppressed?: boolean; unrolled?: 'strategy' | 'beyond'; unrolledPhaseEnd?: 'mid' | 'last'; splicedHost?: string; labelsRetracted?: boolean; bulkingSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
 
 /** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
  *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?

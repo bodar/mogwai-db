@@ -137,6 +137,15 @@ const FOLD: Pass[] = group('canonicalize', [
     applies: (_steps, ctx) => ctx.strategies.without.includes('EarlyLimitStrategy'),
     run: (steps, ctx) => markEarlyLimitSuppressed(steps, ctx.params),
   },
+  // `withoutStrategies(LazyBarrierStrategy)` / `(PathRetractionStrategy)` remove the implicit barriers at
+  // which the reference merges equal traversers, so the chain says so for `bulkingPositions`
+  // (`ir/bulk.ts`), which then answers `'unknown'` rather than place a merge that is not there. Top level
+  // only: the merges the lowering reproduces are the root traversal's.
+  {
+    name: 'markBulkingSuppressed',
+    applies: (_steps, ctx) => ctx.strategies.without.some((s) => s === 'LazyBarrierStrategy' || s === 'PathRetractionStrategy'),
+    run: (steps) => steps.map((s) => ({ ...s, bulkingSuppressed: true })),
+  },
   // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
   // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
   // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's

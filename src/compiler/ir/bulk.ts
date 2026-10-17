@@ -1,6 +1,6 @@
 import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
-import { isNested, isScopeArg, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import { mathVars } from '../../gremlin/math.ts';
+import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { rawBodies, someStepDeep } from './walk.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
 //
@@ -191,122 +191,139 @@ function reducingGroupCollapseTerminal(step: IRStep): boolean {
 export { COLLAPSE_PROJ };
 export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
 
-// ---------- WHERE THE REFERENCE BULKS — the converse question, asked of a PREFIX ----------
+// ---------- WHERE THE REFERENCE BULKS — one authority, `bulkingPositions` ----------
 //
-// Everything above asks where WE may introduce a multiplicity. A consumer that reads ROWS where the
-// reference reads TRAVERSERS asks the converse: could the reference have MERGED two equal traversers
-// before this position? Almost every consumer is indifferent — a reducer weights by bulk, a list fold
-// expands it — but a NON-LIST `fold(seed, Operator.x)` is not: `FoldStep.projectTraverser` hands the
-// operator the traverser's object ONCE whatever its bulk
-// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:58-68`),
-// so `sum` over a bulked `29×3` adds 29 once. Our rows are the reference's traversers EXPANDED by bulk,
-// so the two answers agree exactly when the reference bulked nothing before the fold.
+// Everything above asks where WE may introduce a multiplicity. The converse question — where does the
+// REFERENCE merge equal traversers — is answered once, here, and every consumer derives from it.
 //
-// The reference merges equal traversers wherever a `TraverserSet` receives more than one:
+// The reference merges equal traversers wherever a `TraverserSet` receives more than one: `add` folds an
+// equal traverser into the FIRST arrival's slot, summing bulk
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/TraverserSet.java:88-96`),
+// and equality is the traverser's object (`…/traverser/util/AbstractTraverser.java:181-188`) — plus its
+// path for a path-carrying class (`…/traverser/B_LP_O_S_SE_SL_Traverser.java:113-125`) and never for one
+// carrying an unmergeable sack. The sets that do it:
 //
-// - **`LazyBarrierStrategy`, a DEFAULT strategy** (`…/traversal/TraversalStrategies.java:287`), inserts a
-//   `NoOpBarrierStep` after every flat-map step but the FIRST (a `GraphStep` counting as one), unless
-//   the next step is itself a `Barrier`
-//   (`…/strategy/optimization/LazyBarrierStrategy.java:105-127`) — and it runs per traversal, so a child
-//   traversal starts the count afresh;
-// - **`PathRetractionStrategy`, ALSO default** (`…/traversal/TraversalStrategies.java:286`), inserts one
-//   after every `PathProcessor` (`math`, `where`, `simplePath`, `select`, `dedup`, …) whose next step is
-//   not a `Barrier`, labels or no (`…/strategy/optimization/PathRetractionStrategy.java:134-141`) — and
-//   `FilterRankingStrategy` runs first, so a ranked `where()` may have moved (`lastBeforeConsumer`);
-// - **an explicit `barrier()`** and every collecting barrier (`order()`, `aggregate()`, …);
 // - **a start step's own iterator** — `ExpandableStepIterator.add(Iterator)` drains it INTO the
-//   `TraverserSet` (`…/step/util/ExpandableStepIterator.java:61-63`), so `inject(1, 1, 2)` and `V(1, 1)`
-//   reach their next step as `1×2, 2`.
+//   `TraverserSet` (`…/step/util/ExpandableStepIterator.java:61-63`), so `inject(1, 2, 1)` reaches its next
+//   step as `1×2, 2`;
+// - **`LazyBarrierStrategy`, a DEFAULT strategy**, which inserts a `NoOpBarrierStep(2500)` after every
+//   flat-map step but the FIRST (a `GraphStep` counting as one unless it names fewer than five ids or is
+//   followed by a `has()`), unless the next step is itself a `Barrier`, the traversal end, or a labelled
+//   path is live — and does nothing at all when the traversal requires a PATH
+//   (`…/strategy/optimization/LazyBarrierStrategy.java:73,86-135`);
+// - **`PathRetractionStrategy`, ALSO default**, which inserts one after every `PathProcessor` whose next
+//   step is not a `Barrier` (`…/strategy/optimization/PathRetractionStrategy.java:134-141`);
+// - **an explicit `barrier()`** (`…/step/map/NoOpBarrierStep.java:40-60`), the collecting barriers
+//   `order()`/`sample()` (`…/step/util/CollectingBarrierStep.java:42-90` — `OrderGlobalStep.java:78`
+//   STABLE-sorts the merged set), and the pass-through local barriers `aggregate('x')`/
+//   `groupCount('x')`/`group('x')` (`…/step/sideEffect/SideEffectBarrierStep.java`, `AggregateStep.java`).
 //
-// So the answer is a scan that models those positions and is CONSERVATIVE everywhere it cannot: an
-// unlearned step, a non-literal source argument or a source the scan does not know answers `false`,
-// which costs the caller a decline and never an answer. Over-counting a flat-map (a `V().has(…)` that the
-// reference does not count, an `outE()` it skips) only adds barriers the reference does not have, so the
-// scan never needs to be as precise as `LazyBarrierStrategy` to be SOUND.
+// A `NoOpBarrierStep(n)` drains after n DISTINCT slots (`barrier.size() < maxBarrierSize`), so a merge's
+// `window` is how many distinct traversers one drain may hold; the regroup mint (`regroupFirstOccurrence`,
+// `src/compiler/rel/build.ts`) reproduces one drain exactly and raises a deferral past it.
+//
+// Two answers come out of the one scan, and the difference between them is the whole design:
+//
+// - **EXACT** (`bulkingPositions`): every merge position, for a lowering that REPRODUCES the merge. It is
+//   `'unknown'` wherever the scan cannot be exact before the position asked about — a label (a labelled
+//   path changes both where the strategy inserts and what `equals` compares), a PATH requirement, a body
+//   unrolled past `RepeatUnrollStrategy`, a merge step or a service, or any step outside the vocabulary
+//   below — and for a sack anywhere. The lowering then declines where the SUPERSET says a merge it cannot
+//   place lands under a reader of the order (`mayMergeAt`), and otherwise leaves the stream as it is.
+// - **SUPERSET** (`referenceUnbulkedAt`): may the reference have merged ANYTHING before a position? Here an
+//   over-count only declines, so what only REMOVES a merge (a label's equality) is ignored, what only adds
+//   one is assumed, and a step the scan cannot classify answers `false`.
 
-/** Steps that neither expand nor merge a traverser and whose children (if any) produce a VALUE or a
- *  verdict rather than stream rows — filters and one-to-one maps. None is a `FlatMapStep` or a barrier. */
-const NEITHER_EXPANDS_NOR_MERGES: ReadonlySet<string> = new Set([
-  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'filter', 'not', 'and', 'or',
-  'as', 'identity', 'constant', 'id', 'label', 'key', 'value', 'limit', 'range', 'skip',
-  'project', 'valueMap', 'elementMap', 'propertyMap',
-]);
+/** `LazyBarrierStrategy.MAX_BARRIER_SIZE` and `PathRetractionStrategy.MAX_BARRIER_SIZE` — the distinct-slot
+ *  capacity of an implicit `NoOpBarrierStep` (`…/strategy/optimization/LazyBarrierStrategy.java:74`). */
+export const MAX_BARRIER_SIZE = 2500;
 
-/** The `PathProcessor` steps the scan lets through, each a position where `PathRetractionStrategy` —
- *  ALSO a default strategy (`…/traversal/TraversalStrategies.java:286`) — inserts a `NoOpBarrierStep`
- *  unless the next step is a `Barrier`
- *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/PathRetractionStrategy.java:134-141`).
- *  It does so whether or not a label is involved, and its `keepLabels` retraction can make two traversers
- *  whose paths differed EQUAL there (`ImmutablePath.retract`), so the barrier merges on the object alone.
- *  The other `PathProcessor`s (`select`, `path`, `tree`, `format`, `match`, `dedup`) are in no set here,
- *  so the scan already answers `false` at them. */
-const PATH_PROCESSORS: ReadonlySet<string> = new Set(['where', 'math', 'simplePath', 'cyclicPath']);
+/** Where a `TraverserSet` merge happens. */
+export type BulkingKind =
+  /** a start step's literal arguments, drained into its iterator's set */
+  | 'start'
+  /** `LazyBarrierStrategy`'s implicit `NoOpBarrierStep` after a flat-map */
+  | 'lazy'
+  /** `PathRetractionStrategy`'s implicit `NoOpBarrierStep` after a `PathProcessor` */
+  | 'retraction'
+  /** an explicit `barrier()` */
+  | 'barrier'
+  /** a `CollectingBarrierStep` — `order()`, `sample()` */
+  | 'collecting'
+  /** a pass-through `LocalBarrier` that writes a side effect — `aggregate('x')`, `groupCount('x')`, … */
+  | 'side-effect'
+  /** SUPERSET ONLY: a `RepeatStep`'s re-entry into its body, where an unrolled body went past
+   *  `RepeatUnrollStrategy` — the reference merges there as evaluation interleaves, which no scan places */
+  | 'repeat';
 
-/** The steps `FilterRankingStrategy` ranks. It runs BEFORE `PathRetractionStrategy` and moves a filter in
- *  front of a higher-ranked one it directly follows
- *  (`…/strategy/optimization/FilterRankingStrategy.java:113-131, 174-199`), so a ranked `where()` written
- *  last may no longer be last when the barrier is placed. A rank-0 step (`math`, `simplePath`) never moves. */
-const RANKED_FILTERS: ReadonlySet<string> = new Set([
-  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
-  'dedup', 'order',
-]);
-
-/** The connectives whose children the reference may splice into the parent: `filter` and `and`
- *  (`InlineFilterStrategy.processTraversalFilterStep`/`processAndStep`). `or` inlines only `has()`
- *  children (`processOrStep`), but it is listed too — a decline there costs an opportunity, never an
- *  answer. `not` is absent: `NotStep` is neither inlined nor a `PathProcessor`, so its child runs per
- *  traverser and no barrier lands in this traversal. */
-const INLINED_FILTERS: ReadonlySet<string> = new Set(['filter', 'and', 'or']);
-
-/** Every `PathProcessor` the IR can name — gremlin-core's implementors are `WhereTraversalStep`,
- *  `WherePredicateStep`, `MathStep`, `PathFilterStep`, `SelectStep`, `SelectOneStep`,
- *  `TraversalSelectStep`, `PathStep`, `TreeStep`/`TreeSideEffectStep`, `FormatStep` and `MatchStep` —
- *  plus `dedup`, which reads labels too. */
-const ANY_PATH_PROCESSOR: ReadonlySet<string> = unionOf(PATH_PROCESSORS,
-  new Set(['select', 'path', 'tree', 'format', 'match', 'dedup']));
-
-/** Could inlining `step` land a `PathProcessor` in this traversal? Its children's TOP-LEVEL steps are
- *  what is spliced, and the strategy re-runs until nothing changes, so a nested `filter(and(where(…)))`
- *  inlines all the way down — the walk descends through the connectives only. A path processor's OWN
- *  child (a `where(__.as('a').out())`'s `select`) is never spliced: it stays that step's per-traverser
- *  child. Conservative: a child the scan cannot read answers `true`. */
-function holdsPathProcessor(step: IRStep): boolean {
-  const values: unknown[] = [...(step.args ?? []).map((a) => a.value), ...(step.modulators ?? []).flat()];
-  for (const v of values) {
-    if (!isNested(v)) continue;
-    let chain: readonly IRStep[];
-    try { chain = stepChain(v.nested, {}); } catch { return true; }
-    if (chain.some((c) => ANY_PATH_PROCESSOR.has(c.name) || (INLINED_FILTERS.has(c.name) && holdsPathProcessor(c)))) return true;
-  }
-  return false;
+/** ONE MERGE of the stream `steps[after]` emits, i.e. of the stream reaching `steps[after + 1]`. */
+export interface BulkingPosition {
+  readonly after: number;
+  readonly kind: BulkingKind;
+  /** the most distinct traversers one drain holds — `Infinity` for an unbounded set */
+  readonly window: number;
+  /** is the stream reaching the merge provably pairwise distinct, so the merge folds nothing? */
+  readonly distinct: boolean;
 }
 
-/** Is `step` a `filter`/`and` holding exactly ONE child that is exactly ONE `PATH_PROCESSORS` step (a
- *  label or `identity()` aside)? Inlined, that step alone stands where the wrapper stood. The wrapper's
- *  name is ranked (`RANKED_FILTERS`), so `lastBeforeConsumer` applies the ranked-filter rule to it,
- *  which is exact for `where()` and stricter than needed for a rank-0 `math()`. */
-function soleChildIsPathProcessor(step: IRStep): boolean {
-  if (step.name !== 'filter' && step.name !== 'and') return false;
-  if (step.modulators?.length) return false;
-  const args = step.args ?? [];
-  if (args.length !== 1 || !isNested(args[0]!.value)) return false;
-  let chain: readonly IRStep[];
-  try { chain = stepChain(args[0]!.value.nested, {}); } catch { return false; }
-  const real = chain.filter((c) => !NOT_A_REFERENCE_STEP.has(c.name));
-  return real.length === 1 && PATH_PROCESSORS.has(real[0]!.name);
-}
+/** The reference's `Barrier` steps (`…/process/traversal/step/Barrier.java` and its implementors), by IR
+ *  name — the next-step exemption both strategies make. Only the GLOBAL form of a scoped step is one:
+ *  `count(local)` is a map. */
+const BARRIER_NAMES: ReadonlySet<string> = new Set([
+  'count', 'sum', 'min', 'max', 'mean', 'fold', 'group', 'groupCount', 'order', 'sample', 'aggregate', 'cap',
+  'barrier', 'dedup', 'limit', 'range', 'skip', 'tail', 'tree', 'subgraph',
+]);
+/** A step spliced out of a per-traverser host stands for that host (`local`/`map`/`flatMap`), which is no
+ *  `Barrier` whatever its body holds. */
+export const isReferenceBarrier = (s: IRStep | undefined): boolean =>
+  !!s && !s.perTraverser && BARRIER_NAMES.has(s.name) && !isLocalScope(s);
 
-/** IR steps that are no step in the reference — a label rides the previous step, an `identity()` is
- *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
-const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity']);
+/** The flat-map steps `LazyBarrierStrategy` counts — `FlatMapStep`s (`VertexStep` returning vertices,
+ *  `EdgeVertexStep`, `PropertiesStep`, `UnfoldStep`, `TraversalFlatMapStep`, `CoalesceStep`) and a mid-chain
+ *  `GraphStep`. An EDGE-returning `VertexStep` is excluded by name in the strategy (`returnsEdge()`), and
+ *  `otherV` requires a PATH, which switches the strategy off. */
+const FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, ENDPOINT_MOVES,
+  new Set(['values', 'properties', 'unfold', 'flatMap', 'coalesce', 'V', 'E']));
 
-/** The flat-map steps — the positions `LazyBarrierStrategy` counts, and after the first of which it bulks. */
-const FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V,
-  new Set(['values', 'properties', 'V', 'E']));
+/** Steps that neither expand nor merge and keep a pairwise-distinct stream distinct — filters, and the
+ *  writes that pass their traverser through (`AddPropertyStep`, `AddLabelStep`, … are `SideEffectStep`s;
+ *  `DropStep` a filter that drops everything). Their children (if any) answer a verdict, never stream rows. */
+const FILTERS: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'filter', 'not', 'and', 'or', 'where',
+  'coin', 'identity', 'timeLimit', 'none', 'discard', 'property', 'addLabel', 'dropLabel', 'dropLabels', 'drop',
+]);
+
+/** One-to-one (or one-to-at-most-one) maps and pass-through steps that neither expand nor merge, but may
+ *  map two distinct traversers to equal ones. A `local()`/`map()`/`sideEffect()` runs its body per
+ *  traverser in a traversal of its own, so no merge lands in THIS one; a `branch` step is a `BranchStep`
+ *  whose merge is its arms' (`branchHoldsBarrier`). */
+const MAPS: ReadonlySet<string> = new Set([
+  'id', 'label', 'key', 'value', 'constant', 'project', 'valueMap', 'elementMap', 'propertyMap', 'select', 'addV', 'addE',
+  'local', 'map', 'sideEffect', 'union', 'choose', 'optional', 'branch',
+  'asString', 'toUpper', 'toLower', 'length', 'trim', 'lTrim', 'rTrim', 'reverse', 'concat', 'replace',
+  'substring', 'split', 'dateAdd', 'dateDiff', 'asDate', 'asNumber', 'asBool', 'format', 'index',
+  'conjoin', 'combine', 'difference', 'disjunct', 'intersect', 'merge', 'product',
+]);
+
+/** The steps whose stream is ONE traverser (a global reduction) — distinct by itself. */
+const REDUCING: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', 'mean', 'fold', 'group', 'groupCount', 'cap']);
+
+/** The slices — `FilteringBarrier`s that only drop, so they keep a distinct stream distinct. */
+const SLICES: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail']);
+
+/** Steps whose presence BEFORE a position makes the exact scan unknowable there: a label (a labelled path
+ *  suppresses the strategy and enters `equals`), a PATH requirement (`PathFilterStep`, `PathStep`, `TreeStep`,
+ *  `EdgeOtherVertexStep`, `TraversalSelectStep` — the strategy returns early), `match` (labels), a merge
+ *  step (a `MergeElementStep` is a flat-map whose output depends on the graph it writes), and a service. */
+const UNKNOWABLE_BEFORE: ReadonlySet<string> = new Set([
+  'as', 'path', 'simplePath', 'cyclicPath', 'tree', 'otherV', 'match', 'element', 'mergeV', 'mergeE', 'call', 'io',
+]);
+/** The steps that read or write a sack — present anywhere, the traversal's traversers all carry one. */
+const SACK_STEPS: ReadonlySet<string> = new Set(['sack', 'loops']);
 
 /** A source argument's EQUALITY key, or `undefined` where the scan cannot say. Deliberately COARSER
  *  than Java's `equals` (`1` and `1L` share a key, as do `1` and `"1"`), because a false collision only
- *  declines while a missed one would answer. */
+ *  costs the merge's no-op skip while a missed one would skip a real merge. */
 function literalKey(value: unknown): string | undefined {
   if (value === null || ['string', 'number', 'boolean', 'bigint'].includes(typeof value)) return String(value);
   if (Array.isArray(value) || value instanceof Map) {
@@ -328,64 +345,344 @@ function distinctLiterals(step: IRStep): boolean {
   return true;
 }
 
+/** A root start step whose traversers the scan can name: a `V()`/`E()`/`inject()` the user wrote (not a
+ *  landed marker standing in for a federated arm). */
+const knownStartStep = (start: IRStep | undefined): start is IRStep =>
+  !!start && !start.landedSource && start.graphTag == null
+  && (start.name === 'V' || start.name === 'E' || start.name === 'inject');
+
+/** IR steps that are no step in the reference — a label rides the previous step, an `identity()` is
+ *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
+const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity', 'by', 'with']);
+
+/** The step the reference runs right after `steps[i]`, skipping IR-only steps. */
+function nextReferenceStep(steps: readonly IRStep[], i: number): IRStep | undefined {
+  for (let j = i + 1; j < steps.length; j++) if (!NOT_A_REFERENCE_STEP.has(steps[j]!.name)) return steps[j];
+  return undefined;
+}
+
+/** Does a branch step hold a `Barrier` anywhere in an arm (`BranchStep.hasBarrier`, set by
+ *  `getStepsOfAssignableClassRecursively(Barrier.class, …)`, `…/step/branch/BranchStep.java:87-88`)? Then
+ *  every start enters each arm's own set and is merged there, so the branch's output is no longer
+ *  per-traverser. A folded `option()` cluster or an unreadable arm answers `true`. */
+function branchHoldsBarrier(step: IRStep): boolean {
+  if (step.optionArms?.length) return true;
+  const read = rawBodies({});
+  return (step.args ?? []).some(({ value }) => {
+    if (!isNested(value)) return false;
+    const arm = read(value.nested);
+    return !arm || someStepDeep(arm, read, (s) => isReferenceBarrier(s as IRStep), true);
+  });
+}
+
+/** The side-effect KEY a step writes, if it is the side-effect form (`groupCount('x')`, not `groupCount()`). */
+const sideEffectKey = (s: IRStep): boolean => (s.args ?? []).some((a) => typeof a.value === 'string');
+
+/** `barrier(n)`'s window, or `undefined` when its argument is not a literal count. */
+function barrierWindow(s: IRStep): number | undefined {
+  const args = s.args ?? [];
+  if (!args.length) return Infinity;
+  const n = args[0]!.value;
+  return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** Could inlining `step` land a `PathProcessor` in this traversal? `InlineFilterStrategy` splices a
+ *  `filter()`/`and()`/`or()` whose children are filters into the parent (`…/strategy/optimization/
+ *  InlineFilterStrategy.java:80-84, 196-213`), so a wrapped `where(…)`/`math(…)` lands here. Unreadable
+ *  answers `true`. Only the SUPERSET scan asks — the exact one already refuses every label. */
+function holdsPathProcessor(step: IRStep): boolean {
+  if (!INLINED_FILTERS.has(step.name)) return false;
+  for (const v of [...(step.args ?? []).map((a) => a.value), ...(step.modulators ?? []).flat()]) {
+    if (!isNested(v)) continue;
+    let chain: readonly IRStep[];
+    try { chain = stepChain(v.nested, {}); } catch { return true; }
+    if (chain.some((c) => SUPERSET_PATH_PROCESSORS.has(c.name) || holdsPathProcessor(c))) return true;
+  }
+  return false;
+}
+const INLINED_FILTERS: ReadonlySet<string> = new Set(['filter', 'and', 'or']);
+
+/** The `PathProcessor`s the superset scan places a retraction barrier after: every `where` (a labelled
+ *  one is a `WhereTraversalStep`/`WherePredicateStep`; the superset does not tell them apart), `math`,
+ *  `select`, and the path filters. */
+const SUPERSET_PATH_PROCESSORS: ReadonlySet<string> = new Set(['where', 'math', 'select', 'format', 'simplePath', 'cyclicPath']);
+/** The path processors that MAP rather than filter. */
+const PATH_MAPS: ReadonlySet<string> = new Set(['math', 'select', 'format']);
+
+/** `FilterRankingStrategy` runs BEFORE `PathRetractionStrategy` and moves a filter in front of a
+ *  higher-ranked one it directly follows (`…/strategy/optimization/FilterRankingStrategy.java:113-131,
+ *  174-199`), so a ranked path processor written last may no longer be last when the barrier is placed.
+ *  The superset scan therefore drops the next-step exemption for a ranked processor that directly follows
+ *  another ranked filter. */
+const RANKED_FILTERS: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasNot', 'hasKey', 'hasValue', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'dedup', 'order',
+]);
+
+/** The parents that EMIT their child's traversers rather than a value split off the parent: `LocalStep`
+ *  (`…/step/branch/LocalStep.java:60-67`) and the `BranchStep`s. `map()`/`flatMap()`/`coalesce()` split
+ *  their output off the PARENT traverser (`…/step/map/FlatMapStep.java:42-52`), so a merge inside their
+ *  body never reaches this traversal. */
+const BULK_FORWARDING: ReadonlySet<string> = new Set(['local', 'union', 'choose', 'optional', 'branch']);
+
+/** May a bulk-forwarding parent's body emit merged traversers — does its own (child, superset) scan hold
+ *  a merge over a stream that may repeat? A folded `option()` cluster or an unreadable body answers `true`. */
+function bodiesMayBulk(step: IRStep): boolean {
+  if (step.optionArms?.length) return true;
+  for (const v of (step.args ?? []).map((a) => a.value)) {
+    if (!isNested(v)) continue;
+    let chain: readonly IRStep[];
+    try { chain = stepChain(v.nested, {}); } catch { return true; }
+    const positions = scan(chain, false, 'superset');
+    if (positions === 'unknown' || positions.some((p) => !p.distinct)) return true;
+  }
+  return false;
+}
+
+/** The steps whose `TraverserRequirement.PATH` switches `LazyBarrierStrategy` off for their traversal:
+ *  `PathStep`, `PathFilterStep`, `TreeStep`/`TreeSideEffectStep`, `EdgeOtherVertexStep` (and a
+ *  `TraversalSelectStep`, matched by its nested argument). */
+const PATH_REQUIRERS: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath', 'tree', 'otherV']);
+
+/** A `PathProcessor` that needs no label: `math`, `format`, and a `select` naming a key (a side effect,
+ *  in a label-free traversal) rather than a `Column`. */
+const labelFreePathProcessor = (s: IRStep): boolean =>
+  s.name === 'math' || s.name === 'format'
+  || (s.name === 'select' && (s.args ?? []).some((a) => typeof a.value === 'string' || isNested(a.value)));
+
+type Mode = 'exact' | 'superset';
+
+/**
+ * THE SCAN. Walks `steps` — a whole traversal: `rooted` when `steps[0]` is the root's start step, else a
+ * child traversal handed one parent traverser at a time — through the two strategies' insertion rules,
+ * recording every merge. `upTo` stops the walk (the consumer at `upTo` is still read as a next step).
+ * `'unknown'` where the mode cannot answer.
+ */
+function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = steps.length): readonly BulkingPosition[] | 'unknown' {
+  const exact = mode === 'exact';
+  // A sack is on EVERY traverser once any step reads one, and it decides whether traversers merge at all;
+  // everything else the exact scan cannot place matters only where it sits BEFORE the position asked about
+  // — a label bound later is not yet on the path, a write later has not yet run.
+  if (exact && (someStepDeep(steps, {}, (s) => SACK_STEPS.has(s.name), true)
+    || someStepDeep(steps.slice(0, upTo), {}, (s) => UNKNOWABLE_BEFORE.has(s.name)
+      || (s as IRStep).unrolled === 'beyond' || (s as IRStep).labelsRetracted === true, true))) return 'unknown';
+  if (steps.some((s) => s.bulkingSuppressed)) return 'unknown';
+  // `LazyBarrierStrategy` does NOTHING in a traversal that requires a PATH anywhere in it, or that holds a
+  // `DropStep`/`ElementStep` (`LazyBarrierStrategy.java:80-86`); `PathRetractionStrategy` does nothing
+  // in a ROOT that requires a PATH anywhere (`PathRetractionStrategy.java:76-78, 241-245`). A child cannot
+  // see its root, so it keeps its retraction barriers — over-counting only declines.
+  const requiresPath = someStepDeep(steps, {}, (s) => PATH_REQUIRERS.has(s.name)
+    || (s.name === 'select' && (s.args ?? []).some((a) => isNested(a.value))), false);
+  const lazyOff = requiresPath || steps.some((s) => s.name === 'element' || s.name === 'drop');
+  const retractionOff = requiresPath && rooted;
+  const positions: BulkingPosition[] = [];
+  let foundFlatMap = false;
+  // A live labelled path suppresses the strategy's barriers until a `PathProcessor` retracts every label
+  // (`LazyBarrierStrategy.java:104-108, 128-130`). The exact scan refused every label; the superset clears
+  // the flag at ANY path processor, which can only add barriers.
+  let labeledPath = false;
+  let distinct = true;
+  let from = 0;
+  if (rooted) {
+    const start = steps[0];
+    if (!exact && start?.name === 'call') {
+      foundFlatMap = true;
+      distinct = false;
+      from = 1;
+    } else {
+    if (!knownStartStep(start)) return 'unknown';
+    const ids = start.args ?? [];
+    if (ids.length) {
+      positions.push({ after: 0, kind: 'start', window: Infinity, distinct: distinctLiterals(start) });
+      // A drained set holds pairwise-distinct traversers.
+      distinct = true;
+    } else if (start.name === 'inject') return 'unknown';
+    // A GraphStep counts as the first flat-map unless it names fewer than BIG_START_SIZE (5) ids, or names
+    // none and is followed by a `HasStep` (`LazyBarrierStrategy.java:113-115`).
+    if (start.name !== 'inject') {
+      const next = nextReferenceStep(steps, 0);
+      foundFlatMap = ids.length >= 5 || (ids.length === 0 && !(next && next.name.startsWith('has')));
+    }
+    if (start.labelsRetracted) labeledPath = true;
+    from = 1;
+    }
+  }
+  for (let i = from; i < Math.min(upTo, steps.length); i++) {
+    const s = steps[i]!;
+    const name = s.name;
+    if (name === 'as') { labeledPath = true; continue; }
+    if (name === 'by' || name === 'with') continue;
+    // The LAST step of a body `RepeatUnrollStrategy` unrolled is followed by the `NoOpBarrierStep(2500)` it
+    // inserts — a `Barrier`, so the step itself takes no barrier of the strategy's — except after the final
+    // body when the step after the repeat is a `Barrier` already (`RepeatUnrollStrategy.java:100-113`).
+    const phaseEnd = s.unrolled === 'strategy' ? s.unrolledPhaseEnd : undefined;
+    const next = nextReferenceStep(steps, i);
+    const realNextIsBarrier = !next || isReferenceBarrier(next);
+    const nextIsBarrier = realNextIsBarrier || !!phaseEnd;
+    const verdict = visit(s, i, nextIsBarrier);
+    if (verdict === 'unknown') return 'unknown';
+    if (phaseEnd && !(phaseEnd === 'last' && realNextIsBarrier)) {
+      positions.push({ after: i, kind: 'lazy', window: MAX_BARRIER_SIZE, distinct });
+      distinct = true;
+    }
+    if (s.labelsRetracted) labeledPath = true;
+  }
+  return positions;
+
+  /** One step's effect on the scan state — `'unknown'` where the mode cannot place its merges. */
+  function visit(s: IRStep, i: number, nextIsBarrier: boolean): 'unknown' | void {
+    const name = s.name;
+    const local = isLocalScope(s);
+    const barrierAfter = foundFlatMap && !labeledPath && !lazyOff && !nextIsBarrier;
+    const flatMap = (out: boolean): void => {
+      if (barrierAfter) {
+        positions.push({ after: i, kind: 'lazy', window: MAX_BARRIER_SIZE, distinct: out });
+        // A drained set holds pairwise-distinct traversers — only up to its window, past which the regroup
+        // mint raises — so the stream after a merge is distinct again.
+        distinct = true;
+      } else {
+        foundFlatMap = true;
+        distinct = out;
+      }
+    };
+    // A body this pass widened past `RepeatUnrollStrategy` runs, in the reference, inside a `RepeatStep`
+    // whose re-entries merge as evaluation interleaves (`RepeatStep.java:265-278, 334-353`). The exact scan
+    // refused it; the superset counts a merge after every such step.
+    if (s.unrolled === 'beyond') {
+      positions.push({ after: i, kind: 'repeat', window: Infinity, distinct: false });
+      distinct = false;
+      return;
+    }
+    // A step spliced out of a per-traverser host (`inlineIdentityHostBody`) ran in that host's own child
+    // traversal, one traverser at a time, and its body leaves the stream alone — so it is transparent here,
+    // but a spliced `flatMap()` still stood where a counted flat-map stands (`splicedHost`).
+    if (s.perTraverser) {
+      if (s.splicedHost === 'flatMap') flatMap(distinct);
+      return;
+    }
+    // `otherV()` is a map that requires a PATH (the exact scan refused it); counted as a flat-map here
+    // because over-counting only declines.
+    if (OTHER_V.has(name)) {
+      if (exact) return 'unknown';
+      flatMap(false);
+      return;
+    }
+    // `properties()` of pairwise-distinct elements is pairwise distinct (a property has one owner); every
+    // other flat-map may reach one traverser twice.
+    if (FLAT_MAPS.has(name)) { flatMap(distinct && name === 'properties'); return; }
+    if (EDGE_MOVES.has(name)) { distinct = false; return; }
+    if (name === 'barrier') {
+      const window = barrierWindow(s);
+      if (window === undefined) return 'unknown';
+      positions.push({ after: i, kind: 'barrier', window, distinct });
+      distinct = true;
+      return;
+    }
+    if ((name === 'order' || name === 'sample') && !local) {
+      positions.push({ after: i, kind: 'collecting', window: Infinity, distinct });
+      distinct = true;
+      return;
+    }
+    if (name === 'aggregate' || name === 'subgraph' || ((name === 'groupCount' || name === 'group') && sideEffectKey(s))) {
+      positions.push({ after: i, kind: 'side-effect', window: Infinity, distinct });
+      distinct = true;
+      return;
+    }
+    if (name === 'dedup' && !local) { distinct = true; return; }
+    if (SLICES.has(name) && !local) return;
+    if (REDUCING.has(name) && !local) { distinct = true; return; }
+    if (exact && labelFreePathProcessor(s)) {
+      // `MathStep`, a side-effect `select('x')` (`SelectOneStep`) and `FormatStep` are `PathProcessor`s
+      // with or without a label: `PathRetractionStrategy` places a barrier after each unless the next step
+      // is a `Barrier` (or nothing).
+      if (s.args.some((a) => isNested(a.value)) && name === 'select') return 'unknown';
+      const placed = !nextIsBarrier && !retractionOff;
+      if (placed) positions.push({ after: i, kind: 'retraction', window: MAX_BARRIER_SIZE, distinct: false });
+      distinct = placed;
+      return;
+    }
+    if (!exact && (SUPERSET_PATH_PROCESSORS.has(name) || holdsPathProcessor(s))) {
+      const ranked = RANKED_FILTERS.has(name) || INLINED_FILTERS.has(name);
+      let j = i - 1;
+      while (j >= 0 && NOT_A_REFERENCE_STEP.has(steps[j]!.name)) j--;
+      const movable = ranked && j >= 0 && RANKED_FILTERS.has(steps[j]!.name);
+      // A path FILTER keeps a distinct stream distinct, so its barrier merges nothing wherever it lands; a
+      // path MAP (`math`, `select`, `format`) may map distinct traversers to equal ones.
+      const outDistinct = distinct && !PATH_MAPS.has(name);
+      if (!outDistinct && !retractionOff && (!nextIsBarrier || movable))
+        positions.push({ after: i, kind: 'retraction', window: MAX_BARRIER_SIZE, distinct: false });
+      distinct = outDistinct;
+      labeledPath = false;
+      return;
+    }
+    // A `where()` with a label is a `PathProcessor`; the exact scan already refused every label.
+    if (FILTERS.has(name)) return;
+    if (MAPS.has(name) || (local && BARRIER_NAMES.has(name))) {
+      if (BULK_FORWARDING.has(name) && name !== 'local' && branchHoldsBarrier(s)) return 'unknown';
+      // A body whose OWN traversers may arrive merged forwards them merged: `LocalStep` and `BranchStep`
+      // emit the child's traversers as they are, bulk and all. The exact scan cannot place that merge in
+      // this traversal; the superset counts it as one.
+      if (BULK_FORWARDING.has(name) && bodiesMayBulk(s)) {
+        if (exact) return 'unknown';
+        positions.push({ after: i, kind: 'lazy', window: MAX_BARRIER_SIZE, distinct: false });
+      }
+      distinct = false;
+      return;
+    }
+    return 'unknown';
+  }
+}
+
+/**
+ * EVERY MERGE THE REFERENCE MAKES in the traversal `steps` begins (see the section head) — or `'unknown'`
+ * where the scan cannot be exact. A lowering that reproduces the merges reads this; one that cannot
+ * reproduce them asks `referenceUnbulkedAt` instead.
+ */
+export function bulkingPositions(steps: readonly IRStep[], rooted: boolean, upTo = steps.length): readonly BulkingPosition[] | 'unknown' {
+  return scan(steps, rooted, 'exact', upTo);
+}
+
 /**
  * Does the reference reach position `at` of `steps` with EVERY traverser still at bulk 1 — so a consumer
  * that reads rows reads exactly the reference's traversers? `steps` must BEGIN the traversal: `rooted`
  * when `steps[0]` is the root's start step, `false` for a child traversal handed one parent traverser at
- * a time (a `by()` body), whose incoming bulk scales every member alike and so never changes a
- * per-traverser answer. Conservative: `false` wherever the scan cannot see (above).
+ * a time (a `by()` body, which `TraversalUtil.apply` runs at bulk 1). Derived from the SUPERSET scan: no
+ * merge before `at` over a stream that may hold equal traversers. Conservative: `false` wherever the scan
+ * cannot see.
  */
 export function referenceUnbulkedAt(steps: readonly IRStep[], at: number, rooted: boolean): boolean {
-  let from = 0;
-  let sawFlatMap = false;
-  if (rooted) {
-    if (!knownStart(steps[0])) return false;
-    sawFlatMap = steps[0]!.name !== 'inject';
-    from = 1;
-  }
-  // Is the stream still pairwise DISTINCT here (`referenceDistinctAt`)? A barrier over distinct traversers
-  // merges nothing, so a path-processing FILTER over such a stream is harmless wherever it sits.
-  let distinct = true;
-  for (let i = from; i < at; i++) {
-    const name = steps[i]!.name;
-    if (PATH_PROCESSORS.has(name)) {
-      if (!(distinct && DISTINCT_PRESERVING.has(name)) && !lastBeforeConsumer(steps, i, at)) return false;
-    } else if (INLINED_FILTERS.has(name) && holdsPathProcessor(steps[i]!)) {
-      // `InlineFilterStrategy` runs BEFORE `PathRetractionStrategy` (its POSTS) and splices a `filter()` or
-      // `and()` whose children hold only `FilterStep`s into THIS traversal
-      // (`…/strategy/optimization/InlineFilterStrategy.java:80-84, 196-213` and `processAndStep`), so a
-      // wrapped `where()` lands here as a root PathProcessor and gets the same barrier — followed by
-      // whatever else the child held. So it passes over a still-DISTINCT stream (a barrier there merges
-      // nothing), or — when its whole child is ONE path processor, which is what then sits in the
-      // wrapper's place — where that bare step would: last before the consumer.
-      if (!distinct && !(soleChildIsPathProcessor(steps[i]!) && lastBeforeConsumer(steps, i, at))) return false;
-    } else if (FLAT_MAPS.has(name)) {
-      // A flat-map after the first is followed by a `NoOpBarrierStep` — unless the next step is the
-      // consumer at `at`, a `Barrier` itself, which is the one exemption the strategy makes.
-      if (sawFlatMap && i + 1 !== at) return false;
-      sawFlatMap = true;
-    } else if (!NEITHER_EXPANDS_NOR_MERGES.has(name)) return false;
-    distinct &&= DISTINCT_PRESERVING.has(name);
-  }
-  return true;
+  const positions = scan(steps, rooted, 'superset', at);
+  return positions !== 'unknown' && positions.every((p) => p.after >= at || p.distinct);
 }
 
-/** Is the path processor at `i` the step the reference runs IMMEDIATELY before the consumer at `at`, so
- *  `PathRetractionStrategy` places no barrier after it? Not when another step follows it, and not when it
- *  is a ranked filter directly after another ranked filter `FilterRankingStrategy` could move behind it. */
-function lastBeforeConsumer(steps: readonly IRStep[], i: number, at: number): boolean {
-  if (i + 1 !== at) return false;
-  if (!RANKED_FILTERS.has(steps[i]!.name)) return true;
-  let j = i - 1;
-  while (j >= 0 && NOT_A_REFERENCE_STEP.has(steps[j]!.name)) j--;
-  return j < 0 || !RANKED_FILTERS.has(steps[j]!.name);
+/**
+ * MAY the reference merge equal traversers on the stream reaching `steps[at]` of a ROOT traversal where a
+ * READER observes it — for a caller whose exact scan answered `'unknown'` and that must therefore decline
+ * wherever an unreproduced merge would change its answer. Only a step that reads stream order (a slice, a
+ * collecting consumer — `readsOrder`, at any depth) after `at` observes it; a root emission the corpus
+ * asserts unordered does not. The SUPERSET scan places the merge where it can; where even it cannot see
+ * the prefix, the step before `at` is judged on its own: a flat-map, a path processor or a pass-through
+ * side-effect barrier whose next step is no `Barrier` may carry an implicit `NoOpBarrierStep`, and a
+ * start step naming repeated literals merges them. (An explicit `barrier()`/`order()` merges in its own
+ * step, `barrierRows`/`orderRows`.)
+ */
+export function mayMergeAt(steps: readonly IRStep[], at: number): boolean {
+  if (at <= 0 || !readsStreamOrder(steps.slice(at))) return false;
+  const positions = scan(steps, true, 'superset', at);
+  if (positions !== 'unknown') return positions.some((p) => p.after === at - 1 && !p.distinct && IMPLICIT.has(p.kind));
+  const before = steps[at - 1]!;
+  if (at - 1 === 0) return knownStartStep(before) && !distinctLiterals(before);
+  const next = nextReferenceStep(steps, at - 1);
+  if (before.perTraverser) return before.splicedHost === 'flatMap' && !!next && !isReferenceBarrier(next);
+  if (before.name === 'aggregate') return true;
+  if (!next || isReferenceBarrier(next) || before.unrolled === 'beyond') return false;
+  return FLAT_MAPS.has(before.name) || OTHER_V.has(before.name) || SUPERSET_PATH_PROCESSORS.has(before.name);
 }
 
-/** A root start step whose traversers the scan can name: a `V()`/`E()`/`inject()` the user wrote (not a
- *  landed marker standing in for a federated arm) over literal, pairwise-distinct arguments. */
-const knownStart = (start: IRStep | undefined): boolean =>
-  !!start && !start.landedSource && start.graphTag == null && distinctLiterals(start)
-  && (start.name === 'V' || start.name === 'E' || start.name === 'inject');
+/** The merges a stream receives between two steps rather than in a step of its own. `repeat` is absent: a
+ *  `RepeatStep`'s re-entry merge depends on evaluation interleaving, so declining at it would refuse every
+ *  widened unroll for a merge no one can place — that residue is `bulkingPositions`' `'unknown'`. */
+const IMPLICIT: ReadonlySet<BulkingKind> = new Set<BulkingKind>(['start', 'lazy', 'retraction', 'side-effect']);
 
 /** Steps that keep a stream of pairwise-DISTINCT traversers distinct — filters, which only drop. */
 const DISTINCT_PRESERVING: ReadonlySet<string> = new Set([
@@ -403,25 +700,9 @@ const DISTINCT_PRESERVING: ReadonlySet<string> = new Set([
  * starts from ONE traverser, which is distinct by itself.
  */
 export function referenceDistinctAt(steps: readonly IRStep[], at: number, rooted: boolean): boolean {
-  if (rooted && !knownStart(steps[0])) return false;
+  if (rooted && !(knownStartStep(steps[0]) && distinctLiterals(steps[0]))) return false;
   for (let i = rooted ? 1 : 0; i < at; i++) if (!DISTINCT_PRESERVING.has(steps[i]!.name)) return false;
   return true;
-}
-
-/** The steps after which no ORDER of the stream survives — each consumes the whole stream into one
- *  order-free value (a count, a numeric reduction, a count map), so an upstream reorder is invisible.
- *  A NAME is not enough: only the GLOBAL REDUCING form erases (`erasesOrder`). */
-const ORDER_ERASING: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', 'mean', 'groupCount']);
-
-/** Does `s` ERASE the order of the stream reaching it — is it an `ORDER_ERASING` step in its global
- *  REDUCING form? A local-scope reducer (`count(local)`) maps each traverser on its own, and a
- *  side-effect-keyed `groupCount('x')` is a `GroupCountSideEffectStep`
- *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/GroupCountSideEffectStep.java`),
- *  a `SideEffectStep` that passes every traverser through unchanged — merged bulk and all — so a slice
- *  or a collector after it still reads the order. Only an argument list holding nothing but a GLOBAL
- *  scope token is the reducing form; any other argument (a side-effect key) is not an eraser. */
-function erasesOrder(s: IRStep): boolean {
-  return ORDER_ERASING.has(s.name) && !isLocalScope(s) && (s.args ?? []).every((a) => isScopeArg(a.value));
 }
 
 /** Steps that keep a pairwise-distinct stream distinct ON TOP of `DISTINCT_PRESERVING`: a reorder (a
@@ -432,104 +713,32 @@ const REORDERS: ReadonlySet<string> = new Set(['order', 'barrier']);
  *  distinct (`DISTINCT_PRESERVING`, `REORDERS`), it is when it reaches a whole-traverser `dedup()`
  *  (`DedupGlobalStep` with no key and no `by()` keeps one traverser per equal class, whatever reached
  *  it) or the START of a step list known to begin a traversal (`start`): a rooted chain's start naming
- *  distinct traversers (`knownStart`), or a child traversal's one parent traverser. Anything else —
- *  a flat-map, a map, an unknown start — may hold equal traversers. */
-function distinctAt(steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined): boolean {
+ *  distinct traversers, or a child traversal's one parent traverser. Anything else — a flat-map, a map,
+ *  an unknown start — may hold equal traversers. */
+export function streamDistinctAt(steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined): boolean {
   for (let i = at - 1; i >= 0; i--) {
     const s = steps[i]!;
     if (s.name === 'dedup') return !isLocalScope(s) && !(s.args ?? []).length && !s.modulators?.length;
-    if (i === 0 && start?.rooted) return knownStart(s);
+    if (i === 0 && start?.rooted) return knownStartStep(s) && distinctLiterals(s);
     if (!DISTINCT_PRESERVING.has(s.name) && !REORDERS.has(s.name)) return false;
   }
   return !!start && !start.rooted;
 }
 
-/** Does a key step DISCARD the traverser for a value computed without it? A `constant()` maps every
- *  traverser to one value, and so does a `math()` whose expression references NO variable — neither
- *  `_` nor a label (`math('0')`; `mathVars`, `src/gremlin/math.ts`, is the variable set `MathStep`
- *  binds). A `math()` that reads a variable (`math('a / b')`, `math('_ * 10')`) keys on data, so it is
- *  the data-dependent residue below; an unreadable expression counts as discarding (fail closed). */
-function discardsTraverser(c: IRStep): boolean {
-  if (c.name === 'constant') return true;
-  if (c.name !== 'math') return false;
-  const formula = c.args?.[0]?.value;
-  if (typeof formula !== 'string') return true;
-  try { return mathVars(formula).length === 0; } catch { return true; }
-}
-
-/** May an `order()` TIE EVERY TRAVERSER — a `by()` key whose chain, anywhere at its top level, discards
- *  the traverser (`discardsTraverser`): `constant(0)`, `constant(0).is(0)`,
- *  `constant('a').concat('b')`, `math('0')`? Then the stable sort
- *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:78`)
- *  leaves the merged set in arrival order, so the merge is the whole answer. `true` only ever ADDS a
- *  decline, so an unnormalizable key counts as tying (fail closed).
- *
- *  A key that ties only SOME unequal traversers on some data (two vertices sharing a `name`, two strings
- *  of one `length()`) shows the merge only where the data ties; that data-dependent residue is the
- *  regroup mint's (Cluster A, `docs/2026-08-01-relir-build-plan.md` §10, indexed in
- *  `docs/outstanding-work.md`). Declining it here would lose dozens of correct L3 scenarios (measured). */
-function byTiesEveryTraverser(step: IRStep): boolean {
-  return (step.modulators ?? []).some((by: readonly unknown[]) => by.some((arg) => {
-    if (!isNested(arg)) return false;
-    try { return stepChain(arg.nested, {}).some(discardsTraverser); } catch { return true; }
-  }));
-}
-
-/** Does the stream an `order()` emits reach a step that READS its order before one that ERASES it?
- *  Walking `after` in stream order, the FIRST order-relevant step decides. A reader (`readsOrder`: a
- *  slice, a collecting consumer, or a step holding a body that holds one, at any depth) makes the merge
- *  observable: `limit(2)` over the merged `1(bulk 2),2,3` keeps `1,1`, since `RangeGlobalStep` trims a
- *  traverser's BULK (`…/process/traversal/step/filter/RangeGlobalStep.java`), where the unmerged
- *  `1,2,1,3` keeps `1,2` — so a `sum()` after the slice reads the merge too. A GLOBAL REDUCING eraser
- *  (`erasesOrder` — never a pass-through side-effect form like `groupCount('x')`) reached first makes
- *  it unobservable. Reaching the end unread, the order is the
- *  answer. */
-function orderReadBeforeErased(after: readonly IRStep[]): boolean {
-  for (const s of after) {
-    if (readsOrder([s])) return true;
-    if (erasesOrder(s)) return false;
-  }
-  return true;
-}
-
 /**
- * Does the reference MERGE EQUAL TRAVERSERS at the explicit `barrier()` / global `order()` at `steps[at]`
- * in a way this spine — which never merges, every row one traverser — does not reproduce and a reader
- * can observe? A STOPGAP DECLINE with ONE authority, which every tail consults (`mergeObservableAt`,
- * `lower.ts`) at every depth a step list is lowered.
- *
- * Both steps add their starts into ONE `TraverserSet`, which merges an equal traverser into the FIRST
- * arrival's slot (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/TraverserSet.java:88-96`):
- * `barrier()` is a `NoOpBarrierStep` that drains that set in slot order
- * (`…/process/traversal/step/map/NoOpBarrierStep.java:40-60`), and `order()` is a `CollectingBarrierStep`
- * that STABLE-sorts the merged set (`…/process/traversal/step/util/CollectingBarrierStep.java:42-90`,
- * `…/process/traversal/step/map/OrderGlobalStep.java:78`). So `inject(1,2,1,3).barrier()` emits
- * `1,1,2,3`, and so does `order().by(constant(0))`, where every traverser ties.
- *
- * It is unobservable — and nothing declines — where the scan can vouch the stream reaching `at` is
- * pairwise distinct (`distinctAt`), and for an `order()` whose keys do not tie every traverser
- * (`byTiesEveryTraverser`). A `barrier()` changes only ORDER, so it declines only where a reader demands
- * one (`ordered`, `ChainFacts.demandsEncounter`); an `order()`'s output order is its answer, so it
- * declines unless the stream reaches a global step that erases order (`ORDER_ERASING`) BEFORE any step
- * that reads it (`orderReadBeforeErased`) — a slice in between reads the merged bulk. Everywhere else this is a decline, until
- * a first-occurrence regroup mint lowers the merge itself.
- *
- * Deliberately NOT applied to the implicit `NoOpBarrierStep`s `LazyBarrierStrategy` places after a
- * flat-map (`…/strategy/optimization/LazyBarrierStrategy.java:73,86-135`): declining those loses most of
- * L3 (measured), and they are the plain-chain residue tracked in `docs/outstanding-work.md`.
+ * Does the explicit `barrier()` at `steps[at]` merge equal traversers in a way a reader can observe
+ * WITHOUT an emission order to regroup? `barrier()` is a `NoOpBarrierStep` that drains its
+ * `TraverserSet` in slot order (`…/process/traversal/step/map/NoOpBarrierStep.java:40-60`), so
+ * `inject(1,2,1,3).barrier()` emits `1,1,2,3`. Where the stream carries an emission order the lowering
+ * REPRODUCES that merge (`regroupFirstOccurrence`); this is the residual decline for a stream that carries
+ * none while a reader still demands one — `readsOrder` downstream, or (a body) the inherited `ordered`.
+ * Unobservable — no decline — over a stream the scan vouches pairwise distinct (`streamDistinctAt`).
  */
-export function referenceMergeObservableAt(
+export function unorderedBarrierMergeObservable(
   steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined, ordered: boolean,
 ): boolean {
-  const step = steps[at];
-  if (!step || (step.name !== 'barrier' && step.name !== 'order') || isLocalScope(step)) return false;
-  if (step.name === 'order' && !byTiesEveryTraverser(step)) return false;
-  if (distinctAt(steps, at, start)) return false;
-  const after = steps.slice(at + 1);
-  if (step.name === 'order') return orderReadBeforeErased(after);
-  // A ROOT chain's downstream is `after` itself; a body's continues into whatever encloses it, which
-  // only the inherited chain-global `ordered` speaks for.
-  return readsOrder(after) || (!start?.rooted && ordered);
+  if (streamDistinctAt(steps, at, start)) return false;
+  return readsOrder(steps.slice(at + 1)) || (!start?.rooted && ordered);
 }
 
 /** The steps whose answer READS the order of the stream reaching them — the slices
@@ -537,13 +746,31 @@ export function referenceMergeObservableAt(
  *  arrival order (`ir/analyze.ts`'s `COLLECTING_CONSUMERS`). */
 const ORDER_READERS: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'cap', 'group']);
 
+/** `readsOrder` without `cap`: a `cap` reads a side-effect COLLECTION, whose order was fixed where the
+ *  collection was written (an `aggregate`, itself a reader), not the stream that reaches the `cap`. */
+function readsStreamOrder(steps: readonly IRStep[]): boolean {
+  return someStepDeep(steps, {}, (s) => ORDER_READERS.has(s.name) && s.name !== 'cap' && !isLocalScope(s as IRStep), true);
+}
+
 /** Does any step of `steps` — or of any body nested in one, at any depth — read stream order? Nested
  *  bodies count because a per-traverser child (`local(limit(1))`) or a branch arm reads the order its
  *  host is fed in. An unnormalizable body is assumed to read it. */
 function readsOrder(steps: readonly IRStep[]): boolean {
-  return steps.some((s) => (ORDER_READERS.has(s.name) && !isLocalScope(s))
-    || [...(s.args ?? []).map((a) => a.value), ...(s.modulators ?? []).flat()].some((v) => {
-      if (!isNested(v)) return false;
-      try { return readsOrder(stepChain(v.nested, {})); } catch { return true; }
-    }));
+  return someStepDeep(steps, {}, (s) => ORDER_READERS.has(s.name) && !isLocalScope(s as IRStep), true);
+}
+
+/** The steps a per-traverser body answers DIFFERENTLY for one traverser at bulk k than for k traversers at
+ *  bulk 1, where a host hands its child the traverser WITH its bulk (`OptionalStep`): a global reduction
+ *  emits ONE traverser for the k (a `count()` of `k·n`, not k counts of n), a slice trims the bulk
+ *  (`RangeGlobalStep.filter`, `…/step/filter/RangeGlobalStep.java:73-120`), a dedup resets it, and an
+ *  order or a coin acts on the merged slot. */
+const BULK_NONLINEAR: ReadonlySet<string> = new Set([
+  'count', 'sum', 'min', 'max', 'mean', 'fold', 'group', 'groupCount', 'tree', 'cap',
+  'limit', 'range', 'skip', 'tail', 'sample', 'dedup',
+]);
+
+/** Does a body, at any depth, hold a step whose answer for one bulk-k traverser differs from k bulk-1
+ *  ones (`BULK_NONLINEAR`, global scope)? Unreadable answers `true`. */
+export function bulkNonlinear(body: readonly IRStep[]): boolean {
+  return someStepDeep(body, {}, (s) => BULK_NONLINEAR.has(s.name) && !isLocalScope(s as IRStep), true);
 }

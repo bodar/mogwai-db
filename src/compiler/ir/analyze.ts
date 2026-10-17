@@ -301,6 +301,12 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
   // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value, an L3
   // regression). The order the chain does specify survives a plan change on its own.
   if (ordered) return false;
+  // An explicit `barrier()` MERGES equal traversers into their first arrival's slot, which moves the
+  // emission order the chain ends with — `inject(1,2,1,3).barrier()` emits `1,1,2,3`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/NoOpBarrierStep.java:40-76`).
+  // Only an emission order can carry that merge (`mergeEqual`, `rel/lower.ts`), so such a chain seeds one.
+  if (steps.some((s) => s.name === 'barrier' && !(s.args ?? []).length))
+    return steps.length > 1 && canCarryEncounter(steps);
   return steps.length > 1 && canCarryEncounter(steps) && !bulkObservedFrom(steps, 1);
 }
 

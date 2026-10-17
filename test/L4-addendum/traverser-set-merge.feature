@@ -1,16 +1,17 @@
-Feature: mogwai addendum — an explicit barrier()/order() merges equal traversers at the first arrival
+Feature: mogwai addendum — equal traversers merge into the first arrival's slot at every TraverserSet
 
-  # `barrier()` (a `NoOpBarrierStep`) and `order()` (a `CollectingBarrierStep`) add every start into
+  # `barrier()` (a `NoOpBarrierStep`), `order()` (a `CollectingBarrierStep`), `aggregate('x')`, a start
+  # step's own iterator, and the implicit `NoOpBarrierStep(2500)`s that `LazyBarrierStrategy` puts after
+  # every flat-map but the first (and `PathRetractionStrategy` after a `math()`) all add their starts into
   # ONE `TraverserSet`, which merges an EQUAL traverser into the slot of its first arrival
-  # (vendor/tinkerpop/gremlin-core/.../traverser/util/TraverserSet.java:88-96). `barrier()` then
-  # drains the set in slot order and `order()` stable-sorts it (OrderGlobalStep.java:78), so where
-  # equal traversers are separated by an unequal one the emission order moves: `1,2,1,3` comes out
-  # `1,1,2,3`. This spine keeps one row per traverser and never merges, so wherever a reader observes
-  # that order and the stream may hold equal traversers it DECLINES (`referenceMergeObservableAt`,
-  # src/compiler/ir/bulk.ts) until a first-occurrence regroup mint lowers the merge itself.
+  # (vendor/tinkerpop/gremlin-core/.../traverser/util/TraverserSet.java:88-96). The set drains in slot
+  # order (`order()` stable-sorts it, OrderGlobalStep.java:78), so where equal traversers are separated
+  # by an unequal one the emission order moves: `1,2,1,3` comes out `1,1,2,3` — whatever the order key,
+  # because the merge happens before the sort. `bulkingPositions` (src/compiler/ir/bulk.ts) places every
+  # merge and `regroupFirstOccurrence` (src/compiler/rel/build.ts) reproduces it on the emission order.
   # @gap:traverser-set-merge marks the family.
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_barrier_fold
     Given the empty graph
     And the traversal of
@@ -23,7 +24,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
   # Every traverser ties on `constant(0)`, so the stable sort leaves the MERGED set's slot order.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_fold
     Given the empty graph
     And the traversal of
@@ -36,7 +37,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
   # The same merge one level down: the decline is the step's own, so it holds in any body.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_VX1X_mapXconstantXl1_2_1_3X_unfold_barrier_foldX
     Given the modern graph
     And the traversal of
@@ -90,7 +91,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
   # merged `1(bulk 2)`'s BULK, so `limit(2)` keeps `1,1` (sum 2), where the unmerged `1,2,1,3` keeps `1,2`
   # (sum 3). The FIRST order-relevant step after the `order()` decides (`orderReadBeforeErased`), not
   # whether any eraser follows somewhere.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_sum
     Given the empty graph
     And the traversal of
@@ -102,7 +103,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_tailX2X_sum
     Given the empty graph
     And the traversal of
@@ -114,7 +115,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[5].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_groupCount
     Given the empty graph
     And the traversal of
@@ -128,7 +129,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
 
   # The slice decides at every depth after it — through a per-traverser body, a filter body, a branch,
   # a bounded repeat and an as()/select() pair — and before it (two stacked tie-every orders).
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_localXidentityX_sum
     Given the empty graph
     And the traversal of
@@ -140,7 +141,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_whereXisXgtX0XXX_sum
     Given the empty graph
     And the traversal of
@@ -152,7 +153,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_chooseXisX1X_identity_identityX_sum
     Given the empty graph
     And the traversal of
@@ -164,7 +165,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_limitX2X_repeatXidentityX_timesX1X_sum
     Given the empty graph
     And the traversal of
@@ -176,7 +177,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_asXaX_limitX2X_selectXaX_sum
     Given the empty graph
     And the traversal of
@@ -188,7 +189,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_order_byXconstantX1XX_limitX2X_sum
     Given the empty graph
     And the traversal of
@@ -216,7 +217,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
   # A key that ties every traverser need not be a BARE constant: any key that discards the traverser's
   # value for a computed one (`constant(…)` followed by more steps, a `math()` expression) may tie them
   # all, so the stable sort again leaves the merged set's slot order.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0X_isX0XX_fold
     Given the empty graph
     And the traversal of
@@ -228,7 +229,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantXaX_concatXbXX_fold
     Given the empty graph
     And the traversal of
@@ -240,7 +241,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXmathX0XX_fold
     Given the empty graph
     And the traversal of
@@ -256,7 +257,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
   # GroupCountSideEffectStep, a SideEffectStep that passes every traverser through (merged bulk and all),
   # so the slice or collector after it still reads the merge (`erasesOrder`). Flat, under a modulator,
   # with a collector, and inside a union arm.
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_limitX2X_sum
     Given the empty graph
     And the traversal of
@@ -268,7 +269,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_byXconstantX0XX_limitX2X_sum
     Given the empty graph
     And the traversal of
@@ -280,7 +281,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | d[2].i |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_order_byXconstantX0XX_groupCountXxX_fold
     Given the empty graph
     And the traversal of
@@ -292,7 +293,7 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
       | result |
       | l[d[1].i,d[1].i,d[2].i,d[3].i] |
 
-  @gap:traverser-set-merge @Unsupported
+  @gap:traverser-set-merge
   Scenario: g_injectX1_2_1_3X_unionXorder_byXconstantX0XX_groupCountXxX_limitX2XX_sum
     Given the empty graph
     And the traversal of
@@ -341,3 +342,154 @@ Feature: mogwai addendum — an explicit barrier()/order() merges equal traverse
     Then the result should be unordered
       | result |
       | d[3].i |
+
+  # The merge is the SET's, not the key's: a key that ties traversers only on some data (here every
+  # string of one length) still sorts the merged slots, so the two `a`s are adjacent.
+  @gap:traverser-set-merge
+  Scenario: g_injectXa_b_aX_order_byXlengthX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject("a", "b", "a").order().by(__.length()).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[a,a,b] |
+
+  # A key that reads the traverser yet is constant-VALUED ties every traverser as `constant(0)` does.
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1_3X_order_byXmathX___mul_0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).order().by(__.math("_ * 0")).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  # A start step drains its arguments into its iterator's set (ExpandableStepIterator.java:61-63).
+  @gap:traverser-set-merge
+  Scenario: g_injectX1_2_1_3X_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, 2, 1, 3).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  # `LazyBarrierStrategy` puts a `NoOpBarrierStep` after the SECOND flat-map (the next step is a filter,
+  # not a `Barrier`), so `1,2,1,3` reaches the fold merged — the `flatMap()` is a counted `FlatMapStep`
+  # even when its body is spliced away.
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_1_3X_unfold_flatMapXidentityX_isXgtX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 1, 3]).unfold().flatMap(__.identity()).is(P.gt(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  # …and a slice behind it trims the merged slot's BULK (RangeGlobalStep), so it keeps both 1s.
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_1_3X_unfold_flatMapXidentityX_isXgtX0XX_limitX2X_sum
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 1, 3]).unfold().flatMap(__.identity()).is(P.gt(0)).limit(2).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].i |
+
+  # The first flat-map gets NO barrier — only the ones after it do — and neither does one whose next step is
+  # a `Barrier` (the `fold()` here).
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_1_3X_unfold_flatMapXidentityX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 1, 3]).unfold().flatMap(__.identity()).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[2].i,d[1].i,d[3].i] |
+
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_1_3X_unfold_isXgtX0XX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 1, 3]).unfold().is(P.gt(0)).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[2].i,d[1].i,d[3].i] |
+
+  # `aggregate('x')` is a LocalBarrier: it passes its starts on from its own TraverserSet.
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_1_3X_unfold_aggregateXxX_fold
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 1, 3]).unfold().aggregate("x").fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[d[1].i,d[1].i,d[2].i,d[3].i] |
+
+  # `PathRetractionStrategy` puts a `NoOpBarrierStep` after a `math()` whose next step is not a Barrier.
+  @gap:traverser-set-merge
+  Scenario: g_injectXl1_2_3_4X_unfold_mathX_mod_2X_isXgteX0XX_limitX2X
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([1, 2, 3, 4]).unfold().math("_ % 2").is(P.gte(0)).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1.0].d |
+      | d[1.0].d |
+
+  # `LocalStep` SPLITS a merged slot into unit traversers before running its body (LocalStep.java:80-88),
+  # so a per-traverser reduction after the `both()` merge still answers once per unit: marko, josh and peter
+  # are reached 3, 3 and 1 times with out-degrees 3, 2 and 1 — 9 + 6 + 1. (A merged slot folding ONCE would
+  # give 3 + 2 + 1. `per-traverser-fanout-slice.feature` pins the per-unit `limit(1)` count, 7.)
+  @gap:traverser-set-merge
+  Scenario: g_V_both_localXout_fold_countXlocalXX_sum
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().both().local(__.out().fold().count(Scope.local)).sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[16].l |
+
+  # `OptionalStep` hands its body the merged traverser WITH its bulk (OptionalStep.java:46-57): the six
+  # merged slots each fold ONCE, where one row per unit folds twelve times — which this spine cannot state.
+  @gap:traverser-set-merge @Unsupported
+  Scenario: g_V_both_optionalXout_foldX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().both().optional(__.out().fold()).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |

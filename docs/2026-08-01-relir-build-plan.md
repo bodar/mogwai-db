@@ -703,6 +703,21 @@ authorities.
   possibly-non-distinct stream when an order reader is downstream; pinned in
   `test/L4-addendum/traverser-set-merge.feature`. L3 unchanged (1863). The full `bulkingPositions` /
   `regroupFirstOccurrence` authority above is still open.
+  ✅ **Authority LANDED (wf7/substrate-bulking-positions):** `bulkingPositions` (`ir/bulk.ts`) places every merge —
+  start iterator, LazyBarrier (first flat-map exempt, `Barrier`-next exempt, `GraphStep` id rule, labelled
+  path, PATH/`drop`/`element` off-switches), PathRetraction after a label-free `math`/`select(key)`/`format`,
+  `RepeatUnrollStrategy`'s per-body barrier (`unrolled: 'strategy'`), a spliced `flatMap()` (`splicedHost`),
+  explicit/collecting/side-effect barriers — with a SUPERSET mode `referenceUnbulkedAt` is now derived from.
+  `regroupFirstOccurrence` (`rel/build.ts`) re-positions equal rows to their first arrival's encounter (shared
+  — the bulk), raising a deferral past one 2500-slot drain; `mergeEqual` applies it per implicit position at
+  every tail head (`mergedAt`), in `barrier()` (`barrierRows`), in `order()` (`mergedOrder`, dense-ranked so
+  a merged slot stays one traverser) and at a barrier-arm branch start (`armStartMerge`). The syntactic
+  `referenceMergeObservableAt`/`byTiesEveryTraverser`/`orderReadBeforeErased` are deleted. **Refuted at the
+  pin:** "`local` diverges on a merged slot" — `LocalStep.nextStart` splits a slot into units
+  (`LocalStep.java:80-88`), so `g.V().out().local(both().limit(1)).count()` is 6, not 4; `OptionalStep` does
+  forward bulk, and a bulk-nonlinear `optional` body after a possible merge declines (`bulkForwardingDiverges`).
+  Residue: `'unknown'` positions (labels, a body unrolled past the strategy, a `RepeatStep`'s re-entry) leave
+  the order unmerged unless the superset places a merge under a reader (`mayMergeAt` — then decline).
 - 🚧 **B — the branch emission key.** Authority: `step/branch/BranchStep.java` (traverser-major/arm-minor
   without a barrier, arm-major with one), `step/branch/LocalStep.java` + `util/TraversalUtil.java` `applyAll`
   (arm-major is PER PARENT), `step/map/CoalesceStep.java`. Seam: `src/compiler/rel/lower.ts` `branchResult`

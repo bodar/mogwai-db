@@ -9,16 +9,16 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
 import { isRel, type Rel } from '../../rel/rel.ts';
-import { stmtChildren } from '../../rel/walk.ts';
+import { rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { bulkObservedFrom, referenceMergeObservableAt, referenceUnbulkedAt } from '../ir/bulk.ts';
+import { bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
-import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
+import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import { edgeEndpoint } from './element.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -33,7 +33,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffCo
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf, reducedVtype,
     jsonMemberByTypeof, labelSetArgs, meta, minter,
-    payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
+    payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload,
     type Minter
 } from './build.ts';
@@ -282,16 +282,115 @@ export const BORD_ARM: Channel = { col: 'bord_a', role: 'origin' };
 /** Does the stream reaching `steps[at]` hold exactly the reference's traversers — none merged by a
  *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
  *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
-const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
+export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
   ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted);
 
-/** Would the reference's merge of equal traversers at the explicit `barrier()`/`order()` at `steps[at]`
- *  be observable (`referenceMergeObservableAt`, `ir/bulk.ts`)? The start is vouched for only where `steps`
- *  IS the traversal `ctx.traversal` names (by identity); anywhere else the scan assumes the stream may
- *  hold equal traversers. Every tail's `barrier`/`order` consults this, so the decline holds at every
- *  depth a step list lowers at. */
-export const mergeObservableAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
-  referenceMergeObservableAt(steps, at, ctx.traversal?.steps === steps ? ctx.traversal : undefined, ctx.ordered);
+/**
+ * May a BULK-FORWARDING parent at `steps[at]` answer differently than the reference because the reference
+ * merged equal traversers before it? `OptionalStep` hands its child the traverser WITH its bulk
+ * (`traverser.split()`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/OptionalStep.java:46-57`),
+ * so a body whose answer is not linear in the bulk (`bulkNonlinear`, `ir/bulk.ts` — a reduction emits ONE
+ * traverser for the k, a slice trims the bulk) answers once for a merged slot where this spine, one row
+ * per traverser, answers once per copy. Decline there unless the reference provably merged nothing before
+ * `at` (`unbulkedAt`). `LocalStep` splits a slot into units first (`LocalStep.java:80-88`), and
+ * `coalesce`/`map`/`flatMap` reset the bulk to 1, so none of them diverges; a `BranchStep` whose arms hold
+ * no barrier at any depth has only bulk-linear arms, and one whose arms do runs them over its merged
+ * starts (`armStartMerge`).
+ */
+export const bulkForwardingDiverges = (ctx: ChainCtx, steps: readonly IRStep[] | undefined, at: number, bodies: readonly (readonly IRStep[])[]): boolean =>
+  bodies.some(bulkNonlinear) && !(steps && unbulkedAt(ctx, steps, at));
+
+/** The deferral a merge raises where one `NoOpBarrierStep(2500)` drain would not hold the stream
+ *  (`regroupFirstOccurrence`): the reference merges in successive drains, which one window cannot state. */
+export const MERGE_WINDOW_EXCEEDED = `a traversal whose implicit barrier holds more than ${MAX_BARRIER_SIZE} distinct traversers while its order is read is not supported`;
+
+/**
+ * MERGE EQUAL TRAVERSERS into their first arrival's slot (`regroupFirstOccurrence`, `build.ts`) — the ONE
+ * place a lowering reproduces a reference `TraverserSet`, whichever step owns the set. `key` is the
+ * shape's traverser identity; every carried channel joins it there.
+ *
+ * Only an EMISSION ORDER can carry a merge — the copies' shared position is the bulk — so a stream with
+ * none is returned as it is: nothing downstream reads its order, and a bulk-sensitive consumer asks
+ * `referenceUnbulkedAt` for itself. A SACK makes a traverser unequal to every other unless the traversal
+ * named a merge operator (`B_O_S_SE_SL_Traverser.carriesUnmergeableSack`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java:140-156`):
+ * unmergeable, the set merges nothing; mergeable, it COMBINES sacks, which this cannot state — a decline.
+ */
+export function mergeEqual(
+  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter,
+): Rel | null {
+  if (!encounterOf(rel.channels)) return rel;
+  if (ctx.sack || rel.channels.some((channel) => channel.role === 'sack')) return ctx.sack?.operator ? null : rel;
+  return regroupFirstOccurrence(rel, key, window, (dependsOn) => raiseExpr(MERGE_WINDOW_EXCEEDED, dependsOn), fresh);
+}
+
+/** The merge key of a shape whose identity IS its payload (a value, a list, a map, a record, a path). */
+const payloadKey = (rel: Rel): readonly Expr[] => payloadCols(rel).map((column) => col(rel.id, column.name));
+/** The merge key of an element stream — `Element.equals` is by id. */
+const elementKey = (rel: Rel): readonly Expr[] => [col(rel.id, 'id')];
+
+/** The merge key of a FRAMING's traverser (`RowShape.mergeKey`), or `null` where re-positioning rows
+ *  cannot state the merge (a detached or typed stream). */
+export const framingMergeKey = (framing: RelFraming): ((rel: Rel) => readonly Expr[]) | null =>
+  framing.kind === 'elements' ? elementKey
+    : framing.kind === 'property' ? (rel) => propertyIdentityKey(rel, framing.ownerElem)
+      : framing.kind === 'detached' || framing.kind === 'typedNode' || framing.kind === 'discard' ? null
+        : payloadKey;
+
+/**
+ * THE ARM-START MERGE of a `BranchStep` that holds a barrier: with `hasBarrier` every start is added to
+ * each arm's own `TraverserSet` before the arm runs (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,123-158`),
+ * so an arm sees the merged slots in first-arrival order. Reproduced on the arms' shared input where it
+ * carries an emission order (`mergeEqual`); a framing whose merge cannot be stated declines.
+ */
+export function armStartMerge(input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter): Rel | null {
+  if (!encounterOf(input.channels)) return input;
+  const key = framingMergeKey(framing);
+  return key ? mergeEqual(input, key(input), Infinity, ctx, fresh) : null;
+}
+
+/**
+ * THE IMPLICIT MERGES on the stream reaching `steps[at]` — a start step's iterator, `LazyBarrierStrategy`'s
+ * and `PathRetractionStrategy`'s `NoOpBarrierStep`s, a pass-through side-effect barrier — reproduced where
+ * `bulkingPositions` (`ir/bulk.ts`) can place them: on the ROOT traversal, which `ctx.traversal` names by
+ * identity. Every tail calls this at the head of each step, so the merge lands whichever tail holds the
+ * stream there. The explicit merges (`barrier()`, `order()`) are their own steps' (`barrierRows`,
+ * `orderRows`) and hold at any depth. Where the scan answers `'unknown'` it declines if the SUPERSET scan
+ * places a merge here under a reader of the order (`mayMergeAt`), and otherwise leaves the stream as it is.
+ */
+export function mergedAt(
+  ctx: ChainCtx, steps: readonly IRStep[], at: number, rel: Rel, key: (rel: Rel) => readonly Expr[], fresh: Minter,
+): Rel | null {
+  if (at === 0 || !encounterOf(rel.channels) || ctx.traversal?.steps !== steps || !ctx.traversal.rooted) return rel;
+  // The scan stops at `at`: what follows cannot move a merge that happens before it.
+  const positions = bulkingPositions(steps, true, at);
+  // Where the exact scan cannot place the merges (a label, a body unrolled past the strategy, a merge
+  // step…), the SUPERSET scan still says whether one MAY land here; if it may and a reader observes the
+  // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
+  // answer the unmerged order.
+  if (positions === 'unknown') return referenceUnbulkedAt(steps, at, true) || !mayMergeAt(steps, at) ? rel : null;
+  const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));
+  return !merge || merge.distinct ? rel : mergeEqual(rel, key(rel), merge.window, ctx, fresh);
+}
+const IMPLICIT_MERGES: ReadonlySet<BulkingKind> = new Set<BulkingKind>(['start', 'lazy', 'retraction', 'side-effect']);
+
+/**
+ * `barrier()` — a `NoOpBarrierStep` that drains its `TraverserSet` in slot order
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/NoOpBarrierStep.java:40-76`),
+ * so `inject(1,2,1,3).barrier()` emits `1,1,2,3`. With an emission order the merge is reproduced
+ * (`mergeEqual`, window `n` for `barrier(n)`); without one it is invisible unless a reader demands an order
+ * the stream cannot carry, which declines (`unorderedBarrierMergeObservable`).
+ */
+export function barrierRows(
+  step: IRStep, rel: Rel, key: (rel: Rel) => readonly Expr[], ctx: ChainCtx, steps: readonly IRStep[], at: number, fresh: Minter,
+): Rel | null {
+  const args = step.args ?? [];
+  const n = args[0]?.value;
+  const window = !args.length ? Infinity : typeof n === 'number' && Number.isInteger(n) && n > 0 && args.length === 1 ? n : undefined;
+  if (window === undefined) return null;
+  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh);
+  return unorderedBarrierMergeObservable(steps, at, ctx.traversal?.steps === steps ? ctx.traversal : undefined, ctx.ordered) ? null : rel;
+}
 
 /** Does a SLICE-demanded branch take the traverser-major lowering here? Only when the input carries no
  *  positional (`origin`) key already: a branch NESTED inside another's sliced arm would freeze a SECOND parent
@@ -1033,12 +1132,22 @@ function sortTerms(
  */
 export function orderRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
-  opts: { readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[] } = {},
+  opts: {
+    readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[];
+    readonly merge?: boolean; readonly mergeKey?: (input: Rel) => readonly Expr[] | null;
+  } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
   // No SQL comparator (a LIST/MAP/PATH key): the ranked-order barrier's two statements answer it, where
   // this step is one they rank; everywhere else it declines as before.
-  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie);
+  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie, opts.merge ? opts.mergeKey ?? (() => null) : undefined);
+  // `OrderGlobalStep` is a `CollectingBarrierStep`: it adds every start to ONE `TraverserSet` — merging an
+  // equal traverser into its first arrival's slot — and STABLE-sorts that set
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/CollectingBarrierStep.java:42-90`,
+  // `…/step/map/OrderGlobalStep.java:78`). So the tie-break is the MERGED position, whatever the key: the
+  // keys are projected as columns first, the merge re-positions the copies (`mergeEqual`), and the sort
+  // ranks them DENSELY so one merged traverser keeps one position after the sort as well.
+  if (opts.merge && encounterOf(rel.channels)) return mergedOrder(rel, sort, opts.mergeKey, ctx, fresh);
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
     : rel;
@@ -1070,6 +1179,7 @@ export function orderRows(
  */
 function rankedRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter, tieOf?: (input: Rel) => readonly Expr[],
+  mergeKey?: (input: Rel) => readonly Expr[] | null,
 ): Rel | null {
   const ranked = ctx.rankedOrders?.get(step);
   if (!ranked || isLocalScope(step) || (step.args ?? []).length) return null;
@@ -1094,7 +1204,12 @@ function rankedRows(
     ranked.sink.dirs = tuple.dirs;
     return rel;
   }
-  const withRank = rankJoin(keyed, ranked, fresh);
+  const joined = rankJoin(keyed, ranked, fresh);
+  // The same `TraverserSet` merge the SQL sort makes (`mergedOrder`): the rank is a column here already.
+  const key = mergeKey && encounterOf(joined.channels) ? mergeKey(joined) : undefined;
+  if (key === null) return null;
+  const withRank = key ? mergeEqual(joined, key, Infinity, ctx, fresh) : joined;
+  if (!withRank) return null;
   const carried = encounterOf(withRank.channels);
   const channels = carried ? withRank.channels : withChannel(withRank.channels, ENCOUNTER);
   const tie: readonly Expr[] = carried ? [col(withRank.id, carried.col)] : (tieOf?.(withRank) ?? []);
@@ -1102,7 +1217,54 @@ function rankedRows(
     withRank,
     [{ expr: col(withRank.id, ORDER_RANK), dir: 'asc' }, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
     [...payloadCols(rel), ...carriedCols(channels)],
-    channels, fresh,
+    channels, fresh, key ? 'dense_rank' : 'row_number',
+  );
+}
+
+/**
+ * `order()` over a stream that may hold EQUAL traversers — `orderRows`' merged arm. The sort keys are
+ * projected as columns first (each is a correlated read of the row it keys), then the copies of each
+ * traverser are re-positioned into its first arrival's slot (`mergeEqual`), and the stable sort ranks by
+ * `(keys…, merged position)` with `DENSE_RANK`, so the copies of one merged traverser keep sharing one
+ * position — the bulk the reference's merged slot carries out of the sort. `mergeKey` `null` (a shape
+ * whose merge the rows cannot state) declines.
+ */
+function mergedOrder(
+  rel: Rel, sort: { readonly terms: readonly SortTerm[]; readonly drop?: Expr },
+  mergeKey: ((input: Rel) => readonly Expr[] | null) | undefined, ctx: ChainCtx, fresh: Minter,
+): Rel | null {
+  const { terms, drop } = sort;
+  const name = (i: number): string => `ok${i}`;
+  const DROP = 'okd';
+  const projected = make.project({
+    id: fresh('okc'), input: rel, channels: rel.channels,
+    type: typeOf(...rel.type.cols, ...terms.map((_, i) => meta(name(i), 'any', true)), ...(drop ? [meta(DROP, 'int', true)] : [])),
+    exprs: [
+      ...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+      ...terms.map((term, i) => [name(i), term.expr] as const),
+      ...(drop ? [[DROP, drop] as const] : []),
+    ],
+  });
+  // An unproductive key DROPS its traverser (`orderProductivity`) before the set ever sees it. The keyed
+  // rows are FENCED: the merge's window and the sort's window then read the keys and the identity as
+  // columns, where a fused projection would re-spell every correlated key read in each of them.
+  const keyed = fenced(drop
+    ? make.filter({ id: fresh('f'), input: projected, channels: projected.channels, type: projected.type, pred: col(projected.id, DROP) })
+    : projected, fresh);
+  // The traverser's identity is the INPUT's, re-addressed to the keyed relation that carries the input's
+  // columns under their own names — never the projected sort keys, which a fused window would re-spell.
+  const identity = mergeKey?.(rel);
+  if (!identity) return null;
+  const key = identity.map((expr) => rewriteExpr(expr, (node) =>
+    (node.kind === 'col' && node.rel === rel.id ? col(keyed.id, node.name) : node)));
+  const merged = mergeEqual(keyed, key, Infinity, ctx, fresh);
+  const encounter = merged && encounterOf(merged.channels);
+  if (!merged || !encounter) return null;
+  return renumber(
+    merged,
+    [...terms.map((term, i) => ({ ...term, expr: col(merged.id, name(i)) })), { expr: col(merged.id, encounter.col), dir: 'asc' as const }],
+    [...payloadCols(rel), ...carriedCols(rel.channels)],
+    rel.channels, fresh, 'dense_rank',
   );
 }
 
@@ -1651,6 +1813,7 @@ function scalarTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       const reSourced = reSource(step, rel, out, ctx, fresh);
@@ -1701,7 +1864,7 @@ function scalarTail(
       ...(hostVtype ? { vtype: hostVtype } : {}),
     };
 
-    if (step.name === 'identity' || step.name === 'barrier') { if (args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if (args.length) return null; continue; }
 
     // `as()` over a VALUE traverser records the value AND its type: the entry's own `t` field is the
     // only place a per-row `vtype` COLUMN can survive becoming JSON, which is what makes
@@ -2605,8 +2768,9 @@ function listTail(
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
     seam = childSeam(ctx, fresh);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
-    if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
 
     // `as()` over a LIST traverser binds the whole collection as ONE history entry, tagged `list` — a
     // list is one traverser, so binding it per member would be a different question. `listOf` rides on
@@ -2799,9 +2963,10 @@ function pathTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
-    if (step.name === 'identity' || step.name === 'barrier') { if (args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if (args.length) return null; continue; }
 
     if (step.name === 'is') {
       if (assertsGType(step, 'PATH')) continue;
@@ -2897,9 +3062,10 @@ function mapTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
-    if (step.name === 'identity' || step.name === 'barrier') { if (args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if (args.length) return null; continue; }
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
     // `keyOf`/`valOf` recorded on the entry so `select(label)` re-enters `mapTail` with the same
@@ -3176,9 +3342,10 @@ function mapEntryTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
-    if (step.name === 'identity' || step.name === 'barrier') { if (args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if (args.length) return null; continue; }
     if ((step.modulators?.length && !BY_READERS.has(step.name)) || step.optionArms) return null;
 
     if (step.name === 'count' && !isLocalScope(step)) {
@@ -4696,6 +4863,7 @@ function elementTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, elementKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
@@ -5184,6 +5352,11 @@ function propertyTail(
   if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
   ctx = pullAt(ctx, steps, from, rel);
   const step = steps[from]!;
+  {
+    const merged = mergedAt(ctx, steps, from, rel, (r) => propertyIdentityKey(r, elem), fresh);
+    if (!merged) return null;
+    rel = merged;
+  }
 
   // `hasKey()` / `hasValue()` — the property stream's OWN filters, and the only two steps whose subject
   // is a property rather than an element. They preserve the shape, so they recurse like a row op.
@@ -5266,7 +5439,10 @@ function propertyTail(
       : step.name === 'id' && elem === 'vertex' ? propertyId(rel, fresh)
         : step.name === 'value' ? propertyValue(rel, fresh)
           : step.name === 'asString' ? propertyAsString(rel, elem, fresh)
-          : step.name === 'element' ? propertyElement(rel, elem, fresh)
+          // An edge `Property` is equal to any other of its key and value (`property.ts`), so a merged slot
+          // is the FIRST arrival's — whose element this row may not hold. Where the reference may have
+          // merged before here, `element()` declines (`RowShape.mergeKey`).
+          : step.name === 'element' ? (elem === 'edge' && !unbulkedAt(ctx, steps, from) ? null : propertyElement(rel, elem, fresh))
         // `count()` is shape-agnostic and needs no property-specific arm: `countExpr` reads the BULK
         // CHANNEL, and `properties()` carries the parent's channels through its join — so a
         // bulk-collapsed parent's properties sum their multiplicity rather than counting rows, which
@@ -5550,6 +5726,7 @@ function recordTail(
     if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
     if (at >= steps.length) break;
     ctx = pullAt(ctx, steps, at, rel);
+    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at]!;
     if (step.optionArms) return null;
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
@@ -5558,7 +5735,7 @@ function recordTail(
     const hostRow: HostRow = { rel, aliases: labels, elsewhere: beyondAliases(ctx) };
     const host: ChildHost = { kind: 'record', fields, row: hostRow };
 
-    if (step.name === 'identity' || step.name === 'barrier') { if (step.args.length || mergeObservableAt(ctx, steps, at)) return null; continue; }
+    if (step.name === 'identity') { if (step.args.length) return null; continue; }
 
     if (step.name === 'as') {
       // `as(label…)` binds the record AS THE MAP it is — collapse it (recordToMap, the same boundary

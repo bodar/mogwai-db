@@ -57,20 +57,17 @@ lowered.
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
   (Graph capabilities, below).
-- **TraverserSet merge — the regroup mint (Cluster A, RelIR plan §10).** The reference merges equal
-  traversers into the first arrival's slot at every bulking barrier (`TraverserSet.java:88-96`); this spine
-  never merges. A STOPGAP declines where the merge is observable at an explicit `barrier()`/tie-every
-  `order()` (`referenceMergeObservableAt`, `src/compiler/ir/bulk.ts`). Still WRONG, knowingly:
-  (1) **data-dependent ties** — an `order().by(key)` whose key ties only SOME unequal traversers:
-  `g.V().out().order().by(label).limit(5).values('name').groupCount()` gives `{josh:1,lop:2,ripple:1,vadas:1}`
-  (ref `{vadas:1,josh:1,lop:3}`), `g.inject('a','b','a').order().by(length()).fold()` gives `[a,b,a]` (ref
-  `[a,a,b]`); declining every tie-capable key cost ~36–39 correct L3 scenarios. A `math()` key that reads
-  a variable yet is constant-VALUED (`order().by(math('_ * 0')).fold()` gives `[1,2,1,3]`, ref `[1,1,2,3]`)
-  is the same residue: tying is a property of the values, not the syntax. (2) **plain flat-map chains**
-  — `LazyBarrierStrategy`'s implicit `NoOpBarrierStep(2500)` after a second flat-map
-  (`LazyBarrierStrategy.java:86-135`): `g.V().both().both().limit(4).id()` gives `[1,1,4,6]` (ref
-  `[1,1,1,1]`). (3) an unread root `inject(1,2,1,3).barrier()` emits `[1,2,1,3]`. The fix is
-  `bulkingPositions` + a `regroupFirstOccurrence` mint, after which the stopgap goes.
+- **TraverserSet merge — residue of the bulking-position authority (Cluster A, RelIR plan §10).** The merge
+  itself is lowered (`bulkingPositions`, `src/compiler/ir/bulk.ts`; `regroupFirstOccurrence`,
+  `src/compiler/rel/build.ts`). What remains: (1) **positions the exact scan cannot place** — a labelled path
+  (`as()`, or a label `retractUnreadAlias` dropped), a `repeat` the unroll widened past `RepeatUnrollStrategy`
+  (the reference's `RepeatStep` re-entry merges as evaluation interleaves), a merge step/service before the
+  position, a sack anywhere. There the order is left unmerged unless the superset places a merge under an
+  order reader, which declines (`mayMergeAt`). (2) **merges inside a body** (a branch arm, a `local`/`by()`
+  child): `mergedAt` runs on the root traversal only; an explicit `barrier()`/`order()` merges at any depth.
+  (3) **writes after a merge**: `AddVertexStep` creates ONE element for a merged slot of k
+  (`g.V().both().addV('x')` makes 6 vertices in the reference, 12 here) — the write lowering has no bulk notion.
+  (4) the 2500-slot drain is reproduced only for ONE drain; a merging stream past it raises a deferral.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

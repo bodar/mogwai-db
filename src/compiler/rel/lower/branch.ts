@@ -7,7 +7,8 @@ import type { Binding } from '../../../rel/plan.ts';
 import { unionColumnsViolation } from '../../../rel/structure.ts';
 import { isStreamIdentity, type IRStep } from '../../ir/strategies.ts';
 import { armBatches, isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
-import { referenceDistinctAt } from '../../ir/bulk.ts';
+import { isReferenceBarrier, referenceDistinctAt } from '../../ir/bulk.ts';
+import { someStepDeep } from '../../ir/walk.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
@@ -26,7 +27,7 @@ import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './fil
 import { dedupOn, sliceOp } from './slice.ts';
 import { pullAt } from '../raise-channel.ts';
 import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
-import { augmentParent, BORD_ARM, BORD_PARENT, branchResult, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
+import { armStartMerge, augmentParent, BORD_ARM, BORD_PARENT, branchResult, bulkForwardingDiverges, continueAs, countTail, dropEncounter, mintTraverserMajor, sliceableBranch, tagArm, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
 // the arm builders (unionArms/mergeArms/chooseArms/coalesceMerge/optionalArms) and their variant/scalar
@@ -58,9 +59,9 @@ export function branchArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
 ): BranchRel | null {
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels, position)
-    : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels)
+    : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels, position)
       : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
-        : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels)
+        : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels, position)
           : null;
 }
 
@@ -219,6 +220,12 @@ const armScope = (ctx: ChainCtx, position: BranchPosition | undefined) => {
     (distinct ? { ...inArmBody(ctx), traversal: { steps: body, rooted: false } } : inArmBody(ctx));
 };
 
+/** Does any arm hold a `Barrier` at ANY depth — `BranchStep.hasBarrier`, which the reference sets by
+ *  `getStepsOfAssignableClassRecursively(Barrier.class, …)` (`…/step/branch/BranchStep.java:87-88`)? Then
+ *  every start enters each arm's own set first (`armStartMerge`). */
+const branchHasBarrier = (bodies: readonly (readonly IRStep[] | null | undefined)[], ctx: ChainCtx): boolean =>
+  bodies.some((body) => !body || someStepDeep(body, ctx.params, (s) => isReferenceBarrier(s as IRStep), true));
+
 export function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
@@ -259,7 +266,9 @@ export function unionArms(
   // whole input — is not built, so a SLICE-demanded union with a batched arm declines rather than
   // present a traverser-major subset the reference does not. (`armBatches`, `ir/step.ts`.)
   if (slice && bodies.some((body) => armBatches(body!))) return null;
-  const source = slice ? augmentParent(input, fresh) : input;
+  const merged = branchHasBarrier(bodies, ctx) ? armStartMerge(input, framing, ctx, fresh) : input;
+  if (!merged) return null;
+  const source = slice ? augmentParent(merged, fresh) : merged;
   const arms: Tail[] = [];
   for (const body of bodies) {
     const arm = continueAs(source, framing, body!, 0, bulked, armCtx(body!), fresh, labels);
@@ -850,13 +859,17 @@ export function coalesceArms(
  */
 export function optionalArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
 ): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const nested = step.args[0]?.value, extra = step.args[1]?.value;
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
+  // `OptionalStep` hands its body the traverser WITH its bulk (`traverser.split()`,
+  // `…/step/branch/OptionalStep.java:47-57`) — unlike `coalesce`, which resets it to 1
+  // (`…/step/map/CoalesceStep.java:52-55`) — so a body not linear in the bulk diverges on a merged slot.
+  if (bulkForwardingDiverges(ctx, position?.steps, position?.at ?? 0, [body])) return null;
   return coalesceMerge([body, []], input, framing, bulked, ctx, fresh, labels);
 }
 
@@ -958,7 +971,7 @@ function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>
 
 export function chooseArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: BranchPosition,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
@@ -984,8 +997,11 @@ export function chooseArms(
 
   const slice = sliceableBranch(ctx, input);
   if (slice && [then, otherwise ?? []].some((body) => armBatches(body!))) return null;
-  const source = slice ? augmentParent(input, fresh) : input;
+  const merged = branchHasBarrier([then, otherwise ?? []], ctx) ? armStartMerge(input, framing, ctx, fresh) : input;
+  if (!merged) return null;
+  const source = slice ? augmentParent(merged, fresh) : merged;
   const subject = branchSubject(source, framing);
+  const armCtx = armScope(ctx, position);
   if (!subject) return null;
 
   // The condition is a child of THIS chain, rooted afresh at the subject row with no alias channel, so
@@ -1004,9 +1020,9 @@ export function chooseArms(
     pred: negated ? notProduced(pred) : pred,
   });
 
-  const armThen = continueAs(guarded(false), framing, then, 0, bulked, inArmBody(ctx), fresh, labels);
+  const armThen = continueAs(guarded(false), framing, then, 0, bulked, armCtx(then), fresh, labels);
   // The else arm over ZERO steps is `identity` on the complement — see above.
-  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inArmBody(ctx), fresh, labels);
+  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, otherwise ? armCtx(otherwise) : inArmBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
   const arms = [armThen, armElse];
   if (slice) return mintTraverserMajor(arms, source, labels, ctx.source, fresh);
