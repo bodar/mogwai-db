@@ -753,6 +753,15 @@ export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson
   binary: false,
 });
 
+/** The per-row tag ONE contributor writes into a met type's `MERGED_VTYPE` column — its own per-row
+ *  column, its static tag as a literal, or NULL ("infer this one"). `withMergedVtype`'s cell, shared
+ *  with a variant's scalar arm (`variantArm`), which re-projects onto a wider payload than `v` alone. */
+export const mergedVtypeOf = (rel: Rel, type: ScalarType): Expr => {
+  const existing = perRowColumnOf(type);
+  const tag = staticTypeOf(type);
+  return existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
+};
+
 /**
  * A SCALAR RELATION RE-PROJECTED ONTO THE MET TYPE's per-row column — its own per-row tag where it
  * has one, its static tag as a literal where it has one, and SQL NULL where it genuinely cannot say.
@@ -764,9 +773,7 @@ export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson
  */
 export const withMergedVtype = (rel: Rel, type: ScalarType, fresh: Minter): Rel => {
   const carried = rel.channels;
-  const existing = perRowColumnOf(type);
-  const tag = staticTypeOf(type);
-  const vtype: Expr = existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
+  const vtype = mergedVtypeOf(rel, type);
   return make.project({
     id: fresh('mv'), input: rel, channels: carried,
     type: typeOf(meta('v', 'any', true), meta(MERGED_VTYPE, 'text', true), ...carriedCols(carried)),

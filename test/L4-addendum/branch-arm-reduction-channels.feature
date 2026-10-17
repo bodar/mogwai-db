@@ -9,8 +9,15 @@ Feature: mogwai addendum — reducing branch arms of DIFFERENT shapes merge, and
   # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:80-88),
   # so "was a start routed to this option" is that start's question — an uncorrelated gate emitted the
   # untaken arm's `[]` beside every answer. @gap:branch-arm-reduction-channels marks the family.
+  #
+  # The variant's wire vocabulary has ONE declared list arm, so two fold arms whose MEMBERS differ (names vs
+  # ids, vertices vs ids, vertices vs names) have no truthful shared descriptor: collapsing them to the first
+  # arm's framed ids as vertices and vertices as bare ids. `variantVocabulary` (src/compiler/rel/variant.ts)
+  # DECLINES them, so those scenarios are @Unsupported — each keeps the reference answer for the day a
+  # per-row member descriptor lands. Fold arms whose members AGREE (names vs langs) answer exactly.
 
   @gap:branch-arm-reduction-channels
+  @Unsupported
   Scenario: g_V_chooseXhasLabelXpersonX_valuesXnameX_fold_id_foldX
     Given the modern graph
     And the traversal of
@@ -24,6 +31,7 @@ Feature: mogwai addendum — reducing branch arms of DIFFERENT shapes merge, and
       | l[v[lop].id,v[ripple].id] |
 
   @gap:branch-arm-reduction-channels
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_chooseXhasLabelXpersonX_valuesXnameX_fold_id_foldX
     Given the modern graph
     And the traversal of
@@ -36,6 +44,7 @@ Feature: mogwai addendum — reducing branch arms of DIFFERENT shapes merge, and
       | l[marko,vadas,josh,peter] |
 
   @gap:branch-arm-reduction-channels
+  @Unsupported
   Scenario: g_V_chooseXlabelX_optionXperson_valuesXnameX_foldX_optionXnone_id_foldX
     Given the modern graph
     And the traversal of
@@ -66,6 +75,7 @@ Feature: mogwai addendum — reducing branch arms of DIFFERENT shapes merge, and
       | l[peter] |
 
   @gap:branch-arm-reduction-channels
+  @Unsupported
   Scenario: g_V_localXchooseXhasLabelXpersonX_valuesXnameX_fold_id_foldXX
     Given the modern graph
     And the traversal of
@@ -123,3 +133,49 @@ Feature: mogwai addendum — reducing branch arms of DIFFERENT shapes merge, and
       | result |
       | m[{"a":[["java"]]}] |
       | m[{"a":[["java"]]}] |
+
+  @gap:branch-arm-reduction-channels
+  @Unsupported
+  Scenario: g_V_chooseXhasLabelXpersonX_out_fold_id_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.hasLabel("person"), __.out().fold(), __.id().fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[v[vadas],v[josh],v[lop],v[ripple],v[lop],v[lop]] |
+      | l[v[lop].id,v[ripple].id] |
+
+  @gap:branch-arm-reduction-channels
+  @Unsupported
+  Scenario: g_V_localXchooseXhasLabelXpersonX_out_fold_constantX1X_foldXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.choose(__.hasLabel("person"), __.out().fold(), __.constant(1).fold()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[v[vadas],v[josh],v[lop]] |
+      | l[] |
+      | l[d[1].i] |
+      | l[v[ripple],v[lop]] |
+      | l[d[1].i] |
+      | l[v[lop]] |
+
+  @gap:branch-arm-reduction-channels
+  @Unsupported
+  Scenario: g_V_unionXvaluesXnameX_fold_out_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.values("name").fold(), __.out().fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko,vadas,lop,josh,ripple,peter] |
+      | l[v[lop],v[vadas],v[josh],v[ripple],v[lop],v[lop]] |

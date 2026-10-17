@@ -1,13 +1,13 @@
 // A VARIANT'S SCALAR ROWS KEEP EACH ARM'S OWN CLASS — a branch whose arms differ in SHAPE (an element or
 // a list beside a scalar) frames its scalar rows per row off the variant's tag column
-// (`variantScalarType`, src/compiler/rel/variant.ts), never by one arm's tag and never by value inference.
+// (`variantVocabulary`, src/compiler/rel/variant.ts — `MERGED_VTYPE`), never by one arm's tag and never by value inference.
 //
 // A branch returns each arm's traverser objects unchanged (`BranchStep`,
 // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java),
 // so a Long stays a Long however the sibling arm is shaped. The variant payload used to declare ONE
 // static tag or `UNKNOWN`: a per-row arm (every scalar arm `mixedBranch` normalizes, a stored property)
 // was dropped to inference — every integral value an Integer (`inject(3L).union(fold(), identity())`
-// answered `[3L], 3i`; `V().coalesce(values('l'), identity())` answered `3i`) — and `dedupeArms` kept
+// answered `[3L], 3i`; `V().coalesce(values('l'), identity())` answered `3i`) — and the old `dedupeArms` kept
 // the FIRST scalar arm's type for all of them.
 import { test, expect, describe } from 'bun:test';
 import { seededStore } from '../support/harness.ts';

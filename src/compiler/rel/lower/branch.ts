@@ -21,7 +21,7 @@ import type { GraphSource } from '../source.ts';
 import { joinAliasEntry, type AliasEntry, type AliasMap } from '../../alias.ts';
 import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
-import { variantArm, variantArmOf, variantHasList, variantScalarType, type VariantArm } from '../variant.ts';
+import { variantArm, variantArmOf, variantVocabulary, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
 import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
@@ -496,8 +496,12 @@ export function variantMerge(
     shapes.push(shape);
   }
   if (!mergePeerArms(arms.map((arm) => arm.rel.channels))) return null;
-  const hasList = variantHasList(shapes);
-  const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, hasList, fresh));
+  // The DECLARED vocabulary — one arm per wire tag, each true of every row it will frame — or a decline
+  // where no such description exists (two lists of different members). `variantVocabulary` is the one
+  // authority, so a `union`, a `choose`, a `coalesce` and an `optional` at any depth ask the same question.
+  const vocabulary = variantVocabulary(shapes);
+  if (!vocabulary) return null;
+  const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, vocabulary, fresh));
   // The same column law the plain merge asks (`unionColumnsViolation`): the variant payload is uniform
   // by NAME, but an arm that lays its channels out differently in type or nullability is not a Union.
   if (unionColumnsViolation({ inputs: tagged, type: tagged[0]!.type })) return null;
@@ -509,26 +513,10 @@ export function variantMerge(
   if (!channels) return null;
   return {
     rel: make.union({ id: fresh('vu'), inputs: tagged, all: true, channels, type: tagged[0]!.type }),
-    // The DECLARED vocabulary is de-duplicated by shape, never by position: two arms of the same
-    // shape share one tag, so the framer's arm list stays a description of what a row can BE.
-    framing: { kind: 'variant', arms: dedupeArms(shapes) },
+    framing: { kind: 'variant', arms: vocabulary },
     aliases: labels,
   };
 }
-
-/** The declared arms, one per distinct SHAPE. Two `{kind:'scalar'}` arms collapse to one whose type is
- *  their MEET (`variantScalarType`): one shared static description, else each row's own class off the
- *  variant's tag column — never the first arm's type, which framed a Long arm by an Integer arm's tag. */
-export const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] => {
-  const seen = new Map<string, VariantArm>();
-  for (const arm of arms) {
-    const key = arm.kind === 'elements' ? `e:${arm.elem}` : arm.kind;
-    if (!seen.has(key)) seen.set(key, arm);
-  }
-  const scalars = arms.flatMap((arm) => (arm.kind === 'scalar' ? [arm.type] : []));
-  if (scalars.length) seen.set('scalar', { kind: 'scalar', type: variantScalarType(scalars) });
-  return [...seen.values()];
-};
 
 export function mergeArms(
   arms: readonly Tail[], labels: AliasMap, source: GraphSource, fresh: Minter,
