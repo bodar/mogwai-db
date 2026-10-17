@@ -18,7 +18,7 @@
 // (`binary64Carrier`, `compiler/rel/build.ts`). Zero and ±Infinity are exact everywhere (`0.0`, the overflow
 // literal `9e999`).
 
-import { compilerReal, type BinaryOp, type Expr } from './expr.ts';
+import { compilerInt, compilerReal, type BinaryOp, type Expr } from './expr.ts';
 
 /** The smallest magnitude whose decimal conversion inside SQLite this compiler relies on. */
 export const EXACT_DECIMAL_MIN = 1e-80;
@@ -112,3 +112,32 @@ export function binary64OfCarrier(v: unknown): number | null {
 
 /** Can this JSON text hold a wire carrier? The cheap pre-test a reader skips its reviver on. */
 export const mayHoldCarrier = (text: string): boolean => /\dp-?\d/.test(text);
+
+// ---------- a binary64 OUTSIDE the range, carried exactly INTO a stored column ----------
+//
+// The set-based writer (`src/setwrite.ts`) lands its rows as ONE JSON text SQLite reads (`json_each`), so a
+// scalar Double outside the range would be read back as another number (the bulk loader's `io()` read, a
+// backup restore). It rides there as the pair `[w, n]` instead — `x = w × 2^n`, the same bands as the wire
+// carrier, so `w` is inside the range and SQLite's JSON reader takes it exactly — and the insert multiplies
+// it back by the exact `2^n` (`binary64Store`, `setwrite.ts`). The product is one exact multiplication.
+
+/** `x` as the in-range pair `[w, n]` a stored REAL column decodes (`binary64Store`), or `null` for a value
+ *  SQLite's decimal reader already takes exactly. */
+export function binary64Pair(x: number): readonly [number, number] | null {
+  if (hasExactDecimal(x)) return null;
+  const m = Math.abs(x);
+  const n = m > 1 ? CARRIER_BANDS.large : m * 1e110 >= EXACT_DECIMAL_MIN ? CARRIER_BANDS.small : CARRIER_BANDS.tiny;
+  return [x * 2 ** -n, n];
+}
+
+/** The decode of a stored cell that may hold a `binary64Pair`: `pair0 × 2^pair1`, the power of two a compiler
+ *  REAL (`emit.ts` spells one outside the range as an exact product of in-range factors). `isPair` says the cell
+ *  is one; otherwise the plain cell. */
+export function binary64OfPair(isPair: Expr, w: Expr, n: Expr, plain: Expr): Expr {
+  const power: Expr = {
+    kind: 'case',
+    whens: Object.values(CARRIER_BANDS).map((band) =>
+      [{ kind: 'binary', op: '=', left: n, right: compilerInt(band) }, compilerReal(2 ** band)] as const),
+  };
+  return { kind: 'case', whens: [[isPair, { kind: 'binary', op: '*', left: w, right: power }]], else: plain };
+}

@@ -242,7 +242,7 @@ function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
 }
 
 function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').ListOf): Buffer {
-  const items = JSON.parse(json);
+  const items = parseElementJson(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
   // A MIXED-member list frames each member by its own {t,v} tag, exactly as listItemBuffers does.
@@ -823,7 +823,7 @@ const foreignElementNode = (raw: any, elem: Elem): FrameNode =>
  *  envelope-typed member is already a `{t,v}` node, a mixed/map member self-describes; a nested list
  *  recurses. */
 function foreignListNodes(json: string, of: ListOf): FrameNode[] {
-  return foreignItemNodes(JSON.parse(json), of);
+  return foreignItemNodes(parseElementJson(json), of);
 }
 
 function foreignItemNodes(items: any[], of: ListOf): FrameNode[] {
@@ -1244,10 +1244,10 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
     return rows.map((r) => (tagCol ? { injectedValue: decimalCarrier(r.v, r[tagCol]), injectedType: r[tagCol] ?? null }
       : { injectedValue: decimalCarrier(r.v, staticTag) }));
   }
-  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
+  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: parseElementJson(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same
   // encoding the `map` column carries (a global `order()` over a map stream reads it, `orderMapStreamValue`).
-  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: JSON.parse(r.map), injectedText: r.map }));
+  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: parseElementJson(r.map), injectedText: r.map }));
   // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
   // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
   // not framed). `injVal` is absent on a source-form head (which never reaches this method).

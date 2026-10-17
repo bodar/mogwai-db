@@ -89,12 +89,39 @@ function carriedLeaf(value: unknown, as: (x: number) => unknown): unknown {
  * would have produced from its exact spelling; everything else is `JSON.parse`'s own.
  */
 export function parseElementJson(json: unknown): any {
-  if (typeof json !== 'string') return json;
+  // An ALREADY-PARSED payload is decoded too, so a reader that parsed the text some other way (a list
+  // column holding element members, a federated node) can never hand a raw carrier on: the decode is a
+  // property of THIS reader, not of whichever parse happened to run first.
+  if (typeof json !== 'string') return decodeCarriers(json);
   if (!mayHoldCarrier(json)) return JSON.parse(json);
   return JSON.parse(json, (_key, value: unknown) => {
     const leaf = carriedLeaf(value, (x) => x);
     return leaf === undefined ? value : leaf;
   });
+}
+
+/** An already-parsed JSON tree with every binary64 wire carrier leaf read back (`carriedLeaf`) — the
+ *  object twin of `parseElementJson`'s reviver. Copy-on-write: a tree holding no carrier comes back as
+ *  the SAME object, so the common case allocates nothing. A raw exact number (`parseExactJson`) is a
+ *  leaf, never walked into. */
+export function decodeCarriers(value: unknown): any {
+  if (value === null || typeof value !== 'object' || isExactNumber(value)) return value;
+  const leaf = carriedLeaf(value, (x) => x);
+  if (leaf !== undefined) return leaf;
+  if (Array.isArray(value)) {
+    let out: unknown[] | null = null;
+    value.forEach((member, i) => {
+      const decoded = decodeCarriers(member);
+      if (decoded !== member) (out ??= value.slice())[i] = decoded;
+    });
+    return out ?? value;
+  }
+  let out: Record<string, unknown> | null = null;
+  for (const [key, member] of Object.entries(value)) {
+    const decoded = decodeCarriers(member);
+    if (decoded !== member) (out ??= { ...(value as Record<string, unknown>) })[key] = decoded;
+  }
+  return out ?? value;
 }
 
 /** `JSON.stringify`, spelling a negative zero `-0.0` — the writing half of the module rule, for a

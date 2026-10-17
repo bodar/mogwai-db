@@ -1,7 +1,7 @@
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
-import { BigDecimal, flatType, type CanonicalType } from './types.ts';
+import { BigDecimal, flatType, numberClassOf, type CanonicalType } from './types.ts';
 import { decimalCompare, decimalOf, doubleText, floatingDecimal, floatText, javaFloatOf, javaNumberText } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
@@ -158,8 +158,13 @@ function javaNumber(v: any, sourceType: string | null): JavaNumber {
   }
   if (typeof v === 'bigint') return { cls: CLASS_NAME[sourceType ?? ''] ?? integralClass(v), real: Number(v), int: v };
   if (typeof v === 'number') {
-    const declared = CLASS_NAME[sourceType ?? ''];
-    const cls = declared ?? (Number.isInteger(v) ? integralClass(BigInt(v)) : 'Double');
+    // An UNDECLARED JS number is classed by the ONE untyped-number authority (`numberClassOf`), exactly as
+    // the reference GLV serializes it
+    // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/structure/io/binary/internals/NumberSerializationStrategy.js:77-95`):
+    // a whole number past 2^53 and a negative zero are a Double — never a Long/BigInteger/Integer — so a
+    // Double source returns as is and an overflow names `Double`
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:770,782`).
+    const cls = CLASS_NAME[sourceType ?? ''] ?? CLASS_NAME[numberClassOf(v)]!;
     return cls === 'Float' || cls === 'Double' ? { cls, real: v } : { cls, real: v, int: BigInt(Math.trunc(v)) };
   }
   if (typeof v === 'string') return createNumber(v);
@@ -402,8 +407,10 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
   if (subtype === 'bigdecimal') return { val: v, as: 'bigdecimal' };
   // A Number is returned UNCHANGED (`AsNumberStep.map`), so a wide integral keeps every digit.
   if (typeof v === 'bigint') return { val: exactInteger(v), as: (subtype ?? (v >= LONG_MIN && v <= LONG_MAX ? 'long' : 'bigint')) as ValueType };
-  if (typeof v === 'number')
-    return { val: v, as: (subtype ?? (!Number.isInteger(v) ? 'double' : Math.abs(v) <= 2147483647 ? 'int' : 'long')) as ValueType };
+  // An untagged JS number is the class `numberClassOf` (the ONE untyped-number authority) gives it: a whole
+  // number past 2^53 or a negative zero is a Double — never a Long that cannot hold it (past 2^63 the Long
+  // framer raised an internal RangeError) nor an Integer that drops the sign.
+  if (typeof v === 'number') return { val: v, as: (subtype ?? numberClassOf(v)) as ValueType };
   if (typeof v === 'string') {
     // `javaNumber` is the ONE parse (`createNumber`, above — the typed `asNumber(GType)` fold reads the
     // same), so the two cannot disagree on a class. An integral spelling — decimal, octal or HEX — is

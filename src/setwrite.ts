@@ -22,6 +22,7 @@ import { plan } from './rel/plan.ts';
 import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
 import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
+import { binary64OfPair, binary64Pair } from './rel/exact-decimal.ts';
 import { runProgram, type RowSource } from './program.ts';
 import { execute, identifier, list, q, textLiteral, value, type Expression } from './sql/kernel/q.ts';
 
@@ -37,7 +38,17 @@ export interface SetColumn {
    *  (a raw blob bind diverges across runtimes and cannot ride JSON — storage.ts / program.ts). The
    *  gid column (a 16-byte uuid_v7) is the one user. */
   readonly blob?: boolean;
+  /** A scalar column whose cell may be a `binary64Pair` — a Double outside the range SQLite's decimal
+   *  reader is exact in, crossing as `[w, n]` and landing as the exact `w × 2^n` (`rel/exact-decimal.ts`).
+   *  Only for a column that never holds a JSON array of its own (the SCALAR property batch; a collection
+   *  value crosses as `jsonb` text). The caller encodes with `binary64Cell`. */
+  readonly binary64?: boolean;
 }
+
+/** A scalar cell headed for a `binary64` column: a Double outside the exact range as its `binary64Pair`,
+ *  anything else as itself. */
+export const binary64Cell = (value: unknown): unknown =>
+  typeof value === 'number' ? binary64Pair(value) ?? value : value;
 
 /** `json_extract(<row>, '$[i]')` — a landed row's cell by position, the path a compiler constant so the
  *  statement text stays fixed however many rows landed. A `jsonb` column re-wraps the extracted TEXT; a
@@ -46,6 +57,11 @@ const cellAt = (row: Expr, at: number, col: SetColumn): Expr => {
   const extract: Expr = { kind: 'call', fn: 'json_extract', args: [row, compilerText(`$[${at}]`)] };
   if (col.jsonb) return { kind: 'call', fn: 'jsonb', args: [extract] };
   if (col.blob) return { kind: 'call', fn: 'unhex', args: [extract] };
+  if (col.binary64) {
+    const extractAt = (path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [row, compilerText(path)] });
+    const isPair: Expr = { kind: 'binary', op: '=', left: { kind: 'call', fn: 'json_type', args: [row, compilerText(`$[${at}]`)] }, right: compilerText('array') };
+    return binary64OfPair(isPair, extractAt(`$[${at}][0]`), extractAt(`$[${at}][1]`), extract);
+  }
   return extract;
 };
 
