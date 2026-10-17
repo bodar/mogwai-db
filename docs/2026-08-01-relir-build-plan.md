@@ -540,10 +540,18 @@ UNEVALUABLE`.
 
 **Writes** (rel-blockers: property 4, addE 3, addV 2, mergeE 1):
 
-- 🚧 **`property(k, <traversal>)`** — two values are provably ONE-ROW (first increment); a multi-row value is the
-  `applyAll` case (`AddPropertyStep.java:105-199`): 0 rows → NO mutation; >1 under `single` → the guard message
-  *"Single-cardinality property requires exactly one value, but traversal produced N results"*; >1 under
-  `list`/`set` → each written; the single-argument MAP form is a third case.
+- ✅ **`property(k, <traversal>)`** — multi-row `applyAll` (`AddPropertyStep.java:105-199`: 0 rows → no mutation,
+  >1 under `single` → the guard message, `list`/`set` → each written, the map form) lowers at depth via
+  `sequenceGuard`/`bodyReach`/`programWrites` in `src/compiler/rel/write.ts`; a body whose read could observe a
+  same-statement write (a key, a label — `labels()`, 3-arg `has`, `T.label` — or an opaque step) is refused, not
+  answered. Reference answers for the refused shapes: `test/L4-addendum/property-traversal-site.feature`.
+- 🚧 **`property(k, <traversal>)` residue** — a `sequenceGuard` refusal can fire AFTER an earlier write step has
+  already written (tracked in `docs/outstanding-work.md`; each guard's input must be re-derived from pre-write
+  state); `union()` encounter order inside a child body; pipelined reads after an earlier write inside a body;
+  `mergeArmValueWrite` still takes `limit 1` in scan order and stores a null.
+- 🚧 **`content-demand` 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes
+  `has(label, key, value)`'s FIRST argument (the label) as the key to fetch; if that narrowing ever applies to the
+  3-arg form the real key is not fetched. Unverified — check.
 - 🚧 **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
   needs an `UPDATE` this route does not emit.
 - 🚧 **`with()` on a write · singletons** (`addE` after `addE`, `addInE`; ~10 writes) — one reason each.
