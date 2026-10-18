@@ -303,6 +303,9 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | Regex dialect | JavaScript `RegExp` (tried with the `u` flag, then without), not `java.util.regex` — e.g. `$` is end of input only, `\s` includes Unicode spaces, `\Q…\E` is not quoting; a pattern neither reads raises `UnsupportedTraversal` |
 | String order | SQLite code-point order, not Java's UTF-16 code-unit order (they differ only for astral characters vs U+E000–U+FFFF) |
 | Case mapping | `toUpper`/`toLower` follow SQLite's ASCII mapping; non-ASCII letters may be left as written |
+| String length and indices | `length()`/`substring()` count code points (SQLite), not UTF-16 units: `'😀'.length()` is 1, not 2 |
+| NUL in string data | a NUL arriving as data (a parameter, a JSON literal, a loaded value) is carried whole, but SQLite's `length`/`substr`/`like`/`tinker.search` read text up to it (`'a\u0000bc'.length()` is 1). A NUL in Gremlin statement text still declines |
+| Lone surrogate in a parameter or JSON | a UTF-16 surrogate outside a pair has no UTF-8 form; in a bound parameter or a map/list literal it reaches SQLite as `''` or U+FFFD (statement text still declines it) |
 | Write visibility | SNAPSHOT: a write step sees a snapshot of its input; steps after it see all of its writes (Java's lazy pipeline interleaves per traverser unless a `barrier()` is added) |
 | Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value (`limit(0)` over a raising step answers `[]`) |
 | Error vs filter order | a filter after a type error may drop the row before SQLite evaluates the error (`inject(1).toUpper().is('x')` answers `[]`); `FilterRankingStrategy`'s reordering is not modelled |

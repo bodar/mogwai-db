@@ -85,12 +85,6 @@ const isRaise = (e: Expr): boolean =>
   e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
   && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN);
 
-/** Is `e` ITSELF an arm that never yields a value — a `raiseExpr` or a `deferralExpr`? Syntactic, like
- *  `isRaise`: a physical rewrite that may drop a row taking this arm (it errors rather than answers) asks it. */
-export const alwaysRaises = (e: Expr): boolean =>
-  isRaise(e) || (e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
-    && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN_DEFERRAL));
-
 /**
  * CAN EVALUATING THIS RELATION RAISE — does any expression in it, correlated subplans included, hold a
  * `raiseExpr` arm. A consumer that might otherwise never EVALUATE the relation (an unread side-effect

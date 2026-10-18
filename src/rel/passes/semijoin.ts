@@ -1,9 +1,8 @@
-import { type Expr, and, col, compilerInt, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
+import { type Expr, and, col, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { minter, type Minter } from '../mint.ts';
 import type { RelId } from '../types.ts';
-import { alwaysRaises } from '../raise.ts';
 import { exprRels, forEachExpr, mapRelExprs, rewrite, rewriteExpr } from '../walk.ts';
 
 /**
@@ -252,17 +251,14 @@ export const trigramSeek: OwnerSeek = (term, element, elementTable, mint) => {
   const atom = necessaryTextAtom(free, props.id);
   if (atom == null || literalTerm(atom.pattern).length < 3) return null;
   if (atom.kind === 'negative') return negativeOwners(props, properties, key, atom.matches, mint);
-  return positiveOwners(properties, key, atom.pattern, literalTerm(atom.pattern), mint);
+  return positiveOwners(properties, key, atom.pattern, mint);
 };
 
 /**
  * A TextP atom the WHOLE predicate implies, or `null` — the one soundness question a seek answers.
  *
  * The seek's owner set must CONTAIN every owner the predicate admits, so the atom it reads has to be
- * NECESSARY: reached from the conjunct roots through `and` alone, and through a `case` only into its
- * `else` when every `when` arm is a raise (`containedText`'s NUL deferral, `compiler/rel/text-units.ts`:
- * a row taking that arm errors rather than answers, and the positive seek keeps such rows by `instr`).
- * Anything else — an `or` (TextP's `or`, `P.or`, `outside`), a `not`, a comparison — STOPS the walk,
+ * NECESSARY: reached from the conjunct roots through `and` alone. Anything else — an `or` (TextP's `or`, `P.or`, `outside`), a `not`, a comparison — STOPS the walk,
  * because an atom under it is one way of being admitted, not a requirement: seeking the last `like` in
  * `containing('ark').or(containing('osh'))` read the FTS for `'osh'` alone and dropped marko. A
  * positive atom is the `like` itself; a negative one is `<matches> is not 1` (`negated`,
@@ -280,7 +276,6 @@ function necessaryTextAtom(parts: readonly Expr[], rel: RelId):
   const visit = (e: Expr): void => {
     if (onValue(e)) { positive.push(e.args[0]!); return; }
     if (e.kind === 'binary' && e.op === 'and') { visit(e.left); visit(e.right); return; }
-    if (e.kind === 'case' && e.else && e.whens.every(([, then]) => alwaysRaises(then))) { visit(e.else); return; }
     if (e.kind === 'binary' && e.op === 'is not' && e.right.kind === 'lit' && e.right.value === 1) {
       // The anti-probe drops a row exactly when `<matches>` holds of its FTS text — the very rows this
       // atom rejects — so ANY body is sound provided it reads the value alone and so can be re-asked there.
@@ -302,26 +297,13 @@ function readsOnlyValue(e: Expr, rel: RelId): boolean {
   return only;
 }
 
-/**
- * Positive TextP can start directly from matching FTS rows.
- *
- * A NUL-bearing row that CONTAINS the term stays a candidate even where `like` misses it: SQLite's `like`
- * reads its subject as a C string and stops at the NUL, so `'ab\0cdef'` fails `'%cdef%'` here, and dropping
- * the row let this narrowing answer `[]` before the generic EXISTS above — whose `containedText`
- * (`compiler/rel/text-units.ts`) is the authority that defers on exactly that row — ever saw it. `instr`
- * reads the whole text and is an exact, case-sensitive containment, which every positive TextP match
- * (`containing`, `startingWith`, `endingWith` alike) implies; so a NUL row WITHOUT the term is still
- * correctly dropped. The term needs no NUL test: `trigramSeek` takes a compiler-literal pattern only,
- * which `textLiteral` already proved NUL-free.
- */
-function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, term: string, mint: Minter): Rel {
+/** Positive TextP can start directly from matching FTS rows. */
+function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, mint: Minter): Rel {
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
-  const instr = (needle: Expr): Expr => ({ kind: 'binary', op: '>', left: { kind: 'call', fn: 'instr', args: [col(scan.id, 'text'), needle] }, right: compilerInt(0) });
   const pred = andAll([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
     eq(col(scan.id, 'kind'), compilerText('value')),
-    or({ kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
-      and(instr({ kind: 'call', fn: 'char', args: [compilerInt(0)] }), instr(compilerText(term)))),
+    { kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
   ]);
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
   const owners = make.project({ id: mint.id('fp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(filtered.id, 'owner')]] });
@@ -353,11 +335,8 @@ function negativeOwners(
     eq(col(fts.id, 'pid'), col(rows.id, 'id')), eq(col(fts.id, 'pk'), compilerText(key)),
     eq(col(fts.id, 'kind'), compilerText('value')),
     // The atom's OWN match body re-asked of the FTS text — LIKE (which keeps the trigram index) AND its
-    // exact case test — so the probe drops exactly the rows the negative TextP rejects. A NUL-bearing text
-    // is never dropped (LIKE reads it as a C string): it stays a candidate for the generic EXISTS, whose
-    // `containedText` defers on it.
+    // exact case test — so the probe drops exactly the rows the negative TextP rejects.
     rewriteExpr(matches, (n) => (n.kind === 'col' && n.rel === props.id && n.name === 'value' ? col(fts.id, 'text') : n)),
-    eq({ kind: 'call', fn: 'instr', args: [col(fts.id, 'text'), { kind: 'call', fn: 'char', args: [compilerInt(0)] }] }, compilerInt(0)),
   ]) });
   const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
   const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: andAll([

@@ -1,21 +1,15 @@
 // JAVA STRING SEMANTICS AGAINST SQLITE'S — where the reference's `java.lang.String` and SQLite's text
-// functions read the same string differently, the answer is the reference's or the query DEFERS, never
-// SQLite's. Four readings, each at its one authority:
+// functions read the same string differently. Three readings:
 //
-//  - ORDER is the one reading that is NOT Java's: text compares in SQLite's BINARY (code-point) order, a
-//    deliberate divergence (`docs/feature-support-matrix.md`). Only astral vs U+E000..U+FFFF differs.
-//  - CASE. `toUpperCase`/`toLowerCase` are Unicode; SQLite's `upper`/`lower` fold ASCII only. A cased
-//    non-ASCII character defers (`casedText`, `src/compiler/rel/text-units.ts`).
+//  - ORDER is SQLite's BINARY (code-point) order, a deliberate divergence (`docs/feature-support-matrix.md`).
+//    Only astral vs U+E000..U+FFFF differs.
+//  - CASE is SQLite's ASCII-only `upper`/`lower`, a deliberate divergence: `'é'` stays `'é'`.
 //  - WHITESPACE. `split(null)` splits on `Character.isWhitespace`, the set `trim()` strips
 //    (`JAVA_WHITESPACE`), not JS `\s`.
-//  - NUL. A stored NUL stops SQLite's `like`; the trigram seek and `tinker.search` keep such a row a
-//    candidate (it then defers) instead of dropping it.
 import { describe, expect, test } from 'bun:test';
 import { seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 import { typedAll } from './support/decode.ts';
-import { CASED, UNCASEABLE_TEXT, UNREADABLE_TEXT } from '../src/compiler/rel/text-units.ts';
-import { loadGraphson, writeGraphson } from '../src/formats/graphson.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { GraphStore } from '../src/storage.ts';
 import type { GraphStore as Store } from '../src/storage.ts';
@@ -55,30 +49,14 @@ describe('text ORDER is code-point order, at every position SQLite orders', () =
   });
 });
 
-describe("toUpper()/toLower() are Java's Unicode case mapping, or defer", () => {
-  test('CASED covers every non-ASCII character the running engine case-maps (a superset of Java at any version)', () => {
-    const cased = (cp: number): boolean => CASED.some(([lo, hi]) => cp >= lo && cp <= hi);
-    const missed: string[] = [];
-    for (let cp = 0x80; cp <= 0x10ffff; cp++) {
-      if (cp >= 0xd800 && cp <= 0xdfff) continue;
-      const s = String.fromCodePoint(cp);
-      if ((s.toUpperCase() !== s || s.toLowerCase() !== s) && !cased(cp)) missed.push(cp.toString(16));
-    }
-    expect(missed).toEqual([]);
-  });
-
+describe("toUpper()/toLower() are SQLite's ASCII case fold", () => {
   test.each([
-    ["g.inject('é').toUpper()"], ["g.inject('ß').toUpper()"], ["g.inject('Σ').toLower()"], ["g.inject('É').toLower()"],
-    ['g.inject(y).toUpper()'], ['g.inject(x).toUpper()'], ["g.inject(['é','a']).toUpper(local)"],
-    ["g.inject('é').map(toUpper())"], ["g.inject('é').union(toUpper(), constant('x'))"],
-    ["g.inject('é').choose(toUpper().is('É'), constant('y'), constant('n'))"], ["g.inject('é').where(toUpper().is('É'))"],
-    ["g.inject('é').project('u').by(toUpper())"], ["g.inject('é').as('a').select('a').toLower()"],
-  ])('a cased non-ASCII character defers: %s', (gremlin) => {
-    // `y`: a cased character AFTER a NUL, which a C-string GLOB would stop short of.
-    expect(() => runP(gremlin, { x: 'é', y: 'a\u0000é' })).toThrow(UNCASEABLE_TEXT);
+    ["g.inject('é').toUpper()", 'é'], ["g.inject('ÉA').toLower()", 'Éa'], ["g.inject('éa').map(toUpper())", 'éA'],
+  ] as const)('a non-ASCII character is left as it is: %s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([str(expected)]);
   });
 
-  test('ASCII, and non-ASCII text with no cased character, stay exact', () => {
+  test('ASCII is folded, everything else passes through', () => {
     expect(runP("g.V().values('name').toUpper().order()")).toEqual(['JOSH', 'LOP', 'MARKO', 'PETER', 'RIPPLE', 'VADAS'].map(str));
     expect(runP("g.inject('MiXeD 1').toLower()")).toEqual([str('mixed 1')]);
     expect(runP(`g.inject('ab${EMOJI}日本').toUpper()`)).toEqual([str(`AB${EMOJI}日本`)]);
@@ -134,40 +112,6 @@ describe('asDate() of a run-time String answers only where both date grammars ag
   });
   test.each([['marko'], ['2020-02-30'], ['2020-08-02 10:11:12'], ['now']])('%s defers', (value) => {
     expect(() => answer(dated(value), "g.V().hasLabel('d').values('s').asDate()")).toThrow(/asDate\(\) of a value/);
-  });
-});
-
-describe('a stored NUL never lets the trigram seek or tinker.search drop a match', () => {
-  /** The modern graph with marko's name replaced by a NUL-bearing string, loaded through GraphSON — the
-   *  reader `io()` uses, and the one way a NUL reaches storage (a Gremlin write declines it). */
-  const nulStore = (): Store => {
-    const doc = writeGraphson(seededStore()).replace('"marko"', '"ab\\u0000cdef"');
-    const store = new GraphStore(new BunSqlite(':memory:'));
-    loadGraphson(store, doc);
-    return store;
-  };
-
-  test.each([
-    ["g.V().has('name', containing('cdef')).values('age')"], ["g.V().has('name', containing('def')).count()"],
-    ["g.V().has('name', endingWith('def')).values('age')"], ["g.V().has('person','name', containing('cdef')).values('age')"],
-    ["g.V().filter(has('name', containing('cdef'))).values('age')"], ["g.V().has('name', regex('cdef')).values('age')"],
-    ["g.call('tinker.search', [search:'cdef']).element().values('age')"],
-    // An OR'd TextP: the seek may read only a NECESSARY atom, and neither disjunct is one.
-    ["g.V().has('name', TextP.containing('cdef').or(TextP.containing('zzz'))).values('age')"],
-    ["g.V().has('name', TextP.endingWith('def').or(TextP.startingWith('zzz'))).values('age')"],
-    ["g.V().has('name', TextP.notContaining('zzz').and(TextP.notEndingWith('ab'))).values('age')"],
-  ])('a NUL-bearing value that may match defers: %s', (gremlin) => {
-    expect(() => answer(nulStore(), gremlin)).toThrow(UNREADABLE_TEXT);
-  });
-
-  test('an OR\'d TextP over a parameter defers on the NUL-bearing value too', () => {
-    expect(() => answer(nulStore(), "g.V().has('name', TextP.containing(x).or(TextP.containing('zzz'))).values('age')", { x: 'cdef' }))
-      .toThrow(UNREADABLE_TEXT);
-  });
-
-  test('a term the NUL-bearing value does not contain still answers exactly', () => {
-    expect(answer(nulStore(), "g.V().has('name', containing('osh')).values('age')")).toEqual(['32i']);
-    expect(answer(nulStore(), "g.call('tinker.search', [search:'osh']).element().values('age')")).toEqual(['32i']);
   });
 });
 

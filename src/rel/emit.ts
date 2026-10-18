@@ -1,4 +1,4 @@
-import { assertCarriable, empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
+import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
 import { NEEDS_SUBQUERY, aliasOf, free, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { compilerInt, type Expr } from './expr.ts';
@@ -218,10 +218,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           // uses of one `$x` collapse to a single placeholder + a single bind at render (`keyedValue`
           // → the dedup pass in q.ts). A mechanical `'bound'` bind (an oversized collection / decimal
           // tail) has no key and stays its own `?`.
-          // A STRING crossing as a bind obeys the carrier rule (`assertCarriable`): a lone surrogate has no
-          // UTF-8 form, so the driver would bind U+FFFD and `g.inject($x)` answer `''` for `x = '\ud83d'`.
-          case 'parameter': if (typeof e.value === 'string') assertCarriable(e.value); return keyedValue(e.value, e.name);
-          case 'bound': if (typeof e.value === 'string') assertCarriable(e.value); return value(e.value);
+          case 'parameter': return keyedValue(e.value, e.name);
+          case 'bound': return value(e.value);
           case 'compiler-text': return textLiteral(e.value);
           case 'compiler-int': return raw(String(e.value));
           // A REAL literal must carry a decimal point or exponent, else SQLite reads an integer-valued

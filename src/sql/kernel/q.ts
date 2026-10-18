@@ -165,7 +165,9 @@ export const identifier = (name: string): Text => raw(quote(name));
  * (`'ma` + "unrecognized token"); `char(0)` could spell it, but SQLite's own text functions stop at a NUL
  * (`length('a'||char(0)||'b')` is 1, the reference's `"a\u0000b".length()` is 3), so a spelled NUL would
  * trade the error for a wrong answer. A LONE SURROGATE has no UTF-8 encoding: the statement text carries
- * U+FFFD in its place, which then EQUALS a stored U+FFFD the reference's string does not.
+ * U+FFFD in its place, which then EQUALS a stored U+FFFD the reference's string does not. (A string that
+ * crosses as a BIND or inside JSON text is not checked: a lone surrogate there degrades to U+FFFD or `''`,
+ * and a NUL there reaches SQLite's C-string text functions as is — accepted divergences.)
  */
 export const textLiteral = (text: string): Text => {
   if (UNSAYABLE.test(text))
@@ -174,25 +176,6 @@ export const textLiteral = (text: string): Text => {
 };
 /** A NUL, or a UTF-16 surrogate not in a well-formed pair — what `textLiteral` declines. */
 const UNSAYABLE = /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-/** A UTF-16 surrogate not in a well-formed pair — a string NO UTF-8 carrier can hold: not statement text,
- *  not a bound value (the driver encodes it as U+FFFD), not SQLite's JSON (`json_extract` of `"\ud83d"` is
- *  `''`). A NUL differs everywhere but statement text: a bind and a JSON escape both carry it whole, and
- *  only SQLite's text FUNCTIONS stop at it — a reader's question, answered where such a function is called
- *  (`compiler/rel/text-units.ts`). */
-const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-
-/**
- * THE CARRIER RULE FOR A STRING VALUE that crosses into SQLite as a BIND or inside a JSON text — every
- * string leaf of a user parameter, a mechanical bind, a compile-time collection blob, a barrier's
- * re-injected values. Such a string is faithful unless it holds a lone surrogate, which no UTF-8 form can
- * spell, so it DECLINES here rather than reach SQLite as U+FFFD or `''` — the bind-and-JSON twin of the
- * statement-text rule `textLiteral` enforces. (`g.inject(['k':'\ud83d']).select('k')` answered `''`; a
- * bound `'\ud83d'` answered `''` too.)
- */
-export function assertCarriable(text: string): void {
-  if (LONE_SURROGATE.test(text))
-    throw UnsupportedTraversal.because(`the string ${JSON.stringify(text)} holds an unpaired surrogate, which no UTF-8 carrier (a bind, SQLite's JSON) can hold`);
-}
 
 /** A column reference `qualifier.name`, each part safe-quoted. A Text (no binds). */
 const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier)}.${quote(name)}`);

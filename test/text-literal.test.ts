@@ -11,9 +11,7 @@ import { ValueParseError } from '../src/gremlin/coerce.ts';
 import { run, seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 import { typedAll } from './support/decode.ts';
-import { stringifyExact } from '../src/json-exact.ts';
 import { compilerParamName } from '../src/rel/expr.ts';
-import { UNREADABLE_TEXT } from '../src/compiler/rel/text-units.ts';
 
 /** A NUL, or a surrogate outside a well-formed pair — the only strings SQL text cannot carry faithfully. */
 const unsayable = (s: string): boolean => /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
@@ -112,71 +110,29 @@ describe('a Gremlin string literal decodes with unescapeJava (GenericLiteralVisi
   });
 });
 
-// THE STRING VALUE, wherever it enters SQL — not only as statement text. A string reaches SQLite three
-// more ways than `textLiteral`: a BIND (a user parameter, a mechanical bind), a JSON text (a map/list
-// literal's blob, a bound collection, a barrier's re-injected values), and as stored DATA. Each one is
-// exact or declines, at every depth a value can sit at.
-describe('a string VALUE that SQLite would misread declines at every door, never a different answer', () => {
+// THE STRING VALUE, wherever it enters SQL — not only as statement text: a BIND, a JSON text, stored DATA.
+// SQLite's text functions answer in CODE POINTS (`length('😀')` is 1, Java's UTF-16 says 2) — a deliberate
+// divergence (`docs/feature-support-matrix.md`).
+describe('a string VALUE through SQLite', () => {
   const runP = (gremlin: string, params: Record<string, unknown> = {}): string[] =>
     typedAll(executeQuery(seededStore(), gremlin, params));
   const NUL = 'a\u0000bc';
 
-  test('a lone surrogate in ANY string leaf of a JSON text declines (`assertCarriable` in `stringifyExact`)', () => {
-    for (const gremlin of [
-      "g.inject(['k':'\\ud83d']).select('k')", "g.inject(['\\ud83d':'k'])", "g.inject(['k':['\\udc00']])",
-      "g.V().has('name','marko').constant(['k':'\\ud83d']).select('k')", "g.withSideEffect('m',['k':'\\ud83d']).inject(1).select('m')",
-    ]) expect(() => runP(gremlin)).toThrow(UnsupportedTraversal);
-    // `stringifyExact` is the ONE writer of a JSON text headed into SQLite; a key is a leaf too.
-    expect(() => stringifyExact({ k: '\ud83d' })).toThrow(UnsupportedTraversal);
-    expect(() => stringifyExact({ '\udc00': 1 })).toThrow(UnsupportedTraversal);
-    expect(stringifyExact({ k: 'a\u0000😀' })).toBe('{"k":"a\\u0000😀"}');   // a NUL and a PAIR are carried
-  });
-
-  test('a lone surrogate in a BOUND string declines (the driver would bind U+FFFD)', () => {
-    for (const [gremlin, params] of [
-      ['g.inject(x)', { x: '\ud83d' }], ['g.inject(x).toUpper()', { x: 'a\ud83d' }], ['g.inject(x)', { x: ['\udc00'] }],
-      ["g.V().has('name', x).count()", { x: '\ud83d' }], ["g.V().has('name', within(x)).count()", { x: ['\ud83d', 'marko'] }],
-    ] as const) expect(() => runP(gremlin, params)).toThrow(UnsupportedTraversal);
-  });
-
-  // A NUL arriving as DATA travels whole (a bind and a JSON escape both carry it), so the value itself is
-  // exact; only SQLite's `length`/`substr`/`like` stop at it, and those defer for that row.
+  // A NUL arriving as DATA travels whole (a bind and a JSON escape both carry it).
   test('a NUL carried as data is exact where nothing reads it as text', () => {
     expect(runP('g.inject(x)', { x: NUL })).toEqual([JSON.stringify(NUL)]);
     expect(runP("g.inject(['k':'a\\u0000b']).select('k')")).toEqual([JSON.stringify('a\u0000b')]);
     expect(runP("g.V().has('name', x).count()", { x: NUL })).toEqual(['0L']);
   });
 
-  const MAPPED = "g.inject(['k':'a\\u0000bc']).select('k')";
   test.each([
-    // the bind door
-    ['g.inject(x).length()'], ['g.inject(x).map(length())'], ['g.inject(x).local(length())'], ['g.inject(x).substring(2)'],
-    ['g.inject(x).substring(1,3)'], ["g.inject(x).is(containing('b'))"], ["g.inject(x).is(endingWith('c'))"],
-    ["g.inject(x).is(notContaining('b'))"], ["g.V().has('name', containing(x)).values('name')"],
-    ["g.inject('ab').is(containing(x))"],
-    // the JSON door, at every depth
-    [`${MAPPED}.length()`], [`${MAPPED}.substring(2)`], [`${MAPPED}.is(containing('b'))`], [`${MAPPED}.map(length())`],
-    [`${MAPPED}.local(length())`], [`${MAPPED}.union(length(),length())`],
-    [`${MAPPED}.choose(length().is(4),constant('y'),constant('n'))`], [`${MAPPED}.where(length().is(1))`],
-    [`${MAPPED}.coalesce(length(), constant(0))`], ["g.inject(['k':'a\\u0000bc']).unfold().select(values).length()"],
-    ["g.V().has('name','marko').constant(['k':'a\\u0000b']).select('k').length()"],
-    ["g.withSideEffect('m',['k':'a\\u0000bc']).inject(1).select('m').select('k').length()"],
-  ])('a NUL through a text function defers: %s', (gremlin) => {
-    expect(() => runP(gremlin, { x: NUL })).toThrow(UNREADABLE_TEXT);
+    ["g.inject('😀').length()", ['1i']], ["g.inject('a😀b').substring(1,3)", ['"😀b"']],
+    ["g.inject(['😀','ab']).length(local)", ['[1i,2i]']],
+  ] as const)('a counting text function counts code points: %s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([...expected]);
   });
 
-  // `String.length()` counts UTF-16 units — `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/LengthGlobalStep.java:53` —
-  // and SQLite counts code points, so an astral character in a COUNTING function defers.
-  test.each([
-    ["g.inject('😀').length()"], ["g.inject('a😀b').substring(1,3)"], ["g.inject('a😀b').substring(3)"],
-    ["g.inject(['😀','ab']).length(local)"], ["g.inject(['a😀','ab']).substring(local, 1)"],
-    ["g.inject('😀').map(length())"], ["g.inject('😀').union(length(), constant(1))"],
-    ["g.addV('p').property('name','😀').values('name').length()"], ['g.inject(x).length()'],
-  ])('an astral character through a counting text function defers: %s', (gremlin) => {
-    expect(() => runP(gremlin, { x: '😀' })).toThrow(UNREADABLE_TEXT);
-  });
-
-  test('BMP text, and astral text through a unit-agnostic function, stay exact', () => {
+  test('BMP text, and astral text through a unit-agnostic function', () => {
     expect(runP("g.inject('abc').length()")).toEqual(['3i']);
     expect(runP("g.inject('abc').substring(1,3)")).toEqual(['"bc"']);
     expect(runP("g.inject('\\uffff').length()")).toEqual(['1i']);

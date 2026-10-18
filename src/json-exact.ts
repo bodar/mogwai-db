@@ -28,7 +28,6 @@
 // with a point (`1.0`).
 import { binary64CarrierText, binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
-import { assertCarriable } from './sql/kernel/q.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
 
 const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
@@ -156,12 +155,7 @@ function carrierLeaf(member: unknown): unknown {
  *  element payload holds (`binary64Carrier`, `compiler/rel/build.ts`), so `parseElementJson` reads both back
  *  by one rule. Any other out-of-range number still raises. */
 export function stringifyExact(value: unknown, wireCarrier = false): string {
-  return JSON.stringify(value, (key, member: unknown) => {
-    // EVERY STRING LEAF — a member and an object key alike — obeys the carrier rule (`assertCarriable`):
-    // JSON spells a lone surrogate as an ASCII `\ud83d` escape, so the statement-text check never sees it,
-    // and SQLite's JSON reader turns it into `''` (`g.inject(['k':'\ud83d']).select('k')` answered `""`).
-    assertCarriable(key);
-    if (typeof member === 'string') assertCarriable(member);
+  return JSON.stringify(value, (_key, member: unknown) => {
     const carried = wireCarrier ? carrierLeaf(member) : undefined;
     if (carried !== undefined) return carried;
     // A JS `bigint` is not a leaf form any tree headed into SQLite holds (`leafStore`, `gremlin/types.ts`, spells

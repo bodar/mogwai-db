@@ -1,9 +1,7 @@
 import * as make from '../../rel/factory.ts';
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText } from '../../rel/expr.ts';
 import { and, eq, meta, typeOf } from '../../compiler/rel/build.ts';
 import { propertyJoin } from '../../compiler/rel/property.ts';
-import { UNREADABLE_TEXT } from '../../compiler/rel/text-units.ts';
-import { deferralExpr } from '../../rel/raise.ts';
 import { sqlElem, type Elem } from '../../compiler/elem.ts';
 import type { Service, RelCallSite, RelContribution, CallParams } from '../spi/types.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
@@ -63,21 +61,6 @@ function searchTerm(params: CallParams): string {
 const likeContaining = (term: string): string => `%${term.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
 
 /**
- * `match` — the `like` over an FTS text — or the deferral where that text holds a NUL AND contains the term.
- * `like` reads its subject as a C string and stops at the NUL, so `'ab\0cdef'` misses `cdef` and the search
- * silently answered `[]`. `instr` reads the whole text; over `lower()` of both sides (which, like `like`,
- * folds ASCII only, and maps a NUL byte to itself) it is the same ASCII-case-insensitive containment, so a
- * NUL text that could match defers (`UNREADABLE_TEXT`, the TextP containment's own deferral) and one that
- * cannot is still correctly dropped.
- */
-function nulSafe(text: Expr, term: string, match: Expr): Expr {
-  const instr = (haystack: Expr, needle: Expr): Expr => ({ kind: 'binary', op: '>', left: { kind: 'call', fn: 'instr', args: [haystack, needle] }, right: compilerInt(0) });
-  const lower = (x: Expr): Expr => ({ kind: 'call', fn: 'lower', args: [x] });
-  const couldMatch = and(instr(text, { kind: 'call', fn: 'char', args: [compilerInt(0)] }), instr(lower(text), lower(compilerText(term))));
-  return { kind: 'case', whens: [[couldMatch, deferralExpr(UNREADABLE_TEXT, { kind: 'call', fn: 'random', args: [] })]], else: match };
-}
-
-/**
  * The matched properties as a RelIR relation — an FTS scan joined back to the property table for the
  * payload, which is `propertyJoin`'s caller-supplied ON in its second form: this producer has no
  * element input and matches the property's own id against the hit, where `properties()` matches the
@@ -112,7 +95,7 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, term: string, empt
         // rather than declining. Declining would be wrong: a decline raises `UnsupportedTraversal`,
         // leaving NOTHING answering a shape that should return empty.
         ? eq(compilerInt(0), compilerInt(1))
-        : nulSafe(col(fts.id, 'text'), term, { kind: 'call', fn: 'like', args: [compilerText(pattern), col(fts.id, 'text'), compilerText('\\')] }),
+        : { kind: 'call', fn: 'like', args: [compilerText(pattern), col(fts.id, 'text'), compilerText('\\')] },
     ),
   });
   const rel = propertyJoin(scoped, ownerElem, (props) => eq(col(props, 'id'), col(scoped.id, 'pid')), site.fresh);

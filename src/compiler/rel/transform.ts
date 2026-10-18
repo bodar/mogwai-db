@@ -2,7 +2,7 @@ import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
-import { casedText, countedText, JAVA_WHITESPACE } from './text-units.ts';
+import { JAVA_WHITESPACE } from './text-units.ts';
 import { SAFE_INT } from './reducer.ts';
 import type { Minter } from './build.ts';
 import { doubleDecimalText, FLOAT_MAX, floatRoundedOf, floatShortest } from './float.ts';
@@ -250,13 +250,13 @@ export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = fals
  * If those overloads ever land, THIS is where the `$param` branch would light up.
  */
 const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step: IRStep) => Expr | null>> = {
-  // `length`/`substring` COUNT, in UTF-16 units over the whole string (`String.length()`); SQLite counts
-  // code points up to a NUL — so a subject holding either defers (`countedText`, `text-units.ts`).
-  length: (v) => countedText(v, call('length', v)),
-  // Java's Unicode case mapping, which SQLite's ASCII-only fold agrees with only on a string holding no
-  // non-ASCII cased character — any other defers (`casedText`, `text-units.ts`).
-  toUpper: (v) => casedText(v, call('upper', v)),
-  toLower: (v) => casedText(v, call('lower', v)),
+  // `length`/`substring` count CODE POINTS (SQLite's), not Java's UTF-16 units: `'😀'.length()` is 1 here,
+  // 2 in Java — a deliberate divergence (`docs/feature-support-matrix.md`).
+  length: (v) => call('length', v),
+  // SQLite's `upper()`/`lower()` fold ASCII only: `'é'` stays `'é'` where Java's Unicode mapping gives
+  // `'É'` — a deliberate divergence (`docs/feature-support-matrix.md`), never a lost or extra row.
+  toUpper: (v) => call('upper', v),
+  toLower: (v) => call('lower', v),
   // Gremlin's `trim()` trims JAVA's whitespace set, not SQLite's default space — hence the explicit
   // second argument, and hence importing the list rather than restating it.
   trim: (v) => call('trim', v, held(JAVA_WHITESPACE)),
@@ -303,7 +303,7 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
       });
     const newStart = index(start);
     const from = { kind: 'binary', op: '+', left: newStart, right: heldInt(1) } as Expr;
-    if (end === undefined) return countedText(v, call('substr', v, from));
+    if (end === undefined) return call('substr', v, from);
     const newEnd = index(end);
     // AN EMPTY SLICE IS ARITHMETIC, NOT A BRANCH: `substr(x, from, 0)` is already `''`, so clamping the
     // length at zero answers exactly what the `CASE WHEN newEnd <= newStart THEN ''` guard did —
@@ -311,8 +311,8 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
     // The guard spelled both bounds a second time, and each bound embeds `length(v)`, so a subject that
     // is a correlated property subquery was emitted SIX times for one `substring(0,1)`; this is four.
     // Bind-budget correctness rather than tidiness — see `storedValueOn` for the measured case.
-    return countedText(v, call('substr', v, from,
-      call('MAX', heldInt(0), { kind: 'binary', op: '-', left: newEnd, right: newStart })));
+    return call('substr', v, from,
+      call('MAX', heldInt(0), { kind: 'binary', op: '-', left: newEnd, right: newStart }));
   },
   concat: (v, args) => {
     // A traversal argument is a per-traverser child value (`TraversalUtil.apply`), which makes the step
