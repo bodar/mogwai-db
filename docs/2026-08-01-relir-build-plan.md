@@ -1103,6 +1103,20 @@ hop). Pinned in `test/L4-addendum/parked-branch-salvage.feature` and
 branches; `write-property-guard` was not part of this salvage. Baseline moved: sql-hygiene (wide-sum text
 carrier, `exactWideTotal`); L4 `nested-branch-arms` map(choose) and `receiver-type-raise` where(...is()) now @Unsupported.
 
+✅ **Salvage residue LANDED ON TRUNK 2026-10-18 (`e41a7229`..`5052cdb8`, ff-salvage-residue).** The fix-forward of
+the salvage: path/simplePath `by()` over a VALUE position goes through one value-position arm (`valueByArm`,
+`rel/path.ts`) that declines or defers rather than rejoining a value as a rowid; group value pools cut by a slice
+follow GroupStep's merged TraverserSet (`poolMergeGuard`, `rel/map.ts`; a `count()` straight after the cut is
+merge-invariant); a kept `identity()` under `withoutStrategies(IdentityRemovalStrategy)` declines where it would
+place a merge; a raising projection is no longer evaluated on rows a sorted slice drops; ONE authority for "this
+emitting host's body sorts" (`hostSortsBody`, `ir/bulk.ts`) drives flatMap/coalesce/optional per-start and
+union/choose arm-major order (Pick arms first), with `originMajor`/`mintRowOrigin` emitting a flatMap over a
+merged start slot-major; a `mergeV` map body keys its driver by the minted origin; a spliced `map(identity())`
+host is a reference step for the LazyBarrier merge. `local()` stays out of `hostSortsBody` (TraverserSet residue 5b
+in `docs/outstanding-work.md`). Pinned in new L4 addenda (`branch-arm-sorted-stream`, `group-value-traverser-set`,
+`identity-removal-suppressed`, `path-by-value-position`, `raise-past-sorted-slice`, `per-traverser-body-order`).
+Baseline moved: sql-hygiene (r1–r3, reasons in those commits). CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
